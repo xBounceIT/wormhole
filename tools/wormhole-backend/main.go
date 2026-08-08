@@ -83,25 +83,28 @@ type startupUnlockSnapshot struct {
 }
 
 type treeNode struct {
-	ID                   string      `json:"id"`
-	Name                 string      `json:"name"`
-	Kind                 string      `json:"kind"`
-	Protocol             string      `json:"protocol,omitempty"`
-	Host                 string      `json:"host,omitempty"`
-	Port                 int         `json:"port,omitempty"`
-	SerialBaudRate       *int        `json:"serialBaudRate,omitempty"`
-	SerialDataBits       *int        `json:"serialDataBits,omitempty"`
-	SerialStopBits       *int        `json:"serialStopBits,omitempty"`
-	SerialParity         *int        `json:"serialParity,omitempty"`
-	SerialFlowControl    *int        `json:"serialFlowControl,omitempty"`
-	HTTPIgnoreCertErrors *bool       `json:"httpIgnoreCertErrors,omitempty"`
-	Children             []*treeNode `json:"children,omitempty"`
-	SshAutoSudo          *bool       `json:"sshAutoSudo,omitempty"`
-	TunnelEnabled        *bool       `json:"tunnelEnabled,omitempty"`
-	TunnelConfigID       string      `json:"tunnelConfigId,omitempty"`
-	CredentialMode       *int        `json:"credentialMode,omitempty"`
-	CredentialID         string      `json:"credentialId,omitempty"`
-	Persisted            bool        `json:"persisted,omitempty"`
+	ID                   string                `json:"id"`
+	Name                 string                `json:"name"`
+	Kind                 string                `json:"kind"`
+	Protocol             string                `json:"protocol,omitempty"`
+	Host                 string                `json:"host,omitempty"`
+	Port                 int                   `json:"port,omitempty"`
+	Username             string                `json:"username,omitempty"`
+	HasInlineCredential  bool                  `json:"hasInlineCredential,omitempty"`
+	RDP                  *workspaceRdpSettings `json:"rdp,omitempty"`
+	SerialBaudRate       *int                  `json:"serialBaudRate,omitempty"`
+	SerialDataBits       *int                  `json:"serialDataBits,omitempty"`
+	SerialStopBits       *int                  `json:"serialStopBits,omitempty"`
+	SerialParity         *int                  `json:"serialParity,omitempty"`
+	SerialFlowControl    *int                  `json:"serialFlowControl,omitempty"`
+	HTTPIgnoreCertErrors *bool                 `json:"httpIgnoreCertErrors,omitempty"`
+	Children             []*treeNode           `json:"children,omitempty"`
+	SshAutoSudo          *bool                 `json:"sshAutoSudo,omitempty"`
+	TunnelEnabled        *bool                 `json:"tunnelEnabled,omitempty"`
+	TunnelConfigID       string                `json:"tunnelConfigId,omitempty"`
+	CredentialMode       *int                  `json:"credentialMode,omitempty"`
+	CredentialID         string                `json:"credentialId,omitempty"`
+	Persisted            bool                  `json:"persisted,omitempty"`
 }
 
 type workspaceNodeSshSettingsRequest struct {
@@ -159,6 +162,8 @@ type nodeRow struct {
 	Protocol             sql.NullInt64
 	Host                 sql.NullString
 	Port                 sql.NullInt64
+	Username             sql.NullString
+	UseInlinePassword    sql.NullInt64
 	SshAutoSudo          sql.NullInt64
 	HTTPIgnoreCertErrors sql.NullInt64
 	TunnelEnabled        sql.NullInt64
@@ -1328,8 +1333,16 @@ func loadTree(database *sql.DB) ([]*treeNode, error) {
 	if _, ok := columns["CredentialId"]; ok {
 		credentialIDExpression = "CredentialId"
 	}
+	usernameExpression := "NULL"
+	if _, ok := columns["Username"]; ok {
+		usernameExpression = "Username"
+	}
+	inlinePasswordExpression := "NULL"
+	if _, ok := columns["UseInlinePassword"]; ok {
+		inlinePasswordExpression = "UseInlinePassword"
+	}
 	rows, err := database.Query(`
-SELECT Id, ParentId, Name, Kind, SortOrder, Protocol, Host, ` + portExpression + ` AS Port, ` + sshAutoSudoExpression + ` AS SshAutoSudo, ` + httpIgnoreCertErrorsExpression + ` AS HttpIgnoreCertErrors, ` + tunnelEnabledExpression + ` AS TunnelEnabled, ` + tunnelConfigIDExpression + ` AS TunnelConfigId, ` + credentialModeExpression + ` AS CredentialMode, ` + credentialIDExpression + ` AS CredentialId
+SELECT Id, ParentId, Name, Kind, SortOrder, Protocol, Host, ` + portExpression + ` AS Port, ` + usernameExpression + ` AS Username, ` + inlinePasswordExpression + ` AS UseInlinePassword, ` + sshAutoSudoExpression + ` AS SshAutoSudo, ` + httpIgnoreCertErrorsExpression + ` AS HttpIgnoreCertErrors, ` + tunnelEnabledExpression + ` AS TunnelEnabled, ` + tunnelConfigIDExpression + ` AS TunnelConfigId, ` + credentialModeExpression + ` AS CredentialMode, ` + credentialIDExpression + ` AS CredentialId
 FROM Nodes
 ORDER BY SortOrder, Name, Id;`)
 	if err != nil {
@@ -1344,7 +1357,7 @@ ORDER BY SortOrder, Name, Id;`)
 	protocolByID := map[string]sql.NullInt64{}
 	for rows.Next() {
 		var row nodeRow
-		if err := rows.Scan(&row.ID, &row.ParentID, &row.Name, &row.Kind, &row.SortOrder, &row.Protocol, &row.Host, &row.Port, &row.SshAutoSudo, &row.HTTPIgnoreCertErrors, &row.TunnelEnabled, &row.TunnelConfigID, &row.CredentialMode, &row.CredentialID); err != nil {
+		if err := rows.Scan(&row.ID, &row.ParentID, &row.Name, &row.Kind, &row.SortOrder, &row.Protocol, &row.Host, &row.Port, &row.Username, &row.UseInlinePassword, &row.SshAutoSudo, &row.HTTPIgnoreCertErrors, &row.TunnelEnabled, &row.TunnelConfigID, &row.CredentialMode, &row.CredentialID); err != nil {
 			return nil, fmt.Errorf("cannot read a connection: %w", err)
 		}
 		node := &treeNode{ID: strings.TrimSpace(row.ID), Name: row.Name, Persisted: true}
@@ -1365,6 +1378,8 @@ ORDER BY SortOrder, Name, Id;`)
 			value := int(row.CredentialMode.Int64)
 			node.CredentialMode = &value
 		}
+		node.Username = strings.TrimSpace(nullableString(row.Username))
+		node.HasInlineCredential = row.UseInlinePassword.Valid && row.UseInlinePassword.Int64 != 0
 		node.CredentialID = normalizeID(nullableString(row.CredentialID))
 		if row.Kind == 0 {
 			node.Kind = "folder"
@@ -1416,6 +1431,23 @@ ORDER BY SortOrder, Name, Id;`)
 			currentID = parentID
 		}
 		node.Protocol = protocolName(resolvedProtocol)
+		if node.Protocol == "rdp" {
+			chain, err := loadRdpNodeChain(database, node.ID)
+			if err != nil {
+				return nil, err
+			}
+			host, port := workspaceRdpTargetFromChain(chain)
+			settings := workspaceRdpSettingsFromChain(chain)
+			username, domain, err := resolveNodeRdpIdentity(database, node.ID)
+			if err != nil {
+				return nil, err
+			}
+			node.Username = username
+			node.Host = host
+			node.Port = port
+			settings.Domain = domain
+			node.RDP = &settings
+		}
 	}
 
 	serialNodes, err := loadSerialNodes(database)

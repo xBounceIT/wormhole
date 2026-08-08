@@ -16,24 +16,28 @@ const (
 )
 
 type workspaceNodeWriteRequest struct {
-	ID                   string `json:"id"`
-	ParentID             string `json:"parentId"`
-	Name                 string `json:"name"`
-	Kind                 string `json:"kind"`
-	Protocol             string `json:"protocol"`
-	Host                 string `json:"host"`
-	Port                 int    `json:"port"`
-	SshAutoSudo          *bool  `json:"sshAutoSudo"`
-	HTTPIgnoreCertErrors *bool  `json:"httpIgnoreCertErrors"`
-	TunnelEnabled        *bool  `json:"tunnelEnabled"`
-	TunnelConfigID       string `json:"tunnelConfigId"`
-	CredentialMode       int    `json:"credentialMode"`
-	CredentialID         string `json:"credentialId"`
-	SerialBaudRate       int    `json:"serialBaudRate"`
-	SerialDataBits       int    `json:"serialDataBits"`
-	SerialStopBits       int    `json:"serialStopBits"`
-	SerialParity         int    `json:"serialParity"`
-	SerialFlowControl    int    `json:"serialFlowControl"`
+	ID                   string                `json:"id"`
+	ParentID             string                `json:"parentId"`
+	Name                 string                `json:"name"`
+	Kind                 string                `json:"kind"`
+	Protocol             string                `json:"protocol"`
+	Host                 string                `json:"host"`
+	Port                 int                   `json:"port"`
+	Username             string                `json:"username"`
+	InlinePasswordAction string                `json:"inlinePasswordAction"`
+	InlinePassword       string                `json:"inlinePassword"`
+	SshAutoSudo          *bool                 `json:"sshAutoSudo"`
+	HTTPIgnoreCertErrors *bool                 `json:"httpIgnoreCertErrors"`
+	TunnelEnabled        *bool                 `json:"tunnelEnabled"`
+	TunnelConfigID       string                `json:"tunnelConfigId"`
+	CredentialMode       int                   `json:"credentialMode"`
+	CredentialID         string                `json:"credentialId"`
+	SerialBaudRate       int                   `json:"serialBaudRate"`
+	SerialDataBits       int                   `json:"serialDataBits"`
+	SerialStopBits       int                   `json:"serialStopBits"`
+	SerialParity         int                   `json:"serialParity"`
+	SerialFlowControl    int                   `json:"serialFlowControl"`
+	RDP                  *workspaceRdpSettings `json:"rdp"`
 }
 
 type normalizedWorkspaceNode struct {
@@ -44,6 +48,10 @@ type normalizedWorkspaceNode struct {
 	protocol             sql.NullInt64
 	host                 sql.NullString
 	port                 sql.NullInt64
+	username             any
+	useInlinePassword    any
+	inlinePasswordAction string
+	inlinePassword       string
 	sshAutoSudo          any
 	httpIgnoreCertErrors any
 	tunnelEnabled        any
@@ -55,6 +63,7 @@ type normalizedWorkspaceNode struct {
 	serialStopBits       any
 	serialParity         any
 	serialFlowControl    any
+	rdp                  *workspaceRdpSettings
 }
 
 func createWorkspaceNode(databasePath string, request workspaceNodeWriteRequest) (string, error) {
@@ -90,26 +99,40 @@ func createWorkspaceNode(databasePath string, request workspaceNodeWriteRequest)
 	if err := validateWorkspaceNodeReferences(tx, node, false); err != nil {
 		return "", err
 	}
+	secretChange, err := prepareWorkspaceInlineSecret(tx, node, false)
+	if err != nil {
+		return "", err
+	}
+	defer secretChange.rollback()
 	sortOrder, err := nextWorkspaceNodeSortOrder(tx, node.parentID)
 	if err != nil {
 		return "", err
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
+	insertArgs := []any{
+		node.id, nullableWorkspaceNodeString(node.parentID), node.name, node.kind, sortOrder,
+		nullableWorkspaceNodeInt(node.protocol), nullableWorkspaceNodeSQLString(node.host), nullableWorkspaceNodeInt(node.port),
+		node.username, node.credentialID, node.credentialMode, node.useInlinePassword, node.sshAutoSudo, node.httpIgnoreCertErrors,
+		node.tunnelEnabled, node.tunnelConfigID,
+		node.serialBaudRate, node.serialDataBits, node.serialStopBits, node.serialParity, node.serialFlowControl,
+	}
+	insertArgs = append(insertArgs, workspaceRdpDatabaseValues(node.rdp)...)
+	insertArgs = append(insertArgs, now, now)
 	_, err = tx.Exec(`
 INSERT INTO Nodes (
     Id, ParentId, Name, Kind, SortOrder, Protocol, Host, Port,
-    CredentialId, CredentialMode, SshAutoSudo, HttpIgnoreCertErrors,
+    Username, CredentialId, CredentialMode, UseInlinePassword, SshAutoSudo, HttpIgnoreCertErrors,
     TunnelEnabled, TunnelConfigId,
     SerialBaudRate, SerialDataBits, SerialStopBits, SerialParity, SerialFlowControl,
-    CreatedAt, UpdatedAt)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
-		node.id, nullableWorkspaceNodeString(node.parentID), node.name, node.kind, sortOrder,
-		nullableWorkspaceNodeInt(node.protocol), nullableWorkspaceNodeSQLString(node.host), nullableWorkspaceNodeInt(node.port),
-		node.credentialID, node.credentialMode, node.sshAutoSudo, node.httpIgnoreCertErrors,
-		node.tunnelEnabled, node.tunnelConfigID,
-		node.serialBaudRate, node.serialDataBits, node.serialStopBits, node.serialParity, node.serialFlowControl,
-		now, now,
-	)
+    RdpDomain, RdpScreenSize, RdpFullScreen, RdpColorDepth, RdpUseAllMonitors,
+    RdpAudioMode, RdpAudioCaptureMode, RdpKeyboardHookMode, RdpRedirectClipboard,
+    RdpRedirectPrinters, RdpRedirectSmartCards, RdpRedirectPorts, RdpRedirectDevices,
+    RdpRedirectDrives, RdpConnectionSpeed, RdpDesktopBackground, RdpFontSmoothing,
+    RdpDesktopComposition, RdpWindowDrag, RdpMenuAnimation, RdpVisualStyles,
+    RdpBitmapCaching, RdpAutoReconnect, RdpServerAuthentication, RdpGatewayUsageMethod,
+    RdpGatewayHostname, RdpGatewayCredentialId, RdpGatewayBypassLocal,
+    RdpGatewayUseSameCreds, RdpUseExternalClient, CreatedAt, UpdatedAt)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`, insertArgs...)
 	if err != nil {
 		return "", fmt.Errorf("could not create workspace node: %w", err)
 	}
@@ -117,6 +140,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
 		return "", fmt.Errorf("could not create workspace node: %w", err)
 	}
 	committed = true
+	secretChange.commit()
 	return node.id, nil
 }
 
@@ -146,6 +170,11 @@ func updateWorkspaceNode(databasePath string, request workspaceNodeWriteRequest)
 	if err := validateWorkspaceNodeReferences(tx, node, true); err != nil {
 		return err
 	}
+	secretChange, err := prepareWorkspaceInlineSecret(tx, node, true)
+	if err != nil {
+		return err
+	}
+	defer secretChange.rollback()
 	var result sql.Result
 	if node.kind == workspaceNodeFolder {
 		// Electron's folder editor exposes only identity, credential, SSH auto-sudo, and tunnel
@@ -162,21 +191,52 @@ WHERE lower(Id) = ? AND Kind = ?;`,
 			time.Now().UTC().Format(time.RFC3339Nano), node.id, node.kind,
 		)
 	} else {
-		result, err = tx.Exec(`
+		if node.protocol.Int64 == 1 {
+			updateArgs := []any{
+				nullableWorkspaceNodeString(node.parentID), node.name,
+				nullableWorkspaceNodeInt(node.protocol), nullableWorkspaceNodeSQLString(node.host), nullableWorkspaceNodeInt(node.port),
+				node.username, node.credentialID, node.credentialMode, node.useInlinePassword,
+				node.sshAutoSudo, node.httpIgnoreCertErrors, node.tunnelEnabled, node.tunnelConfigID,
+				node.serialBaudRate, node.serialDataBits, node.serialStopBits, node.serialParity, node.serialFlowControl,
+			}
+			updateArgs = append(updateArgs, workspaceRdpDatabaseValues(node.rdp)...)
+			updateArgs = append(updateArgs, time.Now().UTC().Format(time.RFC3339Nano), node.id, node.kind)
+			result, err = tx.Exec(`
 UPDATE Nodes SET
     ParentId = ?, Name = ?, Protocol = ?, Host = ?, Port = ?,
-    CredentialId = ?, CredentialMode = ?, SshAutoSudo = ?, HttpIgnoreCertErrors = ?,
+    Username = ?, CredentialId = ?, CredentialMode = ?, UseInlinePassword = ?,
+    SshAutoSudo = ?, HttpIgnoreCertErrors = ?,
     TunnelEnabled = ?, TunnelConfigId = ?,
+    SerialBaudRate = ?, SerialDataBits = ?, SerialStopBits = ?, SerialParity = ?, SerialFlowControl = ?,
+    RdpDomain = ?, RdpScreenSize = ?, RdpFullScreen = ?, RdpColorDepth = ?, RdpUseAllMonitors = ?,
+    RdpAudioMode = ?, RdpAudioCaptureMode = ?, RdpKeyboardHookMode = ?, RdpRedirectClipboard = ?,
+    RdpRedirectPrinters = ?, RdpRedirectSmartCards = ?, RdpRedirectPorts = ?, RdpRedirectDevices = ?,
+    RdpRedirectDrives = ?, RdpConnectionSpeed = ?, RdpDesktopBackground = ?, RdpFontSmoothing = ?,
+    RdpDesktopComposition = ?, RdpWindowDrag = ?, RdpMenuAnimation = ?, RdpVisualStyles = ?,
+    RdpBitmapCaching = ?, RdpAutoReconnect = ?, RdpServerAuthentication = ?, RdpGatewayUsageMethod = ?,
+    RdpGatewayHostname = ?, RdpGatewayCredentialId = ?, RdpGatewayBypassLocal = ?,
+    RdpGatewayUseSameCreds = ?, RdpUseExternalClient = ?,
+    UpdatedAt = ?
+WHERE lower(Id) = ? AND Kind = ?;`, updateArgs...)
+		} else {
+			// Protocol-specific values that are not visible remain untouched when a connection is
+			// edited as another protocol. This preserves imported/legacy fields for later switches.
+			result, err = tx.Exec(`
+UPDATE Nodes SET
+    ParentId = ?, Name = ?, Protocol = ?, Host = ?, Port = ?, Username = ?,
+    CredentialId = ?, CredentialMode = ?, UseInlinePassword = ?, SshAutoSudo = ?,
+    HttpIgnoreCertErrors = ?, TunnelEnabled = ?, TunnelConfigId = ?,
     SerialBaudRate = ?, SerialDataBits = ?, SerialStopBits = ?, SerialParity = ?, SerialFlowControl = ?,
     UpdatedAt = ?
 WHERE lower(Id) = ? AND Kind = ?;`,
-			nullableWorkspaceNodeString(node.parentID), node.name,
-			nullableWorkspaceNodeInt(node.protocol), nullableWorkspaceNodeSQLString(node.host), nullableWorkspaceNodeInt(node.port),
-			node.credentialID, node.credentialMode, node.sshAutoSudo, node.httpIgnoreCertErrors,
-			node.tunnelEnabled, node.tunnelConfigID,
-			node.serialBaudRate, node.serialDataBits, node.serialStopBits, node.serialParity, node.serialFlowControl,
-			time.Now().UTC().Format(time.RFC3339Nano), node.id, node.kind,
-		)
+				nullableWorkspaceNodeString(node.parentID), node.name,
+				nullableWorkspaceNodeInt(node.protocol), nullableWorkspaceNodeSQLString(node.host), nullableWorkspaceNodeInt(node.port),
+				node.username, node.credentialID, node.credentialMode, node.useInlinePassword,
+				node.sshAutoSudo, node.httpIgnoreCertErrors, node.tunnelEnabled, node.tunnelConfigID,
+				node.serialBaudRate, node.serialDataBits, node.serialStopBits, node.serialParity, node.serialFlowControl,
+				time.Now().UTC().Format(time.RFC3339Nano), node.id, node.kind,
+			)
+		}
 	}
 	if err != nil {
 		return fmt.Errorf("could not update workspace node: %w", err)
@@ -192,6 +252,7 @@ WHERE lower(Id) = ? AND Kind = ?;`,
 		return fmt.Errorf("could not update workspace node: %w", err)
 	}
 	committed = true
+	secretChange.commit()
 	return nil
 }
 
@@ -238,12 +299,28 @@ func normalizeWorkspaceNodeWrite(
 		tunnelConfigID:       nullableWorkspaceNodeString(tunnelConfigID),
 		credentialMode:       request.CredentialMode,
 		credentialID:         nullableWorkspaceNodeString(credentialID),
+		inlinePasswordAction: strings.ToLower(strings.TrimSpace(request.InlinePasswordAction)),
+		inlinePassword:       request.InlinePassword,
+	}
+	if node.inlinePasswordAction == "" {
+		node.inlinePasswordAction = "clear"
+	}
+	if node.inlinePasswordAction != "preserve" && node.inlinePasswordAction != "set" && node.inlinePasswordAction != "clear" {
+		return normalizedWorkspaceNode{}, errors.New("workspace inline password action is invalid")
+	}
+	if node.inlinePasswordAction == "set" && (request.InlinePassword == "" || utf8.RuneCountInString(request.InlinePassword) > 4096) {
+		return normalizedWorkspaceNode{}, errors.New("workspace inline password is invalid")
+	}
+	if node.inlinePasswordAction != "set" && request.InlinePassword != "" {
+		return normalizedWorkspaceNode{}, errors.New("workspace inline password is invalid")
 	}
 
 	switch strings.ToLower(strings.TrimSpace(request.Kind)) {
 	case "folder":
 		node.kind = workspaceNodeFolder
 		node.httpIgnoreCertErrors = nil
+		node.inlinePasswordAction = "clear"
+		node.inlinePassword = ""
 	case "connection":
 		node.kind = workspaceNodeConnection
 		protocol, ok := workspaceProtocolValue(request.Protocol)
@@ -293,6 +370,7 @@ func normalizeWorkspaceNodeWrite(
 			node.tunnelConfigID = nil
 			node.credentialMode = 1
 			node.credentialID = nil
+			node.inlinePasswordAction = "clear"
 		case 0:
 			if request.Port != 0 {
 				node.port = sql.NullInt64{Int64: int64(request.Port), Valid: true}
@@ -306,6 +384,33 @@ func normalizeWorkspaceNodeWrite(
 			}
 			node.sshAutoSudo = nil
 			node.httpIgnoreCertErrors = nil
+		}
+		username := strings.TrimSpace(request.Username)
+		if utf8.RuneCountInString(username) > maxCredentialUsernameLength || strings.ContainsAny(username, "\r\n\x00") {
+			return normalizedWorkspaceNode{}, errors.New("workspace connection username is invalid")
+		}
+		if protocol == 0 || protocol == 1 {
+			node.username = nullableWorkspaceNodeString(username)
+		} else {
+			node.username = nil
+			node.inlinePasswordAction = "clear"
+		}
+		if node.inlinePasswordAction == "set" || node.inlinePasswordAction == "preserve" {
+			if protocol != 0 && protocol != 1 {
+				return normalizedWorkspaceNode{}, errors.New("inline passwords are supported only for SSH and RDP")
+			}
+			node.useInlinePassword = int64(1)
+			node.credentialMode = 1
+			node.credentialID = nil
+		} else {
+			node.useInlinePassword = int64(0)
+		}
+		if protocol == 1 {
+			rdp, err := normalizeWorkspaceRdpSettings(request.RDP)
+			if err != nil {
+				return normalizedWorkspaceNode{}, err
+			}
+			node.rdp = &rdp
 		}
 		if protocol != 4 {
 			node.httpIgnoreCertErrors = nil
@@ -331,9 +436,17 @@ func requireWorkspaceNodeWriteSchema(database *sql.DB) error {
 	}
 	for _, required := range []string{
 		"Id", "ParentId", "Name", "Kind", "SortOrder", "Protocol", "Host", "Port",
-		"CredentialId", "CredentialMode", "SshAutoSudo", "HttpIgnoreCertErrors",
+		"Username", "CredentialId", "CredentialMode", "UseInlinePassword", "SshAutoSudo", "HttpIgnoreCertErrors",
 		"TunnelEnabled", "TunnelConfigId", "SerialBaudRate", "SerialDataBits", "SerialStopBits",
-		"SerialParity", "SerialFlowControl", "CreatedAt", "UpdatedAt",
+		"SerialParity", "SerialFlowControl", "RdpDomain", "RdpScreenSize", "RdpFullScreen",
+		"RdpColorDepth", "RdpUseAllMonitors", "RdpAudioMode", "RdpAudioCaptureMode",
+		"RdpKeyboardHookMode", "RdpRedirectClipboard", "RdpRedirectPrinters",
+		"RdpRedirectSmartCards", "RdpRedirectPorts", "RdpRedirectDevices", "RdpRedirectDrives",
+		"RdpConnectionSpeed", "RdpDesktopBackground", "RdpFontSmoothing", "RdpDesktopComposition",
+		"RdpWindowDrag", "RdpMenuAnimation", "RdpVisualStyles", "RdpBitmapCaching", "RdpAutoReconnect",
+		"RdpServerAuthentication", "RdpGatewayUsageMethod", "RdpGatewayHostname",
+		"RdpGatewayCredentialId", "RdpGatewayBypassLocal", "RdpGatewayUseSameCreds",
+		"RdpUseExternalClient", "CreatedAt", "UpdatedAt",
 	} {
 		if _, ok := columns[required]; !ok {
 			return fmt.Errorf("Wormhole database schema is missing the %s migration", required)
@@ -402,6 +515,18 @@ func validateWorkspaceNodeReferences(tx *sql.Tx, node normalizedWorkspaceNode, u
 		}
 		if node.kind == workspaceNodeConnection && node.protocol.Valid && protocol != node.protocol.Int64 {
 			return errors.New("selected credential does not match the connection protocol")
+		}
+	}
+	if node.rdp != nil && node.rdp.GatewayCredentialID != "" {
+		protocol, found, err := workspaceCredentialProtocol(tx, node.rdp.GatewayCredentialID)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return errors.New("selected RDP Gateway credential was not found")
+		}
+		if protocol != rdpProtocolValue {
+			return errors.New("selected RDP Gateway credential is not an RDP credential")
 		}
 	}
 	return nil

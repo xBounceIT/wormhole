@@ -16,6 +16,39 @@ type WormholeUpdateCheckResult = {
   installerSha256?: string;
 };
 
+type WorkspaceRdpSettings = {
+  domain: string;
+  screenSize: string;
+  fullScreen: boolean;
+  colorDepth: number;
+  useAllMonitors: boolean;
+  audioMode: number;
+  audioCaptureMode: number;
+  keyboardHookMode: number;
+  redirectClipboard: boolean;
+  redirectPrinters: boolean;
+  redirectSmartCards: boolean;
+  redirectPorts: boolean;
+  redirectDevices: boolean;
+  redirectDrives: string;
+  connectionSpeed: number;
+  desktopBackground: boolean;
+  fontSmoothing: boolean;
+  desktopComposition: boolean;
+  windowDrag: boolean;
+  menuAnimation: boolean;
+  visualStyles: boolean;
+  bitmapCaching: boolean;
+  autoReconnect: boolean;
+  serverAuthentication: number;
+  gatewayUsageMethod: number;
+  gatewayHostname: string;
+  gatewayCredentialId: string;
+  gatewayBypassLocal: boolean;
+  gatewayUseSameCreds: boolean;
+  useExternalClient: boolean;
+};
+
 const wormholeBridge = {
   loadStartup: () => ipcRenderer.invoke('startup:load'),
   unlockStartup: (request: { method: 'pin' | 'password'; secret: string }) =>
@@ -45,6 +78,10 @@ const wormholeBridge = {
     kind: 'folder' | 'connection';
     protocol: '' | 'ssh' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial';
     host: string;
+    port: number;
+    username: string;
+    inlinePasswordAction: 'preserve' | 'set' | 'clear';
+    inlinePassword: string;
     sshAutoSudo: boolean | null;
     httpIgnoreCertErrors: boolean | null;
     tunnelEnabled: boolean | null;
@@ -56,6 +93,7 @@ const wormholeBridge = {
     serialStopBits: number;
     serialParity: number;
     serialFlowControl: number;
+    rdp?: WorkspaceRdpSettings;
   }) => ipcRenderer.invoke('workspace:create-node', request),
   updateWorkspaceNode: (request: {
     id: string;
@@ -64,6 +102,10 @@ const wormholeBridge = {
     kind: 'folder' | 'connection';
     protocol: '' | 'ssh' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial';
     host: string;
+    port: number;
+    username: string;
+    inlinePasswordAction: 'preserve' | 'set' | 'clear';
+    inlinePassword: string;
     sshAutoSudo: boolean | null;
     httpIgnoreCertErrors: boolean | null;
     tunnelEnabled: boolean | null;
@@ -75,6 +117,7 @@ const wormholeBridge = {
     serialStopBits: number;
     serialParity: number;
     serialFlowControl: number;
+    rdp?: WorkspaceRdpSettings;
   }) => ipcRenderer.invoke('workspace:update-node', request),
   createCredential: (request: {
     name: string;

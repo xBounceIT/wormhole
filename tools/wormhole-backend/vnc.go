@@ -49,8 +49,11 @@ type backendCommand struct {
 	CredentialID      string `json:"credentialId,omitempty"`
 	Host              string `json:"host,omitempty"`
 	Port              int    `json:"port,omitempty"`
+	Username          string `json:"username,omitempty"`
+	Domain            string `json:"domain,omitempty"`
 	Password          string `json:"password,omitempty"`
 	PasswordProvided  bool   `json:"passwordProvided,omitempty"`
+	ManualCredentials bool   `json:"manualCredentials,omitempty"`
 	TunnelConfigID    string `json:"tunnelConfigId,omitempty"`
 	Dedicated         bool   `json:"dedicated,omitempty"`
 	PromptID          string `json:"promptId,omitempty"`
@@ -269,7 +272,7 @@ func (m *vncManager) handle(command backendCommand) {
 		"bitwarden.get", "bitwarden.resolve-credential", "bitwarden.resolve-node",
 		"bitwarden.node-reference", "bitwarden.browser-storage-read",
 		"bitwarden.browser-storage-capture", "bitwarden.browser-profile-seed",
-		"bitwarden.browser-profile-register":
+		"bitwarden.browser-profile-register", "rdp.resolve-profile":
 		generation := m.bitwardenGeneration()
 		go m.handleBitwarden(command, generation)
 	default:
@@ -1356,7 +1359,8 @@ func validateBackendCommand(command backendCommand) error {
 		return errors.New("backend command ID is invalid")
 	}
 	bitwardenAction := strings.HasPrefix(command.Action, "bitwarden.")
-	if !bitwardenAction && (command.SessionID == "" || len(command.SessionID) > 128) {
+	requiresSession := !bitwardenAction && command.Action != "rdp.resolve-profile"
+	if requiresSession && (command.SessionID == "" || len(command.SessionID) > 128) {
 		return errors.New("backend session ID is invalid")
 	}
 	switch command.Action {
@@ -1473,6 +1477,12 @@ func validateBackendCommand(command backendCommand) error {
 	case "bitwarden.resolve-node", "bitwarden.node-reference":
 		if len(command.NodeID) == 0 || len(command.NodeID) > 128 || bitwardenProtocolValue(command.Protocol) < 0 {
 			return errors.New("Bitwarden connection request is invalid")
+		}
+	case "rdp.resolve-profile":
+		if !validCredentialID(normalizeID(command.NodeID)) ||
+			(command.ManualCredentials && (!validRdpText(command.Username, 513) ||
+				!validRdpText(command.Domain, 512) || !validRdpText(command.Password, 4096))) {
+			return errors.New("RDP connection request is invalid")
 		}
 	default:
 		return fmt.Errorf("unsupported backend action %q", command.Action)

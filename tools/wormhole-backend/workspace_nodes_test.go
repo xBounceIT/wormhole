@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -24,8 +25,10 @@ CREATE TABLE Nodes (
     Protocol INTEGER NULL,
     Host TEXT NULL,
     Port INTEGER NULL,
-    CredentialId TEXT NULL,
-    CredentialMode INTEGER NULL,
+	Username TEXT NULL,
+	CredentialId TEXT NULL,
+	CredentialMode INTEGER NULL,
+	UseInlinePassword INTEGER NULL,
     SshAutoSudo INTEGER NULL,
     HttpIgnoreCertErrors INTEGER NULL,
     TunnelEnabled INTEGER NULL,
@@ -35,13 +38,48 @@ CREATE TABLE Nodes (
     SerialStopBits INTEGER NULL,
     SerialParity INTEGER NULL,
     SerialFlowControl INTEGER NULL,
+	RdpDomain TEXT NULL,
+	RdpScreenSize TEXT NULL,
+	RdpFullScreen INTEGER NULL,
+	RdpColorDepth INTEGER NULL,
+	RdpUseAllMonitors INTEGER NULL,
+	RdpAudioMode INTEGER NULL,
+	RdpAudioCaptureMode INTEGER NULL,
+	RdpKeyboardHookMode INTEGER NULL,
+	RdpRedirectClipboard INTEGER NULL,
+	RdpRedirectPrinters INTEGER NULL,
+	RdpRedirectSmartCards INTEGER NULL,
+	RdpRedirectPorts INTEGER NULL,
+	RdpRedirectDevices INTEGER NULL,
+	RdpRedirectDrives TEXT NULL,
+	RdpConnectionSpeed INTEGER NULL,
+	RdpDesktopBackground INTEGER NULL,
+	RdpFontSmoothing INTEGER NULL,
+	RdpDesktopComposition INTEGER NULL,
+	RdpWindowDrag INTEGER NULL,
+	RdpMenuAnimation INTEGER NULL,
+	RdpVisualStyles INTEGER NULL,
+	RdpBitmapCaching INTEGER NULL,
+	RdpAutoReconnect INTEGER NULL,
+	RdpServerAuthentication INTEGER NULL,
+	RdpGatewayUsageMethod INTEGER NULL,
+	RdpGatewayHostname TEXT NULL,
+	RdpGatewayCredentialId TEXT NULL,
+	RdpGatewayBypassLocal INTEGER NULL,
+	RdpGatewayUseSameCreds INTEGER NULL,
+	RdpUseExternalClient INTEGER NULL,
     CreatedAt TEXT NOT NULL,
     UpdatedAt TEXT NOT NULL
 );
 CREATE TABLE CredentialProfiles (
     Id TEXT PRIMARY KEY NOT NULL,
-    Protocol INTEGER NOT NULL
+	Username TEXT NULL,
+	Domain TEXT NULL,
+	Protocol INTEGER NOT NULL,
+	Kind INTEGER NOT NULL DEFAULT 0,
+	SecretProvider INTEGER NOT NULL DEFAULT 0
 );
+	CREATE TABLE CredentialSecrets (Id TEXT PRIMARY KEY, Secret TEXT NOT NULL, Encoding TEXT NOT NULL, UpdatedAt TEXT);
 CREATE TABLE TunnelConfigs (
     Id TEXT PRIMARY KEY NOT NULL
 );`)
@@ -163,6 +201,57 @@ func TestWorkspaceNodeCreateRejectsInvalidNetworkPorts(t *testing.T) {
 	}
 }
 
+func TestWorkspaceNodeUpdatePreservesCustomPortAndHiddenLegacyFields(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	createWorkspaceNodeTestSchema(t, databasePath)
+	nodeID, err := createWorkspaceNode(databasePath, workspaceNodeWriteRequest{
+		Name: "SSH", Kind: "connection", Protocol: "ssh", Host: "target.example",
+		Port: 2222, CredentialMode: 0,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec("ALTER TABLE Nodes ADD COLUMN LegacyOpaque TEXT NULL;"); err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(
+		"UPDATE Nodes SET RdpDomain = 'hidden-domain', RdpGatewayHostname = 'hidden-gateway', LegacyOpaque = 'keep-me' WHERE Id = ?;",
+		nodeID,
+	); err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	database.Close()
+
+	if err := updateWorkspaceNode(databasePath, workspaceNodeWriteRequest{
+		ID: nodeID, Name: "Renamed SSH", Kind: "connection", Protocol: "ssh",
+		Host: "target.example", Port: 2222, CredentialMode: 0, InlinePasswordAction: "clear",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	database, err = openDatabase(databasePath, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var port int
+	var domain, gateway, opaque string
+	if err := database.QueryRow(
+		"SELECT Port, RdpDomain, RdpGatewayHostname, LegacyOpaque FROM Nodes WHERE Id = ?;",
+		nodeID,
+	).Scan(&port, &domain, &gateway, &opaque); err != nil {
+		t.Fatal(err)
+	}
+	if port != 2222 || domain != "hidden-domain" || gateway != "hidden-gateway" || opaque != "keep-me" {
+		t.Fatalf("partial edit clobbered persisted fields: port=%d domain=%q gateway=%q opaque=%q", port, domain, gateway, opaque)
+	}
+}
+
 func TestWorkspaceNodeUpdateIsAtomicWhenCredentialProtocolDoesNotMatch(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
 	createWorkspaceNodeTestSchema(t, databasePath)
@@ -204,6 +293,70 @@ func TestWorkspaceNodeUpdateIsAtomicWhenCredentialProtocolDoesNotMatch(t *testin
 	}
 	if name != "Original" || host != "host.example" || credentialIDAfter.Valid {
 		t.Fatalf("rejected update changed the node: name=%q host=%q credential=%+v", name, host, credentialIDAfter)
+	}
+}
+
+func TestWorkspaceInlineSecretReplacementRollsBackOnNodeWriteFailure(t *testing.T) {
+	previousStore := credentialSecretStore
+	previousDelete := credentialSecretDelete
+	storeCount := 0
+	deleted := make([]string, 0)
+	credentialSecretStore = func(_ string, _ string) (string, string, error) {
+		storeCount++
+		return fmt.Sprintf("protected-%d", storeCount), "test-protected-v1", nil
+	}
+	credentialSecretDelete = func(_ string, encoded, _ string) error {
+		deleted = append(deleted, encoded)
+		return nil
+	}
+	t.Cleanup(func() {
+		credentialSecretStore = previousStore
+		credentialSecretDelete = previousDelete
+	})
+
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	createWorkspaceNodeTestSchema(t, databasePath)
+	settings := defaultWorkspaceRdpSettings()
+	nodeID, err := createWorkspaceNode(databasePath, workspaceNodeWriteRequest{
+		Name: "RDP", Kind: "connection", Protocol: "rdp", Host: "rdp.example",
+		InlinePasswordAction: "set", InlinePassword: "initial", RDP: &settings,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`CREATE TRIGGER reject_rdp_node_update
+BEFORE UPDATE ON Nodes BEGIN SELECT RAISE(FAIL, 'simulated write failure'); END;`); err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	database.Close()
+
+	err = updateWorkspaceNode(databasePath, workspaceNodeWriteRequest{
+		ID: nodeID, Name: "Changed", Kind: "connection", Protocol: "rdp", Host: "rdp.example",
+		InlinePasswordAction: "set", InlinePassword: "replacement", RDP: &settings,
+	})
+	if err == nil {
+		t.Fatal("inline password replacement should fail with the node write")
+	}
+	database, err = openDatabase(databasePath, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var name, secret string
+	if err := database.QueryRow(`SELECT n.Name, s.Secret FROM Nodes n
+JOIN CredentialSecrets s ON s.Id = n.Id WHERE n.Id = ?;`, nodeID).Scan(&name, &secret); err != nil {
+		t.Fatal(err)
+	}
+	if name != "RDP" || secret != "protected-1" {
+		t.Fatalf("failed replacement changed persisted state: name=%q secret=%q", name, secret)
+	}
+	if len(deleted) != 1 || deleted[0] != "protected-2" {
+		t.Fatalf("staged protected secret was not cleaned up: %#v", deleted)
 	}
 }
 

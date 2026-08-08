@@ -113,6 +113,7 @@ type rdpProcess struct {
 	stdinMu   sync.Mutex
 	stopOnce  sync.Once
 	terminal  bool
+	external  bool
 	tunnel    *tunnelRuntime
 	forwarder *tunnelForwarder
 }
@@ -183,6 +184,10 @@ func (c *rdpController) start(command rdpCommand) {
 	// familiar `server:3390` form without needing a second port editor in the first UI slice.
 	command.Profile.Host = host
 	command.Profile.Port = port
+	if err := validateRdpProfile(command.Profile); err != nil {
+		writeRdpEvent(rdpEvent{Type: "error", RequestID: command.RequestID, SessionID: command.SessionID, Message: err.Error()})
+		return
+	}
 	if command.Bounds.Width == 0 || command.Bounds.Height == 0 {
 		// The first surface measurement can arrive after the start request. A one-pixel seed keeps
 		// the native host alive until the renderer sends its first real resize.
@@ -216,6 +221,10 @@ func (c *rdpController) start(command rdpCommand) {
 		return
 	}
 
+	if runtime.GOOS == "windows" && command.Profile.UseExternalClient {
+		c.startExternalRdp(command)
+		return
+	}
 	if runtime.GOOS == "windows" {
 		c.startNative(command)
 		return
@@ -486,6 +495,30 @@ func (c *rdpController) startNative(command rdpCommand) {
 	go c.waitForExit(running)
 }
 
+func (c *rdpController) startExternalRdp(command rdpCommand) {
+	defer func() {
+		command.forwarder.close()
+		command.tunnel.close()
+	}()
+	// mstsc has no supported secret-bearing command-line contract. Deliberately pass only the
+	// target; Windows credential roaming or the native prompt owns authentication for this mode.
+	cmd := exec.Command("mstsc.exe", "/v:"+formatRdpTarget(command.Profile.Host, command.Profile.Port))
+	cmd.Stdin = nil
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	if err := cmd.Start(); err != nil {
+		writeRdpEvent(rdpEvent{Type: "error", RequestID: command.RequestID, SessionID: command.SessionID, Backend: "activex", Message: "could not start the system Remote Desktop client"})
+		return
+	}
+	running := &rdpProcess{sessionID: command.SessionID, backend: "activex", process: cmd, external: true}
+	c.mu.Lock()
+	c.processes[command.SessionID] = running
+	c.mu.Unlock()
+	writeRdpEvent(rdpEvent{Type: "started", RequestID: command.RequestID, SessionID: command.SessionID, Backend: "activex"})
+	writeRdpEvent(rdpEvent{Type: "connected", SessionID: command.SessionID, Backend: "activex"})
+	go c.waitForExit(running)
+}
+
 func (c *rdpController) readNativeEvents(process *rdpProcess, stdout io.ReadCloser) {
 	defer stdout.Close()
 	scanner := bufio.NewScanner(stdout)
@@ -519,14 +552,14 @@ func (c *rdpController) startFreeRdp(command rdpCommand) {
 		writeRdpEvent(rdpEvent{Type: "error", RequestID: command.RequestID, SessionID: command.SessionID, Backend: "freerdp", Message: err.Error()})
 		return
 	}
-	args, err := buildFreeRdpArguments(command)
+	args, input, err := buildFreeRdpInvocation(command)
 	if err != nil {
 		writeRdpEvent(rdpEvent{Type: "error", RequestID: command.RequestID, SessionID: command.SessionID, Backend: "freerdp", Message: err.Error()})
 		return
 	}
 
 	cmd := exec.Command(client, args...)
-	cmd.Stdin = nil
+	cmd.Stdin = strings.NewReader(input)
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
 	if err := cmd.Start(); err != nil {
@@ -587,6 +620,14 @@ func (c *rdpController) forward(command rdpCommand) {
 			return
 		}
 		writeRdpEvent(rdpEvent{Type: "error", RequestID: command.RequestID, SessionID: command.SessionID, Message: "RDP session is not running"})
+		return
+	}
+	if process.external {
+		if command.Op == "disconnect" {
+			c.markProcessTerminal(process)
+			c.stop(command.SessionID)
+		}
+		writeRdpEvent(rdpEvent{Type: "ack", RequestID: command.RequestID, SessionID: command.SessionID, Backend: process.backend})
 		return
 	}
 	if process.backend == "freerdp" {
@@ -758,8 +799,6 @@ func buildFreeRdpArguments(command rdpCommand) ([]string, error) {
 		args = append(args, "/d:"+profile.Domain)
 	}
 	if profile.Password != "" {
-		// FreeRDP masks /p values in its own process display. Keeping the value in the
-		// argv passed directly to the client also avoids writing it to a temporary file.
 		args = append(args, "/p:"+profile.Password)
 	}
 	if profile.GatewayHostname != "" && profile.GatewayUsageMethod != 0 {
@@ -770,6 +809,10 @@ func buildFreeRdpArguments(command rdpCommand) ([]string, error) {
 		if profile.GatewayPassword != "" {
 			args = append(args, "/gp:"+profile.GatewayPassword)
 		}
+	}
+	args = append(args, "/audio-mode:"+strconv.Itoa(profile.AudioMode))
+	if profile.AudioCaptureMode == 1 {
+		args = append(args, "/microphone")
 	}
 	if profile.UseAllMonitors {
 		args = append(args, "/multimon")
@@ -783,6 +826,18 @@ func buildFreeRdpArguments(command rdpCommand) ([]string, error) {
 		args = append(args, "+auto-reconnect")
 	}
 	args = appendToggle(args, "clipboard", profile.RedirectClipboard)
+	if profile.RedirectPrinters {
+		args = append(args, "/printer")
+	}
+	if profile.RedirectSmartCards {
+		args = append(args, "/smartcard")
+	}
+	if profile.RedirectPorts {
+		args = append(args, "/serial")
+	}
+	if profile.RedirectDevices {
+		args = append(args, "/usb:auto")
+	}
 	args = appendToggle(args, "wallpaper", profile.DesktopBackground)
 	args = appendToggle(args, "fonts", profile.FontSmoothing)
 	args = appendToggle(args, "aero", profile.DesktopComposition)
@@ -792,8 +847,20 @@ func buildFreeRdpArguments(command rdpCommand) ([]string, error) {
 	if profile.RedirectDrives != "" {
 		if strings.EqualFold(strings.TrimSpace(profile.RedirectDrives), "all") {
 			args = append(args, "/drives")
+		} else {
+			for _, drive := range strings.Split(normalizeRdpDriveList(profile.RedirectDrives), ",") {
+				if drive != "" {
+					args = append(args, "/drive:"+drive+","+drive+":\\")
+				}
+			}
 		}
 	}
+	if profile.BitmapCaching {
+		args = append(args, "/cache:bitmap:on")
+	} else {
+		args = append(args, "/cache:bitmap:off")
+	}
+	args = append(args, "/network:"+freeRdpNetworkName(profile.ConnectionSpeed))
 	usesParentWindow := freeRdpUsesParentWindow(runtime.GOOS, command.OwnerWindow)
 	if usesParentWindow {
 		args = append(args, "/parent-window:"+command.OwnerWindow)
@@ -810,6 +877,67 @@ func buildFreeRdpArguments(command rdpCommand) ([]string, error) {
 		args = append(args, "/cert-ignore")
 	}
 	return args, nil
+}
+
+func buildFreeRdpInvocation(command rdpCommand) ([]string, string, error) {
+	arguments, err := buildFreeRdpArguments(command)
+	if err != nil {
+		return nil, "", err
+	}
+	// FreeRDP accepts one complete argument per stdin line. Supplying every argument through this
+	// channel keeps connection and Gateway passwords out of the operating-system process list.
+	return []string{"/args-from:stdin"}, strings.Join(arguments, "\n") + "\n", nil
+}
+
+func freeRdpNetworkName(speed int) string {
+	switch speed {
+	case 1:
+		return "modem"
+	case 2:
+		return "broadband-low"
+	case 3:
+		return "satellite"
+	case 4:
+		return "broadband-high"
+	case 5:
+		return "wan"
+	case 6:
+		return "lan"
+	default:
+		return "auto"
+	}
+}
+
+func validateRdpProfile(profile rdpProfile) error {
+	settings := workspaceRdpSettings{
+		Domain: profile.Domain, ScreenSize: profile.ScreenSize, FullScreen: profile.FullScreen,
+		ColorDepth: profile.ColorDepth, UseAllMonitors: profile.UseAllMonitors,
+		AudioMode: profile.AudioMode, AudioCaptureMode: profile.AudioCaptureMode,
+		KeyboardHookMode: profile.KeyboardHookMode, RedirectClipboard: profile.RedirectClipboard,
+		RedirectPrinters: profile.RedirectPrinters, RedirectSmartCards: profile.RedirectSmartCards,
+		RedirectPorts: profile.RedirectPorts, RedirectDevices: profile.RedirectDevices,
+		RedirectDrives: profile.RedirectDrives, ConnectionSpeed: profile.ConnectionSpeed,
+		DesktopBackground: profile.DesktopBackground, FontSmoothing: profile.FontSmoothing,
+		DesktopComposition: profile.DesktopComposition, WindowDrag: profile.WindowDrag,
+		MenuAnimation: profile.MenuAnimation, VisualStyles: profile.VisualStyles,
+		BitmapCaching: profile.BitmapCaching, AutoReconnect: profile.AutoReconnect,
+		GatewayUsageMethod: profile.GatewayUsageMethod, GatewayHostname: profile.GatewayHostname,
+		GatewayBypassLocal: profile.GatewayBypassLocal, GatewayUseSameCreds: profile.GatewayUseSameCreds,
+		UseExternalClient: profile.UseExternalClient,
+	}
+	if profile.ServerAuthentication == nil {
+		settings.ServerAuthentication = 2
+	} else {
+		settings.ServerAuthentication = *profile.ServerAuthentication
+	}
+	if _, err := normalizeWorkspaceRdpSettings(&settings); err != nil {
+		return err
+	}
+	if !validRdpText(profile.Username, 513) || !validRdpText(profile.GatewayUsername, 513) ||
+		!validRdpText(profile.Password, 4096) || !validRdpText(profile.GatewayPassword, 4096) {
+		return errors.New("RDP credential values are invalid")
+	}
+	return nil
 }
 
 func freeRdpUsesParentWindow(goos, ownerWindow string) bool {
@@ -854,6 +982,9 @@ func normalizeRdpTarget(rawHost string, rawPort int) (string, int, error) {
 	host := strings.TrimSpace(rawHost)
 	if host == "" {
 		return "", 0, errors.New("RDP host is empty")
+	}
+	if !validRdpHostText(host) {
+		return "", 0, errors.New("RDP host is invalid")
 	}
 	port := rawPort
 	if port == 0 {

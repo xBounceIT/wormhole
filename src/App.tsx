@@ -243,7 +243,7 @@ import {
 type Protocol = QuickConnectProtocol;
 type CredentialProtocol = Extract<Protocol, 'ssh' | 'rdp' | 'vnc'>;
 type AutoSudoMode = 'inherit' | 'on' | 'off';
-type CredentialSelection = 'inherit' | 'none' | string;
+type CredentialSelection = 'inherit' | 'none' | 'inline' | string;
 type NavItem = 'sessions' | 'credentials' | 'tunnels' | 'settings';
 type AuthPromptKind = 'lock' | 'confirmation';
 
@@ -261,6 +261,39 @@ const defaultSerialSettings: SerialSettings = {
   stopBits: 1,
   parity: 0,
   flowControl: 0,
+};
+
+const defaultRdpSettings: WormholeWorkspaceRdpSettings = {
+  domain: '',
+  screenSize: 'fitToWindow',
+  fullScreen: false,
+  colorDepth: 32,
+  useAllMonitors: false,
+  audioMode: 0,
+  audioCaptureMode: 0,
+  keyboardHookMode: 2,
+  redirectClipboard: true,
+  redirectPrinters: false,
+  redirectSmartCards: false,
+  redirectPorts: false,
+  redirectDevices: false,
+  redirectDrives: '',
+  connectionSpeed: 7,
+  desktopBackground: true,
+  fontSmoothing: true,
+  desktopComposition: true,
+  windowDrag: true,
+  menuAnimation: true,
+  visualStyles: true,
+  bitmapCaching: true,
+  autoReconnect: true,
+  serverAuthentication: 2,
+  gatewayUsageMethod: 0,
+  gatewayHostname: '',
+  gatewayCredentialId: '',
+  gatewayBypassLocal: true,
+  gatewayUseSameCreds: false,
+  useExternalClient: false,
 };
 
 const rootFolderSelectionValue = '__wormhole-root__';
@@ -310,6 +343,9 @@ type TreeNode = {
   protocol?: Protocol;
   host?: string;
   port?: number;
+  username?: string;
+  hasInlineCredential?: boolean;
+  rdp?: WormholeWorkspaceRdpSettings;
   serialBaudRate?: number;
   serialDataBits?: number;
   serialStopBits?: number;
@@ -628,7 +664,10 @@ function emptyCredentialDraft(): CredentialDraft {
   };
 }
 
-function credentialSelectionFor(node: Pick<TreeNode, 'credentialMode' | 'credentialId'>) {
+function credentialSelectionFor(
+  node: Pick<TreeNode, 'credentialMode' | 'credentialId' | 'hasInlineCredential'>,
+) {
+  if (node.hasInlineCredential) return 'inline';
   if (node.credentialMode === 1) return 'none';
   if ((node.credentialMode === 2 || node.credentialMode == null) && node.credentialId) {
     return node.credentialId;
@@ -640,6 +679,7 @@ function credentialSettingsFor(selection: CredentialSelection): {
   mode: 0 | 1 | 2;
   credentialId: string;
 } {
+  if (selection === 'inline') return { mode: 1, credentialId: '' };
   if (selection === 'inherit') return { mode: 0, credentialId: '' };
   if (selection === 'none') return { mode: 1, credentialId: '' };
   return { mode: 2, credentialId: selection };
@@ -1341,7 +1381,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   const sshCredentialSubmitInFlight = useRef(false);
   const webSessionAttempts = useRef(new WebSessionAttemptTracker());
   const webSessionOpenInFlight = useRef(new Map<string, number>());
-  const rdpBitwardenAttempts = useRef(new Set<string>());
+  const rdpSavedCredentialAttempts = useRef(new Set<string>());
   const runtimeBitwardenRetries = useRef(new KeyedRetryQueue<string>());
   const [activePage, setActivePage] = useState<NavItem>('sessions');
   const [expanded, setExpanded] = useState<Set<string>>(
@@ -1356,7 +1396,6 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   const sessionsRef = useRef(sessions);
   sessionsRef.current = sessions;
   const [selectedSessionId, setSelectedSessionId] = useState('');
-  const [rdpCredentials, setRdpCredentials] = useState<Record<string, RdpCredentials>>({});
   const [rdpCredentialPrompt, setRdpCredentialPrompt] = useState<string | null>(null);
   const [rdpCredentialForm, setRdpCredentialForm] = useState<RdpCredentials>({
     username: '',
@@ -1416,6 +1455,8 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     name: '',
     host: '',
     port: '',
+    username: '',
+    inlinePassword: '',
     protocol: 'ssh' as Protocol,
     folder: '',
     sshAutoSudo: 'inherit' as AutoSudoMode,
@@ -1423,6 +1464,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     tunnel: 'inherit' as TunnelMode,
     credential: 'inherit' as CredentialSelection,
     serial: { ...defaultSerialSettings },
+    rdp: { ...defaultRdpSettings },
   });
   const [newFolderOpen, setNewFolderOpen] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
@@ -1495,6 +1537,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     return [
       { value: 'inherit', label: 'Inherit from folder' },
       { value: 'none', label: 'No saved credential' },
+      ...(newConnectionForm.protocol === 'ssh' || newConnectionForm.protocol === 'rdp'
+        ? [{ value: 'inline', label: 'Password stored for this connection' }]
+        : []),
       ...options.map((credential) => ({
         value: credential.id,
         label: `${credential.name} · ${credential.provider}`,
@@ -2263,6 +2308,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     setMremoteImportOpen(false);
     window.wormhole?.clearMRemoteImport();
     setSshCredentialPrompt(null);
+    setNewConnectionForm((form) => ({ ...form, inlinePassword: '' }));
     setNewConnectionOpen(false);
     setFolderDetailsOpen(false);
     setNewFolderOpen(false);
@@ -2272,8 +2318,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     setSshCredentialForm({ username: '', password: '' });
     setRdpCredentialPrompt(null);
     setRdpCredentialForm({ username: '', domain: '', password: '' });
-    setRdpCredentials({});
-    rdpBitwardenAttempts.current.clear();
+    rdpSavedCredentialAttempts.current.clear();
     runtimeBitwardenRetries.current.clear();
     setBitwardenUnlockPrompt(null);
     setBitwardenUnlockPassword('');
@@ -2304,12 +2349,12 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     const unsubscribe = window.wormhole?.onRdpEvent((event) => {
       if (!event.sessionId) return;
       const bitwardenAuthenticationFailure =
-        rdpBitwardenAttempts.current.has(event.sessionId) &&
+        rdpSavedCredentialAttempts.current.has(event.sessionId) &&
         (event.type === 'logonError' ||
           (event.type === 'fatalError' &&
             /authenticat|credential|logon|password/i.test(event.message ?? '')));
       if (bitwardenAuthenticationFailure) {
-        rdpBitwardenAttempts.current.delete(event.sessionId);
+        rdpSavedCredentialAttempts.current.delete(event.sessionId);
         setRdpCredentialForm({ username: '', domain: '', password: '' });
         setRdpCredentialPrompt(event.sessionId);
       }
@@ -2752,15 +2797,22 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     await window.wormhole?.closeWebSession(sessionId);
   }
 
-  function defaultRdpProfile(session: Session, credentials?: RdpCredentials): WormholeRdpProfile {
+  function defaultRdpProfile(session: Session): WormholeRdpProfile {
+    if (session.nodeId) {
+      // Go reloads the complete saved/inherited profile and its protected credentials from this
+      // identity. Renderer values are intentionally limited to safe routing metadata.
+      return {
+        nodeId: session.nodeId,
+        name: session.title,
+        host: session.host,
+        port: session.port,
+      };
+    }
     return {
       nodeId: session.nodeId,
       name: session.title,
       host: session.host,
       port: session.port,
-      username: credentials?.username || undefined,
-      domain: credentials?.domain || undefined,
-      password: credentials?.password || undefined,
       screenSize: 'Full connection content',
       colorDepth: 32,
       redirectClipboard: true,
@@ -2783,42 +2835,13 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   async function requestRdpCredentials(sessionId: string) {
     const session = sessions.find((candidate) => candidate.id === sessionId);
     if (!session || session.protocol !== 'rdp') return;
-    const existing = rdpCredentials[sessionId];
     setSelectedSessionId(sessionId);
     setActivePage('sessions');
-    if (existing) {
-      startRdpSession(sessionId, existing, true);
+    if (session.nodeId) {
+      startRdpSession(sessionId, { username: '', domain: '', password: '' }, false);
       return;
     }
-    if (session.nodeId && window.wormhole) {
-      try {
-        const result = await window.wormhole.nodeUsesBitwarden({
-          nodeId: session.nodeId,
-          protocol: 'rdp',
-        });
-        if (result.bitwarden) {
-          startRdpSession(sessionId, { username: '', domain: '', password: '' }, false);
-          return;
-        }
-      } catch (error: unknown) {
-        const message = error instanceof Error ? error.message : String(error);
-        setSessions((current) =>
-          current.map((candidate) =>
-            candidate.id === sessionId
-              ? { ...candidate, rdpStatus: 'failed', rdpError: message }
-              : candidate,
-          ),
-        );
-        return;
-      }
-    }
-    setRdpCredentialForm(
-      existing ?? {
-        username: '',
-        domain: '',
-        password: '',
-      },
-    );
+    setRdpCredentialForm({ username: '', domain: '', password: '' });
     setRdpCredentialPrompt(sessionId);
   }
 
@@ -2836,10 +2859,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       password: credentials.password,
     };
     if (manualCredentials) {
-      rdpBitwardenAttempts.current.delete(sessionId);
-      setRdpCredentials((current) => ({ ...current, [sessionId]: normalizedCredentials }));
+      rdpSavedCredentialAttempts.current.delete(sessionId);
     } else {
-      rdpBitwardenAttempts.current.add(sessionId);
+      rdpSavedCredentialAttempts.current.add(sessionId);
     }
     setSessions((current) =>
       current.map((candidate) =>
@@ -2849,7 +2871,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
               rdpStatus: 'starting',
               rdpError: undefined,
               tunnelProgress: null,
-              rdpProfile: defaultRdpProfile(candidate, normalizedCredentials),
+              rdpProfile: defaultRdpProfile(candidate),
             }
           : candidate,
       ),
@@ -2873,17 +2895,27 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     void window.wormhole
       .startRdpSession({
         sessionId,
-        profile: defaultRdpProfile(session, normalizedCredentials),
+        profile: {
+          ...defaultRdpProfile(session),
+          username: manualCredentials ? normalizedCredentials.username || undefined : undefined,
+          domain: manualCredentials ? normalizedCredentials.domain || undefined : undefined,
+          password: manualCredentials ? normalizedCredentials.password || undefined : undefined,
+        },
         manualCredentials,
       })
       .catch((error: unknown) => {
         const message = error instanceof Error ? error.message : 'The RDP backend could not start.';
         if (isBitwardenUnlockError(message)) {
           requestRuntimeBitwardenUnlock(`rdp:${sessionId}`, message, () =>
-            startRdpSession(sessionId, normalizedCredentials, manualCredentials),
+            manualCredentials
+              ? requestRdpCredentials(sessionId)
+              : startRdpSession(sessionId, normalizedCredentials, false),
           );
-        } else if (!manualCredentials && isBitwardenCredentialError(message)) {
-          rdpBitwardenAttempts.current.delete(sessionId);
+        } else if (
+          !manualCredentials &&
+          (isBitwardenCredentialError(message) || /credential|password/i.test(message))
+        ) {
+          rdpSavedCredentialAttempts.current.delete(sessionId);
           setRdpCredentialForm({ username: '', domain: '', password: '' });
           setRdpCredentialPrompt(sessionId);
         }
@@ -2898,20 +2930,17 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   }
 
   function retryRdpSession(sessionId: string) {
-    const credentials = rdpCredentials[sessionId];
-    if (credentials) {
-      startRdpSession(sessionId, credentials, true);
-    } else {
-      requestRdpCredentials(sessionId);
-    }
+    requestRdpCredentials(sessionId);
   }
 
   function submitRdpCredentials(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!rdpCredentialPrompt) return;
     const sessionId = rdpCredentialPrompt;
+    const credentials = rdpCredentialForm;
     setRdpCredentialPrompt(null);
-    startRdpSession(sessionId, rdpCredentialForm, true);
+    setRdpCredentialForm({ username: '', domain: '', password: '' });
+    startRdpSession(sessionId, credentials, true);
   }
 
   function requestSshCredentials(sessionId: string) {
@@ -3075,7 +3104,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       if (runtimeBitwardenRetries.current.isEmpty && bitwardenUnlockPrompt) {
         dismissRuntimeBitwardenUnlock();
       }
-      rdpBitwardenAttempts.current.delete(id);
+      rdpSavedCredentialAttempts.current.delete(id);
       if (rdpCredentialPrompt === id) setRdpCredentialPrompt(null);
       if (sshCredentialPrompt?.backendSessionId === closing.backendSessionId) {
         setSshCredentialPrompt(null);
@@ -3099,12 +3128,6 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         return nextSelectedSessionId(sessions, current, (sessionId) =>
           closingSessionIds.has(sessionId),
         );
-      });
-      setRdpCredentials((current) => {
-        if (!(id in current)) return current;
-        const next = { ...current };
-        delete next[id];
-        return next;
       });
       setSshCredentialPrompt((current) =>
         current?.sessionId === id || current?.backendSessionId === id ? null : current,
@@ -3137,11 +3160,6 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         : current,
     );
     setRoutePrompts((current) => current.filter((prompt) => !closingIds.has(prompt.sessionId)));
-    setRdpCredentials((current) => {
-      const next = { ...current };
-      for (const id of closingIds) delete next[id];
-      return next;
-    });
   }
 
   const releaseSessionResourcesRef = useRef(releaseSessionResources);
@@ -3306,8 +3324,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       );
     }
     if (duplicate.protocol === 'rdp') {
-      const existing = rdpCredentials[id];
-      setRdpCredentialForm(existing ?? { username: '', domain: '', password: '' });
+      setRdpCredentialForm({ username: '', domain: '', password: '' });
       setRdpCredentialPrompt(duplicate.id);
     }
   }
@@ -4188,6 +4205,8 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       name: '',
       host: '',
       port: '',
+      username: '',
+      inlinePassword: '',
       protocol: 'ssh',
       folder: folderId ?? '',
       sshAutoSudo: 'inherit',
@@ -4195,6 +4214,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       tunnel: 'inherit',
       credential: 'inherit',
       serial: { ...defaultSerialSettings },
+      rdp: { ...defaultRdpSettings },
     });
     setNewConnectionOpen(true);
   }
@@ -4356,6 +4376,8 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       name: node.name,
       host: node.host ?? '',
       port: node.port === undefined ? '' : String(node.port),
+      username: node.username ?? '',
+      inlinePassword: '',
       protocol: node.protocol,
       folder: findParentFolderId(tree, node.id) ?? '',
       sshAutoSudo: autoSudoModeFor(node.sshAutoSudo),
@@ -4363,6 +4385,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       tunnel: tunnelModeFor(node),
       credential: credentialSelectionFor(node),
       serial: serialSettingsFromNode(node),
+      rdp: { ...defaultRdpSettings, ...(node.rdp ?? {}) },
     });
     setNewConnectionOpen(true);
   }
@@ -4501,6 +4524,18 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       if (!window.wormhole) throw new Error('The native workspace bridge is unavailable.');
       const tunnel = tunnelValueFor(connectionTunnel);
       const credential = credentialSettingsFor(connectionCredential);
+      const editingNode = editingId ? findTreeNode(tree, editingId) : undefined;
+      const usingInlinePassword = connectionCredential === 'inline';
+      const inlinePasswordAction: 'preserve' | 'set' | 'clear' | null = usingInlinePassword
+        ? newConnectionForm.inlinePassword
+          ? 'set'
+          : editingNode?.hasInlineCredential
+            ? 'preserve'
+            : null
+        : 'clear';
+      if (!inlinePasswordAction) {
+        throw new Error('Enter a password for this connection.');
+      }
       const nodeWrite = {
         parentId: newConnectionForm.folder,
         name,
@@ -4508,6 +4543,12 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         protocol: newConnectionForm.protocol,
         host,
         port: newConnectionForm.protocol === 'serial' ? 0 : port,
+        username:
+          newConnectionForm.protocol === 'ssh' || newConnectionForm.protocol === 'rdp'
+            ? newConnectionForm.username
+            : '',
+        inlinePasswordAction,
+        inlinePassword: inlinePasswordAction === 'set' ? newConnectionForm.inlinePassword : '',
         sshAutoSudo: autoSudoValueFor(connectionAutoSudo),
         httpIgnoreCertErrors:
           newConnectionForm.protocol === 'https' ? newConnectionForm.httpIgnoreCertErrors : null,
@@ -4520,6 +4561,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         serialStopBits: newConnectionForm.serial.stopBits,
         serialParity: newConnectionForm.serial.parity,
         serialFlowControl: newConnectionForm.serial.flowControl,
+        rdp: newConnectionForm.protocol === 'rdp' ? newConnectionForm.rdp : undefined,
       };
       if (editingId) {
         const result = await window.wormhole.updateWorkspaceNode({ id: editingId, ...nodeWrite });
@@ -4621,6 +4663,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         setExpanded((current) => new Set(current).add(newConnectionForm.folder));
       }
       setEditingConnectionId(null);
+      setNewConnectionForm((form) => ({ ...form, inlinePassword: '' }));
       setNewConnectionOpen(false);
     } catch (error: unknown) {
       setEditorError(error instanceof Error ? error.message : 'Could not save the connection.');
@@ -4651,6 +4694,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         protocol: '',
         host: '',
         port: 0,
+        username: '',
+        inlinePasswordAction: 'clear',
+        inlinePassword: '',
         sshAutoSudo: autoSudoValueFor(folderDetailsForm.sshAutoSudo),
         httpIgnoreCertErrors: null,
         tunnelEnabled: tunnel.tunnelEnabled,
@@ -4690,6 +4736,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         protocol: '',
         host: '',
         port: 0,
+        username: '',
+        inlinePasswordAction: 'clear',
+        inlinePassword: '',
         sshAutoSudo: null,
         httpIgnoreCertErrors: null,
         tunnelEnabled: null,
@@ -5778,6 +5827,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           onOpenChange={(open) => {
             setNewConnectionOpen(open);
             if (!open) {
+              setNewConnectionForm((form) => ({ ...form, inlinePassword: '' }));
               setEditingConnectionId(null);
               setEditorError('');
             }
@@ -5981,6 +6031,46 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                       </div>
                     ) : null}
 
+                    {newConnectionForm.protocol === 'ssh' ||
+                    newConnectionForm.protocol === 'rdp' ? (
+                      <div className="grid gap-4 sm:grid-cols-2">
+                        <div className="grid gap-2">
+                          <Label htmlFor="connection-username">Username override</Label>
+                          <Input
+                            id="connection-username"
+                            onChange={(event) =>
+                              setNewConnectionForm((form) => ({
+                                ...form,
+                                username: event.target.value,
+                              }))
+                            }
+                            placeholder="Use credential or inherited username"
+                            value={newConnectionForm.username}
+                          />
+                        </div>
+                        {newConnectionForm.credential === 'inline' ? (
+                          <div className="grid gap-2">
+                            <Label htmlFor="connection-inline-password">Connection password</Label>
+                            <Input
+                              autoComplete="new-password"
+                              id="connection-inline-password"
+                              onChange={(event) =>
+                                setNewConnectionForm((form) => ({
+                                  ...form,
+                                  inlinePassword: event.target.value,
+                                }))
+                              }
+                              placeholder={
+                                editingConnectionId ? 'Leave blank to keep stored password' : ''
+                              }
+                              type="password"
+                              value={newConnectionForm.inlinePassword}
+                            />
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : null}
+
                     {newConnectionForm.protocol === 'ssh' ? (
                       <AutoSudoField
                         id="connection-auto-sudo"
@@ -6141,7 +6231,30 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                       <div className="grid gap-4 sm:grid-cols-2">
                         <div className="grid gap-2">
                           <Label htmlFor="rdp-display">Display configuration</Label>
-                          <Select defaultValue="fit">
+                          <Select
+                            onValueChange={(value) =>
+                              setNewConnectionForm((form) => ({
+                                ...form,
+                                rdp: {
+                                  ...form.rdp,
+                                  fullScreen: value === 'full',
+                                  screenSize:
+                                    value === 'custom'
+                                      ? /^\d+x\d+$/i.test(form.rdp.screenSize)
+                                        ? form.rdp.screenSize
+                                        : '1280x800'
+                                      : 'fitToWindow',
+                                },
+                              }))
+                            }
+                            value={
+                              newConnectionForm.rdp.fullScreen
+                                ? 'full'
+                                : /^\d+x\d+$/i.test(newConnectionForm.rdp.screenSize)
+                                  ? 'custom'
+                                  : 'fit'
+                            }
+                          >
                             <SelectTrigger id="rdp-display">
                               <SelectValue />
                             </SelectTrigger>
@@ -6154,20 +6267,68 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                         </div>
                         <div className="grid gap-2">
                           <Label htmlFor="rdp-color-depth">Color depth</Label>
-                          <Select defaultValue="32">
+                          <Select
+                            onValueChange={(value) =>
+                              setNewConnectionForm((form) => ({
+                                ...form,
+                                rdp: { ...form.rdp, colorDepth: Number(value) },
+                              }))
+                            }
+                            value={String(newConnectionForm.rdp.colorDepth)}
+                          >
                             <SelectTrigger id="rdp-color-depth">
                               <SelectValue />
                             </SelectTrigger>
                             <SelectContent>
                               <SelectItem value="32">32-bit</SelectItem>
+                              <SelectItem value="24">24-bit</SelectItem>
                               <SelectItem value="16">16-bit</SelectItem>
+                              <SelectItem value="15">15-bit</SelectItem>
                             </SelectContent>
                           </Select>
                         </div>
+                        {!newConnectionForm.rdp.fullScreen &&
+                        /^\d+x\d+$/i.test(newConnectionForm.rdp.screenSize) ? (
+                          <div className="grid gap-2 sm:col-span-2 sm:max-w-[260px]">
+                            <Label htmlFor="rdp-custom-size">Custom desktop size</Label>
+                            <Input
+                              id="rdp-custom-size"
+                              onChange={(event) =>
+                                setNewConnectionForm((form) => ({
+                                  ...form,
+                                  rdp: { ...form.rdp, screenSize: event.target.value },
+                                }))
+                              }
+                              placeholder="1280x800"
+                              value={newConnectionForm.rdp.screenSize}
+                            />
+                          </div>
+                        ) : null}
                         <label className="flex items-center gap-2 text-xs sm:col-span-2">
-                          <Checkbox />
+                          <Checkbox
+                            checked={newConnectionForm.rdp.useAllMonitors}
+                            onCheckedChange={(checked) =>
+                              setNewConnectionForm((form) => ({
+                                ...form,
+                                rdp: { ...form.rdp, useAllMonitors: checked === true },
+                              }))
+                            }
+                          />
                           <span>Use all my monitors</span>
                         </label>
+                        <div className="grid gap-2 sm:col-span-2 sm:max-w-[320px]">
+                          <Label htmlFor="rdp-domain">Domain override</Label>
+                          <Input
+                            id="rdp-domain"
+                            onChange={(event) =>
+                              setNewConnectionForm((form) => ({
+                                ...form,
+                                rdp: { ...form.rdp, domain: event.target.value },
+                              }))
+                            }
+                            value={newConnectionForm.rdp.domain}
+                          />
+                        </div>
                       </div>
                     </TabsContent>
                     <TabsContent
@@ -6177,38 +6338,133 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                       <div className="grid gap-4">
                         <div className="grid gap-2 sm:max-w-[320px]">
                           <Label htmlFor="rdp-audio-playback">Remote audio playback</Label>
-                          <Select defaultValue="local">
+                          <Select
+                            onValueChange={(value) =>
+                              setNewConnectionForm((form) => ({
+                                ...form,
+                                rdp: { ...form.rdp, audioMode: Number(value) },
+                              }))
+                            }
+                            value={String(newConnectionForm.rdp.audioMode)}
+                          >
                             <SelectTrigger id="rdp-audio-playback">
                               <SelectValue />
                             </SelectTrigger>
                             <SelectContent>
-                              <SelectItem value="local">Play on this device</SelectItem>
-                              <SelectItem value="remote">Play on remote device</SelectItem>
-                              <SelectItem value="none">Do not play</SelectItem>
+                              <SelectItem value="0">Play on this device</SelectItem>
+                              <SelectItem value="2">Play on remote device</SelectItem>
+                              <SelectItem value="1">Do not play</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+                        <div className="grid gap-2 sm:max-w-[320px]">
+                          <Label htmlFor="rdp-audio-capture">Remote audio recording</Label>
+                          <Select
+                            onValueChange={(value) =>
+                              setNewConnectionForm((form) => ({
+                                ...form,
+                                rdp: { ...form.rdp, audioCaptureMode: Number(value) },
+                              }))
+                            }
+                            value={String(newConnectionForm.rdp.audioCaptureMode)}
+                          >
+                            <SelectTrigger id="rdp-audio-capture">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="0">Do not record</SelectItem>
+                              <SelectItem value="1">Record from this device</SelectItem>
                             </SelectContent>
                           </Select>
                         </div>
                         <div className="grid gap-2 sm:max-w-[320px]">
                           <Label htmlFor="rdp-keyboard">Apply Windows key combinations</Label>
-                          <Select defaultValue="full">
+                          <Select
+                            onValueChange={(value) =>
+                              setNewConnectionForm((form) => ({
+                                ...form,
+                                rdp: { ...form.rdp, keyboardHookMode: Number(value) },
+                              }))
+                            }
+                            value={String(newConnectionForm.rdp.keyboardHookMode)}
+                          >
                             <SelectTrigger id="rdp-keyboard">
                               <SelectValue />
                             </SelectTrigger>
                             <SelectContent>
-                              <SelectItem value="full">On this computer</SelectItem>
-                              <SelectItem value="remote">On the remote computer</SelectItem>
+                              <SelectItem value="0">On this computer</SelectItem>
+                              <SelectItem value="1">On the remote computer</SelectItem>
+                              <SelectItem value="2">Remote only in full screen</SelectItem>
                             </SelectContent>
                           </Select>
                         </div>
                         <div className="grid gap-2 sm:grid-cols-2">
-                          {['Clipboard', 'Printers', 'Smart cards', 'Serial / parallel ports'].map(
-                            (label) => (
-                              <label className="flex items-center gap-2 text-xs" key={label}>
-                                <Checkbox defaultChecked={label === 'Clipboard'} />
-                                <span>{label}</span>
-                              </label>
-                            ),
-                          )}
+                          {(
+                            [
+                              ['redirectClipboard', 'Clipboard'],
+                              ['redirectPrinters', 'Printers'],
+                              ['redirectSmartCards', 'Smart cards'],
+                              ['redirectPorts', 'Serial / parallel ports'],
+                              ['redirectDevices', 'Supported Plug and Play devices'],
+                            ] as const
+                          ).map(([key, label]) => (
+                            <label className="flex items-center gap-2 text-xs" key={label}>
+                              <Checkbox
+                                checked={newConnectionForm.rdp[key]}
+                                onCheckedChange={(checked) =>
+                                  setNewConnectionForm((form) => ({
+                                    ...form,
+                                    rdp: { ...form.rdp, [key]: checked === true },
+                                  }))
+                                }
+                              />
+                              <span>{label}</span>
+                            </label>
+                          ))}
+                        </div>
+                        <div className="grid gap-2 sm:max-w-[420px]">
+                          <Label htmlFor="rdp-drives">Drive redirection</Label>
+                          <Select
+                            onValueChange={(value) =>
+                              setNewConnectionForm((form) => ({
+                                ...form,
+                                rdp: {
+                                  ...form.rdp,
+                                  redirectDrives:
+                                    value === 'custom' ? 'C' : value === 'all' ? 'all' : '',
+                                },
+                              }))
+                            }
+                            value={
+                              newConnectionForm.rdp.redirectDrives === ''
+                                ? 'none'
+                                : newConnectionForm.rdp.redirectDrives.toLowerCase() === 'all'
+                                  ? 'all'
+                                  : 'custom'
+                            }
+                          >
+                            <SelectTrigger id="rdp-drives">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="none">Do not redirect drives</SelectItem>
+                              <SelectItem value="all">All drives</SelectItem>
+                              <SelectItem value="custom">Selected drive letters</SelectItem>
+                            </SelectContent>
+                          </Select>
+                          {newConnectionForm.rdp.redirectDrives &&
+                          newConnectionForm.rdp.redirectDrives !== 'all' ? (
+                            <Input
+                              onChange={(event) =>
+                                setNewConnectionForm((form) => ({
+                                  ...form,
+                                  rdp: { ...form.rdp, redirectDrives: event.target.value },
+                                }))
+                              }
+                              placeholder="C,D"
+                              value={newConnectionForm.rdp.redirectDrives}
+                            />
+                          ) : null}
                         </div>
                       </div>
                     </TabsContent>
@@ -6219,26 +6475,51 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                       <div className="grid gap-4">
                         <div className="grid gap-2 sm:max-w-[320px]">
                           <Label htmlFor="rdp-connection-speed">Connection speed</Label>
-                          <Select defaultValue="broadband">
+                          <Select
+                            onValueChange={(value) =>
+                              setNewConnectionForm((form) => ({
+                                ...form,
+                                rdp: { ...form.rdp, connectionSpeed: Number(value) },
+                              }))
+                            }
+                            value={String(newConnectionForm.rdp.connectionSpeed)}
+                          >
                             <SelectTrigger id="rdp-connection-speed">
                               <SelectValue />
                             </SelectTrigger>
                             <SelectContent>
-                              <SelectItem value="broadband">Broadband</SelectItem>
-                              <SelectItem value="lan">LAN</SelectItem>
-                              <SelectItem value="custom">Custom</SelectItem>
+                              <SelectItem value="1">Modem</SelectItem>
+                              <SelectItem value="2">Low-speed broadband</SelectItem>
+                              <SelectItem value="3">Satellite</SelectItem>
+                              <SelectItem value="4">High-speed broadband</SelectItem>
+                              <SelectItem value="5">WAN</SelectItem>
+                              <SelectItem value="6">LAN</SelectItem>
+                              <SelectItem value="7">Auto detect</SelectItem>
                             </SelectContent>
                           </Select>
                         </div>
                         <div className="grid gap-2 sm:grid-cols-2">
-                          {[
-                            'Desktop background',
-                            'Font smoothing',
-                            'Desktop composition',
-                            'Visual styles',
-                          ].map((label) => (
+                          {(
+                            [
+                              ['desktopBackground', 'Desktop background'],
+                              ['fontSmoothing', 'Font smoothing'],
+                              ['desktopComposition', 'Desktop composition'],
+                              ['windowDrag', 'Show window contents while dragging'],
+                              ['menuAnimation', 'Menu and window animation'],
+                              ['visualStyles', 'Visual styles'],
+                              ['bitmapCaching', 'Persistent bitmap caching'],
+                            ] as const
+                          ).map(([key, label]) => (
                             <label className="flex items-center gap-2 text-xs" key={label}>
-                              <Checkbox />
+                              <Checkbox
+                                checked={newConnectionForm.rdp[key]}
+                                onCheckedChange={(checked) =>
+                                  setNewConnectionForm((form) => ({
+                                    ...form,
+                                    rdp: { ...form.rdp, [key]: checked === true },
+                                  }))
+                                }
+                              />
                               <span>{label}</span>
                             </label>
                           ))}
@@ -6252,23 +6533,135 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                       <div className="grid gap-4">
                         <div className="grid gap-2 sm:max-w-[320px]">
                           <Label htmlFor="rdp-authentication">Server authentication</Label>
-                          <Select defaultValue="warn">
+                          <Select
+                            onValueChange={(value) =>
+                              setNewConnectionForm((form) => ({
+                                ...form,
+                                rdp: { ...form.rdp, serverAuthentication: Number(value) },
+                              }))
+                            }
+                            value={String(newConnectionForm.rdp.serverAuthentication)}
+                          >
                             <SelectTrigger id="rdp-authentication">
                               <SelectValue />
                             </SelectTrigger>
                             <SelectContent>
-                              <SelectItem value="warn">Warn if authentication fails</SelectItem>
-                              <SelectItem value="connect">Connect and do not warn</SelectItem>
-                              <SelectItem value="never">Never connect</SelectItem>
+                              <SelectItem value="2">Warn if authentication fails</SelectItem>
+                              <SelectItem value="0">Connect and do not warn</SelectItem>
+                              <SelectItem value="1">Never connect</SelectItem>
                             </SelectContent>
                           </Select>
                         </div>
+                        <div className="grid gap-2 sm:max-w-[320px]">
+                          <Label htmlFor="rdp-gateway-mode">Remote Desktop Gateway</Label>
+                          <Select
+                            onValueChange={(value) =>
+                              setNewConnectionForm((form) => ({
+                                ...form,
+                                rdp: { ...form.rdp, gatewayUsageMethod: Number(value) },
+                              }))
+                            }
+                            value={String(newConnectionForm.rdp.gatewayUsageMethod)}
+                          >
+                            <SelectTrigger id="rdp-gateway-mode">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="0">Do not use a gateway</SelectItem>
+                              <SelectItem value="1">Always use this gateway</SelectItem>
+                              <SelectItem value="2">Detect automatically</SelectItem>
+                              <SelectItem value="3">Use system default</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+                        {newConnectionForm.rdp.gatewayUsageMethod !== 0 ? (
+                          <div className="grid gap-4 sm:grid-cols-2">
+                            <div className="grid gap-2">
+                              <Label htmlFor="rdp-gateway-host">Gateway hostname</Label>
+                              <Input
+                                id="rdp-gateway-host"
+                                onChange={(event) =>
+                                  setNewConnectionForm((form) => ({
+                                    ...form,
+                                    rdp: { ...form.rdp, gatewayHostname: event.target.value },
+                                  }))
+                                }
+                                value={newConnectionForm.rdp.gatewayHostname}
+                              />
+                            </div>
+                            <div className="grid gap-2">
+                              <Label htmlFor="rdp-gateway-credential">Gateway credential</Label>
+                              <SearchableCombobox
+                                id="rdp-gateway-credential"
+                                emptyMessage="No RDP credentials found."
+                                onValueChange={(credentialId) =>
+                                  setNewConnectionForm((form) => ({
+                                    ...form,
+                                    rdp: {
+                                      ...form.rdp,
+                                      gatewayCredentialId:
+                                        credentialId === 'none' ? '' : credentialId,
+                                    },
+                                  }))
+                                }
+                                options={[
+                                  { value: 'none', label: 'No saved gateway credential' },
+                                  ...credentialOptions.rdp.map((credential) => ({
+                                    value: credential.id,
+                                    label: `${credential.name} · ${credential.provider}`,
+                                  })),
+                                ]}
+                                placeholder="No saved gateway credential"
+                                searchPlaceholder="Search RDP credentials…"
+                                value={newConnectionForm.rdp.gatewayCredentialId || 'none'}
+                              />
+                            </div>
+                            {(
+                              [
+                                ['gatewayBypassLocal', 'Bypass gateway for local addresses'],
+                                [
+                                  'gatewayUseSameCreds',
+                                  'Use the connection credentials for the gateway',
+                                ],
+                              ] as const
+                            ).map(([key, label]) => (
+                              <label className="flex items-center gap-2 text-xs" key={key}>
+                                <Checkbox
+                                  checked={newConnectionForm.rdp[key]}
+                                  onCheckedChange={(checked) =>
+                                    setNewConnectionForm((form) => ({
+                                      ...form,
+                                      rdp: { ...form.rdp, [key]: checked === true },
+                                    }))
+                                  }
+                                />
+                                <span>{label}</span>
+                              </label>
+                            ))}
+                          </div>
+                        ) : null}
                         <label className="flex items-center gap-2 text-xs">
-                          <Checkbox />
+                          <Checkbox
+                            checked={newConnectionForm.rdp.useExternalClient}
+                            onCheckedChange={(checked) =>
+                              setNewConnectionForm((form) => ({
+                                ...form,
+                                rdp: { ...form.rdp, useExternalClient: checked === true },
+                              }))
+                            }
+                          />
                           <span>Open with system Remote Desktop (mstsc.exe)</span>
                         </label>
                         <label className="flex items-center gap-2 text-xs">
-                          <Checkbox />
+                          <Checkbox
+                            checked={newConnectionForm.rdp.autoReconnect}
+                            onCheckedChange={(checked) =>
+                              setNewConnectionForm((form) => ({
+                                ...form,
+                                rdp: { ...form.rdp, autoReconnect: checked === true },
+                              }))
+                            }
+                          />
                           <span>Reconnect if the connection is dropped</span>
                         </label>
                       </div>
@@ -6281,6 +6674,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                 <Button
                   disabled={editorBusy}
                   onClick={() => {
+                    setNewConnectionForm((form) => ({ ...form, inlinePassword: '' }));
                     setNewConnectionOpen(false);
                     setEditingConnectionId(null);
                   }}
@@ -6510,7 +6904,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
             <DialogHeader>
               <DialogTitle>RDP credentials</DialogTitle>
               <DialogDescription>
-                Credentials stay in memory for this app session and are passed directly to the
+                Credentials are used only for this connection attempt and are passed directly to the
                 native RDP provider.
               </DialogDescription>
             </DialogHeader>

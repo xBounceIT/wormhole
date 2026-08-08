@@ -166,6 +166,7 @@ func TestBuildFreeRdpArgumentsMapsProfileAndSurfaceSettings(t *testing.T) {
 		"/u:operator",
 		"/d:CONTOSO",
 		"/p:secret-marker",
+		"/audio-mode:0",
 		"+dynamic-resolution",
 		"+clipboard",
 		"+wallpaper",
@@ -175,18 +176,86 @@ func TestBuildFreeRdpArgumentsMapsProfileAndSurfaceSettings(t *testing.T) {
 		"-menu-anims",
 		"-themes",
 		"/drives",
-		"/parent-window:1234",
+		"/cache:bitmap:off",
+		"/network:auto",
 	}
 	if runtime.GOOS == "linux" {
-		if !reflect.DeepEqual(args, want) {
-			t.Fatalf("unexpected FreeRDP arguments:\nwant %#v\n got %#v", want, args)
+		if !contains(args, "/parent-window:1234") {
+			t.Fatalf("Linux parent window was not mapped: %#v", args)
 		}
-	} else if runtime.GOOS != "windows" && !containsAll(args, want[:len(want)-1]) {
-		// macOS deliberately does not use the X11 parent-window option.
+	}
+	if !containsAll(args, want) {
 		t.Fatalf("missing common FreeRDP arguments: %#v", args)
 	}
 	if !contains(args, "/p:secret-marker") {
 		t.Fatal("password was not passed to FreeRDP")
+	}
+}
+
+func TestFreeRdpInvocationKeepsPasswordsOutOfProcessArguments(t *testing.T) {
+	processArgs, input, err := buildFreeRdpInvocation(rdpCommand{
+		Bounds: rdpBounds{Width: 1280, Height: 800},
+		Profile: rdpProfile{
+			Host: "rdp.example", Username: "operator", Password: "connection-secret",
+			GatewayHostname: "gateway.example", GatewayUsageMethod: 1,
+			GatewayUsername: "gateway-user", GatewayPassword: "gateway-secret",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(processArgs, []string{"/args-from:stdin"}) {
+		t.Fatalf("unexpected FreeRDP process arguments: %#v", processArgs)
+	}
+	for _, secret := range []string{"connection-secret", "gateway-secret"} {
+		if strings.Contains(strings.Join(processArgs, " "), secret) {
+			t.Fatalf("secret %q was exposed in process arguments", secret)
+		}
+		if !strings.Contains(input, secret) {
+			t.Fatalf("secret %q was not supplied over stdin", secret)
+		}
+	}
+}
+
+func TestRdpProfileRejectsCredentialArgumentInjection(t *testing.T) {
+	profile := rdpProfile{
+		Host: "rdp.example", ScreenSize: "fitToWindow", ColorDepth: 32,
+		KeyboardHookMode: 2, ConnectionSpeed: 7, ServerAuthentication: intPointer(2),
+		Password: "safe\n/cert-ignore",
+	}
+	if err := validateRdpProfile(profile); err == nil {
+		t.Fatal("accepted a newline-bearing RDP password")
+	}
+	profile.Password = "safe"
+	profile.GatewayPassword = "safe\r/g:attacker"
+	if err := validateRdpProfile(profile); err == nil {
+		t.Fatal("accepted a newline-bearing RDP Gateway password")
+	}
+}
+
+func TestFreeRdpArgumentsMapRedirectionAndPerformanceProfile(t *testing.T) {
+	args, err := buildFreeRdpArguments(rdpCommand{
+		Bounds: rdpBounds{Width: 1280, Height: 800},
+		Profile: rdpProfile{
+			Host: "rdp.example", AudioMode: 2, AudioCaptureMode: 1, RedirectClipboard: true,
+			RedirectPrinters: true, RedirectSmartCards: true, RedirectPorts: true,
+			RedirectDevices: true, RedirectDrives: "C,D", ConnectionSpeed: 3,
+			DesktopBackground: true, FontSmoothing: true, DesktopComposition: true,
+			WindowDrag: true, MenuAnimation: true, VisualStyles: true, BitmapCaching: false,
+			AutoReconnect: true,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"/audio-mode:2", "/microphone", "+auto-reconnect", "+clipboard", "/printer",
+		"/smartcard", "/serial", "/usb:auto", "+wallpaper", "+fonts", "+aero",
+		"+window-drag", "+menu-anims", "+themes", "/drive:C,C:\\", "/drive:D,D:\\",
+		"/cache:bitmap:off", "/network:satellite",
+	}
+	if !containsAll(args, want) {
+		t.Fatalf("RDP profile settings were not mapped to FreeRDP: %#v", args)
 	}
 }
 
@@ -239,6 +308,14 @@ func TestRdpArgumentBuilderDoesNotCreateShellSyntax(t *testing.T) {
 	for _, arg := range args {
 		if strings.Contains(arg, "\n") || strings.Contains(arg, "\r") {
 			t.Fatalf("argument contains a line break: %q", arg)
+		}
+	}
+}
+
+func TestRdpTargetRejectsArgumentChannelInjection(t *testing.T) {
+	for _, host := range []string{"server\n/cert-ignore", "server\r/g:attacker", "bad host"} {
+		if _, _, err := normalizeRdpTarget(host, 3389); err == nil {
+			t.Fatalf("accepted malformed RDP host %q", host)
 		}
 	}
 }

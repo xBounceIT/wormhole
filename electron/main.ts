@@ -73,6 +73,7 @@ import {
 } from './serial.js';
 import { WebSessionAttemptTracker } from './web-session-attempt.js';
 import { getInSessionNavigationUrl } from './web-new-window-navigation.js';
+import { parseWorkspaceRdpSettings, type WorkspaceRdpSettings } from './workspace-rdp-contract.js';
 import type {
   RdpBackendEvent,
   RdpCommandRequest,
@@ -214,6 +215,7 @@ type NativeBackendAction =
   | 'bitwarden.get'
   | 'bitwarden.resolve-credential'
   | 'bitwarden.resolve-node'
+  | 'rdp.resolve-profile'
   | 'bitwarden.node-reference'
   | 'bitwarden.browser-storage-read'
   | 'bitwarden.browser-storage-capture'
@@ -227,8 +229,11 @@ type NativeBackendCommand = {
   credentialId?: string;
   host?: string;
   port?: number;
+  username?: string;
+  domain?: string;
   password?: string;
   passwordProvided?: boolean;
+  manualCredentials?: boolean;
   x?: number;
   y?: number;
   buttons?: number;
@@ -454,6 +459,9 @@ type WorkspaceNodeWriteRequest = {
   protocol: '' | 'ssh' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial';
   host: string;
   port: number;
+  username: string;
+  inlinePasswordAction: 'preserve' | 'set' | 'clear';
+  inlinePassword: string;
   sshAutoSudo: boolean | null;
   httpIgnoreCertErrors: boolean | null;
   tunnelEnabled: boolean | null;
@@ -465,6 +473,7 @@ type WorkspaceNodeWriteRequest = {
   serialStopBits: number;
   serialParity: number;
   serialFlowControl: number;
+  rdp?: WorkspaceRdpSettings;
 };
 type WebTargetResponse = {
   url: string;
@@ -1271,6 +1280,9 @@ function parseWorkspaceNodeWriteRequest(
   const protocol = value.protocol;
   const host = typeof value.host === 'string' ? value.host.trim() : '';
   const port = value.port;
+  const username = typeof value.username === 'string' ? value.username.trim() : '';
+  const inlinePasswordAction = value.inlinePasswordAction;
+  const inlinePassword = value.inlinePassword;
   const credentialMode = value.credentialMode;
   const credentialId = typeof value.credentialId === 'string' ? value.credentialId.trim() : '';
   const tunnelConfigId =
@@ -1295,6 +1307,7 @@ function parseWorkspaceNodeWriteRequest(
     (kind === 'connection' && (protocol === '' || host.length === 0)) ||
     (kind === 'folder' && (protocol !== '' || host !== '')) ||
     host.length > webMaxAddressLength ||
+    username.length > credentialMaxUsernameLength ||
     typeof port !== 'number' ||
     !Number.isSafeInteger(port) ||
     port < 0 ||
@@ -1305,7 +1318,14 @@ function parseWorkspaceNodeWriteRequest(
     !nullableBoolean(value.tunnelEnabled) ||
     tunnelConfigId.length > sshMaxSessionIdLength ||
     (credentialMode !== 0 && credentialMode !== 1 && credentialMode !== 2) ||
-    (credentialMode === 2 ? !isSshSessionId(credentialId) : credentialId !== '')
+    (credentialMode === 2 ? !isSshSessionId(credentialId) : credentialId !== '') ||
+    (inlinePasswordAction !== 'preserve' &&
+      inlinePasswordAction !== 'set' &&
+      inlinePasswordAction !== 'clear') ||
+    typeof inlinePassword !== 'string' ||
+    inlinePassword.length > credentialMaxPasswordLength ||
+    (inlinePasswordAction === 'set' ? inlinePassword.length === 0 : inlinePassword.length !== 0) ||
+    (protocol !== 'ssh' && protocol !== 'rdp' && inlinePasswordAction !== 'clear')
   ) {
     throw new Error('Workspace node is invalid.');
   }
@@ -1324,6 +1344,10 @@ function parseWorkspaceNodeWriteRequest(
   ) {
     throw new Error('Workspace serial settings are invalid.');
   }
+  const rdp = protocol === 'rdp' ? parseWorkspaceRdpSettings(value.rdp) : undefined;
+  if (protocol !== 'rdp' && value.rdp !== undefined) {
+    throw new Error('RDP settings are invalid for this protocol.');
+  }
   return {
     ...(updating ? { id } : {}),
     parentId,
@@ -1332,6 +1356,9 @@ function parseWorkspaceNodeWriteRequest(
     protocol,
     host,
     port,
+    username,
+    inlinePasswordAction,
+    inlinePassword,
     sshAutoSudo: value.sshAutoSudo as boolean | null,
     httpIgnoreCertErrors: value.httpIgnoreCertErrors as boolean | null,
     tunnelEnabled: value.tunnelEnabled as boolean | null,
@@ -1343,6 +1370,7 @@ function parseWorkspaceNodeWriteRequest(
     serialStopBits: value.serialStopBits as number,
     serialParity: value.serialParity as number,
     serialFlowControl: value.serialFlowControl as number,
+    rdp,
   };
 }
 
@@ -2724,6 +2752,26 @@ async function runBitwardenBackend<T>(
   const response = await getNativeBackend().send({ action, ...values }, timeoutMs);
   if (!response.ok) throw new Error(response.error || 'Bitwarden operation failed.');
   return response.result as T;
+}
+
+async function resolveNativeRdpProfile(
+  nodeId: string,
+  manualCredentials: boolean,
+  supplied: RdpProfile,
+): Promise<RdpProfile> {
+  const response = await getNativeBackend().send(
+    {
+      action: 'rdp.resolve-profile',
+      nodeId,
+      manualCredentials,
+      username: manualCredentials ? supplied.username : undefined,
+      domain: manualCredentials ? supplied.domain : undefined,
+      password: manualCredentials ? supplied.password : undefined,
+    },
+    cliOperationTimeoutMs,
+  );
+  if (!response.ok) throw new Error(response.error || 'RDP profile resolution failed.');
+  return response.result as RdpProfile;
 }
 
 type BitwardenResolvedCredential = {
@@ -7105,35 +7153,31 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       async (authorizationEpoch) => {
         const client = getRdpClient();
         const bounds = toScreenBounds(ownerWindow, request.bounds);
-        let bitwardenCredential: BitwardenResolvedCredential = { bitwarden: false };
-        if (request.profile.nodeId && !request.manualCredentials) {
+        let resolvedProfile = request.profile;
+        if (request.profile.nodeId) {
           try {
-            bitwardenCredential = await runBitwardenBackend<BitwardenResolvedCredential>(
-              'bitwarden.resolve-node',
-              {
-                nodeId: request.profile.nodeId,
-                protocol: 'rdp',
-              },
+            resolvedProfile = await resolveNativeRdpProfile(
+              request.profile.nodeId,
+              request.manualCredentials === true,
+              request.profile,
             );
           } catch (error) {
-            const message = error instanceof Error ? error.message : 'The vault could not be read.';
-            throw new Error(`Bitwarden credential is unavailable: ${message}`);
-          }
-          if (bitwardenCredential.bitwarden && !bitwardenCredential.username?.trim()) {
-            throw new Error('Bitwarden credential is unavailable: the RDP username is missing.');
+            const message =
+              error instanceof Error ? error.message : 'The RDP profile could not be read.';
+            throw new Error(`RDP profile is unavailable: ${message}`);
           }
         }
         requireAuthorizationEpoch(authorizationEpoch);
         releaseRdpTunnel(request.sessionId);
         let socksEndpoint = '';
-        if (request.profile.nodeId || request.profile.tunnelConfigId) {
+        if (resolvedProfile.nodeId || resolvedProfile.tunnelConfigId) {
           const leaseId = randomUUID();
           rdpTunnelLeases.set(request.sessionId, leaseId);
           try {
             socksEndpoint = await getNativeBackend().acquireTunnel({
               leaseId,
-              nodeId: request.profile.nodeId,
-              tunnelConfigId: request.profile.tunnelConfigId,
+              nodeId: resolvedProfile.nodeId,
+              tunnelConfigId: resolvedProfile.tunnelConfigId,
               progressSessionId: request.sessionId,
             });
           } catch (error) {
@@ -7151,7 +7195,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
           releaseRdpTunnel(request.sessionId);
           throw new Error('Authentication is required before opening the RDP connection.');
         }
-        if (!socksEndpoint && request.profile.tunnelConfigId) {
+        if (!socksEndpoint && resolvedProfile.tunnelConfigId) {
           releaseRdpTunnel(request.sessionId);
           throw new Error('The VPN tunnel returned no SOCKS endpoint.');
         }
@@ -7162,21 +7206,12 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
             {
               ...nativeRequest,
               profile: {
-                ...request.profile,
-                username: bitwardenCredential.bitwarden
-                  ? bitwardenCredential.username
-                  : request.profile.username,
-                domain: bitwardenCredential.bitwarden
-                  ? bitwardenCredential.domain
-                  : request.profile.domain,
-                password: bitwardenCredential.bitwarden
-                  ? bitwardenCredential.password
-                  : request.profile.password,
+                ...resolvedProfile,
                 socksEndpoint: socksEndpoint || undefined,
                 tunnelEnabled:
-                  (request.profile.nodeId || request.profile.tunnelConfigId) && !socksEndpoint
+                  (resolvedProfile.nodeId || resolvedProfile.tunnelConfigId) && !socksEndpoint
                     ? false
-                    : request.profile.tunnelEnabled,
+                    : resolvedProfile.tunnelEnabled,
               },
             },
             nativeWindowHandle(ownerWindow),
@@ -7347,7 +7382,7 @@ function parseRdpStartRequest(value: unknown): RdpStartRequest {
   const sessionId = valueAsString(value, 'sessionId');
   const profile = valueAsObject(value, 'profile') as RdpProfile;
   const host = typeof profile.host === 'string' ? profile.host.trim() : '';
-  if (!sessionId || sessionId.length > 128 || !host || host.length > 253) {
+  if (!sessionId || sessionId.length > 128 || !host || host.length > 253 || /[\r\n\0]/.test(host)) {
     throw new Error('RDP session or host is invalid.');
   }
   if (
