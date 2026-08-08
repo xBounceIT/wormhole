@@ -600,6 +600,7 @@ interface Window {
       kind: 'folder' | 'connection';
       protocol: '' | WormholeProtocol;
       host: string;
+      port: number;
       sshAutoSudo: boolean | null;
       httpIgnoreCertErrors: boolean | null;
       tunnelEnabled: boolean | null;
@@ -619,6 +620,7 @@ interface Window {
       kind: 'folder' | 'connection';
       protocol: '' | WormholeProtocol;
       host: string;
+      port: number;
       sshAutoSudo: boolean | null;
       httpIgnoreCertErrors: boolean | null;
       tunnelEnabled: boolean | null;

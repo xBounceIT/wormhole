@@ -22,6 +22,7 @@ type workspaceNodeWriteRequest struct {
 	Kind                 string `json:"kind"`
 	Protocol             string `json:"protocol"`
 	Host                 string `json:"host"`
+	Port                 int    `json:"port"`
 	SshAutoSudo          *bool  `json:"sshAutoSudo"`
 	HTTPIgnoreCertErrors *bool  `json:"httpIgnoreCertErrors"`
 	TunnelEnabled        *bool  `json:"tunnelEnabled"`
@@ -254,6 +255,9 @@ func normalizeWorkspaceNodeWrite(
 		if host == "" || utf8.RuneCountInString(host) > 4096 || strings.ContainsAny(host, "\r\n\x00") {
 			return normalizedWorkspaceNode{}, errors.New("workspace connection host is invalid")
 		}
+		if request.Port < 0 || request.Port > 65535 {
+			return normalizedWorkspaceNode{}, errors.New("workspace connection port is invalid")
+		}
 		switch protocol {
 		case 3, 4:
 			parsedHost, parsedPort, err := parseWebAddress(host)
@@ -261,10 +265,17 @@ func normalizeWorkspaceNodeWrite(
 				return normalizedWorkspaceNode{}, err
 			}
 			host = parsedHost
-			if parsedPort != 0 {
-				node.port = sql.NullInt64{Int64: int64(parsedPort), Valid: true}
+			port := request.Port
+			if port == 0 {
+				port = parsedPort
+			}
+			if port != 0 {
+				node.port = sql.NullInt64{Int64: int64(port), Valid: true}
 			}
 		case 5:
+			if request.Port != 0 {
+				return normalizedWorkspaceNode{}, errors.New("serial connections do not use a network port")
+			}
 			target, err := normalizeSerialTarget(serialTarget{
 				PortName: request.Host, BaudRate: request.SerialBaudRate, DataBits: request.SerialDataBits,
 				StopBits: request.SerialStopBits, Parity: request.SerialParity, FlowControl: request.SerialFlowControl,
@@ -283,10 +294,16 @@ func normalizeWorkspaceNodeWrite(
 			node.credentialMode = 1
 			node.credentialID = nil
 		case 0:
+			if request.Port != 0 {
+				node.port = sql.NullInt64{Int64: int64(request.Port), Valid: true}
+			}
 			if request.HTTPIgnoreCertErrors != nil {
 				node.httpIgnoreCertErrors = nil
 			}
 		default:
+			if request.Port != 0 {
+				node.port = sql.NullInt64{Int64: int64(request.Port), Valid: true}
+			}
 			node.sshAutoSudo = nil
 			node.httpIgnoreCertErrors = nil
 		}

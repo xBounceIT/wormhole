@@ -403,6 +403,7 @@ type WorkspaceNodeWriteRequest = {
   kind: 'folder' | 'connection';
   protocol: '' | 'ssh' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial';
   host: string;
+  port: number;
   sshAutoSudo: boolean | null;
   httpIgnoreCertErrors: boolean | null;
   tunnelEnabled: boolean | null;
@@ -1211,6 +1212,7 @@ function parseWorkspaceNodeWriteRequest(
   const kind = value.kind;
   const protocol = value.protocol;
   const host = typeof value.host === 'string' ? value.host.trim() : '';
+  const port = value.port;
   const credentialMode = value.credentialMode;
   const credentialId = typeof value.credentialId === 'string' ? value.credentialId.trim() : '';
   const tunnelConfigId =
@@ -1235,6 +1237,11 @@ function parseWorkspaceNodeWriteRequest(
     (kind === 'connection' && (protocol === '' || host.length === 0)) ||
     (kind === 'folder' && (protocol !== '' || host !== '')) ||
     host.length > webMaxAddressLength ||
+    typeof port !== 'number' ||
+    !Number.isSafeInteger(port) ||
+    port < 0 ||
+    port > 65535 ||
+    ((kind === 'folder' || protocol === 'serial') && port !== 0) ||
     !nullableBoolean(value.sshAutoSudo) ||
     !nullableBoolean(value.httpIgnoreCertErrors) ||
     !nullableBoolean(value.tunnelEnabled) ||
@@ -1266,6 +1273,7 @@ function parseWorkspaceNodeWriteRequest(
     kind,
     protocol,
     host,
+    port,
     sshAutoSudo: value.sshAutoSudo as boolean | null,
     httpIgnoreCertErrors: value.httpIgnoreCertErrors as boolean | null,
     tunnelEnabled: value.tunnelEnabled as boolean | null,

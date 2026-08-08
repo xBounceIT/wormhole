@@ -1382,6 +1382,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   const [newConnectionForm, setNewConnectionForm] = useState({
     name: '',
     host: '',
+    port: '',
     protocol: 'ssh' as Protocol,
     folder: '',
     sshAutoSudo: 'inherit' as AutoSudoMode,
@@ -2704,6 +2705,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       nodeId: session.nodeId,
       name: session.title,
       host: session.host,
+      port: session.port,
       username: credentials?.username || undefined,
       domain: credentials?.domain || undefined,
       password: credentials?.password || undefined,
@@ -4100,6 +4102,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     setNewConnectionForm({
       name: '',
       host: '',
+      port: '',
       protocol: 'ssh',
       folder: folderId ?? '',
       sshAutoSudo: 'inherit',
@@ -4267,6 +4270,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     setNewConnectionForm({
       name: node.name,
       host: node.host ?? '',
+      port: node.port === undefined ? '' : String(node.port),
       protocol: node.protocol,
       folder: findParentFolderId(tree, node.id) ?? '',
       sshAutoSudo: autoSudoModeFor(node.sshAutoSudo),
@@ -4383,7 +4387,17 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     if (editorBusy) return;
     const name = newConnectionForm.name.trim();
     const host = newConnectionForm.host.trim();
+    const portText = newConnectionForm.port.trim();
+    const port = portText === '' ? 0 : Number(portText);
     const editingId = editingConnectionId;
+    if (
+      newConnectionForm.protocol !== 'serial' &&
+      portText !== '' &&
+      (!Number.isInteger(port) || port < 1 || port > 65535)
+    ) {
+      setEditorError('Port must be a whole number between 1 and 65535.');
+      return;
+    }
     setEditorBusy(true);
     setEditorError('');
 
@@ -4407,6 +4421,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         kind: 'connection' as const,
         protocol: newConnectionForm.protocol,
         host,
+        port: newConnectionForm.protocol === 'serial' ? 0 : port,
         sshAutoSudo: autoSudoValueFor(connectionAutoSudo),
         httpIgnoreCertErrors:
           newConnectionForm.protocol === 'https' ? newConnectionForm.httpIgnoreCertErrors : null,
@@ -4449,6 +4464,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                   ...session,
                   title: name,
                   host,
+                  port: port || undefined,
                   protocol: newConnectionForm.protocol,
                   canTransfer: newConnectionForm.protocol === 'ssh',
                   nodeId: editingId,
@@ -4498,6 +4514,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
             ...editedSession,
             title: name,
             host,
+            port: port || undefined,
             protocol: newConnectionForm.protocol,
             status: 'connecting',
             webTargetNodeId: editingId,
@@ -4546,6 +4563,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         kind: 'folder',
         protocol: '',
         host: '',
+        port: 0,
         sshAutoSudo: autoSudoValueFor(folderDetailsForm.sshAutoSudo),
         httpIgnoreCertErrors: null,
         tunnelEnabled: tunnel.tunnelEnabled,
@@ -4584,6 +4602,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         kind: 'folder',
         protocol: '',
         host: '',
+        port: 0,
         sshAutoSudo: null,
         httpIgnoreCertErrors: null,
         tunnelEnabled: null,
@@ -5729,7 +5748,14 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                       />
                     </div>
 
-                    <div className="grid gap-3 sm:grid-cols-[120px_minmax(0,1fr)]">
+                    <div
+                      className={cn(
+                        'grid gap-3',
+                        newConnectionForm.protocol === 'serial'
+                          ? 'sm:grid-cols-[120px_minmax(0,1fr)]'
+                          : 'sm:grid-cols-[120px_minmax(0,1fr)_110px]',
+                      )}
+                    >
                       <div className="grid gap-2">
                         <Label htmlFor="connection-protocol">Protocol</Label>
                         <Select
@@ -5737,6 +5763,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                             setNewConnectionForm((form) => ({
                               ...form,
                               protocol,
+                              port: protocol === form.protocol ? form.port : '',
                               credential: protocol === form.protocol ? form.credential : 'inherit',
                             }))
                           }
@@ -5772,22 +5799,37 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                           placeholder={
                             newConnectionForm.protocol === 'serial'
                               ? 'COM1'
-                              : newConnectionForm.protocol === 'http' ||
-                                  newConnectionForm.protocol === 'https'
-                                ? '10.0.0.1:8443'
-                                : 'hostname or IP address'
+                              : 'hostname or IP address'
                           }
                           required
                           value={newConnectionForm.host}
                         />
                       </div>
+                      {newConnectionForm.protocol !== 'serial' ? (
+                        <div className="grid gap-2">
+                          <Label htmlFor="connection-port">Port</Label>
+                          <Input
+                            id="connection-port"
+                            inputMode="numeric"
+                            max={65535}
+                            min={1}
+                            onChange={(event) =>
+                              setNewConnectionForm((form) => ({
+                                ...form,
+                                port: event.target.value,
+                              }))
+                            }
+                            placeholder="Default"
+                            type="number"
+                            value={newConnectionForm.port}
+                          />
+                        </div>
+                      ) : null}
                     </div>
 
-                    {newConnectionForm.protocol === 'http' ||
-                    newConnectionForm.protocol === 'https' ? (
+                    {newConnectionForm.protocol !== 'serial' ? (
                       <p className="text-[11px] leading-relaxed text-muted-foreground">
-                        Enter the host or IP. Include a port if the appliance uses a non-standard
-                        one, for example 10.0.0.1:8443.
+                        Leave the port blank to use the protocol default.
                       </p>
                     ) : null}
 

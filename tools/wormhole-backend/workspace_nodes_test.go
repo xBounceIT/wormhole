@@ -104,6 +104,65 @@ FROM Nodes WHERE Id = ?;`, connectionID).Scan(
 	}
 }
 
+func TestWorkspaceNodeCreatePersistsCustomPortsForNetworkProtocols(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	createWorkspaceNodeTestSchema(t, databasePath)
+
+	tests := []struct {
+		protocol string
+		port     int
+	}{
+		{protocol: "ssh", port: 2222},
+		{protocol: "rdp", port: 3390},
+		{protocol: "http", port: 8080},
+		{protocol: "https", port: 8443},
+		{protocol: "vnc", port: 5901},
+	}
+	for _, test := range tests {
+		t.Run(test.protocol, func(t *testing.T) {
+			nodeID, err := createWorkspaceNode(databasePath, workspaceNodeWriteRequest{
+				Name: test.protocol, Kind: "connection", Protocol: test.protocol,
+				Host: "target.example", Port: test.port, CredentialMode: 0,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			database, err := openDatabase(databasePath, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer database.Close()
+			var port int
+			if err := database.QueryRow("SELECT Port FROM Nodes WHERE Id = ?;", nodeID).Scan(&port); err != nil {
+				t.Fatal(err)
+			}
+			if port != test.port {
+				t.Fatalf("stored custom port %d, want %d", port, test.port)
+			}
+		})
+	}
+}
+
+func TestWorkspaceNodeCreateRejectsInvalidNetworkPorts(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	createWorkspaceNodeTestSchema(t, databasePath)
+
+	for _, port := range []int{-1, 65536} {
+		if _, err := createWorkspaceNode(databasePath, workspaceNodeWriteRequest{
+			Name: "SSH", Kind: "connection", Protocol: "ssh", Host: "target.example", Port: port,
+		}); err == nil {
+			t.Fatalf("accepted invalid network port %d", port)
+		}
+	}
+	if _, err := createWorkspaceNode(databasePath, workspaceNodeWriteRequest{
+		Name: "Serial", Kind: "connection", Protocol: "serial", Host: "COM1", Port: 9600,
+		SerialBaudRate: 9600, SerialDataBits: 8, SerialStopBits: 1,
+	}); err == nil {
+		t.Fatal("accepted a network port for a serial connection")
+	}
+}
+
 func TestWorkspaceNodeUpdateIsAtomicWhenCredentialProtocolDoesNotMatch(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
 	createWorkspaceNodeTestSchema(t, databasePath)
