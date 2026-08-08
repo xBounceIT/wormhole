@@ -3,10 +3,8 @@ package main
 import (
 	"bufio"
 	"context"
-	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -40,7 +38,6 @@ const (
 	sshMaxPasswordBytes               = 4096
 	sshAutoSudoTimeout                = 10 * time.Second
 	sshAutoSudoTailBytes              = 512
-	sshAutoSudoPromptBytes            = 16
 	sshSftpMaxPathBytes               = 16 * 1024
 	sshSftpMaxNameBytes               = 4 * 1024
 	sshSftpMaxEntryCount              = 4096
@@ -1237,14 +1234,14 @@ const (
 )
 
 // sshAutoSudoDriver intentionally lives in the Go backend. The renderer must never receive the
-// saved login password, and the password is only queued after sudo emits a per-invocation prompt
-// marker. A nonce avoids treating a login banner or shell output that merely mentions "password:"
-// as permission to send the secret. If sudo is configured as NOPASSWD (or a cached timestamp skips
-// the prompt), the timeout clears the password without sending it into the root shell.
+// saved login password. Auto Sudo first writes the ordinary `sudo su` command, then queues the
+// password only after sudo emits its standard `[sudo] ...:` prompt. Requiring sudo's prefix avoids
+// treating a login banner or unrelated password text as permission to send the secret. If sudo is
+// configured as NOPASSWD (or a cached timestamp skips the prompt), the timeout clears the password
+// without sending it into the root shell.
 type sshAutoSudoDriver struct {
 	session  *sshNativeSession
 	password string
-	prompt   string
 
 	mu           sync.Mutex
 	state        sshAutoSudoState
@@ -1259,15 +1256,9 @@ func newSSHAutoSudoDriver(session *sshNativeSession, password string) *sshAutoSu
 	if password == "" || strings.ContainsAny(password, "\r\n") {
 		return nil
 	}
-	var nonce [sshAutoSudoPromptBytes]byte
-	if _, err := rand.Read(nonce[:]); err != nil {
-		// Auto sudo is optional; if the nonce cannot be generated, keep the secret out of the shell.
-		return nil
-	}
 	return &sshAutoSudoDriver{
 		session:  session,
 		password: password,
-		prompt:   "__wormhole_sudo_" + hex.EncodeToString(nonce[:]) + "__:",
 		state:    sshAutoSudoWaitingForShell,
 		tail:     make([]byte, 0, sshAutoSudoTailBytes),
 	}
@@ -1285,8 +1276,7 @@ func (driver *sshAutoSudoDriver) startLocked() {
 	}
 	driver.state = sshAutoSudoWaitingForPassword
 	driver.timeout = time.AfterFunc(sshAutoSudoTimeout, driver.onTimeout)
-	command := fmt.Sprintf("sudo -S -p '%s' su\r", driver.prompt)
-	if err := driver.session.writeRaw([]byte(command)); err != nil {
+	if err := driver.session.writeRaw([]byte("sudo su\r")); err != nil {
 		driver.finishLocked(nil)
 	}
 }
@@ -1319,7 +1309,7 @@ func (driver *sshAutoSudoDriver) observe(data []byte) {
 		if len(driver.tail) > sshAutoSudoTailBytes {
 			driver.tail = driver.tail[len(driver.tail)-sshAutoSudoTailBytes:]
 		}
-		if hasSSHSudoPasswordPrompt(driver.tail, driver.prompt) {
+		if hasSSHSudoPasswordPrompt(driver.tail) {
 			passwordInput := append([]byte(driver.password), '\r')
 			driver.finishLocked(passwordInput)
 			clear(passwordInput)
@@ -1327,10 +1317,11 @@ func (driver *sshAutoSudoDriver) observe(data []byte) {
 	}
 }
 
-func hasSSHSudoPasswordPrompt(tail []byte, prompt string) bool {
+func hasSSHSudoPasswordPrompt(tail []byte) bool {
 	trimmed := strings.TrimRight(string(tail), " \t\r\n")
 	lineStart := strings.LastIndexAny(trimmed, "\r\n")
-	return trimmed[lineStart+1:] == prompt
+	line := strings.TrimSpace(trimmed[lineStart+1:])
+	return strings.HasPrefix(line, "[sudo]") && strings.HasSuffix(line, ":")
 }
 
 func (driver *sshAutoSudoDriver) onTimeout() {

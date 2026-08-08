@@ -523,7 +523,7 @@ func (input *recordingSSHInput) String() string {
 
 func requireAutoSudoCommand(t *testing.T, value string) {
 	t.Helper()
-	if !strings.HasPrefix(value, "sudo -S -p '") || !strings.HasSuffix(value, "' su\r") {
+	if value != "sudo su\r" {
 		t.Fatalf("auto sudo sent unexpected initial input: %q", value)
 	}
 }
@@ -540,14 +540,14 @@ func TestSSHAutoSudoDriverSendsPasswordOnlyAfterPrompt(t *testing.T) {
 	initial := input.String()
 	requireAutoSudoCommand(t, initial)
 
-	// The PTY echoes the command containing the nonce. That echo is not the prompt and must not
-	// release the saved password.
+	// The PTY echoes the command. That echo is not the prompt and must not release the saved
+	// password.
 	driver.observe([]byte(initial))
 	if got := input.String(); got != initial {
 		t.Fatalf("auto sudo answered on its command echo: %q", got)
 	}
 
-	driver.observe([]byte(driver.prompt))
+	driver.observe([]byte("[sudo] password for operator: "))
 	if got := input.String(); got != initial+"secret\r" {
 		t.Fatalf("auto sudo sent password before the prompt: %q", got)
 	}
@@ -575,7 +575,7 @@ func TestSSHAutoSudoDriverStartsWithoutShellOutput(t *testing.T) {
 		t.Fatalf("user input reached sudo before its password prompt: %q", got)
 	}
 
-	driver.observe([]byte(driver.prompt))
+	driver.observe([]byte("[sudo] password for operator: "))
 	if got := input.String(); got != initial+"secret\r"+"whoami\r" {
 		t.Fatalf("expected password before buffered user input, got %q", got)
 	}
@@ -618,7 +618,7 @@ func TestSSHAutoSudoDriverBuffersUserInputUntilPrompt(t *testing.T) {
 		t.Fatalf("user input reached sudo before its password prompt: %q", got)
 	}
 
-	driver.observe([]byte(driver.prompt))
+	driver.observe([]byte("[sudo] password for operator: "))
 	if got := input.String(); got != initial+"secret\r"+"ls\r" {
 		t.Fatalf("expected password before buffered user input, got %q", got)
 	}
@@ -655,7 +655,7 @@ func TestSSHAutoSudoDriverDoesNotSendPasswordAfterTimeout(t *testing.T) {
 
 	driver.observe([]byte("shell ready"))
 	driver.onTimeout()
-	driver.observe([]byte(driver.prompt))
+	driver.observe([]byte("[sudo] password for operator: "))
 	requireAutoSudoCommand(t, input.String())
 }
 
@@ -669,7 +669,7 @@ func TestSSHAutoSudoDriverClearsPasswordWhenCancelled(t *testing.T) {
 
 	driver.observe([]byte("shell ready"))
 	driver.dispose()
-	driver.observe([]byte(driver.prompt))
+	driver.observe([]byte("[sudo] password for operator: "))
 	requireAutoSudoCommand(t, input.String())
 }
 
@@ -683,11 +683,11 @@ func TestSSHAutoSudoDriverHandlesPasswordPromptSplitAcrossChunks(t *testing.T) {
 	defer driver.dispose()
 
 	driver.observe([]byte("shell ready"))
-	prompt := driver.prompt
+	prompt := "[sudo] password for operator: "
 	driver.observe([]byte(prompt[:len(prompt)-2]))
 	requireAutoSudoCommand(t, input.String())
 	driver.observe([]byte(prompt[len(prompt)-2:]))
-	if got := input.String(); !strings.HasSuffix(got, "' su\rsecret\r") {
+	if got := input.String(); got != "sudo su\rsecret\r" {
 		t.Fatalf("auto sudo did not answer a split password prompt: %q", got)
 	}
 }
@@ -705,6 +705,22 @@ func TestSSHAutoSudoDriverIgnoresUnrelatedPasswordText(t *testing.T) {
 	driver.observe([]byte("login password: \r\n"))
 	driver.observe([]byte("sudo password: "))
 	requireAutoSudoCommand(t, input.String())
+}
+
+func TestSSHAutoSudoDriverAcceptsLocalizedSudoPrompt(t *testing.T) {
+	input := &recordingSSHInput{}
+	native := &sshNativeSession{stdin: input}
+	driver := newSSHAutoSudoDriver(native, "secret")
+	if driver == nil {
+		t.Fatal("expected auto-sudo driver for a non-empty password")
+	}
+	defer driver.dispose()
+
+	driver.observe([]byte("shell ready"))
+	driver.observe([]byte("[sudo] password di operator: "))
+	if got := input.String(); got != "sudo su\rsecret\r" {
+		t.Fatalf("auto sudo did not answer the localized sudo prompt: %q", got)
+	}
 }
 
 func TestSSHAutoSudoDriverRejectsLineBreakingPasswords(t *testing.T) {
