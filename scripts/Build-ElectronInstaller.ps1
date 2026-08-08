@@ -77,10 +77,10 @@ Copy-Item -Path (Join-Path $electronRuntimeDir "*") -Destination $stagingDir -Re
 Move-Item -LiteralPath (Join-Path $stagingDir "electron.exe") -Destination (Join-Path $stagingDir "Wormhole.exe") -Force
 $node = Get-Command node -ErrorAction SilentlyContinue
 if (-not $node) {
-    throw "Node.js is required to patch the Electron executable (rcedit)."
+    throw "Node.js is required to patch the Electron executable (resedit)."
 }
 & node (Join-Path $scriptRoot "patch-electron-exe.mjs") (Join-Path $stagingDir "Wormhole.exe") $AppVersion
-if ($LASTEXITCODE -ne 0) { throw "Failed to patch the Electron executable with rcedit." }
+if ($LASTEXITCODE -ne 0) { throw "Failed to patch the Electron executable with resedit." }
 
 # The packaged application: package.json (main -> dist-electron/main.js) + renderer + Go backend
 # + sidecars + helpers + static assets. The staged version is pinned to the release version so
