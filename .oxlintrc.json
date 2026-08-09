@@ -1,0 +1,8 @@
+{
+  "$schema": "https://oxc.rs/schema/oxlintrc.json",
+  "plugins": ["react"],
+  "rules": {
+    "no-unused-vars": "error",
+    "react/jsx-no-comment-textnodes": "error"
+  }
+}

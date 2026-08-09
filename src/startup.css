@@ -1,0 +1,264 @@
+:root {
+  color-scheme: dark;
+  font-family: 'Segoe UI Variable', 'Segoe UI', sans-serif;
+  background: #0a0a0a;
+  color: #f3f4f6;
+}
+
+:root:not(.dark) {
+  color-scheme: light;
+  background: #ffffff;
+  color: #111827;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+.startup-shell {
+  display: grid;
+  min-width: 320px;
+  height: 100%;
+  place-items: center;
+  padding: 24px;
+  background: #0a0a0a;
+  color: #f3f4f6;
+}
+
+.startup-loading-shell {
+  overflow: hidden;
+  background: rgb(8 9 11 / 94%);
+}
+
+:root:not(.dark) .startup-shell {
+  background: #ffffff;
+  color: #111827;
+}
+
+:root:not(.dark) .startup-loading-shell {
+  background: rgb(247 248 250 / 94%);
+}
+
+.startup-loading {
+  display: grid;
+  place-items: center;
+  user-select: none;
+}
+
+.startup-logo-stage {
+  position: relative;
+  display: grid;
+  width: 176px;
+  height: 176px;
+  place-items: center;
+  isolation: isolate;
+}
+
+.startup-logo {
+  position: absolute;
+  width: 176px;
+  height: 176px;
+  object-fit: contain;
+  pointer-events: none;
+}
+
+.startup-logo-base {
+  opacity: 0.78;
+  filter: grayscale(1) brightness(0.76) contrast(1.08) drop-shadow(0 0 8px rgb(213 219 230 / 24%));
+}
+
+.startup-logo-shine {
+  opacity: 0.9;
+  filter: grayscale(1) brightness(1.45) contrast(1.08);
+  -webkit-mask-image: linear-gradient(
+    108deg,
+    transparent 25%,
+    rgb(0 0 0 / 8%) 40%,
+    #000 49%,
+    #000 53%,
+    rgb(0 0 0 / 8%) 62%,
+    transparent 77%
+  );
+  mask-image: linear-gradient(
+    108deg,
+    transparent 25%,
+    rgb(0 0 0 / 8%) 40%,
+    #000 49%,
+    #000 53%,
+    rgb(0 0 0 / 8%) 62%,
+    transparent 77%
+  );
+  -webkit-mask-position: 170% 0;
+  mask-position: 170% 0;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-size: 250% 100%;
+  mask-size: 250% 100%;
+  animation: startup-logo-sweep 1.9s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+:root:not(.dark) .startup-logo-base {
+  opacity: 0.68;
+  filter: grayscale(1) brightness(0.68) contrast(1.05) drop-shadow(0 0 7px rgb(72 82 104 / 22%));
+}
+
+:root:not(.dark) .startup-logo-shine {
+  opacity: 0.66;
+  filter: grayscale(1) brightness(1.1) contrast(1.08);
+}
+
+@keyframes startup-logo-sweep {
+  0%,
+  18% {
+    -webkit-mask-position: 170% 0;
+    mask-position: 170% 0;
+  }
+
+  68%,
+  100% {
+    -webkit-mask-position: -75% 0;
+    mask-position: -75% 0;
+  }
+}
+
+.startup-card {
+  width: min(400px, 100%);
+  padding: 20px;
+  border: 1px solid #2a2a2a;
+  border-radius: 12px;
+  background: #111111;
+  box-shadow: 0 24px 80px rgb(0 0 0 / 40%);
+}
+
+:root:not(.dark) .startup-card {
+  border-color: #e5e7eb;
+  background: #ffffff;
+  box-shadow: 0 24px 80px rgb(15 23 42 / 12%);
+}
+
+.startup-heading {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.startup-heading strong,
+.startup-heading small {
+  display: block;
+}
+
+.startup-heading strong {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.startup-heading small,
+.startup-status {
+  margin-top: 4px;
+  color: #a1a1aa;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.startup-mark-box {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 9px;
+  background: #27272a;
+}
+
+.startup-mark {
+  width: 18px;
+  height: 18px;
+  fill: currentColor;
+}
+
+.startup-form {
+  display: grid;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.startup-form label {
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.startup-form input {
+  width: 100%;
+  height: 36px;
+  padding: 0 11px;
+  border: 1px solid #3f3f46;
+  border-radius: 7px;
+  outline: none;
+  background: #09090b;
+  color: inherit;
+}
+
+.startup-form input:focus {
+  border-color: #a1a1aa;
+  box-shadow: 0 0 0 3px rgb(161 161 170 / 16%);
+}
+
+:root:not(.dark) .startup-form input {
+  border-color: #d1d5db;
+  background: #ffffff;
+}
+
+.startup-button {
+  min-height: 34px;
+  margin-top: 14px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 7px;
+  background: #f4f4f5;
+  color: #18181b;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.startup-form .startup-button {
+  justify-self: end;
+  margin-top: 2px;
+}
+
+.startup-button-secondary {
+  width: 100%;
+  margin-top: 18px;
+  border: 1px solid #3f3f46;
+  background: transparent;
+  color: inherit;
+}
+
+.startup-button:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.startup-status {
+  min-height: 16px;
+  margin: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .startup-logo-shine {
+    display: none;
+  }
+}

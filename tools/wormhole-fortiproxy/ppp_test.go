@@ -2,9 +2,16 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"crypto/tls"
 	"encoding/binary"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"net/netip"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestBuildEncapFrame_Roundtrip(t *testing.T) {
@@ -34,6 +41,241 @@ func TestBuildEncapFrame_Roundtrip(t *testing.T) {
 	}
 	if !bytes.Equal(frame[8:], payload) {
 		t.Errorf("payload mismatch")
+	}
+}
+
+func TestHandleLCPRepliesAndTerminates(t *testing.T) {
+	newState := func() (*pppState, <-chan struct{}) {
+		cancelled := make(chan struct{}, 1)
+		state := &pppState{
+			cancel: func() {
+				select {
+				case cancelled <- struct{}{}:
+				default:
+				}
+			},
+			controlFrame: make(chan []byte, controlQueueDepth),
+			dataFrame:    make(chan []byte, dataQueueDepth),
+		}
+		return state, cancelled
+	}
+
+	tests := []struct {
+		name       string
+		code       byte
+		wantReply  byte
+		wantCancel bool
+	}{
+		{name: "configure", code: lcpConfigureRequest, wantReply: lcpConfigureAck},
+		{name: "echo", code: lcpEchoRequest, wantReply: lcpEchoReply},
+		{name: "terminate", code: lcpTerminateRequest, wantReply: lcpTerminateAck, wantCancel: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			state, cancelled := newState()
+			state.handleLCP(buildCPFrame(test.code, 7, []byte{1, 2}))
+			select {
+			case frame := <-state.controlFrame:
+				if binary.BigEndian.Uint16(frame[6:8]) != pppProtoLCP || frame[8] != test.wantReply || frame[9] != 7 {
+					t.Fatalf("reply = %x", frame)
+				}
+			default:
+				t.Fatal("expected an LCP reply")
+			}
+			select {
+			case <-cancelled:
+				if !test.wantCancel {
+					t.Fatal("unexpected cancellation")
+				}
+			default:
+				if test.wantCancel {
+					t.Fatal("expected cancellation")
+				}
+			}
+		})
+	}
+
+	state, cancelled := newState()
+	state.ourMagic.Store(0x01020304)
+	state.handleLCP(buildCPFrame(lcpConfigureRequest, 9, []byte{lcpOptMagicNumber, 6, 1, 2, 3, 4}))
+	frame := <-state.controlFrame
+	if frame[8] != lcpCodeReject {
+		t.Fatalf("loopback reply = %x", frame)
+	}
+	select {
+	case <-cancelled:
+	default:
+		t.Fatal("loopback did not cancel PPP")
+	}
+
+	state.handleLCP([]byte{1})
+	for _, code := range []byte{lcpConfigureAck, lcpConfigureNak, lcpConfigureReject, lcpEchoReply, lcpTerminateAck, lcpCodeReject, 0xff} {
+		state.handleLCP(buildCPFrame(code, 1, nil))
+	}
+}
+
+func TestBuildLCPInitialOptionsAndMagicDetection(t *testing.T) {
+	magic := [4]byte{1, 2, 3, 4}
+	for _, mtu := range []int{0, -1, 1400, 0x10000} {
+		options := buildLCPInitialOptions(magic, mtu)
+		if len(options) != 10 || options[0] != lcpOptMRU || options[4] != lcpOptMagicNumber {
+			t.Fatalf("options for MTU %d = %x", mtu, options)
+		}
+	}
+	state := &pppState{}
+	if state.peerEchoedOurMagic([]byte{lcpOptMagicNumber, 6, 0, 0, 0, 0}) {
+		t.Fatal("zero local magic enabled loopback detection")
+	}
+	state.ourMagic.Store(0x01020304)
+	if !state.peerEchoedOurMagic([]byte{99, lcpOptMagicNumber, 6, 1, 2, 3, 4}) {
+		t.Fatal("matching magic was not detected")
+	}
+	if state.peerEchoedOurMagic([]byte{lcpOptMagicNumber, 6, 1, 2, 3, 5}) {
+		t.Fatal("different magic was reported as loopback")
+	}
+}
+
+func TestReadLoopDispatchesFramesAndStopsAtEOF(t *testing.T) {
+	stack, endpoint, err := newNetstack(netip.MustParseAddr("10.0.0.2"), 1500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stack.Close()
+	ipv4Packet := make([]byte, 20)
+	ipv4Packet[0] = 0x45
+	binary.BigEndian.PutUint16(ipv4Packet[2:4], uint16(len(ipv4Packet)))
+	frames := make([]byte, 0)
+	for _, item := range []struct {
+		proto   uint16
+		payload []byte
+	}{
+		{proto: pppProtoLCP, payload: buildCPFrame(lcpEchoRequest, 3, []byte("echo"))},
+		{proto: pppProtoIPCP, payload: []byte{1}},
+		{proto: pppProtoIPv4, payload: ipv4Packet},
+		{proto: 0x1234, payload: []byte("ignored")},
+	} {
+		frame, err := buildEncapFrame(item.proto, item.payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		frames = append(frames, frame...)
+	}
+	cancelled := false
+	state := &pppState{
+		conn:         &fakeConn{in: bytes.NewBuffer(frames), out: &bytes.Buffer{}},
+		ch:           endpoint,
+		cancel:       func() { cancelled = true },
+		controlFrame: make(chan []byte, controlQueueDepth),
+		dataFrame:    make(chan []byte, dataQueueDepth),
+	}
+	state.readLoop(context.Background())
+	if !cancelled || len(state.controlFrame) != 1 {
+		t.Fatalf("readLoop cancelled=%v replies=%d", cancelled, len(state.controlFrame))
+	}
+}
+
+func TestReadLoopRejectsMalformedFraming(t *testing.T) {
+	tests := [][]byte{
+		{0, 6, 0, 0, 0, 0},
+		{0, 5, 0x50, 0x50, 0xff, 0xff},
+		{0, 7, 0x50, 0x50, 0, 1, 0},
+		{0, 8, 0x50, 0x50, 0, 2, 0},
+	}
+	for _, input := range tests {
+		state := &pppState{conn: &fakeConn{in: bytes.NewBuffer(input), out: &bytes.Buffer{}}, cancel: func() {}}
+		state.readLoop(context.Background())
+	}
+	validHeader := []byte{0, 10, 0x50, 0x50, 0, 4, 0}
+	state := &pppState{conn: &fakeConn{in: bytes.NewBuffer(validHeader), out: &bytes.Buffer{}}, cancel: func() {}}
+	state.readLoop(context.Background())
+}
+
+func TestInjectIPv4RejectsMalformedPackets(t *testing.T) {
+	state := &pppState{}
+	state.injectIPv4(nil)
+	notIPv4 := make([]byte, 20)
+	notIPv4[0] = 0x60
+	state.injectIPv4(notIPv4)
+	badLength := make([]byte, 20)
+	badLength[0] = 0x45
+	binary.BigEndian.PutUint16(badLength[2:4], 10)
+	state.injectIPv4(badLength)
+	binary.BigEndian.PutUint16(badLength[2:4], 21)
+	state.injectIPv4(badLength)
+}
+
+type writeErrorConn struct{ fakeConn }
+
+func (c *writeErrorConn) Write([]byte) (int, error) { return 0, errors.New("write failed") }
+
+func TestWriteFrameAndWriterLoop(t *testing.T) {
+	connection := &fakeConn{in: &bytes.Buffer{}, out: &bytes.Buffer{}}
+	state := &pppState{conn: connection, cancel: func() {}, controlFrame: make(chan []byte, 2), dataFrame: make(chan []byte, 2)}
+	if err := state.writeFrame(context.Background(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.writeFrame(context.Background(), []byte("direct")); err != nil {
+		t.Fatal(err)
+	}
+	errorState := &pppState{conn: &writeErrorConn{fakeConn: fakeConn{in: &bytes.Buffer{}, out: &bytes.Buffer{}}}}
+	if err := errorState.writeFrame(context.Background(), []byte("fail")); err == nil {
+		t.Fatal("write error was ignored")
+	}
+
+	state.controlFrame <- []byte("control")
+	state.dataFrame <- []byte("data")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		state.writerLoop(ctx)
+		close(done)
+	}()
+	time.Sleep(10 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("writerLoop did not stop")
+	}
+	if got := connection.out.String(); !strings.Contains(got, "control") || !strings.Contains(got, "data") {
+		t.Fatalf("writer output = %q", got)
+	}
+}
+
+func TestAllocIDWraps(t *testing.T) {
+	state := &pppState{}
+	state.nextID.Store(254)
+	if got := state.allocID(); got != 255 {
+		t.Fatalf("first ID = %d", got)
+	}
+	if got := state.allocID(); got != 0 {
+		t.Fatalf("wrapped ID = %d", got)
+	}
+}
+
+func TestRunPPPCancelledLifecycle(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer server.Close()
+	connection, err := tls.Dial("tcp", server.Listener.Addr().String(), &tls.Config{InsecureSkipVerify: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stack, endpoint, err := newNetstack(netip.MustParseAddr("10.0.0.2"), 1400)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stack.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	done := make(chan struct{})
+	go func() {
+		runPPP(ctx, &session{Conn: connection, AssignedIP: netip.MustParseAddr("10.0.0.2"), MTU: 1400}, endpoint)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runPPP did not stop after cancellation")
 	}
 }
 

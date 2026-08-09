@@ -2,53 +2,111 @@
 
 # Wormhole — Agent guide
 
-Wormhole is a .NET 10 / WinUI 3 Windows desktop app: a tabbed multi-protocol
-connection manager (SSH, RDP, VNC, HTTP/HTTPS, Serial, SFTP file transfer) positioned
-as a philosophical sequel to mRemoteNG. This file orients agents touching the codebase.
+## Product direction
+
+Wormhole is developed and shipped only as the Electron application. The former
+.NET 10 / WinUI 3 application has been removed. The only managed component is
+the Windows ActiveX RDP host under tools/, a narrow helper used by Electron.
+
+The active architecture has a strict boundary:
+
+- Frontend: React and TypeScript under src/. It renders state, collects user
+  input, and talks to the application only through the preload bridge.
+- Desktop shell: Electron main and preload code under electron/. It owns window
+  lifecycle, isolated Chromium surfaces, and narrow, validated IPC.
+- Backend: native, cross-platform Go under tools/. Go owns the application
+  domain and every backend function: SQLite, migrations, secrets, app
+  authentication, protocols, sessions, VPNs, imports, logging, and updates.
+
+All new feature work belongs to Electron plus Go. Do not add backend behavior
+to React, TypeScript, Node.js, Electron main-process code, or the managed RDP
+helper. Platform-specific adapters belong at the Go boundary and must not move
+domain logic into the frontend.
 
 ## Daily workflow
 
-- Build: `dotnet build Wormhole.csproj -c Debug -p:Platform=x64`
-- Run tests: `dotnet test Wormhole.Tests/Wormhole.Tests.csproj`
-- Run the app: build, then launch the produced `Wormhole.exe` from `bin\x64\Debug\net10.0-windows10.0.19041.0\`.
-- Installer: `scripts/Build-Installer.ps1 -Configuration Release -Architecture x64` publishes the app and builds the Inno Setup `.exe` (requires Inno Setup 6). Use `-DryRun` only to inspect paths.
-- VPN integration tests (Linux/WSL2 + Docker): `tests/vpn-fixtures/bootstrap.sh` -> `docker compose -f tests/vpn-fixtures/docker-compose.yml up -d` -> `dotnet test Wormhole.Tests.Integration/Wormhole.Tests.Integration.csproj`. See [tests/vpn-fixtures/README.md](tests/vpn-fixtures/README.md). CI runs this on `ubuntu-latest`; locally the tests skip if env vars / sidecar binaries aren't set up.
+- Install dependencies: npm install
+- Run the development app: npm run dev
+- Build the renderer, Electron process, and current-host Go backend: npm run build
+- Build the Windows distributable inputs: npm run build:windows
+- Build Windows ARM64 inputs: npm run build:windows:arm64
+- Build the Windows installer: npm run build:installer or npm run build:installer:arm64
+- Run the Electron, Go, and helper test suites: npm run test:electron
+- Run TypeScript checks: npm run typecheck
+- Run lint and formatting checks: npm run lint and npm run format:check
+- Run backend tests directly when iterating: Set-Location
+  tools/wormhole-backend, then run go test ./...
 
-## Conventions
+.NET is used only to build and test the Windows RDP helper with
+npm run build:rdp-host and npm run test:rdp-host. There is no root .NET solution
+or WinUI validation workflow.
 
-- Respect WinUI 3 guidelines. Custom title bar, Mica backdrop, per-monitor DPI.
-- Never wrap a `ListView`/`GridView` in a `ScrollViewer` — the unbounded measure disables UI virtualization and realizes every item at load (multi-second page hangs). Give the list a bounded height (star-sized grid row or `MaxHeight`) and let its built-in template `ScrollViewer` scroll.
-- DI: `Microsoft.Extensions.DependencyInjection` configured in [App.xaml.cs](App.xaml.cs). Resolve from `App.Current.Services`.
-- MVVM: `CommunityToolkit.Mvvm` (`ObservableObject`, `[ObservableProperty]`, `[RelayCommand]`). View models live under [ViewModels/](ViewModels).
-- Logging: log via `ILogger<T>` from MEL. Serilog is the provider. Logs land in `%LOCALAPPDATA%\Wormhole\logs\`.
-- Persistence: SQLite via `Microsoft.Data.Sqlite` + Dapper at `%LOCALAPPDATA%\Wormhole\wormhole.db`. Schema is versioned by `.sql` files in [Data/Migrations/](Data/Migrations) (embedded resources), applied in alphabetical order by [Data/MigrationRunner.cs](Data/MigrationRunner.cs) at startup. Tracking table: `__migration_history`. To add a migration, drop a new `NNNN_description.sql` in that folder. Open connections via `ISqliteConnectionFactory.Open()` — one connection per operation (Microsoft.Data.Sqlite pools).
-- Secrets:
-  - **Passwords** → Windows Credential Manager via `Meziantou.Framework.Win32.CredentialManager` (key = `Wormhole:<credId>`). 2560-byte limit.
-  - **Private keys** → DPAPI-encrypted files under `%LOCALAPPDATA%\Wormhole\keys\` (Credential Manager is too small).
-  - **Tunnel payloads** → DPAPI-encrypted files under `%LOCALAPPDATA%\Wormhole\tunnels\`; SQLite stores only the tunnel row metadata.
-  - **Never** log credentials. Add a redaction enricher before adding new logging around auth.
+## Engineering rules
 
-## Architecture pillars (the parts to handle with care)
+- Keep the renderer presentation-focused. It must not open sockets, read
+  SQLite, access the filesystem, handle credentials, or implement protocol
+  behavior directly.
+- Keep the Electron main/preload layer thin. Validate IPC inputs and outputs,
+  delegate durable state and domain decisions to Go, and never duplicate Go
+  business rules in TypeScript.
+- Use Go as the source of truth for persistence, migrations, authentication,
+  secrets, connection profiles, inheritance, sessions, tunnels, updates, and
+  imports.
+- Keep the Go core cross-platform. Put unavoidable operating-system code in
+  clearly scoped platform files or adapters; shared behavior remains in common
+  Go code. Do not assume Windows paths, APIs, or credential stores in common
+  code.
+- Treat JSON-lines/stdin/stdout process protocols as machine interfaces:
+  stdout is protocol data, stderr is diagnostics, and messages must be bounded
+  and validated.
+- Never put passwords, tokens, private keys, tunnel payloads, or auth cookies
+  in logs, command-line arguments, renderer state, or unencrypted files.
+  Secrets are accepted through Go-owned protected stores or stdin and must be
+  redacted before logging.
+- Go owns network and terminal work. The renderer receives validated state,
+  terminal frames, and bounded scrollback rather than raw credentials or
+  unrestricted sockets.
+- Preserve fail-closed VPN behavior. A tunnel failure must never silently fall
+  back to a direct connection.
+- Add focused Go tests for backend behavior and TypeScript tests for pure
+  renderer/bridge state. Run npm run test:electron before handing off changes.
 
-- **Folder-level inheritance** (`Data/InheritanceResolver.cs`) is the load-bearing domain concept. It is the single thing that makes Wormhole feel like mRemoteNG. Always run its tests before touching it.
-- **RDP host** must be on STA. The ActiveX `MsRdpClient9NotSafeForScripting` lives in a WinForms `Form` (see [Interop/Rdp/RdpHostForm.cs](Interop/Rdp/RdpHostForm.cs)) reparented into the WinUI 3 main window via Win32 `SetParent`, then positioned by [Views/Sessions/RdpSurfaceHost.xaml.cs](Views/Sessions/RdpSurfaceHost.xaml.cs) on every layout tick. COM interop is hand-rolled in [Interop/Rdp/AxMsRdpClient9.cs](Interop/Rdp/AxMsRdpClient9.cs) and [Interop/Rdp/MsTscAxEventsSink.cs](Interop/Rdp/MsTscAxEventsSink.cs) — no AxImp-generated wrappers; property access is dynamic via `GetOcx()`, events go through `IConnectionPointContainer.Advise` with a managed `IMsTscAxEvents` sink.
-- **SSH terminal** is xterm.js inside a `WebView2` bridged to SSH.NET `ShellStream` by [Interop/Terminal/TerminalBridge.cs](Interop/Terminal/TerminalBridge.cs). xterm.js bundle lives under `Assets/web/`.
-- **Serial terminal** (`ProtocolType.Serial`, enum value 5) reuses the same xterm.js/WebView2 terminal surface and `TerminalBridge`, but the runtime session is backed by `System.IO.Ports.SerialPort` in [Services/Serial/SerialSession.cs](Services/Serial/SerialSession.cs). The saved connection's `Host` is the serial line (`COM1`, `COM10`, `\\.\COM10`, etc.); PuTTY-style serial settings live on `ConnectionNode`/`ConnectionProfile` (`SerialBaudRate`, `SerialDataBits`, `SerialStopBits`, `SerialParity`, `SerialFlowControl`). Serial is local and credential-less: no Credential Manager, no VPN routing.
-- **HTTP/HTTPS web browser** (`ProtocolType.Http`/`Https`, enum values 3/4 — 2 is the retired SFTP value, deliberately skipped) renders an appliance/firewall GUI in an embedded `WebView2`. [ViewModels/Sessions/HttpSessionViewModel.cs](ViewModels/Sessions/HttpSessionViewModel.cs) owns the connection lifecycle and computes an `HttpConnectionTarget` (URL + optional SOCKS proxy + cert policy); [Views/Sessions/WebBrowserView.xaml.cs](Views/Sessions/WebBrowserView.xaml.cs) owns the WebView2 (the VM never touches it) and reports navigation results back. No credentials; HTTPS has an "ignore certificate errors" opt-in (`HttpIgnoreCertErrors`, wired through `ServerCertificateErrorDetected = AlwaysAllow`). The address field carries `host[:port]`; there is no path column.
-- **VNC client** (`ProtocolType.Vnc`, enum value 6 — 2 remains the retired SFTP value) uses `Community.MarcusW.VncClient`. [Services/VncSessionService.cs](Services/VncSessionService.cs) wraps `RfbConnection`, auth, input, and tunnel target selection; [Views/Sessions/VncView.xaml.cs](Views/Sessions/VncView.xaml.cs) owns the WinUI render target and pointer/keyboard mapping. v1 supports no-auth and classic VNC password authentication only; VNC credentials are password-only (username/domain hidden or optional).
-- **Per-connection VPN** is resolved through the same folder-inheritance path as credentials. `TunnelEnabled` is tri-state (`null` = inherit, `false` = override off, `true` = on) and `TunnelConfigId` points at [Models/TunnelConfig.cs](Models/TunnelConfig.cs). [Services/Tunneling/TunnelManager.cs](Services/Tunneling/TunnelManager.cs) loads the row + DPAPI secret and dispatches to the matching provider (WireGuard, OpenVPN, Fortinet, WatchGuard, Stormshield, Azure VPN, Cisco Secure Client). Tunnels are shared per config: `EstablishAsync` returns a ref-counted lease over one live instance per `TunnelConfigId` (concurrent connects coalesce into one establishment — one OTP prompt), and the real tunnel closes when the last session's lease is disposed; dead (`Failed`/`Closed`) or edited configs (`UpdatedAt` bump) get a fresh instance on the next connect. WatchGuard, Stormshield, and Azure VPN all delegate their data plane to the shared OpenVPN sidecar; Azure VPN authenticates with a Microsoft Entra ID access token (interactive WebView2 popup + DPAPI refresh-token cache, see [Services/Tunneling/AzureVpn/](Services/Tunneling/AzureVpn)) sent as the OpenVPN password with username `AzureAD`. Cisco Secure Client (AnyConnect) instead has its own Go sidecar [tools/wormhole-ciscoproxy](tools/wormhole-ciscoproxy) — modeled on the Fortinet one — that speaks the AnyConnect protocol directly (aggregate-auth XML login + STF-framed CSTP tunnel over TLS, gVisor netstack → loopback SOCKS5); it does NOT drive the locally-installed Cisco client. v1 handles username/password + optional group + a TOTP/secondary-password second factor; SAML SSO, client certs, and CSD/HostScan posture are unsupported.
-- **Fortinet SAML SSO** is coordinated by [Services/Tunneling/Fortinet/FortinetSamlAuthService.cs](Services/Tunneling/Fortinet/FortinetSamlAuthService.cs): external-browser login reserves a configurable loopback callback (default `8020`) before launch and yields an ephemeral `auth_id`; embedded login uses a dedicated persistent WebView2 profile and yields an ephemeral `SVPNCOOKIE`. The service serializes SSO prompts, clears `SVPNCOOKIE` around embedded authentication, and sends either value only through sidecar stdin. External-browser SSO cannot be combined with a realm.
-- **VPN runtime routing** applies to SSH terminal sessions and SFTP file-transfer dialogs via the sidecars' loopback SOCKS5 endpoints. RDP and VNC — which cannot speak SOCKS5 directly — route through `ITunnelInstance.BindLocalForwarderAsync`, which binds a 127.0.0.1 listener that bridges to the real target through the tunnel; the RDP entry point is [RdpSessionViewModel.PrepareConnectProfileAsync](ViewModels/Sessions/RdpSessionViewModel.cs), and VNC does this in [Services/VncSessionService.cs](Services/VncSessionService.cs). HTTP/HTTPS sessions use a hybrid: when the tunnel exposes `Socks5Endpoint` the WebView2 is created with a `--proxy-server=socks5://…` environment (real hostname preserved → correct SNI/cert/redirects); otherwise they fall back to the same `BindLocalForwarderAsync` loopback bridge as RDP/VNC (cert name won't match loopback, so HTTPS over that path needs the ignore-cert opt-in). Serial sessions are local COM-port sessions and never use VPN tunnels. Three RDP combos are rejected when a tunnel is enabled because the loopback bridge can't safely handle them: external `mstsc.exe` (runs in the host network), RD Gateway (gateway HTTPS would also bypass the forwarder), and strict server authentication (OCX validates the loopback hostname rather than the original server name).
-- **Threading**: UI thread is STA. Use `Task.Run` for SSH/SFTP I/O, marshal back via `DispatcherQueue.TryEnqueue`.
-- **mRemoteNG import** is implemented in [Services/MRemoteNg/](Services/MRemoteNg) and exposed through the tree context menu. mRemoteNG's AES-GCM shape needs BouncyCastle; do not replace it with `System.Security.Cryptography.AesGcm` without verifying nonce compatibility.
+## Active architecture
 
-## Packaging
+- The workspace and settings data live in SQLite managed by Go. Schema changes
+  are versioned migrations applied by the Go backend.
+- Go resolves inherited connection and tunnel profiles, owns credential and
+  app-auth verification, and exposes only the minimum metadata needed by the
+  renderer.
+- SSH, serial, VNC, RDP routing, web targets, SFTP, MCP, and update operations
+  are backend responsibilities. Electron provides lifecycle and rendering
+  integration only.
+- VPN providers run through Go-native sidecars and loopback SOCKS5 or forwarder
+  endpoints. Session code must hold and release tunnel leases deterministically.
+- Electron web sessions use isolated Chromium profiles. Authentication tokens
+  and VPN cookies stay in the owning native/auth flow and are never exposed to
+  React.
+- Windows-only native compatibility helpers may remain where an operating
+  system client requires them, but they are adapters behind the Go-owned
+  boundary, not a second application architecture. New behavior must still be
+  implemented in Go.
 
-- Unpackaged (`WindowsPackageType=None`). Do not switch to MSIX without auditing the ActiveX host path — packaged identity changes ActiveX behavior and may require `runFullTrust`.
-- x64 and arm64 only. No x86.
-- MSBuild fetch targets stage xterm.js assets and the VPN sidecars. Missing Go/C++ toolchains warn rather than fail so the app still builds; using a missing tunnel kind surfaces a runtime error.
+## Packaging and repository hygiene
 
-## Current gaps
+- The Electron installer is the only release target. Use the Electron build and
+  installer scripts under scripts/; do not add a parallel desktop shell or
+  release workflow.
+- Keep Windows x64 and arm64 packaging working, while preserving the
+  cross-platform Go build for other supported Electron hosts.
+- Do not switch the app to MSIX or reintroduce WinUI as the active shell.
+- Preserve existing user changes in a dirty worktree. Inspect git status before
+  editing and avoid destructive reset or checkout commands.
+- When updating this guide, update the mirrored agent guide in the same change
+  so the instructions remain identical.
 
-- SFTP is not a standalone session protocol — `ProtocolType` is `Ssh`/`Rdp`/`Http`/`Https`/`Vnc`/`Serial`. SFTP file transfer is available from connected SSH tabs (see `SftpService` + the File Transfer dialog). Quick Connect supports every session protocol through the full ephemeral connection editor; mRemoteNG import remains SSH/RDP/VNC-only (no HTTP/HTTPS/Serial yet).
-- [Views/Pages/ConnectionEditorPage.xaml](Views/Pages/ConnectionEditorPage.xaml) is a legacy placeholder page; the real editor is [Views/Dialogs/NewConnectionDialog.xaml](Views/Dialogs/NewConnectionDialog.xaml).
+## Native compatibility helpers
+
+The C# code under tools/wormhole-rdp-host is part of the Electron application:
+it hosts the Windows mstscax ActiveX control in a separate process. Keep it
+isolated, secret-free, and limited to native surface integration. Do not
+reintroduce the removed WinUI application or move backend behavior into it.

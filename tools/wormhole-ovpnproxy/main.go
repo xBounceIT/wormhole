@@ -101,17 +101,19 @@ func run(cliMock bool) error {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	input := os.Stdin
 
 	// Watch for stdin EOF (parent gone). When it fires, cancel the context so the SOCKS5
 	// server unblocks and the OpenVPN session tears down.
 	go func() {
-		_, _ = io.Copy(io.Discard, os.Stdin)
+		_, _ = io.Copy(io.Discard, input)
 		logf("stdin closed; shutting down")
 		cancel()
 	}()
 
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigs)
 	go func() {
 		select {
 		case <-sigs:

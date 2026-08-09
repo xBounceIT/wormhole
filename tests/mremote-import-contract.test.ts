@@ -1,0 +1,106 @@
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import test from 'node:test';
+import {
+  parseMRemoteImportInspection,
+  parseMRemoteImportOptions,
+  parseMRemoteImportPlan,
+  parseMRemoteImportResult,
+} from '../electron/mremote-import-contract.ts';
+
+test('mRemoteNG IPC option validation rejects malformed and oversized secrets', () => {
+  assert.deepEqual(parseMRemoteImportOptions({ password: 'secret', structureOnly: false }), {
+    password: 'secret',
+    structureOnly: false,
+  });
+  assert.throws(() => parseMRemoteImportOptions({ password: 'x' }));
+  assert.throws(() =>
+    parseMRemoteImportOptions({ password: 'x'.repeat(16 * 1024 + 1), structureOnly: false }),
+  );
+});
+
+test('mRemoteNG IPC response validation accepts a bounded plan and rejects drift', () => {
+  const plan = {
+    planToken: 'a'.repeat(64),
+    folders: 1,
+    connections: 1,
+    credentials: 1,
+    skippedUnsupported: 0,
+    skippedUnsupportedSamples: [],
+    warnings: [],
+    droppedWarnings: 0,
+    preview: [{ name: 'Root', kind: 'folder', depth: 1 }],
+    previewTruncated: false,
+  };
+  assert.deepEqual(parseMRemoteImportPlan(plan), plan);
+  assert.throws(() =>
+    parseMRemoteImportPlan({
+      ...plan,
+      preview: [{ ...plan.preview[0], password: 'leak', kind: 'invalid' }],
+    }),
+  );
+  assert.throws(() => parseMRemoteImportPlan({ ...plan, warnings: Array(51).fill('warning') }));
+});
+
+test('mRemoteNG inspect and result contracts reject invalid values', () => {
+  assert.equal(
+    parseMRemoteImportInspection(
+      {
+        fileSize: 10,
+        confVersion: '2.7',
+        passwordRequired: true,
+        fullFileEncrypted: false,
+      },
+      'c.xml',
+    ).fileName,
+    'c.xml',
+  );
+  assert.throws(() => parseMRemoteImportInspection({ fileSize: -1 }, 'c.xml'));
+  assert.equal(
+    parseMRemoteImportResult({
+      foldersCreated: 1,
+      connectionsCreated: 2,
+      credentialsCreated: 3,
+      skippedUnsupported: 0,
+      warnings: [],
+      droppedWarnings: 0,
+    }).connectionsCreated,
+    2,
+  );
+  assert.throws(() => parseMRemoteImportResult({ foldersCreated: -1 }));
+  assert.throws(() =>
+    parseMRemoteImportResult({
+      foldersCreated: 1,
+      connectionsCreated: 2,
+      credentialsCreated: 3,
+      skippedUnsupported: 0,
+      warnings: [],
+      droppedWarnings: 0,
+      password: 'must-not-cross',
+    }),
+  );
+});
+
+test('mRemoteNG commit starts inside the authorization boundary and supports cooperative cancellation', () => {
+  const mainSource = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
+  const handler = mainSource.slice(
+    mainSource.indexOf("ipcMain.handle('mremote-import:commit'"),
+    mainSource.indexOf("ipcMain.handle('backup:export'"),
+  );
+  assert.match(handler, /runOwnedNativeOperation\(event\.sender, 'mremote-import'/);
+  assert.match(handler, /mremote\.import\.commit/);
+  assert.match(handler, /mremote-import:cancel-commit/);
+  assert.match(mainSource, /function runOwnedNativeOperation[\s\S]{0,1200}runAuthorizedOperation/);
+  assert.match(mainSource, /cancelOperation\(operation\.id\)/);
+});
+
+test('mRemoteNG import explains how to produce a compatible export', () => {
+  const dialogSource = readFileSync(
+    new URL('../src/components/MRemoteImportDialog.tsx', import.meta.url),
+    'utf8',
+  );
+  assert.match(dialogSource, /Exporting from mRemoteNG/);
+  assert.match(dialogSource, /Export Connections/);
+  assert.match(dialogSource, /username, password, domain, and\s+inheritance/);
+  assert.match(dialogSource, /Tools → Options → Security/);
+});

@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   build:
-    name: Build ${{ matrix.platform }}
+    name: Build Electron ${{ matrix.platform }}
     runs-on: windows-latest
     strategy:
       fail-fast: false
@@ -26,7 +26,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.inputs.tag || github.ref_name }}
-          # Both release architectures ship the real OpenVPN3 sidecar.
           submodules: recursive
 
       - name: Setup .NET 10
@@ -34,23 +33,19 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
       - name: Setup Go
-        # Go builds both userspace sidecars (wgproxy + ovpnproxy). Pin it explicitly rather
-        # than relying on whatever the runner image happens to preinstall.
         uses: actions/setup-go@v5
         with:
           go-version-file: tools/wormhole-ovpnproxy/go.mod
           cache: false
 
       - name: Set up OpenVPN3 sidecar toolchain (x64)
-        # Fetch-OvpnProxy.ps1 builds the real `-tags ovpn3` binary only when a MinGW C++
-        # toolchain + CMake are reachable and vcpkg can supply asio/jsoncpp/lz4/xxhash.
-        # CMake ships on windows-latest; install MinGW-w64 (gcc/g++/mingw32-make — CGO on
-        # Windows uses gcc, NOT MSVC) and point the script at the runner's preinstalled
-        # vcpkg via VCPKG_ROOT so it resolves the x64-mingw-static deps from
-        # ovpn_shim/vcpkg.json. The script hydrates PATH/VCPKG_ROOT from the registry, so
-        # the choco-installed MinGW and this VCPKG_ROOT are picked up by the publish step's
-        # child PowerShell even though choco only updates the machine PATH registry.
         if: matrix.platform == 'x64'
         shell: pwsh
         run: |
@@ -61,9 +56,6 @@ jobs:
         if: matrix.platform == 'arm64'
         shell: pwsh
         run: |
-          # llvm-mingw's x86_64-hosted archive contains cross compilers for every
-          # Windows architecture, including aarch64. Pin the toolchain release so
-          # the release build is reproducible.
           $version = "20260602"
           $archive = "$env:RUNNER_TEMP\llvm-mingw.zip"
           $destination = "$env:RUNNER_TEMP\llvm-mingw"
@@ -93,41 +85,60 @@ jobs:
         run: |
           $tag = $env:INPUT_TAG
           $version = $tag -replace '^v', ''
-          "tag=$tag"         | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
-      - name: Publish (Release / win-${{ matrix.platform }})
-        run: >
-          dotnet publish Wormhole.csproj
-          -c Release
-          -r win-${{ matrix.platform }}
-          -p:Platform=${{ matrix.platform }}
-          -p:RequireRealOvpnProxy=true
-          --self-contained true
-          -o artifacts/publish/win-${{ matrix.platform }}
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Fetch Electron runtime for ${{ matrix.platform }}
+        shell: pwsh
+        run: |
+          if ("${{ matrix.platform }}" -eq "arm64") {
+            $env:npm_config_arch = 'arm64'
+            $env:npm_config_platform = 'win32'
+          }
+          node node_modules/electron/install.js
+
+      - name: Build renderer and Electron main
+        run: npm run build:renderer && npm run build:electron
+
+      - name: Build real VPN sidecars
+        shell: pwsh
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          & scripts\Build-ElectronVpnSidecars.ps1 -Arch $env:PLATFORM -RequireRealOvpn
+          if ($LASTEXITCODE -ne 0) { throw "VPN sidecar build failed with exit $LASTEXITCODE" }
+
+      - name: Build Go backend for ${{ matrix.platform }}
+        run: node scripts/Build-ElectronBackend.mjs --arch ${{ matrix.platform }}
+
+      - name: Build native helpers
+        shell: pwsh
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          & scripts\Build-CredentialReader.ps1 -Arch $env:PLATFORM
+          if ($LASTEXITCODE -ne 0) { throw "Credential reader build failed with exit $LASTEXITCODE" }
+          & scripts\Build-RdpHost.ps1 -Arch $env:PLATFORM
+          if ($LASTEXITCODE -ne 0) { throw "RDP host build failed with exit $LASTEXITCODE" }
 
       - name: Verify real OpenVPN sidecar shipped
-        # Hard gate so we never silently ship the mock-only stub again (the v0.2.4 bug). The
-        # stub fatals with "OpenVPN3 binding not linked" on any real-mode connect; the real
-        # ovpn3 build instead fails a bogus profile with an OpenVPN parse error. Drive one
-        # real-mode config through stdin and assert the stub's signature string is absent.
         shell: pwsh
         run: |
           $platform = "${{ matrix.platform }}"
-          $exe = "$PWD\artifacts\publish\win-$platform\wormhole-ovpnproxy.exe"
+          $exe = "$PWD\dist-electron\wormhole-ovpnproxy.exe"
           if (-not (Test-Path $exe)) {
-            throw "wormhole-ovpnproxy.exe is missing from the publish output — Fetch-OvpnProxy.ps1 produced nothing. Check the 'Set up OpenVPN3 sidecar toolchain' step."
+            throw "wormhole-ovpnproxy.exe is missing from dist-electron."
           }
-          # The mock-only build embeds this fatal string. Byte-scan both architectures
-          # because an x64 GitHub runner cannot execute the arm64 binary.
           $ascii = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($exe))
           if ($ascii -match 'binding not linked') {
-            throw "Shipped wormhole-ovpnproxy.exe is the MOCK-ONLY stub — the '-tags ovpn3' build did not run."
+            throw "Shipped wormhole-ovpnproxy.exe is the mock-only stub."
           }
           if ($platform -eq "x64") {
             $cfg = '{"profile_ovpn":"remote 203.0.113.1 1194\ndev tun\n","mock":false}'
             $out = ($cfg | & $exe 2>&1 | Out-String)
-            # The sidecar exits non-zero on the bogus profile; that is expected.
             $global:LASTEXITCODE = 0
             if ($out -match 'binding not linked') {
               throw "Shipped x64 sidecar is mock-only. Sidecar stderr: $out"
@@ -138,30 +149,23 @@ jobs:
       - name: Install Inno Setup
         run: choco install innosetup -y --no-progress
 
-      - name: Build Inno Setup installer
+      - name: Build Electron installer
         shell: pwsh
         env:
           VERSION: ${{ steps.ver.outputs.version }}
           PLATFORM: ${{ matrix.platform }}
         run: |
-          $iscc      = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-          $publish   = "$PWD\artifacts\publish\win-$env:PLATFORM"
-          $outputDir = "$PWD\installer\output"
-          if (-not (Test-Path $iscc)) {
-            throw "ISCC.exe not found at '$iscc'. Inno Setup 6 install did not land where expected — check the 'Install Inno Setup' step."
+          & scripts\Build-ElectronInstaller.ps1 -Architecture $env:PLATFORM -AppVersion $env:VERSION
+          if ($LASTEXITCODE -ne 0) { throw "Electron installer build failed with exit $LASTEXITCODE" }
+          Move-Item "installer\output\Wormhole-*-setup.exe" .
+
+      - name: Generate SHA-256 sidecars
+        shell: pwsh
+        run: |
+          Get-ChildItem "Wormhole-*-setup.exe" | ForEach-Object {
+            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)" | Set-Content -LiteralPath "$($_.Name).sha256" -Encoding ascii
           }
-          New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
-          & $iscc `
-            "/DAppArchitecture=$env:PLATFORM" `
-            "/DPublishDir=$publish" `
-            "/DMyAppVersion=$env:VERSION" `
-            "/O$outputDir" `
-            installer\Wormhole.iss
-          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit $LASTEXITCODE" }
-          # Flatten EXE to workspace root so upload-artifact stores it at the
-          # same depth as the zip — otherwise the artifact preserves
-          # 'installer/output/' and the release job's glob can't find it.
-          Move-Item "$outputDir\Wormhole-*-setup.exe" .
 
       - name: Package zip
         shell: pwsh
@@ -170,7 +174,7 @@ jobs:
           PLATFORM: ${{ matrix.platform }}
         run: |
           $zip = "Wormhole-$env:VERSION-win-$env:PLATFORM.zip"
-          Compress-Archive -Path "artifacts/publish/win-$env:PLATFORM/*" -DestinationPath $zip
+          Compress-Archive -Path "artifacts/electron-app/$env:PLATFORM/Wormhole/*" -DestinationPath $zip
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -179,11 +183,12 @@ jobs:
           path: |
             Wormhole-*.zip
             Wormhole-*-setup.exe
+            Wormhole-*.sha256
           if-no-files-found: error
 
   release:
     name: Publish GitHub Release
-    needs: build
+    needs: [build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -212,4 +217,5 @@ jobs:
             --title "$TAG" \
             --generate-notes \
             artifacts/Wormhole-*.zip \
-            artifacts/Wormhole-*-setup.exe
+            artifacts/Wormhole-*-setup.exe \
+            artifacts/Wormhole-*.sha256

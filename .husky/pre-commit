@@ -1,6 +1,0 @@
-#!/usr/bin/env sh
-. "$(dirname -- "$0")/_/husky.sh"
-set -e
-
-dotnet husky run --name format-staged
-dotnet husky run --name build
