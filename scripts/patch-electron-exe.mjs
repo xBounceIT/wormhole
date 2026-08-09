@@ -59,6 +59,7 @@ const versionValues = {
   FileDescription: 'Wormhole',
   CompanyName: 'Wormhole project',
   LegalCopyright: 'Wormhole project',
+  InternalName: 'Wormhole.exe',
   OriginalFilename: 'Wormhole.exe',
   FileVersion: version,
   ProductVersion: version,

@@ -79,7 +79,7 @@ export function applyRdpBackendEvent<T extends RdpSessionState>(
       ...session,
       rdpStatus: 'failed',
       rdpBackend: backend,
-      rdpError: event.message || 'The RDP backend rejected the connection.',
+      rdpError: event.message || 'The RDP connection could not be started.',
       rdpExternal: false,
     };
   }

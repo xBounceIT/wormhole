@@ -203,7 +203,7 @@ async function bootstrap() {
   // overlaps the single native bootstrap process instead of extending the blank-window phase.
   window.setTimeout(() => void loadWorkspaceModule().catch(() => undefined), 0);
   if (!window.wormhole) {
-    showError('The native bridge did not load.');
+    showError('Wormhole could not start correctly.');
     return;
   }
   try {
@@ -217,7 +217,7 @@ async function bootstrap() {
       showUnlock(startup);
       return;
     }
-    if (!startup.workspace) throw new Error('The native bootstrap returned no workspace.');
+    if (!startup.workspace) throw new Error('Wormhole could not load the workspace.');
     await mountWorkspace(startup, startup.workspace);
   } catch (error) {
     startupRequest = undefined;

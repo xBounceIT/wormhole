@@ -82,7 +82,7 @@ test('patches prerelease metadata and icons idempotently', async (context) => {
   assert.equal(values.ProductName, 'Wormhole');
   assert.equal(values.FileVersion, version);
   assert.equal(values.ProductVersion, version);
-  assert.equal(values.InternalName, 'electron.exe');
+  assert.equal(values.InternalName, 'Wormhole.exe');
   assert.equal(values.SquirrelAwareVersion, '1');
   assert.equal(versionInfo.fixedInfo.fileVersionMS >>> 0, 2 << 16);
   assert.equal(versionInfo.fixedInfo.fileVersionLS >>> 0, 0);

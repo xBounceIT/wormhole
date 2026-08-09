@@ -299,7 +299,7 @@ CREATE TABLE IF NOT EXISTS CredentialSecrets (
     Encoding  TEXT NOT NULL,
     UpdatedAt TEXT NOT NULL
 );`); err != nil {
-		return fmt.Errorf("cannot create the Electron credential secret table: %w", err)
+		return fmt.Errorf("cannot create the credential secret table: %w", err)
 	}
 	if _, err := connection.ExecContext(ctx, "COMMIT;"); err != nil {
 		return fmt.Errorf("cannot commit the Wormhole database migrations: %w", err)

@@ -168,13 +168,13 @@ func serveBackend(databasePath string, electronUserDataPath ...string) error {
 	for scanner.Scan() {
 		var command backendCommand
 		if err := json.Unmarshal(scanner.Bytes(), &command); err != nil {
-			_ = output.write(backendResponse{OK: false, Error: "invalid backend command"})
+			_ = output.write(backendResponse{OK: false, Error: "invalid Wormhole request"})
 			continue
 		}
 		manager.handle(command)
 	}
 	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("backend command stream failed: %w", err)
+		return fmt.Errorf("Wormhole request stream failed: %w", err)
 	}
 	return nil
 }
@@ -303,7 +303,7 @@ func (m *vncManager) handle(command backendCommand) {
 		generation := m.bitwardenGeneration()
 		go m.handleBitwarden(command, generation)
 	default:
-		m.respond(command.ID, fmt.Errorf("unsupported backend action %q", command.Action))
+		m.respond(command.ID, fmt.Errorf("unsupported request action %q", command.Action))
 	}
 }
 
@@ -1461,7 +1461,7 @@ func (s *vncSession) claimTerminal() bool {
 
 func validateBackendCommand(command backendCommand) error {
 	if command.ID == "" || len(command.ID) > 128 {
-		return errors.New("backend command ID is invalid")
+		return errors.New("request ID is invalid")
 	}
 	bitwardenAction := strings.HasPrefix(command.Action, "bitwarden.")
 	requiresSession := !bitwardenAction &&
@@ -1470,7 +1470,7 @@ func validateBackendCommand(command backendCommand) error {
 		command.Action != "rdp.system-client-capability" &&
 		command.Action != "rdp.resolve-system-profile"
 	if requiresSession && (command.SessionID == "" || len(command.SessionID) > 128) {
-		return errors.New("backend session ID is invalid")
+		return errors.New("session ID is invalid")
 	}
 	switch command.Action {
 	case "vnc.connect":
@@ -1625,7 +1625,7 @@ func validateBackendCommand(command backendCommand) error {
 			return errors.New("RDP system client request is invalid")
 		}
 	default:
-		return fmt.Errorf("unsupported backend action %q", command.Action)
+		return fmt.Errorf("unsupported request action %q", command.Action)
 	}
 	return nil
 }

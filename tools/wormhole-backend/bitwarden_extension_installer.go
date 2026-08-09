@@ -153,7 +153,7 @@ func readBitwardenManifest(extensionRoot string) (bitwardenExtensionManifest, er
 
 func validateBitwardenElectronManifest(manifest bitwardenExtensionManifest) error {
 	if manifest.ManifestVersion != 2 {
-		return errors.New("This Bitwarden browser package uses Manifest V3, which Electron cannot run reliably. Install the Firefox/MV2 Bitwarden package instead.")
+		return errors.New("This Bitwarden browser package is not supported. Install a compatible Bitwarden browser package instead.")
 	}
 	if strings.TrimSpace(manifest.DefaultPopup) == "" {
 		return errors.New("The Bitwarden browser package does not define a popup.")
@@ -389,7 +389,7 @@ func resolveBitwardenLatestRelease(settings bitwardenExtensionSettings) (resolve
 	}
 	asset := findPreferredBitwardenAsset(*release)
 	if asset == nil {
-		return resolvedBitwardenRelease{}, errors.New("The latest Bitwarden browser release has no Firefox/MV2 extension ZIP asset compatible with Electron.")
+		return resolvedBitwardenRelease{}, errors.New("The latest Bitwarden browser release has no package compatible with Wormhole.")
 	}
 	if strings.TrimSpace(asset.BrowserDownloadURL) == "" {
 		return resolvedBitwardenRelease{}, errors.New("The Bitwarden extension asset has no download URL.")

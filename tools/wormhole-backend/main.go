@@ -237,23 +237,23 @@ func main() {
 		return
 	}
 	if *operation == "ssh" {
-		logInfo("native SSH backend started")
+		logInfo("SSH service started")
 		if err := serveSSH(*databasePath, os.Stdin, os.Stdout, *electronUserDataPath); err != nil {
-			logError("native SSH backend failed: %v", err)
+			logError("SSH service failed: %v", err)
 			writeError(err.Error())
 			os.Exit(1)
 		}
-		logInfo("native SSH backend stopped")
+		logInfo("SSH service stopped")
 		return
 	}
 	if *operation == "serial" {
-		logInfo("native serial backend started")
+		logInfo("serial service started")
 		if err := serveSerial(*databasePath, os.Stdin, os.Stdout, *electronUserDataPath); err != nil {
-			logError("native serial backend failed: %v", err)
+			logError("serial service failed: %v", err)
 			writeError(err.Error())
 			os.Exit(1)
 		}
-		logInfo("native serial backend stopped")
+		logInfo("serial service stopped")
 		return
 	}
 	if *operation == "update-download" {
@@ -267,7 +267,7 @@ func main() {
 	}
 	var result any
 	var err error
-	logDebug("backend operation %s started", *operation)
+	logDebug("service operation %s started", *operation)
 	switch *operation {
 	case "startup":
 		var request startupRequest
@@ -753,13 +753,13 @@ func main() {
 			}
 		}
 	case "serve":
-		logInfo("native VNC backend started")
+		logInfo("VNC service started")
 		if err := serveBackend(*databasePath, *electronUserDataPath); err != nil {
-			logError("native VNC backend failed: %v", err)
+			logError("VNC service failed: %v", err)
 			writeError(err.Error())
 			os.Exit(1)
 		}
-		logInfo("native VNC backend stopped")
+		logInfo("VNC service stopped")
 		return
 	case "rdp":
 		err = runRdpController(*databasePath, *rdpHost, *freerdpPath)
@@ -768,16 +768,16 @@ func main() {
 	}
 
 	if err != nil {
-		logError("backend operation %s failed: %v", *operation, err)
+		logError("service operation %s failed: %v", *operation, err)
 		writeError(err.Error())
 		os.Exit(1)
 		return
 	}
-	logDebug("backend operation %s completed", *operation)
+	logDebug("service operation %s completed", *operation)
 
 	if err := json.NewEncoder(os.Stdout).Encode(result); err != nil {
-		logError("failed to encode backend response: %v", err)
-		writeError("failed to encode backend response")
+		logError("failed to encode service response: %v", err)
+		writeError("Wormhole could not complete the request")
 		os.Exit(1)
 	}
 }
@@ -789,13 +789,13 @@ func decodeInput[T any](target *T) error {
 func decodeOptionalInput[T any](target *T) error {
 	contents, err := io.ReadAll(io.LimitReader(os.Stdin, backendMaxRequestBytes+1))
 	if err != nil || len(contents) > backendMaxRequestBytes {
-		return errors.New("backend request was invalid")
+		return errors.New("Wormhole request was invalid")
 	}
 	if len(bytes.TrimSpace(contents)) == 0 {
 		return nil
 	}
 	if err := json.Unmarshal(contents, target); err != nil {
-		return errors.New("backend request was invalid")
+		return errors.New("Wormhole request was invalid")
 	}
 	return nil
 }
@@ -807,10 +807,10 @@ func decodeInputReader[T any](reader io.Reader, target *T) error {
 func decodeInputLimit[T any](reader io.Reader, target *T, limit int64) error {
 	contents, err := io.ReadAll(io.LimitReader(reader, limit+1))
 	if err != nil || len(contents) > int(limit) {
-		return errors.New("backend request was invalid")
+		return errors.New("Wormhole request was invalid")
 	}
 	if err := json.Unmarshal(contents, target); err != nil {
-		return errors.New("backend request was invalid")
+		return errors.New("Wormhole request was invalid")
 	}
 	return nil
 }

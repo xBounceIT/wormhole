@@ -2612,7 +2612,7 @@ class NativeBackendProcess {
     await this.start();
     const child = this.child;
     if (!child?.stdin || child.stdin.destroyed) {
-      throw new Error('Native backend is not available.');
+      throw new Error('Wormhole service is not available.');
     }
 
     const id = `electron-${++this.requestSequence}`;
@@ -2631,7 +2631,7 @@ class NativeBackendProcess {
       const pending = this.pending.get(id);
       if (!pending) return;
       this.pending.delete(id);
-      pending.reject(new Error('Native backend command timed out.'));
+      pending.reject(new Error('Wormhole service did not respond in time.'));
     }, timeoutMs);
 
     return response.finally(() => clearTimeout(timeout));
@@ -2758,7 +2758,7 @@ class NativeBackendProcess {
       { action, sessionId: operationId, ...request },
       nativeLongOperationTimeoutMs,
     );
-    if (!response.ok) throw new Error(response.error || 'The native operation failed.');
+    if (!response.ok) throw new Error(response.error || 'The operation failed.');
     return response.result;
   }
 
@@ -2779,7 +2779,7 @@ class NativeBackendProcess {
     this.stopping = true;
     const child = this.child;
     this.outputBuffer = '';
-    this.rejectAll(new Error('Native backend stopped.'));
+    this.rejectAll(new Error('Wormhole service stopped.'));
 
     this.stopPromise = (async () => {
       if (!child) return;
@@ -2787,7 +2787,7 @@ class NativeBackendProcess {
         gracefulTimeoutMs: nativeBackendShutdownTimeoutMs,
       });
       if (!exited) {
-        console.warn('[Wormhole] Native backend did not exit after its force-kill timeout.');
+        console.warn('[Wormhole] App service did not stop within the allowed time.');
       }
       if (this.child === child) this.child = undefined;
     })().finally(() => {
@@ -2798,8 +2798,8 @@ class NativeBackendProcess {
   }
 
   private async start(): Promise<void> {
-    if (this.permanentlyStopped) throw new Error('Native backend has stopped.');
-    if (this.stopping) throw new Error('Native backend is stopping.');
+    if (this.permanentlyStopped) throw new Error('Wormhole service has stopped.');
+    if (this.stopping) throw new Error('Wormhole service is stopping.');
     if (this.child) return;
     if (this.startPromise) return this.startPromise;
 
@@ -2840,7 +2840,7 @@ class NativeBackendProcess {
         if (this.child === child) this.child = undefined;
         this.outputBuffer = '';
         const error = new Error(
-          code === null ? 'Native backend stopped.' : `Native backend exited (${code}).`,
+          code === null ? 'Wormhole service stopped.' : `Wormhole service stopped (${code}).`,
         );
         this.rejectAll(error);
         if (!settled) reject(error);
@@ -2989,7 +2989,7 @@ let bitwardenOnboardingPromise: Promise<void> | undefined;
 let bitwardenStartupMaintenancePromise: Promise<void> | undefined;
 
 function requireNativeResourcesRunning(): void {
-  if (isQuitting) throw new Error('Native backend is stopping.');
+  if (isQuitting) throw new Error('Wormhole service is stopping.');
 }
 
 function getNativeBackend(): NativeBackendProcess {
@@ -3462,7 +3462,7 @@ function backendPath(): string {
   const executableName = `wormhole-backend-${architecture}${process.platform === 'win32' ? '.exe' : ''}`;
   const executablePath = findBundledExecutable(executableName);
   if (!executablePath) {
-    throw new Error(`Electron Go backend is missing (${executableName}).`);
+    throw new Error('A required Wormhole component is missing.');
   }
   return executablePath;
 }
@@ -3507,7 +3507,7 @@ async function runBackend<T>(
           ? backendMaxTunnelRequestBytes
           : backendMaxRequestBytes;
     if (requestPayload === undefined || Buffer.byteLength(requestPayload, 'utf8') > requestLimit) {
-      throw new Error('Electron Go backend request is too large.');
+      throw new Error('The Wormhole request is too large.');
     }
   }
 
@@ -3527,7 +3527,7 @@ async function runBackend<T>(
         : timeoutMs;
     const timeout = setTimeout(() => {
       child.kill();
-      finishReject(new Error('Electron Go backend timed out.'));
+      finishReject(new Error('Wormhole did not respond in time.'));
     }, effectiveTimeoutMs);
     const abort = () => {
       child.kill();
@@ -3550,7 +3550,7 @@ async function runBackend<T>(
       stdoutBytes += Buffer.byteLength(chunk, 'utf8');
       if (stdoutBytes > backendMaxBuffer) {
         child.kill();
-        finishReject(new Error('Electron Go backend returned too much data.'));
+        finishReject(new Error('Wormhole returned too much data.'));
       }
     });
     child.stderr?.on('data', (chunk: string) => {
@@ -3565,7 +3565,7 @@ async function runBackend<T>(
       clearTimeout(timeout);
       signal?.removeEventListener('abort', abort);
       if (code !== 0) {
-        reject(new Error(stderr.trim() || 'Electron Go backend failed.'));
+        reject(new Error(stderr.trim() || 'Wormhole could not complete the request.'));
         return;
       }
       resolve(stdout);
@@ -3581,7 +3581,7 @@ async function runBackend<T>(
   try {
     return JSON.parse(output) as T;
   } catch {
-    throw new Error('Electron Go backend returned invalid data.');
+    throw new Error('Wormhole returned invalid data.');
   }
 }
 
@@ -3858,7 +3858,7 @@ function validateWebTarget(value: WebTargetResponse): WebTargetResponse {
     (value.tunnelConfigId !== undefined && !isTunnelID(value.tunnelConfigId)) ||
     value.proxyUrl !== undefined
   ) {
-    throw new Error('Electron Go backend returned an invalid web target.');
+    throw new Error('Wormhole returned an invalid web address.');
   }
   const targetUrl = new URL(value.url);
   if (
@@ -3867,7 +3867,7 @@ function validateWebTarget(value: WebTargetResponse): WebTargetResponse {
     targetUrl.username ||
     targetUrl.password
   ) {
-    throw new Error('Electron Go backend returned an invalid web target.');
+    throw new Error('Wormhole returned an invalid web address.');
   }
   return value;
 }
@@ -5699,7 +5699,7 @@ class NativeSshBackend {
     }
     try {
       if (!this.connectionAttempts.isCurrent(request.sessionId, generation)) {
-        throw new Error('SSH connection closed before the native session could start.');
+        throw new Error('SSH connection closed before it could start.');
       }
       requireAuthorizationEpoch(authorizationEpoch);
       this.ensureStarted();
@@ -5921,37 +5921,37 @@ class NativeSshBackend {
 
   async mcpStatus(): Promise<McpStatusResponse> {
     const response = await this.sendMcpControl({ type: 'mcp.status' });
-    if (!response.status) throw new Error('Native MCP backend returned no status.');
+    if (!response.status) throw new Error('MCP service returned no status.');
     return response.status;
   }
 
   async startMcp(port: number): Promise<McpStatusResponse> {
     const response = await this.sendMcpControl({ type: 'mcp.start', port });
-    if (!response.status) throw new Error('Native MCP backend returned no status.');
+    if (!response.status) throw new Error('MCP service returned no status.');
     return response.status;
   }
 
   async stopMcp(): Promise<McpStatusResponse> {
     const response = await this.sendMcpControl({ type: 'mcp.stop' });
-    if (!response.status) throw new Error('Native MCP backend returned no status.');
+    if (!response.status) throw new Error('MCP service returned no status.');
     return response.status;
   }
 
   async setMcpPort(port: number): Promise<McpStatusResponse> {
     const response = await this.sendMcpControl({ type: 'mcp.set-port', port });
-    if (!response.status) throw new Error('Native MCP backend returned no status.');
+    if (!response.status) throw new Error('MCP service returned no status.');
     return response.status;
   }
 
   async getMcpToken(): Promise<string> {
     const response = await this.sendMcpControl({ type: 'mcp.get-token' });
-    if (!response.token) throw new Error('Native MCP backend returned no token.');
+    if (!response.token) throw new Error('MCP service returned no token.');
     return response.token;
   }
 
   async regenerateMcpToken(): Promise<string> {
     const response = await this.sendMcpControl({ type: 'mcp.regenerate-token' });
-    if (!response.token) throw new Error('Native MCP backend returned no token.');
+    if (!response.token) throw new Error('MCP service returned no token.');
     return response.token;
   }
 
@@ -5981,10 +5981,10 @@ class NativeSshBackend {
     for (const sessionId of [...this.pendingConnections]) this.connectionAttempts.cancel(sessionId);
     for (const waiter of this.openWaiters.values()) {
       clearTimeout(waiter.timeout);
-      waiter.reject(new Error('SSH backend stopped.'));
+      waiter.reject(new Error('SSH service stopped.'));
     }
     this.openWaiters.clear();
-    this.failControlWaiters(new Error('Native SSH backend stopped.'));
+    this.failControlWaiters(new Error('SSH service stopped.'));
     this.activeSessions.clear();
     const tunnelReleases = this.tunnelLeases.releaseAll(releaseNativeTunnelLease);
     this.lineReader?.close();
@@ -5994,7 +5994,7 @@ class NativeSshBackend {
     if (child && !child.killed) {
       const exited = await stopChildProcess(child);
       if (!exited) {
-        console.warn('[Wormhole] Native SSH backend did not exit after its force-kill timeout.');
+        console.warn('[Wormhole] SSH service did not stop within the allowed time.');
       }
     }
     await tunnelReleases;
@@ -6027,7 +6027,7 @@ class NativeSshBackend {
     });
     child.stdin.on('error', (error) => {
       if (this.child !== child) return;
-      const failure = new Error(`Native SSH backend input failed: ${error.message}`);
+      const failure = new Error(`SSH service connection failed: ${error.message}`);
       this.failOpenWaiters(failure);
       this.failControlWaiters(failure);
     });
@@ -6037,7 +6037,7 @@ class NativeSshBackend {
     });
     child.on('error', (error) => {
       if (this.child !== child) return;
-      const failure = new Error(`Native SSH backend failed: ${error.message}`);
+      const failure = new Error(`SSH service failed: ${error.message}`);
       this.failOpenWaiters(failure);
       this.failControlWaiters(failure);
     });
@@ -6051,7 +6051,7 @@ class NativeSshBackend {
       for (const sessionId of closedSessions) {
         this.broadcast({ type: 'closed', sessionId });
       }
-      const failure = new Error('Native SSH backend stopped.');
+      const failure = new Error('SSH service stopped.');
       this.failOpenWaiters(failure);
       this.failControlWaiters(failure);
       void this.tunnelLeases.releaseAll(releaseNativeTunnelLease);
@@ -6061,7 +6061,7 @@ class NativeSshBackend {
   private write(command: Record<string, unknown>): void {
     const child = this.child;
     if (!child || child.killed || child.stdin.destroyed) {
-      throw new Error('Native SSH backend is not running.');
+      throw new Error('SSH service is not running.');
     }
     child.stdin.write(`${JSON.stringify(command)}\n`, 'utf8');
   }
@@ -6074,7 +6074,7 @@ class NativeSshBackend {
         const waiter = this.controlWaiters.get(requestId);
         if (!waiter || waiter.timeout !== timeout) return;
         this.controlWaiters.delete(requestId);
-        reject(new Error('Native MCP backend command timed out.'));
+        reject(new Error('MCP service did not respond in time.'));
       }, backendTimeoutMs);
       this.controlWaiters.set(requestId, { resolve, reject, timeout });
     });
@@ -6395,7 +6395,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     return serializeAuthOperation(async () => {
       const startup = await runBackend<StartupResponse>('startup', request);
       if (startup.auth.configured && startup.workspace) {
-        throw new Error('Electron Go backend exposed a locked workspace.');
+        throw new Error('Wormhole could not load the locked workspace.');
       }
       rememberAuthState(startup.auth, false);
       scheduleStartupUpdateCheck(startup.settings);
@@ -6417,10 +6417,10 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       await ensureAuthSession();
       const result = await runBackend<StartupUnlockResponse>('startup-unlock', request);
       if (result.succeeded) {
-        if (!result.workspace) throw new Error('Electron Go backend returned no workspace.');
+        if (!result.workspace) throw new Error('Wormhole returned no workspace.');
         authSession.markUnlocked();
       } else if (result.workspace) {
-        throw new Error('Electron Go backend exposed a workspace before authentication.');
+        throw new Error('Wormhole could not verify the workspace lock.');
       }
       return result;
     });
@@ -7919,7 +7919,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
   });
   ipcMain.handle('vnc:command', async (_event, input: unknown) => {
     if (isQuitting) {
-      return { id: '', ok: false, error: 'Native backend is stopping.' };
+      return { id: '', ok: false, error: 'Wormhole service is stopping.' };
     }
     let command: NativeBackendCommand;
     try {
@@ -7946,7 +7946,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
       if (isQuitting) {
-        return { id: '', ok: false, error: 'Native backend is stopping.' };
+        return { id: '', ok: false, error: 'Wormhole service is stopping.' };
       }
       if (attempt !== undefined && !vncSessionAttempts.isCurrent(command.sessionId!, attempt)) {
         return { id: '', ok: false, error: 'VNC connection closed before it could start.' };
@@ -8110,7 +8110,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
                 !rdpStartAttempts.isCurrent(request.sessionId, requestAttempt) ||
                 !rdpSessionAttempts.isCurrent(request.sessionId, generation)
               ) {
-                throw new Error('RDP connection closed while its native process was starting.');
+                throw new Error('RDP connection closed while it was starting.');
               }
               rdpConnectingLifecycles.delete(lifecycleId);
               return response;
@@ -8401,9 +8401,7 @@ function assertRdpStartCurrent(
     !rdpStartAttempts.isCurrent(sessionId, requestAttempt) ||
     (sessionGeneration !== undefined && !rdpSessionAttempts.isCurrent(sessionId, sessionGeneration))
   ) {
-    throw new Error(
-      'RDP connection was closed or superseded before its native session could start.',
-    );
+    throw new Error('RDP connection was closed or superseded before it could start.');
   }
 }
 
@@ -8505,7 +8503,7 @@ function nativeWindowHandle(window: BrowserWindow): string {
   const handle = window.getNativeWindowHandle();
   if (handle.length >= 8) return handle.readBigUInt64LE(0).toString();
   if (handle.length >= 4) return handle.readUInt32LE(0).toString();
-  throw new Error('RDP native owner window handle is unavailable.');
+  throw new Error('The RDP window is unavailable.');
 }
 
 function toScreenBounds(window: BrowserWindow, rect?: RdpSurfaceRect): RdpSurfaceRect | undefined {
@@ -8748,7 +8746,7 @@ function createWindow() {
       }
       await shutdownNativeResources();
     }).catch((error) => {
-      console.error('[Wormhole] Could not reset native authentication for the renderer.', error);
+      console.error('[Wormhole] Could not reset app authentication.', error);
     });
   });
 
@@ -8849,7 +8847,7 @@ function shutdownNativeResources(): Promise<void> {
     serialBackend = undefined;
     const results = await Promise.allSettled([sshBackend.dispose(), rdpClient?.dispose()]);
     if (results.some((result) => result.status === 'rejected')) {
-      console.warn('[Wormhole] One or more native session backends did not stop cleanly.');
+      console.warn('[Wormhole] One or more connection services did not stop cleanly.');
     }
     await releaseAllRdpTunnels();
     const backend = nativeBackend;
@@ -8873,7 +8871,7 @@ authSession.onUnlocked(() => {
   void runBitwardenStartupMaintenance();
   void showBitwardenOnboardingNoticeIfNeeded();
   void sshBackend.syncMcpAfterUnlock().catch((error) => {
-    console.error('[Wormhole] Could not synchronize the native MCP server after unlock.', error);
+    console.error('[Wormhole] Could not synchronize the MCP service after unlock.', error);
   });
 });
 

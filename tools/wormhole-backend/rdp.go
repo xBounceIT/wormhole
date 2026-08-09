@@ -550,7 +550,7 @@ func (c *rdpController) startNative(command rdpCommand) {
 		hostPath = bundledSibling("wormhole-rdp-host-" + architectureName() + executableSuffix())
 	}
 	if hostPath == "" {
-		writeRdpEvent(rdpEvent{Type: "error", RequestID: command.RequestID, SessionID: command.SessionID, LifecycleID: command.LifecycleID, Backend: "activex", Message: "Windows native RDP host is missing"})
+		writeRdpEvent(rdpEvent{Type: "error", RequestID: command.RequestID, SessionID: command.SessionID, LifecycleID: command.LifecycleID, Backend: "activex", Message: "the embedded Remote Desktop component is missing"})
 		return
 	}
 
@@ -558,20 +558,20 @@ func (c *rdpController) startNative(command rdpCommand) {
 	cmd.Env = rdpChildEnvironment(os.Environ())
 	process, err := cmd.StdinPipe()
 	if err != nil {
-		writeRdpEvent(rdpEvent{Type: "error", RequestID: command.RequestID, SessionID: command.SessionID, LifecycleID: command.LifecycleID, Backend: "activex", Message: "could not open the Windows native RDP host"})
+		writeRdpEvent(rdpEvent{Type: "error", RequestID: command.RequestID, SessionID: command.SessionID, LifecycleID: command.LifecycleID, Backend: "activex", Message: "could not open the embedded Remote Desktop component"})
 		return
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		_ = process.Close()
-		writeRdpEvent(rdpEvent{Type: "error", RequestID: command.RequestID, SessionID: command.SessionID, LifecycleID: command.LifecycleID, Backend: "activex", Message: "could not attach to the Windows native RDP host"})
+		writeRdpEvent(rdpEvent{Type: "error", RequestID: command.RequestID, SessionID: command.SessionID, LifecycleID: command.LifecycleID, Backend: "activex", Message: "could not attach the embedded Remote Desktop component"})
 		return
 	}
 	cmd.Stderr = io.Discard
 	if err := cmd.Start(); err != nil {
 		_ = process.Close()
 		_ = stdout.Close()
-		writeRdpEvent(rdpEvent{Type: "error", RequestID: command.RequestID, SessionID: command.SessionID, LifecycleID: command.LifecycleID, Backend: "activex", Message: "could not start the Windows native RDP host"})
+		writeRdpEvent(rdpEvent{Type: "error", RequestID: command.RequestID, SessionID: command.SessionID, LifecycleID: command.LifecycleID, Backend: "activex", Message: "could not start the embedded Remote Desktop component"})
 		return
 	}
 
@@ -593,7 +593,7 @@ func (c *rdpController) startNative(command rdpCommand) {
 		stopRdpProcess(running)
 		_ = stdout.Close()
 		_ = cmd.Wait()
-		writeRdpEvent(rdpEvent{Type: "error", RequestID: command.RequestID, SessionID: command.SessionID, LifecycleID: command.LifecycleID, Backend: "activex", Message: "could not initialize the Windows native RDP host"})
+		writeRdpEvent(rdpEvent{Type: "error", RequestID: command.RequestID, SessionID: command.SessionID, LifecycleID: command.LifecycleID, Backend: "activex", Message: "could not initialize the embedded Remote Desktop component"})
 		return
 	}
 	go c.readNativeEvents(running, stdout)
@@ -801,7 +801,7 @@ func (c *rdpController) startFreeRdp(command rdpCommand) {
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
 	if err := cmd.Start(); err != nil {
-		writeRdpEvent(rdpEvent{Type: "error", RequestID: command.RequestID, SessionID: command.SessionID, LifecycleID: command.LifecycleID, Backend: "freerdp", Message: "could not start FreeRDP"})
+		writeRdpEvent(rdpEvent{Type: "error", RequestID: command.RequestID, SessionID: command.SessionID, LifecycleID: command.LifecycleID, Backend: "freerdp", Message: "could not start the system Remote Desktop client"})
 		return
 	}
 	running := &rdpProcess{sessionID: command.SessionID, lifecycleID: command.LifecycleID, backend: "freerdp", process: cmd, lifecycleGeneration: command.LifecycleGeneration, tunnel: command.tunnel, forwarder: command.forwarder}
@@ -844,7 +844,7 @@ func (c *rdpController) waitForExit(process *rdpProcess) {
 	if unansweredStart != "" && !disconnectRequested {
 		writeRdpEvent(rdpEvent{
 			Type: "error", RequestID: unansweredStart, SessionID: process.sessionID,
-			Backend: process.backend, Message: "native RDP host exited before initialization completed",
+			Backend: process.backend, Message: "the Remote Desktop component stopped before initialization completed",
 			LifecycleID: process.lifecycleID, LifecycleGeneration: process.lifecycleGeneration,
 		})
 	}
@@ -923,7 +923,7 @@ func (c *rdpController) forward(command rdpCommand) {
 			writeRdpEvent(rdpEvent{Type: "ack", RequestID: command.RequestID, SessionID: command.SessionID, LifecycleID: command.LifecycleID, Backend: process.backend})
 			return
 		}
-		writeRdpEvent(rdpEvent{Type: "error", RequestID: command.RequestID, SessionID: command.SessionID, LifecycleID: command.LifecycleID, Backend: process.backend, Message: "native RDP host is not responding"})
+		writeRdpEvent(rdpEvent{Type: "error", RequestID: command.RequestID, SessionID: command.SessionID, LifecycleID: command.LifecycleID, Backend: process.backend, Message: "the Remote Desktop component is not responding"})
 		return
 	}
 	if process.backend == "activex" {
@@ -1030,14 +1030,14 @@ func locateFreeRdp(explicit string) (string, error) {
 		if info, err := os.Stat(explicit); err == nil && !info.IsDir() {
 			return explicit, nil
 		}
-		return "", errors.New("configured FreeRDP client was not found")
+		return "", errors.New("configured Remote Desktop client was not found")
 	}
 	for _, candidate := range freeRdpCandidates() {
 		if path, err := exec.LookPath(candidate); err == nil {
 			return path, nil
 		}
 	}
-	return "", errors.New("FreeRDP is not installed; install xfreerdp (FreeRDP 2 or 3) and try again")
+	return "", errors.New("no compatible Remote Desktop client is installed; install a supported system client and try again")
 }
 
 func freeRdpCandidates() []string {

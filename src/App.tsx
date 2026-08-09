@@ -2787,7 +2787,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       setSessions((current) =>
         current.map((session) =>
           session.backendSessionId === request.sessionId
-            ? { ...session, status: 'failed', error: 'The native SSH bridge is unavailable.' }
+            ? { ...session, status: 'failed', error: 'The SSH service is unavailable.' }
             : session,
         ),
       );
@@ -2983,7 +2983,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       setSessions((current) =>
         current.map((session) =>
           session.backendSessionId === sessionId
-            ? { ...session, status: 'failed', error: 'The native serial bridge is unavailable.' }
+            ? { ...session, status: 'failed', error: 'The serial service is unavailable.' }
             : session,
         ),
       );
@@ -3026,7 +3026,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                 ? {
                     ...candidate,
                     status: 'failed',
-                    error: 'The native web browser bridge is unavailable.',
+                    error: 'The web session service is unavailable.',
                   }
                 : candidate,
             )
@@ -3188,7 +3188,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
             ? {
                 ...candidate,
                 rdpStatus: 'failed',
-                rdpError: 'The native RDP bridge is unavailable.',
+                rdpError: 'The RDP service is unavailable.',
               }
             : candidate,
         ),
@@ -3228,7 +3228,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       })
       .catch((error: unknown) => {
         if (!rdpSessionAttempts.current.isCurrent(sessionId, attempt)) return;
-        const message = error instanceof Error ? error.message : 'The RDP backend could not start.';
+        const message = error instanceof Error ? error.message : 'The RDP service could not start.';
         if (isBitwardenUnlockError(message)) {
           requestRuntimeBitwardenUnlock(`rdp:${sessionId}`, message, () =>
             manualCredentials
@@ -3319,7 +3319,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     const ran = await sessionDisconnectGate.current.run(sessionId, async () => {
       try {
         const api = window.wormhole;
-        if (!api) throw new Error('The native remote desktop bridge is unavailable.');
+        if (!api) throw new Error('The remote desktop service is unavailable.');
         if (source.protocol === 'rdp') {
           await api.commandRdpSession({ sessionId, operation: 'disconnect' });
           rdpSavedCredentialAttempts.current.delete(sessionId);
@@ -3330,7 +3330,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
             sessionId,
           });
           if (!response.ok) {
-            throw new Error(response.error || 'The VNC backend rejected the disconnect request.');
+            throw new Error(response.error || 'The VNC disconnect request could not be completed.');
           }
         }
         for (const key of sessionRuntimeRetryKeys(source)) {
@@ -4007,7 +4007,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     );
     const api = window.wormhole;
     if (!api) {
-      setSftpFailure(id, requestId, 'The native SFTP bridge is unavailable.');
+      setSftpFailure(id, requestId, 'The SFTP service is unavailable.');
       return;
     }
     void api.openSftpBrowser(session.backendSessionId, remoteRequestId).catch((error: unknown) => {
@@ -4135,7 +4135,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     );
     const api = window.wormhole;
     if (!api) {
-      setSftpFailure(sessionId, requestId, 'The native SFTP bridge is unavailable.');
+      setSftpFailure(sessionId, requestId, 'The SFTP service is unavailable.');
       return;
     }
     void api
@@ -4172,7 +4172,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       );
       const api = window.wormhole;
       if (!api || !session.backendSessionId) {
-        setSftpFailure(id, requestId, 'The native SFTP bridge is unavailable.');
+        setSftpFailure(id, requestId, 'The SFTP service is unavailable.');
         return;
       }
       void api
@@ -4235,7 +4235,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                     status: 'failed',
                     path: candidate.sftp.local.previousPath ?? candidate.sftp.local.path,
                     previousPath: undefined,
-                    error: 'The native SFTP bridge is unavailable.',
+                    error: 'The SFTP service is unavailable.',
                   },
                 },
               }
@@ -4318,7 +4318,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                 local: {
                   ...local,
                   status: 'failed',
-                  error: 'The native SFTP bridge is unavailable.',
+                  error: 'The SFTP service is unavailable.',
                 },
               },
             };
@@ -4329,7 +4329,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
               ...candidate.sftp,
               knownOperationIds,
               status: 'failed',
-              error: 'The native SFTP bridge is unavailable.',
+              error: 'The SFTP service is unavailable.',
             },
           };
         }),
@@ -4437,7 +4437,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
               transferDestinations:
                 Object.keys(transferDestinations).length > 0 ? transferDestinations : undefined,
               transferErrorTransferId: transferId,
-              transferError: 'The native SFTP bridge is unavailable.',
+              transferError: 'The SFTP service is unavailable.',
             },
           };
         }),
@@ -4515,7 +4515,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                 sftp: {
                   ...candidate.sftp,
                   conflict: candidate.sftp.conflict ?? conflict,
-                  transferError: 'The native SFTP bridge is unavailable.',
+                  transferError: 'The SFTP service is unavailable.',
                   transferErrorTransferId: transferId,
                 },
               }
@@ -4593,7 +4593,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
               )
                 ? transfers
                 : [...transfers, cancelledTransfer],
-              transferError: 'The native SFTP bridge is unavailable.',
+              transferError: 'The SFTP service is unavailable.',
               transferErrorTransferId: transferId,
             },
           };
@@ -4752,7 +4752,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     const session = sessions.find((candidate) => candidate.id === sessionId);
     if (!session?.nodeId) return;
     try {
-      if (!window.wormhole) throw new Error('The native SSH bridge is unavailable.');
+      if (!window.wormhole) throw new Error('The SSH service is unavailable.');
       await window.wormhole.trustSshHostKey({
         nodeId: session.nodeId,
         expected: mismatch.expected,
@@ -4973,7 +4973,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       };
       if (persistedNodeIds.length > 0) {
         const api = window.wormhole;
-        if (!api) throw new Error('The native workspace bridge is unavailable.');
+        if (!api) throw new Error('The workspace service is unavailable.');
         const result = await api.deleteWorkspaceNodes({ nodeIds: persistedNodeIds });
         if (!result.deleted) throw new Error('The workspace nodes were not deleted.');
         await reconcileDeletedNodes();
@@ -5000,7 +5000,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     const api = window.wormhole;
     if (node.persisted) {
       if (!api) {
-        setEditorError('The native workspace bridge is unavailable.');
+        setEditorError('The workspace service is unavailable.');
         return;
       }
       void api
@@ -5099,7 +5099,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   }
 
   async function reloadWorkspaceAfterNodeWrite(): Promise<void> {
-    if (!window.wormhole) throw new Error('The native workspace bridge is unavailable.');
+    if (!window.wormhole) throw new Error('The workspace service is unavailable.');
     const workspace = await window.wormhole.loadWorkspace();
     setTree(workspace.tree as TreeNode[]);
     setCredentials(workspace.credentials as CredentialRecord[]);
@@ -5114,7 +5114,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     credentials: { username: string; domain?: string; password: string },
   ): Promise<void> {
     const api = window.wormhole;
-    if (!api) throw new Error('The native workspace bridge is unavailable.');
+    if (!api) throw new Error('The workspace service is unavailable.');
     const result = selectedCredentialId
       ? await api.updateWorkspaceNodeCredential({
           nodeId,
@@ -5314,7 +5314,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         newConnectionForm.protocol === 'vnc'
           ? newConnectionForm.credential
           : 'none';
-      if (!window.wormhole) throw new Error('The native workspace bridge is unavailable.');
+      if (!window.wormhole) throw new Error('The workspace service is unavailable.');
       const tunnel = tunnelValueFor(connectionTunnel);
       const credential = credentialSettingsFor(connectionCredential);
       const usingInlinePassword =
@@ -5504,7 +5504,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     try {
       const folder = findTreeNode(tree, editingFolderId);
       if (!folder) return;
-      if (!window.wormhole) throw new Error('The native workspace bridge is unavailable.');
+      if (!window.wormhole) throw new Error('The workspace service is unavailable.');
       const tunnel = tunnelValueFor(folderDetailsForm.tunnel);
       const credential = credentialSettingsFor(folderDetailsForm.credential);
       const result = await window.wormhole.updateWorkspaceNode({
@@ -5549,7 +5549,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     setEditorBusy(true);
     setEditorError('');
     try {
-      if (!window.wormhole) throw new Error('The native workspace bridge is unavailable.');
+      if (!window.wormhole) throw new Error('The workspace service is unavailable.');
       const tunnel = tunnelValueFor(newFolderForm.tunnel);
       const credential = credentialSettingsFor(newFolderForm.credential);
       const result = await window.wormhole.createWorkspaceNode({
@@ -5776,7 +5776,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   }
 
   async function createCredential(draft: CredentialDraft): Promise<void> {
-    if (!window.wormhole) throw new Error('The native credential bridge is unavailable.');
+    if (!window.wormhole) throw new Error('The credential service is unavailable.');
     const credential = (await window.wormhole.createCredential(draft)) as CredentialRecord;
     setCredentials((current) => mergeCredential(current, credential));
     setCredentialOptions((current) => mergeCredentialOption(current, credential));
@@ -5786,7 +5786,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   }
 
   async function updateCredential(id: string, draft: CredentialDraft): Promise<void> {
-    if (!window.wormhole) throw new Error('The native credential bridge is unavailable.');
+    if (!window.wormhole) throw new Error('The credential service is unavailable.');
     const credential = (await window.wormhole.updateCredential({
       ...draft,
       id,
@@ -5799,7 +5799,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   }
 
   async function deleteSavedCredential(id: string): Promise<void> {
-    if (!window.wormhole) throw new Error('The native credential bridge is unavailable.');
+    if (!window.wormhole) throw new Error('The credential service is unavailable.');
     const result = await window.wormhole.deleteCredential({ id });
     if (!result.deleted) throw new Error(result.error ?? 'The credential was not deleted.');
     setCredentials((current) => current.filter((credential) => credential.id !== id));
@@ -10344,7 +10344,6 @@ function SessionSurface({
   if (session.protocol === 'rdp') {
     return (
       <RdpSurface
-        backend={session.rdpBackend}
         canOpenSystemClient={canOpenRdpSystemClient(session)}
         error={session.rdpError}
         external={session.rdpExternal}
@@ -11204,7 +11203,7 @@ function TunnelRouteField({
         ? isFolder
           ? 'Follows the VPN route configured by the parent folder.'
           : 'Follows the VPN route configured by the containing folder.'
-        : 'The native backend establishes this userspace VPN route before connecting.';
+        : 'Wormhole establishes this VPN route before connecting.';
   return (
     <div className="grid gap-2">
       <Label htmlFor={id}>{isFolder ? 'VPN route default' : 'VPN route'}</Label>
@@ -11792,7 +11791,7 @@ function TunnelEditorDialog({
   ): Promise<T | null> {
     const api = window.wormhole;
     if (!api) {
-      setError('The native VPN bridge is unavailable.');
+      setError('The VPN service is unavailable.');
       return null;
     }
     setBusy(true);
@@ -11881,7 +11880,7 @@ function TunnelEditorDialog({
     }
     const api = window.wormhole;
     if (!api) {
-      setError('The native VPN bridge is unavailable.');
+      setError('The VPN service is unavailable.');
       return;
     }
     setBusy(true);
@@ -11906,8 +11905,7 @@ function TunnelEditorDialog({
         <DialogHeader>
           <DialogTitle>{value.id ? 'Edit VPN tunnel' : 'Add VPN tunnel'}</DialogTitle>
           <DialogDescription>
-            Tunnel credentials stay in the native encrypted store and never enter the connection
-            tree.
+            Tunnel credentials stay in encrypted storage and never enter the connection tree.
           </DialogDescription>
         </DialogHeader>
         <form className="flex min-h-0 flex-1 flex-col gap-4" onSubmit={submit}>
@@ -11971,7 +11969,7 @@ function TunnelEditorDialog({
             <div className="flex items-center justify-between gap-3 rounded-lg border border-border/70 bg-muted/20 px-3 py-2">
               <p className="text-[11px] text-muted-foreground">
                 Import <span className="font-mono">azurevpnconfig.xml</span> from the Azure portal;
-                Microsoft Entra tokens are cached separately in the protected native store.
+                Microsoft Entra tokens are cached separately in protected storage.
               </p>
               <Button
                 disabled={busy}
@@ -11989,7 +11987,7 @@ function TunnelEditorDialog({
             <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border/70 bg-muted/20 px-3 py-2">
               <p className="text-[11px] text-muted-foreground">
                 Import a Cisco Secure Client / AnyConnect profile XML; gateway and group fields are
-                filled by the native parser.
+                filled from the imported configuration.
               </p>
               <Button
                 disabled={busy}
@@ -12060,7 +12058,7 @@ function TunnelEditorDialog({
                       hidden: (field) => field.key === 'SamlRedirectPort' && !useExternalBrowser,
                     })}
                     <p className="text-[11px] leading-relaxed text-muted-foreground">
-                      The embedded option uses a dedicated WebView2 profile. External-browser
+                      The embedded option uses a dedicated browser profile. External-browser
                       authentication requires the callback port configured on the FortiGate.
                     </p>
                   </div>
@@ -12278,7 +12276,7 @@ function TunnelsPage({
   async function editTunnel(tunnel: TunnelRecord) {
     const api = window.wormhole;
     if (!api) {
-      setActionError('The native VPN bridge is unavailable.');
+      setActionError('The VPN service is unavailable.');
       return;
     }
     setActionError('');
@@ -12324,7 +12322,7 @@ function TunnelsPage({
       testState.status === 'connecting' ||
       testState.status === 'cancelling'
     ) {
-      if (!api) setActionError('The native VPN bridge is unavailable.');
+      if (!api) setActionError('The VPN service is unavailable.');
       return;
     }
     const parsedTarget = parseTunnelProbeTarget(testTargetHost, testTargetPort);
@@ -12454,7 +12452,7 @@ function TunnelsPage({
               </h3>
               <p className="text-xs leading-relaxed text-muted-foreground">
                 {tunnels.length === 0
-                  ? 'Add a VPN tunnel to route a connection through an in-process userspace endpoint.'
+                  ? 'Add a VPN tunnel to route a connection through a secure path.'
                   : 'Try a different tunnel name or provider.'}
               </p>
             </div>
@@ -12482,7 +12480,7 @@ function TunnelsPage({
                   </CardAction>
                   <CardDescription className="flex min-w-0 items-center gap-1.5 text-[11px]">
                     <Network className="size-3 shrink-0" />
-                    <span className="truncate">In-process userspace tunnel</span>
+                    <span className="truncate">Managed VPN tunnel</span>
                   </CardDescription>
                 </CardHeader>
                 <CardFooter className="mt-auto justify-end gap-0.5">
@@ -13120,8 +13118,7 @@ function mcpClientCopyDetails(client: McpClient): { label: string; caption: stri
     case 'claude-desktop':
       return {
         label: 'Claude Desktop config (claude_desktop_config.json)',
-        caption:
-          'Claude Desktop launches stdio servers, so this bridges through mcp-remote (requires Node.js / npx).',
+        caption: 'Use this configuration to connect Claude Desktop to Wormhole.',
       };
     case 'codex':
       return {
@@ -15185,10 +15182,7 @@ function SettingsPage({
 
         <SettingsTabPanel value="updates">
           <SettingsSection title="Wormhole updates">
-            <p className="text-xs font-medium">
-              Wormhole {update.currentVersion || '…'}
-              {update.currentVersion ? ' · Electron build' : ''}
-            </p>
+            <p className="text-xs font-medium">Wormhole {update.currentVersion || '…'}</p>
             <p className="text-[11px] text-muted-foreground">
               {formatLastUpdateCheck(update.lastUpdateCheck)}
             </p>
@@ -15250,7 +15244,7 @@ function SettingsPage({
                     ? "Couldn't reach the update server. Try again later."
                     : update.result?.latestVersion
                       ? "You're on the latest version."
-                      : 'Update information will appear here after the native update service reports a new release.'}
+                      : 'Update information will appear here when a new release is available.'}
                 </p>
               )}
             </Card>
@@ -15368,8 +15362,8 @@ function SettingsPage({
               </Button>
             </div>
             <p className="max-w-2xl text-[11px] leading-relaxed text-muted-foreground">
-              Backups use the same schema as Wormhole for WinUI3. Add a password to encrypt every
-              connection name and secret; plaintext exports contain readable credentials.
+              Add a password to encrypt every connection name and secret; plaintext exports contain
+              readable credentials.
             </p>
             {backupSectionError ? (
               <p className="text-[11px] text-destructive">{backupSectionError}</p>
@@ -15415,7 +15409,7 @@ function SettingsPage({
               {mcpRunning
                 ? `Running — connect an MCP client to ${mcpEndpoint}`
                 : mcpEnabled
-                  ? 'MCP server is enabled and will start when the native backend is available.'
+                  ? 'MCP server is enabled and will start when Wormhole is ready.'
                   : 'Stopped'}
             </p>
             <div className="grid gap-2">
@@ -15528,8 +15522,7 @@ function SettingsPage({
           <DialogHeader>
             <DialogTitle>Export backup</DialogTitle>
             <DialogDescription>
-              Save all connection metadata and locally stored secrets in the WinUI-compatible
-              Wormhole backup format.
+              Save all connection metadata and locally stored secrets in the Wormhole backup format.
             </DialogDescription>
           </DialogHeader>
           {backupExportResult ? (

@@ -390,7 +390,7 @@ export class SerialBackendClient {
   dispose(): void {
     for (const waiter of this.openWaiters.values()) {
       clearTimeout(waiter.timeout);
-      waiter.reject(new Error('Serial backend stopped.'));
+      waiter.reject(new Error('Serial service stopped.'));
     }
     this.openWaiters.clear();
     this.activeSessions.clear();
@@ -427,7 +427,7 @@ export class SerialBackendClient {
       });
       child.stdin.on('error', (error) => {
         if (this.process !== child) return;
-        this.failOpenWaiters(new Error(`Serial backend input failed: ${error.message}`));
+        this.failOpenWaiters(new Error(`Serial service connection failed: ${error.message}`));
       });
       child.stderr.on('data', () => {
         // Native diagnostics stay outside the renderer boundary.
@@ -435,7 +435,7 @@ export class SerialBackendClient {
       child.once('error', (error) => {
         if (this.process !== child) return;
         this.process = undefined;
-        this.failOpenWaiters(new Error(`Serial backend failed: ${error.message}`));
+        this.failOpenWaiters(new Error(`Serial service failed: ${error.message}`));
         reject(error);
       });
       child.once('spawn', () => resolve());
@@ -449,7 +449,7 @@ export class SerialBackendClient {
         for (const sessionId of closedSessions) {
           this.broadcast({ type: 'closed', sessionId });
         }
-        this.failOpenWaiters(new Error('Serial backend stopped.'));
+        this.failOpenWaiters(new Error('Serial service stopped.'));
       });
     }).finally(() => {
       this.starting = undefined;
@@ -461,7 +461,7 @@ export class SerialBackendClient {
   private write(command: Record<string, unknown>): void {
     const child = this.process;
     if (!child || child.killed || child.stdin.destroyed) {
-      throw new Error('Serial backend is not running.');
+      throw new Error('Serial service is not running.');
     }
     child.stdin.write(`${JSON.stringify(command)}\n`, 'utf8');
   }

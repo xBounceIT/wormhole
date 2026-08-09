@@ -193,14 +193,14 @@ func unprotectElectronSafeStorageSecret(encoded, userDataPath string) ([]byte, e
 
 func readElectronSafeStorageKey(userDataPath string) ([]byte, error) {
 	if userDataPath == "" {
-		return nil, errors.New("Electron safe-storage user data path is missing")
+		return nil, errors.New("secure storage data path is missing")
 	}
 	localState, err := os.ReadFile(filepath.Join(userDataPath, "Local State"))
 	if err != nil {
-		return nil, errors.New("Electron safe-storage key is unavailable")
+		return nil, errors.New("secure storage key is unavailable")
 	}
 	if len(localState) > electronLocalStateMaxBytes {
-		return nil, errors.New("Electron safe-storage state is too large")
+		return nil, errors.New("secure storage state is too large")
 	}
 
 	var document struct {
@@ -209,18 +209,18 @@ func readElectronSafeStorageKey(userDataPath string) ([]byte, error) {
 		} `json:"os_crypt"`
 	}
 	if err := json.Unmarshal(localState, &document); err != nil {
-		return nil, errors.New("Electron safe-storage state is invalid")
+		return nil, errors.New("secure storage state is invalid")
 	}
 	encodedKey := document.OsCrypt.EncryptedKey
 	keyEnvelope, err := base64.StdEncoding.DecodeString(encodedKey)
 	if err != nil || len(keyEnvelope) <= len(electronSafeStorageKeyHeader) ||
 		string(keyEnvelope[:len(electronSafeStorageKeyHeader)]) != electronSafeStorageKeyHeader {
-		return nil, errors.New("Electron safe-storage key has an invalid envelope")
+		return nil, errors.New("secure storage key has an invalid envelope")
 	}
 
 	key, err := unprotectDpapi(keyEnvelope[len(electronSafeStorageKeyHeader):], nil)
 	if err != nil || len(key) != electronSafeStorageKeyLength {
-		return nil, errors.New("Electron safe-storage key could not be decrypted")
+		return nil, errors.New("secure storage key could not be decrypted")
 	}
 	return key, nil
 }
@@ -228,33 +228,33 @@ func readElectronSafeStorageKey(userDataPath string) ([]byte, error) {
 func decryptElectronSafeStoragePayload(encoded string, key []byte) ([]byte, error) {
 	protected, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
-		return nil, errors.New("stored Electron safe-storage secret is not valid base64")
+		return nil, errors.New("stored secure-storage secret is not valid base64")
 	}
 	if len(key) != electronSafeStorageKeyLength {
-		return nil, errors.New("Electron safe-storage key has an invalid length")
+		return nil, errors.New("secure storage key has an invalid length")
 	}
 	if len(protected) < len(electronSafeStoragePrefix)+electronSafeStorageNonceSize ||
 		string(protected[:len(electronSafeStoragePrefix)]) != electronSafeStoragePrefix {
-		return nil, errors.New("stored Electron safe-storage secret has an invalid envelope")
+		return nil, errors.New("stored secure-storage secret has an invalid envelope")
 	}
 
 	block, err := aes.NewCipher(key)
 	if err != nil {
-		return nil, errors.New("Electron safe-storage cipher is unavailable")
+		return nil, errors.New("secure storage cipher is unavailable")
 	}
 	gcm, err := cipher.NewGCM(block)
 	if err != nil || gcm.NonceSize() != electronSafeStorageNonceSize {
-		return nil, errors.New("Electron safe-storage cipher is unavailable")
+		return nil, errors.New("secure storage cipher is unavailable")
 	}
 	start := len(electronSafeStoragePrefix)
 	nonce := protected[start : start+electronSafeStorageNonceSize]
 	ciphertext := protected[start+electronSafeStorageNonceSize:]
 	if len(ciphertext) < gcm.Overhead() {
-		return nil, errors.New("stored Electron safe-storage secret has an invalid payload")
+		return nil, errors.New("stored secure-storage secret has an invalid payload")
 	}
 	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
 	if err != nil {
-		return nil, errors.New("stored Electron safe-storage secret could not be decrypted")
+		return nil, errors.New("stored secure-storage secret could not be decrypted")
 	}
 	return plaintext, nil
 }

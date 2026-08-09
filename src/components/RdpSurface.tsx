@@ -11,7 +11,6 @@ type RdpSurfaceProps = {
   isActive: boolean;
   isAuthorized: boolean;
   status: RdpUiStatus;
-  backend?: 'activex' | 'freerdp';
   external?: boolean;
   error?: string;
   tunnelProgress?: TunnelProgress | null;
@@ -26,7 +25,6 @@ export function RdpSurface({
   isActive,
   isAuthorized,
   status,
-  backend,
   external = false,
   error,
   tunnelProgress,
@@ -104,7 +102,7 @@ export function RdpSurface({
           data-rdp-system-client-toolbar
         >
           <span className="pointer-events-none rounded-full border border-white/10 bg-black/70 px-3 py-1 text-[10px] text-white/70">
-            {backend === 'activex' ? 'Windows ActiveX surface' : 'FreeRDP surface'}
+            Embedded remote desktop
           </span>
           {canOpenSystemClient ? (
             <Button onClick={onOpenSystemClient} size="sm" variant="secondary">
@@ -156,9 +154,7 @@ export function RdpSurface({
                 </h3>
                 <p className="mt-2 text-xs leading-relaxed text-white/50">
                   {isStarting
-                    ? backend === 'activex'
-                      ? 'Initializing the native Windows ActiveX surface.'
-                      : 'Starting the FreeRDP client for this host.'
+                    ? 'Preparing the remote desktop connection.'
                     : error || 'Connect to open the remote desktop in this tab.'}
                 </p>
                 {isStarting ? (

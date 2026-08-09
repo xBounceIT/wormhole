@@ -267,8 +267,8 @@ func TestBitwardenImportRejectsManifestV3ServiceWorker(t *testing.T) {
 	})
 
 	if _, err := importBitwardenExtensionZip(databasePath, zipPath); err == nil ||
-		!strings.Contains(err.Error(), "Manifest V3") {
-		t.Fatalf("expected Electron compatibility error, got %v", err)
+		!strings.Contains(err.Error(), "package is not supported") {
+		t.Fatalf("expected a compatibility error, got %v", err)
 	}
 	settings, err := readBitwardenExtensionSettings(databasePath)
 	if err != nil {

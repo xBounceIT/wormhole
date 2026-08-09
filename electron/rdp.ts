@@ -157,7 +157,7 @@ export class RdpBackendClient {
   ): Promise<RdpBackendEvent> {
     const lifecycleId = preparedLifecycleId ?? this.beginStart(request.sessionId);
     if (this.lifecycleIds.get(request.sessionId) !== lifecycleId) {
-      throw new Error('RDP connection was superseded before its native session could start.');
+      throw new Error('RDP connection was superseded before it could start.');
     }
     if (lifecycleGeneration === undefined) {
       this.lifecycleGenerations.delete(request.sessionId);
@@ -168,7 +168,7 @@ export class RdpBackendClient {
     if (remembered) this.bounds.set(request.sessionId, remembered);
     await this.ensureProcess();
     if (this.lifecycleIds.get(request.sessionId) !== lifecycleId) {
-      throw new Error('RDP connection was superseded before its native session could start.');
+      throw new Error('RDP connection was superseded before it could start.');
     }
     try {
       const response = await this.send({
@@ -181,7 +181,7 @@ export class RdpBackendClient {
         lifecycleGeneration,
       });
       if (this.lifecycleIds.get(request.sessionId) !== lifecycleId) {
-        throw new Error('RDP connection was superseded while its native session was starting.');
+        throw new Error('RDP connection was superseded while it was starting.');
       }
       return response;
     } catch (error) {
@@ -337,7 +337,7 @@ export class RdpBackendClient {
   }
 
   private async ensureProcess(): Promise<void> {
-    if (this.disposing) throw new Error('RDP backend is stopping.');
+    if (this.disposing) throw new Error('RDP service is stopping.');
     if (this.process && !this.process.killed) return;
     if (this.starting) return this.starting;
 
@@ -350,7 +350,7 @@ export class RdpBackendClient {
           windowsHide: true,
         });
       } catch (error) {
-        reject(toError(error, 'Could not start the RDP backend.'));
+        reject(toError(error, 'Could not start the RDP service.'));
         return;
       }
 
@@ -360,7 +360,7 @@ export class RdpBackendClient {
         this.readOutputForProcess(child, String(chunk));
       });
       child.stdin.once('error', () => {
-        this.handleProcessFailure(child, 'RDP backend input pipe closed.');
+        this.handleProcessFailure(child, 'RDP service connection closed.');
       });
       child.stderr.on('data', () => {
         // The Go boundary intentionally emits only sanitized errors. Do not surface or retain
@@ -368,11 +368,11 @@ export class RdpBackendClient {
       });
       child.once('error', (error) => {
         if (this.process !== child) return;
-        reject(toError(error, 'Could not start the RDP backend.'));
-        this.handleProcessFailure(child, 'RDP backend failed to start.');
+        reject(toError(error, 'Could not start the RDP service.'));
+        this.handleProcessFailure(child, 'RDP service failed to start.');
       });
       child.once('close', () => {
-        this.handleProcessFailure(child, 'RDP backend exited.');
+        this.handleProcessFailure(child, 'RDP service stopped.');
       });
       resolve();
     }).finally(() => {
@@ -385,7 +385,7 @@ export class RdpBackendClient {
   private send(command: Omit<RdpWireCommand, 'requestId'>): Promise<RdpBackendEvent> {
     const child = this.process;
     if (!child || child.killed || !child.stdin.writable) {
-      return Promise.reject(new Error('RDP backend is not running.'));
+      return Promise.reject(new Error('RDP service is not running.'));
     }
     return this.sendToProcess(child, { ...command, requestId: randomUUID() });
   }
@@ -407,7 +407,7 @@ export class RdpBackendClient {
       const timer = setTimeout(
         () => {
           this.pending.delete(command.requestId);
-          reject(new Error('RDP backend did not acknowledge the command.'));
+          reject(new Error('RDP service did not respond.'));
         },
         command.op === 'start' ? startRequestTimeoutMs : requestTimeoutMs,
       );
@@ -457,7 +457,7 @@ export class RdpBackendClient {
         clearTimeout(request.timer);
         this.pending.delete(requestId);
         if (event.type === 'error') {
-          request.reject(new Error(event.message || 'RDP backend command failed.'));
+          request.reject(new Error(event.message || 'RDP request failed.'));
         } else {
           const startLifecycleIsCurrent =
             !request.lifecycleId ||
@@ -510,14 +510,14 @@ export class RdpBackendClient {
       const newline = this.outputBuffer.indexOf('\n');
       if (newline < 0) {
         if (Buffer.byteLength(this.outputBuffer, 'utf8') > maxRdpEventBytes) {
-          this.handleProcessFailure(child, 'RDP backend emitted an oversized event.');
+          this.handleProcessFailure(child, 'RDP service returned too much data.');
         }
         return;
       }
       const line = this.outputBuffer.slice(0, newline).trim();
       this.outputBuffer = this.outputBuffer.slice(newline + 1);
       if (Buffer.byteLength(line, 'utf8') > maxRdpEventBytes) {
-        this.handleProcessFailure(child, 'RDP backend emitted an oversized event.');
+        this.handleProcessFailure(child, 'RDP service returned too much data.');
         return;
       }
       if (line) this.handleLine(line);
@@ -551,7 +551,7 @@ export class RdpBackendClient {
     this.terminateSessions();
     this.bounds.clear();
     if (!child) {
-      this.rejectPending('RDP backend stopped.');
+      this.rejectPending('RDP service stopped.');
       return;
     }
 
@@ -560,9 +560,9 @@ export class RdpBackendClient {
     } catch {
       // The process may already have exited. Closing stdin remains safe and idempotent.
     }
-    this.rejectPending('RDP backend stopped.');
+    this.rejectPending('RDP service stopped.');
     const exited = await stopChildProcess(child);
-    if (!exited) console.warn('[Wormhole] RDP backend did not exit after its force-kill timeout.');
+    if (!exited) console.warn('[Wormhole] RDP service did not stop within the allowed time.');
     if (this.process === child) this.process = undefined;
   }
 

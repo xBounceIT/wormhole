@@ -169,7 +169,7 @@ func updateCredential(databasePath string, request credentialUpdateRequest) (cre
 		return credentialRecord{}, fmt.Errorf("could not read credential: %w", err)
 	}
 	if kind != 0 || (provider != 0 && provider != 1) {
-		return credentialRecord{}, errors.New("only password credentials can be edited in Electron")
+		return credentialRecord{}, errors.New("only password credentials can be edited in Wormhole")
 	}
 	if draft.provider == 0 && draft.password == "" && provider != 0 {
 		return credentialRecord{}, errors.New("a password is required when changing to local storage")
@@ -293,7 +293,7 @@ func deleteCredential(databasePath string, request credentialDeleteRequest) erro
 		return fmt.Errorf("could not read credential: %w", err)
 	}
 	if (kind != 0 && kind != 1) || (provider != 0 && provider != 1) {
-		return errors.New("credential type cannot be deleted in Electron")
+		return errors.New("credential type cannot be deleted in Wormhole")
 	}
 	var encoded, encoding sql.NullString
 	err = tx.QueryRow(

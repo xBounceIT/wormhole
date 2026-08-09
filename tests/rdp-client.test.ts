@@ -16,7 +16,7 @@ test('RDP cannot spawn a replacement controller while disposal is in progress', 
   const internals = client as any;
   internals.disposing = new Promise<void>(() => undefined);
 
-  await assert.rejects(internals.ensureProcess(), /backend is stopping/);
+  await assert.rejects(internals.ensureProcess(), /RDP service is stopping/);
   assert.equal(internals.process, undefined);
 });
 

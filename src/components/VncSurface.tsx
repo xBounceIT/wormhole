@@ -165,7 +165,7 @@ export function VncSurface({
       if (!api) {
         if (canShowError()) {
           setStatus('failed');
-          setMessage('The native VNC bridge is unavailable.');
+          setMessage('The VNC service is unavailable.');
         }
         return false;
       }
@@ -173,7 +173,7 @@ export function VncSurface({
         const response = await api.sendVncCommand(command);
         if (!response.ok && canShowError()) {
           setStatus('failed');
-          setMessage(response.error ?? 'The native VNC backend rejected the request.');
+          setMessage(response.error ?? 'The VNC request could not be completed.');
           setPasswordRequired(isAuthenticationMessage(response.error));
           setBitwardenUnlockRequired(isBitwardenUnlockError(response.error));
         }
@@ -181,7 +181,7 @@ export function VncSurface({
       } catch (error) {
         if (canShowError()) {
           setStatus('failed');
-          const message = error instanceof Error ? error.message : 'The native VNC backend failed.';
+          const message = error instanceof Error ? error.message : 'The VNC service failed.';
           setMessage(message);
           setBitwardenUnlockRequired(isBitwardenUnlockError(message));
         }
@@ -269,7 +269,7 @@ export function VncSurface({
     const api = window.wormhole;
     if (!api) {
       setStatus('failed');
-      setMessage('The native VNC bridge is unavailable.');
+      setMessage('The VNC service is unavailable.');
       return;
     }
 
@@ -591,7 +591,7 @@ export function VncSurface({
       ) : null}
 
       {status === 'idle' ? (
-        <p className="absolute text-xs text-muted-foreground">Waiting for native VNC backend…</p>
+        <p className="absolute text-xs text-muted-foreground">Preparing the VNC connection…</p>
       ) : null}
     </div>
   );
