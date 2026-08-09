@@ -4,10 +4,8 @@
 # Hint git's diff machinery for C# files
 *.cs text diff=csharp
 
-# Shell scripts and Husky hooks: LF only. Git on Windows runs hooks via sh,
-# which chokes on CRLF in the shebang line.
-.husky/* text eol=lf
-*.sh     text eol=lf
+# Shell scripts use LF so their shebangs work outside Windows.
+*.sh text eol=lf
 
 # Go sources and module files: LF only. `go mod tidy` / `gofmt` always write LF;
 # without this override the * eol=crlf rule above would create perpetual diff
@@ -27,14 +25,3 @@ tools/wormhole-ovpnproxy/patches/*.patch text eol=lf
 *.ico binary
 *.dll binary
 *.exe binary
-*.pri binary
-*.xbf binary
-
-# Vendored web assets - skip GitHub language stats and collapse in diffs
-Assets/web/vendor/**     linguist-vendored=true binary
-Assets/web/bridge.js     linguist-vendored=true
-Assets/web/terminal.html linguist-vendored=true
-
-# Generated files
-*.g.cs   linguist-generated=true
-*.g.i.cs linguist-generated=true

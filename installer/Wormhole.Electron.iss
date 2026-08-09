@@ -6,8 +6,7 @@
 ; backend + sidecars + RDP host + credential reader), and Assets\. No Node.js runtime is needed
 ; on the target machine.
 ;
-; Deliberately uses a different AppId than the WinUI 3 installer so both apps can coexist
-; side-by-side during the migration.
+; Keep the established Electron AppId so upgrades remain compatible with existing installs.
 
 #define MyAppName       "Wormhole"
 #define MyAppPublisher  "Wormhole project"

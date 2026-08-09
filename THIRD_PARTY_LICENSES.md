@@ -36,37 +36,21 @@ Used by the Go sidecar binaries, including `tools/wormhole-backend`,
 | [`github.com/godbus/dbus/v5`](https://github.com/godbus/dbus) | [BSD-2-Clause](https://github.com/godbus/dbus/blob/master/LICENSE) |
 | [`github.com/danieljoos/wincred`](https://github.com/danieljoos/wincred) | [MIT](https://github.com/danieljoos/wincred/blob/master/LICENSE) |
 
-## NuGet packages (managed side)
+## Managed Windows helper
 
-Used by `Wormhole.csproj`.
-
-| Package | License |
-| --- | --- |
-| [Microsoft.WindowsAppSDK](https://learn.microsoft.com/windows/apps/windows-app-sdk/) | MIT (with proprietary Windows runtime components — see [the SDK license](https://learn.microsoft.com/windows/apps/windows-app-sdk/license)) |
-| [Microsoft.Web.WebView2](https://learn.microsoft.com/microsoft-edge/webview2/) | Proprietary Microsoft SDK license — see package terms |
-| [CommunityToolkit.Mvvm](https://github.com/CommunityToolkit/dotnet) | MIT |
-| Microsoft.Extensions.DependencyInjection / Http / Logging / Logging.Abstractions (provided by the .NET / ASP.NET Core shared framework) | MIT |
-| [Microsoft.AspNetCore.App](https://github.com/dotnet/aspnetcore) & [Microsoft.WindowsDesktop.App.WindowsForms](https://github.com/dotnet/winforms) (.NET shared frameworks — Kestrel hosts the in-app MCP server; WinForms hosts the RDP ActiveX) | MIT |
-| [Serilog](https://github.com/serilog/serilog), Serilog.Sinks.File, Serilog.Extensions.Logging | Apache-2.0 |
-| [SSH.NET](https://github.com/sshnet/SSH.NET) | MIT |
-| [Community.MarcusW.VncClient](https://github.com/karbonbaron/MarcusW.VncClient) | [MIT](https://licenses.nuget.org/MIT) |
-| [ModelContextProtocol.AspNetCore](https://github.com/modelcontextprotocol/csharp-sdk) | Apache-2.0 (the package 1.3.0 declares Apache-2.0; the SDK is transitioning from MIT) |
-| [Meziantou.Framework.Win32.CredentialManager](https://github.com/meziantou/Meziantou.Framework) | MIT |
-| [Microsoft.Data.Sqlite.Core](https://learn.microsoft.com/dotnet/standard/data/sqlite/) | MIT |
-| [SQLitePCLRaw.config.e_sqlite3](https://github.com/ericsink/SQLitePCL.raw) | Apache-2.0 |
-| [SQLite native DLL](https://www.sqlite.org/download.html) | [Public domain](https://www.sqlite.org/copyright.html) |
-| [Dapper](https://github.com/DapperLib/Dapper) | Apache-2.0 |
-| [Markdig](https://github.com/xoofx/markdig) | BSD-2-Clause |
-| [BouncyCastle.Cryptography](https://github.com/bcgit/bc-csharp) | MIT (based on the MIT X Consortium license; bundles a modified Bzip2 under Apache-2.0) |
-| [xunit](https://github.com/xunit/xunit) (test-only) | Apache-2.0 |
-
-## Web assets
-
-xterm.js (`Assets/web/`) is loaded into the SSH terminal's WebView2.
+The Electron-only Windows RDP helper under `tools/wormhole-rdp-host` uses the
+.NET shared frameworks and does not reference third-party NuGet packages.
 
 | Component | License |
 | --- | --- |
-| [xterm.js](https://github.com/xtermjs/xterm.js) | MIT |
+| [Microsoft.WindowsDesktop.App.WindowsForms](https://github.com/dotnet/winforms) | MIT |
+
+Test-only managed dependencies, not included in release artifacts:
+
+| Package | License |
+| --- | --- |
+| [Microsoft.NET.Test.Sdk](https://github.com/microsoft/vstest) | MIT |
+| [xUnit.net](https://github.com/xunit/xunit) | Apache-2.0 |
 
 ## How attribution works at distribution
 
@@ -76,10 +60,10 @@ A Wormhole release zip ships:
 - Inside `tools/wormhole-ovpnproxy/third_party/<component>/LICENSE` for each
   vendored source dependency
 
-If you build the Inno Setup installer (`scripts/Build-Installer.ps1`), the
-installer bundle includes all of the above. If you `git clone` Wormhole for
-development, `git submodule update --init` pulls the vendored components and
-their license files alongside the source.
+The Electron installer built by `scripts/Build-ElectronInstaller.ps1` includes
+the release license files. If you `git clone` Wormhole for development,
+`git submodule update --init` pulls the vendored components and their license
+files alongside the source.
 
 ## Updating this file
 

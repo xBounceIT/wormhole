@@ -79,9 +79,6 @@ dotnet_naming_style.t_prefix_pascal.required_prefix = T
 dotnet_naming_style.t_prefix_pascal.capitalization  = pascal_case
 
 # Private/internal instance fields: _camelCase
-# Severity is suggestion (not warning) because CommunityToolkit.Mvvm's
-# [ObservableProperty] requires non-underscore field names for the
-# source generator. The IDE still surfaces this for normal fields.
 dotnet_naming_rule.private_fields_underscore.severity = suggestion
 dotnet_naming_rule.private_fields_underscore.symbols  = private_fields
 dotnet_naming_rule.private_fields_underscore.style    = underscore_camel
@@ -105,8 +102,8 @@ dotnet_naming_style.pascal.capitalization = pascal_case
 # --- IDE diagnostic severities (curated bumps) ---
 # Style we already follow - keep loud:
 dotnet_diagnostic.IDE0005.severity = suggestion # remove unnecessary usings - false positives on attribute/source-gen references, keep as IDE hint only
-dotnet_diagnostic.IDE0044.severity = suggestion # make field readonly - noisy on [ObservableProperty] fields
-dotnet_diagnostic.IDE0060.severity = suggestion # unused parameter (XAML codebehind makes this noisy)
+dotnet_diagnostic.IDE0044.severity = suggestion # make field readonly
+dotnet_diagnostic.IDE0060.severity = suggestion # unused parameter
 dotnet_diagnostic.IDE0161.severity = warning   # file-scoped namespace
 dotnet_diagnostic.IDE0065.severity = warning   # using directive placement
 
@@ -116,23 +113,16 @@ dotnet_diagnostic.IDE0058.severity = silent    # expression value never used
 dotnet_diagnostic.IDE0290.severity = silent    # use primary constructor
 
 # --- Quality (CAxxxx) baseline ---
-# Defaults are mostly fine; tone down ones that historically nag WinUI code:
+# Defaults are mostly fine; tune these for the native RDP helper:
 dotnet_diagnostic.CA1031.severity = suggestion # catch general exception types
 dotnet_diagnostic.CA1303.severity = none       # localize literal strings
 dotnet_diagnostic.CA1304.severity = suggestion # specify CultureInfo
 dotnet_diagnostic.CA1305.severity = suggestion # specify IFormatProvider
 dotnet_diagnostic.CA1707.severity = none       # underscores in identifiers (xUnit theory data)
-dotnet_diagnostic.CA1812.severity = none       # internal class never instantiated (DI surfaces this constantly)
+dotnet_diagnostic.CA1812.severity = none       # internal process-protocol types are activated indirectly
 dotnet_diagnostic.CA1848.severity = none       # use LoggerMessage delegates (overkill for a desktop app of this size)
 dotnet_diagnostic.CA1873.severity = none       # LogX expensive arg eval (paired with CA1848 — same motivation)
-dotnet_diagnostic.CA2007.severity = none       # ConfigureAwait - WinUI 3 single-threaded UI doesn't need this
-
-#####################################
-# XAML - 2-space, treat as XML
-#####################################
-[*.xaml]
-indent_size = 2
-tab_width = 2
+dotnet_diagnostic.CA2007.severity = none       # the RDP host owns a single-threaded UI context
 
 #####################################
 # JSON / YAML - 2-space
@@ -163,14 +153,7 @@ trim_trailing_whitespace = false
 max_line_length = off
 
 #####################################
-# Shell scripts (husky hooks) - LF only
+# Shell scripts - LF only
 #####################################
 [*.sh]
 end_of_line = lf
-
-#####################################
-# Generated WinUI files - skip analyzers
-#####################################
-[*.{g.cs,g.i.cs,Designer.cs}]
-generated_code = true
-dotnet_diagnostic.IDE0005.severity = none

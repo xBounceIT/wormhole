@@ -3,10 +3,9 @@
 A modern, cross-platform, tabbed, multi-protocol connection manager inspired
 by [mRemoteNG](https://mremoteng.org).
 
-> Status: active development. The only active product and release target is
-> the Electron application. The legacy .NET 10 / WinUI 3 implementation remains
-> in the repository for reference and compatibility, but it is frozen and is
-> not part of the normal development workflow.
+> Status: active development. The only product and release target is the
+> Electron application. The former .NET 10 / WinUI 3 application has been
+> removed from the repository.
 
 ## Architecture and development boundary
 
@@ -23,7 +22,7 @@ Wormhole is intentionally split into a thin frontend and a native backend:
 In other words, all application behavior is implemented in native
 cross-platform Go except for the frontend. Electron is the desktop shell and
 bridge, not a second backend. New feature work must target Electron plus Go;
-do not add product behavior to the legacy .NET/WinUI code.
+do not reintroduce the removed WinUI application.
 
 The Go core is designed to run across supported Electron hosts. Unavoidable
 operating-system integrations are isolated in Go platform adapters or narrowly
@@ -86,17 +85,15 @@ It cannot open connections or read saved credentials.
 
 ## Requirements
 
-Electron and Go are the only application runtimes needed for active
-development:
+Electron and Go are the primary application runtimes:
 
 - Node.js and npm.
 - Go 1.25 or newer, matching tools/wormhole-backend/go.mod.
 - The Electron runtime downloaded by npm for the desktop shell.
+- The .NET 10 SDK on Windows, only for the separate ActiveX RDP host used by
+  Electron.
 - Platform-native dependencies only where a particular protocol client or OS
   integration requires them.
-
-The .NET SDK is not required for the Electron/Go application and is not part of
-the active build or test workflow.
 
 ## Build and test
 
@@ -121,6 +118,7 @@ Useful focused checks:
     npm run typecheck
     npm run lint
     npm run format:check
+    npm run test:rdp-host
 
 The Go backend can also be tested directly:
 
@@ -135,9 +133,7 @@ artifacts:
     npm run build:installer
     npm run build:installer:arm64
 
-The Electron installer is the only release workflow. The old WinUI installer
-scripts are retained only with the legacy implementation and should not be
-used for new work.
+The Electron installer is the only release workflow.
 
 ## Stack
 
@@ -157,13 +153,6 @@ used for new work.
 See [electron/README.md](electron/README.md) for Electron-specific details and
 [tools/wormhole-backend/README.md](tools/wormhole-backend/README.md) for the
 backend operations and process contracts.
-
-## Legacy implementation
-
-The repository still contains the former C#/.NET and WinUI implementation plus
-compatibility helpers. It is not a second supported version of Wormhole and is
-not an active development target. Required behavior must be implemented in the
-Go backend and exposed through Electron.
 
 ## License
 

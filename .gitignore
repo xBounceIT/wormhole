@@ -17,12 +17,6 @@ dist-electron/
 .vscode/
 *.swp
 
-# Generated WinUI files
-*.g.cs
-*.g.i.cs
-*.xbf
-*.pri
-
 # Logs
 logs/
 *.log
@@ -36,9 +30,6 @@ logs/
 installer/output/
 
 
-# Fetched web assets (xterm.js etc.) -- populated by scripts/Fetch-WebAssets.ps1
-Assets/web/vendor/
-
 # C++ shim build outputs from CMake + vcpkg manifest mode.
 tools/wormhole-ovpnproxy/ovpn_shim/build/
 
@@ -47,9 +38,8 @@ tools/wormhole-ovpnproxy/ovpn_shim/build/
 tools/wormhole-ovpnproxy/shim_buildinfo.go
 
 # Sidecar binaries left behind by `go build` invoked from inside a sidecar dir.
-# The canonical build path (MSBuild Fetch-*.ps1 targets) writes to obj/, which is
-# already covered above; this catches the stray copies for developers iterating
-# on the Go code directly.
+# Electron build scripts stage canonical copies under dist-electron/; this catches
+# stray copies from developers iterating on the Go code directly.
 tools/wormhole-*/wormhole-*proxy
 tools/wormhole-*/wormhole-*proxy.exe
 

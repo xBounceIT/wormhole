@@ -14,7 +14,7 @@ const rdpHostSource = readFileSync(
   'utf8',
 );
 const rdpHostFormSource = readFileSync(
-  new URL('../Interop/Rdp/RdpHostForm.cs', import.meta.url),
+  new URL('../tools/wormhole-rdp-host/Interop/Rdp/RdpHostForm.cs', import.meta.url),
   'utf8',
 );
 

@@ -4,9 +4,9 @@
 
 ## Product direction
 
-Wormhole is developed and shipped only as the Electron application. The legacy
-.NET 10 / WinUI 3 implementation remains in the repository for reference and
-compatibility, but it is frozen and is not an active product target.
+Wormhole is developed and shipped only as the Electron application. The former
+.NET 10 / WinUI 3 application has been removed. The only managed component is
+the Windows ActiveX RDP host under tools/, a narrow helper used by Electron.
 
 The active architecture has a strict boundary:
 
@@ -19,9 +19,9 @@ The active architecture has a strict boundary:
   authentication, protocols, sessions, VPNs, imports, logging, and updates.
 
 All new feature work belongs to Electron plus Go. Do not add backend behavior
-to React, TypeScript, Node.js, Electron main-process code, or the legacy
-.NET/WinUI implementation. Platform-specific adapters belong at the Go
-boundary and must not move domain logic into the frontend.
+to React, TypeScript, Node.js, Electron main-process code, or the managed RDP
+helper. Platform-specific adapters belong at the Go boundary and must not move
+domain logic into the frontend.
 
 ## Daily workflow
 
@@ -37,8 +37,9 @@ boundary and must not move domain logic into the frontend.
 - Run backend tests directly when iterating: Set-Location
   tools/wormhole-backend, then run go test ./...
 
-The normal Electron workflow does not use the .NET solution or dotnet test.
-Do not use the legacy WinUI build as a validation step for Electron changes.
+.NET is used only to build and test the Windows RDP helper with
+npm run build:rdp-host and npm run test:rdp-host. There is no root .NET solution
+or WinUI validation workflow.
 
 ## Engineering rules
 
@@ -93,7 +94,7 @@ Do not use the legacy WinUI build as a validation step for Electron changes.
 ## Packaging and repository hygiene
 
 - The Electron installer is the only release target. Use the Electron build and
-  installer scripts under scripts/; do not add or maintain a parallel WinUI
+  installer scripts under scripts/; do not add a parallel desktop shell or
   release workflow.
 - Keep Windows x64 and arm64 packaging working, while preserving the
   cross-platform Go build for other supported Electron hosts.
@@ -103,10 +104,9 @@ Do not use the legacy WinUI build as a validation step for Electron changes.
 - When updating this guide, update the mirrored agent guide in the same change
   so the instructions remain identical.
 
-## Legacy implementation
+## Native compatibility helpers
 
-The C#/.NET projects, WinUI views, and their tests are retained only as legacy
-reference or compatibility material during the transition. Do not extend them
-with new product behavior. If a legacy component is unavoidable for a native
-OS integration, keep it isolated, document the boundary, and expose the
-behavior through the Go backend to Electron.
+The C# code under tools/wormhole-rdp-host is part of the Electron application:
+it hosts the Windows mstscax ActiveX control in a separate process. Keep it
+isolated, secret-free, and limited to native surface integration. Do not
+reintroduce the removed WinUI application or move backend behavior into it.

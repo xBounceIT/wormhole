@@ -243,13 +243,13 @@ internal sealed class RdpHostApplicationContext : ApplicationContext
         var form = CreateRealizedHostForm();
         _form = form;
         var connectionVisible = false;
-        void Reveal(string context, bool focus = false)
+        void Reveal(bool focus = false)
         {
             connectionVisible = true;
             try
             {
                 _ = Win32Interop.ShowWindow(form.Hwnd, Win32Interop.SW_SHOWNA);
-                _ = form.EnsureVisibleAndRedraw(context);
+                _ = form.EnsureVisibleAndRedraw();
                 if (focus) form.RequestFocus();
             }
             catch
@@ -269,13 +269,13 @@ internal sealed class RdpHostApplicationContext : ApplicationContext
 
         form.Connected += () =>
         {
-            Reveal("connected", focus: true);
+            Reveal(focus: true);
             ScheduleRemoteResolution(_pendingResolutionWidth, _pendingResolutionHeight);
             Write(new RdpHostEvent("connected"));
         };
         form.LoginComplete += () =>
         {
-            Reveal("login-complete", focus: true);
+            Reveal(focus: true);
             ScheduleRemoteResolution(_pendingResolutionWidth, _pendingResolutionHeight);
             Write(new RdpHostEvent("loginComplete"));
         };
@@ -284,10 +284,10 @@ internal sealed class RdpHostApplicationContext : ApplicationContext
             Conceal();
             var info = form.GetDisconnectInfo(code);
             Write(new RdpHostEvent("disconnected", Code: code, Message: info.Description));
-            // The WinUI service disposes the ActiveX host after a terminal disconnect. Do the
-            // same here so a later Retry can create a fresh OCX instead of hitting Start()'s
-            // one-shot guard on a dead control. Auto-reconnect events arrive before this terminal
-            // notification and keep the form alive while the OCX is recovering.
+            // Dispose the ActiveX host after a terminal disconnect so a later retry can create a
+            // fresh OCX instead of hitting Start()'s one-shot guard on a dead control. Auto-reconnect
+            // events arrive before this terminal notification and keep the form alive while the OCX
+            // is recovering.
             CloseHost();
         };
         form.FatalError += code =>
@@ -304,13 +304,13 @@ internal sealed class RdpHostApplicationContext : ApplicationContext
         };
         form.AutoReconnected += () =>
         {
-            Reveal("auto-reconnected");
+            Reveal();
             Write(new RdpHostEvent("autoReconnected"));
         };
 
         var hwnd = form.Hwnd;
         ConfigureAsOwnedOverlay(hwnd, owner);
-        var profile = command.Profile.ToConnectionProfile();
+        var profile = command.Profile.ToRdpConnectionProfile();
         _dynamicResolution =
             !profile.RdpFullScreen && RdpScreenSizes.IsFullConnectionContent(profile.RdpScreenSize);
         // Establish the real connection rectangle while the host is still hidden. Native ActiveX
@@ -342,8 +342,8 @@ internal sealed class RdpHostApplicationContext : ApplicationContext
             throw new InvalidOperationException("native RDP surface activation failed");
         }
 
-        // Start only after every event subscription and the owned overlay relationship are in
-        // place. This mirrors RdpSessionService's early-event race fix in the WinUI client.
+        // Start only after every event subscription and the owned Electron overlay relationship
+        // are in place, otherwise an early native event can be lost.
         ScheduleRemoteResolution(command.Bounds.Width, command.Bounds.Height);
         form.Start();
         if (!_closing && !connectionVisible) Conceal();
@@ -388,8 +388,8 @@ internal sealed class RdpHostApplicationContext : ApplicationContext
 
     private static RdpHostForm CreateRealizedHostForm()
     {
-        // Match the WinUI service's activation policy: try the newest registered mstscax class,
-        // fall back through older registrations, and force both HWNDs before Configure. Some
+        // Try the newest registered mstscax class, fall back through older registrations, and
+        // force both HWNDs before Configure. Some
         // machines register the CLSID but fail during AxHost in-place activation, so probing only
         // the registry is not enough.
         var candidates = AxMsRdpClient9NotSafeForScripting.GetRegisteredClasses();
@@ -534,8 +534,6 @@ internal readonly record struct RdpHostBounds(
 
 internal sealed class RdpHostProfile
 {
-    public string? NodeId { get; set; }
-    public string Name { get; set; } = "RDP session";
     public string Host { get; set; } = string.Empty;
     public int Port { get; set; } = 3389;
     public string? Username { get; set; }
@@ -568,18 +566,12 @@ internal sealed class RdpHostProfile
     public bool AutoReconnect { get; set; } = true;
     public int ServerAuthentication { get; set; } = 2;
     public int GatewayUsageMethod { get; set; }
-    public bool GatewayBypassLocal { get; set; } = true;
     public bool GatewayUseSameCreds { get; set; }
-    public bool UseExternalClient { get; set; }
 
-    public ConnectionProfile ToConnectionProfile()
+    public RdpConnectionProfile ToRdpConnectionProfile()
     {
-        var nodeId = Guid.TryParse(NodeId, out var parsedNodeId) ? parsedNodeId : Guid.NewGuid();
-        return new ConnectionProfile
+        return new RdpConnectionProfile
         {
-            NodeId = nodeId,
-            Name = string.IsNullOrWhiteSpace(Name) ? Host : Name,
-            Protocol = ProtocolType.Rdp,
             Host = Host,
             Port = Port is >= 1 and <= 65535 ? Port : 3389,
             Username = string.IsNullOrWhiteSpace(Username) ? null : Username,
@@ -609,9 +601,7 @@ internal sealed class RdpHostProfile
             RdpServerAuthentication = ServerAuthentication,
             RdpGatewayUsageMethod = GatewayUsageMethod,
             RdpGatewayHostname = GatewayHostname,
-            RdpGatewayBypassLocal = GatewayBypassLocal,
             RdpGatewayUseSameCreds = GatewayUseSameCreds,
-            RdpUseExternalClient = UseExternalClient,
         };
     }
 }

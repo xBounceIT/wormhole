@@ -22,7 +22,7 @@ $env:PATH = $pathParts -join ';'
 
 # Fetches (or builds) the wormhole-wgproxy.exe userspace WireGuard sidecar and writes it
 # to obj\wgproxy\<arch>\ so the project file can pick it up as a None item and copy to the
-# output directory. Mirrors the pattern in Fetch-WebAssets.ps1.
+# output directory. This is shared by the Electron development and packaging builds.
 #
 # Resolution order:
 #   1. If a SHA256-pinned release URL is configured for $Arch, download and verify.

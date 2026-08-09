@@ -3,7 +3,8 @@
 This directory contains the active Wormhole desktop shell. The React renderer
 lives in `src/`, Electron owns native window and isolated Chromium lifecycle,
 and all durable state and protocol behavior are delegated to the Go backend.
-The legacy WinUI implementation is frozen reference code, not a second product.
+The former WinUI application has been removed; the Windows ActiveX RDP helper
+under `tools/wormhole-rdp-host` remains part of the Electron runtime.
 
 From the repository root:
 
@@ -33,8 +34,8 @@ all Windows distributable inputs without starting the development app.
 The renderer loads connection, credential, and tunnel metadata from the Go
 backend over the Electron preload bridge. If the database is missing or empty,
 the UI stays empty; it does not create demo connections or credentials. The
-shell shape mirrors the current WinUI layout (title bar, update strip,
-connection tree, footer navigation, session tabs, and protocol surface).
+shell provides a title bar, update strip, connection tree, footer navigation,
+session tabs, and protocol surfaces.
 
 App authentication is available on every Electron platform. Go owns PIN and
 password verification, startup/reload locking, confirmation prompts, and idle
