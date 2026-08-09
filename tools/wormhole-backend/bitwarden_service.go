@@ -160,7 +160,9 @@ func (m *vncManager) handleBitwarden(command backendCommand, expectedGeneration 
 				Username: command.Username, Domain: command.Domain, Password: command.Password,
 			}
 		}
-		result, err = m.resolveRdpRuntimeProfile(command.NodeID, manual)
+		result, err = m.resolveRdpRuntimeProfileWithCredential(
+			command.NodeID, manual, command.CredentialID,
+		)
 	case "rdp.system-client-capability", "rdp.resolve-system-profile":
 		var profile rdpProfile
 		var capability rdpSystemClientCapability

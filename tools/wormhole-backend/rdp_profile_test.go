@@ -123,6 +123,42 @@ func TestAzureAdRdpCredentialForcesSystemClientBeforeSecretResolution(t *testing
 	}
 }
 
+func TestRdpCredentialOverrideUsesSelectedIdentity(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	if err := ensureElectronWorkspaceSchema(databasePath); err != nil {
+		t.Fatal(err)
+	}
+	credential, err := createCredential(databasePath, credentialCreateRequest{
+		Name: "Selected desktop", Protocol: "rdp", Username: "selected-user",
+		Domain: "SELECTED", Password: "selected-secret",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := defaultWorkspaceRdpSettings()
+	nodeID, err := createWorkspaceNode(databasePath, workspaceNodeWriteRequest{
+		Name: "Desktop", Kind: "connection", Protocol: "rdp", Host: "rdp.example",
+		Username: "connection-user", CredentialMode: 0, RDP: &settings,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	manager := &vncManager{database: database, databasePath: databasePath}
+	profile, err := manager.resolveRdpRuntimeProfileWithCredential(nodeID, nil, credential.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profile.Username != "selected-user" || profile.Domain != "SELECTED" ||
+		profile.Password != "selected-secret" {
+		t.Fatalf("selected RDP identity = %#v", profile)
+	}
+}
+
 func completeRdpSettings() workspaceRdpSettings {
 	return workspaceRdpSettings{
 		Domain: "CONTOSO", ScreenSize: "1600x900", FullScreen: true, ColorDepth: 24,
@@ -353,7 +389,7 @@ func TestWorkspaceInlineRdpSecretSetPreserveClearAndNoRendererLeak(t *testing.T)
 		t.Fatal(err)
 	}
 	manager = &vncManager{database: database, databasePath: databasePath}
-	systemProfile, err := manager.resolveRdpProfile(nodeID, nil, true)
+	systemProfile, err := manager.resolveRdpProfile(nodeID, nil, true, "")
 	database.Close()
 	if err != nil {
 		t.Fatal(err)
@@ -433,6 +469,27 @@ func TestResolveRdpProfileOperationRejectsMalformedNodeIDs(t *testing.T) {
 		NodeID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
 	}); err != nil {
 		t.Fatalf("rejected a valid RDP profile operation: %v", err)
+	}
+	if err := validateBackendCommand(backendCommand{
+		ID: "request-1", Action: "rdp.resolve-profile",
+		NodeID:       "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+		CredentialID: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+	}); err != nil {
+		t.Fatalf("rejected a valid RDP credential override: %v", err)
+	}
+	if err := validateBackendCommand(backendCommand{
+		ID: "request-1", Action: "rdp.resolve-profile",
+		NodeID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", ManualCredentials: true,
+		CredentialID: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", Username: "user",
+	}); err == nil {
+		t.Fatal("accepted conflicting manual and saved RDP credential overrides")
+	}
+	if err := validateBackendCommand(backendCommand{
+		ID: "request-1", Action: "rdp.resolve-system-profile",
+		NodeID:       "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+		CredentialID: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+	}); err == nil {
+		t.Fatal("accepted an ignored credential override for an RDP system-client operation")
 	}
 	if err := validateBackendCommand(backendCommand{
 		ID: "request-1", Action: "rdp.resolve-profile",

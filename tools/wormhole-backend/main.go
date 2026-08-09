@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 	"unicode/utf16"
+	"unicode/utf8"
 
 	_ "modernc.org/sqlite"
 )
@@ -135,6 +136,14 @@ type workspaceNodeCredentialSettingsRequest struct {
 	CredentialID string `json:"credentialId"`
 }
 
+type workspaceNodeInlineCredentialRequest struct {
+	NodeID   string `json:"nodeId"`
+	Protocol string `json:"protocol"`
+	Username string `json:"username"`
+	Domain   string `json:"domain"`
+	Password string `json:"password"`
+}
+
 type credentialsForProtocolRequest struct {
 	Protocol string `json:"protocol"`
 }
@@ -157,6 +166,8 @@ type credentialRecord struct {
 type credentialBindingMetadata struct {
 	protocol int64
 	kind     int64
+	username string
+	domain   string
 }
 
 type credentialMetadataQueryer interface {
@@ -432,6 +443,15 @@ func main() {
 		err = decodeInput(&request)
 		if err == nil {
 			err = updateWorkspaceNodeCredentialSettings(*databasePath, request)
+			if err == nil {
+				result = map[string]bool{"updated": true}
+			}
+		}
+	case "workspace-update-node-inline-credential":
+		var request workspaceNodeInlineCredentialRequest
+		err = decodeInput(&request)
+		if err == nil {
+			err = updateWorkspaceNodeInlineCredential(*databasePath, request)
 			if err == nil {
 				result = map[string]bool{"updated": true}
 			}
@@ -1559,7 +1579,7 @@ ORDER BY SortOrder, Name, Id;`)
 }
 
 func updateWorkspaceNodeSshSettings(databasePath string, request workspaceNodeSshSettingsRequest) error {
-	nodeID := strings.TrimSpace(request.NodeID)
+	nodeID := normalizeID(request.NodeID)
 	if nodeID == "" || len(nodeID) > 128 {
 		return errors.New("workspace node id is invalid")
 	}
@@ -1811,6 +1831,7 @@ func updateWorkspaceNodeCredentialSettings(
 	} else if err != nil {
 		return fmt.Errorf("could not read workspace node: %w", err)
 	}
+	var selected credentialBindingMetadata
 	if credentialID != "" {
 		credential, found, err := credentialMetadataByID(database, credentialID)
 		if err != nil {
@@ -1827,6 +1848,31 @@ func updateWorkspaceNodeCredentialSettings(
 				return errors.New("selected credential type is invalid for the connection protocol")
 			}
 		}
+		selected = credential
+	}
+	secretTableExists, secretTableErr := tableExists(database, "CredentialSecrets")
+	if secretTableErr != nil {
+		return secretTableErr
+	}
+	tx, err := database.Begin()
+	if err != nil {
+		return fmt.Errorf("could not begin connection credential update: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	var secretChange *workspaceInlineSecretChange
+	if kind == workspaceNodeConnection && request.Mode == 2 && secretTableExists {
+		secretChange, err = prepareWorkspaceInlineSecret(tx, normalizedWorkspaceNode{
+			id: nodeID, inlinePasswordAction: "clear",
+		}, true)
+		if err != nil {
+			return err
+		}
+		defer secretChange.rollback()
 	}
 	var storedID any
 	if credentialID != "" {
@@ -1837,14 +1883,25 @@ func updateWorkspaceNodeCredentialSettings(
 		updatedAt = ", UpdatedAt = ?"
 	}
 	args := []any{request.Mode, storedID}
+	setClause := "CredentialMode = ?, CredentialId = ?"
+	if kind == workspaceNodeConnection && request.Mode == 2 {
+		if _, ok := columns["Username"]; ok {
+			setClause += ", Username = ?"
+			args = append(args, nullableWorkspaceNodeString(selected.username))
+		}
+		if _, ok := columns["RdpDomain"]; ok {
+			setClause += ", RdpDomain = ?"
+			args = append(args, nullableWorkspaceNodeString(selected.domain))
+		}
+		if _, ok := columns["UseInlinePassword"]; ok {
+			setClause += ", UseInlinePassword = 0"
+		}
+	}
 	if updatedAt != "" {
 		args = append(args, time.Now().UTC().Format(time.RFC3339Nano))
 	}
 	args = append(args, normalizeID(nodeID))
-	result, err := database.Exec(
-		"UPDATE Nodes SET CredentialMode = ?, CredentialId = ?"+updatedAt+" WHERE lower(Id) = ?;",
-		args...,
-	)
+	result, err := tx.Exec("UPDATE Nodes SET "+setClause+updatedAt+" WHERE lower(Id) = ?;", args...)
 	if err != nil {
 		return fmt.Errorf("could not update connection credential: %w", err)
 	}
@@ -1855,27 +1912,108 @@ func updateWorkspaceNodeCredentialSettings(
 	if affected == 0 {
 		return errors.New("workspace node was not found")
 	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("could not commit connection credential update: %w", err)
+	}
+	committed = true
+	secretChange.commit()
+	return nil
+}
+
+func updateWorkspaceNodeInlineCredential(
+	databasePath string,
+	request workspaceNodeInlineCredentialRequest,
+) error {
+	nodeID := normalizeID(request.NodeID)
+	protocol, ok := workspaceProtocolValue(request.Protocol)
+	username := strings.TrimSpace(request.Username)
+	domain := strings.TrimSpace(request.Domain)
+	if !validCredentialID(nodeID) || !ok || (protocol != 0 && protocol != rdpProtocolValue) ||
+		username == "" || utf8.RuneCountInString(username) > 512 || strings.ContainsAny(username, "\r\n\x00") ||
+		utf8.RuneCountInString(domain) > 512 || strings.ContainsAny(domain, "\r\n\x00") ||
+		request.Password == "" || utf8.RuneCountInString(request.Password) > 4096 {
+		return errors.New("workspace inline credential is invalid")
+	}
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		return err
+	}
+	defer database.Close()
+	if err := requireWorkspaceNodeWriteSchema(database); err != nil {
+		return err
+	}
+	var kind int64
+	var storedProtocol sql.NullInt64
+	if err := database.QueryRow(
+		"SELECT Kind, Protocol FROM Nodes WHERE lower(Id) = ? LIMIT 1;", nodeID,
+	).Scan(&kind, &storedProtocol); errors.Is(err, sql.ErrNoRows) {
+		return errors.New("workspace node was not found")
+	} else if err != nil {
+		return fmt.Errorf("could not read workspace node: %w", err)
+	}
+	if kind != workspaceNodeConnection || !storedProtocol.Valid || storedProtocol.Int64 != protocol {
+		return errors.New("workspace inline credential does not match the connection protocol")
+	}
+	tx, err := database.Begin()
+	if err != nil {
+		return fmt.Errorf("could not begin inline credential update: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	secretChange, err := prepareWorkspaceInlineSecret(tx, normalizedWorkspaceNode{
+		id: nodeID, inlinePasswordAction: "set", inlinePassword: request.Password,
+	}, true)
+	if err != nil {
+		return err
+	}
+	defer secretChange.rollback()
+	if protocol != rdpProtocolValue {
+		domain = ""
+	}
+	result, err := tx.Exec(`
+UPDATE Nodes
+SET Username = ?, RdpDomain = ?, UseInlinePassword = 1, CredentialMode = 1,
+    CredentialId = NULL, UpdatedAt = ?
+WHERE lower(Id) = ?;`, nullableWorkspaceNodeString(username), nullableWorkspaceNodeString(domain),
+		time.Now().UTC().Format(time.RFC3339Nano), nodeID)
+	if err != nil {
+		return fmt.Errorf("could not update inline connection credential: %w", err)
+	}
+	if affected, rowsErr := result.RowsAffected(); rowsErr != nil {
+		return rowsErr
+	} else if affected == 0 {
+		return errors.New("workspace node was not found")
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("could not commit inline credential update: %w", err)
+	}
+	committed = true
+	secretChange.commit()
 	return nil
 }
 
 func credentialMetadataByID(queryer credentialMetadataQueryer, credentialID string) (credentialBindingMetadata, bool, error) {
 	var credential credentialBindingMetadata
 	err := queryer.QueryRow(
-		"SELECT COALESCE(Protocol, 0), COALESCE(Kind, 0) FROM CredentialProfiles WHERE lower(Id) = ? LIMIT 1;",
+		"SELECT COALESCE(Protocol, 0), COALESCE(Kind, 0), COALESCE(Username, ''), COALESCE(Domain, '') FROM CredentialProfiles WHERE lower(Id) = ? LIMIT 1;",
 		credentialID,
-	).Scan(&credential.protocol, &credential.kind)
+	).Scan(&credential.protocol, &credential.kind, &credential.username, &credential.domain)
 	if err == nil {
 		return credential, true, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) && !strings.Contains(strings.ToLower(err.Error()), "no such table") {
 		return credentialBindingMetadata{}, false, fmt.Errorf("could not validate selected credential: %w", err)
 	}
-	var sshID, rdpID, vncID string
+	var sshID, rdpID, vncID, username string
 	err = queryer.QueryRow(`
-SELECT SshCredentialId, RdpCredentialId, VncCredentialId
+SELECT SshCredentialId, RdpCredentialId, VncCredentialId, COALESCE(Username, '')
 FROM BitwardenCredentialCache
 WHERE lower(SshCredentialId) = ? OR lower(RdpCredentialId) = ? OR lower(VncCredentialId) = ?
-LIMIT 1;`, credentialID, credentialID, credentialID).Scan(&sshID, &rdpID, &vncID)
+LIMIT 1;`, credentialID, credentialID, credentialID).Scan(&sshID, &rdpID, &vncID, &username)
 	if errors.Is(err, sql.ErrNoRows) || (err != nil && strings.Contains(strings.ToLower(err.Error()), "no such table")) {
 		return credentialBindingMetadata{}, false, nil
 	}
@@ -1884,11 +2022,11 @@ LIMIT 1;`, credentialID, credentialID, credentialID).Scan(&sshID, &rdpID, &vncID
 	}
 	switch credentialID {
 	case normalizeID(rdpID):
-		return credentialBindingMetadata{protocol: 1}, true, nil
+		return credentialBindingMetadata{protocol: 1, username: username}, true, nil
 	case normalizeID(vncID):
-		return credentialBindingMetadata{protocol: 6}, true, nil
+		return credentialBindingMetadata{protocol: 6, username: username}, true, nil
 	default:
-		return credentialBindingMetadata{protocol: 0}, true, nil
+		return credentialBindingMetadata{protocol: 0, username: username}, true, nil
 	}
 }
 

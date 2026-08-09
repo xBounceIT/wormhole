@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -20,6 +21,23 @@ import (
 
 	"golang.org/x/crypto/ssh"
 )
+
+func TestEncryptedSSHKeyWithoutPassphraseReturnsStablePromptError(t *testing.T) {
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, err := ssh.MarshalPrivateKeyWithPassphrase(privateKey, "test key", []byte("secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = dialNativeSSH(context.Background(), sshTarget{
+		host: "127.0.0.1", port: 22, username: "alice", privateKey: pem.EncodeToMemory(block),
+	}, 80, 24)
+	if err == nil || err.Error() != "SSH private key passphrase is required" {
+		t.Fatalf("encrypted key error = %v", err)
+	}
+}
 
 func TestLoadSSHTargetKeepsExplicitSSHProtocol(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
@@ -339,6 +357,44 @@ VALUES ('leaf', 'SSH leaf', 1, 0, 'ssh.example', ?, 2, 'now');`, credentialID)
 	}
 	if target.username != "vault-user" || target.password != "vault-password" {
 		t.Fatalf("virtual Bitwarden target = %#v", target)
+	}
+}
+
+func TestExplicitSSHCredentialOverrideUsesSelectedIdentity(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	credentialID := "10000000-0000-4000-8000-000000000001"
+	_, err = database.Exec(`
+CREATE TABLE Nodes (
+    Id TEXT PRIMARY KEY NOT NULL, ParentId TEXT NULL, Name TEXT NOT NULL, Kind INTEGER NOT NULL,
+    Protocol INTEGER NULL, Host TEXT NULL, Username TEXT NULL, CredentialId TEXT NULL,
+    CredentialMode INTEGER NULL, UpdatedAt TEXT NOT NULL
+);
+CREATE TABLE CredentialProfiles (
+    Id TEXT PRIMARY KEY NOT NULL, Username TEXT NULL, Kind INTEGER NULL,
+    Protocol INTEGER NULL, SecretProvider INTEGER NULL
+);
+INSERT INTO Nodes (Id, Name, Kind, Protocol, Host, Username, CredentialMode, UpdatedAt)
+VALUES ('leaf', 'SSH leaf', 1, 0, 'ssh.example', 'connection-user', 0, 'now');
+INSERT INTO CredentialProfiles (Id, Username, Kind, Protocol, SecretProvider)
+VALUES (?, 'selected-user', 0, 0, 1);`, credentialID)
+	if err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	database.Close()
+
+	target, err := loadSSHTargetWithCredentialOverrides(
+		databasePath, "leaf", "selected-user", "selected-password", true, true, credentialID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.username != "selected-user" || target.password != "selected-password" {
+		t.Fatalf("selected SSH identity = %#v", target)
 	}
 }
 

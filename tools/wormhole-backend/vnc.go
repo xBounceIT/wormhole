@@ -1611,11 +1611,18 @@ func validateBackendCommand(command backendCommand) error {
 		if len(command.NodeID) == 0 || len(command.NodeID) > 128 || bitwardenProtocolValue(command.Protocol) < 0 {
 			return errors.New("Bitwarden connection request is invalid")
 		}
-	case "rdp.resolve-profile", "rdp.system-client-capability", "rdp.resolve-system-profile":
+	case "rdp.resolve-profile":
 		if !validCredentialID(normalizeID(command.NodeID)) ||
+			(command.CredentialID != "" && !validCredentialID(normalizeID(command.CredentialID))) ||
+			(command.ManualCredentials && command.CredentialID != "") ||
 			(command.ManualCredentials && (!validRdpText(command.Username, 513) ||
 				!validRdpText(command.Domain, 512) || !validRdpText(command.Password, 4096))) {
 			return errors.New("RDP connection request is invalid")
+		}
+	case "rdp.system-client-capability", "rdp.resolve-system-profile":
+		if !validCredentialID(normalizeID(command.NodeID)) || command.CredentialID != "" ||
+			command.ManualCredentials || command.Username != "" || command.Domain != "" || command.Password != "" {
+			return errors.New("RDP system client request is invalid")
 		}
 	default:
 		return fmt.Errorf("unsupported backend action %q", command.Action)

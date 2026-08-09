@@ -27,6 +27,8 @@ export type RdpProfile = {
   nodeId?: string;
   /** Main-process credential resolution for an unsaved Quick Connect target. */
   credentialId?: string;
+  /** Transient credential override for a saved connection; never persisted by this contract. */
+  credentialIdOverride?: string;
   gatewayCredentialId?: string;
   tunnelConfigId?: string;
   name?: string;

@@ -223,6 +223,7 @@ import { KeyedRetryQueue } from './keyed-retry-queue';
 import {
   isBitwardenUnlockError,
   requiresRdpCredentialPrompt,
+  requiresSshKeyPassphrasePrompt,
   sshCredentialPromptTarget,
 } from './runtime-credential-errors';
 import { VncSurface } from './components/VncSurface';
@@ -595,6 +596,22 @@ type SshCredentials = {
   password: string;
 };
 
+type SshStartRequest = {
+  sessionId: string;
+  nodeId?: string;
+  host?: string;
+  port?: number;
+  username?: string;
+  password?: string;
+  credentialId?: string;
+  autoSudo?: boolean;
+  tunnelConfigId?: string;
+  manualCredentials?: boolean;
+  keyPassphrase?: string;
+  manualKeyPassphrase?: boolean;
+  frontendSessionId?: string;
+};
+
 type CredentialRecord = {
   id: string;
   name: string;
@@ -611,6 +628,8 @@ type CredentialRecord = {
 };
 
 type CredentialOptionGroups = Record<CredentialProtocol, CredentialRecord[]>;
+
+const manualCredentialSelectionValue = '__manual__';
 
 function workspaceCredentialOptions(workspace: WormholeWorkspaceSnapshot): CredentialOptionGroups {
   return {
@@ -1484,6 +1503,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     domain: '',
     password: '',
   });
+  const [rdpCredentialSelection, setRdpCredentialSelection] = useState(
+    manualCredentialSelectionValue,
+  );
+  const [rdpCredentialSave, setRdpCredentialSave] = useState(false);
   const [sshCredentialPrompt, setSshCredentialPrompt] = useState<{
     kind: 'saved' | 'quick';
     backendSessionId?: string;
@@ -1494,6 +1517,16 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     username: '',
     password: '',
   });
+  const [sshCredentialSelection, setSshCredentialSelection] = useState(
+    manualCredentialSelectionValue,
+  );
+  const [sshCredentialSave, setSshCredentialSave] = useState(false);
+  const [sshCredentialPromptBusy, setSshCredentialPromptBusy] = useState(false);
+  const [rdpCredentialPromptBusy, setRdpCredentialPromptBusy] = useState(false);
+  const [sshKeyPassphrasePrompt, setSshKeyPassphrasePrompt] = useState<SshStartRequest | null>(
+    null,
+  );
+  const [sshKeyPassphrase, setSshKeyPassphrase] = useState('');
   const [bitwardenUnlockPrompt, setBitwardenUnlockPrompt] = useState<{ reason: string } | null>(
     null,
   );
@@ -1701,6 +1734,27 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       })),
     ],
     [folderCredentialOptions],
+  );
+  const runtimeCredentialSelectionOptions = useMemo<
+    Record<'ssh' | 'rdp', SearchableComboboxOption[]>
+  >(
+    () => ({
+      ssh: [
+        { value: manualCredentialSelectionValue, label: 'Enter manually' },
+        ...credentialOptions.ssh.map((credential) => ({
+          value: credential.id,
+          label: credential.name,
+        })),
+      ],
+      rdp: [
+        { value: manualCredentialSelectionValue, label: 'Enter manually' },
+        ...credentialOptions.rdp.map((credential) => ({
+          value: credential.id,
+          label: credential.name,
+        })),
+      ],
+    }),
+    [credentialOptions],
   );
   const selectedSession =
     sessions.find((session) => session.id === selectedSessionId) ?? sessions[0];
@@ -2462,6 +2516,8 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     setEditingFolderId(null);
     setSshCredentialPrompt(null);
     setSshCredentialForm({ username: '', password: '' });
+    setSshKeyPassphrasePrompt(null);
+    setSshKeyPassphrase('');
     setRdpCredentialPrompt(null);
     setRdpCredentialForm({ username: '', domain: '', password: '' });
     rdpSavedCredentialAttempts.current.clear();
@@ -2499,6 +2555,8 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       if (savedCredentialFailure) {
         rdpSavedCredentialAttempts.current.delete(event.sessionId);
         setRdpCredentialForm({ username: '', domain: '', password: '' });
+        setRdpCredentialSelection(manualCredentialSelectionValue);
+        setRdpCredentialSave(false);
         setRdpCredentialPrompt(event.sessionId);
       }
       setSessions((current) =>
@@ -2723,19 +2781,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     setDropTarget(null);
   }
 
-  function startSshSession(request: {
-    sessionId: string;
-    nodeId?: string;
-    host?: string;
-    port?: number;
-    username?: string;
-    password?: string;
-    credentialId?: string;
-    autoSudo?: boolean;
-    tunnelConfigId?: string;
-    manualCredentials?: boolean;
-    frontendSessionId?: string;
-  }) {
+  function startSshSession(request: SshStartRequest) {
     const api = window.wormhole;
     if (!api) {
       setSessions((current) =>
@@ -2757,7 +2803,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       })
       .catch((error: unknown) => {
         const message = error instanceof Error ? error.message : String(error);
-        if (isBitwardenUnlockError(message)) {
+        if (requiresSshKeyPassphrasePrompt(message) && !request.manualKeyPassphrase) {
+          setSshKeyPassphrase('');
+          setSshKeyPassphrasePrompt(request);
+        } else if (isBitwardenUnlockError(message)) {
           requestRuntimeBitwardenUnlock(`ssh:${request.sessionId}`, message, () =>
             startSshSession(request),
           );
@@ -2765,6 +2814,8 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           const promptTarget = sshCredentialPromptTarget(request, message);
           if (promptTarget === 'saved' && request.nodeId) {
             setSshCredentialForm({ username: '', password: '' });
+            setSshCredentialSelection(manualCredentialSelectionValue);
+            setSshCredentialSave(false);
             setSshCredentialPrompt({
               kind: 'saved',
               backendSessionId: request.sessionId,
@@ -2778,6 +2829,8 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
               )?.id;
             if (sessionId) {
               setSshCredentialForm({ username: '', password: '' });
+              setSshCredentialSelection(manualCredentialSelectionValue);
+              setSshCredentialSave(false);
               setSshCredentialPrompt({ kind: 'quick', sessionId });
             }
           }
@@ -2796,36 +2849,83 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       });
   }
 
-  function submitSshCredentials(event: FormEvent<HTMLFormElement>) {
+  function submitSshKeyPassphrase(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const prompt = sshCredentialPrompt;
-    if (!prompt || !sshCredentialForm.username.trim()) return;
-    const credentials = {
-      username: sshCredentialForm.username.trim(),
-      password: sshCredentialForm.password,
-    };
-    setSshCredentialPrompt(null);
-    setSshCredentialForm({ username: '', password: '' });
-    if (prompt.kind === 'quick' && prompt.sessionId) {
-      sshCredentialSubmitInFlight.current = true;
-      startQuickSshSession(prompt.sessionId, credentials);
-      return;
-    }
-    if (!prompt.backendSessionId || !prompt.nodeId) return;
+    const request = sshKeyPassphrasePrompt;
+    if (!request || !sshKeyPassphrase) return;
+    const passphrase = sshKeyPassphrase;
+    setSshKeyPassphrasePrompt(null);
+    setSshKeyPassphrase('');
     setSessions((current) =>
       current.map((session) =>
-        session.backendSessionId === prompt.backendSessionId
+        session.backendSessionId === request.sessionId
           ? { ...session, status: 'connecting', error: undefined }
           : session,
       ),
     );
     startSshSession({
-      sessionId: prompt.backendSessionId,
-      nodeId: prompt.nodeId,
-      manualCredentials: true,
-      username: credentials.username,
-      password: credentials.password,
+      ...request,
+      keyPassphrase: passphrase,
+      manualKeyPassphrase: true,
     });
+  }
+
+  async function submitSshCredentials(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const prompt = sshCredentialPrompt;
+    if (!prompt || sshCredentialPromptBusy) return;
+    const selectedCredentialID =
+      sshCredentialSelection === manualCredentialSelectionValue ? '' : sshCredentialSelection;
+    if (!selectedCredentialID && !sshCredentialForm.username.trim()) return;
+    const credentials = {
+      username: sshCredentialForm.username.trim(),
+      password: sshCredentialForm.password,
+    };
+    setSshCredentialPromptBusy(true);
+    try {
+      if (prompt.kind === 'saved' && prompt.nodeId && sshCredentialSave) {
+        await saveRuntimeConnectionCredential(
+          prompt.nodeId,
+          'ssh',
+          selectedCredentialID,
+          credentials,
+        );
+      }
+      setSshCredentialPrompt(null);
+      setSshCredentialForm({ username: '', password: '' });
+      if (prompt.kind === 'quick' && prompt.sessionId) {
+        sshCredentialSubmitInFlight.current = true;
+        startQuickSshSession(prompt.sessionId, credentials, selectedCredentialID || undefined);
+        return;
+      }
+      if (!prompt.backendSessionId || !prompt.nodeId) return;
+      setSessions((current) =>
+        current.map((session) =>
+          session.backendSessionId === prompt.backendSessionId
+            ? { ...session, status: 'connecting', error: undefined }
+            : session,
+        ),
+      );
+      startSshSession({
+        sessionId: prompt.backendSessionId,
+        nodeId: prompt.nodeId,
+        credentialId: !sshCredentialSave && selectedCredentialID ? selectedCredentialID : undefined,
+        manualCredentials: !sshCredentialSave && !selectedCredentialID,
+        username: !sshCredentialSave && !selectedCredentialID ? credentials.username : undefined,
+        password: !sshCredentialSave && !selectedCredentialID ? credentials.password : undefined,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Could not save SSH credentials.';
+      setSessions((current) =>
+        current.map((session) =>
+          session.backendSessionId === prompt.backendSessionId
+            ? { ...session, status: 'failed', error: message }
+            : session,
+        ),
+      );
+    } finally {
+      setSshCredentialPromptBusy(false);
+    }
   }
 
   function requestRuntimeBitwardenUnlock(key: string, reason: string, retry: () => void) {
@@ -3041,6 +3141,8 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       return;
     }
     setRdpCredentialForm({ username: '', domain: '', password: '' });
+    setRdpCredentialSelection(manualCredentialSelectionValue);
+    setRdpCredentialSave(false);
     setRdpCredentialPrompt(sessionId);
   }
 
@@ -3048,6 +3150,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     sessionId: string,
     credentials: RdpCredentials,
     manualCredentials: boolean,
+    credentialIdOverride?: string,
   ) {
     const session = sessionsRef.current.find((candidate) => candidate.id === sessionId);
     if (!session || session.protocol !== 'rdp') return;
@@ -3110,6 +3213,11 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           sessionId,
           profile: {
             ...defaultRdpProfile(session),
+            credentialId: !session.nodeId
+              ? (credentialIdOverride ?? session.rdpProfile?.credentialId)
+              : undefined,
+            credentialIdOverride:
+              session.nodeId && credentialIdOverride ? credentialIdOverride : undefined,
             username: manualCredentials ? normalizedCredentials.username || undefined : undefined,
             domain: manualCredentials ? normalizedCredentials.domain || undefined : undefined,
             password: manualCredentials ? normalizedCredentials.password || undefined : undefined,
@@ -3125,11 +3233,13 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           requestRuntimeBitwardenUnlock(`rdp:${sessionId}`, message, () =>
             manualCredentials
               ? requestRdpCredentials(sessionId)
-              : startRdpSession(sessionId, normalizedCredentials, false),
+              : startRdpSession(sessionId, normalizedCredentials, false, credentialIdOverride),
           );
         } else if (!manualCredentials && requiresRdpCredentialPrompt(message)) {
           rdpSavedCredentialAttempts.current.delete(sessionId);
           setRdpCredentialForm({ username: '', domain: '', password: '' });
+          setRdpCredentialSelection(manualCredentialSelectionValue);
+          setRdpCredentialSave(false);
           setRdpCredentialPrompt(sessionId);
         }
         setSessions((current) =>
@@ -3293,16 +3403,46 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
 
   async function submitRdpCredentials(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!rdpCredentialPrompt) return;
+    if (!rdpCredentialPrompt || rdpCredentialPromptBusy) return;
     const sessionId = rdpCredentialPrompt;
     const credentials = rdpCredentialForm;
-    setRdpCredentialPrompt(null);
-    setRdpCredentialForm({ username: '', domain: '', password: '' });
     const source = sessionsRef.current.find((session) => session.id === sessionId);
-    if (source && canDisconnectRemoteDesktopSession(source)) {
-      if (!(await disconnectRemoteDesktopSession(sessionId))) return;
+    const selectedCredentialID =
+      rdpCredentialSelection === manualCredentialSelectionValue ? '' : rdpCredentialSelection;
+    if (!selectedCredentialID && !credentials.username.trim()) return;
+    setRdpCredentialPromptBusy(true);
+    try {
+      if (source?.nodeId && rdpCredentialSave) {
+        await saveRuntimeConnectionCredential(
+          source.nodeId,
+          'rdp',
+          selectedCredentialID,
+          credentials,
+        );
+      }
+      setRdpCredentialPrompt(null);
+      setRdpCredentialForm({ username: '', domain: '', password: '' });
+      if (source && canDisconnectRemoteDesktopSession(source)) {
+        if (!(await disconnectRemoteDesktopSession(sessionId))) return;
+      }
+      startRdpSession(
+        sessionId,
+        credentials,
+        !rdpCredentialSave && !selectedCredentialID,
+        !rdpCredentialSave ? selectedCredentialID || undefined : undefined,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Could not save RDP credentials.';
+      setSessions((current) =>
+        current.map((session) =>
+          session.id === sessionId
+            ? { ...session, rdpStatus: 'failed', rdpError: message }
+            : session,
+        ),
+      );
+    } finally {
+      setRdpCredentialPromptBusy(false);
     }
-    startRdpSession(sessionId, credentials, true);
   }
 
   function requestSshCredentials(sessionId: string) {
@@ -3310,12 +3450,18 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     if (!session || session.protocol !== 'ssh' || session.nodeId) return;
     sshCredentialSubmitInFlight.current = false;
     setSshCredentialForm({ username: '', password: '' });
+    setSshCredentialSelection(manualCredentialSelectionValue);
+    setSshCredentialSave(false);
     setSshCredentialPrompt({ kind: 'quick', sessionId });
     setSelectedSessionId(sessionId);
     setActivePage('sessions');
   }
 
-  function startQuickSshSession(sessionId: string, credentials: SshCredentials) {
+  function startQuickSshSession(
+    sessionId: string,
+    credentials: SshCredentials,
+    credentialId?: string,
+  ) {
     const session = sessions.find((candidate) => candidate.id === sessionId);
     if (!session || session.protocol !== 'ssh' || session.nodeId) return;
 
@@ -3341,8 +3487,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       sessionId: backendSessionId,
       host: session.host,
       port: session.port,
-      username,
-      password: credentials.password,
+      credentialId,
+      username: credentialId ? undefined : username,
+      password: credentialId ? undefined : credentials.password,
       tunnelConfigId: session.tunnelConfigId,
     });
   }
@@ -3470,6 +3617,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       if (sshCredentialPrompt?.backendSessionId === closing.backendSessionId) {
         setSshCredentialPrompt(null);
         setSshCredentialForm({ username: '', password: '' });
+      }
+      if (sshKeyPassphrasePrompt?.sessionId === closing.backendSessionId) {
+        setSshKeyPassphrasePrompt(null);
+        setSshKeyPassphrase('');
       }
       await releaseSessionResources(closing);
       setSessions((current) => current.filter((session) => session.id !== id));
@@ -4956,6 +5107,36 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     setTunnels(workspace.tunnels as TunnelRecord[]);
   }
 
+  async function saveRuntimeConnectionCredential(
+    nodeId: string,
+    protocol: 'ssh' | 'rdp',
+    selectedCredentialId: string,
+    credentials: { username: string; domain?: string; password: string },
+  ): Promise<void> {
+    const api = window.wormhole;
+    if (!api) throw new Error('The native workspace bridge is unavailable.');
+    const result = selectedCredentialId
+      ? await api.updateWorkspaceNodeCredential({
+          nodeId,
+          mode: 2,
+          credentialId: selectedCredentialId,
+        })
+      : await api.updateWorkspaceNodeInlineCredential({
+          nodeId,
+          protocol,
+          username: credentials.username.trim(),
+          domain: protocol === 'rdp' ? credentials.domain?.trim() || '' : '',
+          password: credentials.password,
+        });
+    if (!result.updated) throw new Error('The workspace did not save the connection credential.');
+    try {
+      await reloadWorkspaceAfterNodeWrite();
+    } catch {
+      // The Go transaction is already committed. A catalog refresh must not turn a successful
+      // credential save into a duplicate write or prevent this connection attempt.
+    }
+  }
+
   function openNewFolder(parentFolderId?: string | null) {
     setNewFolderForm(blankFolderForm());
     setNewFolderParentId(parentFolderId ?? null);
@@ -5191,6 +5372,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           if (sshCredentialPrompt?.backendSessionId === editedSession.backendSessionId) {
             setSshCredentialPrompt(null);
             setSshCredentialForm({ username: '', password: '' });
+          }
+          if (sshKeyPassphrasePrompt?.sessionId === editedSession.backendSessionId) {
+            setSshKeyPassphrasePrompt(null);
+            setSshKeyPassphrase('');
           }
           if (runtimeBitwardenRetries.current.isEmpty && bitwardenUnlockPrompt) {
             dismissRuntimeBitwardenUnlock();
@@ -6170,6 +6355,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                     !authPrompt &&
                     !rdpCredentialPrompt &&
                     !sshCredentialPrompt &&
+                    !sshKeyPassphrasePrompt &&
                     !pendingSessionClose
                   }
                   selectedSession={selectedSession}
@@ -6325,6 +6511,55 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                 {windowCloseBusy ? 'Terminating sessions…' : 'Close and terminate sessions'}
               </Button>
             </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        <Dialog
+          onOpenChange={(open) => {
+            if (!open) {
+              setSshKeyPassphrasePrompt(null);
+              setSshKeyPassphrase('');
+            }
+          }}
+          open={sshKeyPassphrasePrompt !== null}
+        >
+          <DialogContent className="border-border/70 bg-card text-card-foreground sm:max-w-md">
+            <DialogHeader>
+              <DialogTitle>SSH key passphrase</DialogTitle>
+              <DialogDescription>
+                This private key is encrypted. Enter its passphrase for this connection attempt.
+              </DialogDescription>
+            </DialogHeader>
+            <form className="grid gap-4" onSubmit={submitSshKeyPassphrase}>
+              <div className="grid gap-2">
+                <Label htmlFor="ssh-key-passphrase">Passphrase</Label>
+                <Input
+                  autoFocus
+                  autoComplete="off"
+                  id="ssh-key-passphrase"
+                  onChange={(event) => setSshKeyPassphrase(event.target.value)}
+                  required
+                  type="password"
+                  value={sshKeyPassphrase}
+                />
+              </div>
+              <DialogFooter>
+                <Button
+                  onClick={() => {
+                    setSshKeyPassphrasePrompt(null);
+                    setSshKeyPassphrase('');
+                  }}
+                  type="button"
+                  variant="ghost"
+                >
+                  Cancel
+                </Button>
+                <Button disabled={!sshKeyPassphrase} type="submit">
+                  <Power data-icon="inline-start" />
+                  Connect
+                </Button>
+              </DialogFooter>
+            </form>
           </DialogContent>
         </Dialog>
 
@@ -7441,9 +7676,11 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
 
         <Dialog
           onOpenChange={(open) => {
-            if (!open) {
+            if (!open && !sshCredentialPromptBusy) {
               setSshCredentialPrompt(null);
               setSshCredentialForm({ username: '', password: '' });
+              setSshCredentialSelection(manualCredentialSelectionValue);
+              setSshCredentialSave(false);
             }
           }}
           open={sshCredentialPrompt !== null}
@@ -7452,38 +7689,64 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
             <DialogHeader>
               <DialogTitle>SSH credentials</DialogTitle>
               <DialogDescription>
-                The saved credential is unavailable. Enter credentials for this connection attempt;
-                they stay in memory only.
+                Choose another saved credential or enter account credentials for this connection.
               </DialogDescription>
             </DialogHeader>
             <form className="grid gap-4" onSubmit={submitSshCredentials}>
               <div className="grid gap-2">
-                <Label htmlFor="ssh-username">Username</Label>
-                <Input
-                  autoFocus
-                  autoComplete="username"
-                  id="ssh-username"
-                  onChange={(event) =>
-                    setSshCredentialForm((form) => ({ ...form, username: event.target.value }))
-                  }
-                  required
-                  value={sshCredentialForm.username}
+                <Label htmlFor="ssh-runtime-credential">Credential</Label>
+                <SearchableCombobox
+                  id="ssh-runtime-credential"
+                  emptyMessage="No SSH credentials found."
+                  onValueChange={setSshCredentialSelection}
+                  options={runtimeCredentialSelectionOptions.ssh}
+                  placeholder="Select a credential"
+                  searchPlaceholder="Search SSH credentials…"
+                  value={sshCredentialSelection}
                 />
               </div>
-              <div className="grid gap-2">
-                <Label htmlFor="ssh-password">Password</Label>
-                <Input
-                  autoComplete="current-password"
-                  id="ssh-password"
-                  onChange={(event) =>
-                    setSshCredentialForm((form) => ({ ...form, password: event.target.value }))
-                  }
-                  type="password"
-                  value={sshCredentialForm.password}
-                />
-              </div>
+              {sshCredentialSelection === manualCredentialSelectionValue ? (
+                <>
+                  <div className="grid gap-2">
+                    <Label htmlFor="ssh-username">Username</Label>
+                    <Input
+                      autoFocus
+                      autoComplete="username"
+                      id="ssh-username"
+                      onChange={(event) =>
+                        setSshCredentialForm((form) => ({ ...form, username: event.target.value }))
+                      }
+                      required
+                      value={sshCredentialForm.username}
+                    />
+                  </div>
+                  <div className="grid gap-2">
+                    <Label htmlFor="ssh-password">Password</Label>
+                    <Input
+                      autoComplete="current-password"
+                      id="ssh-password"
+                      onChange={(event) =>
+                        setSshCredentialForm((form) => ({ ...form, password: event.target.value }))
+                      }
+                      required={sshCredentialSave}
+                      type="password"
+                      value={sshCredentialForm.password}
+                    />
+                  </div>
+                </>
+              ) : null}
+              {sshCredentialPrompt?.kind === 'saved' ? (
+                <label className="flex items-center gap-2 text-xs">
+                  <Checkbox
+                    checked={sshCredentialSave}
+                    onCheckedChange={(checked) => setSshCredentialSave(checked === true)}
+                  />
+                  Save to this connection
+                </label>
+              ) : null}
               <DialogFooter>
                 <Button
+                  disabled={sshCredentialPromptBusy}
                   onClick={() => {
                     setSshCredentialPrompt(null);
                     setSshCredentialForm({ username: '', password: '' });
@@ -7493,9 +7756,17 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                 >
                   Cancel
                 </Button>
-                <Button disabled={!sshCredentialForm.username.trim()} type="submit">
+                <Button
+                  disabled={
+                    sshCredentialPromptBusy ||
+                    (sshCredentialSelection === manualCredentialSelectionValue &&
+                      (!sshCredentialForm.username.trim() ||
+                        (sshCredentialSave && !sshCredentialForm.password)))
+                  }
+                  type="submit"
+                >
                   <Power data-icon="inline-start" />
-                  Connect
+                  {sshCredentialPromptBusy ? 'Connecting…' : 'Connect'}
                 </Button>
               </DialogFooter>
             </form>
@@ -7504,9 +7775,11 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
 
         <Dialog
           onOpenChange={(open) => {
-            if (!open) {
+            if (!open && !rdpCredentialPromptBusy) {
               setRdpCredentialPrompt(null);
               setRdpCredentialForm({ username: '', domain: '', password: '' });
+              setRdpCredentialSelection(manualCredentialSelectionValue);
+              setRdpCredentialSave(false);
             }
           }}
           open={rdpCredentialPrompt !== null}
@@ -7515,48 +7788,74 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
             <DialogHeader>
               <DialogTitle>RDP credentials</DialogTitle>
               <DialogDescription>
-                Credentials are used only for this connection attempt and are passed directly to the
-                native RDP provider.
+                Choose a saved credential or enter account credentials for this connection.
               </DialogDescription>
             </DialogHeader>
             <form className="grid gap-4" onSubmit={submitRdpCredentials}>
               <div className="grid gap-2">
-                <Label htmlFor="rdp-username">Username</Label>
-                <Input
-                  autoFocus
-                  id="rdp-username"
-                  onChange={(event) =>
-                    setRdpCredentialForm((form) => ({ ...form, username: event.target.value }))
-                  }
-                  placeholder="user or DOMAIN\\user"
-                  required
-                  value={rdpCredentialForm.username}
+                <Label htmlFor="rdp-runtime-credential">Credential</Label>
+                <SearchableCombobox
+                  id="rdp-runtime-credential"
+                  emptyMessage="No RDP credentials found."
+                  onValueChange={setRdpCredentialSelection}
+                  options={runtimeCredentialSelectionOptions.rdp}
+                  placeholder="Select a credential"
+                  searchPlaceholder="Search RDP credentials…"
+                  value={rdpCredentialSelection}
                 />
               </div>
-              <div className="grid gap-2">
-                <Label htmlFor="rdp-domain">Domain</Label>
-                <Input
-                  id="rdp-domain"
-                  onChange={(event) =>
-                    setRdpCredentialForm((form) => ({ ...form, domain: event.target.value }))
-                  }
-                  placeholder="Optional"
-                  value={rdpCredentialForm.domain}
-                />
-              </div>
-              <div className="grid gap-2">
-                <Label htmlFor="rdp-password">Password</Label>
-                <Input
-                  id="rdp-password"
-                  onChange={(event) =>
-                    setRdpCredentialForm((form) => ({ ...form, password: event.target.value }))
-                  }
-                  type="password"
-                  value={rdpCredentialForm.password}
-                />
-              </div>
+              {rdpCredentialSelection === manualCredentialSelectionValue ? (
+                <>
+                  <div className="grid gap-2">
+                    <Label htmlFor="rdp-username">Username</Label>
+                    <Input
+                      autoFocus
+                      id="rdp-username"
+                      onChange={(event) =>
+                        setRdpCredentialForm((form) => ({ ...form, username: event.target.value }))
+                      }
+                      placeholder="user or DOMAIN\\user"
+                      required
+                      value={rdpCredentialForm.username}
+                    />
+                  </div>
+                  <div className="grid gap-2">
+                    <Label htmlFor="rdp-domain">Domain</Label>
+                    <Input
+                      id="rdp-domain"
+                      onChange={(event) =>
+                        setRdpCredentialForm((form) => ({ ...form, domain: event.target.value }))
+                      }
+                      placeholder="Optional"
+                      value={rdpCredentialForm.domain}
+                    />
+                  </div>
+                  <div className="grid gap-2">
+                    <Label htmlFor="rdp-password">Password</Label>
+                    <Input
+                      id="rdp-password"
+                      onChange={(event) =>
+                        setRdpCredentialForm((form) => ({ ...form, password: event.target.value }))
+                      }
+                      required={rdpCredentialSave}
+                      type="password"
+                      value={rdpCredentialForm.password}
+                    />
+                  </div>
+                </>
+              ) : null}
+              {sessionsRef.current.find((session) => session.id === rdpCredentialPrompt)?.nodeId ? (
+                <label className="flex items-center gap-2 text-xs">
+                  <Checkbox
+                    checked={rdpCredentialSave}
+                    onCheckedChange={(checked) => setRdpCredentialSave(checked === true)}
+                  />
+                  Save to this connection
+                </label>
+              ) : null}
               <DialogFooter>
                 <Button
+                  disabled={rdpCredentialPromptBusy}
                   onClick={() => {
                     setRdpCredentialPrompt(null);
                     setRdpCredentialForm({ username: '', domain: '', password: '' });
@@ -7566,9 +7865,17 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                 >
                   Cancel
                 </Button>
-                <Button type="submit">
+                <Button
+                  disabled={
+                    rdpCredentialPromptBusy ||
+                    (rdpCredentialSelection === manualCredentialSelectionValue &&
+                      (!rdpCredentialForm.username.trim() ||
+                        (rdpCredentialSave && !rdpCredentialForm.password)))
+                  }
+                  type="submit"
+                >
                   <Power data-icon="inline-start" />
-                  Connect
+                  {rdpCredentialPromptBusy ? 'Connecting…' : 'Connect'}
                 </Button>
               </DialogFooter>
             </form>

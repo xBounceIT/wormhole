@@ -87,6 +87,7 @@ type sshWireCommand struct {
 	UsernameOverrideAuthoritative bool                  `json:"username_override_authoritative,omitempty"`
 	PasswordOverride              string                `json:"password_override,omitempty"`
 	CredentialOverride            bool                  `json:"credential_override,omitempty"`
+	KeyPassphraseOverride         string                `json:"key_passphrase_override,omitempty"`
 	TunnelEnabled                 *bool                 `json:"tunnel_enabled,omitempty"`
 	Data                          string                `json:"data"`
 	Path                          string                `json:"path"`
@@ -302,6 +303,7 @@ func (state *sshReconnectState) clearSecrets() {
 	defer state.commandMu.Unlock()
 	state.command.Password = ""
 	state.command.PasswordOverride = ""
+	state.command.KeyPassphraseOverride = ""
 }
 
 type sshSftpTransfer struct {
@@ -510,9 +512,12 @@ func (server *sshServer) open(command sshWireCommand) {
 			command.Port != 0 ||
 			command.Username != "" ||
 			command.Password != "" ||
-			command.CredentialID != "" ||
 			command.TunnelConfigID != "" {
 			server.writeError(command.SessionID, "SSH connection target is invalid")
+			return
+		}
+		if command.CredentialID != "" && !validCredentialID(normalizeID(command.CredentialID)) {
+			server.writeError(command.SessionID, "SSH credential is invalid")
 			return
 		}
 	} else {
@@ -530,8 +535,13 @@ func (server *sshServer) open(command sshWireCommand) {
 		return
 	}
 	if len([]rune(command.UsernameOverride)) > maxCredentialUsernameLength ||
-		len([]rune(command.PasswordOverride)) > maxStoredCredentialPassword {
-		server.writeError(command.SessionID, "SSH Bitwarden credential is invalid")
+		len([]rune(command.PasswordOverride)) > maxStoredCredentialPassword ||
+		len([]rune(command.KeyPassphraseOverride)) > maxStoredCredentialPassword {
+		server.writeError(command.SessionID, "SSH credential override is invalid")
+		return
+	}
+	if command.CredentialOverride && command.CredentialID != "" {
+		server.writeError(command.SessionID, "SSH credential override is ambiguous")
 		return
 	}
 
@@ -636,7 +646,8 @@ func (server *sshServer) openNativeSSH(
 		ctx, server.databasePath, server.electronUserDataPath, nodeID,
 		directTarget, command.CredentialID, command.SocksEndpoint, command.TunnelEnabled,
 		command.UsernameOverride, command.PasswordOverride, command.CredentialOverride,
-		command.UsernameOverrideAuthoritative, command.Columns, command.Rows,
+		command.UsernameOverrideAuthoritative, command.KeyPassphraseOverride,
+		command.Columns, command.Rows,
 	)
 }
 
@@ -2790,6 +2801,7 @@ func openNativeSSH(
 	passwordOverride string,
 	credentialOverride bool,
 	usernameOverrideAuthoritative bool,
+	keyPassphraseOverride string,
 	columns uint32,
 	rows uint32,
 ) (*sshNativeSession, sshTarget, error) {
@@ -2828,13 +2840,14 @@ func openNativeSSH(
 			return nil, sshTarget{}, errors.New("SSH username is required")
 		}
 	} else if nodeID != "" {
-		target, err = loadSSHTargetWithOverrides(
+		target, err = loadSSHTargetWithCredentialOverrides(
 			databasePath,
 			nodeID,
 			usernameOverride,
 			passwordOverride,
 			credentialOverride,
 			usernameOverrideAuthoritative,
+			directCredentialID,
 			electronUserDataPath,
 		)
 	} else {
@@ -2842,6 +2855,9 @@ func openNativeSSH(
 	}
 	if err != nil {
 		return nil, sshTarget{}, err
+	}
+	if keyPassphraseOverride != "" {
+		target.keyPassphrase = keyPassphraseOverride
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, sshTarget{}, err
@@ -2913,6 +2929,10 @@ func dialNativeSSH(
 			)
 		}
 		if parseErr != nil {
+			var missing *ssh.PassphraseMissingError
+			if errors.As(parseErr, &missing) {
+				return nil, "", errors.New("SSH private key passphrase is required")
+			}
 			return nil, "", fmt.Errorf("could not read the SSH private key: %w", parseErr)
 		}
 		config.Auth = append(config.Auth, ssh.PublicKeys(signer))
@@ -3067,6 +3087,19 @@ func loadSSHTargetWithOverrides(
 	usernameOverrideAuthoritative bool,
 	electronUserDataPath ...string,
 ) (sshTarget, error) {
+	return loadSSHTargetWithCredentialOverrides(
+		databasePath, nodeID, usernameOverride, passwordOverride, credentialOverride,
+		usernameOverrideAuthoritative, "", electronUserDataPath...,
+	)
+}
+
+func loadSSHTargetWithCredentialOverrides(
+	databasePath, nodeID, usernameOverride, passwordOverride string,
+	credentialOverride bool,
+	usernameOverrideAuthoritative bool,
+	credentialIDOverride string,
+	electronUserDataPath ...string,
+) (sshTarget, error) {
 	database, err := openDatabase(databasePath, false)
 	if err != nil {
 		return sshTarget{}, err
@@ -3214,6 +3247,24 @@ func loadSSHTargetWithOverrides(
 			true,
 			usernameOverrideAuthoritative,
 		)
+	} else if credentialIDOverride != "" {
+		// An explicitly selected credential owns both halves of the identity for this attempt.
+		// Retaining the connection username here could pair one account with another account's
+		// password or private key.
+		target.username = ""
+		if err := loadSSHCredential(
+			database,
+			databasePath,
+			normalizeID(credentialIDOverride),
+			&target,
+			"",
+			"",
+			false,
+			false,
+			electronUserDataPath...,
+		); err != nil {
+			return sshTarget{}, err
+		}
 	} else if root.useInlinePassword {
 		secret, err := readCredentialSecret(database, root.id, electronUserDataPath...)
 		if err != nil {

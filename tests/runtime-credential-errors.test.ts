@@ -4,6 +4,7 @@ import {
   isBitwardenUnlockError,
   requiresRdpCredentialPrompt,
   requiresSshCredentialPrompt,
+  requiresSshKeyPassphrasePrompt,
   sshCredentialPromptTarget,
 } from '../src/runtime-credential-errors.ts';
 
@@ -11,6 +12,12 @@ test('locked Bitwarden errors preserve the vault unlock flow', () => {
   assert.equal(isBitwardenUnlockError('Bitwarden vault is locked or the session is invalid'), true);
   assert.equal(isBitwardenUnlockError('The linked Bitwarden item was not found'), false);
   assert.equal(isBitwardenUnlockError(undefined), false);
+});
+
+test('encrypted SSH keys request a dedicated passphrase instead of account credentials', () => {
+  assert.equal(requiresSshKeyPassphrasePrompt('SSH private key passphrase is required'), true);
+  assert.equal(requiresSshKeyPassphrasePrompt('SSH authentication failed'), false);
+  assert.equal(requiresSshCredentialPrompt('SSH private key passphrase is required'), false);
 });
 
 test('RDP gateway failures do not open the unrelated primary credential prompt', () => {

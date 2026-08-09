@@ -467,11 +467,19 @@ func workspaceRdpTargetFromChain(chain []map[string]any) (string, int) {
 }
 
 func (m *vncManager) resolveRdpRuntimeProfile(nodeID string, manual *rdpManualCredential) (rdpProfile, error) {
-	return m.resolveRdpProfile(nodeID, manual, false)
+	return m.resolveRdpProfile(nodeID, manual, false, "")
+}
+
+func (m *vncManager) resolveRdpRuntimeProfileWithCredential(
+	nodeID string,
+	manual *rdpManualCredential,
+	credentialID string,
+) (rdpProfile, error) {
+	return m.resolveRdpProfile(nodeID, manual, false, credentialID)
 }
 
 func (m *vncManager) resolveRdpSystemClientProfile(nodeID string) (rdpProfile, rdpSystemClientCapability, error) {
-	profile, err := m.resolveRdpProfile(nodeID, nil, true)
+	profile, err := m.resolveRdpProfile(nodeID, nil, true, "")
 	if err != nil {
 		return rdpProfile{}, rdpSystemClientCapability{}, err
 	}
@@ -506,6 +514,7 @@ func (m *vncManager) resolveRdpProfile(
 	nodeID string,
 	manual *rdpManualCredential,
 	forSystemClient bool,
+	credentialIDOverride string,
 ) (rdpProfile, error) {
 	chain, err := loadRdpNodeChain(m.database, nodeID)
 	if err != nil {
@@ -570,11 +579,13 @@ func (m *vncManager) resolveRdpProfile(
 	}
 	profile.TunnelConfigID = normalizeTunnelID(firstString("TunnelConfigId"))
 	var credentialID string
+	credentialID = normalizeID(credentialIDOverride)
+	credentialOverride := credentialID != ""
 	if manual != nil {
 		profile.Username = strings.TrimSpace(manual.Username)
 		profile.Domain = strings.TrimSpace(manual.Domain)
 		profile.Password = manual.Password
-	} else if !profile.UseExternalClient && !forSystemClient {
+	} else if credentialID == "" && !profile.UseExternalClient && !forSystemClient {
 		credentialID, err = resolveNodeCredentialID(m.database, nodeID, rdpProtocolValue)
 		if err != nil {
 			return rdpProfile{}, err
@@ -609,10 +620,10 @@ func (m *vncManager) resolveRdpProfile(
 			if credentialErr != nil {
 				return rdpProfile{}, credentialErr
 			}
-			if profile.Username == "" {
+			if credentialOverride || profile.Username == "" {
 				profile.Username = credential.Username
 			}
-			if profile.Domain == "" {
+			if credentialOverride || profile.Domain == "" {
 				profile.Domain = credential.Domain
 			}
 			profile.Password = credential.Password

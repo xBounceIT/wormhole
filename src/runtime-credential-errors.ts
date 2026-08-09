@@ -25,6 +25,10 @@ export function requiresSshCredentialPrompt(message: string): boolean {
   );
 }
 
+export function requiresSshKeyPassphrasePrompt(message: string): boolean {
+  return message.toLowerCase().includes('ssh private key passphrase is required');
+}
+
 export function requiresRdpCredentialPrompt(message: string): boolean {
   const value = message.toLowerCase();
   if (

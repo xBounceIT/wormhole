@@ -90,14 +90,15 @@ test('RDP retry cleans a possibly live failed process before starting again', ()
   assert.ok(cleanupIndex >= 0 && cleanupIndex < startIndex);
 });
 
-test('manual RDP credentials disconnect a non-terminal logon attempt before restart', () => {
+test('replacement RDP credentials disconnect a non-terminal logon attempt before restart', () => {
   const submitSource = appSource.slice(
     appSource.indexOf('async function submitRdpCredentials'),
     appSource.indexOf('function requestSshCredentials'),
   );
   const cleanup = submitSource.indexOf('await disconnectRemoteDesktopSession(sessionId)');
-  const restart = submitSource.indexOf('startRdpSession(sessionId, credentials, true)');
+  const restart = submitSource.indexOf('startRdpSession(');
   assert.ok(cleanup >= 0 && restart > cleanup);
+  assert.match(submitSource, /!rdpCredentialSave && !selectedCredentialID/);
 });
 
 test('RDP bounds updates avoid renderer-frame latency and are deduplicated', () => {

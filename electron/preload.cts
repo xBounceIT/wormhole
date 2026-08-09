@@ -172,6 +172,13 @@ const wormholeBridge = {
     mode: 0 | 1 | 2;
     credentialId: string;
   }) => ipcRenderer.invoke('workspace:update-node-credential', request),
+  updateWorkspaceNodeInlineCredential: (request: {
+    nodeId: string;
+    protocol: 'ssh' | 'rdp';
+    username: string;
+    domain: string;
+    password: string;
+  }) => ipcRenderer.invoke('workspace:update-node-inline-credential', request),
   updateWorkspaceNodeWebSettings: (request: {
     nodeId: string;
     httpIgnoreCertErrors: boolean | null;
@@ -441,6 +448,8 @@ const wormholeBridge = {
     columns: number;
     rows: number;
     manualCredentials?: boolean;
+    keyPassphrase?: string;
+    manualKeyPassphrase?: boolean;
     username?: string;
     password?: string;
   }) => ipcRenderer.invoke('ssh:open', request),

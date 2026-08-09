@@ -12,6 +12,7 @@ interface WormholeRdpSurfaceRect {
 interface WormholeRdpProfile {
   nodeId?: string;
   credentialId?: string;
+  credentialIdOverride?: string;
   gatewayCredentialId?: string;
   tunnelConfigId?: string;
   name?: string;
@@ -811,6 +812,13 @@ interface Window {
       mode: 0 | 1 | 2;
       credentialId: string;
     }): Promise<{ updated: boolean }>;
+    updateWorkspaceNodeInlineCredential(request: {
+      nodeId: string;
+      protocol: 'ssh' | 'rdp';
+      username: string;
+      domain: string;
+      password: string;
+    }): Promise<{ updated: boolean }>;
     updateWorkspaceNodeWebSettings(request: {
       nodeId: string;
       httpIgnoreCertErrors: boolean | null;
@@ -1003,6 +1011,8 @@ interface Window {
       columns: number;
       rows: number;
       manualCredentials?: boolean;
+      keyPassphrase?: string;
+      manualKeyPassphrase?: boolean;
     }): Promise<WormholeSshConnected>;
     trustSshHostKey(request: {
       nodeId: string;

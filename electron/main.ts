@@ -204,6 +204,7 @@ type BackendOperation =
   | 'workspace-update-node-web-settings'
   | 'workspace-update-node-tunnel'
   | 'workspace-update-node-credential'
+  | 'workspace-update-node-inline-credential'
   | 'workspace-node-create'
   | 'workspace-node-update'
   | 'tunnel-create'
@@ -628,6 +629,13 @@ type WorkspaceNodeCredentialSettingsRequest = {
   mode: 0 | 1 | 2;
   credentialId: string;
 };
+type WorkspaceNodeInlineCredentialRequest = {
+  nodeId: string;
+  protocol: 'ssh' | 'rdp';
+  username: string;
+  domain: string;
+  password: string;
+};
 type BitwardenCliState = {
   enabled: boolean;
   path: string;
@@ -956,6 +964,8 @@ type SshOpenRequest = {
   columns: number;
   rows: number;
   manualCredentials?: boolean;
+  keyPassphrase?: string;
+  manualKeyPassphrase?: boolean;
 };
 
 type SshHostKeyTrustRequest = {
@@ -1293,6 +1303,17 @@ function isBitwardenPopupOpenRequest(value: unknown): value is BitwardenPopupOpe
   );
 }
 
+function hasValidSshKeyPassphraseOverride(value: Record<string, unknown>): boolean {
+  return (
+    (value.manualKeyPassphrase === undefined || typeof value.manualKeyPassphrase === 'boolean') &&
+    (value.keyPassphrase === undefined ||
+      (typeof value.keyPassphrase === 'string' &&
+        value.keyPassphrase.length > 0 &&
+        Buffer.byteLength(value.keyPassphrase, 'utf8') <= credentialMaxPasswordLength)) &&
+    (value.manualKeyPassphrase === true) === (value.keyPassphrase !== undefined)
+  );
+}
+
 function isSshOpenRequest(value: unknown): value is SshOpenRequest {
   if (
     !isRecord(value) ||
@@ -1315,9 +1336,12 @@ function isSshOpenRequest(value: unknown): value is SshOpenRequest {
       value.host === undefined &&
       value.port === undefined &&
       value.tunnelConfigId === undefined &&
-      value.credentialId === undefined &&
       value.autoSudo === undefined &&
+      (value.credentialId === undefined || isTunnelID(value.credentialId)) &&
       (value.manualCredentials === undefined || typeof value.manualCredentials === 'boolean') &&
+      (value.manualCredentials !== true || value.credentialId === undefined) &&
+      hasValidSshKeyPassphraseOverride(value) &&
+      !(value.manualCredentials === true && value.manualKeyPassphrase === true) &&
       (value.username === undefined ||
         (typeof value.username === 'string' &&
           value.username.length <= credentialMaxUsernameLength)) &&
@@ -1353,6 +1377,8 @@ function isSshOpenRequest(value: unknown): value is SshOpenRequest {
         value.port <= 65535)) &&
     (value.tunnelConfigId === undefined || isTunnelID(value.tunnelConfigId)) &&
     (value.autoSudo === undefined || typeof value.autoSudo === 'boolean') &&
+    hasValidSshKeyPassphraseOverride(value) &&
+    (value.manualKeyPassphrase !== true || credentialId !== undefined) &&
     value.manualCredentials !== true
   );
 }
@@ -1536,6 +1562,26 @@ function isWorkspaceNodeCredentialSettingsRequest(
     (value.mode === 0 || value.mode === 1 || value.mode === 2) &&
     typeof value.credentialId === 'string' &&
     (value.mode !== 2 || /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(value.credentialId))
+  );
+}
+
+function isWorkspaceNodeInlineCredentialRequest(
+  value: unknown,
+): value is WorkspaceNodeInlineCredentialRequest {
+  return (
+    isRecord(value) &&
+    isSshSessionId(value.nodeId) &&
+    (value.protocol === 'ssh' || value.protocol === 'rdp') &&
+    typeof value.username === 'string' &&
+    value.username.trim().length > 0 &&
+    value.username.length <= credentialMaxUsernameLength &&
+    !/[\r\n\0]/.test(value.username) &&
+    typeof value.domain === 'string' &&
+    value.domain.length <= credentialMaxUsernameLength &&
+    !/[\r\n\0]/.test(value.domain) &&
+    typeof value.password === 'string' &&
+    value.password.length > 0 &&
+    Buffer.byteLength(value.password, 'utf8') <= credentialMaxPasswordLength
   );
 }
 
@@ -3100,6 +3146,7 @@ async function resolveNativeRdpProfile(
       username: manualCredentials ? supplied.username : undefined,
       domain: manualCredentials ? supplied.domain : undefined,
       password: manualCredentials ? supplied.password : undefined,
+      credentialId: manualCredentials ? undefined : supplied.credentialIdOverride,
     },
     cliOperationTimeoutMs,
   );
@@ -5599,10 +5646,10 @@ class NativeSshBackend {
     if ((request.nodeId || request.credentialId) && !request.manualCredentials) {
       try {
         bitwardenCredential = await runBitwardenBackend<BitwardenResolvedCredential>(
-          request.nodeId ? 'bitwarden.resolve-node' : 'bitwarden.resolve-credential',
-          request.nodeId
-            ? { nodeId: request.nodeId, protocol: 'ssh' }
-            : { credentialId: request.credentialId, protocol: 'ssh' },
+          request.credentialId ? 'bitwarden.resolve-credential' : 'bitwarden.resolve-node',
+          request.credentialId
+            ? { credentialId: request.credentialId, protocol: 'ssh' }
+            : { nodeId: request.nodeId, protocol: 'ssh' },
         );
       } catch (error) {
         const message = error instanceof Error ? error.message : 'The vault could not be read.';
@@ -5702,13 +5749,15 @@ class NativeSshBackend {
             : bitwardenCredential.bitwarden
               ? bitwardenCredential.username
               : undefined,
-          username_override_authoritative: request.manualCredentials === true,
+          username_override_authoritative:
+            request.manualCredentials === true || request.credentialId !== undefined,
           password_override: request.manualCredentials
             ? request.password
             : bitwardenCredential.bitwarden
               ? bitwardenCredential.password
               : undefined,
           credential_override: request.manualCredentials === true || bitwardenCredential.bitwarden,
+          key_passphrase_override: request.manualKeyPassphrase ? request.keyPassphrase : undefined,
           columns: request.columns,
           rows: request.rows,
         });
@@ -6960,6 +7009,16 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
       return runBackend<{ updated: boolean }>('workspace-update-node-credential', request);
+    });
+  });
+
+  ipcMain.handle('workspace:update-node-inline-credential', async (_event, request: unknown) => {
+    if (!isWorkspaceNodeInlineCredentialRequest(request)) {
+      throw new Error('Workspace inline credential is invalid.');
+    }
+    return serializeAuthOperation(async () => {
+      await requireWorkspaceAuth();
+      return runBackend<{ updated: boolean }>('workspace-update-node-inline-credential', request);
     });
   });
 
@@ -8509,6 +8568,7 @@ function parseRdpStartRequest(value: unknown): RdpStartRequest {
   }
   if (
     (profile.credentialId !== undefined && !isTunnelID(profile.credentialId)) ||
+    (profile.credentialIdOverride !== undefined && !isTunnelID(profile.credentialIdOverride)) ||
     (profile.gatewayCredentialId !== undefined && !isTunnelID(profile.gatewayCredentialId))
   ) {
     throw new Error('RDP credential selection is invalid.');
@@ -8525,6 +8585,12 @@ function parseRdpStartRequest(value: unknown): RdpStartRequest {
   const manualCredentials = valueAsUnknown(value, 'manualCredentials');
   if (manualCredentials !== undefined && typeof manualCredentials !== 'boolean') {
     throw new Error('RDP credential source is invalid.');
+  }
+  if (profile.nodeId === undefined && profile.credentialIdOverride !== undefined) {
+    throw new Error('RDP credential override requires a saved connection.');
+  }
+  if (manualCredentials === true && profile.credentialIdOverride !== undefined) {
+    throw new Error('RDP manual credentials cannot be combined with a saved credential override.');
   }
   return {
     sessionId,

@@ -395,6 +395,90 @@ func TestWorkspaceNodeCredentialSettingRejectsSshKeyForPasswordOnlyProtocol(t *t
 	}
 }
 
+func TestRuntimeCredentialPersistenceReplacesInlineAndSavedBindingsAtomically(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	createWorkspaceNodeTestSchema(t, databasePath)
+	settings := defaultWorkspaceRdpSettings()
+	nodeID, err := createWorkspaceNode(databasePath, workspaceNodeWriteRequest{
+		Name: "RDP", Kind: "connection", Protocol: "rdp", Host: "rdp.example",
+		InlinePasswordAction: "set", InlinePassword: "initial", Username: "old-user", RDP: &settings,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	credentialID := "40000000-0000-4000-8000-000000000001"
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(
+		"INSERT INTO CredentialProfiles (Id, Username, Domain, Protocol, Kind) VALUES (?, ?, ?, 1, 0);",
+		credentialID, "saved-user", "SAVED",
+	); err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	database.Close()
+
+	if err := updateWorkspaceNodeCredentialSettings(databasePath, workspaceNodeCredentialSettingsRequest{
+		NodeID: nodeID, Mode: 2, CredentialID: credentialID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	database, err = openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var username, domain string
+	var mode, inline int
+	var storedID string
+	var secretCount int
+	if err := database.QueryRow(`
+SELECT Username, RdpDomain, CredentialMode, UseInlinePassword, CredentialId
+FROM Nodes WHERE Id = ?;`, nodeID).Scan(&username, &domain, &mode, &inline, &storedID); err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	if err := database.QueryRow(
+		"SELECT COUNT(*) FROM CredentialSecrets WHERE lower(Id) = ?;", nodeID,
+	).Scan(&secretCount); err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	database.Close()
+	if username != "saved-user" || domain != "SAVED" || mode != 2 || inline != 0 ||
+		storedID != credentialID || secretCount != 0 {
+		t.Fatalf("saved binding = user=%q domain=%q mode=%d inline=%d id=%q secrets=%d",
+			username, domain, mode, inline, storedID, secretCount)
+	}
+
+	if err := updateWorkspaceNodeInlineCredential(databasePath, workspaceNodeInlineCredentialRequest{
+		NodeID: nodeID, Protocol: "rdp", Username: "manual-user", Domain: "MANUAL", Password: "replacement",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	database, err = openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var nullableID sql.NullString
+	if err := database.QueryRow(`
+SELECT Username, RdpDomain, CredentialMode, UseInlinePassword, CredentialId
+FROM Nodes WHERE Id = ?;`, nodeID).Scan(&username, &domain, &mode, &inline, &nullableID); err != nil {
+		t.Fatal(err)
+	}
+	secret, found, err := readStoredSecret(database, nodeID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if username != "manual-user" || domain != "MANUAL" || mode != 1 || inline != 1 ||
+		nullableID.Valid || !found || secret != "replacement" {
+		t.Fatalf("manual binding = user=%q domain=%q mode=%d inline=%d id=%#v secret=%q found=%v",
+			username, domain, mode, inline, nullableID, secret, found)
+	}
+}
+
 func TestWorkspaceInlineSecretReplacementRollsBackOnNodeWriteFailure(t *testing.T) {
 	previousStore := credentialSecretStore
 	previousDelete := credentialSecretDelete
