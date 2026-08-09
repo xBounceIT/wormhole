@@ -25,6 +25,9 @@ import {
   type CrashDiagnosticsPolicy,
 } from '../electron/crash-diagnostics.ts';
 
+const dayMs = 24 * 60 * 60 * 1000;
+const testNow = Date.now();
+
 type LogCapture = {
   info: string[];
   warn: string[];
@@ -79,7 +82,7 @@ function initializeHarness(
     processId: 42,
     localAppData: harness.localAppData,
     logger: createLogger(harness.logs),
-    now: Date.UTC(2026, 7, 8),
+    now: testNow,
     policy,
   });
 }
@@ -242,7 +245,7 @@ test('the same logical dump present in two Crashpad locations is reported once',
     const pendingDump = path.join(pending, 'same.dmp');
     writeFileSync(rootDump, 'same');
     writeFileSync(pendingDump, 'same');
-    const modified = new Date(Date.UTC(2026, 7, 7));
+    const modified = new Date(testNow - dayMs);
     utimesSync(rootDump, modified, modified);
     utimesSync(pendingDump, modified, modified);
 
@@ -261,7 +264,7 @@ test('retention removes old and excess dumps plus matching sidecars within appro
     const harness = createHarness(root);
     const pending = path.join(harness.paths.dumpDirectory, 'pending');
     mkdirSync(pending, { recursive: true });
-    const now = Date.UTC(2026, 7, 8);
+    const now = testNow;
     const newest = path.join(pending, 'newest.dmp');
     const excess = path.join(pending, 'excess.dmp');
     const old = path.join(pending, 'old.dmp');
@@ -299,7 +302,7 @@ test('retention breaks equal-time ties with locale-independent ordinal names', (
     const localeFirst = path.join(harness.paths.dumpDirectory, 'ä.dmp');
     writeFileSync(ordinalFirst, 'one');
     writeFileSync(localeFirst, 'two');
-    const modified = new Date(Date.UTC(2026, 7, 7));
+    const modified = new Date(testNow - dayMs);
     utimesSync(ordinalFirst, modified, modified);
     utimesSync(localeFirst, modified, modified);
 
@@ -327,13 +330,9 @@ test('an implausibly future-dated dump cannot displace a current crash from rete
     const future = path.join(harness.paths.dumpDirectory, 'future.dmp');
     writeFileSync(current, 'current');
     writeFileSync(future, 'future');
-    const now = Date.UTC(2026, 7, 8);
+    const now = testNow;
     utimesSync(current, new Date(now), new Date(now));
-    utimesSync(
-      future,
-      new Date(now + 2 * 24 * 60 * 60 * 1000),
-      new Date(now + 2 * 24 * 60 * 60 * 1000),
-    );
+    utimesSync(future, new Date(now + 2 * dayMs), new Date(now + 2 * dayMs));
 
     const result = initializeHarness(harness, {
       ...defaultCrashDiagnosticsPolicy,
@@ -531,7 +530,7 @@ test('cleanup never unlinks a same-metadata file swapped in after reporting', ()
     mkdirSync(harness.paths.dumpDirectory, { recursive: true });
     const dump = path.join(harness.paths.dumpDirectory, 'swap.dmp');
     writeFileSync(dump, 'old!');
-    const modified = new Date(Date.UTC(2026, 7, 7));
+    const modified = new Date(testNow - dayMs);
     utimesSync(dump, modified, modified);
     let swapped = false;
 
@@ -555,7 +554,7 @@ test('cleanup never unlinks a same-metadata file swapped in after reporting', ()
           utimesSync(dump, modified, modified);
         },
       },
-      now: Date.UTC(2026, 7, 8),
+      now: testNow,
       policy: { ...defaultCrashDiagnosticsPolicy, maxTotalBytes: 1 },
     });
 
@@ -598,7 +597,7 @@ test('cleanup never crosses a dump directory swapped after reporting', () => {
           writeFileSync(path.join(pending, 'swap.dmp'), 'unrelated');
         },
       },
-      now: Date.UTC(2026, 7, 8),
+      now: testNow,
       policy: { ...defaultCrashDiagnosticsPolicy, maxTotalBytes: 1 },
     });
 
@@ -648,7 +647,7 @@ test('a fresh maintenance lock avoids concurrent duplicate reporting without dis
     mkdirSync(harness.paths.dumpDirectory, { recursive: true });
     writeFileSync(path.join(harness.paths.dumpDirectory, 'previous.dmp'), 'dump');
     writeFileSync(harness.paths.lockPath, 'another-process');
-    const current = new Date(Date.UTC(2026, 7, 8));
+    const current = new Date(testNow);
     utimesSync(harness.paths.lockPath, current, current);
 
     const result = initializeHarness(harness);
@@ -669,7 +668,7 @@ test('a stale maintenance lock is reclaimed after an interrupted startup', () =>
     mkdirSync(harness.paths.dumpDirectory, { recursive: true });
     writeFileSync(path.join(harness.paths.dumpDirectory, 'previous.dmp'), 'dump');
     writeFileSync(harness.paths.lockPath, 'stale-process');
-    const stale = new Date(Date.UTC(2026, 7, 8) - 10 * 60 * 1000);
+    const stale = new Date(testNow - 10 * 60 * 1000);
     utimesSync(harness.paths.lockPath, stale, stale);
 
     const result = initializeHarness(harness);
@@ -688,7 +687,7 @@ test('a future-dated invalid lock cannot disable maintenance indefinitely', () =
     mkdirSync(harness.paths.dumpDirectory, { recursive: true });
     writeFileSync(path.join(harness.paths.dumpDirectory, 'previous.dmp'), 'dump');
     writeFileSync(harness.paths.lockPath, 'invalid-lock');
-    const future = new Date(Date.UTC(2026, 7, 9));
+    const future = new Date(testNow + dayMs);
     utimesSync(harness.paths.lockPath, future, future);
 
     const result = initializeHarness(harness);
@@ -730,7 +729,7 @@ test('an old lock owned by a live process is not stolen by another instance', ()
       harness.paths.lockPath,
       JSON.stringify({ pid: process.pid, token: '00000000-0000-4000-8000-000000000000' }),
     );
-    const old = new Date(Date.UTC(2026, 7, 8) - 10 * 60 * 1000);
+    const old = new Date(testNow - 10 * 60 * 1000);
     utimesSync(harness.paths.lockPath, old, old);
 
     const result = initializeHarness(harness);
@@ -752,7 +751,7 @@ test('an implausibly old live-PID lock cannot suppress maintenance indefinitely'
       harness.paths.lockPath,
       JSON.stringify({ pid: process.pid, token: '00000000-0000-4000-8000-000000000000' }),
     );
-    const implausiblyOld = new Date(Date.UTC(2026, 7, 8) - 25 * 60 * 60 * 1000);
+    const implausiblyOld = new Date(testNow - 25 * 60 * 60 * 1000);
     utimesSync(harness.paths.lockPath, implausiblyOld, implausiblyOld);
 
     const result = initializeHarness(harness);
@@ -910,7 +909,7 @@ test('pruning is deferred when a new crash cannot be reported', () => {
           throw new Error('logger unavailable');
         },
       },
-      now: Date.UTC(2026, 7, 8),
+      now: testNow,
       policy,
     });
 
@@ -940,7 +939,7 @@ test('a duplicate outside retention is preserved when its retained copy cannot b
     const duplicate = path.join(pending, 'same.dmp');
     writeFileSync(retained, 'same');
     writeFileSync(duplicate, 'same');
-    const modified = new Date(Date.UTC(2026, 7, 7));
+    const modified = new Date(testNow - dayMs);
     utimesSync(retained, modified, modified);
     utimesSync(duplicate, modified, modified);
     const policy = { ...defaultCrashDiagnosticsPolicy, maxDumps: 1 };
@@ -960,7 +959,7 @@ test('a duplicate outside retention is preserved when its retained copy cannot b
           throw new Error('logger unavailable');
         },
       },
-      now: Date.UTC(2026, 7, 8),
+      now: testNow,
       policy,
     });
 
