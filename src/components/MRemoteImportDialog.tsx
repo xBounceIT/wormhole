@@ -21,6 +21,23 @@ import {
   type MRemoteImportPhase,
 } from '../mremote-import-state';
 
+function keyedPreviewNodes(preview: WormholeMRemoteImportPlan['preview']) {
+  const ancestors: string[] = [];
+  const occurrences = new Map<string, number>();
+  return preview.map((node) => {
+    ancestors.length = node.depth;
+    const baseKey = [...ancestors, `${node.kind}:${node.name}`].join('/');
+    const occurrence = occurrences.get(baseKey) ?? 0;
+    occurrences.set(baseKey, occurrence + 1);
+    const key = `${baseKey}#${occurrence}`;
+    ancestors[node.depth] = key;
+    return { key, node };
+  });
+}
+
+// Selection, analysis, commit progress, and cancellation are one generation-guarded import
+// transaction. Keeping their independent states explicit makes stale native events easy to reject.
+// react-doctor-disable-next-line react-doctor/no-giant-component, react-doctor/prefer-useReducer
 export function MRemoteImportDialog({
   open,
   onOpenChange,
@@ -29,6 +46,7 @@ export function MRemoteImportDialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onImported: (workspace: WormholeWorkspaceSnapshot) => void;
+  // react-doctor-disable-next-line react-doctor/prefer-useReducer
 }) {
   const [inspection, setInspection] = useState<WormholeMRemoteImportInspection | null>(null);
   const [plan, setPlan] = useState<WormholeMRemoteImportPlan | null>(null);
@@ -57,10 +75,6 @@ export function MRemoteImportDialog({
     setCommitCancelling(false);
     setError('');
   }
-
-  useEffect(() => {
-    if (!open) reset();
-  }, [open]);
 
   useEffect(() => {
     return window.wormhole?.onOperationProgress((event) => {
@@ -320,10 +334,10 @@ export function MRemoteImportDialog({
                 <p className="mb-2 text-xs font-medium">Plan preview</p>
                 <ScrollArea className="h-44 rounded border border-border/60 bg-background/40">
                   <ul className="py-1 text-xs">
-                    {plan.preview.map((node, index) => (
+                    {keyedPreviewNodes(plan.preview).map(({ key, node }) => (
                       <li
                         className="flex items-center gap-2 px-2 py-1"
-                        key={`${index}-${node.depth}-${node.name}`}
+                        key={key}
                         style={{ paddingLeft: `${Math.min(node.depth, 12) * 12}px` }}
                       >
                         <span className="text-muted-foreground">

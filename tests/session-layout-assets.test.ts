@@ -53,7 +53,10 @@ test('stable VNC identity preserves the single App-owned disconnect lifecycle', 
   assert.match(releaseSource, /vnc\.disconnect/);
   assert.match(vncSource, /const connectAttempt = useRef\(0\)/);
   assert.match(vncSource, /expectedConnectAttempt[\s\S]*connectAttempt\.current/);
-  assert.match(vncSource, /if \(!disconnected\) return;[\s\S]*connectAttempt\.current \+= 1/);
+  assert.match(
+    vncSource,
+    /if \(!disconnected\) void connect\(\);[\s\S]*connectAttempt\.current \+= 1/,
+  );
 });
 
 test('first-open RDP startup reads the committed session snapshot', () => {
@@ -405,7 +408,10 @@ test('editing an open RDP session releases and resets its native lifecycle', () 
 });
 
 test('native web and RDP overlays are hidden while a layout drag is active', () => {
-  assert.match(appSource, /active && isWebSurfaceVisible && !draggedSessionId && !resizingSplitId/);
+  assert.match(
+    appSource,
+    /active && isWebSurfaceVisible && !activeDraggedSessionId && !resizingSplitId/,
+  );
   assert.match(appSource, /<WebSurface[\s\S]*isActive=\{nativeSurfaceActive\}/);
   assert.match(appSource, /<RdpSurface[\s\S]*isActive=\{nativeSurfaceActive\}/);
   assert.match(appSource, /session\.sftp && isActive/);
@@ -455,7 +461,11 @@ test('drag cancellation clears both the dragged tab and its visual target', () =
     appSource,
     /onDragEnd=\{\(\) => \{\s*setDraggedSessionId\(''\);\s*setDropPreview\(null\);/,
   );
-  assert.match(appSource, /!sessionIds\.includes\(draggedSessionId\)/);
+  assert.match(
+    appSource,
+    /const dragIsValid = !draggedSessionId \|\| sessionIds\.includes\(draggedSessionId\)/,
+  );
+  assert.match(appSource, /const activeDropPreview = dragIsValid \? dropPreview : null/);
 });
 
 test('session pane chrome stays neutral and tab labels match connection tree typography', () => {

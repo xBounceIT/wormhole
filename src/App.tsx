@@ -849,6 +849,9 @@ function applySshTerminalFrame(
 
   for (const change of incoming.changes) {
     if (change.index < 0 || change.index >= cells.length) continue;
+    // React Doctor mistakes this fresh local buffer for React state. It is copied above and never
+    // aliases the previous frame.
+    // react-doctor-disable-next-line react-doctor/no-side-effect-in-state-updater-function
     cells[change.index] = {
       character: change.character,
       foreground: change.foreground,
@@ -1272,6 +1275,7 @@ function AuthPrompt({
   const [busy, setBusy] = useState(false);
   const [helloBusy, setHelloBusy] = useState(false);
   const helloInFlight = useRef(false);
+  const dialogRef = useRef<HTMLDialogElement>(null);
   const method: WormholeAuthFallback =
     state.mode === 'password' || (state.mode === 'windowsHello' && state.fallback === 'password')
       ? 'password'
@@ -1279,40 +1283,64 @@ function AuthPrompt({
   const isHelloMode = state.mode === 'windowsHello';
   const fallbackName = method === 'pin' ? 'Wormhole PIN' : 'Wormhole password';
 
-  async function tryWindowsHello() {
+  function tryWindowsHello(cancelled: () => boolean = () => false) {
     if (helloInFlight.current || !window.wormhole) return;
 
+    const api = window.wormhole;
     helloInFlight.current = true;
     setHelloBusy(true);
     setStatus('Waiting for Windows Hello…');
-    try {
-      const availability = await window.wormhole.checkWindowsHello();
-      if (!availability.available) {
-        setStatus(`${availability.message} You can use your ${fallbackName} instead.`);
-        return;
-      }
-      const result = await window.wormhole.verifyWindowsHello();
-      if (result.succeeded) {
-        onResult(true);
-        return;
-      }
-      setStatus(result.message || `Windows Hello didn't recognize you. Use your ${fallbackName}.`);
-    } catch {
-      setStatus(`Windows Hello isn't available right now. Use your ${fallbackName}.`);
-    } finally {
-      helloInFlight.current = false;
-      setHelloBusy(false);
-    }
+    return api
+      .checkWindowsHello()
+      .then((availability) => {
+        if (cancelled()) return;
+        if (!availability.available) {
+          setStatus(`${availability.message} You can use your ${fallbackName} instead.`);
+          return;
+        }
+        return api.verifyWindowsHello().then((result) => {
+          if (cancelled()) return;
+          if (result.succeeded) {
+            onResult(true);
+            return;
+          }
+          setStatus(
+            result.message || `Windows Hello didn't recognize you. Use your ${fallbackName}.`,
+          );
+        });
+      })
+      .catch(() => {
+        if (!cancelled()) {
+          setStatus(`Windows Hello isn't available right now. Use your ${fallbackName}.`);
+        }
+      })
+      .finally(() => {
+        helloInFlight.current = false;
+        if (!cancelled()) setHelloBusy(false);
+      });
   }
 
   useEffect(() => {
+    let cancelled = false;
     setSecret('');
     setStatus('');
-    if (request.autoWindowsHello && isHelloMode) void tryWindowsHello();
+    if (request.autoWindowsHello && isHelloMode) {
+      void tryWindowsHello(() => cancelled);
+    }
+    return () => {
+      cancelled = true;
+    };
     // The prompt is intentionally restarted when the configured mode changes. The callback is
     // local to this prompt instance and does not need to be a stable dependency.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [request.reason, request.autoWindowsHello, isHelloMode, method]);
+
+  useLayoutEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+    dialog.showModal();
+    return () => dialog.close();
+  }, []);
 
   async function submitSecret(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -1336,12 +1364,15 @@ function AuthPrompt({
   }
 
   return (
-    <div
+    <dialog
+      ref={dialogRef}
       aria-describedby="auth-prompt-description"
       aria-labelledby="auth-prompt-title"
-      aria-modal="true"
-      className="fixed inset-0 z-[100] flex items-center justify-center bg-background/85 p-5 backdrop-blur-md"
-      role="dialog"
+      className="fixed inset-0 z-[100] m-0 h-auto max-h-none w-auto max-w-none border-0 bg-background/85 p-5 backdrop-blur-md open:flex open:items-center open:justify-center"
+      onCancel={(event) => {
+        event.preventDefault();
+        if (request.kind === 'confirmation') onResult(false);
+      }}
     >
       <Card className="w-full max-w-[400px] gap-0 border-border/80 bg-card py-0 shadow-[0_24px_80px_rgba(0,0,0,0.45)]">
         <CardHeader className="gap-3 px-5 py-5">
@@ -1425,7 +1456,7 @@ function AuthPrompt({
           </form>
         </CardContent>
       </Card>
-    </div>
+    </dialog>
   );
 }
 
@@ -1444,12 +1475,92 @@ const connectionTreeShortcutPortaledWidgetSelector = [
   '[data-slot="select-content"][data-state="open"]',
 ].join(', ');
 
+function useLazyRef<T>(initializer: () => T): { current: T } {
+  const ref = useRef<T | null>(null);
+  // This is React's documented lazy-ref initialization pattern: the same object is retained after
+  // the first render and the initializer is not observable outside this component.
+  // react-doctor-disable-next-line react-doctor/no-ref-current-in-render
+  if (ref.current === null) ref.current = initializer();
+  return ref as { current: T };
+}
+
+function getTreeDropPlacement(event: DragEvent<HTMLDivElement>, node: TreeNode): DropPlacement {
+  const bounds = event.currentTarget.getBoundingClientRect();
+  const position = (event.clientY - bounds.top) / Math.max(bounds.height, 1);
+
+  if (node.kind === 'folder' && position > 0.25 && position < 0.75) return 'inside';
+  return position < 0.5 ? 'before' : 'after';
+}
+
+function savedSerialNodeId(nodeId: string | undefined): string | undefined {
+  return nodeId && !nodeId.startsWith('connection-') ? nodeId : undefined;
+}
+
+function defaultRdpProfile(session: Session): WormholeRdpProfile {
+  if (session.nodeId) {
+    // Go reloads the complete saved/inherited profile and its protected credentials from this
+    // identity. Renderer values are intentionally limited to safe routing metadata.
+    return {
+      nodeId: session.nodeId,
+      name: session.title,
+      host: session.host,
+      port: session.port,
+    };
+  }
+  return {
+    ...session.rdpProfile,
+    nodeId: session.nodeId,
+    name: session.title,
+    host: session.host,
+    port: session.port,
+    screenSize: session.rdpProfile?.screenSize ?? 'Full connection content',
+    colorDepth: session.rdpProfile?.colorDepth ?? 32,
+    redirectClipboard: session.rdpProfile?.redirectClipboard ?? true,
+    connectionSpeed: session.rdpProfile?.connectionSpeed ?? 7,
+    desktopBackground: session.rdpProfile?.desktopBackground ?? true,
+    fontSmoothing: session.rdpProfile?.fontSmoothing ?? true,
+    desktopComposition: session.rdpProfile?.desktopComposition ?? true,
+    windowDrag: session.rdpProfile?.windowDrag ?? true,
+    menuAnimation: session.rdpProfile?.menuAnimation ?? true,
+    visualStyles: session.rdpProfile?.visualStyles ?? true,
+    bitmapCaching: session.rdpProfile?.bitmapCaching ?? true,
+    autoReconnect: session.rdpProfile?.autoReconnect ?? true,
+    serverAuthentication: session.rdpProfile?.serverAuthentication ?? 2,
+    gatewayBypassLocal: session.rdpProfile?.gatewayBypassLocal ?? true,
+    tunnelConfigId: session.tunnelConfigId,
+    tunnelEnabled: session.tunnelConfigId ? true : undefined,
+  };
+}
+
+function authSettingsErrorMessage(error: unknown): string {
+  if (error instanceof Error && /^(PIN|Password) (must|can)/.test(error.message)) {
+    return error.message;
+  }
+  return "Wormhole couldn't save this change. Try again.";
+}
+
+function backupOperationErrorMessage(error: unknown): string {
+  if (!(error instanceof Error) || !error.message) {
+    return "Wormhole couldn't complete the backup operation.";
+  }
+  if (/password is incorrect|wrong password/i.test(error.message)) {
+    return 'Wrong password, or the backup file is corrupted. Try again.';
+  }
+  return error.message.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, '');
+}
+
+// App owns independent, long-lived desktop domains (workspace, auth, sessions, tunnels, and
+// updates). Folding those state machines into one reducer would couple unrelated transitions, and
+// splitting the coordinator would duplicate the native lifecycle boundary across components.
+// react-doctor-disable-next-line react-doctor/no-giant-component, react-doctor/prefer-useReducer
 function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAppProps) {
   const [theme, setTheme] = useState<Theme>(initialSettings.theme);
   const [systemTheme, setSystemTheme] = useState<ResolvedTheme>(getSystemTheme);
   const [tree, setTree] = useState<TreeNode[]>(initialWorkspace.tree);
   const treeRef = useRef(tree);
-  treeRef.current = tree;
+  useLayoutEffect(() => {
+    treeRef.current = tree;
+  }, [tree]);
   const [credentials, setCredentials] = useState<CredentialRecord[]>(initialWorkspace.credentials);
   const [credentialOptions, setCredentialOptions] = useState<CredentialOptionGroups>(() =>
     workspaceCredentialOptions(initialWorkspace),
@@ -1477,13 +1588,13 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   }, [activeTunnelPromptId]);
   const authPromptResolver = useRef<((succeeded: boolean) => void) | null>(null);
   const idleCheckInFlight = useRef(false);
-  const lastActivityAt = useRef(Date.now());
+  const lastActivityAt = useLazyRef(Date.now);
   const quickConnectSubmitInFlight = useRef(false);
   const sshCredentialSubmitInFlight = useRef(false);
-  const webSessionAttempts = useRef(new WebSessionAttemptTracker());
+  const webSessionAttempts = useLazyRef(() => new WebSessionAttemptTracker());
   const webSessionOpenInFlight = useRef(new Map<string, number>());
   const rdpSavedCredentialAttempts = useRef(new Set<string>());
-  const runtimeBitwardenRetries = useRef(new KeyedRetryQueue<string>());
+  const [runtimeBitwardenRetries] = useState(() => new KeyedRetryQueue<string>());
   const [activePage, setActivePage] = useState<NavItem>('sessions');
   const [expanded, setExpanded] = useState<Set<string>>(
     () => new Set(collectFolderIds(initialWorkspace.tree)),
@@ -1495,7 +1606,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   const [searchText, setSearchText] = useState('');
   const [sessions, setSessions] = useState<Session[]>([]);
   const sessionsRef = useRef(sessions);
-  sessionsRef.current = sessions;
+  useLayoutEffect(() => {
+    sessionsRef.current = sessions;
+  }, [sessions]);
   const [selectedSessionId, setSelectedSessionId] = useState('');
   const [rdpCredentialPrompt, setRdpCredentialPrompt] = useState<string | null>(null);
   const [rdpCredentialForm, setRdpCredentialForm] = useState<RdpCredentials>({
@@ -1538,7 +1651,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   const [connectionEditorMode, setConnectionEditorMode] = useState<'saved' | 'quick'>('saved');
   const [editingConnectionId, setEditingConnectionId] = useState<string | null>(null);
   const [folderDetailsOpen, setFolderDetailsOpen] = useState(false);
-  const [editingFolderId, setEditingFolderId] = useState<string | null>(null);
+  const editingFolderId = useRef<string | null>(null);
   const [folderDetailsForm, setFolderDetailsForm] = useState<FolderForm>(blankFolderForm);
   const [editorError, setEditorError] = useState('');
   const [editorBusy, setEditorBusy] = useState(false);
@@ -1546,7 +1659,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   const [copiedCredentialField, setCopiedCredentialField] = useState<CredentialCopyField | null>(
     null,
   );
-  const [credentialRevealBusy, setCredentialRevealBusy] = useState(false);
+  const credentialRevealBusy = useRef(false);
   const credentialRevealRequest = useRef(0);
   const copiedCredentialTimer = useRef<number | undefined>(undefined);
   const [pendingDeleteNodes, setPendingDeleteNodes] = useState<TreeNode[]>([]);
@@ -1572,7 +1685,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   const rdpExternalClientRequirementRequest = useRef(0);
   const [newFolderOpen, setNewFolderOpen] = useState(false);
   const [newFolderForm, setNewFolderForm] = useState<FolderForm>(blankFolderForm);
-  const [newFolderParentId, setNewFolderParentId] = useState<string | null>(null);
+  const newFolderParentId = useRef<string | null>(null);
   const [updateCurrentVersion, setUpdateCurrentVersion] = useState('');
   const [updateResult, setUpdateResult] = useState<WormholeUpdateCheckResult | null>(null);
   const [autoCheckForUpdates, setAutoCheckForUpdates] = useState(
@@ -1606,11 +1719,11 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       ),
     [initialSettings.sidebarWidth],
   );
-  const sessionCloseGate = useRef(new SessionCloseGate());
-  const sessionDisconnectGate = useRef(new SessionCloseGate());
-  const sessionResourceReleaseGate = useRef(new SessionResourceReleaseGate());
-  const rdpSessionAttempts = useRef(new WebSessionAttemptTracker());
-  const rdpCapabilityAttempts = useRef(new WebSessionAttemptTracker());
+  const sessionCloseGate = useLazyRef(() => new SessionCloseGate());
+  const sessionDisconnectGate = useLazyRef(() => new SessionCloseGate());
+  const sessionResourceReleaseGate = useLazyRef(() => new SessionResourceReleaseGate());
+  const rdpSessionAttempts = useLazyRef(() => new WebSessionAttemptTracker());
+  const rdpCapabilityAttempts = useLazyRef(() => new WebSessionAttemptTracker());
   const [updateBusy, setUpdateBusy] = useState(false);
   const [updateStatus, setUpdateStatus] = useState('');
   const [updateDownloadProgress, setUpdateDownloadProgress] = useState<number | null>(null);
@@ -1976,16 +2089,37 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     };
     window.addEventListener('keydown', markActivity);
     window.addEventListener('pointerdown', markActivity);
-    window.addEventListener('touchstart', markActivity);
+    window.addEventListener('touchstart', markActivity, { passive: true });
     return () => {
       window.removeEventListener('keydown', markActivity);
       window.removeEventListener('pointerdown', markActivity);
       window.removeEventListener('touchstart', markActivity);
     };
-  }, []);
+  }, [lastActivityAt]);
 
   useEffect(() => {
     const unsubscribe = window.wormhole?.onSshEvent((event) => {
+      if (event.type === 'sftp.transfer') {
+        const terminalBatch =
+          event.transferState === 'batch-failed' ||
+          event.transferState === 'batch-completed' ||
+          event.transferState === 'batch-cancelled';
+        if (terminalBatch) {
+          clearSftpCancelRequestsForTransfer(sftpCancelRequests.current, event.transferId);
+        } else if (event.itemId) {
+          const itemKey = sftpTransferItemKey(event.transferId, event.itemId);
+          if (sftpCancelRequests.current.has(itemKey)) {
+            if (
+              event.transferState === 'completed' ||
+              event.transferState === 'failed' ||
+              event.transferState === 'cancelled'
+            ) {
+              sftpCancelRequests.current.delete(itemKey);
+            }
+            return;
+          }
+        }
+      }
       setSessions((current) =>
         current.map((session) => {
           if (session.backendSessionId !== event.sessionId) return session;
@@ -2196,28 +2330,6 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
             return { ...session, sftp: { ...session.sftp, conflict } };
           }
           if (event.type === 'sftp.transfer') {
-            if (
-              event.transferState === 'batch-failed' ||
-              event.transferState === 'batch-completed' ||
-              event.transferState === 'batch-cancelled'
-            ) {
-              clearSftpCancelRequestsForTransfer(sftpCancelRequests.current, event.transferId);
-            }
-            if (
-              event.itemId &&
-              sftpCancelRequests.current.has(sftpTransferItemKey(event.transferId, event.itemId))
-            ) {
-              if (
-                event.transferState === 'completed' ||
-                event.transferState === 'failed' ||
-                event.transferState === 'cancelled'
-              ) {
-                sftpCancelRequests.current.delete(
-                  sftpTransferItemKey(event.transferId, event.itemId),
-                );
-              }
-              return session;
-            }
             if (
               !session.sftp ||
               session.sftp.status === 'closing' ||
@@ -2475,7 +2587,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       try {
         const systemIdle = await window.wormhole.getSystemIdleSeconds();
         const localIdle = Math.max(0, (Date.now() - lastActivityAt.current) / 1000);
-        if (Math.max(systemIdle.seconds, localIdle) >= timeoutMinutes * 60) {
+        if (Math.max(systemIdle.seconds, localIdle) >= (timeoutMinutes ?? 0) * 60) {
           try {
             await window.wormhole.lockAuthentication();
             setLockReason('Locked after inactivity.');
@@ -2494,7 +2606,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
 
     const timer = window.setInterval(() => void checkIdle(), 15_000);
     return () => window.clearInterval(timer);
-  }, [authGate, authState]);
+  }, [authGate, authState, lastActivityAt]);
 
   useEffect(() => {
     if (authGate === 'unlocked') return;
@@ -2513,7 +2625,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     setFolderDetailsOpen(false);
     setNewFolderOpen(false);
     setEditingConnectionId(null);
-    setEditingFolderId(null);
+    editingFolderId.current = null;
     setSshCredentialPrompt(null);
     setSshCredentialForm({ username: '', password: '' });
     setSshKeyPassphrasePrompt(null);
@@ -2521,11 +2633,11 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     setRdpCredentialPrompt(null);
     setRdpCredentialForm({ username: '', domain: '', password: '' });
     rdpSavedCredentialAttempts.current.clear();
-    runtimeBitwardenRetries.current.clear();
+    runtimeBitwardenRetries.clear();
     setBitwardenUnlockPrompt(null);
     setBitwardenUnlockPassword('');
     setBitwardenUnlockError('');
-    setNewFolderParentId(null);
+    newFolderParentId.current = null;
     setEditorError('');
     setCredentialDialog(null);
     setCopiedCredentialField(null);
@@ -2536,7 +2648,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       return current.map((session) => ({ ...session, sftp: undefined }));
     });
     setMcpApprovals([]);
-  }, [authGate]);
+  }, [authGate, runtimeBitwardenRetries]);
 
   useEffect(
     () => () => {
@@ -2610,7 +2722,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       );
     });
     return unsubscribe;
-  }, []);
+  }, [webSessionAttempts]);
 
   useEffect(() => {
     const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
@@ -2700,27 +2812,20 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   function getDraggedNodeIds(node: TreeNode): string[] {
     if (!selectedTreeNodeIds.has(node.id)) return [node.id];
 
-    const selectedIds = [...selectedTreeNodeIds].filter((id) => findTreeNode(tree, id));
-    const selectedNodes = selectedIds
-      .map((id) => findTreeNode(tree, id))
-      .filter((selected): selected is TreeNode => Boolean(selected));
+    const selectedNodes: TreeNode[] = [];
+    for (const id of selectedTreeNodeIds) {
+      const selected = findTreeNode(tree, id);
+      if (selected) selectedNodes.push(selected);
+    }
 
-    return selectedNodes
-      .filter(
-        (selected) =>
-          !selectedNodes.some(
-            (ancestor) => ancestor.id !== selected.id && containsTreeNode(ancestor, selected.id),
-          ),
-      )
-      .map((selected) => selected.id);
-  }
-
-  function getTreeDropPlacement(event: DragEvent<HTMLDivElement>, node: TreeNode): DropPlacement {
-    const bounds = event.currentTarget.getBoundingClientRect();
-    const position = (event.clientY - bounds.top) / Math.max(bounds.height, 1);
-
-    if (node.kind === 'folder' && position > 0.25 && position < 0.75) return 'inside';
-    return position < 0.5 ? 'before' : 'after';
+    const topLevelIds: string[] = [];
+    for (const selected of selectedNodes) {
+      const nested = selectedNodes.some(
+        (ancestor) => ancestor.id !== selected.id && containsTreeNode(ancestor, selected.id),
+      );
+      if (!nested) topLevelIds.push(selected.id);
+    }
+    return topLevelIds;
   }
 
   function handleTreeDragStart(event: DragEvent<HTMLButtonElement>, node: TreeNode) {
@@ -2929,7 +3034,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   }
 
   function requestRuntimeBitwardenUnlock(key: string, reason: string, retry: () => void) {
-    const isFirst = runtimeBitwardenRetries.current.upsert(key, retry);
+    const isFirst = runtimeBitwardenRetries.upsert(key, retry);
     if (isFirst) {
       setBitwardenUnlockPassword('');
       setBitwardenUnlockError('');
@@ -2938,7 +3043,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   }
 
   function dismissRuntimeBitwardenUnlock() {
-    runtimeBitwardenRetries.current.clear();
+    runtimeBitwardenRetries.clear();
     setBitwardenUnlockPrompt(null);
     setBitwardenUnlockPassword('');
     setBitwardenUnlockError('');
@@ -2960,7 +3065,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         // The vault session is already valid. A transient catalog refresh failure must not keep
         // live connections blocked; the next workspace refresh will reconcile the visible list.
       }
-      const retries = runtimeBitwardenRetries.current.drain();
+      const retries = runtimeBitwardenRetries.drain();
       setBitwardenUnlockPrompt(null);
       for (const retry of retries) retry();
     } catch (error: unknown) {
@@ -3006,10 +3111,6 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         ),
       );
     });
-  }
-
-  function savedSerialNodeId(nodeId: string | undefined): string | undefined {
-    return nodeId && !nodeId.startsWith('connection-') ? nodeId : undefined;
   }
 
   function startWebSession(session: Session) {
@@ -3093,42 +3194,6 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     webSessionOpenInFlight.current.delete(sessionId);
     webSessionAttempts.current.cancel(sessionId);
     await window.wormhole?.closeWebSession(sessionId);
-  }
-
-  function defaultRdpProfile(session: Session): WormholeRdpProfile {
-    if (session.nodeId) {
-      // Go reloads the complete saved/inherited profile and its protected credentials from this
-      // identity. Renderer values are intentionally limited to safe routing metadata.
-      return {
-        nodeId: session.nodeId,
-        name: session.title,
-        host: session.host,
-        port: session.port,
-      };
-    }
-    return {
-      ...session.rdpProfile,
-      nodeId: session.nodeId,
-      name: session.title,
-      host: session.host,
-      port: session.port,
-      screenSize: session.rdpProfile?.screenSize ?? 'Full connection content',
-      colorDepth: session.rdpProfile?.colorDepth ?? 32,
-      redirectClipboard: session.rdpProfile?.redirectClipboard ?? true,
-      connectionSpeed: session.rdpProfile?.connectionSpeed ?? 7,
-      desktopBackground: session.rdpProfile?.desktopBackground ?? true,
-      fontSmoothing: session.rdpProfile?.fontSmoothing ?? true,
-      desktopComposition: session.rdpProfile?.desktopComposition ?? true,
-      windowDrag: session.rdpProfile?.windowDrag ?? true,
-      menuAnimation: session.rdpProfile?.menuAnimation ?? true,
-      visualStyles: session.rdpProfile?.visualStyles ?? true,
-      bitmapCaching: session.rdpProfile?.bitmapCaching ?? true,
-      autoReconnect: session.rdpProfile?.autoReconnect ?? true,
-      serverAuthentication: session.rdpProfile?.serverAuthentication ?? 2,
-      gatewayBypassLocal: session.rdpProfile?.gatewayBypassLocal ?? true,
-      tunnelConfigId: session.tunnelConfigId,
-      tunnelEnabled: session.tunnelConfigId ? true : undefined,
-    };
   }
 
   async function requestRdpCredentials(sessionId: string) {
@@ -3299,7 +3364,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           );
         });
     },
-    [],
+    [rdpCapabilityAttempts],
   );
 
   useLayoutEffect(() => {
@@ -3334,7 +3399,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           }
         }
         for (const key of sessionRuntimeRetryKeys(source)) {
-          runtimeBitwardenRetries.current.remove(key);
+          runtimeBitwardenRetries.remove(key);
         }
         setSessions((current) =>
           current.map((session) =>
@@ -3607,9 +3672,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     if (!closing) return;
     await sessionCloseGate.current.run(id, async () => {
       for (const key of sessionRuntimeRetryKeys(closing)) {
-        runtimeBitwardenRetries.current.remove(key);
+        runtimeBitwardenRetries.remove(key);
       }
-      if (runtimeBitwardenRetries.current.isEmpty && bitwardenUnlockPrompt) {
+      if (runtimeBitwardenRetries.isEmpty && bitwardenUnlockPrompt) {
         dismissRuntimeBitwardenUnlock();
       }
       rdpSavedCredentialAttempts.current.delete(id);
@@ -3677,11 +3742,11 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     const closingIds = new Set(closing.map((session) => session.id));
     for (const session of closing) {
       for (const key of sessionRuntimeRetryKeys(session)) {
-        runtimeBitwardenRetries.current.remove(key);
+        runtimeBitwardenRetries.remove(key);
       }
       rdpSavedCredentialAttempts.current.delete(session.id);
     }
-    if (runtimeBitwardenRetries.current.isEmpty && bitwardenUnlockPrompt) {
+    if (runtimeBitwardenRetries.isEmpty && bitwardenUnlockPrompt) {
       dismissRuntimeBitwardenUnlock();
     }
     await Promise.allSettled(closing.map(releaseSessionResources));
@@ -3710,7 +3775,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   }
 
   const releaseSessionResourcesRef = useRef(releaseSessionResources);
-  releaseSessionResourcesRef.current = releaseSessionResources;
+  useLayoutEffect(() => {
+    releaseSessionResourcesRef.current = releaseSessionResources;
+  });
   useEffect(() => {
     return window.wormhole?.onWindowCloseRequested(async () => {
       await sidebarWriter.flush().catch(() => undefined);
@@ -4663,10 +4730,12 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     );
   }
 
-  sftpRefreshHandlers.current = {
-    local: requestLocalSftpDirectory,
-    remote: requestSftpDirectory,
-  };
+  useLayoutEffect(() => {
+    sftpRefreshHandlers.current = {
+      local: requestLocalSftpDirectory,
+      remote: requestSftpDirectory,
+    };
+  });
 
   useEffect(() => {
     const pending = sessions.find((session) => {
@@ -4863,10 +4932,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
 
   async function showConnectionCredentials(node: TreeNode) {
     const api = window.wormhole;
-    if (node.kind !== 'connection' || !api || credentialRevealBusy) return;
+    if (node.kind !== 'connection' || !api || credentialRevealBusy.current) return;
 
     const requestId = ++credentialRevealRequest.current;
-    setCredentialRevealBusy(true);
+    credentialRevealBusy.current = true;
     try {
       const result = await api.showWorkspaceCredentials({ nodeId: node.id });
       if (credentialRevealRequest.current !== requestId) return;
@@ -4880,7 +4949,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           error instanceof Error ? error.message : 'Could not show the connection credentials.',
       });
     } finally {
-      setCredentialRevealBusy(false);
+      credentialRevealBusy.current = false;
     }
   }
 
@@ -5079,7 +5148,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     if (node.kind !== 'folder') return;
 
     setSelectedNodeId(node.id);
-    setEditingFolderId(node.id);
+    editingFolderId.current = node.id;
     setEditorError('');
     setFolderDetailsForm({
       name: node.name,
@@ -5139,7 +5208,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
 
   function openNewFolder(parentFolderId?: string | null) {
     setNewFolderForm(blankFolderForm());
-    setNewFolderParentId(parentFolderId ?? null);
+    newFolderParentId.current = parentFolderId ?? null;
     setEditorError('');
     setNewFolderOpen(true);
   }
@@ -5365,7 +5434,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         const editedSession = sessions.find((session) => session.id === editedSessionId);
         if (editedSession) {
           for (const key of sessionRuntimeRetryKeys(editedSession)) {
-            runtimeBitwardenRetries.current.remove(key);
+            runtimeBitwardenRetries.remove(key);
           }
           rdpSavedCredentialAttempts.current.delete(editedSession.id);
           if (rdpCredentialPrompt === editedSession.id) setRdpCredentialPrompt(null);
@@ -5377,7 +5446,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
             setSshKeyPassphrasePrompt(null);
             setSshKeyPassphrase('');
           }
-          if (runtimeBitwardenRetries.current.isEmpty && bitwardenUnlockPrompt) {
+          if (runtimeBitwardenRetries.isEmpty && bitwardenUnlockPrompt) {
             dismissRuntimeBitwardenUnlock();
           }
           await releaseSessionResources(editedSession);
@@ -5495,21 +5564,21 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
 
   async function submitFolderDetails(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (editorBusy || !editingFolderId) return;
+    if (editorBusy || !editingFolderId.current) return;
     const name = folderDetailsForm.name.trim();
     if (!name) return;
 
     setEditorBusy(true);
     setEditorError('');
     try {
-      const folder = findTreeNode(tree, editingFolderId);
+      const folder = findTreeNode(tree, editingFolderId.current);
       if (!folder) return;
       if (!window.wormhole) throw new Error('The workspace service is unavailable.');
       const tunnel = tunnelValueFor(folderDetailsForm.tunnel);
       const credential = credentialSettingsFor(folderDetailsForm.credential);
       const result = await window.wormhole.updateWorkspaceNode({
-        id: editingFolderId,
-        parentId: findParentFolderId(tree, editingFolderId) ?? '',
+        id: editingFolderId.current,
+        parentId: findParentFolderId(tree, editingFolderId.current) ?? '',
         name,
         kind: 'folder',
         protocol: '',
@@ -5533,7 +5602,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       if (!result.updated) throw new Error('The workspace did not save the folder.');
       await reloadWorkspaceAfterNodeWrite();
       setFolderDetailsOpen(false);
-      setEditingFolderId(null);
+      editingFolderId.current = null;
     } catch (error: unknown) {
       setEditorError(error instanceof Error ? error.message : 'Could not save the folder.');
     } finally {
@@ -5553,7 +5622,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       const tunnel = tunnelValueFor(newFolderForm.tunnel);
       const credential = credentialSettingsFor(newFolderForm.credential);
       const result = await window.wormhole.createWorkspaceNode({
-        parentId: newFolderParentId ?? '',
+        parentId: newFolderParentId.current ?? '',
         name,
         kind: 'folder',
         protocol: '',
@@ -5575,13 +5644,16 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         serialFlowControl: 0,
       });
       await reloadWorkspaceAfterNodeWrite();
-      setExpanded((current) => {
-        const next = new Set(current).add(result.nodeId);
-        if (newFolderParentId) next.add(newFolderParentId);
-        return next;
-      });
+      setExpanded(
+        (current) =>
+          new Set([
+            ...current,
+            result.nodeId,
+            ...(newFolderParentId.current ? [newFolderParentId.current] : []),
+          ]),
+      );
       setSelectedNodeId(result.nodeId);
-      setNewFolderParentId(null);
+      newFolderParentId.current = null;
       setNewFolderOpen(false);
     } catch (error: unknown) {
       setEditorError(error instanceof Error ? error.message : 'Could not create the folder.');
@@ -5590,6 +5662,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     }
   }
 
+  const draggedNodeIdSet = useMemo(() => new Set(draggedNodeIds), [draggedNodeIds]);
   function renderTree(nodes: TreeNode[], depth = 0): ReactNode {
     return nodes.map((node, index) => {
       const isFolder = node.kind === 'folder';
@@ -5600,7 +5673,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       const isSelected = node.kind === 'folder' && selectedNodeId === node.id;
       const creationFolderId = node.kind === 'folder' ? node.id : findParentFolderId(tree, node.id);
       const activeDropPlacement = dropTarget?.id === node.id ? dropTarget.placement : null;
-      const isDragging = draggedNodeIds.includes(node.id);
+      const isDragging = draggedNodeIdSet.has(node.id);
       const treeDragEnabled = !searchText.trim();
       const treeGeometry = getTreeRowGeometry(depth);
       const branchGeometry = treeGeometry.branch;
@@ -6367,6 +6440,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                   confirmOnTabClose={confirmOnTabClose}
                   authGate={authGate}
                   authState={authState}
+                  key={`${authGate}:${settingsUpdatesRequest}`}
                   onAuthStateChange={setAuthState}
                   onAutoCopyOnSelectChange={handleAutoCopyOnSelectChange}
                   onConfirmOnTabCloseChange={handleConfirmOnTabCloseChange}
@@ -6412,7 +6486,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
               ) : activePage === 'credentials' ? (
                 <CredentialsPage
                   initialCredentials={credentials}
-                  isAuthorized={authGate === 'unlocked'}
+                  key={`${authGate}:${credentials.map((credential) => credential.id).join(',')}`}
                   onCreate={createCredential}
                   onDelete={deleteSavedCredential}
                   onUpdate={updateCredential}
@@ -6445,11 +6519,13 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           </ResizablePanel>
         </ResizablePanelGroup>
 
-        <MRemoteImportDialog
-          onImported={applyWorkspaceSnapshot}
-          onOpenChange={setMremoteImportOpen}
-          open={mremoteImportOpen}
-        />
+        {mremoteImportOpen ? (
+          <MRemoteImportDialog
+            onImported={applyWorkspaceSnapshot}
+            onOpenChange={setMremoteImportOpen}
+            open
+          />
+        ) : null}
 
         <Dialog
           onOpenChange={(open) => {
@@ -7550,7 +7626,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           onOpenChange={(open) => {
             setFolderDetailsOpen(open);
             if (!open) {
-              setEditingFolderId(null);
+              editingFolderId.current = null;
               setEditorError('');
             }
           }}
@@ -7885,7 +7961,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         <Dialog
           onOpenChange={(open) => {
             setNewFolderOpen(open);
-            if (!open) setNewFolderParentId(null);
+            if (!open) newFolderParentId.current = null;
           }}
           open={newFolderOpen}
         >
@@ -8545,6 +8621,8 @@ type SftpDragPayload = {
 function clearSftpCancelRequestsForTransfer(requests: Set<string>, transferId: string) {
   const prefix = `${transferId}\u0000`;
   for (const request of requests) {
+    // This helper intentionally mutates its Set argument; it is not a React state updater.
+    // react-doctor-disable-next-line react-doctor/no-side-effect-in-state-updater-function
     if (request.startsWith(prefix)) requests.delete(request);
   }
 }
@@ -8611,25 +8689,24 @@ function parseSftpDragPayload(data: DataTransfer): SftpDragPayload | undefined {
   }
 
   if (data.files.length === 0) return undefined;
-  const items = Array.from(data.files)
-    .map((file) => {
-      const candidate = file as File & { path?: string };
-      const transferItem = Array.from(data.items).find(
-        (item) => item.getAsFile()?.name === file.name,
-      ) as
-        | (DataTransferItem & {
-            webkitGetAsEntry?: () => { isDirectory?: boolean } | null;
-          })
-        | undefined;
-      const fileSystemEntry = transferItem?.webkitGetAsEntry?.();
-      return {
-        sourcePath: candidate.path || file.name,
-        name: file.name,
-        isDirectory: fileSystemEntry?.isDirectory === true,
-        size: file.size,
-      } satisfies SftpTransferItem;
-    })
-    .filter((item) => item.sourcePath.length > 0);
+  const dataItems = Array.from(data.items);
+  const items = Array.from(data.files).reduce<SftpTransferItem[]>((result, file) => {
+    const candidate = file as File & { path?: string };
+    const transferItem = dataItems.find((item) => item.getAsFile()?.name === file.name) as
+      | (DataTransferItem & {
+          webkitGetAsEntry?: () => { isDirectory?: boolean } | null;
+        })
+      | undefined;
+    const fileSystemEntry = transferItem?.webkitGetAsEntry?.();
+    const item = {
+      sourcePath: candidate.path || file.name,
+      name: file.name,
+      isDirectory: fileSystemEntry?.isDirectory === true,
+      size: file.size,
+    } satisfies SftpTransferItem;
+    if (item.sourcePath.length > 0) result.push(item);
+    return result;
+  }, []);
   return items.length > 0 ? { sourcePane: 'local', items, external: true } : undefined;
 }
 
@@ -8670,6 +8747,9 @@ function isValidSftpNameInput(name: string): boolean {
   );
 }
 
+// Virtualization, selection, drag/drop, and keyboard navigation share one pane coordinate system;
+// keeping them together prevents subtly different path and selection semantics.
+// react-doctor-disable-next-line react-doctor/no-giant-component
 function SftpFilePane({
   pane,
   state,
@@ -8695,7 +8775,8 @@ function SftpFilePane({
   const [promptValue, setPromptValue] = useState('');
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [dropPath, setDropPath] = useState<string>();
-  const [pathDraft, setPathDraft] = useState(state.path);
+  const [pathInput, setPathInput] = useState({ sourcePath: state.path, value: state.path });
+  const pathDraft = pathInput.sourcePath === state.path ? pathInput.value : state.path;
   const [listViewport, setListViewport] = useState({ height: 0, scrollTop: 0 });
   const renameCommitPath = useRef<string | undefined>(undefined);
   const selectionAnchorPath = useRef<string | undefined>(undefined);
@@ -8709,14 +8790,6 @@ function SftpFilePane({
     listViewportStateRef.current = next;
     setListViewport(next);
   }, []);
-
-  useEffect(() => {
-    setSelectedPaths((current) => {
-      const available = new Set(state.entries.map((entry) => entry.fullPath));
-      return pruneSftpSelection(current, available);
-    });
-    setPathDraft(state.path);
-  }, [state.entries, state.path]);
 
   const normalizedSearch = search.trim().toLocaleLowerCase();
   const visibleEntries = useMemo(() => {
@@ -8741,11 +8814,10 @@ function SftpFilePane({
     return () => observer.disconnect();
   }, [syncListViewport]);
 
-  useEffect(() => {
-    setSelectedPaths((current) =>
-      pruneSftpSelection(current, new Set(visibleEntries.map((entry) => entry.fullPath))),
-    );
-  }, [visibleEntries]);
+  const validSelectedPaths = useMemo(
+    () => pruneSftpSelection(selectedPaths, new Set(visibleEntries.map((entry) => entry.fullPath))),
+    [selectedPaths, visibleEntries],
+  );
 
   useEffect(() => {
     const viewport = listViewportRef.current;
@@ -8755,8 +8827,8 @@ function SftpFilePane({
   }, [normalizedSearch, state.path, syncListViewport]);
 
   const selectedEntries = useMemo(
-    () => visibleEntries.filter((entry) => selectedPaths.has(entry.fullPath)),
-    [selectedPaths, visibleEntries],
+    () => visibleEntries.filter((entry) => validSelectedPaths.has(entry.fullPath)),
+    [validSelectedPaths, visibleEntries],
   );
   const busy = state.status === 'opening';
   const root = isSftpPaneRoot(pane, state.path);
@@ -8770,30 +8842,27 @@ function SftpFilePane({
   }
 
   function toggleSelection(entry: WormholeSftpEntry, event: MouseEvent) {
-    setSelectedPaths((current) => {
-      const next = new Set(current);
-      if (event.shiftKey && selectedEntries.length > 0) {
-        const anchorPath = selectionAnchorPath.current ?? selectedEntries[0].fullPath;
-        const anchor = visibleEntries.findIndex((candidate) => candidate.fullPath === anchorPath);
-        const target = visibleEntries.findIndex(
-          (candidate) => candidate.fullPath === entry.fullPath,
-        );
-        if (anchor >= 0 && target >= 0) {
-          const [from, to] = anchor < target ? [anchor, target] : [target, anchor];
-          for (const candidate of visibleEntries.slice(from, to + 1)) next.add(candidate.fullPath);
-          return next;
-        }
+    const next = new Set(validSelectedPaths);
+    if (event.shiftKey && selectedEntries.length > 0) {
+      const anchorPath = selectionAnchorPath.current ?? selectedEntries[0].fullPath;
+      const anchor = visibleEntries.findIndex((candidate) => candidate.fullPath === anchorPath);
+      const target = visibleEntries.findIndex((candidate) => candidate.fullPath === entry.fullPath);
+      if (anchor >= 0 && target >= 0) {
+        const [from, to] = anchor < target ? [anchor, target] : [target, anchor];
+        for (const candidate of visibleEntries.slice(from, to + 1)) next.add(candidate.fullPath);
+        setSelectedPaths(next);
+        return;
       }
-      if (event.ctrlKey || event.metaKey) {
-        if (next.has(entry.fullPath)) next.delete(entry.fullPath);
-        else next.add(entry.fullPath);
-      } else {
-        next.clear();
-        next.add(entry.fullPath);
-      }
-      if (!event.shiftKey) selectionAnchorPath.current = entry.fullPath;
-      return next;
-    });
+    }
+    if (event.ctrlKey || event.metaKey) {
+      if (next.has(entry.fullPath)) next.delete(entry.fullPath);
+      else next.add(entry.fullPath);
+    } else {
+      next.clear();
+      next.add(entry.fullPath);
+    }
+    if (!event.shiftKey) selectionAnchorPath.current = entry.fullPath;
+    setSelectedPaths(next);
   }
 
   function moveKeyboardSelection(entry: WormholeSftpEntry, event: ReactKeyboardEvent) {
@@ -8952,7 +9021,7 @@ function SftpFilePane({
           aria-label={`${pane === 'local' ? 'Local' : 'Remote'} path`}
           className="h-8 min-w-0 flex-1 font-mono text-[11px]"
           disabled={busy}
-          onChange={(event) => setPathDraft(event.target.value)}
+          onChange={(event) => setPathInput({ sourcePath: state.path, value: event.target.value })}
           onKeyDown={(event) => {
             if (event.key === 'Enter') onNavigate(pathDraft);
           }}
@@ -8971,12 +9040,12 @@ function SftpFilePane({
               <TooltipContent side="bottom">Local quick paths</TooltipContent>
             </Tooltip>
             <DropdownMenuContent align="end" className="w-52">
-              {state.quickPaths.map((quickPath, index) =>
+              {state.quickPaths.map((quickPath) =>
                 quickPath.isSeparator ? (
-                  <DropdownMenuSeparator key={`separator-${index}`} />
+                  <DropdownMenuSeparator key="quick-path-separator" />
                 ) : (
                   <DropdownMenuItem
-                    key={`${quickPath.path}:${index}`}
+                    key={quickPath.path}
                     onSelect={() => onNavigate(quickPath.path)}
                   >
                     {quickPath.displayName}
@@ -9084,12 +9153,11 @@ function SftpFilePane({
                 className="absolute inset-x-0 top-0"
                 style={{
                   transform: `translateY(${visibleRange.start * sftpVirtualRowHeight}px)`,
-                  willChange: 'transform',
                 }}
               >
                 {visibleEntries.slice(visibleRange.start, visibleRange.end).map((entry, offset) => {
                   const entryIndex = visibleRange.start + offset;
-                  const selected = selectedPaths.has(entry.fullPath);
+                  const selected = validSelectedPaths.has(entry.fullPath);
                   const isEditing = editingPath === entry.fullPath;
                   return (
                     <ContextMenu key={entry.fullPath}>
@@ -9220,7 +9288,7 @@ function SftpFilePane({
                         <ContextMenuSeparator />
                         <ContextMenuItem
                           onSelect={() => {
-                            if (!selectedPaths.has(entry.fullPath)) {
+                            if (!validSelectedPaths.has(entry.fullPath)) {
                               setSelectedPaths(new Set([entry.fullPath]));
                             }
                             setConfirmDelete(true);
@@ -9425,10 +9493,11 @@ function SftpConflictOverlay({
   onCancel: () => void;
 }) {
   const [applyToAll, setApplyToAll] = useState(false);
-  useEffect(() => setApplyToAll(false), [conflict.itemId, conflict.transferId]);
   return (
-    <div
-      className="absolute inset-0 z-40 grid place-items-center bg-background/80 p-6 backdrop-blur-sm"
+    <dialog
+      open
+      aria-label={`File conflict for ${conflict.displayName}`}
+      className="absolute inset-0 z-40 m-0 h-full max-h-none w-full max-w-none place-items-center border-0 bg-background/80 p-6 backdrop-blur-sm open:grid"
       onKeyDown={(event) => {
         if (event.key === 'Enter') {
           event.preventDefault();
@@ -9438,7 +9507,6 @@ function SftpConflictOverlay({
           onCancel();
         }
       }}
-      tabIndex={-1}
     >
       <div className="w-full max-w-md rounded-xl border border-border bg-card p-5 shadow-2xl">
         <p className="font-mono text-[9px] uppercase tracking-[0.16em] text-muted-foreground">
@@ -9473,7 +9541,7 @@ function SftpConflictOverlay({
           </Button>
         </div>
       </div>
-    </div>
+    </dialog>
   );
 }
 
@@ -9613,6 +9681,7 @@ function SftpBrowserSurface({
       {browser.conflict ? (
         <SftpConflictOverlay
           conflict={browser.conflict}
+          key={`${browser.conflict.transferId}:${browser.conflict.itemId}`}
           onCancel={() =>
             onConflict(browser.conflict!.transferId, browser.conflict!.itemId, 'skip', false)
           }
@@ -9625,6 +9694,8 @@ function SftpBrowserSurface({
   );
 }
 
+// The pane tree and its drag, split, focus, and native-surface routing are one layout state machine.
+// react-doctor-disable-next-line react-doctor/no-giant-component
 function SessionsPage({
   autoCopyOnSelect,
   isAuthorized,
@@ -9726,17 +9797,19 @@ function SessionsPage({
   } | null>(null);
   const sessionIdsKey = JSON.stringify(sessions.map((session) => session.id));
   const sessionIds = useMemo(() => JSON.parse(sessionIdsKey) as string[], [sessionIdsKey]);
+  const currentLayout = useMemo(
+    () => reconcileSessionLayout(layout, sessionIds, selectedSession?.id),
+    [layout, selectedSession?.id, sessionIds],
+  );
+  const dragIsValid = !draggedSessionId || sessionIds.includes(draggedSessionId);
+  const activeDraggedSessionId = dragIsValid ? draggedSessionId : '';
+  const activeDropPreview = dragIsValid ? dropPreview : null;
 
-  useEffect(() => {
-    setLayout((current) => reconcileSessionLayout(current, sessionIds, selectedSession?.id));
-  }, [selectedSession?.id, sessionIds]);
-
-  useEffect(() => {
-    if (draggedSessionId && !sessionIds.includes(draggedSessionId)) {
-      setDraggedSessionId('');
-      setDropPreview(null);
-    }
-  }, [draggedSessionId, sessionIds]);
+  function updateLayout(updater: (current: SessionLayoutState) => SessionLayoutState) {
+    setLayout((current) =>
+      updater(reconcileSessionLayout(current, sessionIds, selectedSession?.id)),
+    );
+  }
 
   if (!selectedSession || sessions.length === 0) {
     return (
@@ -9759,9 +9832,9 @@ function SessionsPage({
     );
   }
 
-  const panes = sessionPanes(layout.root);
-  const rects = sessionPaneRects(layout.root);
-  const dividers = sessionSplitDividers(layout.root);
+  const panes = sessionPanes(currentLayout.root);
+  const rects = sessionPaneRects(currentLayout.root);
+  const dividers = sessionSplitDividers(currentLayout.root);
   const rectByPane = new Map(rects.map((rect) => [rect.paneId, rect]));
   const sessionById = new Map(sessions.map((session) => [session.id, session]));
   const paneBySessionId = new Map(
@@ -9769,7 +9842,7 @@ function SessionsPage({
   );
 
   function activateSession(paneId: string, sessionId: string) {
-    setLayout((current) => selectSession(current, paneId, sessionId));
+    updateLayout((current) => selectSession(current, paneId, sessionId));
     onSelectSession(sessionId);
   }
 
@@ -9783,15 +9856,15 @@ function SessionsPage({
   }
 
   function finishDrop(sessionId: string) {
-    if (!sessionIds.includes(sessionId) || !dropPreview) {
+    if (!sessionIds.includes(sessionId) || !activeDropPreview) {
       setDraggedSessionId('');
       setDropPreview(null);
       return;
     }
-    setLayout((current) =>
-      dropPreview.edge
-        ? splitSession(current, dropPreview.paneId, dropPreview.edge, sessionId)
-        : moveSession(current, dropPreview.paneId, sessionId, dropPreview.tabIndex),
+    updateLayout((current) =>
+      activeDropPreview.edge
+        ? splitSession(current, activeDropPreview.paneId, activeDropPreview.edge, sessionId)
+        : moveSession(current, activeDropPreview.paneId, sessionId, activeDropPreview.tabIndex),
     );
     onSelectSession(sessionId);
     setDraggedSessionId('');
@@ -9799,12 +9872,12 @@ function SessionsPage({
   }
 
   function restoreFullView(sessionId: string) {
-    setLayout((current) => restoreSessionFullView(current, sessionId));
+    updateLayout((current) => restoreSessionFullView(current, sessionId));
     onSelectSession(sessionId);
   }
 
   function updateDropPreview(event: DragEvent<HTMLElement>) {
-    const sessionId = draggedSessionId || event.dataTransfer.getData('text/wormhole-session');
+    const sessionId = activeDraggedSessionId || event.dataTransfer.getData('text/wormhole-session');
     if (!sessionId) return;
     const bounds = event.currentTarget.getBoundingClientRect();
     const x = ((event.clientX - bounds.left) / bounds.width) * 100;
@@ -9827,7 +9900,7 @@ function SessionsPage({
       });
       return;
     }
-    if (!canSplitSession(layout, rect.paneId, sessionId)) {
+    if (!canSplitSession(currentLayout, rect.paneId, sessionId)) {
       event.dataTransfer.dropEffect = 'none';
       setDropPreview(null);
       return;
@@ -9858,7 +9931,7 @@ function SessionsPage({
     if (event.altKey && event.shiftKey && edgeByKey[event.key]) {
       event.preventDefault();
       const edge = edgeByKey[event.key]!;
-      setLayout((current) => splitSession(current, pane.id, edge, sessionId));
+      updateLayout((current) => splitSession(current, pane.id, edge, sessionId));
       onSelectSession(sessionId);
       return;
     }
@@ -9882,16 +9955,16 @@ function SessionsPage({
       onDragOver={updateDropPreview}
       onDrop={(event) => {
         event.preventDefault();
-        finishDrop(draggedSessionId || event.dataTransfer.getData('text/wormhole-session'));
+        finishDrop(activeDraggedSessionId || event.dataTransfer.getData('text/wormhole-session'));
       }}
     >
       {panes.map((pane) => {
         const rect = rectByPane.get(pane.id)!;
         return (
           <SessionPaneChrome
-            dropTarget={dropPreview?.paneId === pane.id && !dropPreview.edge}
+            dropTarget={activeDropPreview?.paneId === pane.id && !activeDropPreview.edge}
             key={pane.id}
-            onActivate={() => setLayout((current) => focusSessionPane(current, pane.id))}
+            onActivate={() => updateLayout((current) => focusSessionPane(current, pane.id))}
             rect={rect}
           >
             {pane.tabs.map((sessionId, tabIndex) => {
@@ -9994,7 +10067,7 @@ function SessionsPage({
               isAuthorized={isAuthorized}
               isWebSurfaceVisible={isWebSurfaceVisible}
               nativeSurfaceActive={
-                active && isWebSurfaceVisible && !draggedSessionId && !resizingSplitId
+                active && isWebSurfaceVisible && !activeDraggedSessionId && !resizingSplitId
               }
               onBitwardenUnlockRequired={onBitwardenUnlockRequired}
               onCloseSftpBrowser={onCloseSftpBrowser}
@@ -10028,18 +10101,21 @@ function SessionsPage({
           onResizeEnd={() => setResizingSplitId('')}
           onResizeStart={() => setResizingSplitId(divider.splitId)}
           onRatioChange={(ratio) =>
-            setLayout((current) => setSessionSplitRatio(current, divider.splitId, ratio))
+            updateLayout((current) => setSessionSplitRatio(current, divider.splitId, ratio))
           }
         />
       ))}
 
-      {dropPreview?.edge ? (
-        <SessionDropPreview edge={dropPreview.edge} rect={rectByPane.get(dropPreview.paneId)} />
+      {activeDropPreview?.edge ? (
+        <SessionDropPreview
+          edge={activeDropPreview.edge}
+          rect={rectByPane.get(activeDropPreview.paneId)}
+        />
       ) : null}
       <p aria-live="polite" className="sr-only">
-        {dropPreview?.edge
-          ? `Drop to split ${dropPreview.edge}`
-          : dropPreview
+        {activeDropPreview?.edge
+          ? `Drop to split ${activeDropPreview.edge}`
+          : activeDropPreview
             ? 'Drop to move this tab into the pane'
             : ''}
       </p>
@@ -10363,7 +10439,7 @@ function SessionSurface({
       <VncSurface
         connectionGeneration={session.vncConnectionGeneration ?? 0}
         disconnected={session.status === 'closed'}
-        isAuthorized={isAuthorized}
+        key={`${session.id}:${session.vncConnectionGeneration ?? 0}:${session.status === 'closed'}:${isAuthorized}`}
         onBitwardenUnlockRequired={(reason, retry) =>
           onBitwardenUnlockRequired(session.id, reason, retry)
         }
@@ -10411,15 +10487,16 @@ function SessionSurface({
   );
 }
 
+// Credential editing and Bitwarden lookup deliberately share one authorization boundary so every
+// close, lock, and failed lookup scrubs the same renderer-held secret state.
+// react-doctor-disable-next-line react-doctor/no-giant-component
 function CredentialsPage({
   initialCredentials,
-  isAuthorized,
   onCreate,
   onUpdate,
   onDelete,
 }: {
   initialCredentials: CredentialRecord[];
-  isAuthorized: boolean;
   onCreate: (draft: CredentialDraft) => Promise<void>;
   onUpdate: (id: string, draft: CredentialDraft) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
@@ -10437,28 +10514,7 @@ function CredentialsPage({
   const [bitwardenUnlockPassword, setBitwardenUnlockPassword] = useState('');
   const [bitwardenSearchStatus, setBitwardenSearchStatus] = useState('');
   const [bitwardenSearching, setBitwardenSearching] = useState(false);
-  const bitwardenSearchAttempts = useRef(new WebSessionAttemptTracker());
-
-  useEffect(() => {
-    setSelectedCredentials((current) => (current.size === 0 ? current : new Set()));
-  }, [initialCredentials]);
-
-  useEffect(() => {
-    if (isAuthorized) return;
-    // App-lock hides this mounted page instead of unmounting it. Explicitly remove every
-    // renderer-held credential value so typed local and Bitwarden secrets do not survive a lock.
-    setEditorOpen(false);
-    setEditingCredential(null);
-    setCredentialForm(emptyCredentialDraft());
-    setPendingDeletion([]);
-    setOperationError('');
-    setBitwardenQuery('');
-    setBitwardenItems([]);
-    setBitwardenUnlockPassword('');
-    setBitwardenSearchStatus('');
-    setBitwardenSearching(false);
-    bitwardenSearchAttempts.current.cancel('credential-search');
-  }, [isAuthorized]);
+  const bitwardenSearchAttempts = useLazyRef(() => new WebSessionAttemptTracker());
 
   const credentials = initialCredentials;
   const deferredSearchText = useDeferredValue(searchText);
@@ -10685,19 +10741,26 @@ function CredentialsPage({
     setBusy(true);
     setOperationError('');
     const failures: string[] = [];
-    for (const id of ids) {
-      try {
-        await onDelete(id);
-      } catch (error) {
-        const name = credentialById.get(id)?.name ?? 'Credential';
-        const message = error instanceof Error ? error.message : 'Could not delete the credential.';
-        failures.push(`${name}: ${message}`);
+    try {
+      // Credential deletion reloads the authoritative Go workspace after each write. Keep those
+      // mutations ordered so a slower earlier reload cannot overwrite a later result.
+      for (const id of ids) {
+        try {
+          // react-doctor-disable-next-line react-doctor/async-await-in-loop
+          await onDelete(id);
+        } catch (error) {
+          const name = credentialById.get(id)?.name ?? 'Credential';
+          const message =
+            error instanceof Error ? error.message : 'Could not delete the credential.';
+          failures.push(`${name}: ${message}`);
+        }
       }
+      setSelectedCredentials(new Set());
+      setPendingDeletion([]);
+      if (failures.length > 0) setOperationError(failures.join(' '));
+    } finally {
+      setBusy(false);
     }
-    setSelectedCredentials(new Set());
-    setPendingDeletion([]);
-    setBusy(false);
-    if (failures.length > 0) setOperationError(failures.join(' '));
   }
 
   return (
@@ -11717,6 +11780,9 @@ function TunnelAdvanced({
   );
 }
 
+// Provider-specific tunnel fields are schema-driven branches of one editor transaction; separate
+// components would duplicate validation and secret-clearing behavior.
+// react-doctor-disable-next-line react-doctor/no-giant-component
 function TunnelEditorDialog({
   initial,
   open,
@@ -11731,7 +11797,14 @@ function TunnelEditorDialog({
   const [value, setValue] = useState<TunnelEditorValue>(initial);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [advancedOpen, setAdvancedOpen] = useState(
+    () =>
+      initial.kind === 3 &&
+      ['Domain', 'CaPem', 'ClientCertPem', 'ClientKeyPem'].some(
+        (key) =>
+          typeof initial.settings[key] === 'string' && (initial.settings[key] as string).trim(),
+      ),
+  );
 
   const missing = useMemo(() => missingTunnelFields(value), [value]);
   const canSave = missing.length === 0;
@@ -11744,39 +11817,21 @@ function TunnelEditorDialog({
       hidden?: (field: TunnelField) => boolean;
     },
   ) =>
-    fields
-      .filter((field) => field.section === section && !options?.hidden?.(field))
-      .map((field) => (
-        <TunnelFieldRow
-          disabled={options?.disabled?.(field)}
-          field={field}
-          key={field.key}
-          onChange={setSetting}
-          value={value.settings}
-        />
-      ));
+    fields.flatMap((field) =>
+      field.section === section && !options?.hidden?.(field)
+        ? [
+            <TunnelFieldRow
+              disabled={options?.disabled?.(field)}
+              field={field}
+              key={field.key}
+              onChange={setSetting}
+              value={value.settings}
+            />,
+          ]
+        : [],
+    );
   const useSso = value.settings.UseSingleSignOn === true;
   const useExternalBrowser = useSso && value.settings.UseExternalBrowser === true;
-  const watchguardAdvancedHasValues =
-    value.kind === 3 &&
-    ['Domain', 'CaPem', 'ClientCertPem', 'ClientKeyPem'].some(
-      (key) => typeof value.settings[key] === 'string' && (value.settings[key] as string).trim(),
-    );
-
-  useEffect(() => {
-    if (open) setAdvancedOpen(watchguardAdvancedHasValues);
-  }, [open, value.kind, watchguardAdvancedHasValues]);
-
-  useEffect(() => {
-    if (open) {
-      setValue(initial);
-      setError('');
-    } else {
-      // Drop decrypted passwords, private keys, and profiles from renderer state as soon as
-      // the editor closes. The native store remains the source of truth for the next edit.
-      setValue(blankTunnelEditor());
-    }
-  }, [initial, open]);
 
   function setSetting(key: string, next: unknown) {
     setValue((current) => ({
@@ -12202,6 +12257,9 @@ function TunnelEditorDialog({
   );
 }
 
+// Tunnel CRUD, test progress, and editor lifecycle form one backend-owned workflow. Their local
+// states transition independently, so combining them in a reducer would obscure those boundaries.
+// react-doctor-disable-next-line react-doctor/no-giant-component, react-doctor/prefer-useReducer
 function TunnelsPage({
   tunnels,
   onTunnelCreated,
@@ -12212,6 +12270,7 @@ function TunnelsPage({
   onTunnelCreated: (tunnel: TunnelRecord) => void;
   onTunnelUpdated: (tunnel: TunnelRecord) => void;
   onTunnelDeleted: (id: string) => void;
+  // react-doctor-disable-next-line react-doctor/prefer-useReducer
 }) {
   const [searchText, setSearchText] = useState('');
   const [editorOpen, setEditorOpen] = useState(false);
@@ -12504,12 +12563,15 @@ function TunnelsPage({
           />
         )}
       </div>
-      <TunnelEditorDialog
-        initial={editorValue}
-        onOpenChange={setTunnelEditorOpen}
-        onSaved={(tunnel) => (editorValue.id ? onTunnelUpdated(tunnel) : onTunnelCreated(tunnel))}
-        open={editorOpen}
-      />
+      {editorOpen ? (
+        <TunnelEditorDialog
+          initial={editorValue}
+          key={editorValue.id ?? `new:${editorValue.kind}`}
+          onOpenChange={setTunnelEditorOpen}
+          onSaved={(tunnel) => (editorValue.id ? onTunnelUpdated(tunnel) : onTunnelCreated(tunnel))}
+          open
+        />
+      ) : null}
       <Dialog
         onOpenChange={(open) => {
           if (!open) closeTunnelTest();
@@ -12751,14 +12813,14 @@ function LogLevelSetting({
   const [logLevel, setLogLevel] = useState<LogLevel>(initialValue);
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
-  const saveState = useRef(createLogLevelSaveState(initialValue));
+  const saveState = useLazyRef(() => createLogLevelSaveState(initialValue));
 
   useEffect(() => {
     if (!loaded || busyRef.current) return;
     saveState.current.desired = initialValue;
     saveState.current.persisted = initialValue;
     setLogLevel(initialValue);
-  }, [initialValue, loaded]);
+  }, [initialValue, loaded, saveState]);
 
   async function persistDesiredLogLevel() {
     const api = window.wormhole;
@@ -12848,13 +12910,6 @@ function BitwardenCliDialog({
     setAuthenticatorCode('');
     setServerRegion(defaultServerRegion);
   }
-
-  useEffect(() => {
-    setEmail('');
-    setMasterPassword('');
-    setAuthenticatorCode('');
-    if (mode !== null) setServerRegion(defaultServerRegion);
-  }, [defaultServerRegion, mode]);
 
   const isLogin = mode === 'login';
   return (
@@ -13208,14 +13263,6 @@ function AuthSecretDialog({
   const [confirmation, setConfirmation] = useState('');
   const [validationError, setValidationError] = useState('');
 
-  useEffect(() => {
-    if (!open) {
-      setSecret('');
-      setConfirmation('');
-      setValidationError('');
-    }
-  }, [open]);
-
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (busy) return;
@@ -13301,41 +13348,47 @@ function formatLastUpdateCheck(stamp: string | null): string {
 const markdownInlinePattern = /(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`|\[[^\]]+\]\(https?:\/\/[^)\s]+\))/;
 
 function renderMarkdownInline(text: string, keyPrefix: string): ReactNode[] {
-  return text.split(markdownInlinePattern).flatMap((part, index) => {
-    const key = `${keyPrefix}:${index}`;
-    if (!part) return [];
+  const nodes: ReactNode[] = [];
+  let searchFrom = 0;
+  for (const part of text.split(markdownInlinePattern)) {
+    if (!part) continue;
+    const sourceOffset = text.indexOf(part, searchFrom);
+    searchFrom = sourceOffset + part.length;
+    const key = `${keyPrefix}:${sourceOffset}`;
     if (part.startsWith('`') && part.endsWith('`') && part.length >= 2) {
-      return <code key={key}>{part.slice(1, -1)}</code>;
+      nodes.push(<code key={key}>{part.slice(1, -1)}</code>);
+      continue;
     }
     if (part.startsWith('**') && part.endsWith('**') && part.length >= 4) {
-      return <strong key={key}>{part.slice(2, -2)}</strong>;
+      nodes.push(<strong key={key}>{part.slice(2, -2)}</strong>);
+      continue;
     }
     if (part.startsWith('*') && part.endsWith('*') && part.length >= 2) {
-      return <em key={key}>{part.slice(1, -1)}</em>;
+      nodes.push(<em key={key}>{part.slice(1, -1)}</em>);
+      continue;
     }
     const link = part.match(/^\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)$/);
     if (link) {
       const url = link[2];
-      return (
-        <a
+      nodes.push(
+        <button
           className="text-foreground underline decoration-border underline-offset-2 hover:text-foreground/80"
-          href={url}
           key={key}
-          onClick={(event) => {
-            event.preventDefault();
+          onClick={() => {
             void window.wormhole?.openExternal(url).catch(() => {
               // Opening the release page is a convenience; a failure is not actionable here.
             });
           }}
-          rel="noreferrer"
-          target="_blank"
+          type="button"
         >
           {link[1]}
-        </a>
+        </button>,
       );
+      continue;
     }
-    return <span key={key}>{part}</span>;
-  });
+    nodes.push(<span key={key}>{part}</span>);
+  }
+  return nodes;
 }
 
 // ReleaseNotesMarkdown is a deliberately small markdown renderer for GitHub release bodies:
@@ -13345,19 +13398,22 @@ function ReleaseNotesMarkdown({ markdown }: { markdown: string }) {
   return useMemo(() => {
     const lines = markdown.replace(/\r\n?/g, '\n').split('\n');
     const blocks: ReactNode[] = [];
-    let sequence = 0;
+    let sourceOffset = 0;
     let listType: 'ul' | 'ol' | null = null;
-    let listItems: string[] = [];
+    let listStartOffset = 0;
+    let listItems: Array<{ sourceOffset: number; text: string }> = [];
     let paragraph: string[] = [];
+    let paragraphStartOffset = 0;
     let codeLines: string[] | null = null;
+    let codeStartOffset = 0;
 
     const flushParagraph = () => {
       if (paragraph.length === 0) return;
       const text = paragraph.join(' ').trim();
       paragraph = [];
       if (!text) return;
-      blocks.push(<p key={sequence}>{renderMarkdownInline(text, `p:${sequence}`)}</p>);
-      sequence += 1;
+      const key = `paragraph:${paragraphStartOffset}`;
+      blocks.push(<p key={key}>{renderMarkdownInline(text, key)}</p>);
     };
     const flushList = () => {
       if (!listType) return;
@@ -13367,34 +13423,38 @@ function ReleaseNotesMarkdown({ markdown }: { markdown: string }) {
       listItems = [];
       blocks.push(
         type === 'ol' ? (
-          <ol className="list-decimal space-y-0.5 pl-4" key={sequence}>
-            {items.map((item, index) => (
-              <li key={index}>{renderMarkdownInline(item, `li:${sequence}:${index}`)}</li>
+          <ol className="list-decimal space-y-0.5 pl-4" key={`list:${listStartOffset}`}>
+            {items.map((item) => (
+              <li key={`item:${item.sourceOffset}`}>
+                {renderMarkdownInline(item.text, `item:${item.sourceOffset}`)}
+              </li>
             ))}
           </ol>
         ) : (
-          <ul className="list-disc space-y-0.5 pl-4" key={sequence}>
-            {items.map((item, index) => (
-              <li key={index}>{renderMarkdownInline(item, `li:${sequence}:${index}`)}</li>
+          <ul className="list-disc space-y-0.5 pl-4" key={`list:${listStartOffset}`}>
+            {items.map((item) => (
+              <li key={`item:${item.sourceOffset}`}>
+                {renderMarkdownInline(item.text, `item:${item.sourceOffset}`)}
+              </li>
             ))}
           </ul>
         ),
       );
-      sequence += 1;
     };
 
     for (const line of lines) {
+      const lineOffset = sourceOffset;
+      sourceOffset += line.length + 1;
       if (codeLines) {
         if (line.trim().startsWith('```')) {
           blocks.push(
             <pre
               className="overflow-x-auto rounded-md bg-muted/70 p-3 font-mono text-[10px] leading-relaxed"
-              key={sequence}
+              key={`code:${codeStartOffset}`}
             >
               {codeLines.join('\n')}
             </pre>,
           );
-          sequence += 1;
           codeLines = null;
         } else {
           codeLines.push(line);
@@ -13405,18 +13465,19 @@ function ReleaseNotesMarkdown({ markdown }: { markdown: string }) {
         flushParagraph();
         flushList();
         codeLines = [];
+        codeStartOffset = lineOffset;
         continue;
       }
       const heading = line.match(/^(#{1,6})\s+(.+)$/);
       if (heading) {
         flushParagraph();
         flushList();
+        const key = `heading:${lineOffset}`;
         blocks.push(
-          <p className="text-xs font-semibold text-foreground" key={sequence}>
-            {renderMarkdownInline(heading[2], `h:${sequence}`)}
+          <p className="text-xs font-semibold text-foreground" key={key}>
+            {renderMarkdownInline(heading[2], key)}
           </p>,
         );
-        sequence += 1;
         continue;
       }
       const unordered = line.match(/^[-*]\s+(.+)$/);
@@ -13424,9 +13485,12 @@ function ReleaseNotesMarkdown({ markdown }: { markdown: string }) {
       if (unordered || ordered) {
         flushParagraph();
         const type: 'ul' | 'ol' = ordered ? 'ol' : 'ul';
-        if (listType !== type) flushList();
+        if (listType !== type) {
+          flushList();
+          listStartOffset = lineOffset;
+        }
         listType = type;
-        listItems.push((unordered ?? ordered)![1]);
+        listItems.push({ sourceOffset: lineOffset, text: (unordered ?? ordered)![1] });
         continue;
       }
       if (line.trim() === '') {
@@ -13435,6 +13499,7 @@ function ReleaseNotesMarkdown({ markdown }: { markdown: string }) {
         continue;
       }
       flushList();
+      if (paragraph.length === 0) paragraphStartOffset = lineOffset;
       paragraph.push(line);
     }
     flushParagraph();
@@ -13443,7 +13508,7 @@ function ReleaseNotesMarkdown({ markdown }: { markdown: string }) {
       blocks.push(
         <pre
           className="overflow-x-auto rounded-md bg-muted/70 p-3 font-mono text-[10px] leading-relaxed"
-          key={sequence}
+          key={`code:${codeStartOffset}`}
         >
           {codeLines.join('\n')}
         </pre>,
@@ -13453,6 +13518,9 @@ function ReleaseNotesMarkdown({ markdown }: { markdown: string }) {
   }, [markdown]);
 }
 
+// Settings hosts independent native services whose state must not share reducer transitions; the
+// long component is an explicit composition root for those isolated settings sections.
+// react-doctor-disable-next-line react-doctor/no-giant-component, react-doctor/prefer-useReducer
 function SettingsPage({
   autoCopyOnSelect,
   confirmOnTabClose,
@@ -13502,16 +13570,13 @@ function SettingsPage({
     downloadProgress: number | null;
   };
   onWorkspaceCredentialsChanged: () => Promise<void>;
+  // react-doctor-disable-next-line react-doctor/prefer-useReducer
 }) {
-  const [activeTab, setActiveTab] = useState('general');
+  const [activeTab, setActiveTab] = useState(settingsUpdatesRequest > 0 ? 'updates' : 'general');
   const [promptBeforeTunnelConnect, setPromptBeforeTunnelConnect] = useState(true);
-  const [authMethod, setAuthMethod] = useState<WormholeAuthMode>(authState?.mode ?? 'disabled');
-  const [helloFallback, setHelloFallback] = useState<WormholeAuthFallback>(
-    authState?.fallback ?? 'pin',
-  );
-  const [idleTimeout, setIdleTimeout] = useState<number | null>(
-    authState?.idleTimeoutMinutes ?? 15,
-  );
+  const authMethod = authState?.mode ?? 'disabled';
+  const helloFallback = authState?.fallback ?? 'pin';
+  const idleTimeout = authState?.idleTimeoutMinutes ?? 15;
   const [securityBusy, setSecurityBusy] = useState(false);
   const [securityError, setSecurityError] = useState('');
   const [securityMessage, setSecurityMessage] = useState('');
@@ -13590,7 +13655,9 @@ function SettingsPage({
   );
   const [backupSectionError, setBackupSectionError] = useState('');
   const backupAuthGateRef = useRef(authGate);
-  backupAuthGateRef.current = authGate;
+  useLayoutEffect(() => {
+    backupAuthGateRef.current = authGate;
+  }, [authGate]);
 
   useEffect(() => {
     return window.wormhole?.onOperationProgress((event) => {
@@ -13598,6 +13665,13 @@ function SettingsPage({
       if (event.kind === 'backup-import') setBackupImportProgress(event);
     });
   }, []);
+
+  useEffect(
+    () => () => {
+      window.wormhole?.clearBackupImportSelection();
+    },
+    [],
+  );
 
   useEffect(
     () => () => {
@@ -13609,41 +13683,7 @@ function SettingsPage({
   );
 
   useEffect(() => {
-    if (settingsUpdatesRequest > 0) setActiveTab('updates');
-  }, [settingsUpdatesRequest]);
-
-  useEffect(() => {
-    if (authGate === 'unlocked') return;
-    setSecretDialog(null);
-    setBitwardenCliDialog(null);
-    setBitwardenSyncDialog(null);
-    setBitwardenCliUpdateDialog(null);
-    setBitwardenExtensionUpdateDialog(null);
-    pendingSecretAction.current = null;
-    setBackupExportOpen(false);
-    setBackupExportPassword('');
-    setBackupExportConfirmation('');
-    setBackupImportOpen(false);
-    setBackupImportPassword('');
-    setBackupImportSelection(null);
-    setBackupSectionError('');
-    window.wormhole?.clearBackupImportSelection();
-  }, [authGate]);
-
-  useEffect(() => {
-    if (!authState) return;
-    setAuthMethod(authState.mode);
-    setHelloFallback(authState.fallback);
-    setIdleTimeout(authState.idleTimeoutMinutes);
-  }, [authState]);
-
-  useEffect(() => {
-    if (authGate !== 'unlocked' || !window.wormhole) {
-      setMcpState(null);
-      setMcpToken('');
-      setMcpTokenRevealed(false);
-      return;
-    }
+    if (authGate !== 'unlocked' || !window.wormhole) return;
     let active = true;
     void window.wormhole
       .mcpStatus()
@@ -13655,7 +13695,7 @@ function SettingsPage({
       })
       .catch((error) => {
         if (!active) return;
-        setMcpError(errorMessage(error));
+        setMcpError(authSettingsErrorMessage(error));
       });
     return () => {
       active = false;
@@ -13867,44 +13907,46 @@ function SettingsPage({
     setBitwardenBusy(true);
     setBitwardenError('');
     try {
-      await window.wormhole.loginBitwardenCli({
-        email,
-        masterPassword,
-        authenticatorCode: authenticatorCode?.trim() || undefined,
-        serverRegion: serverRegion === 'UnitedStates' ? 0 : serverRegion === 'Europe' ? 1 : 2,
-      });
-    } catch (error) {
-      setBitwardenError(backendErrorMessage(error));
-      setBitwardenBusy(false);
-      return false;
-    }
-
-    // Authentication is complete at this point. Close the secret prompt before the potentially
-    // slower initial vault sync so successful credentials never leave the dialog stuck on Working.
-    setBitwardenCliDialog(null);
-    let syncSucceeded = false;
-    try {
-      const result = await window.wormhole.syncBitwardenCli();
-      setBitwardenLastSyncStatus(result.lastSyncStatus);
-      setBitwardenAvailableCount(result.availableCount);
-      syncSucceeded = true;
-    } catch (error) {
-      setBitwardenError(backendErrorMessage(error));
-    }
-    try {
-      await reloadBitwardenCliStatus();
-    } catch (error) {
-      if (syncSucceeded) setBitwardenError(backendErrorMessage(error));
-    }
-    if (syncSucceeded) {
       try {
-        await onWorkspaceCredentialsChanged();
+        await window.wormhole.loginBitwardenCli({
+          email,
+          masterPassword,
+          authenticatorCode: authenticatorCode?.trim() || undefined,
+          serverRegion: serverRegion === 'UnitedStates' ? 0 : serverRegion === 'Europe' ? 1 : 2,
+        });
+      } catch (error) {
+        setBitwardenError(backendErrorMessage(error));
+        return false;
+      }
+
+      // Authentication is complete at this point. Close the secret prompt before the potentially
+      // slower initial vault sync so successful credentials never leave the dialog stuck on Working.
+      setBitwardenCliDialog(null);
+      let syncSucceeded = false;
+      try {
+        const result = await window.wormhole.syncBitwardenCli();
+        setBitwardenLastSyncStatus(result.lastSyncStatus);
+        setBitwardenAvailableCount(result.availableCount);
+        syncSucceeded = true;
       } catch (error) {
         setBitwardenError(backendErrorMessage(error));
       }
+      try {
+        await reloadBitwardenCliStatus();
+      } catch (error) {
+        if (syncSucceeded) setBitwardenError(backendErrorMessage(error));
+      }
+      if (syncSucceeded) {
+        try {
+          await onWorkspaceCredentialsChanged();
+        } catch (error) {
+          setBitwardenError(backendErrorMessage(error));
+        }
+      }
+      return true;
+    } finally {
+      setBitwardenBusy(false);
     }
-    setBitwardenBusy(false);
-    return true;
   }
 
   async function handleBitwardenCliUnlock(masterPassword: string) {
@@ -14093,13 +14135,6 @@ function SettingsPage({
     setSecurityMessage('');
   }
 
-  function errorMessage(error: unknown): string {
-    if (error instanceof Error && /^(PIN|Password) (must|can)/.test(error.message)) {
-      return error.message;
-    }
-    return "Wormhole couldn't save this change. Try again.";
-  }
-
   async function persistAuthSettings(
     mode: WormholeAuthMode,
     fallback: WormholeAuthFallback,
@@ -14145,7 +14180,7 @@ function SettingsPage({
         setSecurityMessage(`${authSecretLabel(secretDialog)} saved.`);
       }
     } catch (error) {
-      setSecurityError(errorMessage(error));
+      setSecurityError(authSettingsErrorMessage(error));
     } finally {
       setSecurityBusy(false);
     }
@@ -14172,7 +14207,6 @@ function SettingsPage({
     }
 
     const nextMode = value as WormholeAuthMode;
-    const previousMode = authMethod;
     clearSecurityStatus();
     setSecurityBusy(true);
     try {
@@ -14208,8 +14242,7 @@ function SettingsPage({
           : `Unlock method set to ${authModeLabel(nextMode)}.`,
       );
     } catch (error) {
-      setAuthMethod(previousMode);
-      setSecurityError(errorMessage(error));
+      setSecurityError(authSettingsErrorMessage(error));
     } finally {
       setSecurityBusy(false);
     }
@@ -14237,7 +14270,7 @@ function SettingsPage({
       await persistAuthSettings(authMethod, nextFallback, idleTimeout);
       setSecurityMessage(`Backup method set to ${authSecretLabel(nextFallback)}.`);
     } catch (error) {
-      setSecurityError(errorMessage(error));
+      setSecurityError(authSettingsErrorMessage(error));
     } finally {
       setSecurityBusy(false);
     }
@@ -14257,7 +14290,7 @@ function SettingsPage({
         nextTimeout === null ? 'Auto-lock turned off.' : `Auto-lock set to ${nextTimeout} minutes.`,
       );
     } catch (error) {
-      setSecurityError(errorMessage(error));
+      setSecurityError(authSettingsErrorMessage(error));
     } finally {
       setSecurityBusy(false);
     }
@@ -14290,7 +14323,7 @@ function SettingsPage({
         if (result.succeeded) setSecurityMessage('Windows Hello works.');
         else setSecurityError(result.message || 'Windows Hello was canceled.');
       } catch (error) {
-        setSecurityError(errorMessage(error));
+        setSecurityError(authSettingsErrorMessage(error));
       } finally {
         setSecurityBusy(false);
       }
@@ -14310,7 +14343,7 @@ function SettingsPage({
       onAuthStateChange({ ...authState, windowsHello });
       setSecurityMessage(windowsHello.message);
     } catch (error) {
-      setSecurityError(errorMessage(error));
+      setSecurityError(authSettingsErrorMessage(error));
     } finally {
       setSecurityBusy(false);
     }
@@ -14334,7 +14367,7 @@ function SettingsPage({
       setMcpPort(String(nextState.port));
       setMcpMessage(enabled ? 'MCP server started.' : 'MCP server stopped.');
     } catch (error) {
-      setMcpError(errorMessage(error));
+      setMcpError(authSettingsErrorMessage(error));
     } finally {
       setMcpBusy(false);
     }
@@ -14359,7 +14392,7 @@ function SettingsPage({
       setMcpMessage('MCP port saved.');
     } catch (error) {
       setMcpPort(String(mcpState?.port ?? 8765));
-      setMcpError(errorMessage(error));
+      setMcpError(authSettingsErrorMessage(error));
     } finally {
       setMcpBusy(false);
     }
@@ -14378,7 +14411,7 @@ function SettingsPage({
       setMcpToken(await window.wormhole.getMcpToken());
       setMcpTokenRevealed(true);
     } catch (error) {
-      setMcpError(errorMessage(error));
+      setMcpError(authSettingsErrorMessage(error));
     } finally {
       setMcpBusy(false);
     }
@@ -14393,7 +14426,7 @@ function SettingsPage({
       await copyTextToClipboard(token);
       setMcpMessage('Bearer token copied.');
     } catch (error) {
-      setMcpError(errorMessage(error));
+      setMcpError(authSettingsErrorMessage(error));
     } finally {
       setMcpBusy(false);
     }
@@ -14416,7 +14449,7 @@ function SettingsPage({
       setMcpTokenRevealed(true);
       setMcpMessage('MCP token regenerated. Update connected clients.');
     } catch (error) {
-      setMcpError(errorMessage(error));
+      setMcpError(authSettingsErrorMessage(error));
     } finally {
       setMcpBusy(false);
     }
@@ -14429,7 +14462,7 @@ function SettingsPage({
       await copyTextToClipboard(mcpState?.endpoint ?? `http://127.0.0.1:${mcpPort}/mcp`);
       setMcpMessage('MCP endpoint copied.');
     } catch (error) {
-      setMcpError(errorMessage(error));
+      setMcpError(authSettingsErrorMessage(error));
     }
   }
 
@@ -14442,7 +14475,7 @@ function SettingsPage({
       await copyTextToClipboard(buildMcpConfig(mcpClient, mcpEndpoint, token));
       setMcpMessage('MCP client configuration copied with the current bearer token.');
     } catch (error) {
-      setMcpError(errorMessage(error));
+      setMcpError(authSettingsErrorMessage(error));
     } finally {
       setMcpBusy(false);
     }
@@ -14500,16 +14533,6 @@ function SettingsPage({
     }
   }
 
-  function backupErrorMessage(error: unknown): string {
-    if (!(error instanceof Error) || !error.message) {
-      return "Wormhole couldn't complete the backup operation.";
-    }
-    if (/password is incorrect|wrong password/i.test(error.message)) {
-      return 'Wrong password, or the backup file is corrupted. Try again.';
-    }
-    return error.message.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, '');
-  }
-
   function closeBackupExport(open: boolean) {
     if (open) {
       setBackupExportOpen(true);
@@ -14533,7 +14556,7 @@ function SettingsPage({
     try {
       await window.wormhole.cancelBackupExport();
     } catch (error) {
-      setBackupExportError(backupErrorMessage(error));
+      setBackupExportError(backupOperationErrorMessage(error));
     } finally {
       setBackupExportCancelling(false);
     }
@@ -14556,7 +14579,7 @@ function SettingsPage({
       setBackupExportPassword('');
       setBackupExportConfirmation('');
     } catch (error) {
-      setBackupExportError(backupErrorMessage(error));
+      setBackupExportError(backupOperationErrorMessage(error));
     } finally {
       setBackupExportBusy(false);
     }
@@ -14576,7 +14599,7 @@ function SettingsPage({
       setBackupImportOpen(true);
     } catch (error) {
       if (backupAuthGateRef.current === 'unlocked') {
-        setBackupSectionError(backupErrorMessage(error));
+        setBackupSectionError(backupOperationErrorMessage(error));
       }
     } finally {
       setBackupImportPickerBusy(false);
@@ -14607,7 +14630,7 @@ function SettingsPage({
     try {
       await window.wormhole.cancelBackupImport();
     } catch (error) {
-      setBackupImportError(backupErrorMessage(error));
+      setBackupImportError(backupOperationErrorMessage(error));
     } finally {
       setBackupImportCancelling(false);
     }
@@ -14630,7 +14653,7 @@ function SettingsPage({
         );
       }
     } catch (error) {
-      const message = backupErrorMessage(error);
+      const message = backupOperationErrorMessage(error);
       setBackupImportError(
         /cancel/i.test(message)
           ? 'Import cancelled. Items committed before cancellation were kept; running the import again safely skips them.'
@@ -15147,17 +15170,20 @@ function SettingsPage({
           </SettingsSection>
         </SettingsTabPanel>
 
-        <BitwardenCliDialog
-          currentServerRegion={currentBitwardenServerRegion}
-          defaultServerRegion={bitwardenServerRegion}
-          loginBusy={bitwardenBusy}
-          mode={bitwardenCliDialog}
-          onClose={() => setBitwardenCliDialog(null)}
-          onLogin={(email, masterPassword, authenticatorCode, serverRegion) =>
-            void handleBitwardenCliLogin(email, masterPassword, authenticatorCode, serverRegion)
-          }
-          onUnlock={(masterPassword) => void handleBitwardenCliUnlock(masterPassword)}
-        />
+        {bitwardenCliDialog ? (
+          <BitwardenCliDialog
+            currentServerRegion={currentBitwardenServerRegion}
+            defaultServerRegion={bitwardenServerRegion}
+            key={`${bitwardenCliDialog}:${bitwardenServerRegion}`}
+            loginBusy={bitwardenBusy}
+            mode={bitwardenCliDialog}
+            onClose={() => setBitwardenCliDialog(null)}
+            onLogin={(email, masterPassword, authenticatorCode, serverRegion) =>
+              void handleBitwardenCliLogin(email, masterPassword, authenticatorCode, serverRegion)
+            }
+            onUnlock={(masterPassword) => void handleBitwardenCliUnlock(masterPassword)}
+          />
+        ) : null}
 
         <BitwardenOperationDialog
           description="Refresh the Bitwarden credentials available to Wormhole."
@@ -15810,14 +15836,17 @@ function SettingsPage({
           ) : null}
         </DialogContent>
       </Dialog>
-      <AuthSecretDialog
-        busy={securityBusy}
-        error={securityError}
-        method={secretDialog ?? 'pin'}
-        onOpenChange={closeSecretDialog}
-        onSubmit={saveAuthSecret}
-        open={secretDialog !== null}
-      />
+      {secretDialog ? (
+        <AuthSecretDialog
+          busy={securityBusy}
+          error={securityError}
+          key={secretDialog}
+          method={secretDialog}
+          onOpenChange={closeSecretDialog}
+          onSubmit={saveAuthSecret}
+          open
+        />
+      ) : null}
     </section>
   );
 }

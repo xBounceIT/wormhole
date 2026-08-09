@@ -1,0 +1,13 @@
+{
+  "$schema": "https://react.doctor/schema/config.json",
+  "ignore": {
+    "files": ["electron/**", "scripts/**", "tests/**", "tools/**", "vite.config.ts"],
+    "overrides": [
+      {
+        "files": ["package.json"],
+        "rules": ["react-doctor/plugin-update-trust-risk"]
+      }
+    ]
+  },
+  "share": false
+}

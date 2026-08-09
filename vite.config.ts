@@ -19,6 +19,31 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     emptyOutDir: true,
-    sourcemap: true,
+    sourcemap: false,
+    rolldownOptions: {
+      output: {
+        codeSplitting: {
+          minSize: 20_000,
+          maxSize: 400_000,
+          groups: [
+            {
+              name: 'react-vendor',
+              test: /node_modules[\\/](?:react|react-dom)[\\/]/,
+              priority: 30,
+            },
+            {
+              name: 'ui-vendor',
+              test: /node_modules[\\/](?:@base-ui|@radix-ui|radix-ui|lucide-react)[\\/]/,
+              priority: 20,
+            },
+            {
+              name: 'vendor',
+              test: /node_modules[\\/]/,
+              priority: 10,
+            },
+          ],
+        },
+      },
+    },
   },
 });

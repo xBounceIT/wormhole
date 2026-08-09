@@ -1,5 +1,4 @@
-import { StrictMode } from 'react';
-import { flushSync } from 'react-dom';
+import { StrictMode, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import App from './App';
 
@@ -9,15 +8,18 @@ type WorkspaceAppProps = {
   initialSettings: WormholeAppSettings;
 };
 
+function WorkspaceApp(props: WorkspaceAppProps) {
+  useEffect(() => {
+    window.wormhole?.markStartupReady();
+  }, []);
+  return <App {...props} />;
+}
+
 export function mountWorkspaceApp(container: HTMLElement, props: WorkspaceAppProps) {
   const workspaceRoot = createRoot(container);
-  flushSync(() => {
-    workspaceRoot.render(
-      <StrictMode>
-        <App {...props} />
-      </StrictMode>,
-    );
-  });
-
-  window.wormhole?.markStartupReady();
+  workspaceRoot.render(
+    <StrictMode>
+      <WorkspaceApp {...props} />
+    </StrictMode>,
+  );
 }

@@ -116,11 +116,10 @@ export function VirtualCardGrid<T>({
       aria-label={ariaLabel}
       className={className}
       onViewportScroll={(event) => syncViewport(event.currentTarget)}
-      role="list"
       viewportRef={viewportRef}
     >
       <div className="relative" style={{ height: contentHeight + bottomPadding }}>
-        <div
+        <ul
           className="absolute left-0 top-0 grid"
           style={{
             right: endPadding,
@@ -128,24 +127,22 @@ export function VirtualCardGrid<T>({
             gridAutoRows: rowHeight,
             gridTemplateColumns: `repeat(${columnCount}, minmax(0, 1fr))`,
             transform: `translateY(${range.startRow * (rowHeight + gap)}px)`,
-            willChange: 'transform',
           }}
         >
           {visibleItems.map((item, offset) => {
             const itemIndex = range.startIndex + offset;
             return (
-              <div
+              <li
                 aria-posinset={itemIndex + 1}
                 aria-setsize={items.length}
                 className="min-w-0"
                 key={getKey(item)}
-                role="listitem"
               >
                 {renderItem(item)}
-              </div>
+              </li>
             );
           })}
-        </div>
+        </ul>
       </div>
     </ScrollArea>
   );
