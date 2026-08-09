@@ -57,6 +57,131 @@ type rdpManualCredential struct {
 	Password string
 }
 
+type rdpExternalClientRequirementRequest struct {
+	Username            string `json:"username"`
+	Domain              string `json:"domain"`
+	CredentialID        string `json:"credentialId"`
+	InheritedFromNodeID string `json:"inheritedFromNodeId"`
+}
+
+type rdpExternalClientRequirementResponse struct {
+	Required bool `json:"required"`
+}
+
+func isAzureAdRdpIdentity(username, domain string) bool {
+	return strings.EqualFold(strings.TrimSpace(domain), "AzureAD") ||
+		strings.HasPrefix(strings.ToLower(strings.TrimLeftFunc(username, unicode.IsSpace)), "azuread\\")
+}
+
+func enforceAzureAdRdpExternalClient(profile *rdpProfile, operatingSystem string) bool {
+	if profile == nil || operatingSystem != "windows" || !isAzureAdRdpIdentity(profile.Username, profile.Domain) {
+		return false
+	}
+	profile.UseExternalClient = true
+	clearRdpExternalClientCredentials(profile)
+	return true
+}
+
+func clearRdpExternalClientCredentials(profile *rdpProfile) {
+	if profile == nil {
+		return
+	}
+	profile.Username = ""
+	profile.Domain = ""
+	profile.Password = ""
+	profile.GatewayUsername = ""
+	profile.GatewayPassword = ""
+}
+
+func rdpExternalClientRequirement(
+	databasePath string,
+	request rdpExternalClientRequirementRequest,
+) (rdpExternalClientRequirementResponse, error) {
+	if !validRdpText(request.Username, 512) || !validRdpText(request.Domain, 512) {
+		return rdpExternalClientRequirementResponse{}, errors.New("RDP external-client requirement is invalid")
+	}
+	credentialID := normalizeID(request.CredentialID)
+	inheritedFromNodeID := normalizeID(request.InheritedFromNodeID)
+	if (credentialID != "" && !validCredentialID(credentialID)) ||
+		(inheritedFromNodeID != "" && !validCredentialID(inheritedFromNodeID)) ||
+		(credentialID != "" && inheritedFromNodeID != "") {
+		return rdpExternalClientRequirementResponse{}, errors.New("RDP external-client requirement is invalid")
+	}
+	if runtime.GOOS != "windows" {
+		return rdpExternalClientRequirementResponse{}, nil
+	}
+	if isAzureAdRdpIdentity(request.Username, request.Domain) {
+		return rdpExternalClientRequirementResponse{Required: true}, nil
+	}
+	if credentialID == "" && inheritedFromNodeID == "" {
+		return rdpExternalClientRequirementResponse{}, nil
+	}
+	database, err := openDatabase(databasePath, true)
+	if err != nil {
+		return rdpExternalClientRequirementResponse{}, err
+	}
+	if database == nil {
+		return rdpExternalClientRequirementResponse{}, errors.New("RDP credential storage is unavailable")
+	}
+	defer database.Close()
+	return rdpExternalClientRequirementFromDatabase(database, request)
+}
+
+func rdpExternalClientRequirementFromDatabase(
+	database *sql.DB,
+	request rdpExternalClientRequirementRequest,
+) (rdpExternalClientRequirementResponse, error) {
+	required := runtime.GOOS == "windows" && isAzureAdRdpIdentity(request.Username, request.Domain)
+	if runtime.GOOS != "windows" || required {
+		return rdpExternalClientRequirementResponse{Required: required}, nil
+	}
+	credentialID := normalizeID(request.CredentialID)
+	if credentialID == "" && strings.TrimSpace(request.InheritedFromNodeID) != "" {
+		var err error
+		credentialID, err = resolveNodeCredentialID(database, request.InheritedFromNodeID, rdpProtocolValue)
+		if err != nil {
+			return rdpExternalClientRequirementResponse{}, err
+		}
+	}
+	if credentialID == "" {
+		return rdpExternalClientRequirementResponse{}, nil
+	}
+	username, domain, found, err := resolveRdpCredentialIdentityMetadata(database, credentialID)
+	if err != nil {
+		return rdpExternalClientRequirementResponse{}, err
+	}
+	if !found {
+		return rdpExternalClientRequirementResponse{}, nil
+	}
+	return rdpExternalClientRequirementResponse{Required: isAzureAdRdpIdentity(username, domain)}, nil
+}
+
+func resolveRdpCredentialIdentityMetadata(
+	database *sql.DB,
+	credentialID string,
+) (string, string, bool, error) {
+	var username, domain sql.NullString
+	var protocol sql.NullInt64
+	err := database.QueryRow(`
+SELECT Username, Domain, Protocol
+FROM CredentialProfiles WHERE lower(Id) = ? LIMIT 1;`, normalizeID(credentialID)).
+		Scan(&username, &domain, &protocol)
+	if err == nil {
+		if protocol.Valid && protocol.Int64 != rdpProtocolValue {
+			return "", "", false, nil
+		}
+		return strings.TrimSpace(nullableString(username)), strings.TrimSpace(nullableString(domain)), true, nil
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) && !strings.Contains(strings.ToLower(err.Error()), "no such table") {
+		return "", "", false, fmt.Errorf("could not read RDP credential metadata: %w", err)
+	}
+	reference, found, err := resolveBitwardenCredentialReference(database, credentialID, rdpProtocolValue)
+	if err != nil || !found {
+		return "", "", found, err
+	}
+	return reference.Username, reference.Domain, true, nil
+}
+
 func defaultWorkspaceRdpSettings() workspaceRdpSettings {
 	return workspaceRdpSettings{
 		ScreenSize: "fitToWindow", ColorDepth: 32, KeyboardHookMode: 2,
@@ -444,29 +569,35 @@ func (m *vncManager) resolveRdpProfile(
 		profile.TunnelEnabled = &value
 	}
 	profile.TunnelConfigID = normalizeTunnelID(firstString("TunnelConfigId"))
-	if profile.UseExternalClient || forSystemClient {
-		// The system client has no supported secret-bearing launch contract. Do not resolve or
-		// return credentials that mstsc cannot consume; Windows will use its own credential UI.
-		if forSystemClient {
-			profile.Username = ""
-			profile.Domain = ""
-			profile.Password = ""
-			profile.GatewayUsername = ""
-			profile.GatewayPassword = ""
-		}
-		return profile, nil
-	}
-
+	var credentialID string
 	if manual != nil {
 		profile.Username = strings.TrimSpace(manual.Username)
 		profile.Domain = strings.TrimSpace(manual.Domain)
 		profile.Password = manual.Password
-	} else {
-		inline, _ := workspaceNodeValueInt64(chain[0]["UseInlinePassword"])
-		credentialID, credentialErr := resolveNodeCredentialID(m.database, nodeID, rdpProtocolValue)
-		if credentialErr != nil {
-			return rdpProfile{}, credentialErr
+	} else if !profile.UseExternalClient && !forSystemClient {
+		credentialID, err = resolveNodeCredentialID(m.database, nodeID, rdpProtocolValue)
+		if err != nil {
+			return rdpProfile{}, err
 		}
+	}
+	if !profile.UseExternalClient && !forSystemClient {
+		requirement, requirementErr := rdpExternalClientRequirementFromDatabase(m.database, rdpExternalClientRequirementRequest{
+			Username: profile.Username, Domain: profile.Domain, CredentialID: credentialID,
+		})
+		if requirementErr != nil {
+			return rdpProfile{}, requirementErr
+		}
+		profile.UseExternalClient = requirement.Required
+	}
+	if profile.UseExternalClient || forSystemClient {
+		// The system client has no supported secret-bearing launch contract. Do not resolve or
+		// return credentials that mstsc cannot consume; Windows will use its own credential UI.
+		clearRdpExternalClientCredentials(&profile)
+		return profile, nil
+	}
+
+	if manual == nil {
+		inline, _ := workspaceNodeValueInt64(chain[0]["UseInlinePassword"])
 		if inline != 0 {
 			if secret, found, secretErr := readStoredSecret(m.database, nodeID, m.electronUserDataPath); secretErr != nil {
 				return rdpProfile{}, fmt.Errorf("inline RDP credential is unavailable: %w", secretErr)

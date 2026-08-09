@@ -79,6 +79,51 @@ export type RdpStartRequest = {
   manualCredentials?: boolean;
 };
 
+export type RdpExternalClientRequirementRequest = {
+  username: string;
+  domain: string;
+  credentialId?: string;
+  inheritedFromNodeId?: string;
+};
+
+const rdpWorkspaceIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function parseRdpExternalClientRequirementRequest(
+  value: unknown,
+): RdpExternalClientRequirementRequest {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('RDP external-client requirement is invalid.');
+  }
+  const candidate = value as Record<string, unknown>;
+  const username = candidate.username;
+  const domain = candidate.domain;
+  const credentialId = candidate.credentialId;
+  const inheritedFromNodeId = candidate.inheritedFromNodeId;
+  if (
+    typeof username !== 'string' ||
+    username.length > 512 ||
+    /[\r\n\0]/.test(username) ||
+    typeof domain !== 'string' ||
+    domain.length > 512 ||
+    /[\r\n\0]/.test(domain) ||
+    (credentialId !== undefined &&
+      (typeof credentialId !== 'string' || !rdpWorkspaceIdPattern.test(credentialId.trim()))) ||
+    (inheritedFromNodeId !== undefined &&
+      (typeof inheritedFromNodeId !== 'string' ||
+        !rdpWorkspaceIdPattern.test(inheritedFromNodeId.trim()))) ||
+    (credentialId !== undefined && inheritedFromNodeId !== undefined)
+  ) {
+    throw new Error('RDP external-client requirement is invalid.');
+  }
+  return {
+    username,
+    domain,
+    credentialId: typeof credentialId === 'string' ? credentialId.trim() : undefined,
+    inheritedFromNodeId:
+      typeof inheritedFromNodeId === 'string' ? inheritedFromNodeId.trim() : undefined,
+  };
+}
+
 export function rdpGatewayCredentialIdForResolution(profile: RdpProfile): string | undefined {
   if (!profile.gatewayUsageMethod || profile.gatewayUseSameCreds) return undefined;
   return profile.gatewayCredentialId;

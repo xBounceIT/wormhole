@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { parseWorkspaceRdpSettings } from '../electron/workspace-rdp-contract.ts';
 import {
   canProceedWithRdpTunnelRoute,
   isRdpSurfaceRectWithinNativeBounds,
   isRdpLifecycleEvent,
+  parseRdpExternalClientRequirementRequest,
   rdpGatewayCredentialIdForResolution,
   rdpGatewayUsername,
   rdpTunnelEnabledForNative,
@@ -91,6 +93,50 @@ test('RDP broker routes allow only Go-authorized direct saved connections', () =
 test('request acknowledgements and errors are not renderer lifecycle events', () => {
   assert.equal(isRdpLifecycleEvent({}), true);
   assert.equal(isRdpLifecycleEvent({ requestId: 'request-1' }), false);
+});
+
+test('RDP external-client requirement accepts one bounded credential source', () => {
+  assert.deepEqual(
+    parseRdpExternalClientRequirementRequest({
+      username: 'AzureAD\\operator@example.com',
+      domain: '',
+      credentialId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    }),
+    {
+      username: 'AzureAD\\operator@example.com',
+      domain: '',
+      credentialId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      inheritedFromNodeId: undefined,
+    },
+  );
+  assert.throws(() =>
+    parseRdpExternalClientRequirementRequest({
+      username: '',
+      domain: '',
+      credentialId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      inheritedFromNodeId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+    }),
+  );
+  assert.throws(() =>
+    parseRdpExternalClientRequirementRequest({ username: 'bad\nuser', domain: '' }),
+  );
+});
+
+test('Quick Connect classifies Azure AD before resolving any RDP secret', () => {
+  const mainSource = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
+  const startHandler = mainSource.slice(
+    mainSource.indexOf("ipcMain.handle('rdp:start'"),
+    mainSource.indexOf("ipcMain.handle('rdp:disconnect'"),
+  );
+  const requirementIndex = startHandler.indexOf('await resolveRdpExternalClientRequirement');
+  const credentialIndex = startHandler.indexOf(
+    'await resolveNativeRdpCredential(request.profile.credentialId)',
+  );
+  assert.ok(requirementIndex >= 0 && requirementIndex < credentialIndex);
+  assert.match(
+    startHandler,
+    /if \(requiresExternalClient\)[\s\S]*delete resolvedProfile\.password;[\s\S]*delete resolvedProfile\.gatewayPassword;/,
+  );
 });
 
 test('native RDP surface bounds reject unsafe coordinates before screen conversion', () => {

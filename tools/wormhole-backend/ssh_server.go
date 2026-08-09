@@ -25,27 +25,30 @@ import (
 )
 
 const (
-	sshConnectTimeout                 = 15 * time.Second
-	sshKeepAliveInterval              = 30 * time.Second
-	sshOutputDrainTimeout             = 2 * time.Second
-	sshInputMaxBytes                  = 1024 * 1024
-	sshInputQueueCapacity             = 16
-	sshOutputChunk                    = 16 * 1024
-	sshMaxColumns                     = 500
-	sshMaxRows                        = 500
-	sshMaxHostLength                  = 4096
-	sshMaxUsernameLength              = 512
-	sshMaxPasswordBytes               = 4096
-	sshAutoSudoTimeout                = 10 * time.Second
-	sshAutoSudoTailBytes              = 512
-	sshSftpMaxPathBytes               = 16 * 1024
-	sshSftpMaxNameBytes               = 4 * 1024
-	sshSftpMaxEntryCount              = 4096
-	sshSftpListTimeout                = 30 * time.Second
-	sshSftpMaxSafeSize          int64 = 1<<53 - 1
-	sshSftpMaxTransferItems           = 256
-	sshSftpMaxTransferPlanCount       = 4096
-	sshSftpTransferBuffer             = 128 * 1024
+	sshConnectTimeout                  = 15 * time.Second
+	sshKeepAliveInterval               = 30 * time.Second
+	sshOutputDrainTimeout              = 2 * time.Second
+	sshInputMaxBytes                   = 1024 * 1024
+	sshInputQueueCapacity              = 16
+	sshOutputChunk                     = 16 * 1024
+	sshMaxColumns                      = 500
+	sshMaxRows                         = 500
+	sshMaxHostLength                   = 4096
+	sshMaxUsernameLength               = 512
+	sshMaxPasswordBytes                = 4096
+	sshAutoSudoTimeout                 = 10 * time.Second
+	sshAutoSudoTailBytes               = 512
+	sshAutoReconnectMaxAttempts        = 3
+	sshAutoReconnectDelay              = 10 * time.Second
+	sshAutoReconnectStableWindow       = 30 * time.Second
+	sshSftpMaxPathBytes                = 16 * 1024
+	sshSftpMaxNameBytes                = 4 * 1024
+	sshSftpMaxEntryCount               = 4096
+	sshSftpListTimeout                 = 30 * time.Second
+	sshSftpMaxSafeSize           int64 = 1<<53 - 1
+	sshSftpMaxTransferItems            = 256
+	sshSftpMaxTransferPlanCount        = 4096
+	sshSftpTransferBuffer              = 128 * 1024
 )
 
 var (
@@ -138,6 +141,9 @@ type sshWireEvent struct {
 	IncomingSize        int64              `json:"incoming_size,omitempty"`
 	ExistingSize        int64              `json:"existing_size,omitempty"`
 	ExistingIsDirectory bool               `json:"existing_is_directory,omitempty"`
+	Attempt             int                `json:"attempt,omitempty"`
+	MaxAttempts         int                `json:"max_attempts,omitempty"`
+	DelaySeconds        int                `json:"delay_seconds,omitempty"`
 }
 
 type sshSftpEntry struct {
@@ -263,15 +269,39 @@ type sshServer struct {
 	output               *sshEventWriter
 	mcp                  *mcpController
 
-	mu       sync.Mutex
-	sessions map[string]*sshNativeSession
-	pending  map[string]context.CancelFunc
+	mu                     sync.Mutex
+	sessions               map[string]*sshNativeSession
+	pending                map[string]context.CancelFunc
+	lifecycles             map[string]*sshReconnectState
+	openSSH                func(context.Context, *sshReconnectState) (*sshNativeSession, sshTarget, error)
+	reconnectDelayOverride *time.Duration
 
 	transferMu sync.Mutex
 	transfers  map[string]*sshSftpTransfer
 	transferWG sync.WaitGroup
 
 	localQuickPaths localQuickPathCache
+}
+
+type sshReconnectState struct {
+	commandMu         sync.Mutex
+	command           sshWireCommand
+	attempts          int
+	connectedAt       time.Time
+	reconnectDisabled bool
+}
+
+func (state *sshReconnectState) commandSnapshot() sshWireCommand {
+	state.commandMu.Lock()
+	defer state.commandMu.Unlock()
+	return state.command
+}
+
+func (state *sshReconnectState) clearSecrets() {
+	state.commandMu.Lock()
+	defer state.commandMu.Unlock()
+	state.command.Password = ""
+	state.command.PasswordOverride = ""
 }
 
 type sshSftpTransfer struct {
@@ -366,6 +396,7 @@ func serveSSH(databasePath string, input io.Reader, output io.Writer, electronUs
 		output:               &sshEventWriter{encoder: json.NewEncoder(output)},
 		sessions:             make(map[string]*sshNativeSession),
 		pending:              make(map[string]context.CancelFunc),
+		lifecycles:           make(map[string]*sshReconnectState),
 		transfers:            make(map[string]*sshSftpTransfer),
 	}
 	server.mcp = newMcpController(server)
@@ -426,6 +457,8 @@ func (server *sshServer) handle(command sshWireCommand) {
 		server.sftpClose(command)
 	case "auto-sudo-cancel":
 		server.cancelAutoSudo(command)
+	case "app-lock":
+		server.prepareSessionForLock(command.SessionID)
 	case "close":
 		server.close(command.SessionID)
 	default:
@@ -442,9 +475,35 @@ func (server *sshServer) cancelAutoSudo(command sshWireCommand) {
 	}
 }
 
+func (server *sshServer) prepareSessionForLock(sessionID string) {
+	server.mu.Lock()
+	state := server.lifecycles[sessionID]
+	native := server.sessions[sessionID]
+	cancel := server.pending[sessionID]
+	delete(server.pending, sessionID)
+	emitClosed := false
+	if state != nil {
+		state.reconnectDisabled = true
+		state.clearSecrets()
+		if native == nil {
+			delete(server.lifecycles, sessionID)
+			emitClosed = true
+		}
+	}
+	server.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if native != nil {
+		native.cancelAutoSudo()
+	}
+	if emitClosed {
+		server.output.write(sshWireEvent{Type: "closed", SessionID: sessionID})
+	}
+}
+
 func (server *sshServer) open(command sshWireCommand) {
 	nodeID := strings.TrimSpace(command.NodeID)
-	var directTarget *sshTarget
 	if nodeID != "" {
 		if len(nodeID) > 128 ||
 			command.Host != "" ||
@@ -457,8 +516,7 @@ func (server *sshServer) open(command sshWireCommand) {
 			return
 		}
 	} else {
-		target, err := resolveDirectSSHTarget(command)
-		if err != nil {
+		if _, err := resolveDirectSSHTarget(command); err != nil {
 			server.writeError(command.SessionID, err.Error())
 			return
 		}
@@ -466,7 +524,6 @@ func (server *sshServer) open(command sshWireCommand) {
 			server.writeError(command.SessionID, "SSH credential is invalid")
 			return
 		}
-		directTarget = &target
 	}
 	if command.SocksEndpoint != "" && !isLoopbackSocksEndpoint(command.SocksEndpoint) {
 		server.writeError(command.SessionID, "SSH VPN proxy endpoint is invalid")
@@ -479,12 +536,7 @@ func (server *sshServer) open(command sshWireCommand) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	openContext := withTunnelProgressHandler(ctx, func(_ context.Context, phase, detail string) error {
-		server.output.write(sshWireEvent{
-			Type: "tunnel.progress", SessionID: command.SessionID, Phase: phase, Detail: detail,
-		})
-		return nil
-	})
+	state := &sshReconnectState{command: command}
 	server.mu.Lock()
 	if _, exists := server.sessions[command.SessionID]; exists {
 		server.mu.Unlock()
@@ -498,34 +550,35 @@ func (server *sshServer) open(command sshWireCommand) {
 		server.writeError(command.SessionID, "SSH session is already connecting")
 		return
 	}
+	if _, exists := server.lifecycles[command.SessionID]; exists {
+		server.mu.Unlock()
+		cancel()
+		server.writeError(command.SessionID, "SSH session is already open")
+		return
+	}
 	server.pending[command.SessionID] = cancel
+	server.lifecycles[command.SessionID] = state
 	server.mu.Unlock()
 
-	go func() {
-		native, target, err := openNativeSSH(
-			openContext,
-			server.databasePath,
-			server.electronUserDataPath,
-			nodeID,
-			directTarget,
-			command.CredentialID,
-			command.SocksEndpoint,
-			command.TunnelEnabled,
-			command.UsernameOverride,
-			command.PasswordOverride,
-			command.CredentialOverride,
-			command.UsernameOverrideAuthoritative,
-			command.Columns,
-			command.Rows,
-		)
-		if err != nil {
-			pending := server.finishPending(command.SessionID)
+	go server.connectSSH(ctx, state, true)
+}
+
+func (server *sshServer) connectSSH(ctx context.Context, state *sshReconnectState, initial bool) {
+	command := state.commandSnapshot()
+	openContext := withTunnelProgressHandler(ctx, func(_ context.Context, phase, detail string) error {
+		server.output.write(sshWireEvent{
+			Type: "tunnel.progress", SessionID: command.SessionID, Phase: phase, Detail: detail,
+		})
+		return nil
+	})
+	native, target, err := server.openNativeSSH(openContext, state)
+	if err != nil {
+		if initial {
+			pending := server.finishPendingState(state, true)
 			if pending && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 				logError("SSH session failed to connect: %v", safeSSHError(err))
 				event := sshWireEvent{
-					Type:      "error",
-					SessionID: command.SessionID,
-					Error:     safeSSHError(err),
+					Type: "error", SessionID: command.SessionID, Error: safeSSHError(err),
 				}
 				var mismatch *sshHostKeyMismatchError
 				if errors.As(err, &mismatch) {
@@ -534,38 +587,57 @@ func (server *sshServer) open(command sshWireCommand) {
 				}
 				server.output.write(event)
 			}
-			return
+		} else {
+			server.reconnectAttemptFailed(state, err)
 		}
+		return
+	}
 
-		native.id = command.SessionID
-		native.server = server
-		native.mcpSession = mcpSessionInfo{
-			ID:       command.SessionID,
-			Host:     target.host,
-			Port:     target.port,
-			Username: target.username,
-			Title:    target.title,
-			Status:   "connected",
+	native.id = command.SessionID
+	native.server = server
+	native.mcpSession = mcpSessionInfo{
+		ID: command.SessionID, Host: target.host, Port: target.port, Username: target.username,
+		Title: target.title, Status: "connected",
+	}
+	if !server.promote(command.SessionID, native, state) {
+		native.close(false)
+		return
+	}
+	if !server.publishConnected(command.SessionID, native, sshWireEvent{
+		Type: "connected", SessionID: command.SessionID, Host: target.host, Port: target.port,
+		Username: target.username, Fingerprint: target.knownHostFingerprint,
+	}) {
+		native.close(false)
+		return
+	}
+	logInfo("SSH session connected: %s@%s:%d", target.username, target.host, target.port)
+	native.publishTerminalFrame(native.terminal.initialFrame())
+	native.start()
+}
+
+func (server *sshServer) openNativeSSH(
+	ctx context.Context,
+	state *sshReconnectState,
+) (*sshNativeSession, sshTarget, error) {
+	if server.openSSH != nil {
+		return server.openSSH(ctx, state)
+	}
+	command := state.commandSnapshot()
+	nodeID := strings.TrimSpace(command.NodeID)
+	var directTarget *sshTarget
+	if nodeID == "" {
+		target, err := resolveDirectSSHTarget(command)
+		if err != nil {
+			return nil, sshTarget{}, err
 		}
-		if !server.promote(command.SessionID, native) {
-			native.close(false)
-			return
-		}
-		if !server.publishConnected(command.SessionID, native, sshWireEvent{
-			Type:        "connected",
-			SessionID:   command.SessionID,
-			Host:        target.host,
-			Port:        target.port,
-			Username:    target.username,
-			Fingerprint: target.knownHostFingerprint,
-		}) {
-			native.close(false)
-			return
-		}
-		logInfo("SSH session connected: %s@%s:%d", target.username, target.host, target.port)
-		native.publishTerminalFrame(native.terminal.initialFrame())
-		native.start()
-	}()
+		directTarget = &target
+	}
+	return openNativeSSH(
+		ctx, server.databasePath, server.electronUserDataPath, nodeID,
+		directTarget, command.CredentialID, command.SocksEndpoint, command.TunnelEnabled,
+		command.UsernameOverride, command.PasswordOverride, command.CredentialOverride,
+		command.UsernameOverrideAuthoritative, command.Columns, command.Rows,
+	)
 }
 
 func (server *sshServer) input(command sshWireCommand) {
@@ -767,33 +839,54 @@ func (server *sshServer) close(sessionID string) {
 	delete(server.pending, sessionID)
 	native := server.sessions[sessionID]
 	delete(server.sessions, sessionID)
+	state, hadLifecycle := server.lifecycles[sessionID]
+	delete(server.lifecycles, sessionID)
 	server.mu.Unlock()
 	if cancel != nil {
 		cancel()
 	}
+	if state != nil {
+		state.clearSecrets()
+	}
 	server.cancelTransfersForSession(sessionID)
 	if native != nil {
 		logInfo("SSH session closed: %s@%s:%d", native.mcpSession.Username, native.mcpSession.Host, native.mcpSession.Port)
-		native.close(true)
+		native.close(false)
+	}
+	if hadLifecycle {
+		server.output.write(sshWireEvent{Type: "closed", SessionID: sessionID})
 	}
 }
 
-func (server *sshServer) finishPending(sessionID string) bool {
+func (server *sshServer) finishPendingState(state *sshReconnectState, abandon bool) bool {
 	server.mu.Lock()
+	defer server.mu.Unlock()
+	sessionID := state.commandSnapshot().SessionID
 	_, pending := server.pending[sessionID]
+	if server.lifecycles[sessionID] != state {
+		return false
+	}
 	delete(server.pending, sessionID)
-	server.mu.Unlock()
+	if abandon {
+		delete(server.lifecycles, sessionID)
+		state.clearSecrets()
+	}
 	return pending
 }
 
-func (server *sshServer) promote(sessionID string, native *sshNativeSession) bool {
+func (server *sshServer) promote(
+	sessionID string,
+	native *sshNativeSession,
+	state *sshReconnectState,
+) bool {
 	server.mu.Lock()
 	defer server.mu.Unlock()
-	if _, exists := server.pending[sessionID]; !exists {
+	if _, exists := server.pending[sessionID]; !exists || server.lifecycles[sessionID] != state {
 		return false
 	}
 	delete(server.pending, sessionID)
 	server.sessions[sessionID] = native
+	state.connectedAt = time.Now()
 	return true
 }
 
@@ -819,6 +912,83 @@ func (server *sshServer) remove(native *sshNativeSession) {
 	server.mu.Unlock()
 }
 
+func (server *sshServer) nativeClosed(native *sshNativeSession) {
+	server.mu.Lock()
+	if server.sessions[native.id] != native {
+		server.mu.Unlock()
+		return
+	}
+	delete(server.sessions, native.id)
+	state := server.lifecycles[native.id]
+	reconnectDisabled := state != nil && state.reconnectDisabled
+	if reconnectDisabled {
+		delete(server.lifecycles, native.id)
+	}
+	if state != nil && !state.connectedAt.IsZero() && time.Since(state.connectedAt) >= sshAutoReconnectStableWindow {
+		state.attempts = 0
+	}
+	server.mu.Unlock()
+	server.cancelTransfersForSession(native.id)
+	if state == nil || reconnectDisabled {
+		server.output.write(sshWireEvent{Type: "closed", SessionID: native.id})
+		return
+	}
+	server.scheduleReconnect(state, "SSH connection closed unexpectedly")
+}
+
+func (server *sshServer) scheduleReconnect(state *sshReconnectState, lastError string) {
+	reconnectDelay := sshAutoReconnectDelay
+	if server.reconnectDelayOverride != nil {
+		reconnectDelay = *server.reconnectDelayOverride
+	}
+	delaySeconds := int((reconnectDelay + time.Second - 1) / time.Second)
+	server.mu.Lock()
+	sessionID := state.commandSnapshot().SessionID
+	if server.lifecycles[sessionID] != state || server.sessions[sessionID] != nil || server.pending[sessionID] != nil {
+		server.mu.Unlock()
+		return
+	}
+	if state.attempts >= sshAutoReconnectMaxAttempts {
+		delete(server.lifecycles, sessionID)
+		state.clearSecrets()
+		server.output.write(sshWireEvent{
+			Type: "reconnect-failed", SessionID: sessionID, Error: lastError,
+			Attempt: state.attempts, MaxAttempts: sshAutoReconnectMaxAttempts,
+		})
+		server.mu.Unlock()
+		logError("SSH automatic reconnect exhausted for session %s", sessionID)
+		return
+	}
+	state.attempts++
+	attempt := state.attempts
+	ctx, cancel := context.WithCancel(context.Background())
+	server.pending[sessionID] = cancel
+	server.output.write(sshWireEvent{
+		Type: "reconnecting", SessionID: sessionID, Error: lastError,
+		Attempt: attempt, MaxAttempts: sshAutoReconnectMaxAttempts, DelaySeconds: delaySeconds,
+	})
+	server.mu.Unlock()
+	go func() {
+		timer := time.NewTimer(reconnectDelay)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+			server.connectSSH(ctx, state, false)
+		}
+	}()
+}
+
+func (server *sshServer) reconnectAttemptFailed(state *sshReconnectState, err error) {
+	if !server.finishPendingState(state, false) || errors.Is(err, context.Canceled) {
+		return
+	}
+	message := safeSSHError(err)
+	logError("SSH automatic reconnect attempt failed: %v", message)
+	server.scheduleReconnect(state, message)
+}
+
 func (server *sshServer) isActive(native *sshNativeSession) bool {
 	server.mu.Lock()
 	defer server.mu.Unlock()
@@ -830,10 +1000,15 @@ func (server *sshServer) shutdown() {
 		_ = server.mcp.stop(false)
 	}
 	server.mu.Lock()
+	lifecycles := make([]*sshReconnectState, 0, len(server.lifecycles))
 	pending := make([]context.CancelFunc, 0, len(server.pending))
 	for sessionID, cancel := range server.pending {
 		pending = append(pending, cancel)
 		delete(server.pending, sessionID)
+	}
+	for sessionID, state := range server.lifecycles {
+		lifecycles = append(lifecycles, state)
+		delete(server.lifecycles, sessionID)
 	}
 	sessions := make([]*sshNativeSession, 0, len(server.sessions))
 	for sessionID, native := range server.sessions {
@@ -844,6 +1019,9 @@ func (server *sshServer) shutdown() {
 
 	for _, cancel := range pending {
 		cancel()
+	}
+	for _, state := range lifecycles {
+		state.clearSecrets()
 	}
 	server.cancelAllTransfers()
 	for _, native := range sessions {
@@ -1188,12 +1366,13 @@ func (native *sshNativeSession) close(notify bool) {
 			native.tunnel.close()
 		}
 		if native.server != nil {
-			native.server.remove(native)
 			if native.server.mcp != nil {
 				native.server.mcp.forgetSession(native.id)
 			}
 			if notify {
-				native.server.output.write(sshWireEvent{Type: "closed", SessionID: native.id})
+				native.server.nativeClosed(native)
+			} else {
+				native.server.remove(native)
 			}
 		}
 	})

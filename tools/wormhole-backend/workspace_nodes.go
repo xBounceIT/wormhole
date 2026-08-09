@@ -257,7 +257,7 @@ WHERE lower(Id) = ? AND Kind = ?;`,
 }
 
 func normalizeWorkspaceNodeWrite(
-	_ *sql.DB,
+	database *sql.DB,
 	request workspaceNodeWriteRequest,
 	requireID bool,
 ) (normalizedWorkspaceNode, error) {
@@ -418,6 +418,23 @@ func normalizeWorkspaceNodeWrite(
 		node.host = sql.NullString{String: host, Valid: true}
 	default:
 		return normalizedWorkspaceNode{}, errors.New("workspace node kind is invalid")
+	}
+	if node.rdp != nil {
+		credentialID, _ := node.credentialID.(string)
+		inheritedFromNodeID := ""
+		if node.credentialMode == 0 {
+			inheritedFromNodeID = node.parentID
+		}
+		requirement, err := rdpExternalClientRequirementFromDatabase(database, rdpExternalClientRequirementRequest{
+			Username: request.Username, Domain: node.rdp.Domain,
+			CredentialID: credentialID, InheritedFromNodeID: inheritedFromNodeID,
+		})
+		if err != nil {
+			return normalizedWorkspaceNode{}, err
+		}
+		if requirement.Required {
+			node.rdp.UseExternalClient = true
+		}
 	}
 	return node, nil
 }

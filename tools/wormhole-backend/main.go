@@ -345,6 +345,12 @@ func main() {
 		if err == nil {
 			result, err = importAzureVPNFile(request)
 		}
+	case "rdp-external-client-requirement":
+		var request rdpExternalClientRequirementRequest
+		err = decodeInput(&request)
+		if err == nil {
+			result, err = rdpExternalClientRequirement(*databasePath, request)
+		}
 	case "cisco-profile-import":
 		var request ciscoImportRequest
 		err = decodeInput(&request)

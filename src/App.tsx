@@ -40,12 +40,14 @@ import {
   shouldAutoCopyTerminalSelection,
   shouldUseTerminalClipboardShortcut,
 } from './terminal-clipboard';
+import { failedSshReconnectState, reconnectingSshState } from './ssh-reconnect-state';
 import {
   canSplitSession,
   createSessionLayout,
   focusSessionPane,
   moveSession,
   reconcileSessionLayout,
+  restoreSessionFullView,
   selectSession,
   sessionPaneRects,
   sessionPanes,
@@ -113,6 +115,7 @@ import {
   Info,
   KeyRound,
   LoaderCircle,
+  Maximize2,
   Monitor,
   MoreHorizontal,
   Network,
@@ -1042,6 +1045,7 @@ function SessionTabContextMenu({
   session,
   children,
   onReconnect,
+  onRestoreFullView,
   onDisconnect,
   onDuplicate,
   onOpenSystemRdp,
@@ -1051,6 +1055,7 @@ function SessionTabContextMenu({
   session: Session;
   children: ReactNode;
   onReconnect: () => void;
+  onRestoreFullView?: () => void;
   onDisconnect: () => void;
   onDuplicate: () => void;
   onOpenSystemRdp: () => void;
@@ -1069,6 +1074,12 @@ function SessionTabContextMenu({
           <RefreshCcw />
           Reconnect
         </ContextMenuItem>
+        {onRestoreFullView ? (
+          <ContextMenuItem onSelect={onRestoreFullView}>
+            <Maximize2 />
+            Restore full view
+          </ContextMenuItem>
+        ) : null}
         {canDisconnectRemoteDesktopSession(session) ? (
           <ContextMenuItem onSelect={onDisconnect}>
             <Power />
@@ -1498,6 +1509,8 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     serial: { ...defaultSerialSettings },
     rdp: { ...defaultRdpSettings },
   });
+  const [rdpExternalClientRequired, setRdpExternalClientRequired] = useState(false);
+  const rdpExternalClientRequirementRequest = useRef(0);
   const [newFolderOpen, setNewFolderOpen] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
   const [newFolderParentId, setNewFolderParentId] = useState<string | null>(null);
@@ -1565,6 +1578,53 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   );
 
   useEffect(() => () => sidebarWriter.cancel(), [sidebarWriter]);
+  useEffect(() => {
+    const requestId = ++rdpExternalClientRequirementRequest.current;
+    if (!newConnectionOpen || newConnectionForm.protocol !== 'rdp' || !window.wormhole) {
+      setRdpExternalClientRequired(false);
+      return;
+    }
+    const credentialId =
+      newConnectionForm.useSavedCredentials &&
+      newConnectionForm.credential !== 'inherit' &&
+      newConnectionForm.credential !== 'none'
+        ? newConnectionForm.credential
+        : undefined;
+    const inheritedFromNodeId =
+      newConnectionForm.useSavedCredentials &&
+      newConnectionForm.credential === 'inherit' &&
+      newConnectionForm.folder
+        ? newConnectionForm.folder
+        : undefined;
+    const timer = window.setTimeout(() => {
+      void window.wormhole
+        ?.rdpExternalClientRequirement({
+          username: newConnectionForm.username,
+          domain: newConnectionForm.rdp.domain,
+          credentialId,
+          inheritedFromNodeId,
+        })
+        .then((result) => {
+          if (rdpExternalClientRequirementRequest.current === requestId) {
+            setRdpExternalClientRequired(result.required);
+          }
+        })
+        .catch(() => {
+          if (rdpExternalClientRequirementRequest.current === requestId) {
+            setRdpExternalClientRequired(false);
+          }
+        });
+    }, 200);
+    return () => window.clearTimeout(timer);
+  }, [
+    newConnectionForm.credential,
+    newConnectionForm.folder,
+    newConnectionForm.protocol,
+    newConnectionForm.rdp.domain,
+    newConnectionForm.useSavedCredentials,
+    newConnectionForm.username,
+    newConnectionOpen,
+  ]);
   const activeSessionCount = useMemo(() => sessions.filter(isSessionActive).length, [sessions]);
   useEffect(() => {
     window.wormhole?.reportActiveSessionCount(activeSessionCount);
@@ -1864,6 +1924,12 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
               ...session,
               terminalFrame: applySshTerminalFrame(session.terminalFrame, event.frame),
             };
+          }
+          if (event.type === 'reconnecting') {
+            return { ...session, ...reconnectingSshState(event) };
+          }
+          if (event.type === 'reconnect-failed') {
+            return { ...session, ...failedSshReconnectState(event) };
           }
           if (event.type === 'sftp.opening') {
             const requestMatches =
@@ -7118,7 +7184,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                         ) : null}
                         <label className="flex items-center gap-2 text-xs">
                           <Checkbox
-                            checked={newConnectionForm.rdp.useExternalClient}
+                            checked={
+                              rdpExternalClientRequired || newConnectionForm.rdp.useExternalClient
+                            }
+                            disabled={rdpExternalClientRequired}
                             onCheckedChange={(checked) =>
                               setNewConnectionForm((form) => ({
                                 ...form,
@@ -7128,6 +7197,12 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                           />
                           <span>Open with system Remote Desktop (mstsc.exe)</span>
                         </label>
+                        {rdpExternalClientRequired ? (
+                          <p className="text-[11px] leading-relaxed text-muted-foreground">
+                            Azure AD credentials require the system Remote Desktop client. Wormhole
+                            enforces this route to avoid the embedded Windows host failure.
+                          </p>
+                        ) : null}
                         <label className="flex items-center gap-2 text-xs">
                           <Checkbox
                             checked={newConnectionForm.rdp.autoReconnect}
@@ -9326,6 +9401,11 @@ function SessionsPage({
     setDropPreview(null);
   }
 
+  function restoreFullView(sessionId: string) {
+    setLayout((current) => restoreSessionFullView(current, sessionId));
+    onSelectSession(sessionId);
+  }
+
   function updateDropPreview(event: DragEvent<HTMLElement>) {
     const sessionId = draggedSessionId || event.dataTransfer.getData('text/wormhole-session');
     if (!sessionId) return;
@@ -9430,6 +9510,9 @@ function SessionsPage({
                   onFileTransfer={() => onOpenFileTransfer(session.id)}
                   onOpenSystemRdp={() => onOpenSystemRdp(session.id)}
                   onReconnect={() => onReconnectSession(session.id)}
+                  onRestoreFullView={
+                    panes.length > 1 ? () => restoreFullView(session.id) : undefined
+                  }
                   session={session}
                 >
                   <div
@@ -9458,6 +9541,9 @@ function SessionsPage({
                       }}
                       onFocus={() => activateSession(pane.id, session.id)}
                       onKeyDown={(event) => keyboardMove(event, pane, session.id)}
+                      onDoubleClick={() => {
+                        if (panes.length > 1) restoreFullView(session.id);
+                      }}
                       role="tab"
                       tabIndex={active ? 0 : -1}
                       title="Drag to another tab bar to move, or to a pane edge to split. Alt+Shift+Arrow also splits."

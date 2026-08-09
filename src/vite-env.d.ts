@@ -331,6 +331,21 @@ type WormholeSshEvent =
   | { type: 'screen'; sessionId: string; frame: WormholeSshTerminalFrame }
   | { type: 'closed'; sessionId: string }
   | {
+      type: 'reconnecting';
+      sessionId: string;
+      error: string;
+      attempt: number;
+      maxAttempts: number;
+      delaySeconds: number;
+    }
+  | {
+      type: 'reconnect-failed';
+      sessionId: string;
+      error: string;
+      attempt: number;
+      maxAttempts: number;
+    }
+  | {
       type: 'error';
       sessionId: string;
       error: string;
@@ -736,6 +751,12 @@ interface Window {
       serialFlowControl: number;
       rdp?: WormholeWorkspaceRdpSettings;
     }): Promise<{ updated: boolean }>;
+    rdpExternalClientRequirement(request: {
+      username: string;
+      domain: string;
+      credentialId?: string;
+      inheritedFromNodeId?: string;
+    }): Promise<{ required: boolean }>;
     createCredential(request: {
       name: string;
       protocol: 'ssh' | 'rdp' | 'vnc';

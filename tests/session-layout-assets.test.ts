@@ -431,6 +431,7 @@ test('session tab actions use the themed renderer context menu with dedicated ic
   assert.match(menuSource, /<ContextMenuTrigger asChild>/);
   assert.match(menuSource, /<Copy \/>[\s\S]*Duplicate/);
   assert.match(menuSource, /<RefreshCcw \/>[\s\S]*Reconnect/);
+  assert.match(menuSource, /<Maximize2 \/>[\s\S]*Restore full view/);
   assert.match(menuSource, /<Power \/>[\s\S]*Disconnect/);
   assert.match(menuSource, /<Monitor \/>[\s\S]*Open in System Remote Desktop/);
   assert.match(menuSource, /<FolderOpen \/>[\s\S]*SFTP browser/);

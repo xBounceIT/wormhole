@@ -9,6 +9,7 @@ import {
   moveSession,
   reconcileSessionLayout,
   removeSession,
+  restoreSessionFullView,
   sessionPaneRects,
   sessionPanes,
   selectSession,
@@ -76,6 +77,34 @@ test('moving the sole tab onto another pane collapses the empty source leaf', ()
   assert.deepEqual(sessionPanes(layout.root)[0].tabs, ['a', 'c', 'b']);
   assert.equal(layout.activePaneId, target.id);
   assertSessionLayout(layout);
+});
+
+test('restoring full view collapses every pane without dropping or recreating sessions', () => {
+  let layout = createSessionLayout(['a', 'b', 'c', 'd'], 'a');
+  layout = splitSession(layout, 'pane-0', 'right', 'c');
+  layout = splitSession(layout, findSessionPane(layout.root, 'c')!.id, 'bottom', 'd');
+  const sourcePaneId = findSessionPane(layout.root, 'd')!.id;
+
+  layout = restoreSessionFullView(layout, 'd');
+
+  assert.equal(layout.root?.kind, 'pane');
+  assert.equal(layout.activePaneId, sourcePaneId);
+  assert.deepEqual(sessionPanes(layout.root)[0], {
+    kind: 'pane',
+    id: sourcePaneId,
+    tabs: ['a', 'b', 'c', 'd'],
+    activeSessionId: 'd',
+  });
+  assertSessionLayout(layout);
+});
+
+test('restoring an unknown session is stable and a single pane only changes selection', () => {
+  const layout = createSessionLayout(['a', 'b'], 'a');
+  assert.equal(restoreSessionFullView(layout, 'missing'), layout);
+  const restored = restoreSessionFullView(layout, 'b');
+  assert.equal(restored.root?.kind, 'pane');
+  assert.equal(sessionPanes(restored.root)[0].activeSessionId, 'b');
+  assertSessionLayout(restored);
 });
 
 test('closing or terminating the final tab collapses its leaf and focuses a survivor', () => {

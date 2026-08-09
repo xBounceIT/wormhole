@@ -129,6 +129,12 @@ const wormholeBridge = {
     serialFlowControl: number;
     rdp?: WorkspaceRdpSettings;
   }) => ipcRenderer.invoke('workspace:update-node', request),
+  rdpExternalClientRequirement: (request: {
+    username: string;
+    domain: string;
+    credentialId?: string;
+    inheritedFromNodeId?: string;
+  }) => ipcRenderer.invoke('rdp:external-client-requirement', request),
   createCredential: (request: {
     name: string;
     protocol: 'ssh' | 'rdp' | 'vnc';
@@ -555,6 +561,8 @@ const wormholeBridge = {
       type:
         | 'connected'
         | 'screen'
+        | 'reconnecting'
+        | 'reconnect-failed'
         | 'closed'
         | 'error'
         | 'sftp.opening'
@@ -642,6 +650,9 @@ const wormholeBridge = {
       incomingSize?: number;
       existingSize?: number;
       existingIsDirectory?: boolean;
+      attempt?: number;
+      maxAttempts?: number;
+      delaySeconds?: number;
     }) => void,
   ) => {
     const handler = (_event: Electron.IpcRendererEvent, value: unknown) => {

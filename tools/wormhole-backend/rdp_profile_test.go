@@ -3,9 +3,125 @@ package main
 import (
 	"encoding/json"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
+
+func TestAzureAdRdpIdentityUsesOnlyExplicitDomainOrPrefixSignals(t *testing.T) {
+	for _, test := range []struct {
+		username string
+		domain   string
+		expected bool
+	}{
+		{username: " AzureAD\\operator@example.com", expected: true},
+		{username: "operator@example.onmicrosoft.com", expected: false},
+		{domain: " azuread ", expected: true},
+		{domain: "CONTOSO", expected: false},
+	} {
+		if actual := isAzureAdRdpIdentity(test.username, test.domain); actual != test.expected {
+			t.Fatalf("identity (%q, %q) detected=%v, want %v", test.username, test.domain, actual, test.expected)
+		}
+	}
+}
+
+func TestAzureAdRdpRoutingStripsQuickConnectCredentialsAtTheGoBoundary(t *testing.T) {
+	profile := rdpProfile{
+		Username: "AzureAD\\operator@example.com", Password: "secret",
+		GatewayUsername: "gateway-user", GatewayPassword: "gateway-secret",
+	}
+	if !enforceAzureAdRdpExternalClient(&profile, "windows") {
+		t.Fatal("Azure AD Quick Connect profile was not routed externally")
+	}
+	if !profile.UseExternalClient || profile.Username != "" || profile.Password != "" ||
+		profile.GatewayUsername != "" || profile.GatewayPassword != "" {
+		t.Fatalf("system-client profile retained credential material: %#v", profile)
+	}
+	nonWindows := rdpProfile{Username: "AzureAD\\operator@example.com", Password: "secret"}
+	if enforceAzureAdRdpExternalClient(&nonWindows, "linux") || nonWindows.UseExternalClient || nonWindows.Password == "" {
+		t.Fatalf("Windows-only compatibility route changed a non-Windows profile: %#v", nonWindows)
+	}
+}
+
+func TestExplicitExternalRdpProfileNeverReturnsManualCredentials(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	if err := ensureElectronWorkspaceSchema(databasePath); err != nil {
+		t.Fatal(err)
+	}
+	settings := defaultWorkspaceRdpSettings()
+	settings.UseExternalClient = true
+	nodeID, err := createWorkspaceNode(databasePath, workspaceNodeWriteRequest{
+		Name: "External desktop", Kind: "connection", Protocol: "rdp", Host: "external.example",
+		CredentialMode: 1, InlinePasswordAction: "set", InlinePassword: "stored-secret", RDP: &settings,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	manager := &vncManager{database: database, databasePath: databasePath}
+	profile, err := manager.resolveRdpRuntimeProfile(nodeID, &rdpManualCredential{
+		Username: "operator", Domain: "CONTOSO", Password: "manual-secret",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !profile.UseExternalClient || profile.Username != "" || profile.Domain != "" || profile.Password != "" ||
+		profile.GatewayUsername != "" || profile.GatewayPassword != "" {
+		t.Fatalf("external RDP profile returned credential material: %#v", profile)
+	}
+}
+
+func TestAzureAdRdpCredentialForcesSystemClientBeforeSecretResolution(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("the Azure AD ActiveX compatibility route is Windows-only")
+	}
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	if err := ensureElectronWorkspaceSchema(databasePath); err != nil {
+		t.Fatal(err)
+	}
+	credential, err := createCredential(databasePath, credentialCreateRequest{
+		Name: "Azure desktop", Protocol: "rdp", Username: "operator@example.com",
+		Domain: "AzureAD", Password: "must-not-cross-the-system-client-boundary",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := defaultWorkspaceRdpSettings()
+	nodeID, err := createWorkspaceNode(databasePath, workspaceNodeWriteRequest{
+		Name: "Azure desktop", Kind: "connection", Protocol: "rdp", Host: "aad.example",
+		CredentialMode: 2, CredentialID: credential.ID, RDP: &settings,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	manager := &vncManager{database: database, databasePath: databasePath}
+	profile, err := manager.resolveRdpRuntimeProfile(nodeID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !profile.UseExternalClient || profile.Password != "" {
+		t.Fatalf("Azure AD profile was not safely routed before secret resolution: %#v", profile)
+	}
+	var persisted bool
+	if err := database.QueryRow(
+		"SELECT COALESCE(RdpUseExternalClient, 0) <> 0 FROM Nodes WHERE Id = ?;",
+		nodeID,
+	).Scan(&persisted); err != nil {
+		t.Fatal(err)
+	}
+	if !persisted {
+		t.Fatal("Azure AD routing requirement was not persisted on the connection")
+	}
+}
 
 func completeRdpSettings() workspaceRdpSettings {
 	return workspaceRdpSettings{

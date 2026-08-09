@@ -31,6 +31,52 @@ import {
   minSidebarWidth,
   normalizeSidebarWidth,
 } from '../src/sidebar-settings.ts';
+import { failedSshReconnectState, reconnectingSshState } from '../src/ssh-reconnect-state.ts';
+
+test('SSH automatic reconnect keeps the tab alive and reports terminal exhaustion', () => {
+  assert.deepEqual(reconnectingSshState({ attempt: 1, maxAttempts: 3, delaySeconds: 10 }), {
+    status: 'connecting',
+    sftp: undefined,
+    tunnelProgress: null,
+    error: 'Connection lost. Reconnecting in 10 seconds (attempt 1 of 3).',
+  });
+  assert.deepEqual(
+    failedSshReconnectState({ attempt: 3, maxAttempts: 3, error: 'network unavailable' }),
+    {
+      status: 'failed',
+      sftp: undefined,
+      tunnelProgress: null,
+      error: 'Automatic reconnect failed after 3 attempts. network unavailable',
+    },
+  );
+});
+
+test('SSH reconnect lifecycle is validated before renderer delivery and retains its VPN lease', () => {
+  const mainSource = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
+  const appSource = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  const parser = mainSource.slice(
+    mainSource.indexOf('function parseSshBackendEvent'),
+    mainSource.indexOf('function parseMcpBackendMessage'),
+  );
+  assert.match(parser, /value\.type === 'reconnecting' \|\| value\.type === 'reconnect-failed'/);
+  assert.match(parser, /value\.max_attempts > 10/);
+  const handler = mainSource.slice(
+    mainSource.indexOf('private handleLine'),
+    mainSource.indexOf('private broadcast', mainSource.indexOf('private handleLine')),
+  );
+  assert.match(handler, /event\.type === 'closed' \|\| event\.type === 'reconnect-failed'/);
+  assert.doesNotMatch(handler, /event\.type === 'reconnecting'/);
+  assert.match(mainSource, /prepareForLock\(\): void[\s\S]*type: 'app-lock'/);
+  assert.match(
+    mainSource.slice(mainSource.indexOf("ipcMain.handle('auth:lock'")),
+    /sshBackend\.prepareForLock\(\)/,
+  );
+  assert.match(appSource, /event\.type === 'reconnecting'[\s\S]*reconnectingSshState\(event\)/);
+  assert.match(
+    appSource,
+    /event\.type === 'reconnect-failed'[\s\S]*failedSshReconnectState\(event\)/,
+  );
+});
 
 test('dialog close animations retain the last open visuals instead of rendering cleared state', () => {
   const retained = { icon: 'success', message: 'Extension updated.' };

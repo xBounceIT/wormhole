@@ -229,6 +229,23 @@ export function moveSession(
   };
 }
 
+export function restoreSessionFullView(
+  state: SessionLayoutState,
+  sessionId: string,
+): SessionLayoutState {
+  const panes = sessionPanes(state.root);
+  const source = panes.find((pane) => pane.tabs.includes(sessionId));
+  if (!source) return state;
+  if (panes.length === 1) return selectSession(state, source.id, sessionId);
+
+  const tabs = unique(panes.flatMap((pane) => pane.tabs));
+  return {
+    ...state,
+    root: { kind: 'pane', id: source.id, tabs, activeSessionId: sessionId },
+    activePaneId: source.id,
+  };
+}
+
 export function sessionPaneRects(root: SessionLayoutNode | null): SessionPaneRect[] {
   const result: SessionPaneRect[] = [];
   function visit(

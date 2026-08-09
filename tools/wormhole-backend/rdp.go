@@ -219,6 +219,7 @@ func (c *rdpController) start(command rdpCommand) {
 		writeRdpEvent(rdpEvent{Type: "error", RequestID: command.RequestID, LifecycleID: command.LifecycleID, Message: "RDP session ID is required"})
 		return
 	}
+	enforceAzureAdRdpExternalClient(&command.Profile, runtime.GOOS)
 	if command.Profile.UseExternalClient && strings.TrimSpace(command.Profile.NodeID) != "" {
 		profile, err := refreshSavedSystemRdpProfile(
 			command.Profile,

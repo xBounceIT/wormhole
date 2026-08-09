@@ -1490,6 +1490,175 @@ func TestSSHNativeSessionSnapshotPublishesAFullFrame(t *testing.T) {
 	}
 }
 
+func TestSSHUnexpectedCloseRetriesThreeTimesBeforeTerminalFailure(t *testing.T) {
+	reconnectDelay := time.Duration(0)
+
+	var output bytes.Buffer
+	var callsMu sync.Mutex
+	calls := 0
+	server := &sshServer{
+		output:                 &sshEventWriter{encoder: json.NewEncoder(&output)},
+		sessions:               make(map[string]*sshNativeSession),
+		pending:                make(map[string]context.CancelFunc),
+		lifecycles:             make(map[string]*sshReconnectState),
+		reconnectDelayOverride: &reconnectDelay,
+	}
+	server.openSSH = func(context.Context, *sshReconnectState) (*sshNativeSession, sshTarget, error) {
+		callsMu.Lock()
+		calls++
+		callsMu.Unlock()
+		return nil, sshTarget{}, errors.New("network unavailable")
+	}
+	state := &sshReconnectState{
+		command: sshWireCommand{SessionID: "session", Password: "retry-secret"}, connectedAt: time.Now(),
+	}
+	native := &sshNativeSession{id: "session", server: server}
+	server.sessions[native.id] = native
+	server.lifecycles[native.id] = state
+
+	native.close(true)
+	deadline := time.Now().Add(time.Second)
+	for {
+		server.output.mu.Lock()
+		complete := strings.Contains(output.String(), `"type":"reconnect-failed"`)
+		server.output.mu.Unlock()
+		if complete {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("automatic reconnect did not exhaust its retry budget")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	callsMu.Lock()
+	actualCalls := calls
+	callsMu.Unlock()
+	if actualCalls != sshAutoReconnectMaxAttempts {
+		t.Fatalf("automatic reconnect opened %d times, want %d", actualCalls, sshAutoReconnectMaxAttempts)
+	}
+
+	server.output.mu.Lock()
+	snapshot := append([]byte(nil), output.Bytes()...)
+	server.output.mu.Unlock()
+	decoder := json.NewDecoder(bytes.NewReader(snapshot))
+	for attempt := 1; attempt <= sshAutoReconnectMaxAttempts; attempt++ {
+		var event sshWireEvent
+		if err := decoder.Decode(&event); err != nil {
+			t.Fatal(err)
+		}
+		if event.Type != "reconnecting" || event.Attempt != attempt ||
+			event.MaxAttempts != sshAutoReconnectMaxAttempts {
+			t.Fatalf("unexpected reconnect event for attempt %d: %#v", attempt, event)
+		}
+	}
+	var terminal sshWireEvent
+	if err := decoder.Decode(&terminal); err != nil {
+		t.Fatal(err)
+	}
+	if terminal.Type != "reconnect-failed" || terminal.Attempt != sshAutoReconnectMaxAttempts ||
+		terminal.Error != "network unavailable" {
+		t.Fatalf("unexpected terminal reconnect event: %#v", terminal)
+	}
+	if state.commandSnapshot().Password != "" {
+		t.Fatal("terminal reconnect failure retained the SSH password")
+	}
+}
+
+func TestSSHExplicitCloseCancelsAPendingAutomaticReconnect(t *testing.T) {
+	reconnectDelay := time.Hour
+
+	var output bytes.Buffer
+	var callsMu sync.Mutex
+	calls := 0
+	server := &sshServer{
+		output:                 &sshEventWriter{encoder: json.NewEncoder(&output)},
+		sessions:               make(map[string]*sshNativeSession),
+		pending:                make(map[string]context.CancelFunc),
+		lifecycles:             make(map[string]*sshReconnectState),
+		transfers:              make(map[string]*sshSftpTransfer),
+		reconnectDelayOverride: &reconnectDelay,
+	}
+	server.openSSH = func(context.Context, *sshReconnectState) (*sshNativeSession, sshTarget, error) {
+		callsMu.Lock()
+		calls++
+		callsMu.Unlock()
+		return nil, sshTarget{}, errors.New("must not run")
+	}
+	state := &sshReconnectState{
+		command:     sshWireCommand{SessionID: "session", Password: "retry-secret"},
+		connectedAt: time.Now().Add(-sshAutoReconnectStableWindow - time.Second),
+		attempts:    sshAutoReconnectMaxAttempts,
+	}
+	native := &sshNativeSession{id: "session", server: server}
+	server.sessions[native.id] = native
+	server.lifecycles[native.id] = state
+
+	native.close(true)
+	if state.attempts != 1 {
+		t.Fatalf("stable session did not reset its reconnect budget: %d", state.attempts)
+	}
+	server.close(native.id)
+	time.Sleep(10 * time.Millisecond)
+	callsMu.Lock()
+	actualCalls := calls
+	callsMu.Unlock()
+	if actualCalls != 0 {
+		t.Fatalf("explicit close allowed %d reconnect attempts", actualCalls)
+	}
+	server.mu.Lock()
+	_, pending := server.pending[native.id]
+	_, retained := server.lifecycles[native.id]
+	server.mu.Unlock()
+	if pending || retained {
+		t.Fatal("explicit close retained automatic reconnect state")
+	}
+	if state.commandSnapshot().Password != "" {
+		t.Fatal("explicit close retained the SSH password")
+	}
+}
+
+func TestSSHAppLockClearsReconnectSecretsWithoutClosingAnActiveSession(t *testing.T) {
+	var output bytes.Buffer
+	calls := 0
+	server := &sshServer{
+		output:     &sshEventWriter{encoder: json.NewEncoder(&output)},
+		sessions:   make(map[string]*sshNativeSession),
+		pending:    make(map[string]context.CancelFunc),
+		lifecycles: make(map[string]*sshReconnectState),
+	}
+	server.openSSH = func(context.Context, *sshReconnectState) (*sshNativeSession, sshTarget, error) {
+		calls++
+		return nil, sshTarget{}, errors.New("must not reconnect while locked")
+	}
+	state := &sshReconnectState{command: sshWireCommand{
+		SessionID: "session", Password: "manual-secret", PasswordOverride: "vault-secret",
+	}}
+	native := &sshNativeSession{id: "session", server: server}
+	server.sessions[native.id] = native
+	server.lifecycles[native.id] = state
+
+	server.prepareSessionForLock(native.id)
+	command := state.commandSnapshot()
+	if !state.reconnectDisabled || command.Password != "" || command.PasswordOverride != "" {
+		t.Fatalf("application lock retained SSH reconnect secrets: %#v", command)
+	}
+	if server.sessions[native.id] != native {
+		t.Fatal("application lock closed an active SSH session")
+	}
+
+	native.close(true)
+	if calls != 0 {
+		t.Fatalf("locked SSH session attempted %d reconnects", calls)
+	}
+	var event sshWireEvent
+	if err := json.NewDecoder(&output).Decode(&event); err != nil {
+		t.Fatal(err)
+	}
+	if event.Type != "closed" || event.SessionID != native.id {
+		t.Fatalf("locked SSH close emitted an unexpected event: %#v", event)
+	}
+}
+
 func TestSSHSnapshotIgnoresAClosedSession(t *testing.T) {
 	var output bytes.Buffer
 	server := &sshServer{

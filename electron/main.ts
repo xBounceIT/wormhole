@@ -85,6 +85,7 @@ import { parseWorkspaceRdpSettings, type WorkspaceRdpSettings } from './workspac
 import type {
   RdpBackendEvent,
   RdpCommandRequest,
+  RdpExternalClientRequirementRequest,
   RdpProfile,
   RdpStartRequest,
   RdpSurfaceRect,
@@ -97,6 +98,7 @@ import {
   canProceedWithRdpTunnelRoute,
   isRdpLifecycleEvent,
   isRdpSurfaceRectWithinNativeBounds,
+  parseRdpExternalClientRequirementRequest,
   rdpGatewayCredentialIdForResolution,
   rdpGatewayUsername,
   rdpTunnelEnabledForNative,
@@ -185,6 +187,7 @@ type BackendOperation =
   | 'web-target'
   | 'watchguard-import'
   | 'azure-vpn-import'
+  | 'rdp-external-client-requirement'
   | 'cisco-profile-import'
   | 'ovpn-file-import'
   | 'credential-create'
@@ -829,6 +832,21 @@ type SshBackendEvent =
   | { type: 'screen'; sessionId: string; frame: SshTerminalFrame }
   | { type: 'closed'; sessionId: string }
   | {
+      type: 'reconnecting';
+      sessionId: string;
+      error: string;
+      attempt: number;
+      maxAttempts: number;
+      delaySeconds: number;
+    }
+  | {
+      type: 'reconnect-failed';
+      sessionId: string;
+      error: string;
+      attempt: number;
+      maxAttempts: number;
+    }
+  | {
       type: 'error';
       sessionId: string;
       error: string;
@@ -966,7 +984,7 @@ const sshMaxTerminalScrollbackLineLength = 2048;
 const sshMaxSftpPathLength = 16 * 1024;
 const sshMaxSftpEntries = 4096;
 const sshMaxSftpEntryNameLength = 4096;
-const sshMaxSftpErrorLength = 4096;
+const sshMaxBackendErrorLength = 4096;
 const sshMaxSftpQuickPaths = 64;
 const sshMaxSftpQuickPathLabelLength = 256;
 const credentialMaxNameLength = 256;
@@ -1875,6 +1893,43 @@ function parseSshBackendEvent(line: string): SshBackendEvent | undefined {
     const frame = parseSshTerminalFrame(value.frame);
     return frame ? { type: 'screen', sessionId: value.session_id, frame } : undefined;
   }
+  if (value.type === 'reconnecting' || value.type === 'reconnect-failed') {
+    if (
+      typeof value.error !== 'string' ||
+      value.error.length > sshMaxBackendErrorLength ||
+      typeof value.attempt !== 'number' ||
+      !Number.isInteger(value.attempt) ||
+      value.attempt < 1 ||
+      value.attempt > 10 ||
+      typeof value.max_attempts !== 'number' ||
+      !Number.isInteger(value.max_attempts) ||
+      value.max_attempts < value.attempt ||
+      value.max_attempts > 10 ||
+      (value.type === 'reconnecting' &&
+        (typeof value.delay_seconds !== 'number' ||
+          !Number.isInteger(value.delay_seconds) ||
+          value.delay_seconds < 0 ||
+          value.delay_seconds > 3600))
+    ) {
+      return undefined;
+    }
+    return value.type === 'reconnecting'
+      ? {
+          type: 'reconnecting',
+          sessionId: value.session_id,
+          error: value.error,
+          attempt: value.attempt,
+          maxAttempts: value.max_attempts,
+          delaySeconds: value.delay_seconds as number,
+        }
+      : {
+          type: 'reconnect-failed',
+          sessionId: value.session_id,
+          error: value.error,
+          attempt: value.attempt,
+          maxAttempts: value.max_attempts,
+        };
+  }
   if (value.type === 'closed') {
     return { type: 'closed', sessionId: value.session_id };
   }
@@ -1972,7 +2027,7 @@ function parseSshBackendEvent(line: string): SshBackendEvent | undefined {
       requestId: value.request_id,
       pane: 'local',
       path: value.path,
-      error: value.error.slice(0, sshMaxSftpErrorLength),
+      error: value.error.slice(0, sshMaxBackendErrorLength),
     };
   }
   if (value.type === 'sftp.operation') {
@@ -1994,7 +2049,9 @@ function parseSshBackendEvent(line: string): SshBackendEvent | undefined {
       operation: value.operation,
       path: value.path,
       error:
-        typeof value.error === 'string' ? value.error.slice(0, sshMaxSftpErrorLength) : undefined,
+        typeof value.error === 'string'
+          ? value.error.slice(0, sshMaxBackendErrorLength)
+          : undefined,
     };
   }
   if (value.type === 'sftp.conflict') {
@@ -2075,7 +2132,9 @@ function parseSshBackendEvent(line: string): SshBackendEvent | undefined {
       expectedBytes: value.expected_bytes,
       bytesTransferred: value.bytes_transferred,
       error:
-        typeof value.error === 'string' ? value.error.slice(0, sshMaxSftpErrorLength) : undefined,
+        typeof value.error === 'string'
+          ? value.error.slice(0, sshMaxBackendErrorLength)
+          : undefined,
     };
   }
   if (value.type === 'sftp.error' && typeof value.error === 'string') {
@@ -2085,7 +2144,7 @@ function parseSshBackendEvent(line: string): SshBackendEvent | undefined {
     return {
       type: 'sftp.error',
       sessionId: value.session_id,
-      error: value.error.slice(0, sshMaxSftpErrorLength),
+      error: value.error.slice(0, sshMaxBackendErrorLength),
       path: isSftpPath(value.path) ? value.path : undefined,
       requestId: isSftpRequestId(value.request_id) ? value.request_id : undefined,
     };
@@ -2902,6 +2961,19 @@ async function resolveNativeRdpProfile(
   );
   if (!response.ok) throw new Error(response.error || 'RDP profile resolution failed.');
   return response.result as RdpProfile;
+}
+
+async function resolveRdpExternalClientRequirement(
+  request: RdpExternalClientRequirementRequest,
+): Promise<boolean> {
+  const response = await runBackend<{ required: boolean }>(
+    'rdp-external-client-requirement',
+    request,
+  );
+  if (!response || typeof response.required !== 'boolean') {
+    throw new Error('RDP external-client requirement returned an invalid result.');
+  }
+  return response.required;
 }
 
 async function resolveNativeRdpSystemClientCapability(
@@ -5472,10 +5544,10 @@ class NativeSshBackend {
     }
   }
 
-  cancelAutoSudo(): void {
+  prepareForLock(): void {
     for (const sessionId of this.activeSessions) {
       try {
-        this.write({ type: 'auto-sudo-cancel', session_id: sessionId });
+        this.write({ type: 'app-lock', session_id: sessionId });
       } catch {
         // A broken pipe during lock/reload is already a terminal cleanup state.
         continue;
@@ -5746,7 +5818,7 @@ class NativeSshBackend {
         );
       }
       void this.releaseTunnel(event.sessionId).catch(() => undefined);
-    } else if (event.type === 'closed') {
+    } else if (event.type === 'closed' || event.type === 'reconnect-failed') {
       this.activeSessions.delete(event.sessionId);
       void this.releaseTunnel(event.sessionId).catch(() => undefined);
     }
@@ -6280,6 +6352,14 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
       return runBackend<{ updated: boolean }>('workspace-node-update', request);
+    });
+  });
+
+  ipcMain.handle('rdp:external-client-requirement', async (_event, value: unknown) => {
+    const request = parseRdpExternalClientRequirementRequest(value);
+    return serializeAuthOperation(async () => {
+      await requireWorkspaceAuth();
+      return { required: await resolveRdpExternalClientRequirement(request) };
     });
   });
 
@@ -7046,7 +7126,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     } finally {
       authLockRequested = false;
     }
-    sshBackend.cancelAutoSudo();
+    sshBackend.prepareForLock();
     sshBackend.closeAllSftp();
     sshBackend.cancelPendingConnections();
     webSurfaces.hideAll();
@@ -7505,33 +7585,50 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
               }
             } else {
               resolvedProfile = { ...request.profile };
-              if (request.profile.credentialId && request.manualCredentials !== true) {
-                const credential = await resolveNativeRdpCredential(request.profile.credentialId);
-                resolvedProfile.username = credential.username;
-                resolvedProfile.domain = credential.domain;
-                resolvedProfile.password = credential.password;
-              }
-              const gatewayCredentialId = rdpGatewayCredentialIdForResolution(request.profile);
-              if (request.profile.gatewayUsageMethod && request.profile.gatewayUseSameCreds) {
-                resolvedProfile.gatewayUsername = rdpGatewayUsername(
-                  resolvedProfile.username,
-                  resolvedProfile.domain,
-                );
-                resolvedProfile.gatewayPassword = resolvedProfile.password;
-              } else if (gatewayCredentialId) {
-                let gateway: BitwardenResolvedCredential;
-                try {
-                  gateway = await resolveNativeRdpCredential(gatewayCredentialId);
-                } catch (error) {
-                  const message =
-                    error instanceof Error ? error.message : 'credential resolution failed';
-                  throw new Error(`RDP Gateway credential is unavailable: ${message}`);
+              const requiresExternalClient =
+                request.profile.useExternalClient === true ||
+                (await resolveRdpExternalClientRequirement({
+                  username: request.profile.username ?? '',
+                  domain: request.profile.domain ?? '',
+                  credentialId:
+                    request.manualCredentials === true ? undefined : request.profile.credentialId,
+                }));
+              if (requiresExternalClient) {
+                resolvedProfile.useExternalClient = true;
+                delete resolvedProfile.username;
+                delete resolvedProfile.domain;
+                delete resolvedProfile.password;
+                delete resolvedProfile.gatewayUsername;
+                delete resolvedProfile.gatewayPassword;
+              } else {
+                if (request.profile.credentialId && request.manualCredentials !== true) {
+                  const credential = await resolveNativeRdpCredential(request.profile.credentialId);
+                  resolvedProfile.username = credential.username;
+                  resolvedProfile.domain = credential.domain;
+                  resolvedProfile.password = credential.password;
                 }
-                resolvedProfile.gatewayUsername = rdpGatewayUsername(
-                  gateway.username,
-                  gateway.domain,
-                );
-                resolvedProfile.gatewayPassword = gateway.password;
+                const gatewayCredentialId = rdpGatewayCredentialIdForResolution(request.profile);
+                if (request.profile.gatewayUsageMethod && request.profile.gatewayUseSameCreds) {
+                  resolvedProfile.gatewayUsername = rdpGatewayUsername(
+                    resolvedProfile.username,
+                    resolvedProfile.domain,
+                  );
+                  resolvedProfile.gatewayPassword = resolvedProfile.password;
+                } else if (gatewayCredentialId) {
+                  let gateway: BitwardenResolvedCredential;
+                  try {
+                    gateway = await resolveNativeRdpCredential(gatewayCredentialId);
+                  } catch (error) {
+                    const message =
+                      error instanceof Error ? error.message : 'credential resolution failed';
+                    throw new Error(`RDP Gateway credential is unavailable: ${message}`);
+                  }
+                  resolvedProfile.gatewayUsername = rdpGatewayUsername(
+                    gateway.username,
+                    gateway.domain,
+                  );
+                  resolvedProfile.gatewayPassword = gateway.password;
+                }
               }
               delete resolvedProfile.credentialId;
               delete resolvedProfile.gatewayCredentialId;
@@ -8233,7 +8330,7 @@ function createWindow() {
       mremoteImportAnalysis.delete(window.webContents);
       mremoteImportSelections.delete(window.webContents);
       await nativeBackend?.send({ action: 'bitwarden.clear-session' }).catch(() => undefined);
-      sshBackend.cancelAutoSudo();
+      sshBackend.prepareForLock();
       sshBackend.closeAllSftp();
       sshBackend.cancelPendingConnections();
       try {
