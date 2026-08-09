@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, mkdirSync, renameSync, rmSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, renameSync, rmSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -65,6 +65,7 @@ function mergeUniversalBinary(x64Path, arm64Path, outputPath) {
   rmSync(outputPath, { force: true });
   run('lipo', ['-create', x64Path, arm64Path, '-output', outputPath]);
   run('lipo', ['-verify_arch', 'x86_64', 'arm64', outputPath]);
+  chmodSync(outputPath, 0o755);
   console.log(`OK    ${outputPath} (universal x64 + arm64)`);
 }
 

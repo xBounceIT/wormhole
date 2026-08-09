@@ -11,11 +11,34 @@ on:
         type: string
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
+  checks:
+    name: Verify release tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Verify tag matches package version
+        env:
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: node -e "const expected = 'v' + require('./package.json').version; if (process.env.RELEASE_TAG !== expected) { throw new Error('Release tag ' + process.env.RELEASE_TAG + ' does not match ' + expected); }"
+
   build:
     name: Build Electron ${{ matrix.platform }}
+    needs: checks
     runs-on: windows-latest
     strategy:
       fail-fast: false
@@ -38,11 +61,6 @@ jobs:
         with:
           node-version: '24'
           cache: npm
-
-      - name: Verify tag matches package version
-        env:
-          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
-        run: node -e "const expected = 'v' + require('./package.json').version; if (process.env.RELEASE_TAG !== expected) { throw new Error('Release tag ' + process.env.RELEASE_TAG + ' does not match ' + expected); }"
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -193,6 +211,7 @@ jobs:
 
   installers:
     name: Build ${{ matrix.platform }} installer
+    needs: checks
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -227,11 +246,6 @@ jobs:
         with:
           node-version: '24'
           cache: npm
-
-      - name: Verify tag matches package version
-        env:
-          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
-        run: node -e "const expected = 'v' + require('./package.json').version; if (process.env.RELEASE_TAG !== expected) { throw new Error('Release tag ' + process.env.RELEASE_TAG + ' does not match ' + expected); }"
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -268,6 +282,8 @@ jobs:
     name: Publish GitHub Release
     needs: [build, installers]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Download installers
         uses: actions/download-artifact@v4
