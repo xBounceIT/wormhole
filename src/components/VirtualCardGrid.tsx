@@ -113,13 +113,13 @@ export function VirtualCardGrid<T>({
 
   return (
     <ScrollArea
-      aria-label={ariaLabel}
       className={className}
       onViewportScroll={(event) => syncViewport(event.currentTarget)}
       viewportRef={viewportRef}
     >
       <div className="relative" style={{ height: contentHeight + bottomPadding }}>
         <ul
+          aria-label={ariaLabel}
           className="absolute left-0 top-0 grid"
           style={{
             right: endPadding,

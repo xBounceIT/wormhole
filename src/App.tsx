@@ -82,6 +82,7 @@ import {
   shouldFinishSftpClose,
   shouldRefreshSftpPane,
   nextSftpOperationRefreshRequests,
+  nextSftpSelection,
   nextSftpTransferRefreshRequests,
   compareSftpEntries,
   pruneSftpSelection,
@@ -284,7 +285,12 @@ type FolderForm = {
 };
 
 function blankFolderForm(): FolderForm {
-  return { name: '', sshAutoSudo: 'inherit', tunnel: 'inherit', credential: 'inherit' };
+  return {
+    name: '',
+    sshAutoSudo: 'inherit',
+    tunnel: 'inherit',
+    credential: 'inherit',
+  };
 }
 type NavItem = 'sessions' | 'credentials' | 'tunnels' | 'settings';
 type AuthPromptKind = 'lock' | 'confirmation';
@@ -467,7 +473,10 @@ function insertIntoTreeFolder(
     }
 
     return node.children
-      ? { ...node, children: insertIntoTreeFolder(node.children, folderId, children) }
+      ? {
+          ...node,
+          children: insertIntoTreeFolder(node.children, folderId, children),
+        }
       : node;
   });
 }
@@ -881,9 +890,14 @@ const navItems: Array<{ id: NavItem; label: string; hint: string }> = [
 ];
 
 function protocolLabel(protocol: Protocol) {
-  return { ssh: 'SSH', rdp: 'RDP', http: 'HTTP', https: 'HTTPS', vnc: 'VNC', serial: 'Serial' }[
-    protocol
-  ];
+  return {
+    ssh: 'SSH',
+    rdp: 'RDP',
+    http: 'HTTP',
+    https: 'HTTPS',
+    vnc: 'VNC',
+    serial: 'Serial',
+  }[protocol];
 }
 
 function ProtocolIcon({ protocol, size = 15 }: { protocol: Protocol; size?: number }) {
@@ -1193,7 +1207,12 @@ function NodeTooltip({ node, children }: { node: TreeNode; children: ReactNode }
       const textWidth = context?.measureText(host).width ?? host.length * 7;
       void window.wormhole?.showTreeTooltip({
         text: host,
-        anchor: { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height },
+        anchor: {
+          x: bounds.x,
+          y: bounds.y,
+          width: bounds.width,
+          height: bounds.height,
+        },
         width: Math.min(328, Math.max(48, Math.ceil(textWidth) + 29)),
       });
     }, nodeTooltipDelayMs);
@@ -1274,66 +1293,74 @@ function AuthPrompt({
   const [status, setStatus] = useState('');
   const [busy, setBusy] = useState(false);
   const [helloBusy, setHelloBusy] = useState(false);
-  const helloInFlight = useRef(false);
+  const activeHelloRequest = useRef<string | null>(null);
+  const helloInFlight = useRef<string | null>(null);
   const dialogRef = useRef<HTMLDialogElement>(null);
+  const onResultRef = useRef(onResult);
   const method: WormholeAuthFallback =
     state.mode === 'password' || (state.mode === 'windowsHello' && state.fallback === 'password')
       ? 'password'
       : 'pin';
   const isHelloMode = state.mode === 'windowsHello';
   const fallbackName = method === 'pin' ? 'Wormhole PIN' : 'Wormhole password';
+  const helloRequestKey = `${request.kind}\0${request.reason}\0${request.autoWindowsHello}\0${isHelloMode}\0${method}`;
 
-  function tryWindowsHello(cancelled: () => boolean = () => false) {
-    if (helloInFlight.current || !window.wormhole) return;
+  useLayoutEffect(() => {
+    onResultRef.current = onResult;
+  }, [onResult]);
 
-    const api = window.wormhole;
-    helloInFlight.current = true;
-    setHelloBusy(true);
-    setStatus('Waiting for Windows Hello…');
-    return api
-      .checkWindowsHello()
-      .then((availability) => {
-        if (cancelled()) return;
-        if (!availability.available) {
-          setStatus(`${availability.message} You can use your ${fallbackName} instead.`);
-          return;
-        }
-        return api.verifyWindowsHello().then((result) => {
-          if (cancelled()) return;
-          if (result.succeeded) {
-            onResult(true);
+  const tryWindowsHello = useCallback(
+    (requestKey = helloRequestKey) => {
+      if (helloInFlight.current === requestKey || !window.wormhole) return;
+
+      const api = window.wormhole;
+      const isCurrent = () => activeHelloRequest.current === requestKey;
+      helloInFlight.current = requestKey;
+      setHelloBusy(true);
+      setStatus('Waiting for Windows Hello…');
+      return api
+        .checkWindowsHello()
+        .then((availability) => {
+          if (!isCurrent()) return;
+          if (!availability.available) {
+            setStatus(`${availability.message} You can use your ${fallbackName} instead.`);
             return;
           }
-          setStatus(
-            result.message || `Windows Hello didn't recognize you. Use your ${fallbackName}.`,
-          );
+          return api.verifyWindowsHello().then((result) => {
+            if (!isCurrent()) return;
+            if (result.succeeded) {
+              onResultRef.current(true);
+              return;
+            }
+            setStatus(
+              result.message || `Windows Hello didn't recognize you. Use your ${fallbackName}.`,
+            );
+          });
+        })
+        .catch(() => {
+          if (isCurrent()) {
+            setStatus(`Windows Hello isn't available right now. Use your ${fallbackName}.`);
+          }
+        })
+        .finally(() => {
+          if (helloInFlight.current === requestKey) helloInFlight.current = null;
+          if (isCurrent()) setHelloBusy(false);
         });
-      })
-      .catch(() => {
-        if (!cancelled()) {
-          setStatus(`Windows Hello isn't available right now. Use your ${fallbackName}.`);
-        }
-      })
-      .finally(() => {
-        helloInFlight.current = false;
-        if (!cancelled()) setHelloBusy(false);
-      });
-  }
+    },
+    [fallbackName, helloRequestKey],
+  );
 
   useEffect(() => {
-    let cancelled = false;
+    activeHelloRequest.current = helloRequestKey;
     setSecret('');
     setStatus('');
     if (request.autoWindowsHello && isHelloMode) {
-      void tryWindowsHello(() => cancelled);
+      void tryWindowsHello(helloRequestKey);
     }
     return () => {
-      cancelled = true;
+      if (activeHelloRequest.current === helloRequestKey) activeHelloRequest.current = null;
     };
-    // The prompt is intentionally restarted when the configured mode changes. The callback is
-    // local to this prompt instance and does not need to be a stable dependency.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [request.reason, request.autoWindowsHello, isHelloMode, method]);
+  }, [helloRequestKey, request.autoWindowsHello, isHelloMode, tryWindowsHello]);
 
   useLayoutEffect(() => {
     const dialog = dialogRef.current;
@@ -1640,9 +1667,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     null,
   );
   const [sshKeyPassphrase, setSshKeyPassphrase] = useState('');
-  const [bitwardenUnlockPrompt, setBitwardenUnlockPrompt] = useState<{ reason: string } | null>(
-    null,
-  );
+  const [bitwardenUnlockPrompt, setBitwardenUnlockPrompt] = useState<{
+    reason: string;
+  } | null>(null);
   const [bitwardenUnlockPassword, setBitwardenUnlockPassword] = useState('');
   const [bitwardenUnlockBusy, setBitwardenUnlockBusy] = useState(false);
   const [bitwardenUnlockError, setBitwardenUnlockError] = useState('');
@@ -1652,6 +1679,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   const [editingConnectionId, setEditingConnectionId] = useState<string | null>(null);
   const [folderDetailsOpen, setFolderDetailsOpen] = useState(false);
   const editingFolderId = useRef<string | null>(null);
+  const editingFolderGeneration = useRef(0);
   const [folderDetailsForm, setFolderDetailsForm] = useState<FolderForm>(blankFolderForm);
   const [editorError, setEditorError] = useState('');
   const [editorBusy, setEditorBusy] = useState(false);
@@ -1686,6 +1714,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   const [newFolderOpen, setNewFolderOpen] = useState(false);
   const [newFolderForm, setNewFolderForm] = useState<FolderForm>(blankFolderForm);
   const newFolderParentId = useRef<string | null>(null);
+  const newFolderGeneration = useRef(0);
   const [updateCurrentVersion, setUpdateCurrentVersion] = useState('');
   const [updateResult, setUpdateResult] = useState<WormholeUpdateCheckResult | null>(null);
   const [autoCheckForUpdates, setAutoCheckForUpdates] = useState(
@@ -2267,7 +2296,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
             ) {
               return session;
             }
-            const knownOperationIds = { ...(session.sftp.knownOperationIds ?? {}) };
+            const knownOperationIds = {
+              ...(session.sftp.knownOperationIds ?? {}),
+            };
             delete knownOperationIds[event.requestId];
             const currentPane: SftpPaneState =
               event.pane === 'local'
@@ -2342,7 +2373,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
               event.transferState === 'batch-completed' ||
               event.transferState === 'batch-cancelled'
             ) {
-              const knownTransferIds = { ...(session.sftp.knownTransferIds ?? {}) };
+              const knownTransferIds = {
+                ...(session.sftp.knownTransferIds ?? {}),
+              };
               delete knownTransferIds[event.transferId];
               const { [event.transferId]: destination, ...transferDestinations } =
                 session.sftp.transferDestinations ?? {};
@@ -2439,7 +2472,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
               tunnelProgress: null,
               hostKeyMismatch:
                 event.hostKeyExpected && event.hostKeyReceived
-                  ? { expected: event.hostKeyExpected, received: event.hostKeyReceived }
+                  ? {
+                      expected: event.hostKeyExpected,
+                      received: event.hostKeyReceived,
+                    }
                   : undefined,
               error: event.error,
             };
@@ -2626,6 +2662,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     setNewFolderOpen(false);
     setEditingConnectionId(null);
     editingFolderId.current = null;
+    editingFolderGeneration.current += 1;
     setSshCredentialPrompt(null);
     setSshCredentialForm({ username: '', password: '' });
     setSshKeyPassphrasePrompt(null);
@@ -2638,6 +2675,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     setBitwardenUnlockPassword('');
     setBitwardenUnlockError('');
     newFolderParentId.current = null;
+    newFolderGeneration.current += 1;
     setEditorError('');
     setCredentialDialog(null);
     setCopiedCredentialField(null);
@@ -2892,7 +2930,11 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       setSessions((current) =>
         current.map((session) =>
           session.backendSessionId === request.sessionId
-            ? { ...session, status: 'failed', error: 'The SSH service is unavailable.' }
+            ? {
+                ...session,
+                status: 'failed',
+                error: 'The SSH service is unavailable.',
+              }
             : session,
         ),
       );
@@ -3088,7 +3130,11 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       setSessions((current) =>
         current.map((session) =>
           session.backendSessionId === sessionId
-            ? { ...session, status: 'failed', error: 'The serial service is unavailable.' }
+            ? {
+                ...session,
+                status: 'failed',
+                error: 'The serial service is unavailable.',
+              }
             : session,
         ),
       );
@@ -3137,7 +3183,11 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     }
 
     const request = session.webTargetNodeId
-      ? { sessionId: session.id, attempt: generation, nodeId: session.webTargetNodeId }
+      ? {
+          sessionId: session.id,
+          attempt: generation,
+          nodeId: session.webTargetNodeId,
+        }
       : {
           sessionId: session.id,
           attempt: generation,
@@ -3441,7 +3491,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     rdpSavedCredentialAttempts.current.delete(sessionId);
     if (rdpCredentialPrompt === sessionId) setRdpCredentialPrompt(null);
     try {
-      const result = await api.openRdpInSystemClient({ sessionId, nodeId: source.nodeId });
+      const result = await api.openRdpInSystemClient({
+        sessionId,
+        nodeId: source.nodeId,
+      });
       if (!rdpSessionAttempts.current.isCurrent(sessionId, attempt) || result.ok) return;
       setSessions((current) =>
         current.map((session) =>
@@ -3639,7 +3692,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         rdpSessionAttempts.current.cancel(closing.id);
         releases.push(
           window.wormhole
-            ?.commandRdpSession({ sessionId: closing.id, operation: 'disconnect' })
+            ?.commandRdpSession({
+              sessionId: closing.id,
+              operation: 'disconnect',
+            })
             .catch(() => undefined) ?? Promise.resolve(),
         );
       } else if (closing.protocol === 'http' || closing.protocol === 'https') {
@@ -3647,7 +3703,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       } else if (closing.protocol === 'vnc') {
         releases.push(
           window.wormhole
-            ?.sendVncCommand({ action: 'vnc.disconnect', sessionId: closing.id })
+            ?.sendVncCommand({
+              action: 'vnc.disconnect',
+              sessionId: closing.id,
+            })
             .catch(() => undefined) ?? Promise.resolve(),
         );
       }
@@ -3994,7 +4053,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     setSelectedSessionId(duplicate.id);
     setActivePage('sessions');
     if (duplicate.backendSessionId && duplicate.nodeId && duplicate.protocol === 'ssh') {
-      startSshSession({ sessionId: duplicate.backendSessionId, nodeId: duplicate.nodeId });
+      startSshSession({
+        sessionId: duplicate.backendSessionId,
+        nodeId: duplicate.nodeId,
+      });
     }
     if (duplicate.backendSessionId && duplicate.credentialId && duplicate.protocol === 'ssh') {
       startSshSession({
@@ -4143,7 +4205,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     setSessions((current) =>
       current.map((candidate) =>
         candidate.id === id && candidate.sftp
-          ? { ...candidate, sftp: { ...candidate.sftp, status: 'closing', error: undefined } }
+          ? {
+              ...candidate,
+              sftp: { ...candidate.sftp, status: 'closing', error: undefined },
+            }
           : candidate,
       ),
     );
@@ -4368,7 +4433,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       setSessions((current) =>
         current.map((candidate) => {
           if (candidate.id !== sessionId || !candidate.sftp) return candidate;
-          const knownOperationIds = { ...(candidate.sftp.knownOperationIds ?? {}) };
+          const knownOperationIds = {
+            ...(candidate.sftp.knownOperationIds ?? {}),
+          };
           delete knownOperationIds[requestId];
           if (pane === 'local') {
             const local = candidate.sftp.local ?? {
@@ -4422,7 +4489,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
             ) {
               return candidate;
             }
-            const knownOperationIds = { ...(candidate.sftp.knownOperationIds ?? {}) };
+            const knownOperationIds = {
+              ...(candidate.sftp.knownOperationIds ?? {}),
+            };
             delete knownOperationIds[requestId];
             if (pane === 'local') {
               const local = candidate.sftp.local ?? {
@@ -4442,7 +4511,12 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
             }
             return {
               ...candidate,
-              sftp: { ...candidate.sftp, knownOperationIds, status: 'failed', error: message },
+              sftp: {
+                ...candidate.sftp,
+                knownOperationIds,
+                status: 'failed',
+                error: message,
+              },
             };
           }),
         );
@@ -4492,7 +4566,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       setSessions((current) =>
         current.map((candidate) => {
           if (candidate.id !== sessionId || !candidate.sftp) return candidate;
-          const knownTransferIds = { ...(candidate.sftp.knownTransferIds ?? {}) };
+          const knownTransferIds = {
+            ...(candidate.sftp.knownTransferIds ?? {}),
+          };
           delete knownTransferIds[transferId];
           const { [transferId]: _, ...transferDestinations } =
             candidate.sftp.transferDestinations ?? {};
@@ -4529,7 +4605,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
             ) {
               return candidate;
             }
-            const knownTransferIds = { ...(candidate.sftp.knownTransferIds ?? {}) };
+            const knownTransferIds = {
+              ...(candidate.sftp.knownTransferIds ?? {}),
+            };
             delete knownTransferIds[transferId];
             const { [transferId]: _, ...transferDestinations } =
               candidate.sftp.transferDestinations ?? {};
@@ -5043,7 +5121,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       if (persistedNodeIds.length > 0) {
         const api = window.wormhole;
         if (!api) throw new Error('The workspace service is unavailable.');
-        const result = await api.deleteWorkspaceNodes({ nodeIds: persistedNodeIds });
+        const result = await api.deleteWorkspaceNodes({
+          nodeIds: persistedNodeIds,
+        });
         if (!result.deleted) throw new Error('The workspace nodes were not deleted.');
         await reconcileDeletedNodes();
         setPendingDeleteNodes([]);
@@ -5148,6 +5228,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     if (node.kind !== 'folder') return;
 
     setSelectedNodeId(node.id);
+    editingFolderGeneration.current += 1;
     editingFolderId.current = node.id;
     setEditorError('');
     setFolderDetailsForm({
@@ -5208,6 +5289,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
 
   function openNewFolder(parentFolderId?: string | null) {
     setNewFolderForm(blankFolderForm());
+    newFolderGeneration.current += 1;
     newFolderParentId.current = parentFolderId ?? null;
     setEditorError('');
     setNewFolderOpen(true);
@@ -5428,7 +5510,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         rdp: newConnectionForm.protocol === 'rdp' ? newConnectionForm.rdp : undefined,
       };
       if (editingId) {
-        const result = await window.wormhole.updateWorkspaceNode({ id: editingId, ...nodeWrite });
+        const result = await window.wormhole.updateWorkspaceNode({
+          id: editingId,
+          ...nodeWrite,
+        });
         if (!result.updated) throw new Error('The workspace did not save the connection.');
         const editedSessionId = `session-${editingId}`;
         const editedSession = sessions.find((session) => session.id === editedSessionId);
@@ -5564,21 +5649,23 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
 
   async function submitFolderDetails(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (editorBusy || !editingFolderId.current) return;
+    const folderId = editingFolderId.current;
+    if (editorBusy || !folderId) return;
+    const dialogGeneration = editingFolderGeneration.current;
     const name = folderDetailsForm.name.trim();
     if (!name) return;
 
     setEditorBusy(true);
     setEditorError('');
     try {
-      const folder = findTreeNode(tree, editingFolderId.current);
+      const folder = findTreeNode(tree, folderId);
       if (!folder) return;
       if (!window.wormhole) throw new Error('The workspace service is unavailable.');
       const tunnel = tunnelValueFor(folderDetailsForm.tunnel);
       const credential = credentialSettingsFor(folderDetailsForm.credential);
       const result = await window.wormhole.updateWorkspaceNode({
-        id: editingFolderId.current,
-        parentId: findParentFolderId(tree, editingFolderId.current) ?? '',
+        id: folderId,
+        parentId: findParentFolderId(tree, folderId) ?? '',
         name,
         kind: 'folder',
         protocol: '',
@@ -5601,10 +5688,14 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       });
       if (!result.updated) throw new Error('The workspace did not save the folder.');
       await reloadWorkspaceAfterNodeWrite();
-      setFolderDetailsOpen(false);
-      editingFolderId.current = null;
+      if (editingFolderGeneration.current === dialogGeneration) {
+        setFolderDetailsOpen(false);
+        editingFolderId.current = null;
+      }
     } catch (error: unknown) {
-      setEditorError(error instanceof Error ? error.message : 'Could not save the folder.');
+      if (editingFolderGeneration.current === dialogGeneration) {
+        setEditorError(error instanceof Error ? error.message : 'Could not save the folder.');
+      }
     } finally {
       setEditorBusy(false);
     }
@@ -5613,6 +5704,8 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   async function submitNewFolder(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (editorBusy) return;
+    const parentFolderId = newFolderParentId.current;
+    const dialogGeneration = newFolderGeneration.current;
     const name = newFolderForm.name.trim();
     if (!name) return;
     setEditorBusy(true);
@@ -5622,7 +5715,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       const tunnel = tunnelValueFor(newFolderForm.tunnel);
       const credential = credentialSettingsFor(newFolderForm.credential);
       const result = await window.wormhole.createWorkspaceNode({
-        parentId: newFolderParentId.current ?? '',
+        parentId: parentFolderId ?? '',
         name,
         kind: 'folder',
         protocol: '',
@@ -5646,17 +5739,17 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       await reloadWorkspaceAfterNodeWrite();
       setExpanded(
         (current) =>
-          new Set([
-            ...current,
-            result.nodeId,
-            ...(newFolderParentId.current ? [newFolderParentId.current] : []),
-          ]),
+          new Set([...current, result.nodeId, ...(parentFolderId ? [parentFolderId] : [])]),
       );
-      setSelectedNodeId(result.nodeId);
-      newFolderParentId.current = null;
-      setNewFolderOpen(false);
+      if (newFolderGeneration.current === dialogGeneration) {
+        setSelectedNodeId(result.nodeId);
+        newFolderParentId.current = null;
+        setNewFolderOpen(false);
+      }
     } catch (error: unknown) {
-      setEditorError(error instanceof Error ? error.message : 'Could not create the folder.');
+      if (newFolderGeneration.current === dialogGeneration) {
+        setEditorError(error instanceof Error ? error.message : 'Could not create the folder.');
+      }
     } finally {
       setEditorBusy(false);
     }
@@ -6387,6 +6480,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
               {activePage === 'sessions' ? (
                 <SessionsPage
                   autoCopyOnSelect={autoCopyOnSelect}
+                  bitwardenUnlockPending={bitwardenUnlockPrompt !== null}
                   onBitwardenUnlockRequired={(sessionId, reason, retry) =>
                     requestRuntimeBitwardenUnlock(`vnc:${sessionId}`, reason, retry)
                   }
@@ -6440,7 +6534,6 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                   confirmOnTabClose={confirmOnTabClose}
                   authGate={authGate}
                   authState={authState}
-                  key={`${authGate}:${settingsUpdatesRequest}`}
                   onAuthStateChange={setAuthState}
                   onAutoCopyOnSelectChange={handleAutoCopyOnSelectChange}
                   onConfirmOnTabCloseChange={handleConfirmOnTabCloseChange}
@@ -6486,7 +6579,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
               ) : activePage === 'credentials' ? (
                 <CredentialsPage
                   initialCredentials={credentials}
-                  key={`${authGate}:${credentials.map((credential) => credential.id).join(',')}`}
+                  isAuthorized={authGate === 'unlocked'}
                   onCreate={createCredential}
                   onDelete={deleteSavedCredential}
                   onUpdate={updateCredential}
@@ -6776,7 +6869,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                         autoFocus
                         id="connection-name"
                         onChange={(event) =>
-                          setNewConnectionForm((form) => ({ ...form, name: event.target.value }))
+                          setNewConnectionForm((form) => ({
+                            ...form,
+                            name: event.target.value,
+                          }))
                         }
                         placeholder={
                           connectionEditorMode === 'quick'
@@ -6922,7 +7018,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                               id="connection-credential"
                               emptyMessage="No credentials found."
                               onValueChange={(credential) =>
-                                setNewConnectionForm((form) => ({ ...form, credential }))
+                                setNewConnectionForm((form) => ({
+                                  ...form,
+                                  credential,
+                                }))
                               }
                               options={
                                 connectionEditorMode === 'quick'
@@ -6984,7 +7083,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                         id="connection-auto-sudo"
                         mode={newConnectionForm.sshAutoSudo}
                         onChange={(sshAutoSudo) =>
-                          setNewConnectionForm((form) => ({ ...form, sshAutoSudo }))
+                          setNewConnectionForm((form) => ({
+                            ...form,
+                            sshAutoSudo,
+                          }))
                         }
                         scope={connectionEditorMode === 'quick' ? 'quick' : 'connection'}
                       />
@@ -7044,7 +7146,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                           onValueChange={(value) =>
                             setNewConnectionForm((form) => ({
                               ...form,
-                              serial: { ...form.serial, dataBits: Number(value) },
+                              serial: {
+                                ...form.serial,
+                                dataBits: Number(value),
+                              },
                             }))
                           }
                           value={String(newConnectionForm.serial.dataBits)}
@@ -7066,7 +7171,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                           onValueChange={(value) =>
                             setNewConnectionForm((form) => ({
                               ...form,
-                              serial: { ...form.serial, stopBits: Number(value) },
+                              serial: {
+                                ...form.serial,
+                                stopBits: Number(value),
+                              },
                             }))
                           }
                           value={String(newConnectionForm.serial.stopBits)}
@@ -7110,7 +7218,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                           onValueChange={(value) =>
                             setNewConnectionForm((form) => ({
                               ...form,
-                              serial: { ...form.serial, flowControl: Number(value) },
+                              serial: {
+                                ...form.serial,
+                                flowControl: Number(value),
+                              },
                             }))
                           }
                           value={String(newConnectionForm.serial.flowControl)}
@@ -7204,7 +7315,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                               onChange={(event) =>
                                 setNewConnectionForm((form) => ({
                                   ...form,
-                                  rdp: { ...form.rdp, screenSize: event.target.value },
+                                  rdp: {
+                                    ...form.rdp,
+                                    screenSize: event.target.value,
+                                  },
                                 }))
                               }
                               placeholder="1280x800"
@@ -7218,7 +7332,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                             onCheckedChange={(checked) =>
                               setNewConnectionForm((form) => ({
                                 ...form,
-                                rdp: { ...form.rdp, useAllMonitors: checked === true },
+                                rdp: {
+                                  ...form.rdp,
+                                  useAllMonitors: checked === true,
+                                },
                               }))
                             }
                           />
@@ -7231,7 +7348,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                             onChange={(event) =>
                               setNewConnectionForm((form) => ({
                                 ...form,
-                                rdp: { ...form.rdp, domain: event.target.value },
+                                rdp: {
+                                  ...form.rdp,
+                                  domain: event.target.value,
+                                },
                               }))
                             }
                             value={newConnectionForm.rdp.domain}
@@ -7271,7 +7391,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                             onValueChange={(value) =>
                               setNewConnectionForm((form) => ({
                                 ...form,
-                                rdp: { ...form.rdp, audioCaptureMode: Number(value) },
+                                rdp: {
+                                  ...form.rdp,
+                                  audioCaptureMode: Number(value),
+                                },
                               }))
                             }
                             value={String(newConnectionForm.rdp.audioCaptureMode)}
@@ -7291,7 +7414,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                             onValueChange={(value) =>
                               setNewConnectionForm((form) => ({
                                 ...form,
-                                rdp: { ...form.rdp, keyboardHookMode: Number(value) },
+                                rdp: {
+                                  ...form.rdp,
+                                  keyboardHookMode: Number(value),
+                                },
                               }))
                             }
                             value={String(newConnectionForm.rdp.keyboardHookMode)}
@@ -7322,7 +7448,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                                 onCheckedChange={(checked) =>
                                   setNewConnectionForm((form) => ({
                                     ...form,
-                                    rdp: { ...form.rdp, [key]: checked === true },
+                                    rdp: {
+                                      ...form.rdp,
+                                      [key]: checked === true,
+                                    },
                                   }))
                                 }
                               />
@@ -7366,7 +7495,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                               onChange={(event) =>
                                 setNewConnectionForm((form) => ({
                                   ...form,
-                                  rdp: { ...form.rdp, redirectDrives: event.target.value },
+                                  rdp: {
+                                    ...form.rdp,
+                                    redirectDrives: event.target.value,
+                                  },
                                 }))
                               }
                               placeholder="C,D"
@@ -7387,7 +7519,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                             onValueChange={(value) =>
                               setNewConnectionForm((form) => ({
                                 ...form,
-                                rdp: { ...form.rdp, connectionSpeed: Number(value) },
+                                rdp: {
+                                  ...form.rdp,
+                                  connectionSpeed: Number(value),
+                                },
                               }))
                             }
                             value={String(newConnectionForm.rdp.connectionSpeed)}
@@ -7424,7 +7559,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                                 onCheckedChange={(checked) =>
                                   setNewConnectionForm((form) => ({
                                     ...form,
-                                    rdp: { ...form.rdp, [key]: checked === true },
+                                    rdp: {
+                                      ...form.rdp,
+                                      [key]: checked === true,
+                                    },
                                   }))
                                 }
                               />
@@ -7445,7 +7583,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                             onValueChange={(value) =>
                               setNewConnectionForm((form) => ({
                                 ...form,
-                                rdp: { ...form.rdp, serverAuthentication: Number(value) },
+                                rdp: {
+                                  ...form.rdp,
+                                  serverAuthentication: Number(value),
+                                },
                               }))
                             }
                             value={String(newConnectionForm.rdp.serverAuthentication)}
@@ -7466,7 +7607,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                             onValueChange={(value) =>
                               setNewConnectionForm((form) => ({
                                 ...form,
-                                rdp: { ...form.rdp, gatewayUsageMethod: Number(value) },
+                                rdp: {
+                                  ...form.rdp,
+                                  gatewayUsageMethod: Number(value),
+                                },
                               }))
                             }
                             value={String(newConnectionForm.rdp.gatewayUsageMethod)}
@@ -7491,7 +7635,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                                 onChange={(event) =>
                                   setNewConnectionForm((form) => ({
                                     ...form,
-                                    rdp: { ...form.rdp, gatewayHostname: event.target.value },
+                                    rdp: {
+                                      ...form.rdp,
+                                      gatewayHostname: event.target.value,
+                                    },
                                   }))
                                 }
                                 value={newConnectionForm.rdp.gatewayHostname}
@@ -7513,7 +7660,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                                   }))
                                 }
                                 options={[
-                                  { value: 'none', label: 'No saved gateway credential' },
+                                  {
+                                    value: 'none',
+                                    label: 'No saved gateway credential',
+                                  },
                                   ...credentialOptions.rdp.map((credential) => ({
                                     value: credential.id,
                                     label: `${credential.name} · ${credential.provider}`,
@@ -7539,7 +7689,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                                   onCheckedChange={(checked) =>
                                     setNewConnectionForm((form) => ({
                                       ...form,
-                                      rdp: { ...form.rdp, [key]: checked === true },
+                                      rdp: {
+                                        ...form.rdp,
+                                        [key]: checked === true,
+                                      },
                                     }))
                                   }
                                 />
@@ -7557,7 +7710,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                             onCheckedChange={(checked) =>
                               setNewConnectionForm((form) => ({
                                 ...form,
-                                rdp: { ...form.rdp, useExternalClient: checked === true },
+                                rdp: {
+                                  ...form.rdp,
+                                  useExternalClient: checked === true,
+                                },
                               }))
                             }
                           />
@@ -7575,7 +7731,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                             onCheckedChange={(checked) =>
                               setNewConnectionForm((form) => ({
                                 ...form,
-                                rdp: { ...form.rdp, autoReconnect: checked === true },
+                                rdp: {
+                                  ...form.rdp,
+                                  autoReconnect: checked === true,
+                                },
                               }))
                             }
                           />
@@ -7591,7 +7750,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                 <Button
                   disabled={editorBusy}
                   onClick={() => {
-                    setNewConnectionForm((form) => ({ ...form, inlinePassword: '' }));
+                    setNewConnectionForm((form) => ({
+                      ...form,
+                      inlinePassword: '',
+                    }));
                     setNewConnectionOpen(false);
                     setEditingConnectionId(null);
                     setConnectionEditorMode('saved');
@@ -7626,6 +7788,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           onOpenChange={(open) => {
             setFolderDetailsOpen(open);
             if (!open) {
+              editingFolderGeneration.current += 1;
               editingFolderId.current = null;
               setEditorError('');
             }
@@ -7646,7 +7809,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                   autoFocus
                   id="folder-details-name"
                   onChange={(event) =>
-                    setFolderDetailsForm((form) => ({ ...form, name: event.target.value }))
+                    setFolderDetailsForm((form) => ({
+                      ...form,
+                      name: event.target.value,
+                    }))
                   }
                   required
                   value={folderDetailsForm.name}
@@ -7790,7 +7956,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                       autoComplete="username"
                       id="ssh-username"
                       onChange={(event) =>
-                        setSshCredentialForm((form) => ({ ...form, username: event.target.value }))
+                        setSshCredentialForm((form) => ({
+                          ...form,
+                          username: event.target.value,
+                        }))
                       }
                       required
                       value={sshCredentialForm.username}
@@ -7802,7 +7971,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                       autoComplete="current-password"
                       id="ssh-password"
                       onChange={(event) =>
-                        setSshCredentialForm((form) => ({ ...form, password: event.target.value }))
+                        setSshCredentialForm((form) => ({
+                          ...form,
+                          password: event.target.value,
+                        }))
                       }
                       required={sshCredentialSave}
                       type="password"
@@ -7888,7 +8060,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                       autoFocus
                       id="rdp-username"
                       onChange={(event) =>
-                        setRdpCredentialForm((form) => ({ ...form, username: event.target.value }))
+                        setRdpCredentialForm((form) => ({
+                          ...form,
+                          username: event.target.value,
+                        }))
                       }
                       placeholder="user or DOMAIN\\user"
                       required
@@ -7900,7 +8075,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                     <Input
                       id="rdp-domain"
                       onChange={(event) =>
-                        setRdpCredentialForm((form) => ({ ...form, domain: event.target.value }))
+                        setRdpCredentialForm((form) => ({
+                          ...form,
+                          domain: event.target.value,
+                        }))
                       }
                       placeholder="Optional"
                       value={rdpCredentialForm.domain}
@@ -7911,7 +8089,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                     <Input
                       id="rdp-password"
                       onChange={(event) =>
-                        setRdpCredentialForm((form) => ({ ...form, password: event.target.value }))
+                        setRdpCredentialForm((form) => ({
+                          ...form,
+                          password: event.target.value,
+                        }))
                       }
                       required={rdpCredentialSave}
                       type="password"
@@ -7934,7 +8115,11 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                   disabled={rdpCredentialPromptBusy}
                   onClick={() => {
                     setRdpCredentialPrompt(null);
-                    setRdpCredentialForm({ username: '', domain: '', password: '' });
+                    setRdpCredentialForm({
+                      username: '',
+                      domain: '',
+                      password: '',
+                    });
                   }}
                   type="button"
                   variant="ghost"
@@ -7961,7 +8146,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         <Dialog
           onOpenChange={(open) => {
             setNewFolderOpen(open);
-            if (!open) newFolderParentId.current = null;
+            if (!open) {
+              newFolderGeneration.current += 1;
+              newFolderParentId.current = null;
+            }
           }}
           open={newFolderOpen}
         >
@@ -7977,7 +8165,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                   autoFocus
                   id="folder-name"
                   onChange={(event) =>
-                    setNewFolderForm((form) => ({ ...form, name: event.target.value }))
+                    setNewFolderForm((form) => ({
+                      ...form,
+                      name: event.target.value,
+                    }))
                   }
                   placeholder="e.g. Staging"
                   required
@@ -8134,7 +8325,13 @@ function terminalTextRuns(frame: WormholeSshTerminalFrame, row: number): Termina
       previous.text += cell.character || ' ';
       previous.cellCount += 1;
     } else {
-      runs.push({ text: cell.character || ' ', foreground, background, cursor, cellCount: 1 });
+      runs.push({
+        text: cell.character || ' ',
+        foreground,
+        background,
+        cursor,
+        cellCount: 1,
+      });
     }
   }
   return runs;
@@ -8775,7 +8972,10 @@ function SftpFilePane({
   const [promptValue, setPromptValue] = useState('');
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [dropPath, setDropPath] = useState<string>();
-  const [pathInput, setPathInput] = useState({ sourcePath: state.path, value: state.path });
+  const [pathInput, setPathInput] = useState({
+    sourcePath: state.path,
+    value: state.path,
+  });
   const pathDraft = pathInput.sourcePath === state.path ? pathInput.value : state.path;
   const [listViewport, setListViewport] = useState({ height: 0, scrollTop: 0 });
   const renameCommitPath = useRef<string | undefined>(undefined);
@@ -8842,27 +9042,15 @@ function SftpFilePane({
   }
 
   function toggleSelection(entry: WormholeSftpEntry, event: MouseEvent) {
-    const next = new Set(validSelectedPaths);
-    if (event.shiftKey && selectedEntries.length > 0) {
-      const anchorPath = selectionAnchorPath.current ?? selectedEntries[0].fullPath;
-      const anchor = visibleEntries.findIndex((candidate) => candidate.fullPath === anchorPath);
-      const target = visibleEntries.findIndex((candidate) => candidate.fullPath === entry.fullPath);
-      if (anchor >= 0 && target >= 0) {
-        const [from, to] = anchor < target ? [anchor, target] : [target, anchor];
-        for (const candidate of visibleEntries.slice(from, to + 1)) next.add(candidate.fullPath);
-        setSelectedPaths(next);
-        return;
-      }
-    }
-    if (event.ctrlKey || event.metaKey) {
-      if (next.has(entry.fullPath)) next.delete(entry.fullPath);
-      else next.add(entry.fullPath);
-    } else {
-      next.clear();
-      next.add(entry.fullPath);
-    }
-    if (!event.shiftKey) selectionAnchorPath.current = entry.fullPath;
-    setSelectedPaths(next);
+    const next = nextSftpSelection(
+      validSelectedPaths,
+      visibleEntries.map((candidate) => candidate.fullPath),
+      entry.fullPath,
+      selectionAnchorPath.current,
+      { extend: event.shiftKey, toggle: event.ctrlKey || event.metaKey },
+    );
+    selectionAnchorPath.current = next.anchorPath;
+    setSelectedPaths(next.selected);
   }
 
   function moveKeyboardSelection(entry: WormholeSftpEntry, event: ReactKeyboardEvent) {
@@ -8884,17 +9072,17 @@ function SftpFilePane({
     event.stopPropagation();
     const target = visibleEntries[targetIndex];
     if (event.shiftKey) {
-      const anchorPath = selectionAnchorPath.current ?? entry.fullPath;
-      const anchorIndex = visibleEntries.findIndex(
-        (candidate) => candidate.fullPath === anchorPath,
+      const selection =
+        validSelectedPaths.size > 0 ? validSelectedPaths : new Set([entry.fullPath]);
+      const next = nextSftpSelection(
+        selection,
+        visibleEntries.map((candidate) => candidate.fullPath),
+        target.fullPath,
+        selectionAnchorPath.current ?? entry.fullPath,
+        { extend: true, toggle: false },
       );
-      if (anchorIndex >= 0) {
-        const [from, to] =
-          anchorIndex < targetIndex ? [anchorIndex, targetIndex] : [targetIndex, anchorIndex];
-        setSelectedPaths(
-          new Set(visibleEntries.slice(from, to + 1).map((candidate) => candidate.fullPath)),
-        );
-      }
+      selectionAnchorPath.current = next.anchorPath;
+      setSelectedPaths(next.selected);
     } else if (!event.ctrlKey && !event.metaKey) {
       selectionAnchorPath.current = target.fullPath;
       setSelectedPaths(new Set([target.fullPath]));
@@ -9698,6 +9886,7 @@ function SftpBrowserSurface({
 // react-doctor-disable-next-line react-doctor/no-giant-component
 function SessionsPage({
   autoCopyOnSelect,
+  bitwardenUnlockPending,
   isAuthorized,
   isWebSurfaceVisible,
   sessions,
@@ -9729,6 +9918,7 @@ function SessionsPage({
   onVncStatusChange,
 }: {
   autoCopyOnSelect: boolean;
+  bitwardenUnlockPending: boolean;
   isAuthorized: boolean;
   isWebSurfaceVisible: boolean;
   sessions: Session[];
@@ -9801,6 +9991,18 @@ function SessionsPage({
     () => reconcileSessionLayout(layout, sessionIds, selectedSession?.id),
     [layout, selectedSession?.id, sessionIds],
   );
+
+  // The session catalog is owned by App and may change after native lifecycle events. Persist the
+  // reconciled tree so removed tab identities and drag state cannot revive if an ID is reopened.
+  // react-doctor-disable-next-line react-hooks-js/set-state-in-effect
+  useEffect(() => {
+    setLayout((current) => reconcileSessionLayout(current, sessionIds, selectedSession?.id)); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
+    if (draggedSessionId && !sessionIds.includes(draggedSessionId)) {
+      setDraggedSessionId(''); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
+      setDropPreview(null); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
+    }
+  }, [draggedSessionId, selectedSession?.id, sessionIds]);
+
   const dragIsValid = !draggedSessionId || sessionIds.includes(draggedSessionId);
   const activeDraggedSessionId = dragIsValid ? draggedSessionId : '';
   const activeDropPreview = dragIsValid ? dropPreview : null;
@@ -10063,6 +10265,7 @@ function SessionsPage({
             <SessionSurface
               autoCopyOnSelect={autoCopyOnSelect}
               bitwardenOpen={bitwardenOpenSessionId === session.id}
+              bitwardenUnlockPending={bitwardenUnlockPending}
               isActive={active}
               isAuthorized={isAuthorized}
               isWebSurfaceVisible={isWebSurfaceVisible}
@@ -10281,6 +10484,7 @@ function SessionDropPreview({
 function SessionSurface({
   autoCopyOnSelect,
   bitwardenOpen,
+  bitwardenUnlockPending,
   isActive,
   isAuthorized,
   isWebSurfaceVisible,
@@ -10308,6 +10512,7 @@ function SessionSurface({
 }: {
   autoCopyOnSelect: boolean;
   bitwardenOpen: boolean;
+  bitwardenUnlockPending: boolean;
   isActive: boolean;
   isAuthorized: boolean;
   isWebSurfaceVisible: boolean;
@@ -10437,9 +10642,10 @@ function SessionSurface({
   if (session.protocol === 'vnc') {
     return (
       <VncSurface
+        bitwardenUnlockPending={bitwardenUnlockPending}
         connectionGeneration={session.vncConnectionGeneration ?? 0}
         disconnected={session.status === 'closed'}
-        key={`${session.id}:${session.vncConnectionGeneration ?? 0}:${session.status === 'closed'}:${isAuthorized}`}
+        isAuthorized={isAuthorized}
         onBitwardenUnlockRequired={(reason, retry) =>
           onBitwardenUnlockRequired(session.id, reason, retry)
         }
@@ -10489,17 +10695,20 @@ function SessionSurface({
 
 // Credential editing and Bitwarden lookup deliberately share one authorization boundary so every
 // close, lock, and failed lookup scrubs the same renderer-held secret state.
-// react-doctor-disable-next-line react-doctor/no-giant-component
+// react-doctor-disable-next-line react-doctor/no-giant-component, react-doctor/prefer-useReducer
 function CredentialsPage({
   initialCredentials,
+  isAuthorized,
   onCreate,
   onUpdate,
   onDelete,
 }: {
   initialCredentials: CredentialRecord[];
+  isAuthorized: boolean;
   onCreate: (draft: CredentialDraft) => Promise<void>;
   onUpdate: (id: string, draft: CredentialDraft) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
+  // react-doctor-disable-next-line react-doctor/prefer-useReducer
 }) {
   const [searchText, setSearchText] = useState('');
   const [selectedCredentials, setSelectedCredentials] = useState<Set<string>>(() => new Set());
@@ -10515,6 +10724,24 @@ function CredentialsPage({
   const [bitwardenSearchStatus, setBitwardenSearchStatus] = useState('');
   const [bitwardenSearching, setBitwardenSearching] = useState(false);
   const bitwardenSearchAttempts = useLazyRef(() => new WebSessionAttemptTracker());
+
+  // App lock is an external security boundary. Scrub every renderer-held secret without
+  // remounting this page, because a remount would orphan credential mutations already in flight.
+  // react-doctor-disable-next-line react-hooks-js/set-state-in-effect, react-doctor/no-adjust-state-on-prop-change
+  useEffect(() => {
+    if (isAuthorized) return;
+    setEditorOpen(false); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
+    setEditingCredential(null); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
+    setCredentialForm(emptyCredentialDraft()); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
+    setPendingDeletion([]); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
+    setOperationError(''); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
+    setBitwardenQuery(''); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
+    setBitwardenItems([]); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
+    setBitwardenUnlockPassword(''); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
+    setBitwardenSearchStatus(''); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
+    setBitwardenSearching(false); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
+    bitwardenSearchAttempts.current.cancel('credential-search');
+  }, [bitwardenSearchAttempts, isAuthorized]);
 
   const credentials = initialCredentials;
   const deferredSearchText = useDeferredValue(searchText);
@@ -10543,19 +10770,19 @@ function CredentialsPage({
     [credentialSearchIndex, credentials, normalizedCredentialSearch],
   );
 
-  const credentialLookupRequired = selectedCredentials.size > 0 || pendingDeletion.length > 0;
   const credentialById = useMemo(
-    () =>
-      credentialLookupRequired
-        ? new Map(credentials.map((credential) => [credential.id, credential]))
-        : new Map<string, CredentialRecord>(),
-    [credentialLookupRequired, credentials],
+    () => new Map(credentials.map((credential) => [credential.id, credential])),
+    [credentials],
+  );
+  const validSelectedCredentials = useMemo(
+    () => new Set([...selectedCredentials].filter((id) => credentialById.has(id))),
+    [credentialById, selectedCredentials],
   );
 
   const allVisibleSelected =
     filteredCredentials.length > 0 &&
-    filteredCredentials.every((credential) => selectedCredentials.has(credential.id));
-  const deletableSelectedCredentials = [...selectedCredentials].filter(
+    filteredCredentials.every((credential) => validSelectedCredentials.has(credential.id));
+  const deletableSelectedCredentials = [...validSelectedCredentials].filter(
     (id) => credentialById.get(id)?.canDelete,
   );
 
@@ -10798,11 +11025,11 @@ function CredentialsPage({
           </Button>
         </div>
 
-        {selectedCredentials.size > 0 ? (
+        {validSelectedCredentials.size > 0 ? (
           <div className="mt-3 flex shrink-0 flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-muted/30 px-3 py-2">
             <div className="flex items-center gap-2 text-xs text-foreground/80">
               <Check className="size-3.5" />
-              <span>{selectedCredentials.size} credential(s) selected</span>
+              <span>{validSelectedCredentials.size} credential(s) selected</span>
             </div>
             <div className="flex gap-2">
               <Button
@@ -10883,7 +11110,7 @@ function CredentialsPage({
                       <TooltipTrigger asChild>
                         <Checkbox
                           aria-label={`Select ${credential.name}`}
-                          checked={selectedCredentials.has(credential.id)}
+                          checked={validSelectedCredentials.has(credential.id)}
                           onCheckedChange={(checked) =>
                             toggleCredential(credential.id, checked === true)
                           }
@@ -10945,7 +11172,10 @@ function CredentialsPage({
                 id="credential-name"
                 maxLength={256}
                 onChange={(event) =>
-                  setCredentialForm((form) => ({ ...form, name: event.target.value }))
+                  setCredentialForm((form) => ({
+                    ...form,
+                    name: event.target.value,
+                  }))
                 }
                 placeholder="Production SSH"
                 required
@@ -11002,7 +11232,10 @@ function CredentialsPage({
                   id="credential-username"
                   maxLength={512}
                   onChange={(event) =>
-                    setCredentialForm((form) => ({ ...form, username: event.target.value }))
+                    setCredentialForm((form) => ({
+                      ...form,
+                      username: event.target.value,
+                    }))
                   }
                   placeholder="user"
                   required
@@ -11017,7 +11250,10 @@ function CredentialsPage({
                   id="credential-domain"
                   maxLength={512}
                   onChange={(event) =>
-                    setCredentialForm((form) => ({ ...form, domain: event.target.value }))
+                    setCredentialForm((form) => ({
+                      ...form,
+                      domain: event.target.value,
+                    }))
                   }
                   placeholder="CORP"
                   required
@@ -11037,7 +11273,10 @@ function CredentialsPage({
                   id="credential-password"
                   maxLength={4096}
                   onChange={(event) =>
-                    setCredentialForm((form) => ({ ...form, password: event.target.value }))
+                    setCredentialForm((form) => ({
+                      ...form,
+                      password: event.target.value,
+                    }))
                   }
                   required={!editingCredential || editingCredential.provider !== 'Local'}
                   type="password"
@@ -11302,7 +11541,12 @@ function tunnelEditorFields(kind: number): TunnelField[] {
           section: 'Interface',
           placeholder: '10.0.0.2/32',
         },
-        { key: 'Mtu', label: 'MTU (optional)', section: 'Interface', type: 'number' },
+        {
+          key: 'Mtu',
+          label: 'MTU (optional)',
+          section: 'Interface',
+          type: 'number',
+        },
         {
           key: 'Dns',
           label: 'DNS (comma-separated, optional)',
@@ -11351,14 +11595,35 @@ function tunnelEditorFields(kind: number): TunnelField[] {
           section: 'Authentication',
           placeholder: 'leave blank for certificate-only auth',
         },
-        { key: 'Password', label: 'Password', section: 'Authentication', type: 'password' },
+        {
+          key: 'Password',
+          label: 'Password',
+          section: 'Authentication',
+          type: 'password',
+        },
       ];
     case 2:
       return [
-        { key: 'Host', label: 'Host', section: 'Gateway', placeholder: 'vpn.example.com' },
-        { key: 'Port', label: 'Port', section: 'Gateway', type: 'number', placeholder: '443' },
+        {
+          key: 'Host',
+          label: 'Host',
+          section: 'Gateway',
+          placeholder: 'vpn.example.com',
+        },
+        {
+          key: 'Port',
+          label: 'Port',
+          section: 'Gateway',
+          type: 'number',
+          placeholder: '443',
+        },
         { key: 'Username', label: 'Username', section: 'Credentials' },
-        { key: 'Password', label: 'Password', section: 'Credentials', type: 'password' },
+        {
+          key: 'Password',
+          label: 'Password',
+          section: 'Credentials',
+          type: 'password',
+        },
         { key: 'Realm', label: 'Realm (optional)', section: 'Credentials' },
         {
           key: 'UseSingleSignOn',
@@ -11411,8 +11676,19 @@ function tunnelEditorFields(kind: number): TunnelField[] {
             { value: 2, label: 'SAML' },
           ],
         },
-        { key: 'Server', label: 'Server', section: 'Gateway', placeholder: 'firebox.example.com' },
-        { key: 'Port', label: 'Port', section: 'Gateway', type: 'number', placeholder: '443' },
+        {
+          key: 'Server',
+          label: 'Server',
+          section: 'Gateway',
+          placeholder: 'firebox.example.com',
+        },
+        {
+          key: 'Port',
+          label: 'Port',
+          section: 'Gateway',
+          type: 'number',
+          placeholder: '443',
+        },
         { key: 'Username', label: 'Username', section: 'Credentials' },
         {
           key: 'Password',
@@ -11427,7 +11703,12 @@ function tunnelEditorFields(kind: number): TunnelField[] {
           section: 'Advanced',
           placeholder: 'auto-detect',
         },
-        { key: 'CaPem', label: 'CA certificate (PEM)', section: 'Advanced', type: 'textarea' },
+        {
+          key: 'CaPem',
+          label: 'CA certificate (PEM)',
+          section: 'Advanced',
+          type: 'textarea',
+        },
         {
           key: 'ClientCertPem',
           label: 'Client certificate (PEM)',
@@ -11471,9 +11752,24 @@ function tunnelEditorFields(kind: number): TunnelField[] {
             { value: 1, label: 'Import — paste a downloaded .ovpn' },
           ],
         },
-        { key: 'Server', label: 'Server', section: 'Gateway', placeholder: 'rpv.example.com' },
-        { key: 'Port', label: 'Port', section: 'Gateway', type: 'number', placeholder: '443' },
-        { key: 'Description', label: 'Description (optional)', section: 'Gateway' },
+        {
+          key: 'Server',
+          label: 'Server',
+          section: 'Gateway',
+          placeholder: 'rpv.example.com',
+        },
+        {
+          key: 'Port',
+          label: 'Port',
+          section: 'Gateway',
+          type: 'number',
+          placeholder: '443',
+        },
+        {
+          key: 'Description',
+          label: 'Description (optional)',
+          section: 'Gateway',
+        },
         {
           key: 'UseSingleSignOn',
           label: 'Connect with single sign-on',
@@ -11481,8 +11777,18 @@ function tunnelEditorFields(kind: number): TunnelField[] {
           type: 'checkbox',
         },
         { key: 'Username', label: 'Username', section: 'Authentication' },
-        { key: 'Password', label: 'Password', section: 'Authentication', type: 'password' },
-        { key: 'UseOtp', label: 'Use an OTP', section: 'Authentication', type: 'checkbox' },
+        {
+          key: 'Password',
+          label: 'Password',
+          section: 'Authentication',
+          type: 'password',
+        },
+        {
+          key: 'UseOtp',
+          label: 'Use an OTP',
+          section: 'Authentication',
+          type: 'checkbox',
+        },
         {
           key: 'ProfileOvpn',
           label: 'OpenVPN profile (.ovpn contents)',
@@ -11579,8 +11885,19 @@ function tunnelEditorFields(kind: number): TunnelField[] {
       ];
     case 6:
       return [
-        { key: 'Host', label: 'Host', section: 'Gateway', placeholder: 'vpn.example.com' },
-        { key: 'Port', label: 'Port', section: 'Gateway', type: 'number', placeholder: '443' },
+        {
+          key: 'Host',
+          label: 'Host',
+          section: 'Gateway',
+          placeholder: 'vpn.example.com',
+        },
+        {
+          key: 'Port',
+          label: 'Port',
+          section: 'Gateway',
+          type: 'number',
+          placeholder: '443',
+        },
         {
           key: 'Group',
           label: 'Group / connection profile (optional)',
@@ -11588,7 +11905,12 @@ function tunnelEditorFields(kind: number): TunnelField[] {
           placeholder: 'leave blank for the gateway default',
         },
         { key: 'Username', label: 'Username', section: 'Credentials' },
-        { key: 'Password', label: 'Password', section: 'Credentials', type: 'password' },
+        {
+          key: 'Password',
+          label: 'Password',
+          section: 'Credentials',
+          type: 'password',
+        },
         {
           key: 'TotpSecret',
           label: 'TOTP shared secret (Base32, optional)',
@@ -11943,9 +12265,22 @@ function TunnelEditorDialog({
     try {
       const settings = normalizeTunnelEditorSettings(value.kind, value.settings);
       const saved = value.id
-        ? await api.updateTunnel({ id: value.id, name: value.name, kind: value.kind, settings })
-        : await api.createTunnel({ name: value.name, kind: value.kind, settings });
-      onSaved({ id: saved.id, name: saved.name, kind: tunnelKindLabel(saved.kind) });
+        ? await api.updateTunnel({
+            id: value.id,
+            name: value.name,
+            kind: value.kind,
+            settings,
+          })
+        : await api.createTunnel({
+            name: value.name,
+            kind: value.kind,
+            settings,
+          });
+      onSaved({
+        id: saved.id,
+        name: saved.name,
+        kind: tunnelKindLabel(saved.kind),
+      });
       onOpenChange(false);
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : 'Could not save VPN tunnel.');
@@ -11970,7 +12305,10 @@ function TunnelEditorDialog({
               <Input
                 id="tunnel-name"
                 onChange={(event) =>
-                  setValue((current) => ({ ...current, name: event.target.value }))
+                  setValue((current) => ({
+                    ...current,
+                    name: event.target.value,
+                  }))
                 }
                 placeholder="e.g. corporate VPN"
                 required
@@ -12404,7 +12742,10 @@ function TunnelsPage({
         id: tunnel.id,
         attempt,
         ...(parsedTarget.target
-          ? { targetHost: parsedTarget.target.host, targetPort: parsedTarget.target.port }
+          ? {
+              targetHost: parsedTarget.target.host,
+              targetPort: parsedTarget.target.port,
+            }
           : {}),
       });
       if (attempt !== testAttemptRef.current) return;
@@ -13168,7 +13509,10 @@ function buildMcpConfig(client: McpClient, endpoint: string, token: string): str
   );
 }
 
-function mcpClientCopyDetails(client: McpClient): { label: string; caption: string } {
+function mcpClientCopyDetails(client: McpClient): {
+  label: string;
+  caption: string;
+} {
   switch (client) {
     case 'claude-desktop':
       return {
@@ -13490,7 +13834,10 @@ function ReleaseNotesMarkdown({ markdown }: { markdown: string }) {
           listStartOffset = lineOffset;
         }
         listType = type;
-        listItems.push({ sourceOffset: lineOffset, text: (unordered ?? ordered)![1] });
+        listItems.push({
+          sourceOffset: lineOffset,
+          text: (unordered ?? ordered)![1],
+        });
         continue;
       }
       if (line.trim() === '') {
@@ -13572,7 +13919,12 @@ function SettingsPage({
   onWorkspaceCredentialsChanged: () => Promise<void>;
   // react-doctor-disable-next-line react-doctor/prefer-useReducer
 }) {
-  const [activeTab, setActiveTab] = useState(settingsUpdatesRequest > 0 ? 'updates' : 'general');
+  const [activeTabSelection, setActiveTabSelection] = useState({
+    request: settingsUpdatesRequest,
+    value: settingsUpdatesRequest > 0 ? 'updates' : 'general',
+  });
+  const activeTab =
+    activeTabSelection.request === settingsUpdatesRequest ? activeTabSelection.value : 'updates';
   const [promptBeforeTunnelConnect, setPromptBeforeTunnelConnect] = useState(true);
   const authMethod = authState?.mode ?? 'disabled';
   const helloFallback = authState?.fallback ?? 'pin';
@@ -13654,9 +14006,9 @@ function SettingsPage({
     null,
   );
   const [backupSectionError, setBackupSectionError] = useState('');
-  const backupAuthGateRef = useRef(authGate);
+  const authGateRef = useRef(authGate);
   useLayoutEffect(() => {
-    backupAuthGateRef.current = authGate;
+    authGateRef.current = authGate;
   }, [authGate]);
 
   useEffect(() => {
@@ -13681,6 +14033,30 @@ function SettingsPage({
     },
     [],
   );
+
+  // App lock is an external security boundary. Scrub renderer-held secrets while retaining the
+  // Settings instance so native backup and Bitwarden operations keep their progress/cancel state.
+  // react-doctor-disable-next-line react-hooks-js/set-state-in-effect, react-doctor/no-adjust-state-on-prop-change
+  useEffect(() => {
+    if (authGate === 'unlocked') return;
+    setSecretDialog(null); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
+    setBitwardenCliDialog(null); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
+    setBitwardenSyncDialog(null); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
+    setBitwardenCliUpdateDialog(null); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
+    setBitwardenExtensionUpdateDialog(null); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
+    pendingSecretAction.current = null;
+    setBackupExportOpen(false); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
+    setBackupExportPassword(''); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
+    setBackupExportConfirmation(''); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
+    setBackupImportOpen(false); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
+    setBackupImportPassword(''); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
+    setBackupImportSelection(null); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
+    setBackupSectionError(''); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
+    setMcpState(null); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
+    setMcpToken(''); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
+    setMcpTokenRevealed(false); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
+    window.wormhole?.clearBackupImportSelection();
+  }, [authGate]);
 
   useEffect(() => {
     if (authGate !== 'unlocked' || !window.wormhole) return;
@@ -13817,7 +14193,10 @@ function SettingsPage({
     setBitwardenBusy(true);
     setBitwardenInstallBusy(true);
     setBitwardenError('');
-    setBitwardenCliUpdateDialog({ status: 'working', message: 'Updating Bitwarden CLI…' });
+    setBitwardenCliUpdateDialog({
+      status: 'working',
+      message: 'Updating Bitwarden CLI…',
+    });
     try {
       const state = await window.wormhole.installBitwardenCli();
       await reloadBitwardenCliStatus(state);
@@ -13971,7 +14350,10 @@ function SettingsPage({
     if (bitwardenBusy || !window.wormhole) return;
     setBitwardenBusy(true);
     setBitwardenError('');
-    setBitwardenSyncDialog({ status: 'working', message: 'Syncing Bitwarden vault…' });
+    setBitwardenSyncDialog({
+      status: 'working',
+      message: 'Syncing Bitwarden vault…',
+    });
     try {
       const result = await window.wormhole.syncBitwardenCli();
       setBitwardenLastSyncStatus(result.lastSyncStatus);
@@ -14169,7 +14551,10 @@ function SettingsPage({
     setSecurityError('');
     setSecurityMessage('');
     try {
-      const nextState = await window.wormhole.setAuthSecret({ method: secretDialog, secret });
+      const nextState = await window.wormhole.setAuthSecret({
+        method: secretDialog,
+        secret,
+      });
       onAuthStateChange(nextState);
       setSecretDialog(null);
       const afterSecret = pendingSecretAction.current;
@@ -14408,7 +14793,9 @@ function SettingsPage({
     setMcpBusy(true);
     setMcpError('');
     try {
-      setMcpToken(await window.wormhole.getMcpToken());
+      const token = await window.wormhole.getMcpToken();
+      if (authGateRef.current !== 'unlocked') return;
+      setMcpToken(token);
       setMcpTokenRevealed(true);
     } catch (error) {
       setMcpError(authSettingsErrorMessage(error));
@@ -14423,6 +14810,7 @@ function SettingsPage({
     setMcpError('');
     try {
       const token = mcpToken || (await window.wormhole.getMcpToken());
+      if (authGateRef.current !== 'unlocked') return;
       await copyTextToClipboard(token);
       setMcpMessage('Bearer token copied.');
     } catch (error) {
@@ -14445,7 +14833,12 @@ function SettingsPage({
     setMcpError('');
     setMcpMessage('');
     try {
-      setMcpToken(await window.wormhole.regenerateMcpToken());
+      const token = await window.wormhole.regenerateMcpToken();
+      if (authGateRef.current !== 'unlocked') {
+        setMcpMessage('MCP token regenerated. Reveal it again after unlocking.');
+        return;
+      }
+      setMcpToken(token);
       setMcpTokenRevealed(true);
       setMcpMessage('MCP token regenerated. Update connected clients.');
     } catch (error) {
@@ -14472,6 +14865,7 @@ function SettingsPage({
     setMcpError('');
     try {
       const token = await window.wormhole.getMcpToken();
+      if (authGateRef.current !== 'unlocked') return;
       await copyTextToClipboard(buildMcpConfig(mcpClient, mcpEndpoint, token));
       setMcpMessage('MCP client configuration copied with the current bearer token.');
     } catch (error) {
@@ -14598,7 +14992,7 @@ function SettingsPage({
       setBackupImportResult(null);
       setBackupImportOpen(true);
     } catch (error) {
-      if (backupAuthGateRef.current === 'unlocked') {
+      if (authGateRef.current === 'unlocked') {
         setBackupSectionError(backupOperationErrorMessage(error));
       }
     } finally {
@@ -14701,7 +15095,11 @@ function SettingsPage({
     <section className="flex h-full min-h-0 flex-col overflow-hidden p-6">
       <h2 className="shrink-0 text-xl font-semibold tracking-tight">Settings</h2>
 
-      <Tabs className="mt-4 min-h-0 flex-1 gap-0" onValueChange={setActiveTab} value={activeTab}>
+      <Tabs
+        className="mt-4 min-h-0 flex-1 gap-0"
+        onValueChange={(value) => setActiveTabSelection({ request: settingsUpdatesRequest, value })}
+        value={activeTab}
+      >
         <TabsList
           className="h-9 w-full shrink-0 items-stretch justify-start gap-1 overflow-x-auto overflow-y-hidden rounded-none border-b border-border p-0"
           variant="line"
@@ -15174,7 +15572,7 @@ function SettingsPage({
           <BitwardenCliDialog
             currentServerRegion={currentBitwardenServerRegion}
             defaultServerRegion={bitwardenServerRegion}
-            key={`${bitwardenCliDialog}:${bitwardenServerRegion}`}
+            key={bitwardenCliDialog}
             loginBusy={bitwardenBusy}
             mode={bitwardenCliDialog}
             onClose={() => setBitwardenCliDialog(null)}
@@ -15226,7 +15624,9 @@ function SettingsPage({
                 <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-muted">
                   <div
                     className="h-full rounded-full bg-primary transition-[width]"
-                    style={{ width: `${Math.round(update.downloadProgress * 100)}%` }}
+                    style={{
+                      width: `${Math.round(update.downloadProgress * 100)}%`,
+                    }}
                   />
                 </div>
               </div>
@@ -15561,7 +15961,8 @@ function SettingsPage({
                     {backupExportResult.fileName} contains {backupExportResult.nodeCount} nodes,{' '}
                     {backupExportResult.credentialCount} credentials,{' '}
                     {backupExportResult.tunnelCount} tunnels, {backupExportResult.passwordCount}{' '}
-                    password{backupExportResult.passwordCount === 1 ? '' : 's'},{' '}
+                    password
+                    {backupExportResult.passwordCount === 1 ? '' : 's'},{' '}
                     {backupExportResult.privateKeyCount} private key
                     {backupExportResult.privateKeyCount === 1 ? '' : 's'}, and{' '}
                     {backupExportResult.tunnelPayloadCount} tunnel payload

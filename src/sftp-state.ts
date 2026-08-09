@@ -103,6 +103,40 @@ export function pruneSftpSelection(
   return next;
 }
 
+export function nextSftpSelection(
+  selected: ReadonlySet<string>,
+  visiblePaths: readonly string[],
+  targetPath: string,
+  anchorPath: string | undefined,
+  modifiers: { extend: boolean; toggle: boolean },
+): { selected: Set<string>; anchorPath: string | undefined } {
+  const visible = new Set(visiblePaths);
+  const next = new Set([...selected].filter((path) => visible.has(path)));
+  const targetIndex = visiblePaths.indexOf(targetPath);
+  if (targetIndex < 0) return { selected: next, anchorPath: undefined };
+
+  const validAnchor = anchorPath && visible.has(anchorPath) ? anchorPath : undefined;
+  const rangeAnchor = validAnchor ?? next.values().next().value;
+  if (modifiers.extend && next.size > 0 && rangeAnchor) {
+    const anchorIndex = visiblePaths.indexOf(rangeAnchor);
+    if (anchorIndex >= 0) {
+      const [from, to] =
+        anchorIndex < targetIndex ? [anchorIndex, targetIndex] : [targetIndex, anchorIndex];
+      for (const path of visiblePaths.slice(from, to + 1)) next.add(path);
+      return { selected: next, anchorPath: rangeAnchor };
+    }
+  }
+
+  if (modifiers.toggle) {
+    if (next.has(targetPath)) next.delete(targetPath);
+    else next.add(targetPath);
+  } else {
+    next.clear();
+    next.add(targetPath);
+  }
+  return { selected: next, anchorPath: targetPath };
+}
+
 export function nextSftpOperationRefreshRequests(
   current: SftpRefreshRequests | undefined,
   operation: SftpRefreshRequest & { error?: string },

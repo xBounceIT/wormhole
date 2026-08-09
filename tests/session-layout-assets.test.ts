@@ -53,10 +53,43 @@ test('stable VNC identity preserves the single App-owned disconnect lifecycle', 
   assert.match(releaseSource, /vnc\.disconnect/);
   assert.match(vncSource, /const connectAttempt = useRef\(0\)/);
   assert.match(vncSource, /expectedConnectAttempt[\s\S]*connectAttempt\.current/);
+  assert.match(vncSource, /onStatusChangeRef\.current\?\.\(nextStatus\)/);
+  assert.match(vncSource, /if \(!request\.isAuthorized\) return/);
+  assert.match(
+    vncSource,
+    /const promptAllowed = unlockRequired && bitwardenUnlockRequestRef\.current\.isAuthorized/,
+  );
+  assert.match(vncSource, /isAuthorized && bitwardenUnlockRequired && bitwardenUnlockPending/);
+  assert.match(appSource, /<VncSurface[\s\S]*isAuthorized=\{isAuthorized\}/);
+  assert.match(
+    appSource,
+    /<SessionsPage[\s\S]*bitwardenUnlockPending=\{bitwardenUnlockPrompt !== null\}/,
+  );
+  const vncMountSource = appSource.slice(
+    appSource.indexOf('<VncSurface'),
+    appSource.indexOf('/>', appSource.indexOf('<VncSurface')),
+  );
+  assert.doesNotMatch(vncMountSource, /key=/);
+  assert.match(vncMountSource, /bitwardenUnlockPending=\{bitwardenUnlockPending\}/);
   assert.match(
     vncSource,
     /if \(!disconnected\) void connect\(\);[\s\S]*connectAttempt\.current \+= 1/,
   );
+});
+
+test('authentication prompt keeps the active Windows Hello request through StrictMode replay', () => {
+  const promptSource = appSource.slice(
+    appSource.indexOf('function AuthPrompt'),
+    appSource.indexOf('type WormholeAppProps'),
+  );
+  assert.match(promptSource, /const activeHelloRequest = useRef<string \| null>\(null\)/);
+  assert.match(promptSource, /helloInFlight\.current === requestKey/);
+  assert.match(promptSource, /activeHelloRequest\.current = helloRequestKey/);
+  assert.match(
+    promptSource,
+    /if \(activeHelloRequest\.current === helloRequestKey\) activeHelloRequest\.current = null/,
+  );
+  assert.doesNotMatch(promptSource, /let cancelled = false/);
 });
 
 test('first-open RDP startup reads the committed session snapshot', () => {
@@ -466,6 +499,24 @@ test('drag cancellation clears both the dragged tab and its visual target', () =
     /const dragIsValid = !draggedSessionId \|\| sessionIds\.includes\(draggedSessionId\)/,
   );
   assert.match(appSource, /const activeDropPreview = dragIsValid \? dropPreview : null/);
+  assert.match(
+    appSource,
+    /if \(draggedSessionId && !sessionIds\.includes\(draggedSessionId\)\)[\s\S]*setDraggedSessionId\(''\);[\s\S]*setDropPreview\(null\);/,
+  );
+});
+
+test('session reconciliation is persisted so reopened IDs cannot revive stale pane placement', () => {
+  const sessionsSource = sourceBetween(
+    appSource,
+    'function SessionsPage',
+    'function SessionSplitHandle',
+  );
+
+  assert.match(
+    sessionsSource,
+    /setLayout\(\(current\) =>[\s\S]*reconcileSessionLayout\(current, sessionIds, selectedSession\?\.id\)/,
+  );
+  assert.match(sessionsSource, /\}, \[draggedSessionId, selectedSession\?\.id, sessionIds\]\);/);
 });
 
 test('session pane chrome stays neutral and tab labels match connection tree typography', () => {
@@ -495,6 +546,105 @@ test('new folders expose every inheritable default before creation', () => {
   assert.match(appSource, /id="new-folder-tunnel-route"/);
   assert.match(appSource, /credentialSettingsFor\(newFolderForm\.credential\)/);
   assert.match(appSource, /tunnelValueFor\(newFolderForm\.tunnel\)/);
+});
+
+test('folder writes retain their submitted target when a dialog is reopened mid-request', () => {
+  const folderDetailsSource = sourceBetween(
+    appSource,
+    'async function submitFolderDetails',
+    'async function submitNewFolder',
+  );
+  const newFolderSource = sourceBetween(
+    appSource,
+    'async function submitNewFolder',
+    'const draggedNodeIdSet',
+  );
+  assert.match(folderDetailsSource, /const folderId = editingFolderId\.current/);
+  assert.match(folderDetailsSource, /const dialogGeneration = editingFolderGeneration\.current/);
+  assert.match(folderDetailsSource, /if \(editingFolderGeneration\.current === dialogGeneration\)/);
+  assert.match(newFolderSource, /const parentFolderId = newFolderParentId\.current/);
+  assert.match(newFolderSource, /const dialogGeneration = newFolderGeneration\.current/);
+  assert.match(newFolderSource, /if \(newFolderGeneration\.current === dialogGeneration\)/);
+  assert.doesNotMatch(newFolderSource, /parentId: newFolderParentId\.current/);
+});
+
+test('opening update settings does not remount and orphan active settings operations', () => {
+  const settingsMount = sourceBetween(
+    appSource,
+    '<SettingsPage',
+    'onWorkspaceCredentialsChanged={refreshWorkspaceCredentials}',
+  );
+  const settingsSource = sourceBetween(appSource, 'function SettingsPage', 'function UtilityPage');
+  assert.doesNotMatch(settingsMount, /key=/);
+  assert.doesNotMatch(settingsMount, /key=\{`\$\{authGate\}:\$\{settingsUpdatesRequest\}`\}/);
+  assert.match(
+    settingsSource,
+    /activeTabSelection\.request === settingsUpdatesRequest[\s\S]*activeTabSelection\.value[\s\S]*'updates'/,
+  );
+  assert.match(
+    settingsSource,
+    /if \(authGate === 'unlocked'\) return;[\s\S]*setMcpState\(null\);[\s\S]*setMcpToken\(''\);[\s\S]*setMcpTokenRevealed\(false\);/,
+  );
+  for (const operation of [
+    'revealMcpToken',
+    'copyMcpToken',
+    'regenerateMcpToken',
+    'copyMcpConfig',
+  ]) {
+    const operationSource = sourceBetween(
+      settingsSource,
+      `async function ${operation}`,
+      operation === 'copyMcpConfig' ? 'async function openCurrentLogFile' : 'async function',
+    );
+    assert.match(operationSource, /authGateRef\.current !== 'unlocked'/);
+  }
+});
+
+test('credential mutations do not remount and orphan an active batch operation', () => {
+  const credentialsMount = appSource.match(/<CredentialsPage[\s\S]*?\/>/)?.[0] ?? '';
+
+  assert.doesNotMatch(credentialsMount, /key=/);
+  assert.match(credentialsMount, /isAuthorized=\{authGate === 'unlocked'\}/);
+  assert.doesNotMatch(credentialsMount, /credentials\.map/);
+  assert.match(appSource, /const validSelectedCredentials = useMemo\(/);
+  assert.match(
+    appSource,
+    /new Set\(\[\.\.\.selectedCredentials\]\.filter\(\(id\) => credentialById\.has\(id\)\)\)/,
+  );
+});
+
+test('virtual card grids label the semantic list rather than a generic scroll container', () => {
+  const virtualGridSource = readFileSync(
+    new URL('../src/components/VirtualCardGrid.tsx', import.meta.url),
+    'utf8',
+  );
+  const scrollArea = sourceBetween(virtualGridSource, '<ScrollArea', '<ul');
+  const list = sourceBetween(virtualGridSource, '<ul', 'className="absolute');
+
+  assert.doesNotMatch(scrollArea, /aria-label/);
+  assert.match(list, /aria-label=\{ariaLabel\}/);
+});
+
+test('an asynchronous Bitwarden region refresh does not clear an open login form', () => {
+  const dialogMount = sourceBetween(appSource, '<BitwardenCliDialog', 'onUnlock={(masterPassword)');
+
+  assert.match(dialogMount, /key=\{bitwardenCliDialog\}/);
+  assert.doesNotMatch(
+    dialogMount,
+    /key=\{`\$\{bitwardenCliDialog\}:\$\{bitwardenServerRegion\}`\}/,
+  );
+});
+
+test('SFTP keyboard range selection replaces a stale anchor', () => {
+  const keyboardSelection = sourceBetween(
+    appSource,
+    'function moveKeyboardSelection',
+    'function beginRename',
+  );
+
+  assert.match(keyboardSelection, /validSelectedPaths\.size > 0/);
+  assert.match(keyboardSelection, /nextSftpSelection\(/);
+  assert.match(keyboardSelection, /selectionAnchorPath\.current = next\.anchorPath/);
 });
 
 test('VPN diagnostics expose target probing and cancellation across the bridge', () => {

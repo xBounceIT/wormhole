@@ -5,6 +5,7 @@ import {
   compareSftpEntries,
   isSftpTransferTerminal,
   nextSftpOperationRefreshRequests,
+  nextSftpSelection,
   nextSftpTransferRefreshRequests,
   parentLocalSftpPath,
   parentSftpPath,
@@ -337,6 +338,36 @@ test('unchanged SFTP selection preserves its identity', () => {
     pruneSftpSelection(selected, new Set(['C:\\Users\\operator\\report.txt'])),
     selected,
   );
+});
+
+test('SFTP range selection replaces a stale anchor after directory navigation', () => {
+  const visible = ['/new/alpha.txt', '/new/bravo.txt', '/new/charlie.txt'];
+  const first = nextSftpSelection(new Set(), visible, visible[0], '/old/stale.txt', {
+    extend: true,
+    toggle: false,
+  });
+  assert.deepEqual([...first.selected], [visible[0]]);
+  assert.equal(first.anchorPath, visible[0]);
+
+  const range = nextSftpSelection(first.selected, visible, visible[2], first.anchorPath, {
+    extend: true,
+    toggle: false,
+  });
+  assert.deepEqual([...range.selected], visible);
+  assert.equal(range.anchorPath, visible[0]);
+});
+
+test('SFTP toggle selection prunes hidden paths before changing the target', () => {
+  const visible = ['/home/report.txt', '/home/notes.txt'];
+  const next = nextSftpSelection(
+    new Set(['/old/hidden.txt', visible[0]]),
+    visible,
+    visible[0],
+    visible[0],
+    { extend: false, toggle: true },
+  );
+  assert.deepEqual([...next.selected], []);
+  assert.equal(next.anchorPath, visible[0]);
 });
 
 test('SFTP virtual list renders only the viewport and a bounded overscan', () => {
