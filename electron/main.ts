@@ -121,6 +121,7 @@ const startupWindowOpacity = 0.96;
 const wormholeDataDirectoryName = 'Wormhole';
 const backendTimeoutMs = 30_000;
 const backupTimeoutMs = 5 * 60_000;
+const nativeLongOperationTimeoutMs = 30 * 60_000;
 const tunnelTestTimeoutMs = 315_000;
 // The Go installers allow five minutes for the browser ZIP and ten minutes for the CLI ZIP.
 // IPC must outlive those inner deadlines or the UI reports a timeout while Go completes later.
@@ -253,6 +254,10 @@ type NativeBackendAction =
   | 'tunnel.release'
   | 'tunnel.prompt-response'
   | 'tunnel.route-response'
+  | 'backup.export'
+  | 'backup.import'
+  | 'mremote.import.commit'
+  | 'operation.cancel'
   | 'bitwarden.read'
   | 'bitwarden.set-enabled'
   | 'bitwarden.set-config'
@@ -315,6 +320,9 @@ type NativeBackendCommand = {
   sessionJson?: string;
   sourceRevision?: number;
   profilePath?: string;
+  structureOnly?: boolean;
+  planNonce?: string;
+  planToken?: string;
 };
 type BackendResponse = {
   id: string;
@@ -346,6 +354,7 @@ type BackendEvent = {
   leaseId?: string;
   phase?: string;
   detail?: string;
+  percent?: number;
   connectionName?: string;
   tunnelName?: string;
 };
@@ -700,9 +709,19 @@ type TunnelReadRequest = { id: string };
 type TunnelDeleteRequest = { id: string };
 type ActiveTunnelTest = {
   leaseId: string;
+  attempt: number;
   cancelled: boolean;
   backend?: NativeBackendProcess;
   leases: TunnelLeaseRegistry;
+  sender: Electron.WebContents;
+  lastProgress?: string;
+};
+type NativeOperationKind = 'backup-export' | 'backup-import' | 'mremote-import';
+type ActiveNativeOperation = {
+  id: string;
+  kind: NativeOperationKind;
+  backend: NativeBackendProcess;
+  sender: Electron.WebContents;
 };
 type TunnelDetailsResponse = {
   id: string;
@@ -2680,6 +2699,33 @@ class NativeBackendProcess {
     if (!response.ok) throw new Error(response.error || 'Could not answer the VPN prompt.');
   }
 
+  async runOperation(
+    operationId: string,
+    action: 'backup.export' | 'backup.import' | 'mremote.import.commit',
+    request: Pick<
+      NativeBackendCommand,
+      'path' | 'password' | 'structureOnly' | 'planNonce' | 'planToken'
+    >,
+  ): Promise<unknown> {
+    const response = await this.send(
+      { action, sessionId: operationId, ...request },
+      nativeLongOperationTimeoutMs,
+    );
+    if (!response.ok) throw new Error(response.error || 'The native operation failed.');
+    return response.result;
+  }
+
+  async cancelOperation(operationId: string): Promise<void> {
+    // A crashed/stopped backend has already ended every operation. Do not restart a fresh process
+    // merely to send an idempotent cancellation for work that no longer exists.
+    if (!this.child) return;
+    const response = await this.send(
+      { action: 'operation.cancel', sessionId: operationId },
+      backupTimeoutMs,
+    );
+    if (!response.ok) throw new Error(response.error || 'Could not cancel the operation.');
+  }
+
   async stop(permanent = false): Promise<void> {
     if (permanent) this.permanentlyStopped = true;
     if (this.stopPromise) return this.stopPromise;
@@ -2794,6 +2840,13 @@ class NativeBackendProcess {
           if (event) enqueueTunnelBrowserAuth(this, event);
           continue;
         }
+        if (message.type === 'operation.progress') {
+          routeNativeOperationProgress(this, message);
+          continue;
+        }
+        if (message.type === 'tunnel.progress' && routeTunnelTestProgress(this, message)) {
+          continue;
+        }
         if (!authSession.isAccessAllowed) continue;
         for (const window of BrowserWindow.getAllWindows()) {
           if (window.isDestroyed()) continue;
@@ -2815,6 +2868,73 @@ class NativeBackendProcess {
 
 let nativeBackend: NativeBackendProcess | undefined;
 const activeTunnelTests = new Map<number, ActiveTunnelTest>();
+const activeNativeOperations = new Map<number, ActiveNativeOperation>();
+
+function boundedProgressText(value: unknown, maximum = 512): string {
+  if (typeof value !== 'string') return '';
+  return value
+    .replace(/[\p{Cc}]+/gu, ' ')
+    .trim()
+    .slice(0, maximum);
+}
+
+function sendTunnelTestProgress(test: ActiveTunnelTest, phase: string, detail: string): void {
+  const safePhase = boundedProgressText(phase, 64);
+  const safeDetail = boundedProgressText(detail);
+  if (!authSession.isAccessAllowed || !safePhase || !safeDetail || test.sender.isDestroyed())
+    return;
+  test.lastProgress = safeDetail;
+  test.sender.send('tunnel:test-progress', {
+    attempt: test.attempt,
+    phase: safePhase,
+    detail: safeDetail,
+  });
+}
+
+function routeTunnelTestProgress(backend: NativeBackendProcess, value: unknown): boolean {
+  if (!value || typeof value !== 'object') return false;
+  const event = value as Record<string, unknown>;
+  if (typeof event.sessionId !== 'string') return false;
+  const test = [...activeTunnelTests.values()].find(
+    (candidate) => candidate.backend === backend && candidate.leaseId === event.sessionId,
+  );
+  if (!test) return false;
+  if (
+    authSession.isAccessAllowed &&
+    typeof event.phase === 'string' &&
+    typeof event.detail === 'string'
+  ) {
+    sendTunnelTestProgress(test, event.phase, event.detail);
+  }
+  return true;
+}
+
+function routeNativeOperationProgress(backend: NativeBackendProcess, value: unknown): void {
+  if (!authSession.isAccessAllowed || !value || typeof value !== 'object') return;
+  const event = value as Record<string, unknown>;
+  if (typeof event.sessionId !== 'string') return;
+  const operation = [...activeNativeOperations.values()].find(
+    (candidate) => candidate.backend === backend && candidate.id === event.sessionId,
+  );
+  if (!operation || operation.sender.isDestroyed()) return;
+  const phase = boundedProgressText(event.phase, 64);
+  const detail = boundedProgressText(event.detail);
+  const percent = event.percent;
+  if (
+    !phase ||
+    !detail ||
+    !Number.isInteger(percent) ||
+    (percent as number) < 0 ||
+    (percent as number) > 100
+  )
+    return;
+  operation.sender.send('operation:progress', {
+    kind: operation.kind,
+    phase,
+    detail,
+    percent,
+  });
+}
 let isQuitting = false;
 let skipQuitConfirmation = false;
 let bitwardenBackgroundTimer: NodeJS.Timeout | undefined;
@@ -3197,6 +3317,70 @@ function releaseTunnelTest(test: ActiveTunnelTest): Promise<void> {
 async function cancelTunnelTest(test: ActiveTunnelTest): Promise<void> {
   test.cancelled = true;
   await releaseTunnelTest(test);
+}
+
+async function runOwnedNativeOperation(
+  sender: Electron.WebContents,
+  kind: NativeOperationKind,
+  action: 'backup.export' | 'backup.import' | 'mremote.import.commit',
+  request: Pick<
+    NativeBackendCommand,
+    'path' | 'password' | 'structureOnly' | 'planNonce' | 'planToken'
+  >,
+): Promise<unknown> {
+  requireNativeResourcesRunning();
+  if (activeNativeOperations.has(sender.id)) {
+    throw new Error('Another backup or import operation is already running.');
+  }
+  const backend = getNativeBackend();
+  const operation: ActiveNativeOperation = {
+    id: randomUUID(),
+    kind,
+    backend,
+    sender,
+  };
+  activeNativeOperations.set(sender.id, operation);
+  const cancel = () => backend.cancelOperation(operation.id);
+  const cancelWhenRendererCloses = () => void cancel().catch(() => undefined);
+  sender.once('destroyed', cancelWhenRendererCloses);
+  try {
+    try {
+      return await runAuthorizedOperation(
+        () => backend.runOperation(operation.id, action, request),
+        cancel,
+      );
+    } catch (error) {
+      // A timed-out or failed request must not leave its Go mutation running headlessly after
+      // the renderer loses the only cancellation handle. Cancelling an already-finished
+      // operation is intentionally idempotent.
+      await cancel().catch(() => undefined);
+      throw error;
+    }
+  } finally {
+    if (!sender.isDestroyed()) sender.removeListener('destroyed', cancelWhenRendererCloses);
+    if (activeNativeOperations.get(sender.id) === operation) {
+      activeNativeOperations.delete(sender.id);
+    }
+  }
+}
+
+async function cancelOwnedNativeOperation(
+  sender: Electron.WebContents,
+  expected: NativeOperationKind,
+): Promise<boolean> {
+  const operation = activeNativeOperations.get(sender.id);
+  if (!operation || operation.kind !== expected) return false;
+  await operation.backend.cancelOperation(operation.id);
+  return true;
+}
+
+function cancelAllUserOperations(): void {
+  for (const test of activeTunnelTests.values()) {
+    void cancelTunnelTest(test).catch(() => undefined);
+  }
+  for (const operation of activeNativeOperations.values()) {
+    void operation.backend.cancelOperation(operation.id).catch(() => undefined);
+  }
 }
 
 function wormholeDatabasePath(): string {
@@ -6328,25 +6512,22 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     ) {
       throw new Error('Analyze the mRemoteNG file with these options before importing it.');
     }
-    return serializeAuthOperation(async () => {
-      await requireWorkspaceAuth();
-      const result = parseMRemoteImportResult(
-        await runBackend(
-          'mremote-import-commit',
-          {
-            path: selection.path,
-            password: options.password,
-            structureOnly: options.structureOnly,
-            planNonce: selection.planNonce,
-            planToken: selection.planToken,
-          },
-          backupTimeoutMs,
-        ),
-      );
-      mremoteImportSelections.delete(event.sender);
-      return result;
-    });
+    const result = parseMRemoteImportResult(
+      await runOwnedNativeOperation(event.sender, 'mremote-import', 'mremote.import.commit', {
+        path: selection.path,
+        password: options.password,
+        structureOnly: options.structureOnly,
+        planNonce: selection.planNonce,
+        planToken: selection.planToken,
+      }),
+    );
+    mremoteImportSelections.delete(event.sender);
+    return result;
   });
+
+  ipcMain.handle('mremote-import:cancel-commit', (event) =>
+    cancelOwnedNativeOperation(event.sender, 'mremote-import'),
+  );
 
   ipcMain.handle('backup:export', async (event, value: unknown) => {
     const request = parseBackupPasswordRequest(value);
@@ -6365,15 +6546,21 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       ? await dialog.showSaveDialog(owner, options)
       : await dialog.showSaveDialog(options);
     if (selection.canceled || !selection.filePath) return null;
-    return serializeAuthOperation(async () => {
-      await requireWorkspaceAuth();
-      const backendResult = await runBackend<BackupExportBackendResponse>('backup-export', {
+    const backendResult = await runOwnedNativeOperation(
+      event.sender,
+      'backup-export',
+      'backup.export',
+      {
         path: selection.filePath,
         password: request.password,
-      });
-      return parseBackupExportResponse(backendResult, selection.filePath);
-    });
+      },
+    );
+    return parseBackupExportResponse(backendResult, selection.filePath);
   });
+
+  ipcMain.handle('backup:cancel-export', (event) =>
+    cancelOwnedNativeOperation(event.sender, 'backup-export'),
+  );
 
   ipcMain.handle('backup:select-import', async (event) => {
     await serializeAuthOperation(requireWorkspaceAuth);
@@ -6412,18 +6599,24 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
 
   ipcMain.handle('backup:import', async (event, value: unknown) => {
     const request = parseBackupPasswordRequest(value);
-    return serializeAuthOperation(async () => {
-      await requireWorkspaceAuth();
-      const selectedPath = backupImportSelections.get(event.sender);
-      if (!selectedPath) throw new Error('Choose a backup file before importing.');
-      const backendResult = await runBackend<BackupImportResponse>('backup-import', {
+    const selectedPath = backupImportSelections.get(event.sender);
+    if (!selectedPath) throw new Error('Choose a backup file before importing.');
+    const backendResult = await runOwnedNativeOperation(
+      event.sender,
+      'backup-import',
+      'backup.import',
+      {
         path: selectedPath,
         password: request.password,
-      });
-      backupImportSelections.delete(event.sender);
-      return parseBackupImportResponse(backendResult);
-    });
+      },
+    );
+    backupImportSelections.delete(event.sender);
+    return parseBackupImportResponse(backendResult);
   });
+
+  ipcMain.handle('backup:cancel-import', (event) =>
+    cancelOwnedNativeOperation(event.sender, 'backup-import'),
+  );
 
   ipcMain.handle('workspace:create-node', async (_event, value: unknown) => {
     const request = parseWorkspaceNodeWriteRequest(value, false);
@@ -6961,10 +7154,13 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     if (activeTunnelTests.has(senderID)) throw new Error('A VPN tunnel test is already running.');
     const test: ActiveTunnelTest = {
       leaseId: randomUUID(),
+      attempt: request.attempt,
       cancelled: false,
       leases: new TunnelLeaseRegistry(),
+      sender: event.sender,
     };
     activeTunnelTests.set(senderID, test);
+    sendTunnelTestProgress(test, 'preparing', 'Preparing the VPN tunnel test…');
     const cancelWhenRendererCloses = () => void cancelTunnelTest(test).catch(() => undefined);
     event.sender.once('destroyed', cancelWhenRendererCloses);
     try {
@@ -6983,8 +7179,18 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
           if (test.cancelled) throw new Error('VPN tunnel test was cancelled.');
           if (!socksEndpoint) throw new Error('The VPN tunnel returned no SOCKS endpoint.');
           if (request.targetHost && request.targetPort) {
+            sendTunnelTestProgress(
+              test,
+              'probing',
+              `Testing ${request.targetHost}:${request.targetPort} through the VPN tunnel…`,
+            );
             try {
               await backend.probeTunnelTarget(test.leaseId, request.targetHost, request.targetPort);
+              sendTunnelTestProgress(
+                test,
+                'reachable',
+                'The target is reachable through the VPN tunnel.',
+              );
             } catch (error) {
               if (test.cancelled) throw new Error('VPN tunnel test was cancelled.');
               const message = error instanceof Error ? error.message : String(error);
@@ -7000,11 +7206,15 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     } catch (error) {
       // Cancellation is a normal user outcome. Other test failures are expected user-facing data
       // too, so do not reject the IPC call and make Electron log an unhandled handler error.
-      const message = test.cancelled
+      const baseMessage = test.cancelled
         ? 'VPN tunnel test was cancelled.'
         : error instanceof Error
           ? error.message
           : String(error);
+      const message =
+        !test.cancelled && test.lastProgress && !baseMessage.includes(test.lastProgress)
+          ? `${baseMessage}\nLast step: ${test.lastProgress}`
+          : baseMessage;
       if (test.cancelled || /cancell/i.test(message)) {
         console.info(`[Wormhole] VPN tunnel test cancelled (${request.id}).`);
       } else {
@@ -7015,10 +7225,11 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       if (!event.sender.isDestroyed()) {
         event.sender.removeListener('destroyed', cancelWhenRendererCloses);
       }
-      if (activeTunnelTests.get(senderID) === test) activeTunnelTests.delete(senderID);
       await releaseTunnelTest(test).catch((error) => {
         console.warn('[Wormhole] Could not release the VPN tunnel test lease.', error);
       });
+      sendTunnelTestProgress(test, 'closed', 'The temporary VPN tunnel is closed.');
+      if (activeTunnelTests.get(senderID) === test) activeTunnelTests.delete(senderID);
     }
   });
 
@@ -7248,6 +7459,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       await authStateMutationQueue.catch(() => undefined);
       await ensureAuthSession();
       authSession.lock();
+      cancelAllUserOperations();
       backupImportSelections.delete(event.sender);
       mremoteImportAnalysis.get(event.sender)?.abort();
       mremoteImportAnalysis.delete(event.sender);

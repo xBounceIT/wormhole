@@ -496,6 +496,11 @@ test('VPN diagnostics expose target probing and cancellation across the bridge',
     /cancelTunnelTest: \(\) => ipcRenderer\.invoke\('tunnel:test-cancel'\)/,
   );
   assert.match(mainSource, /ipcMain\.handle\('tunnel:test-cancel'/);
+  assert.match(preloadSource, /onTunnelTestProgress/);
+  assert.match(mainSource, /routeTunnelTestProgress/);
+  assert.match(mainSource, /'tunnel:test-progress'/);
+  assert.match(appSource, /Diagnostic log/);
+  assert.match(appSource, /attempt,/);
   assert.match(mainSource, /probeTunnelTarget\([\s\S]{0,180}request\.targetHost/);
   assert.match(mainSource, /return test\.leases\.release\('tunnel-test'/);
   assert.match(
@@ -505,6 +510,23 @@ test('VPN diagnostics expose target probing and cancellation across the bridge',
   assert.match(
     appSource,
     /function closeTunnelTest\(\)[\s\S]{0,180}void cancelTunnelTestRun\(\)[\s\S]{0,180}status === 'cancelling'\) return/,
+  );
+});
+
+test('backup and mRemoteNG mutations expose cooperative progress and cancellation', () => {
+  assert.match(preloadSource, /cancelBackupExport/);
+  assert.match(preloadSource, /cancelBackupImport/);
+  assert.match(preloadSource, /cancelMRemoteImportCommit/);
+  assert.match(preloadSource, /onOperationProgress/);
+  assert.match(mainSource, /operation\.cancel/);
+  assert.match(mainSource, /routeNativeOperationProgress/);
+  assert.match(mainSource, /runOwnedNativeOperation/);
+  assert.doesNotMatch(
+    mainSource.slice(
+      mainSource.indexOf("ipcMain.handle('backup:export'"),
+      mainSource.indexOf("ipcMain.handle('workspace:create-node'"),
+    ),
+    /runBackend<Backup(?:Export|Import)/,
   );
 });
 

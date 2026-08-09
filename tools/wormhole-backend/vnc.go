@@ -77,6 +77,9 @@ type backendCommand struct {
 	SessionJSON       string `json:"sessionJson,omitempty"`
 	SourceRevision    int64  `json:"sourceRevision,omitempty"`
 	ProfilePath       string `json:"profilePath,omitempty"`
+	StructureOnly     bool   `json:"structureOnly,omitempty"`
+	PlanNonce         string `json:"planNonce,omitempty"`
+	PlanToken         string `json:"planToken,omitempty"`
 }
 
 type backendResponse struct {
@@ -97,6 +100,7 @@ type backendEvent struct {
 	LeaseID                 string   `json:"leaseId,omitempty"`
 	Phase                   string   `json:"phase,omitempty"`
 	Detail                  string   `json:"detail,omitempty"`
+	Percent                 int      `json:"percent,omitempty"`
 	ConnectionName          string   `json:"connectionName,omitempty"`
 	TunnelName              string   `json:"tunnelName,omitempty"`
 	Status                  string   `json:"status,omitempty"`
@@ -190,6 +194,7 @@ type vncManager struct {
 	promptSequence                     uint64
 	routePrompts                       map[string]*pendingTunnelPrompt
 	routeSequence                      uint64
+	operations                         map[string]*pendingBackendOperation
 	cleanup                            sync.WaitGroup
 	bitwardenMu                        sync.RWMutex
 	bitwardenOperationMu               sync.Mutex
@@ -207,6 +212,11 @@ type pendingTunnelPrompt struct {
 }
 
 type pendingTunnelStart struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
+type pendingBackendOperation struct {
 	cancel context.CancelFunc
 	done   chan struct{}
 }
@@ -235,6 +245,7 @@ func newVncManager(
 		tunnelStarts:         make(map[string]*pendingTunnelStart),
 		tunnelPrompts:        make(map[string]*pendingTunnelPrompt),
 		routePrompts:         make(map[string]*pendingTunnelPrompt),
+		operations:           make(map[string]*pendingBackendOperation),
 	}
 }
 
@@ -269,6 +280,14 @@ func (m *vncManager) handle(command backendCommand) {
 		m.respondTunnelPrompt(command)
 	case "tunnel.route-response":
 		m.respondTunnelRoute(command)
+	case "backup.export", "backup.import", "mremote.import.commit":
+		m.startBackendOperation(command)
+	case "operation.cancel":
+		m.cleanup.Add(1)
+		go func() {
+			defer m.cleanup.Done()
+			m.cancelBackendOperation(command)
+		}()
 	case "bitwarden.clear-session":
 		// App lock must invalidate the in-memory vault session immediately. In particular, do not
 		// queue this command behind a potentially long-running Bitwarden CLI operation.
@@ -354,6 +373,11 @@ func (m *vncManager) close() {
 	for _, start := range m.tunnelStarts {
 		start.cancel()
 	}
+	operations := make([]*pendingBackendOperation, 0, len(m.operations))
+	for _, operation := range m.operations {
+		operation.cancel()
+		operations = append(operations, operation)
+	}
 	forwarders := make([]*tunnelForwarder, 0, len(m.tunnelForwarders))
 	for _, forwarder := range m.tunnelForwarders {
 		forwarders = append(forwarders, forwarder)
@@ -363,6 +387,7 @@ func (m *vncManager) close() {
 	m.tunnelStarts = make(map[string]*pendingTunnelStart)
 	m.tunnelPrompts = make(map[string]*pendingTunnelPrompt)
 	m.routePrompts = make(map[string]*pendingTunnelPrompt)
+	m.operations = make(map[string]*pendingBackendOperation)
 	m.mu.Unlock()
 
 	for _, session := range sessions {
@@ -373,6 +398,9 @@ func (m *vncManager) close() {
 	}
 	for _, lease := range leases {
 		m.cleanupNative(lease.close)
+	}
+	for _, operation := range operations {
+		<-operation.done
 	}
 	m.cleanup.Wait()
 }
@@ -1511,6 +1539,16 @@ func validateBackendCommand(command backendCommand) error {
 		default:
 			return errors.New("VPN tunnel choice is invalid")
 		}
+	case "backup.export", "backup.import":
+		if command.Path == "" || len([]rune(command.Path)) > 4096 || len(command.Password) > maxStoredCredentialBytes {
+			return errors.New("backup operation request is invalid")
+		}
+	case "mremote.import.commit":
+		if command.Path == "" || len([]rune(command.Path)) > 4096 || len(command.Password) > maxStoredCredentialBytes ||
+			!validMRemotePlanNonce(command.PlanNonce) || !validSHA256(command.PlanToken) {
+			return errors.New("mRemoteNG import request is invalid")
+		}
+	case "operation.cancel":
 	case "bitwarden.read", "bitwarden.install", "bitwarden.ensure-installed", "bitwarden.status", "bitwarden.logout",
 		"bitwarden.sync", "bitwarden.sync-if-stale",
 		"bitwarden.clear-session":

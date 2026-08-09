@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  appendTunnelTestLog,
   isTunnelTestCancellation,
   isTunnelTestNotice,
   missingTunnelFields,
   normalizeTunnelEditorSettings,
   parseTunnelProbeTarget,
   tunnelModeFor,
+  tunnelTestPhaseLabel,
   tunnelValueFor,
   userFacingTunnelError,
 } from '../src/tunnel-state.ts';
@@ -155,6 +157,7 @@ test('VPN test cancellation detection only matches voluntary cancellation messag
   assert.equal(isTunnelTestCancellation('VPN authentication was cancelled'), true);
   assert.equal(isTunnelTestCancellation('VPN tunnel establishment was cancelled'), true);
   assert.equal(isTunnelTestCancellation('the operation was cancelled'), true);
+  assert.equal(isTunnelTestCancellation('VPN tunnel test was cancelled.'), true);
   assert.equal(
     isTunnelTestCancellation('the VPN gateway cancelled the session mid-handshake'),
     false,
@@ -183,4 +186,26 @@ test('VPN tunnel target probes require a complete bounded host and port pair', (
   assert.match(parseTunnelProbeTarget('server.internal', '65536').error ?? '', /between/i);
   assert.match(parseTunnelProbeTarget('server.internal', '22.5').error ?? '', /between/i);
   assert.match(parseTunnelProbeTarget('server.internal', '1e2').error ?? '', /between/i);
+});
+
+test('VPN diagnostics label native phases and retain a bounded timestamped log', () => {
+  assert.equal(
+    tunnelTestPhaseLabel('authenticating', 'detail'),
+    'Authenticating with the VPN gateway',
+  );
+  assert.equal(tunnelTestPhaseLabel('provider-step', 'Provider detail'), 'Provider detail');
+
+  const timestamp = new Date('2026-08-09T12:34:56Z');
+  const initial = appendTunnelTestLog([], 'Starting\nprovider', timestamp, 2);
+  assert.equal(initial.length, 1);
+  assert.match(initial[0], /^\[.+\] Starting provider$/);
+  const bounded = appendTunnelTestLog(
+    appendTunnelTestLog(initial, 'Second', timestamp, 2),
+    'Third',
+    timestamp,
+    2,
+  );
+  assert.equal(bounded.length, 2);
+  assert.match(bounded[0], /Second$/);
+  assert.match(bounded[1], /Third$/);
 });

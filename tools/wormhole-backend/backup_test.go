@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -14,6 +15,40 @@ import (
 	"testing"
 	"time"
 )
+
+func TestBackupOperationsHonorCancellationBeforeSideEffects(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	directory := t.TempDir()
+	databasePath := filepath.Join(directory, "workspace.db")
+	destination := filepath.Join(directory, "backup.json")
+	request := backupRequest{Path: destination}
+
+	if _, err := exportBackupContext(ctx, databasePath, request, nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled export returned %v", err)
+	}
+	if _, err := os.Stat(destination); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cancelled export created destination: %v", err)
+	}
+	if _, err := importBackupContext(ctx, databasePath, request, nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled import returned %v", err)
+	}
+}
+
+func TestOperationProgressInterpolationIsBounded(t *testing.T) {
+	for _, test := range []struct {
+		completed, total, expected int
+	}{
+		{-1, 4, 10},
+		{2, 4, 50},
+		{9, 4, 90},
+		{0, 0, 90},
+	} {
+		if got := progressBetween(10, 90, test.completed, test.total); got != test.expected {
+			t.Fatalf("progressBetween(%d, %d) = %d, want %d", test.completed, test.total, got, test.expected)
+		}
+	}
+}
 
 const (
 	backupTestFolderID     = "11111111-1111-4111-8111-111111111111"

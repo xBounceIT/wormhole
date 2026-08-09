@@ -677,6 +677,19 @@ interface WormholeLogsInfo {
   logLevel: string;
 }
 
+interface WormholeOperationProgress {
+  kind: 'backup-export' | 'backup-import' | 'mremote-import';
+  phase: string;
+  detail: string;
+  percent: number;
+}
+
+interface WormholeTunnelTestProgress {
+  attempt: number;
+  phase: string;
+  detail: string;
+}
+
 interface Window {
   wormhole?: {
     loadStartup(legacyTheme?: 'system' | 'light' | 'dark'): Promise<WormholeStartupSnapshot>;
@@ -693,6 +706,7 @@ interface Window {
       password: string;
       structureOnly: boolean;
     }): Promise<WormholeMRemoteImportResult>;
+    cancelMRemoteImportCommit(): Promise<boolean>;
     clearMRemoteImport(): void;
     duplicateWorkspaceNode(request: { nodeId: string }): Promise<{ nodeId: string; name: string }>;
     deleteWorkspaceNode(request: { nodeId: string }): Promise<{ deleted: boolean }>;
@@ -701,9 +715,12 @@ interface Window {
       nodeId: string;
     }): Promise<WormholeWorkspaceCredentialReveal>;
     exportBackup(password: string): Promise<WormholeBackupExportResult | null>;
+    cancelBackupExport(): Promise<boolean>;
     selectBackupForImport(): Promise<WormholeBackupImportSelection | null>;
     clearBackupImportSelection(): void;
     importBackup(password: string): Promise<WormholeBackupImportResult>;
+    cancelBackupImport(): Promise<boolean>;
+    onOperationProgress(listener: (event: WormholeOperationProgress) => void): () => void;
     createWorkspaceNode(request: {
       parentId: string;
       name: string;
@@ -860,10 +877,12 @@ interface Window {
     deleteTunnel(id: string): Promise<{ deleted: boolean; error?: string }>;
     testTunnel(request: {
       id: string;
+      attempt: number;
       targetHost?: string;
       targetPort?: number;
     }): Promise<{ connected: boolean; error?: string }>;
     cancelTunnelTest(): Promise<{ cancelled: boolean }>;
+    onTunnelTestProgress(listener: (event: WormholeTunnelTestProgress) => void): () => void;
     importWatchguardProfile(): Promise<{
       server: string;
       port: number;

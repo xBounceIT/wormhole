@@ -252,11 +252,13 @@ import {
   normalizeSidebarWidth,
 } from './sidebar-settings';
 import {
+  appendTunnelTestLog,
   isTunnelTestCancellation,
   isTunnelTestNotice,
   missingTunnelFields,
   normalizeTunnelEditorSettings,
   parseTunnelProbeTarget,
+  tunnelTestPhaseLabel,
   tunnelModeFor,
   tunnelValueFor,
   userFacingTunnelError,
@@ -11878,6 +11880,8 @@ function TunnelsPage({
     status: 'idle' | 'connecting' | 'cancelling' | 'connected' | 'notice' | 'cancelled' | 'failed';
     targetProbed?: boolean;
     error?: string;
+    progress?: string;
+    log: string[];
   } | null>(null);
   const [testTargetHost, setTestTargetHost] = useState('');
   const [testTargetPort, setTestTargetPort] = useState('');
@@ -11900,6 +11904,21 @@ function TunnelsPage({
     () => filterListSearchIndex(tunnels, tunnelSearchIndex, normalizedTunnelSearch),
     [normalizedTunnelSearch, tunnelSearchIndex, tunnels],
   );
+
+  useEffect(() => {
+    return window.wormhole?.onTunnelTestProgress((event) => {
+      if (event.attempt !== testAttemptRef.current) return;
+      setTestState((current) =>
+        current
+          ? {
+              ...current,
+              progress: tunnelTestPhaseLabel(event.phase, event.detail),
+              log: appendTunnelTestLog(current.log, event.detail),
+            }
+          : current,
+      );
+    });
+  }, []);
 
   function addTunnel() {
     setActionError('');
@@ -11950,7 +11969,7 @@ function TunnelsPage({
     setTestTargetHost('');
     setTestTargetPort('');
     setTestInputError('');
-    setTestState({ tunnel, status: 'idle' });
+    setTestState({ tunnel, status: 'idle', log: [] });
   }
 
   async function runTunnelTest() {
@@ -11973,10 +11992,16 @@ function TunnelsPage({
     setTestInputError('');
     const attempt = ++testAttemptRef.current;
     const tunnel = testState.tunnel;
-    setTestState({ tunnel, status: 'connecting', targetProbed: Boolean(parsedTarget.target) });
+    setTestState({
+      tunnel,
+      status: 'connecting',
+      targetProbed: Boolean(parsedTarget.target),
+      log: [],
+    });
     try {
       const result = await api.testTunnel({
         id: tunnel.id,
+        attempt,
         ...(parsedTarget.target
           ? { targetHost: parsedTarget.target.host, targetPort: parsedTarget.target.port }
           : {}),
@@ -12021,7 +12046,7 @@ function TunnelsPage({
 
   async function cancelTunnelTestRun() {
     if (testState?.status !== 'connecting') return;
-    const attempt = ++testAttemptRef.current;
+    const attempt = testAttemptRef.current;
     setTestState((current) =>
       current ? { ...current, status: 'cancelling', error: undefined } : current,
     );
@@ -12193,7 +12218,7 @@ function TunnelsPage({
             ) : testState?.status === 'connecting' ? (
               <>
                 <LoaderCircle className="size-5 shrink-0 animate-spin text-muted-foreground" />
-                <p className="text-sm">Connecting to the VPN gateway…</p>
+                <p className="text-sm">{testState.progress ?? 'Connecting to the VPN gateway…'}</p>
               </>
             ) : testState?.status === 'cancelling' ? (
               <>
@@ -12215,7 +12240,7 @@ function TunnelsPage({
                 <div className="min-w-0 space-y-1">
                   <p className="text-sm font-medium">Test cancelled.</p>
                   <p className="text-xs leading-relaxed text-muted-foreground">
-                    You stopped the authentication prompt — no changes were made.
+                    The temporary tunnel was stopped and released.
                   </p>
                 </div>
               </>
@@ -12242,6 +12267,21 @@ function TunnelsPage({
               </>
             )}
           </div>
+          {testState && testState.log.length > 0 ? (
+            <div className="grid gap-2">
+              <Label>Diagnostic log</Label>
+              <ScrollArea className="h-32 rounded-md border border-border/70 bg-background/50">
+                <ol
+                  aria-live="polite"
+                  className="grid gap-1 p-3 font-mono text-[10px] text-muted-foreground"
+                >
+                  {testState.log.map((entry, index) => (
+                    <li key={`${index}:${entry}`}>{entry}</li>
+                  ))}
+                </ol>
+              </ScrollArea>
+            </div>
+          ) : null}
           <DialogFooter>
             {testState?.status === 'connecting' ? (
               <Button
@@ -13187,6 +13227,9 @@ function SettingsPage({
   const [backupExportPassword, setBackupExportPassword] = useState('');
   const [backupExportConfirmation, setBackupExportConfirmation] = useState('');
   const [backupExportBusy, setBackupExportBusy] = useState(false);
+  const [backupExportCancelling, setBackupExportCancelling] = useState(false);
+  const [backupExportProgress, setBackupExportProgress] =
+    useState<WormholeOperationProgress | null>(null);
   const [backupExportError, setBackupExportError] = useState('');
   const [backupExportResult, setBackupExportResult] = useState<WormholeBackupExportResult | null>(
     null,
@@ -13197,6 +13240,9 @@ function SettingsPage({
     useState<WormholeBackupImportSelection | null>(null);
   const [backupImportPassword, setBackupImportPassword] = useState('');
   const [backupImportBusy, setBackupImportBusy] = useState(false);
+  const [backupImportCancelling, setBackupImportCancelling] = useState(false);
+  const [backupImportProgress, setBackupImportProgress] =
+    useState<WormholeOperationProgress | null>(null);
   const [backupImportError, setBackupImportError] = useState('');
   const [backupImportResult, setBackupImportResult] = useState<WormholeBackupImportResult | null>(
     null,
@@ -13204,6 +13250,13 @@ function SettingsPage({
   const [backupSectionError, setBackupSectionError] = useState('');
   const backupAuthGateRef = useRef(authGate);
   backupAuthGateRef.current = authGate;
+
+  useEffect(() => {
+    return window.wormhole?.onOperationProgress((event) => {
+      if (event.kind === 'backup-export') setBackupExportProgress(event);
+      if (event.kind === 'backup-import') setBackupImportProgress(event);
+    });
+  }, []);
 
   useEffect(
     () => () => {
@@ -14121,12 +14174,28 @@ function SettingsPage({
       setBackupExportOpen(true);
       return;
     }
-    if (backupExportBusy) return;
+    if (backupExportBusy) {
+      void cancelBackupExport();
+      return;
+    }
     setBackupExportOpen(false);
     setBackupExportPassword('');
     setBackupExportConfirmation('');
     setBackupExportError('');
     setBackupExportResult(null);
+    setBackupExportProgress(null);
+  }
+
+  async function cancelBackupExport() {
+    if (!backupExportBusy || backupExportCancelling || !window.wormhole) return;
+    setBackupExportCancelling(true);
+    try {
+      await window.wormhole.cancelBackupExport();
+    } catch (error) {
+      setBackupExportError(backupErrorMessage(error));
+    } finally {
+      setBackupExportCancelling(false);
+    }
   }
 
   async function exportWormholeBackup() {
@@ -14138,6 +14207,7 @@ function SettingsPage({
     setBackupExportBusy(true);
     setBackupExportError('');
     setBackupExportResult(null);
+    setBackupExportProgress(null);
     try {
       const result = await window.wormhole.exportBackup(backupExportPassword);
       if (!result) return;
@@ -14177,19 +14247,36 @@ function SettingsPage({
       setBackupImportOpen(true);
       return;
     }
-    if (backupImportBusy) return;
+    if (backupImportBusy) {
+      void cancelBackupImport();
+      return;
+    }
     setBackupImportOpen(false);
     setBackupImportPassword('');
     setBackupImportError('');
     setBackupImportResult(null);
     setBackupImportSelection(null);
+    setBackupImportProgress(null);
     window.wormhole?.clearBackupImportSelection();
+  }
+
+  async function cancelBackupImport() {
+    if (!backupImportBusy || backupImportCancelling || !window.wormhole) return;
+    setBackupImportCancelling(true);
+    try {
+      await window.wormhole.cancelBackupImport();
+    } catch (error) {
+      setBackupImportError(backupErrorMessage(error));
+    } finally {
+      setBackupImportCancelling(false);
+    }
   }
 
   async function importWormholeBackup() {
     if (backupImportBusy || !window.wormhole || !backupImportSelection) return;
     setBackupImportBusy(true);
     setBackupImportError('');
+    setBackupImportProgress(null);
     try {
       const result = await window.wormhole.importBackup(backupImportPassword);
       setBackupImportResult(result);
@@ -14202,7 +14289,19 @@ function SettingsPage({
         );
       }
     } catch (error) {
-      setBackupImportError(backupErrorMessage(error));
+      const message = backupErrorMessage(error);
+      setBackupImportError(
+        /cancel/i.test(message)
+          ? 'Import cancelled. Items committed before cancellation were kept; running the import again safely skips them.'
+          : message,
+      );
+      if (/cancel/i.test(message)) {
+        try {
+          onBackupImported(await window.wormhole.loadWorkspace());
+        } catch {
+          // The cancellation result remains accurate even if the refreshed tree cannot be loaded.
+        }
+      }
     } finally {
       setBackupImportBusy(false);
     }
@@ -15161,18 +15260,40 @@ function SettingsPage({
               ) : !backupExportPasswordConfirmed ? (
                 <p className="text-[11px] text-destructive">The passwords do not match.</p>
               ) : null}
+              {backupExportBusy ? (
+                <div aria-live="polite" className="grid gap-1.5">
+                  <div className="flex justify-between text-[11px] text-muted-foreground">
+                    <span>
+                      {backupExportCancelling
+                        ? 'Cancelling backup export…'
+                        : (backupExportProgress?.detail ?? 'Preparing backup export…')}
+                    </span>
+                    <span>{backupExportProgress?.percent ?? 0}%</span>
+                  </div>
+                  <progress
+                    aria-label="Backup export progress"
+                    className="h-2 w-full"
+                    max={100}
+                    value={backupExportProgress?.percent ?? 0}
+                  />
+                </div>
+              ) : null}
               {backupExportError ? (
                 <p className="text-[11px] text-destructive">{backupExportError}</p>
               ) : null}
               <DialogFooter>
                 <Button
-                  disabled={backupExportBusy}
+                  disabled={backupExportCancelling}
                   onClick={() => closeBackupExport(false)}
                   size="sm"
                   type="button"
                   variant="ghost"
                 >
-                  Cancel
+                  {backupExportBusy
+                    ? backupExportCancelling
+                      ? 'Cancelling…'
+                      : 'Cancel export'
+                    : 'Cancel'}
                 </Button>
                 <Button
                   disabled={backupExportBusy || !backupExportPasswordConfirmed}
@@ -15288,15 +15409,37 @@ function SettingsPage({
                       </p>
                     </div>
                   )}
+                  {backupImportBusy ? (
+                    <div aria-live="polite" className="grid gap-1.5">
+                      <div className="flex justify-between text-[11px] text-muted-foreground">
+                        <span>
+                          {backupImportCancelling
+                            ? 'Cancelling backup import…'
+                            : (backupImportProgress?.detail ?? 'Preparing backup import…')}
+                        </span>
+                        <span>{backupImportProgress?.percent ?? 0}%</span>
+                      </div>
+                      <progress
+                        aria-label="Backup import progress"
+                        className="h-2 w-full"
+                        max={100}
+                        value={backupImportProgress?.percent ?? 0}
+                      />
+                    </div>
+                  ) : null}
                   <DialogFooter>
                     <Button
-                      disabled={backupImportBusy}
+                      disabled={backupImportCancelling}
                       onClick={() => closeBackupImport(false)}
                       size="sm"
                       type="button"
                       variant="ghost"
                     >
-                      Cancel
+                      {backupImportBusy
+                        ? backupImportCancelling
+                          ? 'Cancelling…'
+                          : 'Cancel import'
+                        : 'Cancel'}
                     </Button>
                     <Button
                       disabled={

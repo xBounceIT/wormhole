@@ -197,9 +197,19 @@ func commitMRemoteImport(databasePath string, request mremoteImportRequest) (mre
 }
 
 func commitMRemoteImportContext(ctx context.Context, databasePath string, request mremoteImportRequest) (mremoteImportResult, error) {
+	return commitMRemoteImportContextWithProgress(ctx, databasePath, request, nil)
+}
+
+func commitMRemoteImportContextWithProgress(
+	ctx context.Context,
+	databasePath string,
+	request mremoteImportRequest,
+	progress operationProgress,
+) (mremoteImportResult, error) {
 	if !validMRemotePlanNonce(request.PlanNonce) || !validSHA256(request.PlanToken) {
 		return mremoteImportResult{}, errors.New("mRemoteNG import plan is invalid; analyze the file again")
 	}
+	reportOperationProgress(progress, "verifying", "Verifying the analyzed mRemoteNG plan…", 10)
 	plan, err := buildMRemotePlan(ctx, databasePath, request)
 	if err != nil {
 		return mremoteImportResult{}, err
@@ -211,6 +221,7 @@ func commitMRemoteImportContext(ctx context.Context, databasePath string, reques
 	if !strings.EqualFold(token, request.PlanToken) {
 		return mremoteImportResult{}, errors.New("the mRemoteNG file or workspace changed after analysis; analyze it again")
 	}
+	reportOperationProgress(progress, "protecting", "Protecting imported credentials…", 45)
 
 	database, err := openDatabase(databasePath, false)
 	if err != nil {
@@ -233,7 +244,7 @@ func commitMRemoteImportContext(ctx context.Context, databasePath string, reques
 			}
 		}
 	}
-	for _, credential := range plan.Credentials {
+	for index, credential := range plan.Credentials {
 		if err := ctx.Err(); err != nil {
 			cleanup()
 			return mremoteImportResult{}, err
@@ -244,6 +255,12 @@ func commitMRemoteImportContext(ctx context.Context, databasePath string, reques
 			return mremoteImportResult{}, errors.New("could not protect an imported credential password; no changes were saved")
 		}
 		stored = append(stored, storedSecret{credential.ID, encoded, encoding})
+		reportOperationProgress(
+			progress,
+			"protecting",
+			"Protecting imported credentials…",
+			progressBetween(45, 65, index+1, len(plan.Credentials)),
+		)
 	}
 
 	tx, err := database.Begin()
@@ -258,6 +275,8 @@ func commitMRemoteImportContext(ctx context.Context, databasePath string, reques
 		}
 	}()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
+	totalWrites := len(plan.Credentials) + len(plan.Nodes)
+	completedWrites := 0
 	for index, credential := range plan.Credentials {
 		if err := ctx.Err(); err != nil {
 			_ = tx.Rollback()
@@ -278,6 +297,8 @@ VALUES (?, ?, ?, ?, 0, NULL, ?, 0, NULL, NULL, 'login.password', ?);`,
 			cleanup()
 			return mremoteImportResult{}, normalizeMRemoteCommitError(err)
 		}
+		completedWrites++
+		reportOperationProgress(progress, "committing", "Saving credentials and connections…", progressBetween(65, 95, completedWrites, totalWrites))
 	}
 	for _, node := range plan.Nodes {
 		if err := ctx.Err(); err != nil {
@@ -300,12 +321,15 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
 			cleanup()
 			return mremoteImportResult{}, normalizeMRemoteCommitError(err)
 		}
+		completedWrites++
+		reportOperationProgress(progress, "committing", "Saving credentials and connections…", progressBetween(65, 95, completedWrites, totalWrites))
 	}
 	if err := tx.Commit(); err != nil {
 		cleanup()
 		return mremoteImportResult{}, fmt.Errorf("could not commit mRemoteNG import; no changes were saved: %w", err)
 	}
 	committed = true
+	reportOperationProgress(progress, "complete", "mRemoteNG import complete.", 100)
 	return mremoteImportResult{
 		FoldersCreated: plan.Folders, ConnectionsCreated: plan.Connections,
 		CredentialsCreated: len(plan.Credentials), SkippedUnsupported: plan.Skipped,
@@ -359,13 +383,16 @@ func buildMRemotePlan(ctx context.Context, databasePath string, request mremoteI
 	}
 	defer database.Close()
 	existingNames := map[string]struct{}{}
-	rows, err := database.Query("SELECT Name FROM CredentialProfiles;")
+	rows, err := database.QueryContext(ctx, "SELECT Name FROM CredentialProfiles;")
 	if err != nil && !strings.Contains(strings.ToLower(err.Error()), "no such table") {
 		return mremotePlan{}, fmt.Errorf("could not inspect existing credentials: %w", err)
 	}
 	if err == nil {
 		defer rows.Close()
 		for rows.Next() {
+			if err := ctx.Err(); err != nil {
+				return mremotePlan{}, err
+			}
 			var name string
 			if scanErr := rows.Scan(&name); scanErr != nil {
 				return mremotePlan{}, scanErr
@@ -377,7 +404,7 @@ func buildMRemotePlan(ctx context.Context, databasePath string, request mremoteI
 		}
 	}
 	rootSort := 0
-	if err := database.QueryRow("SELECT COALESCE(MAX(SortOrder), -1) + 1 FROM Nodes WHERE ParentId IS NULL;").Scan(&rootSort); err != nil && !strings.Contains(strings.ToLower(err.Error()), "no such table") {
+	if err := database.QueryRowContext(ctx, "SELECT COALESCE(MAX(SortOrder), -1) + 1 FROM Nodes WHERE ParentId IS NULL;").Scan(&rootSort); err != nil && !strings.Contains(strings.ToLower(err.Error()), "no such table") {
 		return mremotePlan{}, fmt.Errorf("could not inspect workspace order: %w", err)
 	}
 

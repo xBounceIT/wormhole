@@ -232,7 +232,7 @@ export function userFacingTunnelError(error: unknown): string {
 // Only treat a test as voluntarily cancelled when the backend says an interactive step was
 // cancelled. A broad /cancell/i match would mislabel gateway errors that mention "cancel".
 export function isTunnelTestCancellation(message: string): boolean {
-  return /(authentication|prompt|operation|establishment).{0,48}cancell/i.test(message);
+  return /(authentication|prompt|operation|establishment|test).{0,48}cancell/i.test(message);
 }
 
 export type TunnelProbeTarget = { host: string; port: number };
@@ -259,4 +259,34 @@ export function isTunnelTestNotice(message: string): boolean {
   return /downloaded (?:and protected )?a fresh VPN profile|one-time code was just used/i.test(
     message,
   );
+}
+
+const tunnelTestPhaseLabels: Record<string, string> = {
+  preparing: 'Preparing the VPN tunnel',
+  authenticating: 'Authenticating with the VPN gateway',
+  downloading: 'Downloading the VPN profile',
+  starting: 'Starting the VPN tunnel',
+  ready: 'VPN tunnel ready',
+  probing: 'Testing target reachability',
+  reachable: 'Target reachable',
+  closed: 'Temporary VPN tunnel closed',
+};
+
+export function tunnelTestPhaseLabel(phase: string, detail: string): string {
+  return tunnelTestPhaseLabels[phase] ?? detail;
+}
+
+export function appendTunnelTestLog(
+  entries: string[],
+  detail: string,
+  timestamp = new Date(),
+  maximum = 100,
+): string[] {
+  const safeDetail = detail
+    .replace(/[\r\n\0]+/g, ' ')
+    .trim()
+    .slice(0, 512);
+  if (!safeDetail || maximum < 1) return entries;
+  const next = [...entries, `[${timestamp.toLocaleTimeString()}] ${safeDetail}`];
+  return next.length > maximum ? next.slice(-maximum) : next;
 }

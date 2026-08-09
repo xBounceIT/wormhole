@@ -69,6 +69,7 @@ const wormholeBridge = {
   cancelMRemoteImportAnalysis: () => ipcRenderer.send('mremote-import:cancel-analysis'),
   commitMRemoteImport: (options: { password: string; structureOnly: boolean }) =>
     ipcRenderer.invoke('mremote-import:commit', options),
+  cancelMRemoteImportCommit: () => ipcRenderer.invoke('mremote-import:cancel-commit'),
   clearMRemoteImport: () => ipcRenderer.send('mremote-import:clear'),
   duplicateWorkspaceNode: (request: { nodeId: string }) =>
     ipcRenderer.invoke('workspace:duplicate-node', request),
@@ -79,9 +80,11 @@ const wormholeBridge = {
   showWorkspaceCredentials: (request: { nodeId: string }) =>
     ipcRenderer.invoke('workspace:show-credentials', request),
   exportBackup: (password: string) => ipcRenderer.invoke('backup:export', { password }),
+  cancelBackupExport: () => ipcRenderer.invoke('backup:cancel-export'),
   selectBackupForImport: () => ipcRenderer.invoke('backup:select-import'),
   clearBackupImportSelection: () => ipcRenderer.send('backup:clear-import'),
   importBackup: (password: string) => ipcRenderer.invoke('backup:import', { password }),
+  cancelBackupImport: () => ipcRenderer.invoke('backup:cancel-import'),
   createWorkspaceNode: (request: {
     parentId: string;
     name: string;
@@ -248,9 +251,18 @@ const wormholeBridge = {
     settings: Record<string, unknown>;
   }) => ipcRenderer.invoke('tunnel:update', request),
   deleteTunnel: (id: string) => ipcRenderer.invoke('tunnel:delete', { id }),
-  testTunnel: (request: { id: string; targetHost?: string; targetPort?: number }) =>
-    ipcRenderer.invoke('tunnel:test', request),
+  testTunnel: (request: {
+    id: string;
+    attempt: number;
+    targetHost?: string;
+    targetPort?: number;
+  }) => ipcRenderer.invoke('tunnel:test', request),
   cancelTunnelTest: () => ipcRenderer.invoke('tunnel:test-cancel'),
+  onTunnelTestProgress: (listener: (event: unknown) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, payload: unknown) => listener(payload);
+    ipcRenderer.on('tunnel:test-progress', handler);
+    return () => ipcRenderer.removeListener('tunnel:test-progress', handler);
+  },
   importWatchguardProfile: () => ipcRenderer.invoke('tunnel:import-watchguard'),
   importAzureVpnProfile: () => ipcRenderer.invoke('tunnel:import-azure-vpn'),
   importOvpnProfile: () => ipcRenderer.invoke('tunnel:import-ovpn'),
@@ -702,6 +714,11 @@ const wormholeBridge = {
     const handler = (_event: Electron.IpcRendererEvent, payload: unknown) => listener(payload);
     ipcRenderer.on('backend:event', handler);
     return () => ipcRenderer.removeListener('backend:event', handler);
+  },
+  onOperationProgress: (listener: (event: unknown) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, payload: unknown) => listener(payload);
+    ipcRenderer.on('operation:progress', handler);
+    return () => ipcRenderer.removeListener('operation:progress', handler);
   },
   startRdpSession: (request: RdpStartRequest) => ipcRenderer.invoke('rdp:start', request),
   getRdpSystemClientCapability: (request: RdpSystemClientCapabilityRequest) =>

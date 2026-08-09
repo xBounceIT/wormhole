@@ -81,13 +81,15 @@ test('mRemoteNG inspect and result contracts reject invalid values', () => {
   );
 });
 
-test('mRemoteNG commit holds the serialized authentication boundary', () => {
+test('mRemoteNG commit starts inside the authorization boundary and supports cooperative cancellation', () => {
   const mainSource = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
   const handler = mainSource.slice(
     mainSource.indexOf("ipcMain.handle('mremote-import:commit'"),
     mainSource.indexOf("ipcMain.handle('backup:export'"),
   );
-  assert.match(handler, /return serializeAuthOperation\(async \(\) => \{/);
-  assert.match(handler, /await requireWorkspaceAuth\(\)/);
-  assert.doesNotMatch(handler, /runAuthorizedOperation/);
+  assert.match(handler, /runOwnedNativeOperation\(event\.sender, 'mremote-import'/);
+  assert.match(handler, /mremote\.import\.commit/);
+  assert.match(handler, /mremote-import:cancel-commit/);
+  assert.match(mainSource, /function runOwnedNativeOperation[\s\S]{0,1200}runAuthorizedOperation/);
+  assert.match(mainSource, /cancelOperation\(operation\.id\)/);
 });

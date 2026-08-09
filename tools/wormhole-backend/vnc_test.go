@@ -21,6 +21,65 @@ import (
 	vnc "github.com/kward/go-vnc"
 )
 
+func TestBackendLongOperationCommandsAreNarrowlyValidated(t *testing.T) {
+	valid := []backendCommand{
+		{ID: "1", Action: "backup.export", SessionID: "operation-1", Path: "backup.json"},
+		{ID: "2", Action: "backup.import", SessionID: "operation-2", Path: "backup.json"},
+		{
+			ID: "3", Action: "mremote.import.commit", SessionID: "operation-3", Path: "connections.xml",
+			PlanNonce: "11111111-2222-4333-8444-555555555555", PlanToken: strings.Repeat("b", 64),
+		},
+		{ID: "4", Action: "operation.cancel", SessionID: "operation-1"},
+	}
+	for _, command := range valid {
+		if err := validateBackendCommand(command); err != nil {
+			t.Fatalf("valid %s command rejected: %v", command.Action, err)
+		}
+	}
+	invalid := []backendCommand{
+		{ID: "1", Action: "backup.export", SessionID: "operation-1"},
+		{ID: "2", Action: "backup.import", SessionID: "operation-2", Path: "backup.json", Password: strings.Repeat("x", maxStoredCredentialBytes+1)},
+		{ID: "3", Action: "mremote.import.commit", SessionID: "operation-3", Path: "connections.xml", PlanNonce: "bad", PlanToken: "bad"},
+		{ID: "4", Action: "operation.cancel"},
+	}
+	for _, command := range invalid {
+		if err := validateBackendCommand(command); err == nil {
+			t.Fatalf("invalid %s command accepted", command.Action)
+		}
+	}
+}
+
+func TestBackendOperationCancellationDoesNotBlockCommandReader(t *testing.T) {
+	readPipe, writePipe, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer readPipe.Close()
+	defer writePipe.Close()
+	manager := newVncManager(nil, newBackendLineWriter(writePipe))
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	manager.operations["operation-1"] = &pendingBackendOperation{cancel: cancel, done: done}
+
+	returned := make(chan struct{})
+	go func() {
+		manager.handle(backendCommand{ID: "cancel-1", Action: "operation.cancel", SessionID: "operation-1"})
+		close(returned)
+	}()
+	select {
+	case <-returned:
+	case <-time.After(time.Second):
+		t.Fatal("operation cancellation blocked the backend command reader")
+	}
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("operation cancellation did not cancel its context")
+	}
+	close(done)
+	manager.cleanup.Wait()
+}
+
 func TestVncDisconnectWaitsForConnectCleanupBoundary(t *testing.T) {
 	session := newVncSession("session-1", nil, nil)
 	session.done = make(chan struct{})

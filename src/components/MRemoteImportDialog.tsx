@@ -38,6 +38,8 @@ export function MRemoteImportDialog({
   const [passwordProvided, setPasswordProvided] = useState(false);
   const [structureOnly, setStructureOnly] = useState(false);
   const [phase, setPhase] = useState<MRemoteImportPhase>('idle');
+  const [commitProgress, setCommitProgress] = useState<WormholeOperationProgress | null>(null);
+  const [commitCancelling, setCommitCancelling] = useState(false);
   const [error, setError] = useState('');
   const busy = phase !== 'idle';
 
@@ -51,6 +53,8 @@ export function MRemoteImportDialog({
     setPasswordProvided(false);
     setStructureOnly(false);
     setPhase('idle');
+    setCommitProgress(null);
+    setCommitCancelling(false);
     setError('');
   }
 
@@ -58,12 +62,21 @@ export function MRemoteImportDialog({
     if (!open) reset();
   }, [open]);
 
+  useEffect(() => {
+    return window.wormhole?.onOperationProgress((event) => {
+      if (event.kind === 'mremote-import') setCommitProgress(event);
+    });
+  }, []);
+
   function close(nextOpen: boolean) {
     if (nextOpen) {
       onOpenChange(true);
       return;
     }
-    if (phase === 'committing') return;
+    if (phase === 'committing') {
+      void cancelCommit();
+      return;
+    }
     if (phase === 'analyzing') window.wormhole?.cancelMRemoteImportAnalysis();
     reset();
     onOpenChange(false);
@@ -132,6 +145,8 @@ export function MRemoteImportDialog({
     if (!api || !plan || busy) return;
     const generation = ++operationGeneration.current;
     setPhase('committing');
+    setCommitProgress(null);
+    setCommitCancelling(false);
     setError('');
     try {
       const imported = await api.commitMRemoteImport({
@@ -152,14 +167,34 @@ export function MRemoteImportDialog({
       }
     } catch (commitError) {
       if (generation !== operationGeneration.current) return;
-      setPlan(null);
-      setError(importErrorMessage(commitError));
+      const message = importErrorMessage(commitError);
+      if (/cancel/i.test(message)) {
+        setError('Import cancelled; the verified plan was not saved.');
+      } else {
+        setPlan(null);
+        setError(message);
+      }
     } finally {
       if (generation === operationGeneration.current) setPhase('idle');
     }
   }
 
-  const percent = mremoteImportProgress(phase, Boolean(inspection), Boolean(plan), Boolean(result));
+  async function cancelCommit() {
+    if (phase !== 'committing' || commitCancelling || !window.wormhole) return;
+    setCommitCancelling(true);
+    try {
+      await window.wormhole.cancelMRemoteImportCommit();
+    } catch (cancelError) {
+      setError(importErrorMessage(cancelError));
+    } finally {
+      setCommitCancelling(false);
+    }
+  }
+
+  const percent =
+    phase === 'committing' && commitProgress
+      ? commitProgress.percent
+      : mremoteImportProgress(phase, Boolean(inspection), Boolean(plan), Boolean(result));
 
   return (
     <Dialog onOpenChange={close} open={open}>
@@ -237,7 +272,9 @@ export function MRemoteImportDialog({
                   {phase === 'analyzing'
                     ? 'Analyzing and decrypting…'
                     : phase === 'committing'
-                      ? 'Saving the verified plan…'
+                      ? commitCancelling
+                        ? 'Cancelling import…'
+                        : (commitProgress?.detail ?? 'Saving the verified plan…')
                       : plan
                         ? 'Analysis complete'
                         : 'Ready to analyze'}
@@ -343,14 +380,22 @@ export function MRemoteImportDialog({
               Cancel analysis
             </Button>
           ) : null}
-          <Button
-            disabled={phase === 'committing'}
-            onClick={() => close(false)}
-            type="button"
-            variant="ghost"
-          >
-            {result ? 'Close' : 'Cancel'}
-          </Button>
+          {phase === 'committing' ? (
+            <Button
+              disabled={commitCancelling}
+              onClick={() => void cancelCommit()}
+              type="button"
+              variant="outline"
+            >
+              {commitCancelling ? <LoaderCircle className="animate-spin" /> : <X />}
+              {commitCancelling ? 'Cancelling…' : 'Cancel import'}
+            </Button>
+          ) : null}
+          {phase !== 'committing' ? (
+            <Button onClick={() => close(false)} type="button" variant="ghost">
+              {result ? 'Close' : 'Cancel'}
+            </Button>
+          ) : null}
           {!result && inspection ? (
             <Button
               disabled={

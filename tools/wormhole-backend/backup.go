@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -309,12 +310,25 @@ func inspectBackup(request backupRequest) (backupInspectResult, error) {
 }
 
 func exportBackup(databasePath string, request backupRequest) (backupExportResult, error) {
+	return exportBackupContext(context.Background(), databasePath, request, nil)
+}
+
+func exportBackupContext(
+	ctx context.Context,
+	databasePath string,
+	request backupRequest,
+	progress operationProgress,
+) (backupExportResult, error) {
 	if err := validateBackupRequest(request, true); err != nil {
 		return backupExportResult{}, err
 	}
 	if isBackupDatabaseFile(databasePath, request.Path) {
 		return backupExportResult{}, errors.New("The backup destination cannot be a Wormhole database file.")
 	}
+	if err := ctx.Err(); err != nil {
+		return backupExportResult{}, err
+	}
+	reportOperationProgress(progress, "reading", "Reading workspace metadata…", 10)
 
 	database, err := openDatabase(databasePath, true)
 	if err != nil {
@@ -323,22 +337,30 @@ func exportBackup(databasePath string, request backupRequest) (backupExportResul
 	payload := newBackupPayload()
 	if database != nil {
 		defer database.Close()
-		if payload.Nodes, err = loadBackupObjects(database, "Nodes", backupNodeColumns); err != nil {
+		if payload.Nodes, err = loadBackupObjectsContext(ctx, database, "Nodes", backupNodeColumns); err != nil {
 			return backupExportResult{}, err
 		}
-		if payload.Credentials, err = loadBackupObjects(database, "CredentialProfiles", backupCredentialColumns); err != nil {
+		if payload.Credentials, err = loadBackupObjectsContext(ctx, database, "CredentialProfiles", backupCredentialColumns); err != nil {
 			return backupExportResult{}, err
 		}
-		if payload.Tunnels, err = loadBackupObjects(database, "TunnelConfigs", backupTunnelColumns); err != nil {
+		if payload.Tunnels, err = loadBackupObjectsContext(ctx, database, "TunnelConfigs", backupTunnelColumns); err != nil {
 			return backupExportResult{}, err
 		}
-		if payload.BitwardenCredentialCache, err = loadBackupObjects(database, "BitwardenCredentialCache", backupBitwardenColumns); err != nil {
+		if payload.BitwardenCredentialCache, err = loadBackupObjectsContext(ctx, database, "BitwardenCredentialCache", backupBitwardenColumns); err != nil {
 			return backupExportResult{}, err
 		}
-		if err := exportBackupSecrets(database, databasePath, payload); err != nil {
+		if err := ctx.Err(); err != nil {
+			return backupExportResult{}, err
+		}
+		reportOperationProgress(progress, "secrets", "Reading protected secrets…", 35)
+		if err := exportBackupSecretsContext(ctx, database, databasePath, payload); err != nil {
 			return backupExportResult{}, err
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return backupExportResult{}, err
+	}
+	reportOperationProgress(progress, "encoding", "Encrypting and encoding the backup…", 70)
 
 	document := backupDocument{
 		SchemaVersion: backupCurrentSchemaVersion,
@@ -368,6 +390,10 @@ func exportBackup(databasePath string, request backupRequest) (backupExportResul
 		return backupExportResult{}, err
 	}
 	defer clearBytes(encoded)
+	if err := ctx.Err(); err != nil {
+		return backupExportResult{}, err
+	}
+	reportOperationProgress(progress, "writing", "Writing the backup file…", 90)
 	if err := writeBackupFile(request.Path, encoded); err != nil {
 		return backupExportResult{}, err
 	}
@@ -384,6 +410,7 @@ func exportBackup(databasePath string, request backupRequest) (backupExportResul
 	}
 	logInfo("backup exported: nodes=%d credentials=%d tunnels=%d encrypted=%t",
 		result.NodeCount, result.CredentialCount, result.TunnelCount, encrypted)
+	reportOperationProgress(progress, "complete", "Backup export complete.", 100)
 	return result, nil
 }
 
@@ -413,7 +440,12 @@ func newBackupPayload() *backupPayload {
 	}
 }
 
-func loadBackupObjects(database *sql.DB, table string, columns []backupColumn) ([]*backupObject, error) {
+func loadBackupObjectsContext(
+	ctx context.Context,
+	database *sql.DB,
+	table string,
+	columns []backupColumn,
+) ([]*backupObject, error) {
 	exists, err := tableExists(database, table)
 	if err != nil || !exists {
 		return []*backupObject{}, err
@@ -438,13 +470,16 @@ func loadBackupObjects(database *sql.DB, table string, columns []backupColumn) (
 	} else {
 		order = " ORDER BY Name, Id"
 	}
-	rows, err := database.Query("SELECT " + strings.Join(selects, ", ") + " FROM " + quoteBackupIdentifier(table) + order + ";")
+	rows, err := database.QueryContext(ctx, "SELECT "+strings.Join(selects, ", ")+" FROM "+quoteBackupIdentifier(table)+order+";")
 	if err != nil {
 		return nil, fmt.Errorf("Could not read backup metadata: %w", err)
 	}
 	defer rows.Close()
 	objects := make([]*backupObject, 0)
 	for rows.Next() {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		values := make([]any, len(columns))
 		destinations := make([]any, len(columns))
 		for index := range values {
@@ -565,10 +600,10 @@ func backupDatabaseInteger(value any) (int64, bool) {
 	}
 }
 
-func exportBackupSecrets(database *sql.DB, databasePath string, payload *backupPayload) error {
+func exportBackupSecretsContext(ctx context.Context, database *sql.DB, databasePath string, payload *backupPayload) error {
 	passwordEntries := make([]*backupPasswordEntry, len(payload.Credentials))
 	privateKeyEntries := make([]*backupPrivateKeyEntry, len(payload.Credentials))
-	if err := runBackupSecretReads(len(payload.Credentials), func(index int) error {
+	if err := runBackupSecretReadsContext(ctx, len(payload.Credentials), func(index int) error {
 		credential := payload.Credentials[index]
 		if credential == nil {
 			return nil
@@ -616,7 +651,7 @@ func exportBackupSecrets(database *sql.DB, databasePath string, payload *backupP
 	}
 
 	inlinePasswordEntries := make([]*backupInlinePasswordEntry, len(payload.Nodes))
-	if err := runBackupSecretReads(len(payload.Nodes), func(index int) error {
+	if err := runBackupSecretReadsContext(ctx, len(payload.Nodes), func(index int) error {
 		node := payload.Nodes[index]
 		if node == nil {
 			return nil
@@ -645,7 +680,7 @@ func exportBackupSecrets(database *sql.DB, databasePath string, payload *backupP
 	}
 
 	tunnelPayloadEntries := make([]*backupTunnelPayloadEntry, len(payload.Tunnels))
-	if err := runBackupSecretReads(len(payload.Tunnels), func(index int) error {
+	if err := runBackupSecretReadsContext(ctx, len(payload.Tunnels), func(index int) error {
 		tunnel := payload.Tunnels[index]
 		if tunnel == nil {
 			return nil
@@ -685,12 +720,21 @@ func readBackupPrivateKey(path string) ([]byte, error) {
 }
 
 func runBackupSecretReads(count int, read func(index int) error) error {
+	return runBackupSecretReadsContext(context.Background(), count, read)
+}
+
+func runBackupSecretReadsContext(ctx context.Context, count int, read func(index int) error) error {
 	semaphore := make(chan struct{}, backupSecretExportConcurrency)
 	var waitGroup sync.WaitGroup
 	var errorLock sync.Mutex
 	var firstError error
+readLoop:
 	for index := 0; index < count; index++ {
-		semaphore <- struct{}{}
+		select {
+		case semaphore <- struct{}{}:
+		case <-ctx.Done():
+			break readLoop
+		}
 		errorLock.Lock()
 		stopped := firstError != nil
 		errorLock.Unlock()
@@ -699,19 +743,28 @@ func runBackupSecretReads(count int, read func(index int) error) error {
 			break
 		}
 		waitGroup.Add(1)
-		go func() {
+		go func(index int) {
 			defer waitGroup.Done()
 			defer func() { <-semaphore }()
-			if err := read(index); err != nil {
+			if err := ctx.Err(); err != nil {
+				errorLock.Lock()
+				if firstError == nil {
+					firstError = err
+				}
+				errorLock.Unlock()
+			} else if err := read(index); err != nil {
 				errorLock.Lock()
 				if firstError == nil {
 					firstError = err
 				}
 				errorLock.Unlock()
 			}
-		}()
+		}(index)
 	}
 	waitGroup.Wait()
+	if err := ctx.Err(); err != nil && firstError == nil {
+		return err
+	}
 	return firstError
 }
 
@@ -1106,10 +1159,23 @@ func backupDotNetGuidFromBytes(bytes []byte) string {
 }
 
 func importBackup(databasePath string, request backupRequest) (backupImportResult, error) {
+	return importBackupContext(context.Background(), databasePath, request, nil)
+}
+
+func importBackupContext(
+	ctx context.Context,
+	databasePath string,
+	request backupRequest,
+	progress operationProgress,
+) (backupImportResult, error) {
 	result := backupImportResult{Warnings: []string{}}
 	if err := validateBackupRequest(request, true); err != nil {
 		return result, err
 	}
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	reportOperationProgress(progress, "reading", "Reading and validating the backup…", 10)
 	contents, err := readBackupFile(request.Path)
 	if err != nil {
 		return result, err
@@ -1148,6 +1214,9 @@ func importBackup(databasePath string, request backupRequest) (backupImportResul
 	if payload == nil {
 		return result, errors.New("Backup is missing its payload.")
 	}
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
 	normalizeBackupPayloadLists(payload)
 	nullDrops := filterBackupNulls(payload)
 	if nullDrops > 0 {
@@ -1167,26 +1236,34 @@ func importBackup(databasePath string, request backupRequest) (backupImportResul
 		return result, fmt.Errorf("Could not enable backup integrity checks: %w", err)
 	}
 
-	state, err := loadBackupImportState(database)
+	state, err := loadBackupImportStateContext(ctx, database)
 	if err != nil {
 		return result, err
 	}
-	insertedCredentials, err := importBackupCredentials(database, payload.Credentials, state, &result)
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	reportOperationProgress(progress, "metadata", "Merging credentials and connection metadata…", 35)
+	insertedCredentials, err := importBackupCredentialsContext(ctx, database, payload.Credentials, state, &result)
 	if err != nil {
 		return result, err
 	}
-	if err := importBackupBitwardenCache(database, payload.BitwardenCredentialCache, state); err != nil {
+	if err := importBackupBitwardenCacheContext(ctx, database, payload.BitwardenCredentialCache, state); err != nil {
 		return result, err
 	}
-	insertedTunnels, err := importBackupTunnels(database, payload.Tunnels, state, &result)
+	reportOperationProgress(progress, "metadata", "Merging VPN tunnels…", 50)
+	insertedTunnels, err := importBackupTunnelsContext(ctx, database, payload.Tunnels, state, &result)
 	if err != nil {
 		return result, err
 	}
-	insertedNodes, err := importBackupNodes(database, payload.Nodes, state, &result)
+	reportOperationProgress(progress, "metadata", "Merging workspace nodes…", 65)
+	insertedNodes, err := importBackupNodesContext(ctx, database, payload.Nodes, state, &result)
 	if err != nil {
 		return result, err
 	}
-	if err := restoreBackupSecrets(
+	reportOperationProgress(progress, "secrets", "Restoring protected secrets…", 80)
+	if err := restoreBackupSecretsContext(
+		ctx,
 		database, databasePath, payload, state,
 		insertedCredentials, insertedTunnels, insertedNodes, &result,
 	); err != nil {
@@ -1200,6 +1277,7 @@ func importBackup(databasePath string, request backupRequest) (backupImportResul
 		result.NodesImported, result.NodesSkipped,
 		result.CredentialsImported, result.CredentialsSkipped,
 		result.TunnelsImported, result.TunnelsSkipped, len(result.Warnings))
+	reportOperationProgress(progress, "complete", "Backup import complete.", 100)
 	return result, nil
 }
 
@@ -1267,7 +1345,7 @@ type backupImportState struct {
 	resolvableTunnels     map[string]struct{}
 }
 
-func loadBackupImportState(database *sql.DB) (*backupImportState, error) {
+func loadBackupImportStateContext(ctx context.Context, database *sql.DB) (*backupImportState, error) {
 	state := &backupImportState{
 		credentialIDs:         map[string]struct{}{},
 		credentialNames:       map[string]struct{}{},
@@ -1279,11 +1357,14 @@ func loadBackupImportState(database *sql.DB) (*backupImportState, error) {
 		resolvableCredentials: map[string]struct{}{},
 		resolvableTunnels:     map[string]struct{}{},
 	}
-	credentials, err := loadBackupObjects(database, "CredentialProfiles", backupCredentialColumns)
+	credentials, err := loadBackupObjectsContext(ctx, database, "CredentialProfiles", backupCredentialColumns)
 	if err != nil {
 		return nil, err
 	}
 	for _, credential := range credentials {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if credential == nil {
 			continue
 		}
@@ -1297,11 +1378,14 @@ func loadBackupImportState(database *sql.DB) (*backupImportState, error) {
 		provider, _ := backupObjectInteger(*credential, "secretProvider")
 		state.credentialProviders[id] = provider
 	}
-	tunnels, err := loadBackupObjects(database, "TunnelConfigs", backupTunnelColumns)
+	tunnels, err := loadBackupObjectsContext(ctx, database, "TunnelConfigs", backupTunnelColumns)
 	if err != nil {
 		return nil, err
 	}
 	for _, tunnel := range tunnels {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if tunnel == nil {
 			continue
 		}
@@ -1313,11 +1397,14 @@ func loadBackupImportState(database *sql.DB) (*backupImportState, error) {
 		state.resolvableTunnels[id] = struct{}{}
 		state.tunnelNames[backupObjectString(*tunnel, "name")] = struct{}{}
 	}
-	nodes, err := loadBackupObjects(database, "Nodes", backupNodeColumns)
+	nodes, err := loadBackupObjectsContext(ctx, database, "Nodes", backupNodeColumns)
 	if err != nil {
 		return nil, err
 	}
 	for _, node := range nodes {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if node == nil {
 			continue
 		}
@@ -1329,15 +1416,18 @@ func loadBackupImportState(database *sql.DB) (*backupImportState, error) {
 		state.nodeIDs[id] = struct{}{}
 		state.nodesByID[id] = node
 	}
-	cache, err := loadBackupObjects(database, "BitwardenCredentialCache", backupBitwardenColumns)
+	cache, err := loadBackupObjectsContext(ctx, database, "BitwardenCredentialCache", backupBitwardenColumns)
 	if err != nil {
 		return nil, err
 	}
-	addBackupBitwardenVirtualIDs(state.resolvableCredentials, cache)
+	if err := addBackupBitwardenVirtualIDsContext(ctx, state.resolvableCredentials, cache); err != nil {
+		return nil, err
+	}
 	return state, nil
 }
 
-func importBackupCredentials(
+func importBackupCredentialsContext(
+	ctx context.Context,
 	database *sql.DB,
 	credentials []*backupObject,
 	state *backupImportState,
@@ -1345,6 +1435,9 @@ func importBackupCredentials(
 ) (map[string]struct{}, error) {
 	inserted := map[string]struct{}{}
 	for _, credential := range credentials {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		object := *credential
 		id, ok := canonicalBackupID(backupObjectString(object, "id"))
 		if !ok {
@@ -1381,7 +1474,8 @@ func importBackupCredentials(
 	return inserted, nil
 }
 
-func importBackupTunnels(
+func importBackupTunnelsContext(
+	ctx context.Context,
 	database *sql.DB,
 	tunnels []*backupObject,
 	state *backupImportState,
@@ -1389,6 +1483,9 @@ func importBackupTunnels(
 ) (map[string]struct{}, error) {
 	inserted := map[string]struct{}{}
 	for _, tunnel := range tunnels {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		object := *tunnel
 		id, ok := canonicalBackupID(backupObjectString(object, "id"))
 		if !ok {
@@ -1427,10 +1524,22 @@ func importBackupBitwardenCache(
 	entries []*backupObject,
 	state *backupImportState,
 ) error {
+	return importBackupBitwardenCacheContext(context.Background(), database, entries, state)
+}
+
+func importBackupBitwardenCacheContext(
+	ctx context.Context,
+	database *sql.DB,
+	entries []*backupObject,
+	state *backupImportState,
+) error {
 	// Match BitwardenCredentialCacheRepository.Normalize: duplicate ItemIds use the final
 	// payload entry, so a newer row later in the backup wins deterministically.
 	byItemID := map[string]*backupObject{}
 	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		object := *entry
 		itemID := strings.TrimSpace(backupObjectString(object, "itemId"))
 		if itemID == "" {
@@ -1481,6 +1590,9 @@ func importBackupBitwardenCache(
 		}
 	}()
 	for _, entry := range normalized {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		object := *entry
 		if err := upsertBackupBitwardenObject(transaction, object); err != nil {
 			return err
@@ -1490,21 +1602,24 @@ func importBackupBitwardenCache(
 		return fmt.Errorf("Could not import Bitwarden credential metadata: %w", err)
 	}
 	committed = true
-	addBackupBitwardenVirtualIDs(state.resolvableCredentials, normalized)
-	return nil
+	return addBackupBitwardenVirtualIDsContext(ctx, state.resolvableCredentials, normalized)
 }
 
-func importBackupNodes(
+func importBackupNodesContext(
+	ctx context.Context,
 	database *sql.DB,
 	nodes []*backupObject,
 	state *backupImportState,
 	result *backupImportResult,
 ) (map[string]struct{}, error) {
-	ordered, err := topologicallyOrderBackupNodes(nodes, state.nodeIDs, result)
+	ordered, err := topologicallyOrderBackupNodesContext(ctx, nodes, state.nodeIDs, result)
 	if err != nil {
 		return nil, err
 	}
 	for _, node := range ordered {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		id := backupObjectString(*node, "id")
 		if _, exists := state.nodesByID[id]; !exists {
 			state.nodesByID[id] = node
@@ -1533,7 +1648,8 @@ func importBackupNodes(
 	return inserted, nil
 }
 
-func topologicallyOrderBackupNodes(
+func topologicallyOrderBackupNodesContext(
+	ctx context.Context,
 	nodes []*backupObject,
 	existingIDs map[string]struct{},
 	result *backupImportResult,
@@ -1541,6 +1657,9 @@ func topologicallyOrderBackupNodes(
 	byID := map[string]*backupObject{}
 	inputOrder := make([]string, 0, len(nodes))
 	for _, node := range nodes {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		object := *node
 		id, ok := canonicalBackupID(backupObjectString(object, "id"))
 		if !ok {
@@ -1572,6 +1691,9 @@ func topologicallyOrderBackupNodes(
 	inFlight := map[string]struct{}{}
 	var visit func(node *backupObject, from *backupObject, depth int) error
 	visit = func(node *backupObject, from *backupObject, depth int) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if depth > backupMaxNestingDepth {
 			return fmt.Errorf("Backup nesting depth exceeds %d; refusing to import.", backupMaxNestingDepth)
 		}
@@ -1706,7 +1828,8 @@ func resolveBackupTunnelState(object backupObject, state *backupImportState) (bo
 	return effective != nil && *effective, false
 }
 
-func restoreBackupSecrets(
+func restoreBackupSecretsContext(
+	ctx context.Context,
 	database *sql.DB,
 	databasePath string,
 	payload *backupPayload,
@@ -1717,6 +1840,9 @@ func restoreBackupSecrets(
 	result *backupImportResult,
 ) error {
 	for _, entry := range payload.Passwords {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		id, ok := canonicalBackupID(entry.CredentialID)
 		if !ok {
 			addBackupWarning(result, "A password entry with an invalid credential ID was skipped.")
@@ -1746,6 +1872,9 @@ func restoreBackupSecrets(
 		result.PasswordsImported++
 	}
 	for _, entry := range payload.InlinePasswords {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		id, ok := canonicalBackupID(entry.NodeID)
 		if !ok {
 			addBackupWarning(result, "An inline password entry with an invalid node ID was skipped.")
@@ -1772,6 +1901,9 @@ func restoreBackupSecrets(
 		result.PasswordsImported++
 	}
 	for _, entry := range payload.PrivateKeys {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		id, ok := canonicalBackupID(entry.CredentialID)
 		if !ok {
 			addBackupWarning(result, "A private-key entry with an invalid credential ID was skipped.")
@@ -1807,6 +1939,9 @@ func restoreBackupSecrets(
 		result.PrivateKeysImported++
 	}
 	for _, entry := range payload.TunnelPayloads {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		id, ok := canonicalBackupID(entry.TunnelConfigID)
 		if !ok {
 			addBackupWarning(result, "A tunnel-payload entry with an invalid tunnel ID was skipped.")
@@ -2106,8 +2241,15 @@ func ensureBackupBitwardenObjectIDs(object backupObject) {
 	}
 }
 
-func addBackupBitwardenVirtualIDs(target map[string]struct{}, entries []*backupObject) {
+func addBackupBitwardenVirtualIDsContext(
+	ctx context.Context,
+	target map[string]struct{},
+	entries []*backupObject,
+) error {
 	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if entry == nil || strings.TrimSpace(backupObjectString(*entry, "itemId")) == "" {
 			continue
 		}
@@ -2118,4 +2260,5 @@ func addBackupBitwardenVirtualIDs(target map[string]struct{}, entries []*backupO
 			}
 		}
 	}
+	return nil
 }
