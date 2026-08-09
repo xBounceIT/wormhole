@@ -64,7 +64,7 @@ function mergeUniversalBinary(x64Path, arm64Path, outputPath) {
   assertFileExists(arm64Path);
   rmSync(outputPath, { force: true });
   run('lipo', ['-create', x64Path, arm64Path, '-output', outputPath]);
-  run('lipo', ['-verify_arch', 'x86_64', 'arm64', outputPath]);
+  run('lipo', [outputPath, '-verify_arch', 'x86_64', 'arm64']);
   chmodSync(outputPath, 0o755);
   console.log(`OK    ${outputPath} (universal x64 + arm64)`);
 }
