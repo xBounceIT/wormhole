@@ -39,6 +39,11 @@ jobs:
           node-version: '24'
           cache: npm
 
+      - name: Verify tag matches package version
+        env:
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: node -e "const expected = 'v' + require('./package.json').version; if (process.env.RELEASE_TAG !== expected) { throw new Error('Release tag ' + process.env.RELEASE_TAG + ' does not match ' + expected); }"
+
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
@@ -186,36 +191,121 @@ jobs:
             Wormhole-*.sha256
           if-no-files-found: error
 
-  release:
-    name: Publish GitHub Release
-    needs: [build]
-    runs-on: ubuntu-latest
+  installers:
+    name: Build ${{ matrix.platform }} installer
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            runner: ubuntu-latest
+            builder_platform: linux
+            builder_arch: x64
+            backend_arch: x64
+            artifact: release/Wormhole-*-linux-x64-setup.AppImage
+          - platform: linux-arm64
+            runner: ubuntu-latest
+            builder_platform: linux
+            builder_arch: arm64
+            backend_arch: arm64
+            artifact: release/Wormhole-*-linux-arm64-setup.AppImage
+          - platform: macos
+            runner: macos-latest
+            builder_platform: mac
+            builder_arch: universal
+            backend_arch: universal
+            artifact: release/Wormhole-*-mac-universal-setup.dmg
+
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.inputs.tag || github.ref_name }}
 
-      - name: Download artifacts
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Verify tag matches package version
+        env:
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: node -e "const expected = 'v' + require('./package.json').version; if (process.env.RELEASE_TAG !== expected) { throw new Error('Release tag ' + process.env.RELEASE_TAG + ' does not match ' + expected); }"
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: tools/wormhole-backend/go.mod
+          cache: false
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Build renderer and Electron main
+        run: npm run build:renderer && npm run build:electron
+
+      - name: Build native Go components
+        if: matrix.backend_arch != 'universal'
+        run: node scripts/Build-ElectronBackend.mjs --arch ${{ matrix.backend_arch }}
+
+      - name: Build universal macOS Go components
+        if: matrix.backend_arch == 'universal'
+        run: npm run build:backend:universal
+
+      - name: Build ${{ matrix.platform }} installer
+        run: npm run package -- --${{ matrix.builder_platform }} --${{ matrix.builder_arch }}
+
+      - name: Upload ${{ matrix.platform }} installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: wormhole-${{ matrix.platform }}
+          path: ${{ matrix.artifact }}
+          if-no-files-found: error
+          retention-days: 1
+
+  release:
+    name: Publish GitHub Release
+    needs: [build, installers]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download installers
         uses: actions/download-artifact@v4
         with:
-          path: artifacts
+          path: dist
           merge-multiple: true
 
-      - name: Resolve tag
-        id: tag
-        env:
-          INPUT_TAG: ${{ github.event.inputs.tag || github.ref_name }}
-        run: |
-          printf 'tag=%s\n' "$INPUT_TAG" >> "$GITHUB_OUTPUT"
-
-      - name: Create release with auto-generated notes
+      - name: Publish release with generated notes
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.tag.outputs.tag }}
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          REPOSITORY: ${{ github.repository }}
         run: |
-          gh release create "$TAG" \
-            --title "$TAG" \
-            --generate-notes \
-            artifacts/Wormhole-*.zip \
-            artifacts/Wormhole-*-setup.exe \
-            artifacts/Wormhole-*.sha256
+          set -euo pipefail
+
+          if release_json="$(gh release view "$RELEASE_TAG" --repo "$REPOSITORY" --json isDraft,assets 2>/dev/null)"; then
+            is_draft="$(jq -r '.isDraft' <<<"$release_json")"
+            existing_assets="$(jq -r '.assets[].name' <<<"$release_json")"
+
+            for asset in dist/*; do
+              asset_name="$(basename "$asset")"
+              if grep -Fqx "$asset_name" <<<"$existing_assets"; then
+                if [[ "$is_draft" == "true" ]]; then
+                  gh release upload "$RELEASE_TAG" "$asset" --repo "$REPOSITORY" --clobber
+                fi
+              else
+                gh release upload "$RELEASE_TAG" "$asset" --repo "$REPOSITORY"
+              fi
+            done
+
+            gh release edit "$RELEASE_TAG" \
+              --repo "$REPOSITORY" \
+              --verify-tag \
+              --draft=false
+          else
+            gh release create "$RELEASE_TAG" \
+              --repo "$REPOSITORY" \
+              --verify-tag \
+              --generate-notes \
+              dist/*
+          fi

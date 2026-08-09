@@ -28,6 +28,7 @@ logs/
 
 # Installer outputs
 installer/output/
+release/
 
 
 # C++ shim build outputs from CMake + vcpkg manifest mode.
