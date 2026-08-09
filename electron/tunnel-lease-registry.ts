@@ -55,3 +55,13 @@ export class TunnelLeaseRegistry {
     this.entries.clear();
   }
 }
+
+export async function settleTunnelCleanup<T>(
+  disconnect: Promise<T>,
+  releaseTunnel: Promise<void>,
+): Promise<T> {
+  const [disconnectResult, releaseResult] = await Promise.allSettled([disconnect, releaseTunnel]);
+  if (disconnectResult.status === 'rejected') throw disconnectResult.reason;
+  if (releaseResult.status === 'rejected') throw releaseResult.reason;
+  return disconnectResult.value;
+}

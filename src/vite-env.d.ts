@@ -104,6 +104,8 @@ interface WormholeRdpBackendEvent {
   requestId?: string;
   sessionId?: string;
   backend?: 'activex' | 'freerdp';
+  external?: boolean;
+  lifecycleGeneration?: number;
   code?: number;
   attempt?: number;
   max?: number;
@@ -1052,6 +1054,14 @@ interface Window {
       bounds?: WormholeRdpSurfaceRect;
       manualCredentials?: boolean;
     }): Promise<WormholeRdpBackendEvent>;
+    getRdpSystemClientCapability(request: { nodeId: string }): Promise<{ supported: boolean }>;
+    openRdpInSystemClient(request: {
+      sessionId: string;
+      nodeId: string;
+    }): Promise<
+      | { ok: true; event: WormholeRdpBackendEvent }
+      | { ok: false; lifecycleCommitted: boolean; error: string }
+    >;
     resizeRdpSession(request: {
       sessionId: string;
       bounds?: WormholeRdpSurfaceRect;

@@ -226,6 +226,25 @@ func TestWorkspaceInlineRdpSecretSetPreserveClearAndNoRendererLeak(t *testing.T)
 	}
 	settings = externalSettings
 	settings.UseExternalClient = false
+	if err := updateWorkspaceNode(databasePath, workspaceNodeWriteRequest{
+		ID: nodeID, Name: "Inline RDP", Kind: "connection", Protocol: "rdp", Host: "inline.example",
+		Username: "inline-user", InlinePasswordAction: "preserve", RDP: &settings,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	database, err = openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager = &vncManager{database: database, databasePath: databasePath}
+	systemProfile, err := manager.resolveRdpProfile(nodeID, nil, true)
+	database.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if systemProfile.Username != "" || systemProfile.Domain != "" || systemProfile.Password != "" {
+		t.Fatalf("system RDP profile crossed the Go boundary with credentials: %#v", systemProfile)
+	}
 
 	workspace, err := loadWorkspace(databasePath)
 	if err != nil {

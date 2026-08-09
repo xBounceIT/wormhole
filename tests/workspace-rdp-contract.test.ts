@@ -2,8 +2,12 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { parseWorkspaceRdpSettings } from '../electron/workspace-rdp-contract.ts';
 import {
+  canProceedWithRdpTunnelRoute,
+  isRdpSurfaceRectWithinNativeBounds,
+  isRdpLifecycleEvent,
   rdpGatewayCredentialIdForResolution,
   rdpGatewayUsername,
+  rdpTunnelEnabledForNative,
 } from '../electron/rdp-contract.ts';
 
 const validSettings = () => ({
@@ -53,6 +57,55 @@ test('Quick Connect resolves a gateway credential only when it is actually selec
   );
   assert.equal(rdpGatewayUsername('operator', 'CONTOSO'), 'CONTOSO\\operator');
   assert.equal(rdpGatewayUsername('CONTOSO\\operator', 'IGNORED'), 'CONTOSO\\operator');
+});
+
+test('a brokered RDP route cannot be disabled by renderer tunnel metadata', () => {
+  assert.equal(
+    rdpTunnelEnabledForNative(
+      { tunnelConfigId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', tunnelEnabled: false },
+      '127.0.0.1:1080',
+    ),
+    true,
+  );
+  assert.equal(rdpTunnelEnabledForNative({ nodeId: 'saved', tunnelEnabled: true }, ''), false);
+  assert.equal(rdpTunnelEnabledForNative({ tunnelEnabled: true }, ''), true);
+});
+
+test('RDP broker routes allow only Go-authorized direct saved connections', () => {
+  const saved = { nodeId: 'saved', tunnelConfigId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' };
+  const quick = { tunnelConfigId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' };
+
+  assert.equal(canProceedWithRdpTunnelRoute(saved, { active: false, socksEndpoint: '' }), true);
+  assert.equal(canProceedWithRdpTunnelRoute(quick, { active: false, socksEndpoint: '' }), false);
+  assert.equal(
+    canProceedWithRdpTunnelRoute(saved, { active: true, socksEndpoint: '127.0.0.1:1080' }),
+    true,
+  );
+  assert.equal(canProceedWithRdpTunnelRoute(saved, { active: true, socksEndpoint: '' }), false);
+  assert.equal(
+    canProceedWithRdpTunnelRoute(saved, { active: false, socksEndpoint: '127.0.0.1:1080' }),
+    false,
+  );
+});
+
+test('request acknowledgements and errors are not renderer lifecycle events', () => {
+  assert.equal(isRdpLifecycleEvent({}), true);
+  assert.equal(isRdpLifecycleEvent({ requestId: 'request-1' }), false);
+});
+
+test('native RDP surface bounds reject unsafe coordinates before screen conversion', () => {
+  assert.equal(
+    isRdpSurfaceRectWithinNativeBounds({ x: -1_000_000, y: 1_000_000, width: 1, height: 16_384 }),
+    true,
+  );
+  assert.equal(
+    isRdpSurfaceRectWithinNativeBounds({ x: 1_000_001, y: 0, width: 800, height: 600 }),
+    false,
+  );
+  assert.equal(
+    isRdpSurfaceRectWithinNativeBounds({ x: 0, y: 0, width: 16_385, height: 600 }),
+    false,
+  );
 });
 
 test('workspace RDP IPC contract accepts the complete persisted profile', () => {

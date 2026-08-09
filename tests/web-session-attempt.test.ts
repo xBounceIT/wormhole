@@ -22,16 +22,7 @@ test('web session attempts use last-request-wins semantics for a retry', () => {
   assert.equal(attempts.isCurrent('web-1', retry), true);
 });
 
-test('credential editor reset invalidates an in-flight Bitwarden search', () => {
-  const attempts = new WebSessionAttemptTracker();
-  const searching = attempts.begin('credential-search');
-
-  attempts.cancel('credential-search');
-
-  assert.equal(attempts.isCurrent('credential-search', searching), false);
-});
-
-test('bulk cancellation invalidates every tracked asynchronous attempt', () => {
+test('bulk cancellation invalidates every in-flight session without reusing generations', () => {
   const attempts = new WebSessionAttemptTracker();
   const first = attempts.begin('first');
   const second = attempts.begin('second');
@@ -40,4 +31,14 @@ test('bulk cancellation invalidates every tracked asynchronous attempt', () => {
 
   assert.equal(attempts.isCurrent('first', first), false);
   assert.equal(attempts.isCurrent('second', second), false);
+  assert.ok(attempts.begin('first') > first);
+});
+
+test('credential editor reset invalidates an in-flight Bitwarden search', () => {
+  const attempts = new WebSessionAttemptTracker();
+  const searching = attempts.begin('credential-search');
+
+  attempts.cancel('credential-search');
+
+  assert.equal(attempts.isCurrent('credential-search', searching), false);
 });

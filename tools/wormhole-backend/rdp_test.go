@@ -1,12 +1,129 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"net"
 	"reflect"
 	"runtime"
 	"strings"
 	"testing"
 )
+
+func TestSystemRdpCapabilityIsWindowsOnlyAndFailsClosedForUnsupportedRouting(t *testing.T) {
+	available := func() (string, error) { return `C:\\Windows\\System32\\mstsc.exe`, nil }
+	missing := func() (string, error) { return "", errors.New("missing") }
+	profile := rdpProfile{Host: "rdp.example"}
+
+	if !evaluateRdpSystemClientCapability(profile, false, "windows", available).Supported {
+		t.Fatal("safe Windows RDP profile did not expose the system client")
+	}
+	if evaluateRdpSystemClientCapability(profile, false, "linux", available).Supported {
+		t.Fatal("non-Windows host exposed mstsc")
+	}
+	if evaluateRdpSystemClientCapability(profile, true, "windows", available).Supported {
+		t.Fatal("VPN-routed RDP profile exposed a direct system client route")
+	}
+	profile.GatewayUsageMethod = 1
+	profile.GatewayHostname = "gateway.example"
+	if evaluateRdpSystemClientCapability(profile, false, "windows", available).Supported {
+		t.Fatal("RDP Gateway profile exposed a system route that drops gateway settings")
+	}
+	profile.GatewayUsageMethod = 0
+	profile.GatewayHostname = ""
+	if evaluateRdpSystemClientCapability(profile, false, "windows", missing).Supported {
+		t.Fatal("missing mstsc executable was reported as supported")
+	}
+}
+
+func TestSystemRdpInvocationContainsOnlyTheValidatedTarget(t *testing.T) {
+	args := buildSystemRdpInvocation(rdpProfile{
+		Host: "rdp.example", Port: 3391, Username: "operator", Domain: "CONTOSO",
+		Password: "connection-secret", GatewayPassword: "gateway-secret",
+	})
+	if !reflect.DeepEqual(args, []string{"/v:rdp.example:3391"}) {
+		t.Fatalf("unexpected system RDP invocation: %#v", args)
+	}
+	joined := strings.Join(args, " ")
+	for _, secret := range []string{"operator", "CONTOSO", "connection-secret", "gateway-secret"} {
+		if strings.Contains(joined, secret) {
+			t.Fatalf("system RDP arguments exposed %q", secret)
+		}
+	}
+}
+
+func TestRdpChildEnvironmentScrubsInheritedBitwardenSecrets(t *testing.T) {
+	environment := rdpChildEnvironment([]string{
+		"PATH=/usr/bin",
+		"BW_SESSION=session-secret",
+		"wormhole_bw_password=password-secret",
+		"KEEP=value",
+	})
+	joined := strings.Join(environment, "\n")
+	if strings.Contains(strings.ToLower(joined), "session-secret") ||
+		strings.Contains(strings.ToLower(joined), "password-secret") {
+		t.Fatalf("RDP child environment retained a Bitwarden secret: %v", environment)
+	}
+	if !strings.Contains(joined, "PATH=/usr/bin") || !strings.Contains(joined, "KEEP=value") {
+		t.Fatalf("RDP child environment dropped required desktop values: %v", environment)
+	}
+}
+
+func TestRdpBoundsRejectCoordinatesOutsideTheNativeAdapterContract(t *testing.T) {
+	if !(rdpBounds{X: -rdpMaxCoordinate, Y: rdpMaxCoordinate, Width: 1, Height: rdpMaxDimension}).valid() {
+		t.Fatal("valid boundary RDP surface was rejected")
+	}
+	for _, bounds := range []rdpBounds{
+		{X: -rdpMaxCoordinate - 1, Width: 1, Height: 1},
+		{Y: rdpMaxCoordinate + 1, Width: 1, Height: 1},
+		{Width: rdpMaxDimension + 1, Height: 1},
+	} {
+		if bounds.valid() {
+			t.Fatalf("out-of-contract RDP bounds were accepted: %#v", bounds)
+		}
+	}
+}
+
+func TestSavedSystemRdpLaunchRefreshesRoutingInsideController(t *testing.T) {
+	suppliedTunnelEnabled := false
+	supplied := rdpProfile{
+		NodeID: "saved-rdp", Host: "stale.example", UseExternalClient: true,
+		TunnelEnabled: &suppliedTunnelEnabled,
+	}
+	_, err := refreshSavedSystemRdpProfile(
+		supplied,
+		func(nodeID string) (rdpProfile, rdpSystemClientCapability, error) {
+			if nodeID != supplied.NodeID {
+				t.Fatalf("unexpected node ID %q", nodeID)
+			}
+			return rdpProfile{}, rdpSystemClientCapability{
+				Reason: "System Remote Desktop cannot safely use this connection's VPN tunnel.",
+			}, nil
+		},
+	)
+	if err == nil {
+		t.Fatal("stale direct-route snapshot bypassed the refreshed VPN decision")
+	}
+
+	resolved, err := refreshSavedSystemRdpProfile(
+		supplied,
+		func(string) (rdpProfile, rdpSystemClientCapability, error) {
+			return rdpProfile{
+				NodeID: supplied.NodeID, Host: "current.example", Port: 3391,
+				Username: "must-not-cross", Password: "must-not-cross",
+			}, rdpSystemClientCapability{Supported: true}, nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Host != "current.example" || resolved.Port != 3391 || !resolved.UseExternalClient {
+		t.Fatalf("controller did not use the refreshed system profile: %#v", resolved)
+	}
+	if resolved.Username != "" || resolved.Password != "" {
+		t.Fatalf("controller retained credentials in the system profile: %#v", resolved)
+	}
+}
 
 func TestNormalizeRdpTargetUsesExplicitPortBeforeHostPortSuffix(t *testing.T) {
 	host, port, err := normalizeRdpTarget("rdp.example:3390", 0)
@@ -167,6 +284,145 @@ func TestDisconnectCanMarkTheCurrentProcessTerminalBeforeExit(t *testing.T) {
 	controller.markProcessTerminal(process)
 	if replacement.terminal {
 		t.Fatal("stale RDP process marked the replacement terminal")
+	}
+}
+
+func TestRequestedRdpDisconnectTreatsForcedProcessExitAsClean(t *testing.T) {
+	if code := rdpProcessExitCode(errors.New("process killed"), true); code != 0 {
+		t.Fatalf("requested disconnect returned exit code %d", code)
+	}
+	if code := rdpProcessExitCode(errors.New("unexpected failure"), false); code != -1 {
+		t.Fatalf("unexpected process failure returned exit code %d", code)
+	}
+}
+
+func TestRdpLifecycleEventsRejectStaleAndDisconnectingProcesses(t *testing.T) {
+	current := &rdpProcess{sessionID: "session-1", lifecycleGeneration: 7}
+	controller := &rdpController{processes: map[string]*rdpProcess{current.sessionID: current}}
+	if !controller.shouldForwardProcessEvent(current, rdpEvent{Type: "connected"}) {
+		t.Fatal("current RDP process event was rejected")
+	}
+
+	current.disconnectRequested = true
+	current.terminal = true
+	if controller.shouldForwardProcessEvent(current, rdpEvent{Type: "disconnected"}) {
+		t.Fatal("requested disconnect could overwrite the preserved tab with a stale native event")
+	}
+	if !controller.shouldForwardProcessEvent(current, rdpEvent{Type: "ack", RequestID: "request-1"}) {
+		t.Fatal("request acknowledgement was not allowed to settle during disconnect")
+	}
+
+	replacement := &rdpProcess{sessionID: current.sessionID, lifecycleGeneration: 8}
+	controller.processes[current.sessionID] = replacement
+	current.disconnectRequested = false
+	current.terminal = false
+	if controller.shouldForwardProcessEvent(current, rdpEvent{Type: "connected"}) {
+		t.Fatal("superseded RDP process event reached the replacement lifecycle")
+	}
+}
+
+func TestRdpRequestResponsesAreNeverTerminalLifecycleEvents(t *testing.T) {
+	for _, event := range []rdpEvent{
+		{Type: "disconnected", RequestID: "disconnect-1"},
+		{Type: "fatalError", RequestID: "start-1"},
+	} {
+		if isRdpTerminalLifecycleEvent(event) {
+			t.Fatalf("request response %q was treated as a terminal lifecycle event", event.Type)
+		}
+	}
+	if !isRdpTerminalLifecycleEvent(rdpEvent{Type: "disconnected"}) {
+		t.Fatal("unsolicited disconnect was not treated as a terminal lifecycle event")
+	}
+}
+
+func TestRdpStopClosesNativeControlPipeAndTunnelLease(t *testing.T) {
+	sidecar := newTestTunnelProcess()
+	pool := newTunnelRuntimePool(func(context.Context, tunnelConfigSnapshot) (*tunnelProcess, error) {
+		return nil, errors.New("unexpected start")
+	})
+	entry := &sharedTunnelEntry{key: "rdp", refs: 1, process: sidecar}
+	pool.entries[entry.key] = entry
+	stdinClosed := false
+	process := &rdpProcess{
+		stdin: closeWriterFunc(func() error {
+			stdinClosed = true
+			return nil
+		}),
+		tunnel: &tunnelRuntime{entry: entry, pool: pool},
+	}
+
+	stopRdpProcess(process)
+
+	if !stdinClosed {
+		t.Fatal("RDP native control pipe remained open after disconnect")
+	}
+	pool.mu.Lock()
+	remaining := len(pool.entries)
+	pool.mu.Unlock()
+	if remaining != 0 || sidecar.alive() {
+		t.Fatal("RDP disconnect retained its tunnel lease or sidecar")
+	}
+}
+
+func TestRdpDisconnectAckFinalizesNativeResourcesBeforeForwarding(t *testing.T) {
+	stdinClosed := false
+	process := &rdpProcess{
+		disconnectRequested: true,
+		stdin: closeWriterFunc(func() error {
+			stdinClosed = true
+			return nil
+		}),
+	}
+
+	controller := &rdpController{}
+	if !process.beginDisconnect("disconnect-1") {
+		t.Fatal("RDP disconnect request was not registered")
+	}
+	if !controller.finalizeRequestedRdpDisconnect(process, rdpEvent{Type: "ack", RequestID: "disconnect-1"}) {
+		t.Fatal("RDP disconnect acknowledgement was not forwarded")
+	}
+
+	if !stdinClosed {
+		t.Fatal("RDP disconnect acknowledgement preceded native process cleanup")
+	}
+	if controller.finalizeRequestedRdpDisconnect(process, rdpEvent{Type: "ack", RequestID: "disconnect-1"}) {
+		t.Fatal("late RDP disconnect acknowledgement crossed the completed lifecycle")
+	}
+}
+
+func TestRdpDisconnectFallbackClaimsAndFinalizesStalledNativeHost(t *testing.T) {
+	stdinClosed := false
+	process := &rdpProcess{
+		disconnectRequested: true,
+		stdin: closeWriterFunc(func() error {
+			stdinClosed = true
+			return nil
+		}),
+	}
+	if !process.beginDisconnect("disconnect-1") {
+		t.Fatal("RDP disconnect request was not registered")
+	}
+	controller := &rdpController{}
+	if !controller.completeRequestedRdpDisconnect(process, "disconnect-1") {
+		t.Fatal("stalled RDP disconnect fallback did not claim the request")
+	}
+	if !stdinClosed {
+		t.Fatal("stalled RDP disconnect fallback retained the native process")
+	}
+	if controller.completeRequestedRdpDisconnect(process, "disconnect-1") {
+		t.Fatal("stalled RDP disconnect fallback completed twice")
+	}
+}
+
+func TestRdpNativeStartResponseTracksHelperInitialization(t *testing.T) {
+	process := &rdpProcess{startRequestID: "start-1"}
+	if requestID := process.unansweredStartRequestID(); requestID != "start-1" {
+		t.Fatalf("unanswered start request = %q", requestID)
+	}
+
+	process.recordStartResponse(rdpEvent{Type: "ready", RequestID: "start-1"})
+	if requestID := process.unansweredStartRequestID(); requestID != "" {
+		t.Fatalf("ready helper left start request unanswered: %q", requestID)
 	}
 }
 

@@ -13,8 +13,12 @@ import {
 } from '../electron/window-lifecycle.ts';
 import { createLogLevelSaveState, drainLogLevelChanges } from '../src/log-level-settings.ts';
 import {
+  canDisconnectRemoteDesktopSession,
+  canOpenRdpSystemClient,
+  disconnectedRemoteDesktopState,
   isSessionActive,
   nextSelectedSessionId,
+  reconnectingVncState,
   sessionRuntimeRetryKeys,
   SessionCloseGate,
   SessionResourceReleaseGate,
@@ -147,6 +151,88 @@ test('session activity excludes failed, closed, disconnected, and idle tabs', ()
     shouldConfirmConnectedTabClose(false, [{ protocol: 'ssh', status: 'connected' }]),
     false,
   );
+});
+
+test('remote desktop actions expose only valid disconnect and system-client states', () => {
+  assert.equal(canDisconnectRemoteDesktopSession({ protocol: 'vnc', status: 'connecting' }), true);
+  assert.equal(canDisconnectRemoteDesktopSession({ protocol: 'vnc', status: 'closed' }), false);
+  assert.equal(
+    canDisconnectRemoteDesktopSession({
+      protocol: 'rdp',
+      status: 'placeholder',
+      rdpStatus: 'connected',
+    }),
+    true,
+  );
+  assert.equal(
+    canDisconnectRemoteDesktopSession({
+      protocol: 'rdp',
+      status: 'placeholder',
+      rdpStatus: 'disconnected',
+    }),
+    false,
+  );
+  assert.equal(
+    canDisconnectRemoteDesktopSession({
+      protocol: 'rdp',
+      status: 'placeholder',
+      rdpStatus: 'failed',
+    }),
+    true,
+  );
+  assert.equal(
+    canOpenRdpSystemClient({
+      protocol: 'rdp',
+      status: 'placeholder',
+      rdpStatus: 'failed',
+      rdpSystemClientSupported: true,
+    }),
+    true,
+  );
+  assert.equal(
+    canOpenRdpSystemClient({
+      protocol: 'rdp',
+      status: 'placeholder',
+      rdpStatus: 'starting',
+      rdpSystemClientSupported: true,
+    }),
+    false,
+  );
+  assert.equal(
+    canOpenRdpSystemClient({
+      protocol: 'rdp',
+      status: 'placeholder',
+      rdpStatus: 'connected',
+      rdpExternal: true,
+      rdpSystemClientSupported: true,
+    }),
+    false,
+  );
+});
+
+test('disconnect preserves remote desktop tabs and VNC reconnect advances its attempt', () => {
+  assert.deepEqual(
+    disconnectedRemoteDesktopState({
+      protocol: 'rdp',
+      status: 'placeholder',
+      rdpStatus: 'connected',
+      rdpExternal: true,
+    }),
+    {
+      status: 'closed',
+      rdpStatus: 'disconnected',
+      rdpExternal: false,
+    },
+  );
+  const disconnectedVnc = {
+    protocol: 'vnc',
+    status: 'closed',
+    vncConnectionGeneration: 4,
+  };
+  assert.deepEqual(reconnectingVncState(disconnectedVnc), {
+    status: 'connecting',
+    vncConnectionGeneration: 5,
+  });
 });
 
 test('window close cancellation is fail-closed and duplicate requests do not prompt twice', async () => {
@@ -359,33 +445,45 @@ test('cancelled OS shutdown restores ordinary close confirmation policy', () => 
   assert.equal(tracker.reason, 'window');
 });
 
-test('renderer failure replaces unavailable renderer teardown with native cleanup', () => {
+test('window close always follows renderer teardown with native cleanup', () => {
   const mainSource = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
   const start = mainSource.indexOf("if (closeReason.reason !== 'renderer-failure')");
   const failureBranch = mainSource.slice(start, start + 1_000);
+  assert.match(failureBranch, /await requestRendererTeardown\(window\)/);
+  assert.doesNotMatch(
+    failureBranch.slice(
+      failureBranch.indexOf('await requestRendererTeardown(window)'),
+      failureBranch.indexOf('await shutdownNativeResources()'),
+    ),
+    /\breturn\b/,
+  );
   assert.match(failureBranch, /await shutdownNativeResources\(\)/);
 });
 
 test('RDP start cancellation and VPN ownership are scoped before asynchronous profile resolution', () => {
   const mainSource = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
-  const startHandler = mainSource.slice(
-    mainSource.indexOf("ipcMain.handle('rdp:start'"),
-    mainSource.indexOf("ipcMain.handle('rdp:resize'"),
-  );
+  const start = mainSource.indexOf("ipcMain.handle('rdp:start'");
+  const end = mainSource.indexOf("ipcMain.handle('rdp:system-client-capability'", start);
+  const startHandler = mainSource.slice(start, end);
   assert.match(startHandler, /rdpStartAttempts\.begin\(request\.sessionId\)/);
   assert.match(startHandler, /resolveNativeRdpProfile\(/);
   assert.ok(
     startHandler.indexOf('rdpStartAttempts.begin(request.sessionId)') <
       startHandler.indexOf('resolveNativeRdpProfile('),
   );
-  assert.match(startHandler, /assertRdpStartCurrent\(request\.sessionId, generation\)/);
+  assert.match(startHandler, /assertRdpStartCurrent\(request\.sessionId, requestAttempt\)/);
+  assert.match(startHandler, /rdpSessionAttempts\.begin\(request\.sessionId\)/);
+  assert.match(
+    startHandler,
+    /assertRdpStartCurrent\(request\.sessionId, requestAttempt, generation\)/,
+  );
   assert.match(startHandler, /rdpTunnelLeases\.claim\(lifecycleId, leaseId\)/);
   assert.match(startHandler, /rdpTunnelLeaseSessions\.set\(lifecycleId, request\.sessionId\)/);
   assert.match(startHandler, /releaseRdpTunnelsForSession\(request\.sessionId\)/);
   assert.doesNotMatch(startHandler, /rdpTunnelLeases\.claim\(request\.sessionId, leaseId\)/);
   assert.match(
     mainSource,
-    /function cancelPreparingRdpStarts\(\)[\s\S]*rdpStartAttempts\.cancelAll\(\)[\s\S]*releaseRdpTunnel\(lifecycleId\)/,
+    /function cancelPreparingRdpStarts\(\)[\s\S]*rdpStartAttempts\.cancelAll\(\)[\s\S]*rdpSessionAttempts\.cancelAll\(\)[\s\S]*releaseRdpTunnel\(lifecycleId\)/,
   );
 });
 
@@ -492,4 +590,22 @@ test('tunnel lease release is idempotent, cancels ownership immediately, and ret
   await leases.release('rdp-old-lifecycle', async () => undefined);
   assert.equal(leases.has('rdp-old-lifecycle'), false);
   assert.equal(leases.isActive('rdp-new-lifecycle', 'lease-new'), true);
+});
+
+test('VNC disconnect remains available as cleanup across an authentication lock', () => {
+  const mainSource = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
+  const handler = mainSource.slice(
+    mainSource.indexOf("ipcMain.handle('vnc:command'"),
+    mainSource.indexOf("ipcMain.handle('rdp:start'"),
+  );
+  const disconnect = handler.indexOf("command.action === 'vnc.disconnect'");
+  const authGate = handler.indexOf('return serializeAuthOperation');
+  assert.ok(disconnect >= 0 && disconnect < authGate);
+  assert.match(
+    handler.slice(disconnect, authGate),
+    /getNativeBackend\(\)\.send\(command, cliOperationTimeoutMs\)/,
+  );
+  assert.match(handler, /vncSessionAttempts\.cancel\(command\.sessionId!\)/);
+  assert.match(handler, /vncSessionAttempts\.begin\(command\.sessionId!\)/);
+  assert.match(handler, /vncSessionAttempts\.isCurrent\(command\.sessionId!, attempt\)/);
 });

@@ -161,6 +161,19 @@ func (m *vncManager) handleBitwarden(command backendCommand, expectedGeneration 
 			}
 		}
 		result, err = m.resolveRdpRuntimeProfile(command.NodeID, manual)
+	case "rdp.system-client-capability", "rdp.resolve-system-profile":
+		var profile rdpProfile
+		var capability rdpSystemClientCapability
+		profile, capability, err = m.resolveRdpSystemClientProfile(command.NodeID)
+		if err == nil {
+			if command.Action == "rdp.system-client-capability" {
+				result = capability
+			} else if !capability.Supported {
+				err = errors.New(capability.Reason)
+			} else {
+				result = profile
+			}
+		}
 	case "bitwarden.node-reference":
 		result, err = m.bitwardenNodeReference(command.NodeID, bitwardenProtocolValue(command.Protocol))
 	case "bitwarden.browser-storage-read":

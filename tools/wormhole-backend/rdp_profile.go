@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"runtime"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -341,6 +342,46 @@ func workspaceRdpTargetFromChain(chain []map[string]any) (string, int) {
 }
 
 func (m *vncManager) resolveRdpRuntimeProfile(nodeID string, manual *rdpManualCredential) (rdpProfile, error) {
+	return m.resolveRdpProfile(nodeID, manual, false)
+}
+
+func (m *vncManager) resolveRdpSystemClientProfile(nodeID string) (rdpProfile, rdpSystemClientCapability, error) {
+	profile, err := m.resolveRdpProfile(nodeID, nil, true)
+	if err != nil {
+		return rdpProfile{}, rdpSystemClientCapability{}, err
+	}
+	_, tunnelEnabled, err := resolveNodeTunnel(m.databasePath, nodeID)
+	if err != nil {
+		return rdpProfile{}, rdpSystemClientCapability{}, err
+	}
+	capability := evaluateRdpSystemClientCapability(profile, tunnelEnabled, runtime.GOOS, systemRdpClientExecutable)
+	if capability.Supported {
+		profile.UseExternalClient = true
+	}
+	return profile, capability, nil
+}
+
+func resolveRdpSystemClientProfileFromDatabase(
+	databasePath string,
+	nodeID string,
+) (rdpProfile, rdpSystemClientCapability, error) {
+	database, err := openDatabase(databasePath, true)
+	if err != nil {
+		return rdpProfile{}, rdpSystemClientCapability{}, err
+	}
+	if database == nil {
+		return rdpProfile{}, rdpSystemClientCapability{}, errors.New("RDP connection was not found")
+	}
+	defer database.Close()
+	manager := &vncManager{database: database, databasePath: databasePath}
+	return manager.resolveRdpSystemClientProfile(nodeID)
+}
+
+func (m *vncManager) resolveRdpProfile(
+	nodeID string,
+	manual *rdpManualCredential,
+	forSystemClient bool,
+) (rdpProfile, error) {
 	chain, err := loadRdpNodeChain(m.database, nodeID)
 	if err != nil {
 		return rdpProfile{}, err
@@ -403,9 +444,16 @@ func (m *vncManager) resolveRdpRuntimeProfile(nodeID string, manual *rdpManualCr
 		profile.TunnelEnabled = &value
 	}
 	profile.TunnelConfigID = normalizeTunnelID(firstString("TunnelConfigId"))
-	if profile.UseExternalClient {
+	if profile.UseExternalClient || forSystemClient {
 		// The system client has no supported secret-bearing launch contract. Do not resolve or
 		// return credentials that mstsc cannot consume; Windows will use its own credential UI.
+		if forSystemClient {
+			profile.Username = ""
+			profile.Domain = ""
+			profile.Password = ""
+			profile.GatewayUsername = ""
+			profile.GatewayPassword = ""
+		}
 		return profile, nil
 	}
 

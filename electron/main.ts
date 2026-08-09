@@ -62,7 +62,7 @@ import { KeyedTaskTracker } from './keyed-task-tracker.js';
 import { shouldDeferExtensionReload } from './extension-reload-policy.js';
 import { encodeTerminalClipboardText, isEncodedSshInput } from './terminal-clipboard.js';
 import { RdpBackendClient, stopChildProcess } from './rdp.js';
-import { TunnelLeaseRegistry } from './tunnel-lease-registry.js';
+import { settleTunnelCleanup, TunnelLeaseRegistry } from './tunnel-lease-registry.js';
 import {
   isMatchingOAuthRedirect,
   tunnelAuthPartition,
@@ -86,8 +86,19 @@ import type {
   RdpProfile,
   RdpStartRequest,
   RdpSurfaceRect,
+  RdpSystemClientCapability,
+  RdpSystemClientCapabilityRequest,
+  RdpSystemClientOpenRequest,
+  RdpSystemClientOpenResult,
 } from './rdp-contract.js';
-import { rdpGatewayCredentialIdForResolution, rdpGatewayUsername } from './rdp-contract.js';
+import {
+  canProceedWithRdpTunnelRoute,
+  isRdpLifecycleEvent,
+  isRdpSurfaceRectWithinNativeBounds,
+  rdpGatewayCredentialIdForResolution,
+  rdpGatewayUsername,
+  rdpTunnelEnabledForNative,
+} from './rdp-contract.js';
 import {
   parseMRemoteImportInspection,
   parseMRemoteImportOptions,
@@ -127,8 +138,11 @@ const bitwardenExtensionHostMaxListeners = 64;
 let rdpClient: RdpBackendClient | undefined;
 const rdpTunnelLeases = new TunnelLeaseRegistry();
 const rdpTunnelLeaseSessions = new Map<string, string>();
+const rdpStartOperations = new KeyedSingleFlight<string>();
 const rdpStartAttempts = new WebSessionAttemptTracker();
+const rdpSessionAttempts = new WebSessionAttemptTracker();
 const rdpConnectingLifecycles = new Map<string, string>();
+const vncSessionAttempts = new WebSessionAttemptTracker();
 const rdpSurfacePlacements = new Map<
   string,
   { owner: BrowserWindow; rendererBounds: RdpSurfaceRect }
@@ -237,6 +251,8 @@ type NativeBackendAction =
   | 'bitwarden.resolve-node'
   | 'rdp.resolve-credential'
   | 'rdp.resolve-profile'
+  | 'rdp.system-client-capability'
+  | 'rdp.resolve-system-profile'
   | 'bitwarden.node-reference'
   | 'bitwarden.browser-storage-read'
   | 'bitwarden.browser-storage-capture'
@@ -2871,6 +2887,44 @@ async function resolveNativeRdpProfile(
   );
   if (!response.ok) throw new Error(response.error || 'RDP profile resolution failed.');
   return response.result as RdpProfile;
+}
+
+async function resolveNativeRdpSystemClientCapability(
+  nodeId: string,
+): Promise<RdpSystemClientCapability> {
+  const response = await getNativeBackend().send(
+    { action: 'rdp.system-client-capability', nodeId },
+    cliOperationTimeoutMs,
+  );
+  if (!response.ok) throw new Error(response.error || 'RDP system client capability failed.');
+  const result = response.result as Partial<RdpSystemClientCapability> | undefined;
+  if (!result || typeof result.supported !== 'boolean') {
+    throw new Error('RDP system client capability returned an invalid result.');
+  }
+  return { supported: result.supported };
+}
+
+async function resolveNativeRdpSystemProfile(nodeId: string): Promise<RdpProfile> {
+  const response = await getNativeBackend().send(
+    { action: 'rdp.resolve-system-profile', nodeId },
+    cliOperationTimeoutMs,
+  );
+  if (!response.ok) throw new Error(response.error || 'RDP system profile resolution failed.');
+  const profile = response.result as RdpProfile | undefined;
+  if (
+    !profile ||
+    typeof profile.host !== 'string' ||
+    !profile.host ||
+    profile.useExternalClient !== true ||
+    profile.username ||
+    profile.domain ||
+    profile.password ||
+    profile.gatewayUsername ||
+    profile.gatewayPassword
+  ) {
+    throw new Error('RDP system profile returned an invalid result.');
+  }
+  return profile;
 }
 
 async function resolveNativeRdpCredential(
@@ -7381,10 +7435,25 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
         error: error instanceof Error ? error.message : 'Invalid VNC command.',
       };
     }
+    // Disconnect is an idempotent cleanup boundary, not workspace access. It must remain
+    // reachable when a concurrent lock invalidates ordinary VNC commands, otherwise the renderer
+    // can remove a closing tab while its native socket and tunnel continue running.
+    if (command.action === 'vnc.disconnect') {
+      vncSessionAttempts.cancel(command.sessionId!);
+      // A disconnect waits for an in-flight credential/tunnel start to observe cancellation and
+      // release its eventual resources. Match the longest native credential path instead of
+      // timing out at the ordinary 15-second control-command deadline.
+      return getNativeBackend().send(command, cliOperationTimeoutMs);
+    }
+    const attempt =
+      command.action === 'vnc.connect' ? vncSessionAttempts.begin(command.sessionId!) : undefined;
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
       if (isQuitting) {
         return { id: '', ok: false, error: 'Native backend is stopping.' };
+      }
+      if (attempt !== undefined && !vncSessionAttempts.isCurrent(command.sessionId!, attempt)) {
+        return { id: '', ok: false, error: 'VNC connection closed before it could start.' };
       }
       return getNativeBackend().send(command);
     });
@@ -7396,150 +7465,290 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     const ownerWindow = BrowserWindow.fromWebContents(event.sender);
     if (!ownerWindow) throw new Error('RDP owner window is unavailable.');
     if (request.bounds) rememberRdpSurfacePlacement(ownerWindow, request.sessionId, request.bounds);
-    // Track the renderer's intent before authentication/profile resolution starts. A close or a
-    // newer Retry can now invalidate this work before it acquires a VPN lease.
-    const generation = rdpStartAttempts.begin(request.sessionId);
-    const client = getRdpClient();
+    return rdpStartOperations.runExclusive(
+      request.sessionId,
+      async () => {
+        const requestAttempt = rdpStartAttempts.begin(request.sessionId);
+        let ownsLifecycle = false;
+        const client = getRdpClient();
+        let lifecycleId: string | undefined;
+        return runAuthorizedOperation(
+          async (authorizationEpoch) => {
+            requireNativeResourcesRunning();
+            let resolvedProfile = request.profile;
+            if (request.profile.nodeId) {
+              try {
+                resolvedProfile = await resolveNativeRdpProfile(
+                  request.profile.nodeId,
+                  request.manualCredentials === true,
+                  request.profile,
+                );
+              } catch (error) {
+                const message =
+                  error instanceof Error ? error.message : 'The RDP profile could not be read.';
+                throw new Error(`RDP profile is unavailable: ${message}`);
+              }
+            } else {
+              resolvedProfile = { ...request.profile };
+              if (request.profile.credentialId && request.manualCredentials !== true) {
+                const credential = await resolveNativeRdpCredential(request.profile.credentialId);
+                resolvedProfile.username = credential.username;
+                resolvedProfile.domain = credential.domain;
+                resolvedProfile.password = credential.password;
+              }
+              const gatewayCredentialId = rdpGatewayCredentialIdForResolution(request.profile);
+              if (request.profile.gatewayUsageMethod && request.profile.gatewayUseSameCreds) {
+                resolvedProfile.gatewayUsername = rdpGatewayUsername(
+                  resolvedProfile.username,
+                  resolvedProfile.domain,
+                );
+                resolvedProfile.gatewayPassword = resolvedProfile.password;
+              } else if (gatewayCredentialId) {
+                let gateway: BitwardenResolvedCredential;
+                try {
+                  gateway = await resolveNativeRdpCredential(gatewayCredentialId);
+                } catch (error) {
+                  const message =
+                    error instanceof Error ? error.message : 'credential resolution failed';
+                  throw new Error(`RDP Gateway credential is unavailable: ${message}`);
+                }
+                resolvedProfile.gatewayUsername = rdpGatewayUsername(
+                  gateway.username,
+                  gateway.domain,
+                );
+                resolvedProfile.gatewayPassword = gateway.password;
+              }
+              delete resolvedProfile.credentialId;
+              delete resolvedProfile.gatewayCredentialId;
+            }
+            assertRdpStartCurrent(request.sessionId, requestAttempt);
+            if (client.hasSession(request.sessionId)) {
+              throw new Error('RDP session is already running.');
+            }
+            const generation = rdpSessionAttempts.begin(request.sessionId);
+            ownsLifecycle = true;
+            requireAuthorizationEpoch(authorizationEpoch);
+            const ownerHandle = nativeWindowHandle(ownerWindow);
+            const bounds = currentRdpSurfaceScreenBounds(ownerWindow, request.sessionId);
+            // A retry reuses the renderer session id. Retire the previous native attempt before its
+            // broker lease is released so it cannot overlap the replacement through a closing proxy.
+            const previousLifecycleId = client.currentLifecycleId(request.sessionId);
+            await client
+              .command('disconnect', request.sessionId, ownerHandle, bounds, previousLifecycleId)
+              .catch(() => undefined);
+            assertRdpStartCurrent(request.sessionId, requestAttempt, generation);
+            await releaseRdpTunnelsForSession(request.sessionId);
+            assertRdpStartCurrent(request.sessionId, requestAttempt, generation);
+            lifecycleId = client.beginStart(request.sessionId);
+            rdpConnectingLifecycles.set(lifecycleId, request.sessionId);
+            try {
+              let socksEndpoint = '';
+              if (resolvedProfile.nodeId || resolvedProfile.tunnelConfigId) {
+                const leaseId = randomUUID();
+                rdpTunnelLeases.claim(lifecycleId, leaseId);
+                rdpTunnelLeaseSessions.set(lifecycleId, request.sessionId);
+                let route: { active: boolean; socksEndpoint: string };
+                try {
+                  route = await getNativeBackend().acquireTunnelRoute({
+                    leaseId,
+                    nodeId: resolvedProfile.nodeId,
+                    tunnelConfigId: resolvedProfile.tunnelConfigId,
+                    progressSessionId: request.sessionId,
+                  });
+                } catch (error) {
+                  await releaseRdpTunnel(lifecycleId).catch(() => undefined);
+                  const message =
+                    error instanceof Error ? error.message : 'VPN tunnel establishment failed.';
+                  throw new Error(`RDP VPN tunnel is unavailable: ${message}`);
+                }
+                if (!canProceedWithRdpTunnelRoute(resolvedProfile, route)) {
+                  await releaseRdpTunnel(lifecycleId);
+                  throw new Error('RDP VPN tunnel returned an invalid route.');
+                }
+                socksEndpoint = route.socksEndpoint;
+                assertRdpStartCurrent(request.sessionId, requestAttempt, generation);
+                if (!rdpTunnelLeases.isActive(lifecycleId, leaseId)) {
+                  throw new Error('RDP connection closed while opening its VPN tunnel.');
+                }
+                if (!socksEndpoint) await releaseRdpTunnel(lifecycleId);
+              }
+              if (!isAuthorizationEpochCurrent(authorizationEpoch)) {
+                await releaseRdpTunnel(lifecycleId);
+                throw new Error('Authentication is required before opening the RDP connection.');
+              }
+              if (!socksEndpoint) await releaseRdpTunnel(lifecycleId);
+              assertRdpStartCurrent(request.sessionId, requestAttempt, generation);
+              const { manualCredentials: _manualCredentials, ...nativeRequest } = request;
+              const response = await client.start(
+                {
+                  ...nativeRequest,
+                  profile: {
+                    ...resolvedProfile,
+                    socksEndpoint: socksEndpoint || undefined,
+                    tunnelEnabled: rdpTunnelEnabledForNative(resolvedProfile, socksEndpoint),
+                  },
+                },
+                ownerHandle,
+                bounds,
+                lifecycleId,
+                generation,
+              );
+              if (
+                !rdpStartAttempts.isCurrent(request.sessionId, requestAttempt) ||
+                !rdpSessionAttempts.isCurrent(request.sessionId, generation)
+              ) {
+                throw new Error('RDP connection closed while its native process was starting.');
+              }
+              rdpConnectingLifecycles.delete(lifecycleId);
+              return response;
+            } catch (error) {
+              rdpConnectingLifecycles.delete(lifecycleId);
+              await settleTunnelCleanup(
+                client.command('disconnect', request.sessionId, ownerHandle, bounds, lifecycleId),
+                releaseRdpTunnel(lifecycleId),
+              ).catch(() => undefined);
+              client.cancelStart(request.sessionId, lifecycleId);
+              throw error;
+            }
+          },
+          async () => {
+            if (!ownsLifecycle) return;
+            if (lifecycleId) rdpConnectingLifecycles.delete(lifecycleId);
+            if (lifecycleId) {
+              const ownerWindowAvailable = !ownerWindow.isDestroyed();
+              await settleTunnelCleanup(
+                client.command(
+                  'disconnect',
+                  request.sessionId,
+                  ownerWindowAvailable ? nativeWindowHandle(ownerWindow) : '',
+                  ownerWindowAvailable ? toScreenBounds(ownerWindow, request.bounds) : undefined,
+                  lifecycleId,
+                ),
+                releaseRdpTunnel(lifecycleId),
+              ).catch(() => undefined);
+            }
+          },
+        );
+      },
+      'RDP session is already starting.',
+    );
+  });
+
+  ipcMain.handle('rdp:system-client-capability', async (_event, value: unknown) => {
+    const request = parseRdpSystemClientCapabilityRequest(value);
+    return serializeAuthOperation(async () => {
+      await requireWorkspaceAuth();
+      return resolveNativeRdpSystemClientCapability(request.nodeId);
+    });
+  });
+
+  ipcMain.handle('rdp:open-system', async (event, value: unknown) => {
+    const request = parseRdpSystemClientOpenRequest(value);
+    let ownsLifecycle = false;
+    const ownerWindow = BrowserWindow.fromWebContents(event.sender);
+    if (!ownerWindow) throw new Error('RDP owner window is unavailable.');
     let lifecycleId: string | undefined;
 
-    return runAuthorizedOperation(
-      async (authorizationEpoch) => {
-        requireNativeResourcesRunning();
-        let resolvedProfile = request.profile;
-        if (request.profile.nodeId) {
-          try {
-            resolvedProfile = await resolveNativeRdpProfile(
-              request.profile.nodeId,
-              request.manualCredentials === true,
-              request.profile,
-            );
-          } catch (error) {
-            const message =
-              error instanceof Error ? error.message : 'The RDP profile could not be read.';
-            throw new Error(`RDP profile is unavailable: ${message}`);
-          }
-        } else {
-          resolvedProfile = { ...request.profile };
-          if (request.profile.credentialId && request.manualCredentials !== true) {
-            const credential = await resolveNativeRdpCredential(request.profile.credentialId);
-            resolvedProfile.username = credential.username;
-            resolvedProfile.domain = credential.domain;
-            resolvedProfile.password = credential.password;
-          }
-          const gatewayCredentialId = rdpGatewayCredentialIdForResolution(request.profile);
-          if (request.profile.gatewayUsageMethod && request.profile.gatewayUseSameCreds) {
-            resolvedProfile.gatewayUsername = rdpGatewayUsername(
-              resolvedProfile.username,
-              resolvedProfile.domain,
-            );
-            resolvedProfile.gatewayPassword = resolvedProfile.password;
-          } else if (gatewayCredentialId) {
-            let gateway: BitwardenResolvedCredential;
-            try {
-              gateway = await resolveNativeRdpCredential(gatewayCredentialId);
-            } catch (error) {
-              const message =
-                error instanceof Error ? error.message : 'credential resolution failed';
-              throw new Error(`RDP Gateway credential is unavailable: ${message}`);
-            }
-            resolvedProfile.gatewayUsername = rdpGatewayUsername(gateway.username, gateway.domain);
-            resolvedProfile.gatewayPassword = gateway.password;
-          }
-          delete resolvedProfile.credentialId;
-          delete resolvedProfile.gatewayCredentialId;
-        }
-        assertRdpStartCurrent(request.sessionId, generation);
-        requireAuthorizationEpoch(authorizationEpoch);
-        const ownerHandle = nativeWindowHandle(ownerWindow);
-        const bounds = currentRdpSurfaceScreenBounds(ownerWindow, request.sessionId);
-        // A retry reuses the renderer session id. Retire the previous native attempt before its
-        // broker lease is released so it cannot overlap the replacement through a closing proxy.
-        const previousLifecycleId = client.currentLifecycleId(request.sessionId);
-        await client
-          .command('disconnect', request.sessionId, ownerHandle, bounds, previousLifecycleId)
-          .catch(() => undefined);
-        assertRdpStartCurrent(request.sessionId, generation);
-        await releaseRdpTunnelsForSession(request.sessionId);
-        assertRdpStartCurrent(request.sessionId, generation);
-        lifecycleId = client.beginStart(request.sessionId);
-        rdpConnectingLifecycles.set(lifecycleId, request.sessionId);
-        try {
-          let socksEndpoint = '';
-          if (resolvedProfile.nodeId || resolvedProfile.tunnelConfigId) {
-            const leaseId = randomUUID();
-            rdpTunnelLeases.claim(lifecycleId, leaseId);
-            rdpTunnelLeaseSessions.set(lifecycleId, request.sessionId);
-            try {
-              socksEndpoint = await getNativeBackend().acquireTunnel({
-                leaseId,
-                nodeId: resolvedProfile.nodeId,
-                tunnelConfigId: resolvedProfile.tunnelConfigId,
-                progressSessionId: request.sessionId,
-              });
-            } catch (error) {
-              await releaseRdpTunnel(lifecycleId).catch(() => undefined);
-              const message =
-                error instanceof Error ? error.message : 'VPN tunnel establishment failed.';
-              throw new Error(`RDP VPN tunnel is unavailable: ${message}`);
-            }
-            assertRdpStartCurrent(request.sessionId, generation);
-            if (!rdpTunnelLeases.isActive(lifecycleId, leaseId)) {
-              throw new Error('RDP connection closed while opening its VPN tunnel.');
-            }
-            if (!socksEndpoint) await releaseRdpTunnel(lifecycleId);
-          }
-          if (!isAuthorizationEpochCurrent(authorizationEpoch)) {
-            await releaseRdpTunnel(lifecycleId);
-            throw new Error('Authentication is required before opening the RDP connection.');
-          }
-          if (!socksEndpoint && resolvedProfile.tunnelConfigId) {
-            await releaseRdpTunnel(lifecycleId);
-            throw new Error('The VPN tunnel returned no SOCKS endpoint.');
-          }
-          if (!socksEndpoint) await releaseRdpTunnel(lifecycleId);
-          assertRdpStartCurrent(request.sessionId, generation);
-          const { manualCredentials: _manualCredentials, ...nativeRequest } = request;
-          const response = await client.start(
-            {
-              ...nativeRequest,
-              profile: {
-                ...resolvedProfile,
-                socksEndpoint: socksEndpoint || undefined,
-                tunnelEnabled:
-                  (resolvedProfile.nodeId || resolvedProfile.tunnelConfigId) && !socksEndpoint
-                    ? false
-                    : resolvedProfile.tunnelEnabled,
-              },
+    try {
+      const result = await rdpStartOperations.runExclusive(
+        request.sessionId,
+        async () => {
+          const requestAttempt = rdpStartAttempts.begin(request.sessionId);
+          return runAuthorizedOperation(
+            async (authorizationEpoch) => {
+              const profile = await resolveNativeRdpSystemProfile(request.nodeId);
+              if (!rdpStartAttempts.isCurrent(request.sessionId, requestAttempt)) {
+                throw new Error('RDP connection closed before System Remote Desktop could start.');
+              }
+              const generation = rdpSessionAttempts.begin(request.sessionId);
+              ownsLifecycle = true;
+              requireAuthorizationEpoch(authorizationEpoch);
+              if (ownerWindow.isDestroyed()) throw new Error('RDP owner window is unavailable.');
+              const ownerHandle = nativeWindowHandle(ownerWindow);
+              const client = getRdpClient();
+              const previousLifecycleId = client.currentLifecycleId(request.sessionId);
+              await settleTunnelCleanup(
+                client.command(
+                  'disconnect',
+                  request.sessionId,
+                  ownerHandle,
+                  undefined,
+                  previousLifecycleId,
+                ),
+                releaseRdpTunnelsForSession(request.sessionId),
+              );
+              forgetRdpSurfacePlacement(request.sessionId);
+              if (
+                !rdpStartAttempts.isCurrent(request.sessionId, requestAttempt) ||
+                !rdpSessionAttempts.isCurrent(request.sessionId, generation)
+              ) {
+                throw new Error('RDP connection closed before System Remote Desktop could start.');
+              }
+              requireAuthorizationEpoch(authorizationEpoch);
+              lifecycleId = client.beginStart(request.sessionId);
+              rdpConnectingLifecycles.set(lifecycleId, request.sessionId);
+              try {
+                const result = await client.start(
+                  { sessionId: request.sessionId, profile },
+                  ownerHandle,
+                  undefined,
+                  lifecycleId,
+                  generation,
+                );
+                if (
+                  !rdpStartAttempts.isCurrent(request.sessionId, requestAttempt) ||
+                  !rdpSessionAttempts.isCurrent(request.sessionId, generation)
+                ) {
+                  throw new Error('System Remote Desktop closed while its process was starting.');
+                }
+                rdpConnectingLifecycles.delete(lifecycleId);
+                return result;
+              } catch (error) {
+                rdpConnectingLifecycles.delete(lifecycleId);
+                await settleTunnelCleanup(
+                  client.command(
+                    'disconnect',
+                    request.sessionId,
+                    ownerWindow.isDestroyed() ? '' : ownerHandle,
+                    undefined,
+                    lifecycleId,
+                  ),
+                  releaseRdpTunnel(lifecycleId),
+                ).catch(() => undefined);
+                client.cancelStart(request.sessionId, lifecycleId);
+                throw error;
+              }
             },
-            ownerHandle,
-            bounds,
-            lifecycleId,
+            async () => {
+              if (!ownsLifecycle) return;
+              if (lifecycleId) {
+                rdpConnectingLifecycles.delete(lifecycleId);
+                await Promise.allSettled([
+                  rdpClient?.command(
+                    'disconnect',
+                    request.sessionId,
+                    ownerWindow.isDestroyed() ? '' : nativeWindowHandle(ownerWindow),
+                    undefined,
+                    lifecycleId,
+                  ),
+                  releaseRdpTunnel(lifecycleId),
+                ]);
+              }
+            },
           );
-          rdpConnectingLifecycles.delete(lifecycleId);
-          return response;
-        } catch (error) {
-          rdpConnectingLifecycles.delete(lifecycleId);
-          client.cancelStart(request.sessionId, lifecycleId);
-          await releaseRdpTunnel(lifecycleId).catch(() => undefined);
-          throw error;
-        }
-      },
-      async () => {
-        if (lifecycleId) rdpConnectingLifecycles.delete(lifecycleId);
-        if (lifecycleId && !ownerWindow.isDestroyed()) {
-          await client
-            .command(
-              'disconnect',
-              request.sessionId,
-              nativeWindowHandle(ownerWindow),
-              toScreenBounds(ownerWindow, request.bounds),
-              lifecycleId,
-            )
-            .catch(() => undefined);
-        }
-        if (lifecycleId) await releaseRdpTunnel(lifecycleId).catch(() => undefined);
-      },
-    );
+        },
+        'RDP session is already starting.',
+      );
+      return { ok: true, event: result } satisfies RdpSystemClientOpenResult;
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'System Remote Desktop could not start.';
+      return {
+        ok: false,
+        lifecycleCommitted: ownsLifecycle,
+        error: message.slice(0, 1024),
+      } satisfies RdpSystemClientOpenResult;
+    }
   });
 
   ipcMain.handle('rdp:resize', async (event, value: unknown) => {
@@ -7575,8 +7784,11 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     const client = getRdpClient();
     const lifecycleId =
       operation === 'disconnect' ? client.currentLifecycleId(request.sessionId) : undefined;
+    let resumeStarts: (() => void) | undefined;
     if (operation === 'disconnect') {
+      resumeStarts = rdpStartOperations.suspend(request.sessionId);
       rdpStartAttempts.cancel(request.sessionId);
+      rdpSessionAttempts.cancel(request.sessionId);
       if (lifecycleId) rdpConnectingLifecycles.delete(lifecycleId);
     }
     const command = () =>
@@ -7590,10 +7802,14 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     if (operation === 'hide' || operation === 'disconnect') {
       if (operation === 'disconnect') {
         try {
-          return await command();
+          return await settleTunnelCleanup(
+            command(),
+            releaseRdpTunnelsForSession(request.sessionId),
+          );
         } finally {
-          await releaseRdpTunnelsForSession(request.sessionId).catch(() => undefined);
+          await rdpStartOperations.waitForIdle(request.sessionId);
           forgetRdpSurfacePlacement(request.sessionId);
+          resumeStarts?.();
         }
       }
       return command();
@@ -7616,6 +7832,14 @@ function getRdpClient(): RdpBackendClient {
 
   rdpClient = new RdpBackendClient({ executable: backendPath(), args });
   rdpClient.onEvent((event: RdpBackendEvent) => {
+    if (!isRdpLifecycleEvent(event)) return;
+    if (
+      event.sessionId &&
+      event.lifecycleGeneration !== undefined &&
+      !rdpSessionAttempts.isCurrent(event.sessionId, event.lifecycleGeneration)
+    ) {
+      return;
+    }
     const terminalEvent =
       event.type === 'disconnected' ||
       event.type === 'fatalError' ||
@@ -7655,8 +7879,15 @@ async function releaseRdpTunnelsForSession(sessionId: string): Promise<void> {
   if (failed?.status === 'rejected') throw failed.reason;
 }
 
-function assertRdpStartCurrent(sessionId: string, generation: number): void {
-  if (!rdpStartAttempts.isCurrent(sessionId, generation)) {
+function assertRdpStartCurrent(
+  sessionId: string,
+  requestAttempt: number,
+  sessionGeneration?: number,
+): void {
+  if (
+    !rdpStartAttempts.isCurrent(sessionId, requestAttempt) ||
+    (sessionGeneration !== undefined && !rdpSessionAttempts.isCurrent(sessionId, sessionGeneration))
+  ) {
     throw new Error(
       'RDP connection was closed or superseded before its native session could start.',
     );
@@ -7665,6 +7896,7 @@ function assertRdpStartCurrent(sessionId: string, generation: number): void {
 
 function cancelPreparingRdpStarts(): void {
   rdpStartAttempts.cancelAll();
+  rdpSessionAttempts.cancelAll();
   for (const [lifecycleId, sessionId] of rdpConnectingLifecycles) {
     rdpConnectingLifecycles.delete(lifecycleId);
     rdpClient?.cancelStart(sessionId, lifecycleId);
@@ -7858,20 +8090,35 @@ function parseRdpCommandRequest(value: unknown): RdpCommandRequest {
   };
 }
 
+function parseRdpSystemClientCapabilityRequest(value: unknown): RdpSystemClientCapabilityRequest {
+  if (!value || typeof value !== 'object') {
+    throw new Error('Invalid RDP system client capability request.');
+  }
+  const nodeId = valueAsString(value, 'nodeId');
+  if (!nodeId || nodeId.length > 128) throw new Error('RDP connection identity is invalid.');
+  return { nodeId };
+}
+
+function parseRdpSystemClientOpenRequest(value: unknown): RdpSystemClientOpenRequest {
+  const capability = parseRdpSystemClientCapabilityRequest(value);
+  const command = parseRdpCommandRequest(value);
+  return { ...capability, sessionId: command.sessionId };
+}
+
 function parseOptionalBounds(value: unknown): RdpSurfaceRect | undefined {
   if (value === undefined) return undefined;
   if (!value || typeof value !== 'object') throw new Error('RDP surface bounds are invalid.');
-  const bounds = value as Record<string, unknown>;
-  const numbers = ['x', 'y', 'width', 'height'].map((key) => bounds[key]);
+  const rawBounds = value as Record<string, unknown>;
+  const numbers = ['x', 'y', 'width', 'height'].map((key) => rawBounds[key]);
   if (!numbers.every((number) => typeof number === 'number' && Number.isFinite(number))) {
     throw new Error('RDP surface bounds are invalid.');
   }
-  return {
-    x: numbers[0] as number,
-    y: numbers[1] as number,
-    width: numbers[2] as number,
-    height: numbers[3] as number,
-  };
+  const [x, y, width, height] = numbers as number[];
+  const parsed = { x, y, width, height };
+  if (!isRdpSurfaceRectWithinNativeBounds(parsed)) {
+    throw new Error('RDP surface bounds are invalid.');
+  }
+  return parsed;
 }
 
 function valueAsUnknown(value: unknown, key: string): unknown {
@@ -7960,6 +8207,7 @@ function createWindow() {
     window.setOpacity(startupWindowOpacity);
     webSurfaces.closeForWindow(window);
     clearRdpSurfacePlacements(window);
+    vncSessionAttempts.cancelAll();
     cancelPreparingRdpStarts();
     void serializeAuthOperation(async () => {
       // A renderer reload creates a fresh UI process context. Do not let a previous renderer's
@@ -7978,9 +8226,7 @@ function createWindow() {
       } catch {
         // The MCP process is allowed to exit while the renderer is being re-authenticated.
       }
-      await sshBackend.dispose();
-      await rdpClient?.dispose();
-      await releaseAllRdpTunnels();
+      await shutdownNativeResources();
     }).catch((error) => {
       console.error('[Wormhole] Could not reset native authentication for the renderer.', error);
     });
@@ -8027,7 +8273,6 @@ function createWindow() {
             async () => {
               if (closeReason.reason !== 'renderer-failure') {
                 await requestRendererTeardown(window);
-                return;
               }
               // The renderer can no longer enumerate or close its sessions. Dispose every native
               // owner here so macOS cannot keep headless sessions alive after the last window closes.
@@ -8078,6 +8323,7 @@ let nativeResourceShutdownPromise: Promise<void> | undefined;
 function shutdownNativeResources(): Promise<void> {
   if (nativeResourceShutdownPromise) return nativeResourceShutdownPromise;
   const task = (async () => {
+    vncSessionAttempts.cancelAll();
     cancelPreparingRdpStarts();
     serialBackend?.dispose();
     serialBackend = undefined;

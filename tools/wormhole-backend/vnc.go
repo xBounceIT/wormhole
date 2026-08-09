@@ -277,7 +277,8 @@ func (m *vncManager) handle(command backendCommand) {
 		"bitwarden.get", "bitwarden.resolve-credential", "bitwarden.resolve-node",
 		"bitwarden.node-reference", "bitwarden.browser-storage-read",
 		"bitwarden.browser-storage-capture", "bitwarden.browser-profile-seed",
-		"bitwarden.browser-profile-register", "rdp.resolve-credential", "rdp.resolve-profile":
+		"bitwarden.browser-profile-register", "rdp.resolve-credential", "rdp.resolve-profile",
+		"rdp.system-client-capability", "rdp.resolve-system-profile":
 		generation := m.bitwardenGeneration()
 		go m.handleBitwarden(command, generation)
 	default:
@@ -299,11 +300,11 @@ func (m *vncManager) connect(command backendCommand) {
 	m.sessions[command.SessionID] = session
 	m.mu.Unlock()
 	if previous != nil {
-		previous.close()
+		previous.closeAndWait()
 	}
 
 	m.respond(command.ID, nil)
-	go session.connect(command, m.database, m.electronUserDataPath)
+	session.start(command, m.database, m.electronUserDataPath)
 }
 
 func (m *vncManager) disconnect(command backendCommand) {
@@ -312,7 +313,7 @@ func (m *vncManager) disconnect(command backendCommand) {
 	delete(m.sessions, command.SessionID)
 	m.mu.Unlock()
 	if session != nil {
-		session.close()
+		session.closeAndWait()
 	}
 	m.respond(command.ID, nil)
 }
@@ -363,7 +364,7 @@ func (m *vncManager) close() {
 	m.mu.Unlock()
 
 	for _, session := range sessions {
-		m.cleanupNative(session.close)
+		m.cleanupNative(session.closeAndWait)
 	}
 	for _, forwarder := range forwarders {
 		forwarder.close()
@@ -704,6 +705,7 @@ type vncSession struct {
 	output  *backendLineWriter
 	manager *vncManager
 	stop    chan struct{}
+	done    chan struct{}
 
 	stopOnce      sync.Once
 	stateMu       sync.Mutex
@@ -729,6 +731,16 @@ func newVncSession(id string, output *backendLineWriter, manager *vncManager) *v
 		manager: manager,
 		stop:    make(chan struct{}),
 	}
+}
+
+func (s *vncSession) start(command backendCommand, database *sql.DB, electronUserDataPath ...string) {
+	s.done = make(chan struct{})
+	go s.run(command, database, electronUserDataPath...)
+}
+
+func (s *vncSession) run(command backendCommand, database *sql.DB, electronUserDataPath ...string) {
+	defer close(s.done)
+	s.connect(command, database, electronUserDataPath...)
 }
 
 func (s *vncSession) connect(command backendCommand, database *sql.DB, electronUserDataPath ...string) {
@@ -1220,6 +1232,13 @@ func (s *vncSession) close() {
 	})
 }
 
+func (s *vncSession) closeAndWait() {
+	s.close()
+	if s.done != nil {
+		<-s.done
+	}
+}
+
 func (s *vncSession) isStopped() bool {
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
@@ -1390,7 +1409,9 @@ func validateBackendCommand(command backendCommand) error {
 	bitwardenAction := strings.HasPrefix(command.Action, "bitwarden.")
 	requiresSession := !bitwardenAction &&
 		command.Action != "rdp.resolve-profile" &&
-		command.Action != "rdp.resolve-credential"
+		command.Action != "rdp.resolve-credential" &&
+		command.Action != "rdp.system-client-capability" &&
+		command.Action != "rdp.resolve-system-profile"
 	if requiresSession && (command.SessionID == "" || len(command.SessionID) > 128) {
 		return errors.New("backend session ID is invalid")
 	}
@@ -1516,7 +1537,7 @@ func validateBackendCommand(command backendCommand) error {
 		if len(command.NodeID) == 0 || len(command.NodeID) > 128 || bitwardenProtocolValue(command.Protocol) < 0 {
 			return errors.New("Bitwarden connection request is invalid")
 		}
-	case "rdp.resolve-profile":
+	case "rdp.resolve-profile", "rdp.system-client-capability", "rdp.resolve-system-profile":
 		if !validCredentialID(normalizeID(command.NodeID)) ||
 			(command.ManualCredentials && (!validRdpText(command.Username, 513) ||
 				!validRdpText(command.Domain, 512) || !validRdpText(command.Password, 4096))) {

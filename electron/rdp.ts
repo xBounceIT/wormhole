@@ -1,6 +1,5 @@
 import { randomUUID } from 'node:crypto';
 import { spawn, type ChildProcess, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { createInterface } from 'node:readline';
 import type {
   RdpBackendEvent,
   RdpCommandRequest,
@@ -17,6 +16,7 @@ type RdpWireCommand = {
   ownerWindow?: string;
   bounds?: RdpSurfaceRect;
   profile?: RdpProfile;
+  lifecycleGeneration?: number;
 };
 
 type RdpBackendClientOptions = {
@@ -32,10 +32,15 @@ type PendingRequest = {
   op: RdpWireCommand['op'];
   sessionId?: string;
   lifecycleId?: string;
+  lifecycleGeneration?: number;
 };
 
 const requestTimeoutMs = 15_000;
 const startRequestTimeoutMs = 315_000;
+const maxRdpCommandBytes = 256 * 1024;
+const maxRdpEventBytes = 256 * 1024;
+const maxRdpSurfaceCoordinate = 1_000_000;
+const maxRdpSurfaceDimension = 16_384;
 
 export type ChildProcessStopOptions = {
   gracefulTimeoutMs?: number;
@@ -106,6 +111,9 @@ export class RdpBackendClient {
   private readonly bounds = new Map<string, RdpSurfaceRect>();
   private readonly sessionIds = new Set<string>();
   private readonly lifecycleIds = new Map<string, string>();
+  private readonly lifecycleGenerations = new Map<string, number>();
+  private readonly disconnects = new Map<string, Promise<RdpBackendEvent>>();
+  private outputBuffer = '';
   private starting: Promise<void> | undefined;
   private disposing: Promise<void> | undefined;
 
@@ -125,7 +133,6 @@ export class RdpBackendClient {
   beginStart(sessionId: string): string {
     const lifecycleId = randomUUID();
     this.lifecycleIds.set(sessionId, lifecycleId);
-    this.sessionIds.add(sessionId);
     return lifecycleId;
   }
 
@@ -137,15 +144,25 @@ export class RdpBackendClient {
     if (this.lifecycleIds.get(sessionId) === lifecycleId) this.forgetSession(sessionId);
   }
 
+  hasSession(sessionId: string): boolean {
+    return this.sessionIds.has(sessionId);
+  }
+
   async start(
     request: RdpStartRequest,
     ownerWindow: string,
     bounds?: RdpSurfaceRect,
     preparedLifecycleId?: string,
+    lifecycleGeneration?: number,
   ): Promise<RdpBackendEvent> {
     const lifecycleId = preparedLifecycleId ?? this.beginStart(request.sessionId);
     if (this.lifecycleIds.get(request.sessionId) !== lifecycleId) {
       throw new Error('RDP connection was superseded before its native session could start.');
+    }
+    if (lifecycleGeneration === undefined) {
+      this.lifecycleGenerations.delete(request.sessionId);
+    } else {
+      this.lifecycleGenerations.set(request.sessionId, lifecycleGeneration);
     }
     const remembered = bounds ? sanitizeBounds(bounds) : this.bounds.get(request.sessionId);
     if (remembered) this.bounds.set(request.sessionId, remembered);
@@ -161,6 +178,7 @@ export class RdpBackendClient {
         ownerWindow,
         profile: request.profile,
         bounds: remembered,
+        lifecycleGeneration,
       });
       if (this.lifecycleIds.get(request.sessionId) !== lifecycleId) {
         throw new Error('RDP connection was superseded while its native session was starting.');
@@ -174,6 +192,7 @@ export class RdpBackendClient {
           requestId: randomUUID(),
           sessionId: request.sessionId,
           lifecycleId,
+          lifecycleGeneration,
           ownerWindow,
           bounds: remembered,
         }).catch(() => undefined);
@@ -207,6 +226,31 @@ export class RdpBackendClient {
   }
 
   async command(
+    op: Extract<RdpWireCommand['op'], 'show' | 'hide' | 'focus' | 'disconnect'>,
+    sessionId: string,
+    ownerWindow: string,
+    bounds?: RdpSurfaceRect,
+    expectedLifecycleId?: string,
+  ): Promise<RdpBackendEvent> {
+    if (op !== 'disconnect') {
+      return this.executeCommand(op, sessionId, ownerWindow, bounds, expectedLifecycleId);
+    }
+    const pending = this.disconnects.get(sessionId);
+    if (pending) return pending;
+    const disconnect = this.executeCommand(
+      op,
+      sessionId,
+      ownerWindow,
+      bounds,
+      expectedLifecycleId,
+    ).finally(() => {
+      if (this.disconnects.get(sessionId) === disconnect) this.disconnects.delete(sessionId);
+    });
+    this.disconnects.set(sessionId, disconnect);
+    return disconnect;
+  }
+
+  private async executeCommand(
     op: Extract<RdpWireCommand['op'], 'show' | 'hide' | 'focus' | 'disconnect'>,
     sessionId: string,
     ownerWindow: string,
@@ -311,14 +355,12 @@ export class RdpBackendClient {
       }
 
       this.process = child;
-      const output = createInterface({ input: child.stdout });
-      output.on('line', (line) => this.handleLineForProcess(child, line));
+      child.stdout.setEncoding('utf8');
+      child.stdout.on('data', (chunk: string | Buffer) => {
+        this.readOutputForProcess(child, String(chunk));
+      });
       child.stdin.once('error', () => {
-        if (this.process !== child) return;
-        this.process = undefined;
-        this.rejectPending('RDP backend input pipe closed.');
-        this.terminateSessions();
-        void stopChildProcess(child);
+        this.handleProcessFailure(child, 'RDP backend input pipe closed.');
       });
       child.stderr.on('data', () => {
         // The Go boundary intentionally emits only sanitized errors. Do not surface or retain
@@ -326,17 +368,11 @@ export class RdpBackendClient {
       });
       child.once('error', (error) => {
         if (this.process !== child) return;
-        this.process = undefined;
         reject(toError(error, 'Could not start the RDP backend.'));
-        this.rejectPending('RDP backend failed to start.');
-        this.terminateSessions();
+        this.handleProcessFailure(child, 'RDP backend failed to start.');
       });
       child.once('close', () => {
-        output.close();
-        if (this.process !== child) return;
-        this.process = undefined;
-        this.rejectPending('RDP backend exited.');
-        this.terminateSessions();
+        this.handleProcessFailure(child, 'RDP backend exited.');
       });
       resolve();
     }).finally(() => {
@@ -358,6 +394,15 @@ export class RdpBackendClient {
     child: ChildProcessWithoutNullStreams,
     command: RdpWireCommand,
   ): Promise<RdpBackendEvent> {
+    let encodedCommand: string;
+    try {
+      encodedCommand = JSON.stringify(command);
+    } catch {
+      return Promise.reject(new Error('RDP command could not be encoded.'));
+    }
+    if (Buffer.byteLength(encodedCommand, 'utf8') > maxRdpCommandBytes) {
+      return Promise.reject(new Error('RDP command is too large.'));
+    }
     return new Promise<RdpBackendEvent>((resolve, reject) => {
       const timer = setTimeout(
         () => {
@@ -373,9 +418,10 @@ export class RdpBackendClient {
         op: command.op,
         sessionId: command.sessionId,
         lifecycleId: command.lifecycleId,
+        lifecycleGeneration: command.lifecycleGeneration,
       });
       try {
-        child.stdin.write(`${JSON.stringify(command)}\n`, (error) => {
+        child.stdin.write(`${encodedCommand}\n`, (error) => {
           if (!error) return;
           clearTimeout(timer);
           if (this.pending.delete(command.requestId)) {
@@ -398,14 +444,36 @@ export class RdpBackendClient {
       return;
     }
     if (!event || typeof event.type !== 'string') return;
-    if (event.requestId) {
-      const request = this.pending.get(event.requestId);
+    const requestId = event.requestId;
+    if (requestId) {
+      const request = this.pending.get(requestId);
       if (request) {
+        if (request.lifecycleId !== undefined && event.lifecycleId === undefined) {
+          event = { ...event, lifecycleId: request.lifecycleId };
+        }
+        if (request.lifecycleGeneration !== undefined && event.lifecycleGeneration === undefined) {
+          event = { ...event, lifecycleGeneration: request.lifecycleGeneration };
+        }
         clearTimeout(request.timer);
-        this.pending.delete(event.requestId);
+        this.pending.delete(requestId);
         if (event.type === 'error') {
           request.reject(new Error(event.message || 'RDP backend command failed.'));
         } else {
+          const startLifecycleIsCurrent =
+            !request.lifecycleId ||
+            (request.sessionId !== undefined &&
+              this.lifecycleIds.get(request.sessionId) === request.lifecycleId);
+          if (request.op === 'start' && request.sessionId && startLifecycleIsCurrent) {
+            this.sessionIds.add(request.sessionId);
+            if (request.lifecycleId) {
+              this.lifecycleIds.set(request.sessionId, request.lifecycleId);
+            }
+            if (request.lifecycleGeneration === undefined) {
+              this.lifecycleGenerations.delete(request.sessionId);
+            } else {
+              this.lifecycleGenerations.set(request.sessionId, request.lifecycleGeneration);
+            }
+          }
           request.resolve(event);
         }
       }
@@ -419,6 +487,7 @@ export class RdpBackendClient {
     }
     if (
       event.sessionId &&
+      !requestId &&
       (event.type === 'disconnected' ||
         event.type === 'fatalError' ||
         event.type === 'exited' ||
@@ -434,10 +503,46 @@ export class RdpBackendClient {
     this.handleLine(line);
   }
 
+  private readOutputForProcess(child: ChildProcessWithoutNullStreams, chunk: string): void {
+    if (this.process !== child) return;
+    this.outputBuffer += chunk;
+    while (true) {
+      const newline = this.outputBuffer.indexOf('\n');
+      if (newline < 0) {
+        if (Buffer.byteLength(this.outputBuffer, 'utf8') > maxRdpEventBytes) {
+          this.handleProcessFailure(child, 'RDP backend emitted an oversized event.');
+        }
+        return;
+      }
+      const line = this.outputBuffer.slice(0, newline).trim();
+      this.outputBuffer = this.outputBuffer.slice(newline + 1);
+      if (Buffer.byteLength(line, 'utf8') > maxRdpEventBytes) {
+        this.handleProcessFailure(child, 'RDP backend emitted an oversized event.');
+        return;
+      }
+      if (line) this.handleLine(line);
+      if (this.process !== child) return;
+    }
+  }
+
   private forgetSession(sessionId: string): void {
     this.sessionIds.delete(sessionId);
     this.lifecycleIds.delete(sessionId);
     this.bounds.delete(sessionId);
+    this.lifecycleGenerations.delete(sessionId);
+  }
+
+  private handleProcessFailure(child: ChildProcessWithoutNullStreams, message: string): void {
+    if (this.process !== child) return;
+    this.process = undefined;
+    this.outputBuffer = '';
+    try {
+      if (!child.killed) child.kill();
+    } catch {
+      // The process can already be gone when its close event reaches this handler.
+    }
+    this.rejectPending(message);
+    this.terminateSessions(-1, 'The RDP controller exited unexpectedly.');
   }
 
   private async disposeCurrentProcess(): Promise<void> {
@@ -461,20 +566,26 @@ export class RdpBackendClient {
     if (this.process === child) this.process = undefined;
   }
 
-  private terminateSessions(): void {
-    const sessions = [...this.sessionIds].map((sessionId) => ({
+  private terminateSessions(code?: number, message?: string): void {
+    const trackedSessionIds = new Set([...this.sessionIds, ...this.lifecycleIds.keys()]);
+    const sessions = [...trackedSessionIds].map((sessionId) => ({
       sessionId,
       lifecycleId: this.lifecycleIds.get(sessionId),
+      lifecycleGeneration: this.lifecycleGenerations.get(sessionId),
     }));
     this.sessionIds.clear();
     this.lifecycleIds.clear();
-    for (const { sessionId, lifecycleId } of sessions) {
+    this.lifecycleGenerations.clear();
+    for (const { sessionId, lifecycleId, lifecycleGeneration } of sessions) {
       this.bounds.delete(sessionId);
       for (const listener of this.listeners) {
         listener({
           type: 'exited',
           sessionId,
           ...(lifecycleId ? { lifecycleId } : {}),
+          ...(lifecycleGeneration !== undefined ? { lifecycleGeneration } : {}),
+          ...(code !== undefined ? { code } : {}),
+          ...(message ? { message } : {}),
         });
       }
     }
@@ -491,11 +602,15 @@ export class RdpBackendClient {
 
 function sanitizeBounds(bounds: RdpSurfaceRect): RdpSurfaceRect {
   return {
-    x: finiteInteger(bounds.x),
-    y: finiteInteger(bounds.y),
-    width: Math.max(1, Math.min(16_384, finiteInteger(bounds.width))),
-    height: Math.max(1, Math.min(16_384, finiteInteger(bounds.height))),
+    x: clamp(finiteInteger(bounds.x), -maxRdpSurfaceCoordinate, maxRdpSurfaceCoordinate),
+    y: clamp(finiteInteger(bounds.y), -maxRdpSurfaceCoordinate, maxRdpSurfaceCoordinate),
+    width: clamp(finiteInteger(bounds.width), 1, maxRdpSurfaceDimension),
+    height: clamp(finiteInteger(bounds.height), 1, maxRdpSurfaceDimension),
   };
+}
+
+function clamp(value: number, minimum: number, maximum: number): number {
+  return Math.max(minimum, Math.min(maximum, value));
 }
 
 function finiteInteger(value: number): number {

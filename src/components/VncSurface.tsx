@@ -96,12 +96,18 @@ function isFormInteraction(target: EventTarget | null): boolean {
 export function VncSurface({
   isAuthorized,
   session,
+  connectionGeneration,
+  disconnected,
   onBitwardenUnlockRequired,
+  onReconnect,
   onStatusChange,
 }: {
   isAuthorized: boolean;
   session: VncSurfaceSession;
+  connectionGeneration: number;
+  disconnected: boolean;
   onBitwardenUnlockRequired?: (reason: string, retry: () => void) => void;
+  onReconnect?: () => void;
   onStatusChange?: (status: VncStatus) => void;
 }) {
   const [status, setStatus] = useState<VncStatus>('idle');
@@ -117,6 +123,7 @@ export function VncSurface({
   const pressedKeys = useRef(new Map<string, number>());
   const lastPointer = useRef<{ x: number; y: number } | null>(null);
   const pointerMoveGeneration = useRef(0);
+  const connectAttempt = useRef(0);
   const pendingPointerMove = useRef<PendingPointerMove | null>(null);
   const pointerMoveSending = useRef<number | null>(null);
   const buttons = useRef(0);
@@ -127,11 +134,36 @@ export function VncSurface({
   }, [onStatusChange]);
   useEffect(() => onStatusChangeRef.current?.(status), [status]);
 
+  useEffect(() => {
+    if (!disconnected) return;
+    connectAttempt.current += 1;
+    setStatus('disconnected');
+    setMessage('The session was disconnected.');
+    setPasswordRequired(false);
+    setBitwardenUnlockRequired(false);
+    setPassword('');
+    setTunnelProgress(null);
+    setFrame(undefined);
+    setFrameSize({ width: 0, height: 0 });
+    lastPointer.current = null;
+    pointerMoveGeneration.current += 1;
+    pendingPointerMove.current = null;
+    pressedKeys.current.clear();
+    buttons.current = 0;
+  }, [disconnected]);
+
   const sendCommand = useCallback(
-    async (command: WormholeVncCommand, showError = false): Promise<boolean> => {
+    async (
+      command: WormholeVncCommand,
+      showError = false,
+      expectedConnectAttempt?: number,
+    ): Promise<boolean> => {
+      const canShowError = () =>
+        showError &&
+        (expectedConnectAttempt === undefined || connectAttempt.current === expectedConnectAttempt);
       const api = window.wormhole;
       if (!api) {
-        if (showError) {
+        if (canShowError()) {
           setStatus('failed');
           setMessage('The native VNC bridge is unavailable.');
         }
@@ -139,7 +171,7 @@ export function VncSurface({
       }
       try {
         const response = await api.sendVncCommand(command);
-        if (!response.ok && showError) {
+        if (!response.ok && canShowError()) {
           setStatus('failed');
           setMessage(response.error ?? 'The native VNC backend rejected the request.');
           setPasswordRequired(isAuthenticationMessage(response.error));
@@ -147,7 +179,7 @@ export function VncSurface({
         }
         return response.ok;
       } catch (error) {
-        if (showError) {
+        if (canShowError()) {
           setStatus('failed');
           const message = error instanceof Error ? error.message : 'The native VNC backend failed.';
           setMessage(message);
@@ -161,6 +193,8 @@ export function VncSurface({
 
   const connect = useCallback(
     async (providedPassword?: string) => {
+      const attempt = connectAttempt.current + 1;
+      connectAttempt.current = attempt;
       setStatus('connecting');
       setMessage('');
       setPasswordRequired(false);
@@ -187,6 +221,7 @@ export function VncSurface({
             : { password: providedPassword, passwordProvided: true }),
         },
         true,
+        attempt,
       );
     },
     [
@@ -259,7 +294,7 @@ export function VncSurface({
       setBitwardenUnlockRequired(isBitwardenUnlockError(event.message));
     });
 
-    void connect();
+    if (!disconnected) void connect();
     const pressedKeysForCleanup = pressedKeys.current;
     return () => {
       mounted = false;
@@ -270,10 +305,11 @@ export function VncSurface({
       }
       pressedKeysForCleanup.clear();
       pointerMoveGeneration.current += 1;
+      connectAttempt.current += 1;
       pendingPointerMove.current = null;
       buttons.current = 0;
     };
-  }, [connect, sendCommand, session.id]);
+  }, [connect, connectionGeneration, disconnected, sendCommand, session.id]);
 
   useEffect(() => {
     if (
@@ -542,7 +578,10 @@ export function VncSurface({
                 </div>
               </form>
             ) : (
-              <Button onClick={() => void connect()} variant="outline">
+              <Button
+                onClick={() => (disconnected ? onReconnect?.() : void connect())}
+                variant="outline"
+              >
                 <RefreshCcw data-icon="inline-start" />
                 Reconnect
               </Button>

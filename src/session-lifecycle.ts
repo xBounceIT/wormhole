@@ -4,6 +4,9 @@ export type SessionLifecycleState = {
   protocol: string;
   status: string;
   rdpStatus?: string;
+  rdpExternal?: boolean;
+  rdpSystemClientSupported?: boolean;
+  vncConnectionGeneration?: number;
 };
 
 export function sessionRuntimeRetryKeys(
@@ -22,6 +25,58 @@ export function isSessionActive(session: SessionLifecycleState): boolean {
     return session.rdpStatus === 'starting' || session.rdpStatus === 'connected';
   }
   return session.status === 'connecting' || session.status === 'connected';
+}
+
+export function canDisconnectRemoteDesktopSession(session: SessionLifecycleState): boolean {
+  if (session.protocol === 'rdp') {
+    return (
+      session.rdpStatus === 'starting' ||
+      session.rdpStatus === 'connected' ||
+      session.rdpStatus === 'failed'
+    );
+  }
+  return (
+    session.protocol === 'vnc' &&
+    (session.status === 'connecting' || session.status === 'connected')
+  );
+}
+
+export function canOpenRdpSystemClient(session: SessionLifecycleState): boolean {
+  return (
+    session.protocol === 'rdp' &&
+    session.rdpSystemClientSupported === true &&
+    session.rdpExternal !== true &&
+    session.rdpStatus !== 'starting'
+  );
+}
+
+export function disconnectedRemoteDesktopState(session: SessionLifecycleState): {
+  status: 'closed';
+  rdpStatus?: 'disconnected';
+  rdpExternal?: false;
+  vncConnectionGeneration?: number;
+} {
+  if (session.protocol === 'rdp') {
+    return {
+      status: 'closed',
+      rdpStatus: 'disconnected',
+      rdpExternal: false,
+    };
+  }
+  return {
+    status: 'closed',
+    vncConnectionGeneration: session.vncConnectionGeneration,
+  };
+}
+
+export function reconnectingVncState(session: SessionLifecycleState): {
+  status: 'connecting';
+  vncConnectionGeneration: number;
+} {
+  return {
+    status: 'connecting',
+    vncConnectionGeneration: (session.vncConnectionGeneration ?? 0) + 1,
+  };
 }
 
 export function shouldConfirmConnectedTabClose(

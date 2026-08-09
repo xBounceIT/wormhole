@@ -21,6 +21,37 @@ import (
 	vnc "github.com/kward/go-vnc"
 )
 
+func TestVncDisconnectWaitsForConnectCleanupBoundary(t *testing.T) {
+	session := newVncSession("session-1", nil, nil)
+	session.done = make(chan struct{})
+	finished := make(chan struct{})
+	go func() {
+		session.closeAndWait()
+		close(finished)
+	}()
+
+	deadline := time.After(time.Second)
+	for !session.isStopped() {
+		select {
+		case <-deadline:
+			t.Fatal("VNC disconnect did not begin")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	select {
+	case <-finished:
+		t.Fatal("VNC disconnect completed before the connect goroutine released its resources")
+	default:
+	}
+	close(session.done)
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("VNC disconnect did not complete after connect cleanup")
+	}
+}
+
 func TestSplitVncHostPortSupportsCommonForms(t *testing.T) {
 	tests := []struct {
 		name     string

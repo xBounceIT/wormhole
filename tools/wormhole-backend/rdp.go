@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // The RDP controller is intentionally a small process supervisor rather than an RDP
@@ -26,7 +27,10 @@ import (
 const (
 	rdpMaxCommandBytes = 256 * 1024
 	rdpMaxHostLength   = 253
+	rdpMaxCoordinate   = 1_000_000
+	rdpMaxDimension    = 16_384
 	rdpDefaultPort     = 3389
+	rdpDisconnectGrace = 10 * time.Second
 )
 
 type rdpBounds struct {
@@ -37,7 +41,10 @@ type rdpBounds struct {
 }
 
 func (b rdpBounds) valid() bool {
-	return b.Width >= 1 && b.Height >= 1 && b.Width <= 16384 && b.Height <= 16384
+	return b.X >= -rdpMaxCoordinate && b.X <= rdpMaxCoordinate &&
+		b.Y >= -rdpMaxCoordinate && b.Y <= rdpMaxCoordinate &&
+		b.Width >= 1 && b.Height >= 1 &&
+		b.Width <= rdpMaxDimension && b.Height <= rdpMaxDimension
 }
 
 type rdpProfile struct {
@@ -84,42 +91,80 @@ type rdpProfile struct {
 }
 
 type rdpCommand struct {
-	Op          string     `json:"op"`
-	RequestID   string     `json:"requestId,omitempty"`
-	SessionID   string     `json:"sessionId"`
-	LifecycleID string     `json:"lifecycleId,omitempty"`
-	OwnerWindow string     `json:"ownerWindow,omitempty"`
-	Bounds      rdpBounds  `json:"bounds,omitempty"`
-	Profile     rdpProfile `json:"profile,omitempty"`
-	tunnel      *tunnelRuntime
-	forwarder   *tunnelForwarder
+	Op                  string     `json:"op"`
+	RequestID           string     `json:"requestId,omitempty"`
+	SessionID           string     `json:"sessionId"`
+	LifecycleID         string     `json:"lifecycleId,omitempty"`
+	OwnerWindow         string     `json:"ownerWindow,omitempty"`
+	Bounds              rdpBounds  `json:"bounds,omitempty"`
+	Profile             rdpProfile `json:"profile,omitempty"`
+	LifecycleGeneration uint64     `json:"lifecycleGeneration,omitempty"`
+	tunnel              *tunnelRuntime
+	forwarder           *tunnelForwarder
 }
 
 type rdpEvent struct {
-	Type              string `json:"type"`
-	RequestID         string `json:"requestId,omitempty"`
-	SessionID         string `json:"sessionId,omitempty"`
-	LifecycleID       string `json:"lifecycleId,omitempty"`
-	Backend           string `json:"backend,omitempty"`
-	Code              int    `json:"code,omitempty"`
-	Attempt           int    `json:"attempt,omitempty"`
-	Max               int    `json:"max,omitempty"`
-	Message           string `json:"message,omitempty"`
-	CredentialFailure bool   `json:"credentialFailure,omitempty"`
+	Type                string `json:"type"`
+	RequestID           string `json:"requestId,omitempty"`
+	SessionID           string `json:"sessionId,omitempty"`
+	LifecycleID         string `json:"lifecycleId,omitempty"`
+	Backend             string `json:"backend,omitempty"`
+	Code                int    `json:"code,omitempty"`
+	Attempt             int    `json:"attempt,omitempty"`
+	Max                 int    `json:"max,omitempty"`
+	Message             string `json:"message,omitempty"`
+	CredentialFailure   bool   `json:"credentialFailure,omitempty"`
+	External            bool   `json:"external"`
+	LifecycleGeneration uint64 `json:"lifecycleGeneration,omitempty"`
+}
+
+type rdpSystemClientCapability struct {
+	Supported bool   `json:"supported"`
+	Reason    string `json:"reason,omitempty"`
+}
+
+func evaluateRdpSystemClientCapability(
+	profile rdpProfile,
+	tunnelEnabled bool,
+	goos string,
+	locateClient func() (string, error),
+) rdpSystemClientCapability {
+	if goos != "windows" {
+		return rdpSystemClientCapability{Reason: "System Remote Desktop is available only on Windows."}
+	}
+	if tunnelEnabled {
+		return rdpSystemClientCapability{Reason: "System Remote Desktop cannot safely use this connection's VPN tunnel."}
+	}
+	if profile.GatewayUsageMethod != 0 || strings.TrimSpace(profile.GatewayHostname) != "" {
+		return rdpSystemClientCapability{Reason: "System Remote Desktop routing is unavailable for RDP Gateway profiles."}
+	}
+	if _, err := locateClient(); err != nil {
+		return rdpSystemClientCapability{Reason: "The system Remote Desktop client is unavailable."}
+	}
+	return rdpSystemClientCapability{Supported: true}
 }
 
 type rdpProcess struct {
-	sessionID   string
-	lifecycleID string
-	backend     string
-	process     *exec.Cmd
-	stdin       io.WriteCloser
-	stdinMu     sync.Mutex
-	stopOnce    sync.Once
-	terminal    bool
-	external    bool
-	tunnel      *tunnelRuntime
-	forwarder   *tunnelForwarder
+	sessionID           string
+	lifecycleID         string
+	backend             string
+	process             *exec.Cmd
+	stdin               io.WriteCloser
+	stdinMu             sync.Mutex
+	stopOnce            sync.Once
+	startResponseMu     sync.Mutex
+	startRequestID      string
+	startResponded      bool
+	disconnectMu        sync.Mutex
+	disconnectRequestID string
+	disconnectSettled   bool
+	nativeEventsDone    chan struct{}
+	terminal            bool
+	disconnectRequested bool
+	external            bool
+	lifecycleGeneration uint64
+	tunnel              *tunnelRuntime
+	forwarder           *tunnelForwarder
 }
 
 type rdpController struct {
@@ -174,6 +219,19 @@ func (c *rdpController) start(command rdpCommand) {
 		writeRdpEvent(rdpEvent{Type: "error", RequestID: command.RequestID, LifecycleID: command.LifecycleID, Message: "RDP session ID is required"})
 		return
 	}
+	if command.Profile.UseExternalClient && strings.TrimSpace(command.Profile.NodeID) != "" {
+		profile, err := refreshSavedSystemRdpProfile(
+			command.Profile,
+			func(nodeID string) (rdpProfile, rdpSystemClientCapability, error) {
+				return resolveRdpSystemClientProfileFromDatabase(c.databasePath, nodeID)
+			},
+		)
+		if err != nil {
+			writeRdpEvent(rdpEvent{Type: "error", RequestID: command.RequestID, SessionID: command.SessionID, Message: err.Error()})
+			return
+		}
+		command.Profile = profile
+	}
 	if strings.TrimSpace(command.Profile.Host) == "" || len([]rune(strings.TrimSpace(command.Profile.Host))) > rdpMaxHostLength {
 		writeRdpEvent(rdpEvent{Type: "error", RequestID: command.RequestID, SessionID: command.SessionID, LifecycleID: command.LifecycleID, Message: "RDP host is invalid"})
 		return
@@ -191,6 +249,17 @@ func (c *rdpController) start(command rdpCommand) {
 	if err := validateRdpProfile(command.Profile); err != nil {
 		writeRdpEvent(rdpEvent{Type: "error", RequestID: command.RequestID, SessionID: command.SessionID, LifecycleID: command.LifecycleID, Message: err.Error()})
 		return
+	}
+	if command.Profile.UseExternalClient {
+		tunnelEnabled := command.Profile.TunnelEnabled != nil && *command.Profile.TunnelEnabled
+		if command.Profile.TunnelEnabled == nil && command.Profile.TunnelConfigID != "" {
+			tunnelEnabled = true
+		}
+		capability := evaluateRdpSystemClientCapability(command.Profile, tunnelEnabled, runtime.GOOS, systemRdpClientExecutable)
+		if !capability.Supported {
+			writeRdpEvent(rdpEvent{Type: "error", RequestID: command.RequestID, SessionID: command.SessionID, Message: capability.Reason})
+			return
+		}
 	}
 	if command.Bounds.Width == 0 || command.Bounds.Height == 0 {
 		// The first surface measurement can arrive after the start request. A one-pixel seed keeps
@@ -234,6 +303,31 @@ func (c *rdpController) start(command rdpCommand) {
 		return
 	}
 	c.startFreeRdp(command)
+}
+
+func refreshSavedSystemRdpProfile(
+	profile rdpProfile,
+	resolve func(string) (rdpProfile, rdpSystemClientCapability, error),
+) (rdpProfile, error) {
+	if !profile.UseExternalClient || strings.TrimSpace(profile.NodeID) == "" {
+		return profile, nil
+	}
+	resolved, capability, err := resolve(profile.NodeID)
+	if err != nil {
+		return rdpProfile{}, err
+	}
+	if !capability.Supported {
+		return rdpProfile{}, errors.New(capability.Reason)
+	}
+	// Never trust a profile snapshot that crossed the Electron boundary for a saved system-client
+	// launch. The controller owns the final database read and strips credentials defensively.
+	resolved.UseExternalClient = true
+	resolved.Username = ""
+	resolved.Domain = ""
+	resolved.Password = ""
+	resolved.GatewayUsername = ""
+	resolved.GatewayPassword = ""
+	return resolved, nil
 }
 
 func (c *rdpController) routeRdpThroughTunnel(command *rdpCommand, host string, port int) error {
@@ -460,6 +554,7 @@ func (c *rdpController) startNative(command rdpCommand) {
 	}
 
 	cmd := exec.Command(hostPath)
+	cmd.Env = rdpChildEnvironment(os.Environ())
 	process, err := cmd.StdinPipe()
 	if err != nil {
 		writeRdpEvent(rdpEvent{Type: "error", RequestID: command.RequestID, SessionID: command.SessionID, LifecycleID: command.LifecycleID, Backend: "activex", Message: "could not open the Windows native RDP host"})
@@ -479,7 +574,11 @@ func (c *rdpController) startNative(command rdpCommand) {
 		return
 	}
 
-	running := &rdpProcess{sessionID: command.SessionID, lifecycleID: command.LifecycleID, backend: "activex", process: cmd, stdin: process, tunnel: command.tunnel, forwarder: command.forwarder}
+	running := &rdpProcess{
+		sessionID: command.SessionID, lifecycleID: command.LifecycleID, backend: "activex", process: cmd, stdin: process,
+		startRequestID: command.RequestID, nativeEventsDone: make(chan struct{}),
+		lifecycleGeneration: command.LifecycleGeneration, tunnel: command.tunnel, forwarder: command.forwarder,
+	}
 	c.mu.Lock()
 	c.processes[command.SessionID] = running
 	c.mu.Unlock()
@@ -496,8 +595,6 @@ func (c *rdpController) startNative(command rdpCommand) {
 		writeRdpEvent(rdpEvent{Type: "error", RequestID: command.RequestID, SessionID: command.SessionID, LifecycleID: command.LifecycleID, Backend: "activex", Message: "could not initialize the Windows native RDP host"})
 		return
 	}
-	writeRdpEvent(rdpEvent{Type: "started", RequestID: command.RequestID, SessionID: command.SessionID, LifecycleID: command.LifecycleID, Backend: "activex"})
-
 	go c.readNativeEvents(running, stdout)
 	go c.waitForExit(running)
 }
@@ -509,7 +606,14 @@ func (c *rdpController) startExternalRdp(command rdpCommand) {
 	}()
 	// mstsc has no supported secret-bearing command-line contract. Deliberately pass only the
 	// target; Windows credential roaming or the native prompt owns authentication for this mode.
-	cmd := exec.Command("mstsc.exe", "/v:"+formatRdpTarget(command.Profile.Host, command.Profile.Port))
+	executable, err := systemRdpClientExecutable()
+	if err != nil {
+		writeRdpEvent(rdpEvent{Type: "error", RequestID: command.RequestID, SessionID: command.SessionID, Backend: "activex", Message: "the system Remote Desktop client is unavailable"})
+		return
+	}
+	args := buildSystemRdpInvocation(command.Profile)
+	cmd := exec.Command(executable, args...)
+	cmd.Env = rdpChildEnvironment(os.Environ())
 	cmd.Stdin = nil
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
@@ -517,17 +621,22 @@ func (c *rdpController) startExternalRdp(command rdpCommand) {
 		writeRdpEvent(rdpEvent{Type: "error", RequestID: command.RequestID, SessionID: command.SessionID, LifecycleID: command.LifecycleID, Backend: "activex", Message: "could not start the system Remote Desktop client"})
 		return
 	}
-	running := &rdpProcess{sessionID: command.SessionID, lifecycleID: command.LifecycleID, backend: "activex", process: cmd, external: true}
+	running := &rdpProcess{sessionID: command.SessionID, lifecycleID: command.LifecycleID, backend: "activex", process: cmd, external: true, lifecycleGeneration: command.LifecycleGeneration}
 	c.mu.Lock()
 	c.processes[command.SessionID] = running
 	c.mu.Unlock()
-	writeRdpEvent(rdpEvent{Type: "started", RequestID: command.RequestID, SessionID: command.SessionID, LifecycleID: command.LifecycleID, Backend: "activex"})
-	writeRdpEvent(rdpEvent{Type: "connected", SessionID: command.SessionID, LifecycleID: command.LifecycleID, Backend: "activex"})
+	writeRdpEvent(rdpEvent{Type: "started", RequestID: command.RequestID, SessionID: command.SessionID, LifecycleID: command.LifecycleID, Backend: "activex", External: true, LifecycleGeneration: command.LifecycleGeneration})
+	writeRdpEvent(rdpEvent{Type: "connected", SessionID: command.SessionID, LifecycleID: command.LifecycleID, Backend: "activex", External: true, LifecycleGeneration: command.LifecycleGeneration})
 	go c.waitForExit(running)
+}
+
+func buildSystemRdpInvocation(profile rdpProfile) []string {
+	return []string{"/v:" + formatRdpTarget(profile.Host, profile.Port)}
 }
 
 func (c *rdpController) readNativeEvents(process *rdpProcess, stdout io.ReadCloser) {
 	defer stdout.Close()
+	defer close(process.nativeEventsDone)
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 8*1024), 64*1024)
 	for scanner.Scan() {
@@ -539,13 +648,112 @@ func (c *rdpController) readNativeEvents(process *rdpProcess, stdout io.ReadClos
 		event.SessionID = process.sessionID
 		event.LifecycleID = process.lifecycleID
 		event.Backend = process.backend
-		if event.Type == "disconnected" || event.Type == "fatalError" {
+		event.External = process.external
+		event.LifecycleGeneration = process.lifecycleGeneration
+		process.recordStartResponse(event)
+		if !c.shouldForwardProcessEvent(process, event) {
+			continue
+		}
+		if !c.finalizeRequestedRdpDisconnect(process, event) {
+			continue
+		}
+		if isRdpTerminalLifecycleEvent(event) {
 			c.markProcessTerminal(process)
 		}
 		// The helper may include a request id for command acknowledgements, but it must never
 		// echo profile or password fields across this boundary.
 		writeRdpEvent(event)
 	}
+}
+
+func isRdpTerminalLifecycleEvent(event rdpEvent) bool {
+	return event.RequestID == "" && (event.Type == "disconnected" || event.Type == "fatalError")
+}
+
+func (process *rdpProcess) recordStartResponse(event rdpEvent) {
+	if event.RequestID == "" || event.RequestID != process.startRequestID {
+		return
+	}
+	process.startResponseMu.Lock()
+	process.startResponded = true
+	process.startResponseMu.Unlock()
+}
+
+func (process *rdpProcess) unansweredStartRequestID() string {
+	process.startResponseMu.Lock()
+	defer process.startResponseMu.Unlock()
+	if process.startResponded {
+		return ""
+	}
+	return process.startRequestID
+}
+
+func (c *rdpController) finalizeRequestedRdpDisconnect(process *rdpProcess, event rdpEvent) bool {
+	if event.RequestID == "" || (event.Type != "ack" && event.Type != "error") {
+		return true
+	}
+	c.mu.Lock()
+	disconnectRequested := process.disconnectRequested
+	c.mu.Unlock()
+	if !disconnectRequested {
+		return true
+	}
+	if !process.isDisconnectRequest(event.RequestID) {
+		return true
+	}
+	return c.completeRequestedRdpDisconnect(process, event.RequestID)
+}
+
+func (process *rdpProcess) beginDisconnect(requestID string) bool {
+	process.disconnectMu.Lock()
+	defer process.disconnectMu.Unlock()
+	if process.disconnectRequestID != "" {
+		return false
+	}
+	process.disconnectRequestID = requestID
+	return true
+}
+
+func (process *rdpProcess) claimDisconnect(requestID string) bool {
+	process.disconnectMu.Lock()
+	defer process.disconnectMu.Unlock()
+	if process.disconnectSettled || process.disconnectRequestID != requestID {
+		return false
+	}
+	process.disconnectSettled = true
+	return true
+}
+
+func (process *rdpProcess) isDisconnectRequest(requestID string) bool {
+	process.disconnectMu.Lock()
+	defer process.disconnectMu.Unlock()
+	return process.disconnectRequestID == requestID
+}
+
+func (c *rdpController) completeRequestedRdpDisconnect(process *rdpProcess, requestID string) bool {
+	if !process.claimDisconnect(requestID) {
+		return false
+	}
+	process.stopOnce.Do(func() {
+		stopRdpProcess(process)
+	})
+	return true
+}
+
+func (c *rdpController) scheduleRequestedRdpDisconnectFallback(process *rdpProcess, requestID string) {
+	go func() {
+		timer := time.NewTimer(rdpDisconnectGrace)
+		defer timer.Stop()
+		<-timer.C
+		if !c.completeRequestedRdpDisconnect(process, requestID) {
+			return
+		}
+		writeRdpEvent(rdpEvent{
+			Type: "ack", RequestID: requestID, SessionID: process.sessionID,
+			LifecycleID: process.lifecycleID, Backend: process.backend,
+			LifecycleGeneration: process.lifecycleGeneration,
+		})
+	}()
 }
 
 func classifyNativeRdpEvent(event *rdpEvent) {
@@ -587,6 +795,7 @@ func (c *rdpController) startFreeRdp(command rdpCommand) {
 	}
 
 	cmd := exec.Command(client, args...)
+	cmd.Env = rdpChildEnvironment(os.Environ())
 	cmd.Stdin = strings.NewReader(input)
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
@@ -594,23 +803,27 @@ func (c *rdpController) startFreeRdp(command rdpCommand) {
 		writeRdpEvent(rdpEvent{Type: "error", RequestID: command.RequestID, SessionID: command.SessionID, LifecycleID: command.LifecycleID, Backend: "freerdp", Message: "could not start FreeRDP"})
 		return
 	}
-	running := &rdpProcess{sessionID: command.SessionID, lifecycleID: command.LifecycleID, backend: "freerdp", process: cmd, tunnel: command.tunnel, forwarder: command.forwarder}
+	running := &rdpProcess{sessionID: command.SessionID, lifecycleID: command.LifecycleID, backend: "freerdp", process: cmd, lifecycleGeneration: command.LifecycleGeneration, tunnel: command.tunnel, forwarder: command.forwarder}
 	c.mu.Lock()
 	c.processes[command.SessionID] = running
 	c.mu.Unlock()
 	handoff = true
-	writeRdpEvent(rdpEvent{Type: "started", RequestID: command.RequestID, SessionID: command.SessionID, LifecycleID: command.LifecycleID, Backend: "freerdp"})
+	writeRdpEvent(rdpEvent{Type: "started", RequestID: command.RequestID, SessionID: command.SessionID, LifecycleID: command.LifecycleID, Backend: "freerdp", LifecycleGeneration: command.LifecycleGeneration})
 	// FreeRDP's X11/SDL clients do not expose a stable machine-readable connected event across
 	// versions. Treat successful process launch as surface readiness; a non-zero exit still turns
 	// the session into a failure, while a normal exit becomes a clean disconnect.
-	writeRdpEvent(rdpEvent{Type: "connected", SessionID: command.SessionID, LifecycleID: command.LifecycleID, Backend: "freerdp"})
+	writeRdpEvent(rdpEvent{Type: "connected", SessionID: command.SessionID, LifecycleID: command.LifecycleID, Backend: "freerdp", LifecycleGeneration: command.LifecycleGeneration})
 	go c.waitForExit(running)
 }
 
 func (c *rdpController) waitForExit(process *rdpProcess) {
 	err := process.process.Wait()
+	if process.nativeEventsDone != nil {
+		<-process.nativeEventsDone
+	}
 	c.mu.Lock()
 	wasCurrent := false
+	disconnectRequested := process.disconnectRequested
 	if current, ok := c.processes[process.sessionID]; ok && current == process {
 		delete(c.processes, process.sessionID)
 		wasCurrent = true
@@ -626,16 +839,40 @@ func (c *rdpController) waitForExit(process *rdpProcess) {
 		// exited event that could overwrite the new attempt's UI state.
 		return
 	}
-	code := 0
-	if err != nil {
-		var exitError *exec.ExitError
-		if errors.As(err, &exitError) {
-			code = exitError.ExitCode()
-		} else {
-			code = -1
-		}
+	unansweredStart := process.unansweredStartRequestID()
+	if unansweredStart != "" && !disconnectRequested {
+		writeRdpEvent(rdpEvent{
+			Type: "error", RequestID: unansweredStart, SessionID: process.sessionID,
+			Backend: process.backend, Message: "native RDP host exited before initialization completed",
+			LifecycleID: process.lifecycleID, LifecycleGeneration: process.lifecycleGeneration,
+		})
 	}
-	writeRdpEvent(rdpEvent{Type: "exited", SessionID: process.sessionID, LifecycleID: process.lifecycleID, Backend: process.backend, Code: code})
+	code := rdpProcessExitCode(err, disconnectRequested)
+	if unansweredStart != "" && !disconnectRequested && code == 0 {
+		code = -1
+	}
+	writeRdpEvent(rdpEvent{Type: "exited", SessionID: process.sessionID, LifecycleID: process.lifecycleID, Backend: process.backend, Code: code, External: process.external, LifecycleGeneration: process.lifecycleGeneration})
+}
+
+func (c *rdpController) shouldForwardProcessEvent(process *rdpProcess, event rdpEvent) bool {
+	if event.RequestID != "" {
+		return true
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	current := c.processes[process.sessionID]
+	return current == process && !process.terminal && !process.disconnectRequested
+}
+
+func rdpProcessExitCode(err error, disconnectRequested bool) int {
+	if err == nil || disconnectRequested {
+		return 0
+	}
+	var exitError *exec.ExitError
+	if errors.As(err, &exitError) {
+		return exitError.ExitCode()
+	}
+	return -1
 }
 
 func (c *rdpController) forward(command rdpCommand) {
@@ -656,7 +893,7 @@ func (c *rdpController) forward(command rdpCommand) {
 	}
 	if process.external {
 		if command.Op == "disconnect" {
-			c.markProcessTerminal(process)
+			c.markProcessDisconnectRequested(process)
 			c.stop(command.SessionID)
 		}
 		writeRdpEvent(rdpEvent{Type: "ack", RequestID: command.RequestID, SessionID: command.SessionID, LifecycleID: command.LifecycleID, Backend: process.backend})
@@ -664,7 +901,7 @@ func (c *rdpController) forward(command rdpCommand) {
 	}
 	if process.backend == "freerdp" {
 		if command.Op == "disconnect" {
-			c.markProcessTerminal(process)
+			c.markProcessDisconnectRequested(process)
 			c.stop(command.SessionID)
 		}
 		writeRdpEvent(rdpEvent{Type: "ack", RequestID: command.RequestID, SessionID: command.SessionID, LifecycleID: command.LifecycleID, Backend: process.backend})
@@ -673,9 +910,18 @@ func (c *rdpController) forward(command rdpCommand) {
 	if command.Op == "disconnect" {
 		// Allow an immediate Retry to replace this process while the native helper performs its
 		// orderly STA teardown and before waitForExit observes the closed pipe.
-		c.markProcessTerminal(process)
+		c.markProcessDisconnectRequested(process)
+		if !process.beginDisconnect(command.RequestID) {
+			writeRdpEvent(rdpEvent{Type: "error", RequestID: command.RequestID, SessionID: command.SessionID, Backend: process.backend, Message: "RDP disconnect is already in progress"})
+			return
+		}
 	}
 	if err := process.write(command); err != nil {
+		if command.Op == "disconnect" {
+			c.completeRequestedRdpDisconnect(process, command.RequestID)
+			writeRdpEvent(rdpEvent{Type: "ack", RequestID: command.RequestID, SessionID: command.SessionID, LifecycleID: command.LifecycleID, Backend: process.backend})
+			return
+		}
 		writeRdpEvent(rdpEvent{Type: "error", RequestID: command.RequestID, SessionID: command.SessionID, LifecycleID: command.LifecycleID, Backend: process.backend, Message: "native RDP host is not responding"})
 		return
 	}
@@ -683,6 +929,9 @@ func (c *rdpController) forward(command rdpCommand) {
 		// The native helper acknowledges after the STA command has completed. Do not synthesize a
 		// second acknowledgement here; duplicate request IDs can otherwise race the real helper
 		// response across the Go/Electron boundary.
+		if command.Op == "disconnect" {
+			c.scheduleRequestedRdpDisconnectFallback(process, command.RequestID)
+		}
 		return
 	}
 	writeRdpEvent(rdpEvent{Type: "ack", RequestID: command.RequestID, SessionID: command.SessionID, LifecycleID: command.LifecycleID, Backend: process.backend})
@@ -693,6 +942,15 @@ func (c *rdpController) markProcessTerminal(process *rdpProcess) {
 	defer c.mu.Unlock()
 	if current, ok := c.processes[process.sessionID]; ok && current == process {
 		process.terminal = true
+	}
+}
+
+func (c *rdpController) markProcessDisconnectRequested(process *rdpProcess) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if current, ok := c.processes[process.sessionID]; ok && current == process {
+		process.terminal = true
+		process.disconnectRequested = true
 	}
 }
 
@@ -919,6 +1177,12 @@ func buildFreeRdpInvocation(command rdpCommand) ([]string, string, error) {
 	// FreeRDP accepts one complete argument per stdin line. Supplying every argument through this
 	// channel keeps connection and Gateway passwords out of the operating-system process list.
 	return []string{"/args-from:stdin"}, strings.Join(arguments, "\n") + "\n", nil
+}
+
+func rdpChildEnvironment(base []string) []string {
+	// RDP helpers need the ordinary desktop environment, but never a Bitwarden session inherited
+	// from the process that launched Wormhole. Reuse the case-insensitive Windows-safe scrubber.
+	return bitwardenCliMergeEnv(base, nil)
 }
 
 func freeRdpNetworkName(speed int) string {

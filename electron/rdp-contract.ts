@@ -5,6 +5,24 @@ export type RdpSurfaceRect = {
   height: number;
 };
 
+export const rdpMaxSurfaceCoordinate = 1_000_000;
+export const rdpMaxSurfaceDimension = 16_384;
+
+export function isRdpSurfaceRectWithinNativeBounds(rect: RdpSurfaceRect): boolean {
+  return (
+    Number.isFinite(rect.x) &&
+    Number.isFinite(rect.y) &&
+    Number.isFinite(rect.width) &&
+    Number.isFinite(rect.height) &&
+    Math.abs(rect.x) <= rdpMaxSurfaceCoordinate &&
+    Math.abs(rect.y) <= rdpMaxSurfaceCoordinate &&
+    rect.width >= 1 &&
+    rect.height >= 1 &&
+    rect.width <= rdpMaxSurfaceDimension &&
+    rect.height <= rdpMaxSurfaceDimension
+  );
+}
+
 export type RdpProfile = {
   nodeId?: string;
   /** Main-process credential resolution for an unsaved Quick Connect target. */
@@ -74,9 +92,45 @@ export function rdpGatewayUsername(
   return `${domain}\\${username}`;
 }
 
+export function rdpTunnelEnabledForNative(
+  profile: Pick<RdpProfile, 'nodeId' | 'tunnelConfigId' | 'tunnelEnabled'>,
+  socksEndpoint: string,
+): boolean | undefined {
+  if (socksEndpoint) return true;
+  if (profile.nodeId || profile.tunnelConfigId) return false;
+  return profile.tunnelEnabled;
+}
+
+export function canProceedWithRdpTunnelRoute(
+  profile: Pick<RdpProfile, 'nodeId' | 'tunnelConfigId'>,
+  route: { active: boolean; socksEndpoint: string },
+): boolean {
+  if (route.active) return route.socksEndpoint.length > 0;
+  if (route.socksEndpoint) return false;
+  // Only Go can authorize a saved connection to proceed directly (disabled tunnel or an explicit
+  // route prompt decision). A Quick Connect tunnel selection must always produce a live endpoint.
+  return Boolean(profile.nodeId) || !profile.tunnelConfigId;
+}
+
 export type RdpCommandRequest = {
   sessionId: string;
   bounds?: RdpSurfaceRect;
+};
+
+export type RdpSystemClientCapabilityRequest = {
+  nodeId: string;
+};
+
+export type RdpSystemClientOpenRequest = RdpSystemClientCapabilityRequest & {
+  sessionId: string;
+};
+
+export type RdpSystemClientOpenResult =
+  | { ok: true; event: RdpBackendEvent }
+  | { ok: false; lifecycleCommitted: boolean; error: string };
+
+export type RdpSystemClientCapability = {
+  supported: boolean;
 };
 
 export type RdpBackendEvent = {
@@ -98,6 +152,8 @@ export type RdpBackendEvent = {
   /** Main/controller lifecycle token used to discard events from a superseded native process. */
   lifecycleId?: string;
   backend?: 'activex' | 'freerdp';
+  external?: boolean;
+  lifecycleGeneration?: number;
   code?: number;
   attempt?: number;
   max?: number;
@@ -105,3 +161,7 @@ export type RdpBackendEvent = {
   /** Go-classified ActiveX logon failure for which transient credentials can help. */
   credentialFailure?: boolean;
 };
+
+export function isRdpLifecycleEvent(event: Pick<RdpBackendEvent, 'requestId'>): boolean {
+  return !event.requestId;
+}

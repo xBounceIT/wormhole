@@ -1,5 +1,12 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import type { RdpBackendEvent, RdpCommandRequest, RdpStartRequest } from './rdp-contract.js';
+import type {
+  RdpBackendEvent,
+  RdpCommandRequest,
+  RdpStartRequest,
+  RdpSystemClientCapabilityRequest,
+  RdpSystemClientOpenRequest,
+  RdpSystemClientOpenResult,
+} from './rdp-contract.js';
 
 type WormholeUpdateCheckResult = {
   currentVersion: string;
@@ -684,6 +691,10 @@ const wormholeBridge = {
     return () => ipcRenderer.removeListener('backend:event', handler);
   },
   startRdpSession: (request: RdpStartRequest) => ipcRenderer.invoke('rdp:start', request),
+  getRdpSystemClientCapability: (request: RdpSystemClientCapabilityRequest) =>
+    ipcRenderer.invoke('rdp:system-client-capability', request),
+  openRdpInSystemClient: (request: RdpSystemClientOpenRequest) =>
+    ipcRenderer.invoke('rdp:open-system', request) as Promise<RdpSystemClientOpenResult>,
   resizeRdpSession: (request: RdpCommandRequest) => ipcRenderer.invoke('rdp:resize', request),
   commandRdpSession: (
     request: RdpCommandRequest & { operation: 'show' | 'hide' | 'focus' | 'disconnect' },

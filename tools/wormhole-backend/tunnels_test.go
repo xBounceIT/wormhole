@@ -378,6 +378,26 @@ func TestVncRemoteDisconnectClosesTunnelAndRemovesSession(t *testing.T) {
 	}
 }
 
+func TestVncUserDisconnectAcknowledgesAfterTunnelReleaseAndSessionRemoval(t *testing.T) {
+	session, manager, output := newTestVncSessionWithClosedTunnel("user-disconnect")
+	pool := session.tunnel.pool
+
+	manager.disconnect(backendCommand{ID: "disconnect-1", SessionID: session.id})
+
+	if !session.isStopped() || manager.sessions[session.id] != nil {
+		t.Fatal("user-disconnected VNC session retained native resources")
+	}
+	pool.mu.Lock()
+	remaining := len(pool.entries)
+	pool.mu.Unlock()
+	if remaining != 0 {
+		t.Fatal("VNC disconnect acknowledged before releasing its tunnel lease")
+	}
+	if !strings.Contains(output.String(), `"id":"disconnect-1","ok":true`) {
+		t.Fatalf("VNC disconnect was not acknowledged: %s", output.String())
+	}
+}
+
 func newTestVncSessionWithClosedTunnel(id string) (*vncSession, *vncManager, *bytes.Buffer) {
 	output := &bytes.Buffer{}
 	lineWriter := &backendLineWriter{writer: bufio.NewWriter(output)}

@@ -224,15 +224,19 @@ import { MRemoteImportDialog } from './components/MRemoteImportDialog';
 import { SearchableCombobox, type SearchableComboboxOption } from './components/SearchableCombobox';
 import { VirtualCardGrid } from './components/VirtualCardGrid';
 import { applyTheme, getSystemTheme, isTheme, type ResolvedTheme, type Theme } from './theme';
-import { applyRdpBackendEvent } from './rdp-state';
+import { applyRdpBackendEvent, applyRdpSystemClientOpenFailure } from './rdp-state';
 import { formatSftpDate, formatSftpSize } from './sftp-format';
 import { hasSftpDragPayload, sftpDragDataType } from './sftp-dnd';
 import { cn } from '@/lib/utils';
 import { WebSessionAttemptTracker } from '../electron/web-session-attempt';
 import {
+  canDisconnectRemoteDesktopSession,
+  canOpenRdpSystemClient,
   connectedTabCloseMessage,
+  disconnectedRemoteDesktopState,
   isSessionActive,
   nextSelectedSessionId,
+  reconnectingVncState,
   sessionRuntimeRetryKeys,
   SessionCloseGate,
   SessionResourceReleaseGate,
@@ -545,7 +549,10 @@ type Session = {
   rdpStatus?: RdpUiStatus;
   rdpBackend?: 'activex' | 'freerdp';
   rdpError?: string;
+  rdpExternal?: boolean;
   rdpProfile?: WormholeRdpProfile;
+  rdpSystemClientSupported?: boolean;
+  vncConnectionGeneration?: number;
   webTargetNodeId?: string;
   webIgnoreCertErrors?: boolean;
   webUrl?: string;
@@ -1035,21 +1042,25 @@ function SessionTabContextMenu({
   session,
   children,
   onReconnect,
+  onDisconnect,
   onDuplicate,
+  onOpenSystemRdp,
   onClose,
   onFileTransfer,
 }: {
   session: Session;
   children: ReactNode;
   onReconnect: () => void;
+  onDisconnect: () => void;
   onDuplicate: () => void;
+  onOpenSystemRdp: () => void;
   onClose: () => void;
   onFileTransfer: () => void;
 }) {
   return (
     <ContextMenu>
       <ContextMenuTrigger asChild>{children}</ContextMenuTrigger>
-      <ContextMenuContent className="w-48">
+      <ContextMenuContent className="w-64">
         <ContextMenuItem onSelect={onDuplicate}>
           <Copy />
           Duplicate
@@ -1058,6 +1069,18 @@ function SessionTabContextMenu({
           <RefreshCcw />
           Reconnect
         </ContextMenuItem>
+        {canDisconnectRemoteDesktopSession(session) ? (
+          <ContextMenuItem onSelect={onDisconnect}>
+            <Power />
+            Disconnect
+          </ContextMenuItem>
+        ) : null}
+        {canOpenRdpSystemClient(session) ? (
+          <ContextMenuItem onSelect={onOpenSystemRdp}>
+            <Monitor />
+            Open in System Remote Desktop
+          </ContextMenuItem>
+        ) : null}
         {session.canTransfer === true && session.status === 'connected' ? (
           <ContextMenuItem onSelect={onFileTransfer}>
             <FolderOpen />
@@ -1512,7 +1535,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     [initialSettings.sidebarWidth],
   );
   const sessionCloseGate = useRef(new SessionCloseGate());
+  const sessionDisconnectGate = useRef(new SessionCloseGate());
   const sessionResourceReleaseGate = useRef(new SessionResourceReleaseGate());
+  const rdpSessionAttempts = useRef(new WebSessionAttemptTracker());
+  const rdpCapabilityAttempts = useRef(new WebSessionAttemptTracker());
   const [updateBusy, setUpdateBusy] = useState(false);
   const [updateStatus, setUpdateStatus] = useState('');
   const [updateDownloadProgress, setUpdateDownloadProgress] = useState<number | null>(null);
@@ -2925,6 +2951,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   ) {
     const session = sessionsRef.current.find((candidate) => candidate.id === sessionId);
     if (!session || session.protocol !== 'rdp') return;
+    const attempt = rdpSessionAttempts.current.begin(sessionId);
 
     const normalizedCredentials = {
       username: credentials.username.trim(),
@@ -2971,7 +2998,14 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         // Opening a saved connection creates and starts its tab in one event. Wait one frame for
         // that tab's real layout so the native host never centers prompts or initializes the
         // remote desktop from the backend's 1x1 startup placeholder.
-        if (!sessionsRef.current.some((candidate) => candidate.id === sessionId)) return;
+        if (
+          !rdpSessionAttempts.current.isCurrent(sessionId, attempt) ||
+          !sessionsRef.current.some(
+            (candidate) => candidate.id === sessionId && candidate.protocol === 'rdp',
+          )
+        ) {
+          return;
+        }
         return wormhole.startRdpSession({
           sessionId,
           profile: {
@@ -2985,6 +3019,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         });
       })
       .catch((error: unknown) => {
+        if (!rdpSessionAttempts.current.isCurrent(sessionId, attempt)) return;
         const message = error instanceof Error ? error.message : 'The RDP backend could not start.';
         if (isBitwardenUnlockError(message)) {
           requestRuntimeBitwardenUnlock(`rdp:${sessionId}`, message, () =>
@@ -3008,16 +3043,165 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   }
 
   function retryRdpSession(sessionId: string) {
-    requestRdpCredentials(sessionId);
+    void (async () => {
+      const source = sessionsRef.current.find((session) => session.id === sessionId);
+      if (!source || source.protocol !== 'rdp') return;
+      if (canDisconnectRemoteDesktopSession(source)) {
+        if (!(await disconnectRemoteDesktopSession(sessionId))) return;
+      }
+      await requestRdpCredentials(sessionId);
+    })();
   }
 
-  function submitRdpCredentials(event: FormEvent<HTMLFormElement>) {
+  const refreshRdpSystemClientCapability = useCallback(
+    (sessionId: string, nodeId: string | undefined) => {
+      if (!nodeId) return;
+      const attempt = rdpCapabilityAttempts.current.begin(sessionId);
+      setSessions((current) =>
+        current.map((session) =>
+          session.id === sessionId && session.protocol === 'rdp' && session.nodeId === nodeId
+            ? { ...session, rdpSystemClientSupported: false }
+            : session,
+        ),
+      );
+      const api = window.wormhole;
+      if (!api) return;
+      void api
+        .getRdpSystemClientCapability({ nodeId })
+        .then((capability) => {
+          if (!rdpCapabilityAttempts.current.isCurrent(sessionId, attempt)) return;
+          setSessions((current) =>
+            current.map((session) =>
+              session.id === sessionId && session.protocol === 'rdp' && session.nodeId === nodeId
+                ? { ...session, rdpSystemClientSupported: capability.supported }
+                : session,
+            ),
+          );
+        })
+        .catch(() => {
+          if (!rdpCapabilityAttempts.current.isCurrent(sessionId, attempt)) return;
+          setSessions((current) =>
+            current.map((session) =>
+              session.id === sessionId && session.protocol === 'rdp'
+                ? { ...session, rdpSystemClientSupported: false }
+                : session,
+            ),
+          );
+        });
+    },
+    [],
+  );
+
+  useLayoutEffect(() => {
+    for (const session of sessionsRef.current) {
+      if (session.protocol === 'rdp' && session.nodeId) {
+        refreshRdpSystemClientCapability(session.id, session.nodeId);
+      }
+    }
+  }, [refreshRdpSystemClientCapability, tree]);
+
+  async function disconnectRemoteDesktopSession(sessionId: string): Promise<boolean> {
+    const source = sessionsRef.current.find((session) => session.id === sessionId);
+    if (!source || !canDisconnectRemoteDesktopSession(source)) return false;
+    if (source.protocol === 'rdp') rdpSessionAttempts.current.cancel(sessionId);
+
+    let disconnected = false;
+    const ran = await sessionDisconnectGate.current.run(sessionId, async () => {
+      try {
+        const api = window.wormhole;
+        if (!api) throw new Error('The native remote desktop bridge is unavailable.');
+        if (source.protocol === 'rdp') {
+          await api.commandRdpSession({ sessionId, operation: 'disconnect' });
+          rdpSavedCredentialAttempts.current.delete(sessionId);
+          if (rdpCredentialPrompt === sessionId) setRdpCredentialPrompt(null);
+        } else {
+          const response = await api.sendVncCommand({
+            action: 'vnc.disconnect',
+            sessionId,
+          });
+          if (!response.ok) {
+            throw new Error(response.error || 'The VNC backend rejected the disconnect request.');
+          }
+        }
+        for (const key of sessionRuntimeRetryKeys(source)) {
+          runtimeBitwardenRetries.current.remove(key);
+        }
+        setSessions((current) =>
+          current.map((session) =>
+            session.id === sessionId
+              ? {
+                  ...session,
+                  ...disconnectedRemoteDesktopState(session),
+                  error: undefined,
+                  rdpError: undefined,
+                  tunnelProgress: null,
+                }
+              : session,
+          ),
+        );
+        disconnected = true;
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : 'The session could not disconnect.';
+        setSessions((current) =>
+          current.map((session) =>
+            session.id === sessionId
+              ? session.protocol === 'rdp'
+                ? { ...session, rdpStatus: 'failed', rdpError: message }
+                : { ...session, error: message }
+              : session,
+          ),
+        );
+      }
+    });
+    return ran && disconnected;
+  }
+
+  async function openRdpInSystemClient(sessionId: string) {
+    const source = sessionsRef.current.find((session) => session.id === sessionId);
+    if (!source?.nodeId || !canOpenRdpSystemClient(source)) return;
+    const api = window.wormhole;
+    if (!api) return;
+    const attempt = rdpSessionAttempts.current.begin(sessionId);
+    rdpSavedCredentialAttempts.current.delete(sessionId);
+    if (rdpCredentialPrompt === sessionId) setRdpCredentialPrompt(null);
+    try {
+      const result = await api.openRdpInSystemClient({ sessionId, nodeId: source.nodeId });
+      if (!rdpSessionAttempts.current.isCurrent(sessionId, attempt) || result.ok) return;
+      setSessions((current) =>
+        current.map((session) =>
+          session.id === sessionId
+            ? applyRdpSystemClientOpenFailure(session, result.error, result.lifecycleCommitted)
+            : session,
+        ),
+      );
+      refreshRdpSystemClientCapability(sessionId, source.nodeId);
+    } catch (error) {
+      if (!rdpSessionAttempts.current.isCurrent(sessionId, attempt)) return;
+      const message =
+        error instanceof Error ? error.message : 'System Remote Desktop could not start.';
+      setSessions((current) =>
+        current.map((session) =>
+          session.id === sessionId
+            ? applyRdpSystemClientOpenFailure(session, message, false)
+            : session,
+        ),
+      );
+      refreshRdpSystemClientCapability(sessionId, source.nodeId);
+    }
+  }
+
+  async function submitRdpCredentials(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!rdpCredentialPrompt) return;
     const sessionId = rdpCredentialPrompt;
     const credentials = rdpCredentialForm;
     setRdpCredentialPrompt(null);
     setRdpCredentialForm({ username: '', domain: '', password: '' });
+    const source = sessionsRef.current.find((session) => session.id === sessionId);
+    if (source && canDisconnectRemoteDesktopSession(source)) {
+      if (!(await disconnectRemoteDesktopSession(sessionId))) return;
+    }
     startRdpSession(sessionId, credentials, true);
   }
 
@@ -3105,6 +3289,8 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           : 'placeholder',
       serialSettings,
       rdpStatus: node.protocol === 'rdp' ? 'idle' : undefined,
+      rdpSystemClientSupported: node.protocol === 'rdp' ? false : undefined,
+      vncConnectionGeneration: node.protocol === 'vnc' ? 0 : undefined,
       webTargetNodeId:
         (node.protocol === 'http' || node.protocol === 'https') && node.persisted
           ? node.id
@@ -3128,6 +3314,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       );
     }
     if (session.protocol === 'rdp') {
+      refreshRdpSystemClientCapability(session.id, session.nodeId);
       window.setTimeout(() => void requestRdpCredentials(session.id), 0);
     }
     if (session.protocol === 'http' || session.protocol === 'https') startWebSession(session);
@@ -3137,6 +3324,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     await sessionResourceReleaseGate.current.release(closing.id, async () => {
       const releases: Promise<unknown>[] = [];
       if (closing.protocol === 'rdp') {
+        rdpSessionAttempts.current.cancel(closing.id);
         releases.push(
           window.wormhole
             ?.commandRdpSession({ sessionId: closing.id, operation: 'disconnect' })
@@ -3321,6 +3509,20 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         void window.wormhole?.closeSshSession(source.backendSessionId);
       }
     }
+    if (source.protocol === 'vnc') {
+      setSessions((current) =>
+        current.map((session) =>
+          session.id === id
+            ? {
+                ...session,
+                ...reconnectingVncState(session),
+                error: undefined,
+                tunnelProgress: null,
+              }
+            : session,
+        ),
+      );
+    }
     if (source.protocol === 'http' || source.protocol === 'https') {
       const restarted: Session = {
         ...source,
@@ -3425,8 +3627,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
 
     setSelectedSessionId(id);
     setActivePage('sessions');
-    const session = sessions.find((candidate) => candidate.id === id);
-    if (session?.protocol === 'rdp') retryRdpSession(id);
+    if (source.protocol === 'rdp') {
+      retryRdpSession(id);
+    }
   }
 
   function duplicateSession(id: string) {
@@ -3453,7 +3656,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       error: undefined,
       hostKeyMismatch: undefined,
       rdpStatus: source.protocol === 'rdp' ? 'idle' : source.rdpStatus,
+      rdpExternal: source.protocol === 'rdp' ? false : source.rdpExternal,
       rdpError: undefined,
+      vncConnectionGeneration: source.protocol === 'vnc' ? 0 : source.vncConnectionGeneration,
       serialSettings: source.serialSettings
         ? { ...source.serialSettings }
         : source.protocol === 'serial'
@@ -4720,6 +4925,8 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       serialSettings:
         newConnectionForm.protocol === 'serial' ? { ...newConnectionForm.serial } : undefined,
       rdpStatus: newConnectionForm.protocol === 'rdp' ? 'idle' : undefined,
+      rdpSystemClientSupported: newConnectionForm.protocol === 'rdp' ? false : undefined,
+      vncConnectionGeneration: newConnectionForm.protocol === 'vnc' ? 0 : undefined,
       rdpProfile:
         newConnectionForm.protocol === 'rdp'
           ? {
@@ -4917,7 +5124,14 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                   rdpStatus: newConnectionForm.protocol === 'rdp' ? 'idle' : undefined,
                   rdpBackend: undefined,
                   rdpError: undefined,
+                  rdpExternal: undefined,
                   rdpProfile: undefined,
+                  rdpSystemClientSupported:
+                    newConnectionForm.protocol === 'rdp' ? false : undefined,
+                  vncConnectionGeneration:
+                    newConnectionForm.protocol === 'vnc'
+                      ? (session.vncConnectionGeneration ?? 0) + 1
+                      : undefined,
                   tunnelProgress: null,
                   webTargetNodeId:
                     newConnectionForm.protocol === 'http' || newConnectionForm.protocol === 'https'
@@ -4943,6 +5157,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           );
         }
         if (editedSession && newConnectionForm.protocol === 'rdp') {
+          refreshRdpSystemClientCapability(editedSessionId, editingId);
           window.setTimeout(() => void requestRdpCredentials(editedSessionId), 0);
         }
         if (
@@ -5806,10 +6021,12 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                   }
                   onCloseSession={closeSession}
                   onConnectRdp={requestRdpCredentials}
+                  onDisconnectSession={disconnectRemoteDesktopSession}
                   onDuplicateSession={duplicateSession}
                   onCloseSftpBrowser={closeSftpBrowser}
                   onOpenFileTransfer={openFileTransfer}
                   onOpenQuickConnect={openQuickConnect}
+                  onOpenSystemRdp={openRdpInSystemClient}
                   onReconnectSession={reconnectSession}
                   onRetryRdp={retryRdpSession}
                   onSelectSession={setSelectedSessionId}
@@ -8945,6 +9162,8 @@ function SessionsPage({
   onBitwardenUnlockRequired,
   onCloseSession,
   onConnectRdp,
+  onOpenSystemRdp,
+  onDisconnectSession,
   onDuplicateSession,
   onCloseSftpBrowser,
   onOpenFileTransfer,
@@ -8974,6 +9193,8 @@ function SessionsPage({
   onBitwardenUnlockRequired: (sessionId: string, reason: string, retry: () => void) => void;
   onCloseSession: (id: string, preferredNextSessionId?: string) => void;
   onConnectRdp: (id: string) => void;
+  onOpenSystemRdp: (id: string) => void;
+  onDisconnectSession: (id: string) => void;
   onDuplicateSession: (id: string) => void;
   onCloseSftpBrowser: (id: string) => void;
   onOpenFileTransfer: (id: string) => void;
@@ -9204,8 +9425,10 @@ function SessionsPage({
                 <SessionTabContextMenu
                   key={session.id}
                   onClose={() => closePaneSession(pane, session.id)}
+                  onDisconnect={() => onDisconnectSession(session.id)}
                   onDuplicate={() => onDuplicateSession(session.id)}
                   onFileTransfer={() => onOpenFileTransfer(session.id)}
+                  onOpenSystemRdp={() => onOpenSystemRdp(session.id)}
                   onReconnect={() => onReconnectSession(session.id)}
                   session={session}
                 >
@@ -9293,6 +9516,7 @@ function SessionsPage({
               onBitwardenUnlockRequired={onBitwardenUnlockRequired}
               onCloseSftpBrowser={onCloseSftpBrowser}
               onConnectRdp={onConnectRdp}
+              onOpenSystemRdp={onOpenSystemRdp}
               onReconnectSession={onReconnectSession}
               onRetryRdp={onRetryRdp}
               onSerialInput={onSerialInput}
@@ -9505,6 +9729,7 @@ function SessionSurface({
   onBitwardenUnlockRequired,
   onCloseSftpBrowser,
   onConnectRdp,
+  onOpenSystemRdp,
   onReconnectSession,
   onRetryRdp,
   onSerialInput,
@@ -9532,6 +9757,7 @@ function SessionSurface({
   onBitwardenUnlockRequired: (sessionId: string, reason: string, retry: () => void) => void;
   onCloseSftpBrowser: (id: string) => void;
   onConnectRdp: (id: string) => void;
+  onOpenSystemRdp: (id: string) => void;
   onReconnectSession: (id: string) => void;
   onRetryRdp: (id: string) => void;
   onSerialInput: (sessionId: string, value: string) => void;
@@ -9636,10 +9862,13 @@ function SessionSurface({
     return (
       <RdpSurface
         backend={session.rdpBackend}
+        canOpenSystemClient={canOpenRdpSystemClient(session)}
         error={session.rdpError}
+        external={session.rdpExternal}
         isActive={nativeSurfaceActive}
         isAuthorized={isAuthorized}
         onConnect={() => onConnectRdp(session.id)}
+        onOpenSystemClient={() => onOpenSystemRdp(session.id)}
         onRetry={() => onRetryRdp(session.id)}
         sessionId={session.id}
         status={session.rdpStatus ?? 'idle'}
@@ -9650,10 +9879,13 @@ function SessionSurface({
   if (session.protocol === 'vnc') {
     return (
       <VncSurface
+        connectionGeneration={session.vncConnectionGeneration ?? 0}
+        disconnected={session.status === 'closed'}
         isAuthorized={isAuthorized}
         onBitwardenUnlockRequired={(reason, retry) =>
           onBitwardenUnlockRequired(session.id, reason, retry)
         }
+        onReconnect={() => onReconnectSession(session.id)}
         onStatusChange={(status) =>
           status === 'idle'
             ? undefined

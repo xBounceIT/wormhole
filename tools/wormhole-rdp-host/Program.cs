@@ -147,8 +147,10 @@ internal sealed class RdpHostApplicationContext : ApplicationContext
                     break;
                 case "disconnect":
                 case "shutdown":
-                    Write(new RdpHostEvent("ack", command.RequestId));
                     CloseHost();
+                    // The Go supervisor treats this acknowledgement as the deterministic cleanup
+                    // boundary. Publish it only after the ActiveX control and HWND are disposed.
+                    Write(new RdpHostEvent("ack", command.RequestId));
                     break;
                 default:
                     Write(new RdpHostEvent("error", command.RequestId, "unsupported native RDP command"));
@@ -345,7 +347,7 @@ internal sealed class RdpHostApplicationContext : ApplicationContext
         ScheduleRemoteResolution(command.Bounds.Width, command.Bounds.Height);
         form.Start();
         if (!_closing && !connectionVisible) Conceal();
-        if (!_closing) Write(new RdpHostEvent("ready"));
+        if (!_closing) Write(new RdpHostEvent("ready", command.RequestId));
     }
 
     private void ScheduleRemoteResolution(int width, int height)
