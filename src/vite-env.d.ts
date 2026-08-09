@@ -858,7 +858,12 @@ interface Window {
       settings: Record<string, unknown>;
     }): Promise<WormholeTunnelDetails>;
     deleteTunnel(id: string): Promise<{ deleted: boolean; error?: string }>;
-    testTunnel(id: string): Promise<{ connected: boolean; error?: string }>;
+    testTunnel(request: {
+      id: string;
+      targetHost?: string;
+      targetPort?: number;
+    }): Promise<{ connected: boolean; error?: string }>;
+    cancelTunnelTest(): Promise<{ cancelled: boolean }>;
     importWatchguardProfile(): Promise<{
       server: string;
       port: number;

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"io"
@@ -80,6 +81,113 @@ INSERT INTO TunnelConfigs (Id, Name, Kind, CreatedAt, UpdatedAt) VALUES
 	}
 	if process.alive() {
 		t.Fatal("last broker release was acknowledged before the sidecar exited")
+	}
+}
+
+func TestTunnelBrokerProbeDialsTheRequestedTargetThroughTheActiveLease(t *testing.T) {
+	proxy, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer proxy.Close()
+	targets := make(chan string, 1)
+	go func() {
+		connection, acceptErr := proxy.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer connection.Close()
+		greeting := make([]byte, 3)
+		if _, acceptErr = io.ReadFull(connection, greeting); acceptErr != nil {
+			return
+		}
+		_, _ = connection.Write([]byte{5, 0})
+		header := make([]byte, 5)
+		if _, acceptErr = io.ReadFull(connection, header); acceptErr != nil || header[3] != 3 {
+			return
+		}
+		host := make([]byte, int(header[4]))
+		port := make([]byte, 2)
+		if _, acceptErr = io.ReadFull(connection, host); acceptErr != nil {
+			return
+		}
+		if _, acceptErr = io.ReadFull(connection, port); acceptErr != nil {
+			return
+		}
+		targets <- net.JoinHostPort(string(host), strconv.Itoa(int(binary.BigEndian.Uint16(port))))
+		_, _ = connection.Write([]byte{5, 0, 0, 1, 127, 0, 0, 1, 0, 1})
+	}()
+
+	process := newTestTunnelProcess()
+	process.socks = proxy.Addr().String()
+	pool := newTunnelRuntimePool(func(context.Context, tunnelConfigSnapshot) (*tunnelProcess, error) {
+		return process, nil
+	})
+	lease, err := pool.acquire(context.Background(), "probe", tunnelConfigSnapshot{id: "probe"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	outputReader, outputWriter := io.Pipe()
+	defer outputReader.Close()
+	defer outputWriter.Close()
+	manager := newVncManager(nil, &backendLineWriter{writer: bufio.NewWriter(outputWriter)})
+	manager.tunnelLeases["probe-lease"] = lease
+	defer manager.close()
+	responses := json.NewDecoder(outputReader)
+	manager.handle(backendCommand{
+		ID: "probe-target", Action: "tunnel.probe", SessionID: "probe-lease",
+		Host: "server.internal", Port: 8443,
+	})
+	response := readTunnelResponse(t, responses, "probe-target")
+	if !response.OK {
+		t.Fatalf("probe response = %#v", response)
+	}
+	select {
+	case target := <-targets:
+		if target != "server.internal:8443" {
+			t.Fatalf("SOCKS target = %q", target)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("probe target was not observed")
+	}
+}
+
+func TestTunnelBrokerProbeRejectsMissingLease(t *testing.T) {
+	outputReader, outputWriter := io.Pipe()
+	defer outputReader.Close()
+	defer outputWriter.Close()
+	manager := newVncManager(nil, &backendLineWriter{writer: bufio.NewWriter(outputWriter)})
+	defer manager.close()
+	responses := json.NewDecoder(outputReader)
+	go manager.handle(backendCommand{
+		ID: "probe-missing", Action: "tunnel.probe", SessionID: "missing",
+		Host: "server.internal", Port: 443,
+	})
+	response := readTunnelResponse(t, responses, "probe-missing")
+	if response.OK || !strings.Contains(response.Error, "not active") {
+		t.Fatalf("missing lease probe response = %#v", response)
+	}
+}
+
+func TestTunnelBrokerProbeRejectsInvalidTargetsBeforeDialing(t *testing.T) {
+	for _, command := range []backendCommand{
+		{ID: "invalid", Action: "tunnel.probe", SessionID: "lease", Port: 443},
+		{ID: "invalid", Action: "tunnel.probe", SessionID: "lease", Host: "bad host", Port: 443},
+		{ID: "invalid", Action: "tunnel.probe", SessionID: "lease", Host: "server.internal:443", Port: 443},
+		{ID: "invalid", Action: "tunnel.probe", SessionID: "lease", Host: "server.internal", Port: 0},
+		{ID: "invalid", Action: "tunnel.probe", SessionID: "lease", Host: "server.internal", Port: 65536},
+	} {
+		if err := validateBackendCommand(command); err == nil {
+			t.Fatalf("invalid probe target was accepted: %#v", command)
+		}
+	}
+	for _, host := range []string{"server.internal", "127.0.0.1", "[2001:db8::1]"} {
+		if err := validateBackendCommand(backendCommand{
+			ID: "valid", Action: "tunnel.probe", SessionID: "lease", Host: host, Port: 443,
+		}); err != nil {
+			t.Fatalf("valid probe target %q was rejected: %v", host, err)
+		}
 	}
 }
 

@@ -235,6 +235,26 @@ export function isTunnelTestCancellation(message: string): boolean {
   return /(authentication|prompt|operation|establishment).{0,48}cancell/i.test(message);
 }
 
+export type TunnelProbeTarget = { host: string; port: number };
+
+export function parseTunnelProbeTarget(
+  hostText: string,
+  portText: string,
+): { target?: TunnelProbeTarget; error?: string } {
+  const host = hostText.trim();
+  const portValue = portText.trim();
+  if (!host && !portValue) return {};
+  if (!host) return { error: 'Target host is required when a target port is provided.' };
+  if (host.length > 1024 || /[\r\n\0]/.test(host)) {
+    return { error: 'Target host is invalid.' };
+  }
+  const port = Number(portValue);
+  if (!/^\d+$/.test(portValue) || !Number.isInteger(port) || port < 1 || port > 65535) {
+    return { error: 'Target port must be between 1 and 65535.' };
+  }
+  return { target: { host, port } };
+}
+
 export function isTunnelTestNotice(message: string): boolean {
   return /downloaded (?:and protected )?a fresh VPN profile|one-time code was just used/i.test(
     message,

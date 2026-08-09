@@ -263,6 +263,8 @@ func (m *vncManager) handle(command backendCommand) {
 		m.releaseTunnel(command)
 	case "tunnel.forward":
 		m.bindTunnelForwarder(command)
+	case "tunnel.probe":
+		m.probeTunnelTarget(command)
 	case "tunnel.prompt-response":
 		m.respondTunnelPrompt(command)
 	case "tunnel.route-response":
@@ -678,6 +680,33 @@ func (m *vncManager) bindTunnelForwarder(command backendCommand) {
 	_ = m.output.write(backendResponse{
 		ID: command.ID, OK: true, LeaseID: command.SessionID, ForwardHost: host, ForwardPort: port,
 	})
+}
+
+func (m *vncManager) probeTunnelTarget(command backendCommand) {
+	m.mu.Lock()
+	lease := m.tunnelLeases[command.SessionID]
+	m.mu.Unlock()
+	if lease == nil {
+		m.respond(command.ID, errors.New("VPN tunnel lease is not active"))
+		return
+	}
+
+	targetHost := strings.TrimSpace(command.Host)
+	if strings.HasPrefix(targetHost, "[") && strings.HasSuffix(targetHost, "]") {
+		targetHost = strings.TrimSuffix(strings.TrimPrefix(targetHost, "["), "]")
+	}
+	target := net.JoinHostPort(targetHost, strconv.Itoa(command.Port))
+	m.cleanup.Add(1)
+	go func() {
+		defer m.cleanup.Done()
+		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+		defer cancel()
+		connection, err := lease.dialContext(ctx, "tcp", target)
+		if connection != nil {
+			_ = connection.Close()
+		}
+		m.respond(command.ID, err)
+	}()
 }
 
 func (m *vncManager) respond(id string, err error) {
@@ -1461,6 +1490,13 @@ func validateBackendCommand(command backendCommand) error {
 		}
 		if _, err := buildWebURL("http", command.Host, command.Port); err != nil {
 			return errors.New("VPN tunnel forward target is invalid")
+		}
+	case "tunnel.probe":
+		if strings.TrimSpace(command.Host) == "" || command.Port < 1 || command.Port > 65535 {
+			return errors.New("VPN tunnel probe target is invalid")
+		}
+		if _, err := buildWebURL("http", command.Host, command.Port); err != nil {
+			return errors.New("VPN tunnel probe target is invalid")
 		}
 	case "tunnel.prompt-response":
 		if command.PromptID == "" || len(command.PromptID) > 128 || len(command.Value) > 16*1024 {

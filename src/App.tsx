@@ -256,6 +256,7 @@ import {
   isTunnelTestNotice,
   missingTunnelFields,
   normalizeTunnelEditorSettings,
+  parseTunnelProbeTarget,
   tunnelModeFor,
   tunnelValueFor,
   userFacingTunnelError,
@@ -266,6 +267,16 @@ type Protocol = QuickConnectProtocol;
 type CredentialProtocol = Extract<Protocol, 'ssh' | 'rdp' | 'vnc'>;
 type AutoSudoMode = 'inherit' | 'on' | 'off';
 type CredentialSelection = 'inherit' | 'none' | string;
+type FolderForm = {
+  name: string;
+  sshAutoSudo: AutoSudoMode;
+  tunnel: TunnelMode;
+  credential: CredentialSelection;
+};
+
+function blankFolderForm(): FolderForm {
+  return { name: '', sshAutoSudo: 'inherit', tunnel: 'inherit', credential: 'inherit' };
+}
 type NavItem = 'sessions' | 'credentials' | 'tunnels' | 'settings';
 type AuthPromptKind = 'lock' | 'confirmation';
 
@@ -1475,12 +1486,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   const [editingConnectionId, setEditingConnectionId] = useState<string | null>(null);
   const [folderDetailsOpen, setFolderDetailsOpen] = useState(false);
   const [editingFolderId, setEditingFolderId] = useState<string | null>(null);
-  const [folderDetailsForm, setFolderDetailsForm] = useState({
-    name: '',
-    sshAutoSudo: 'inherit' as AutoSudoMode,
-    tunnel: 'inherit' as TunnelMode,
-    credential: 'inherit' as CredentialSelection,
-  });
+  const [folderDetailsForm, setFolderDetailsForm] = useState<FolderForm>(blankFolderForm);
   const [editorError, setEditorError] = useState('');
   const [editorBusy, setEditorBusy] = useState(false);
   const [credentialDialog, setCredentialDialog] = useState<CredentialDialogState | null>(null);
@@ -1512,7 +1518,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   const [rdpExternalClientRequired, setRdpExternalClientRequired] = useState(false);
   const rdpExternalClientRequirementRequest = useRef(0);
   const [newFolderOpen, setNewFolderOpen] = useState(false);
-  const [newFolderName, setNewFolderName] = useState('');
+  const [newFolderForm, setNewFolderForm] = useState<FolderForm>(blankFolderForm);
   const [newFolderParentId, setNewFolderParentId] = useState<string | null>(null);
   const [updateCurrentVersion, setUpdateCurrentVersion] = useState('');
   const [updateResult, setUpdateResult] = useState<WormholeUpdateCheckResult | null>(null);
@@ -4923,7 +4929,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   }
 
   function openNewFolder(parentFolderId?: string | null) {
-    setNewFolderName('');
+    setNewFolderForm(blankFolderForm());
     setNewFolderParentId(parentFolderId ?? null);
     setEditorError('');
     setNewFolderOpen(true);
@@ -5314,12 +5320,14 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   async function submitNewFolder(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (editorBusy) return;
-    const name = newFolderName.trim();
+    const name = newFolderForm.name.trim();
     if (!name) return;
     setEditorBusy(true);
     setEditorError('');
     try {
       if (!window.wormhole) throw new Error('The native workspace bridge is unavailable.');
+      const tunnel = tunnelValueFor(newFolderForm.tunnel);
+      const credential = credentialSettingsFor(newFolderForm.credential);
       const result = await window.wormhole.createWorkspaceNode({
         parentId: newFolderParentId ?? '',
         name,
@@ -5330,12 +5338,12 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         username: '',
         inlinePasswordAction: 'clear',
         inlinePassword: '',
-        sshAutoSudo: null,
+        sshAutoSudo: autoSudoValueFor(newFolderForm.sshAutoSudo),
         httpIgnoreCertErrors: null,
-        tunnelEnabled: null,
-        tunnelConfigId: '',
-        credentialMode: 0,
-        credentialId: '',
+        tunnelEnabled: tunnel.tunnelEnabled,
+        tunnelConfigId: tunnel.tunnelConfigId,
+        credentialMode: credential.mode,
+        credentialId: credential.credentialId,
         serialBaudRate: 0,
         serialDataBits: 0,
         serialStopBits: 0,
@@ -6409,15 +6417,23 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                 <TabsContent className="min-h-0 flex-1 overflow-y-auto px-1 py-4" value="general">
                   <div className="grid gap-4">
                     <div className="grid gap-2">
-                      <Label htmlFor="connection-name">Connection name</Label>
+                      <Label htmlFor="connection-name">
+                        {connectionEditorMode === 'quick'
+                          ? 'Session name (optional)'
+                          : 'Connection name'}
+                      </Label>
                       <Input
                         autoFocus
                         id="connection-name"
                         onChange={(event) =>
                           setNewConnectionForm((form) => ({ ...form, name: event.target.value }))
                         }
-                        placeholder="e.g. production gateway"
-                        required
+                        placeholder={
+                          connectionEditorMode === 'quick'
+                            ? 'Defaults to target'
+                            : 'e.g. production gateway'
+                        }
+                        required={connectionEditorMode === 'saved'}
                         value={newConnectionForm.name}
                       />
                     </div>
@@ -7527,7 +7543,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           }}
           open={newFolderOpen}
         >
-          <DialogContent className="border-border/70 bg-card text-card-foreground sm:max-w-sm">
+          <DialogContent className="border-border/70 bg-card text-card-foreground sm:max-w-xl">
             <DialogHeader>
               <DialogTitle>New folder</DialogTitle>
               <DialogDescription>Create a folder for organizing connections.</DialogDescription>
@@ -7538,19 +7554,54 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                 <Input
                   autoFocus
                   id="folder-name"
-                  onChange={(event) => setNewFolderName(event.target.value)}
+                  onChange={(event) =>
+                    setNewFolderForm((form) => ({ ...form, name: event.target.value }))
+                  }
                   placeholder="e.g. Staging"
                   required
-                  value={newFolderName}
+                  value={newFolderForm.name}
                 />
               </div>
+              <div className="grid max-w-[280px] gap-2">
+                <Label htmlFor="new-folder-credential">Credential</Label>
+                <SearchableCombobox
+                  id="new-folder-credential"
+                  emptyMessage="No credentials found."
+                  onValueChange={(credential) =>
+                    setNewFolderForm((form) => ({ ...form, credential }))
+                  }
+                  options={folderCredentialSelectionOptions}
+                  placeholder="Select a credential"
+                  searchPlaceholder="Search credentials…"
+                  value={newFolderForm.credential}
+                />
+              </div>
+              <AutoSudoField
+                id="new-folder-auto-sudo"
+                mode={newFolderForm.sshAutoSudo}
+                onChange={(sshAutoSudo) => setNewFolderForm((form) => ({ ...form, sshAutoSudo }))}
+                scope="folder"
+              />
+              <TunnelRouteField
+                id="new-folder-tunnel-route"
+                mode={newFolderForm.tunnel}
+                onChange={(tunnel) => setNewFolderForm((form) => ({ ...form, tunnel }))}
+                scope="folder"
+                tunnels={tunnels}
+              />
+              {editorError ? <p className="text-[11px] text-destructive">{editorError}</p> : null}
               <DialogFooter>
-                <Button onClick={() => setNewFolderOpen(false)} type="button" variant="ghost">
+                <Button
+                  disabled={editorBusy}
+                  onClick={() => setNewFolderOpen(false)}
+                  type="button"
+                  variant="ghost"
+                >
                   Cancel
                 </Button>
-                <Button type="submit">
+                <Button disabled={editorBusy} type="submit">
                   <FolderPlus data-icon="inline-start" />
-                  Create folder
+                  {editorBusy ? 'Creating…' : 'Create folder'}
                 </Button>
               </DialogFooter>
             </form>
@@ -11824,9 +11875,13 @@ function TunnelsPage({
   const [actionError, setActionError] = useState('');
   const [testState, setTestState] = useState<{
     tunnel: TunnelRecord;
-    status: 'connecting' | 'connected' | 'notice' | 'cancelled' | 'failed';
+    status: 'idle' | 'connecting' | 'cancelling' | 'connected' | 'notice' | 'cancelled' | 'failed';
+    targetProbed?: boolean;
     error?: string;
   } | null>(null);
+  const [testTargetHost, setTestTargetHost] = useState('');
+  const [testTargetPort, setTestTargetPort] = useState('');
+  const [testInputError, setTestInputError] = useState('');
   const testAttemptRef = useRef(0);
   const deferredSearchText = useDeferredValue(searchText);
   const normalizedTunnelSearch = normalizeListSearch(deferredSearchText);
@@ -11889,17 +11944,43 @@ function TunnelsPage({
     }
   }
 
-  async function testTunnel(tunnel: TunnelRecord) {
+  function openTunnelTest(tunnel: TunnelRecord) {
+    if (testState) return;
+    setActionError('');
+    setTestTargetHost('');
+    setTestTargetPort('');
+    setTestInputError('');
+    setTestState({ tunnel, status: 'idle' });
+  }
+
+  async function runTunnelTest() {
     const api = window.wormhole;
-    if (!api || testState) {
+    if (
+      !api ||
+      !testState ||
+      testState.status === 'connecting' ||
+      testState.status === 'cancelling'
+    ) {
       if (!api) setActionError('The native VPN bridge is unavailable.');
       return;
     }
+    const parsedTarget = parseTunnelProbeTarget(testTargetHost, testTargetPort);
+    if (parsedTarget.error) {
+      setTestInputError(parsedTarget.error);
+      return;
+    }
     setActionError('');
+    setTestInputError('');
     const attempt = ++testAttemptRef.current;
-    setTestState({ tunnel, status: 'connecting' });
+    const tunnel = testState.tunnel;
+    setTestState({ tunnel, status: 'connecting', targetProbed: Boolean(parsedTarget.target) });
     try {
-      const result = await api.testTunnel(tunnel.id);
+      const result = await api.testTunnel({
+        id: tunnel.id,
+        ...(parsedTarget.target
+          ? { targetHost: parsedTarget.target.host, targetPort: parsedTarget.target.port }
+          : {}),
+      });
       if (attempt !== testAttemptRef.current) return;
       if (!result.connected) {
         const message = result.error || 'The VPN tunnel test failed.';
@@ -11936,6 +12017,43 @@ function TunnelsPage({
           : current,
       );
     }
+  }
+
+  async function cancelTunnelTestRun() {
+    if (testState?.status !== 'connecting') return;
+    const attempt = ++testAttemptRef.current;
+    setTestState((current) =>
+      current ? { ...current, status: 'cancelling', error: undefined } : current,
+    );
+    try {
+      await window.wormhole?.cancelTunnelTest();
+      if (attempt !== testAttemptRef.current) return;
+      setTestState((current) =>
+        current ? { ...current, status: 'cancelled', error: undefined } : current,
+      );
+    } catch (error) {
+      if (attempt !== testAttemptRef.current) return;
+      setTestState((current) =>
+        current
+          ? {
+              ...current,
+              status: 'failed',
+              error: userFacingTunnelError(error) || 'Could not cancel the VPN tunnel test.',
+            }
+          : current,
+      );
+    }
+  }
+
+  function closeTunnelTest() {
+    if (testState?.status === 'connecting') {
+      void cancelTunnelTestRun();
+      return;
+    }
+    if (testState?.status === 'cancelling') return;
+    ++testAttemptRef.current;
+    setTestState(null);
+    setTestInputError('');
   }
 
   return (
@@ -11999,7 +12117,7 @@ function TunnelsPage({
                   </CardDescription>
                 </CardHeader>
                 <CardFooter className="mt-auto justify-end gap-0.5">
-                  <IconButton label={`Test ${tunnel.name}`} onClick={() => void testTunnel(tunnel)}>
+                  <IconButton label={`Test ${tunnel.name}`} onClick={() => openTunnelTest(tunnel)}>
                     <FlaskConical />
                   </IconButton>
                   <IconButton label={`Edit ${tunnel.name}`} onClick={() => void editTunnel(tunnel)}>
@@ -12027,25 +12145,69 @@ function TunnelsPage({
       />
       <Dialog
         onOpenChange={(open) => {
-          if (!open) setTestState(null);
+          if (!open) closeTunnelTest();
         }}
         open={testState !== null}
       >
-        <DialogContent className="sm:max-w-md">
+        <DialogContent className="sm:max-w-lg">
           <DialogHeader>
             <DialogTitle>Test VPN tunnel</DialogTitle>
             <DialogDescription>{testState?.tunnel.name}</DialogDescription>
           </DialogHeader>
+          <div className="grid gap-3 sm:grid-cols-[1fr_8rem]">
+            <div className="grid gap-2">
+              <Label htmlFor="tunnel-test-target-host">Target host (optional)</Label>
+              <Input
+                disabled={testState?.status === 'connecting' || testState?.status === 'cancelling'}
+                id="tunnel-test-target-host"
+                onChange={(event) => {
+                  setTestTargetHost(event.target.value);
+                  setTestInputError('');
+                }}
+                placeholder="server.internal"
+                value={testTargetHost}
+              />
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="tunnel-test-target-port">Port</Label>
+              <Input
+                disabled={testState?.status === 'connecting' || testState?.status === 'cancelling'}
+                id="tunnel-test-target-port"
+                inputMode="numeric"
+                onChange={(event) => {
+                  setTestTargetPort(event.target.value);
+                  setTestInputError('');
+                }}
+                placeholder="22"
+                value={testTargetPort}
+              />
+            </div>
+          </div>
+          {testInputError ? <p className="text-xs text-destructive">{testInputError}</p> : null}
           <div className="flex min-h-24 items-center gap-3 rounded-lg border border-border/70 bg-muted/20 px-4 py-3">
-            {testState?.status === 'connecting' ? (
+            {testState?.status === 'idle' ? (
+              <>
+                <Info className="size-5 shrink-0 text-muted-foreground" />
+                <p className="text-sm">Ready to start a temporary VPN tunnel.</p>
+              </>
+            ) : testState?.status === 'connecting' ? (
               <>
                 <LoaderCircle className="size-5 shrink-0 animate-spin text-muted-foreground" />
                 <p className="text-sm">Connecting to the VPN gateway…</p>
               </>
+            ) : testState?.status === 'cancelling' ? (
+              <>
+                <LoaderCircle className="size-5 shrink-0 animate-spin text-muted-foreground" />
+                <p className="text-sm">Stopping the VPN tunnel test…</p>
+              </>
             ) : testState?.status === 'connected' ? (
               <>
                 <CheckCircle2 className="size-5 shrink-0 text-emerald-500" />
-                <p className="text-sm">VPN tunnel connected successfully.</p>
+                <p className="text-sm">
+                  {testState.targetProbed
+                    ? 'VPN tunnel connected and the target is reachable.'
+                    : 'VPN tunnel connected successfully.'}
+                </p>
               </>
             ) : testState?.status === 'cancelled' ? (
               <>
@@ -12081,9 +12243,29 @@ function TunnelsPage({
             )}
           </div>
           <DialogFooter>
-            <Button onClick={() => setTestState(null)} type="button">
-              Close
-            </Button>
+            {testState?.status === 'connecting' ? (
+              <Button
+                onClick={() => void cancelTunnelTestRun()}
+                type="button"
+                variant="destructive"
+              >
+                Cancel test
+              </Button>
+            ) : testState?.status === 'cancelling' ? (
+              <Button disabled type="button" variant="outline">
+                <LoaderCircle className="animate-spin" />
+                Cancelling…
+              </Button>
+            ) : (
+              <>
+                <Button onClick={closeTunnelTest} type="button" variant="ghost">
+                  Close
+                </Button>
+                <Button onClick={() => void runTunnelTest()} type="button">
+                  Start test
+                </Button>
+              </>
+            )}
           </DialogFooter>
         </DialogContent>
       </Dialog>

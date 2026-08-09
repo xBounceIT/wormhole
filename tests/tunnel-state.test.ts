@@ -5,6 +5,7 @@ import {
   isTunnelTestNotice,
   missingTunnelFields,
   normalizeTunnelEditorSettings,
+  parseTunnelProbeTarget,
   tunnelModeFor,
   tunnelValueFor,
   userFacingTunnelError,
@@ -164,4 +165,22 @@ test('VPN test cancellation detection only matches voluntary cancellation messag
     ),
     false,
   );
+});
+
+test('VPN tunnel target probes require a complete bounded host and port pair', () => {
+  assert.deepEqual(parseTunnelProbeTarget('', ''), {});
+  assert.deepEqual(parseTunnelProbeTarget('', '22'), {
+    error: 'Target host is required when a target port is provided.',
+  });
+  assert.deepEqual(parseTunnelProbeTarget('server.internal', ''), {
+    error: 'Target port must be between 1 and 65535.',
+  });
+  assert.deepEqual(parseTunnelProbeTarget(' server.internal ', ' 22 '), {
+    target: { host: 'server.internal', port: 22 },
+  });
+  assert.match(parseTunnelProbeTarget('bad\nhost', '443').error ?? '', /invalid/i);
+  assert.match(parseTunnelProbeTarget('server.internal', '0').error ?? '', /between/i);
+  assert.match(parseTunnelProbeTarget('server.internal', '65536').error ?? '', /between/i);
+  assert.match(parseTunnelProbeTarget('server.internal', '22.5').error ?? '', /between/i);
+  assert.match(parseTunnelProbeTarget('server.internal', '1e2').error ?? '', /between/i);
 });

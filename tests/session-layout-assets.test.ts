@@ -471,3 +471,51 @@ test('session pane chrome stays neutral and tab labels match connection tree typ
   assert.match(paneChromeSource, /absolute border border-border/);
   assert.doesNotMatch(paneChromeSource, /active \? 'border-primary/);
 });
+
+test('Quick Connect keeps its session name optional in the mounted form', () => {
+  assert.match(appSource, /Session name \(optional\)/);
+  assert.match(appSource, /required=\{connectionEditorMode === 'saved'\}/);
+  assert.match(appSource, /connectionEditorMode === 'quick'[\s\S]{0,160}Defaults to target/);
+});
+
+test('new folders expose every inheritable default before creation', () => {
+  assert.match(appSource, /id="new-folder-credential"/);
+  assert.match(appSource, /id="new-folder-auto-sudo"/);
+  assert.match(appSource, /id="new-folder-tunnel-route"/);
+  assert.match(appSource, /credentialSettingsFor\(newFolderForm\.credential\)/);
+  assert.match(appSource, /tunnelValueFor\(newFolderForm\.tunnel\)/);
+});
+
+test('VPN diagnostics expose target probing and cancellation across the bridge', () => {
+  assert.match(appSource, /id="tunnel-test-target-host"/);
+  assert.match(appSource, /id="tunnel-test-target-port"/);
+  assert.match(appSource, /cancelTunnelTestRun/);
+  assert.match(appSource, /status: 'cancelling'/);
+  assert.match(
+    preloadSource,
+    /cancelTunnelTest: \(\) => ipcRenderer\.invoke\('tunnel:test-cancel'\)/,
+  );
+  assert.match(mainSource, /ipcMain\.handle\('tunnel:test-cancel'/);
+  assert.match(mainSource, /probeTunnelTarget\([\s\S]{0,180}request\.targetHost/);
+  assert.match(mainSource, /return test\.leases\.release\('tunnel-test'/);
+  assert.match(
+    mainSource,
+    /if \(test\.cancelled\)[\s\S]{0,180}test\.backend = backend[\s\S]{0,180}test\.leases\.claim\('tunnel-test'/,
+  );
+  assert.match(
+    appSource,
+    /function closeTunnelTest\(\)[\s\S]{0,180}void cancelTunnelTestRun\(\)[\s\S]{0,180}status === 'cancelling'\) return/,
+  );
+});
+
+test('failed initial web navigation diagnoses SOCKS targets and releases its VPN lease', () => {
+  assert.match(mainSource, /finishInitialNavigationFailure/);
+  assert.match(mainSource, /tunnelBackend: openingLeaseId \? openingTunnelBackend : undefined/);
+  assert.match(
+    mainSource,
+    /await backend\.probeTunnelTarget\(leaseId, probeTarget\.host, probeTarget\.port\)/,
+  );
+  assert.doesNotMatch(mainSource, /getNativeBackend\(\)\.probeTunnelTarget/);
+  assert.match(mainSource, /tunnelLeases\.isActive\(sessionId, leaseId\)/);
+  assert.match(mainSource, /Could not release the failed web session VPN tunnel/);
+});

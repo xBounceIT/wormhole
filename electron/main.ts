@@ -65,6 +65,7 @@ import { shouldDeferExtensionReload } from './extension-reload-policy.js';
 import { encodeTerminalClipboardText, isEncodedSshInput } from './terminal-clipboard.js';
 import { RdpBackendClient, stopChildProcess } from './rdp.js';
 import { settleTunnelCleanup, TunnelLeaseRegistry } from './tunnel-lease-registry.js';
+import { isTunnelIdentifier, parseTunnelTestRequest } from './tunnel-test-contract.js';
 import {
   isMatchingOAuthRedirect,
   tunnelAuthPartition,
@@ -248,6 +249,7 @@ type NativeBackendAction =
   | 'vnc.key'
   | 'tunnel.acquire'
   | 'tunnel.forward'
+  | 'tunnel.probe'
   | 'tunnel.release'
   | 'tunnel.prompt-response'
   | 'tunnel.route-response'
@@ -696,6 +698,12 @@ type TunnelWriteRequest = {
 };
 type TunnelReadRequest = { id: string };
 type TunnelDeleteRequest = { id: string };
+type ActiveTunnelTest = {
+  leaseId: string;
+  cancelled: boolean;
+  backend?: NativeBackendProcess;
+  leases: TunnelLeaseRegistry;
+};
 type TunnelDetailsResponse = {
   id: string;
   name: string;
@@ -2623,6 +2631,20 @@ class NativeBackendProcess {
     return { host: response.forwardHost, port: forwardPort };
   }
 
+  async probeTunnelTarget(leaseId: string, host: string, port: number): Promise<void> {
+    const response = await this.send(
+      {
+        action: 'tunnel.probe',
+        sessionId: leaseId,
+        host,
+        port,
+      },
+      10_000,
+    );
+    if (!response.ok)
+      throw new Error(response.error || 'The VPN tunnel could not reach the target.');
+  }
+
   async releaseTunnel(leaseId: string): Promise<void> {
     const response = await this.send({ action: 'tunnel.release', sessionId: leaseId });
     if (!response.ok) throw new Error(response.error || 'Could not release the VPN tunnel.');
@@ -2792,6 +2814,7 @@ class NativeBackendProcess {
 }
 
 let nativeBackend: NativeBackendProcess | undefined;
+const activeTunnelTests = new Map<number, ActiveTunnelTest>();
 let isQuitting = false;
 let skipQuitConfirmation = false;
 let bitwardenBackgroundTimer: NodeJS.Timeout | undefined;
@@ -3127,10 +3150,7 @@ function isWorkspaceNodeTunnelSettingsRequest(
 }
 
 function isTunnelID(value: unknown): value is string {
-  return (
-    typeof value === 'string' &&
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)
-  );
+  return isTunnelIdentifier(value);
 }
 
 function isTunnelSettings(value: unknown): value is Record<string, unknown> {
@@ -3166,6 +3186,17 @@ function parseTunnelIDRequest(value: unknown): TunnelReadRequest {
     throw new Error('VPN tunnel id is invalid.');
   }
   return { id: (value as Record<string, string>).id };
+}
+
+function releaseTunnelTest(test: ActiveTunnelTest): Promise<void> {
+  const backend = test.backend;
+  if (!backend) return Promise.resolve();
+  return test.leases.release('tunnel-test', (leaseId) => backend.releaseTunnel(leaseId));
+}
+
+async function cancelTunnelTest(test: ActiveTunnelTest): Promise<void> {
+  test.cancelled = true;
+  await releaseTunnelTest(test);
 }
 
 function wormholeDatabasePath(): string {
@@ -3536,6 +3567,8 @@ type WebSurfaceRecord = {
     originalUrl?: string;
   };
   tunnelLeaseId?: string;
+  tunnelBackend?: NativeBackendProcess;
+  tunnelProbeTarget?: { host: string; port: number };
   bitwardenUseRelease?: () => void;
   bitwardenTabRegistered?: boolean;
   bitwarden?: {
@@ -3827,6 +3860,7 @@ class WebSurfaceManager {
     this.pendingOpenOwners.set(request.sessionId, owner);
     this.dispose(request.sessionId);
     let openingLeaseId: string | undefined;
+    let openingTunnelBackend: NativeBackendProcess | undefined;
     let bitwardenUseRelease: (() => void) | undefined;
     try {
       await this.releaseTunnel(request.sessionId);
@@ -3858,7 +3892,8 @@ class WebSurfaceManager {
         openingLeaseId = leaseId;
         this.tunnelLeases.claim(request.sessionId, leaseId);
         this.tunnelLeaseOwners.set(request.sessionId, owner);
-        const tunnelRoute = await getNativeBackend().acquireTunnelRoute({
+        openingTunnelBackend = getNativeBackend();
+        const tunnelRoute = await openingTunnelBackend.acquireTunnelRoute({
           leaseId,
           nodeId: request.nodeId,
           tunnelConfigId: target.tunnelConfigId,
@@ -3869,7 +3904,7 @@ class WebSurfaceManager {
           target.proxyUrl = `socks5://${tunnelRoute.socksEndpoint}`;
         } else if (tunnelRoute.active) {
           resolvedTunnelRoute = 'forwarder';
-          const forwarder = await getNativeBackend().bindTunnelForwarder(
+          const forwarder = await openingTunnelBackend.bindTunnelForwarder(
             leaseId,
             target.host,
             target.port,
@@ -4058,6 +4093,9 @@ class WebSurfaceManager {
           originalUrl: resolvedTunnelRoute === 'forwarder' ? logicalTargetUrl : undefined,
         },
         tunnelLeaseId: openingLeaseId,
+        tunnelBackend: openingLeaseId ? openingTunnelBackend : undefined,
+        tunnelProbeTarget:
+          resolvedTunnelRoute === 'socks5' ? { host: target.host, port: target.port } : undefined,
         bitwardenUseRelease,
         bitwarden: target.bitwarden,
       };
@@ -4083,10 +4121,11 @@ class WebSurfaceManager {
       }
       void view.webContents.loadURL(target.url).catch((error: unknown) => {
         if (!record.disposed && record.initialNavigationPending) {
-          record.initialNavigationPending = false;
-          this.sendEvent(request.sessionId, record, 'failed', {
-            error: describeWebNavigationError(error),
-          });
+          this.beginInitialNavigationFailure(
+            request.sessionId,
+            record,
+            describeWebNavigationError(error),
+          );
         }
       });
       openingLeaseId = undefined;
@@ -5172,10 +5211,11 @@ class WebSurfaceManager {
         // connection into a failed tab.
         if (!isMainFrame || errorCode === -3 || record.disposed) return;
         if (record.initialNavigationPending) {
-          record.initialNavigationPending = false;
-          this.sendEvent(sessionId, record, 'failed', {
-            error: describeWebLoadFailure(errorCode, errorDescription),
-          });
+          this.beginInitialNavigationFailure(
+            sessionId,
+            record,
+            describeWebLoadFailure(errorCode, errorDescription),
+          );
           return;
         }
         this.sendEvent(sessionId, record, 'navigation');
@@ -5198,6 +5238,52 @@ class WebSurfaceManager {
       // WebContents teardown during an owner-window failure).
       this.close(sessionId);
     });
+  }
+
+  private beginInitialNavigationFailure(
+    sessionId: string,
+    record: WebSurfaceRecord,
+    error: string,
+  ): void {
+    if (
+      record.disposed ||
+      !record.initialNavigationPending ||
+      this.surfaces.get(sessionId) !== record
+    ) {
+      return;
+    }
+    record.initialNavigationPending = false;
+    void this.finishInitialNavigationFailure(sessionId, record, error);
+  }
+
+  private async finishInitialNavigationFailure(
+    sessionId: string,
+    record: WebSurfaceRecord,
+    error: string,
+  ): Promise<void> {
+    const leaseId = record.tunnelLeaseId;
+    const backend = record.tunnelBackend;
+    const probeTarget = record.tunnelProbeTarget;
+    let finalError = error;
+    if (leaseId && backend && probeTarget) {
+      try {
+        await backend.probeTunnelTarget(leaseId, probeTarget.host, probeTarget.port);
+      } catch {
+        finalError = `The VPN tunnel is up, but target ${probeTarget.host}:${probeTarget.port} did not respond through it. Check that the target allows access from the VPN network.`;
+      }
+    }
+    if (record.disposed || this.surfaces.get(sessionId) !== record) return;
+
+    this.sendEvent(sessionId, record, 'failed', { error: finalError });
+    if (leaseId && this.tunnelLeases.isActive(sessionId, leaseId)) {
+      record.tunnelLeaseId = undefined;
+      void this.releaseTunnel(sessionId).catch((releaseError) => {
+        console.warn(
+          '[Wormhole] Could not release the failed web session VPN tunnel.',
+          releaseError,
+        );
+      });
+    }
   }
 
   private sendEvent(
@@ -6868,36 +6954,79 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     });
   });
 
-  ipcMain.handle('tunnel:test', async (_event, value: unknown) => {
+  ipcMain.handle('tunnel:test', async (event, value: unknown) => {
     requireNativeResourcesRunning();
-    const request = parseTunnelIDRequest(value);
-    return serializeAuthOperation(async () => {
-      await requireWorkspaceAuth();
-      requireNativeResourcesRunning();
-      const leaseId = randomUUID();
-      try {
-        const socksEndpoint = await getNativeBackend().acquireTunnel({
-          leaseId,
-          tunnelConfigId: request.id,
-          dedicated: true,
-        });
-        if (!socksEndpoint) throw new Error('The VPN tunnel returned no SOCKS endpoint.');
-        return { connected: true };
-      } catch (error) {
-        // A cancelled authentication is a normal user outcome; other test failures are expected
-        // user-facing results too. Return them as data instead of rejecting the IPC call, so
-        // Electron doesn't log "Error occurred in handler" for them.
-        const message = error instanceof Error ? error.message : String(error);
-        if (/cancell/i.test(message)) {
-          console.info(`[Wormhole] VPN tunnel test cancelled (${request.id}): ${message}`);
-        } else {
-          console.warn(`[Wormhole] VPN tunnel test failed (${request.id}): ${message}`);
-        }
-        return { connected: false, error: message };
-      } finally {
-        await releaseNativeTunnelLease(leaseId);
+    const request = parseTunnelTestRequest(value);
+    const senderID = event.sender.id;
+    if (activeTunnelTests.has(senderID)) throw new Error('A VPN tunnel test is already running.');
+    const test: ActiveTunnelTest = {
+      leaseId: randomUUID(),
+      cancelled: false,
+      leases: new TunnelLeaseRegistry(),
+    };
+    activeTunnelTests.set(senderID, test);
+    const cancelWhenRendererCloses = () => void cancelTunnelTest(test).catch(() => undefined);
+    event.sender.once('destroyed', cancelWhenRendererCloses);
+    try {
+      await runAuthorizedOperation(
+        async () => {
+          requireNativeResourcesRunning();
+          if (test.cancelled) throw new Error('VPN tunnel test was cancelled.');
+          const backend = getNativeBackend();
+          test.backend = backend;
+          test.leases.claim('tunnel-test', test.leaseId);
+          const socksEndpoint = await backend.acquireTunnel({
+            leaseId: test.leaseId,
+            tunnelConfigId: request.id,
+            dedicated: true,
+          });
+          if (test.cancelled) throw new Error('VPN tunnel test was cancelled.');
+          if (!socksEndpoint) throw new Error('The VPN tunnel returned no SOCKS endpoint.');
+          if (request.targetHost && request.targetPort) {
+            try {
+              await backend.probeTunnelTarget(test.leaseId, request.targetHost, request.targetPort);
+            } catch (error) {
+              if (test.cancelled) throw new Error('VPN tunnel test was cancelled.');
+              const message = error instanceof Error ? error.message : String(error);
+              throw new Error(
+                `The VPN tunnel started, but target ${request.targetHost}:${request.targetPort} could not be reached through it: ${message}`,
+              );
+            }
+          }
+        },
+        () => cancelTunnelTest(test),
+      );
+      return { connected: true };
+    } catch (error) {
+      // Cancellation is a normal user outcome. Other test failures are expected user-facing data
+      // too, so do not reject the IPC call and make Electron log an unhandled handler error.
+      const message = test.cancelled
+        ? 'VPN tunnel test was cancelled.'
+        : error instanceof Error
+          ? error.message
+          : String(error);
+      if (test.cancelled || /cancell/i.test(message)) {
+        console.info(`[Wormhole] VPN tunnel test cancelled (${request.id}).`);
+      } else {
+        console.warn(`[Wormhole] VPN tunnel test failed (${request.id}).`);
       }
-    });
+      return { connected: false, error: message };
+    } finally {
+      if (!event.sender.isDestroyed()) {
+        event.sender.removeListener('destroyed', cancelWhenRendererCloses);
+      }
+      if (activeTunnelTests.get(senderID) === test) activeTunnelTests.delete(senderID);
+      await releaseTunnelTest(test).catch((error) => {
+        console.warn('[Wormhole] Could not release the VPN tunnel test lease.', error);
+      });
+    }
+  });
+
+  ipcMain.handle('tunnel:test-cancel', async (event) => {
+    const test = activeTunnelTests.get(event.sender.id);
+    if (!test) return { cancelled: false };
+    await cancelTunnelTest(test);
+    return { cancelled: true };
   });
 
   ipcMain.handle('tunnel:import-watchguard', async (event) => {

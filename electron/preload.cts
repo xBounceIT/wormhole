@@ -248,7 +248,9 @@ const wormholeBridge = {
     settings: Record<string, unknown>;
   }) => ipcRenderer.invoke('tunnel:update', request),
   deleteTunnel: (id: string) => ipcRenderer.invoke('tunnel:delete', { id }),
-  testTunnel: (id: string) => ipcRenderer.invoke('tunnel:test', { id }),
+  testTunnel: (request: { id: string; targetHost?: string; targetPort?: number }) =>
+    ipcRenderer.invoke('tunnel:test', request),
+  cancelTunnelTest: () => ipcRenderer.invoke('tunnel:test-cancel'),
   importWatchguardProfile: () => ipcRenderer.invoke('tunnel:import-watchguard'),
   importAzureVpnProfile: () => ipcRenderer.invoke('tunnel:import-azure-vpn'),
   importOvpnProfile: () => ipcRenderer.invoke('tunnel:import-ovpn'),
