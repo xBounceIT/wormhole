@@ -20,14 +20,14 @@ concurrency:
 jobs:
   checks:
     name: Verify release tag
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.inputs.tag || github.ref_name }}
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '24'
 
@@ -39,31 +39,31 @@ jobs:
   build:
     name: Build Electron ${{ matrix.platform }}
     needs: checks
-    runs-on: windows-latest
+    runs-on: windows-2025
     strategy:
       fail-fast: false
       matrix:
         platform: [x64, arm64]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.inputs.tag || github.ref_name }}
           submodules: recursive
 
       - name: Setup .NET 10
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: '10.0.x'
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '24'
           cache: npm
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: tools/wormhole-ovpnproxy/go.mod
           cache: false
@@ -200,7 +200,7 @@ jobs:
           Compress-Archive -Path "artifacts/electron-app/$env:PLATFORM/Wormhole/*" -DestinationPath $zip
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: wormhole-win-${{ matrix.platform }}
           path: |
@@ -218,37 +218,37 @@ jobs:
       matrix:
         include:
           - platform: linux
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
             builder_platform: linux
             builder_arch: x64
             backend_arch: x64
-            artifact: release/Wormhole-*-linux-x64-setup.AppImage
+            artifact: release/Wormhole-*-linux-x86_64-setup.AppImage
           - platform: linux-arm64
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
             builder_platform: linux
             builder_arch: arm64
             backend_arch: arm64
             artifact: release/Wormhole-*-linux-arm64-setup.AppImage
           - platform: macos
-            runner: macos-latest
+            runner: macos-26
             builder_platform: mac
             builder_arch: universal
             backend_arch: universal
             artifact: release/Wormhole-*-mac-universal-setup.dmg
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.inputs.tag || github.ref_name }}
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '24'
           cache: npm
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: tools/wormhole-backend/go.mod
           cache: false
@@ -271,7 +271,7 @@ jobs:
         run: npm run package -- --${{ matrix.builder_platform }} --${{ matrix.builder_arch }}
 
       - name: Upload ${{ matrix.platform }} installer
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: wormhole-${{ matrix.platform }}
           path: ${{ matrix.artifact }}
@@ -281,12 +281,12 @@ jobs:
   release:
     name: Publish GitHub Release
     needs: [build, installers]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
       - name: Download installers
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: dist
           merge-multiple: true
