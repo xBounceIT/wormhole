@@ -25,6 +25,8 @@ var (
 	advapi32       = syscall.NewLazyDLL("advapi32.dll")
 	credEnumerateW = advapi32.NewProc("CredEnumerateW")
 	credFree       = advapi32.NewProc("CredFree")
+	credEnumerate  = callCredEnumerate
+	credFreeMemory = callCredFree
 )
 
 // credential mirrors the Windows CREDENTIALW layout on both amd64 and arm64. The helper is
@@ -73,12 +75,7 @@ func enumerateCredentials(filter string) ([]credentialEntry, error) {
 
 	var count uint32
 	var raw **credential
-	result, _, callErr := credEnumerateW.Call(
-		uintptr(unsafe.Pointer(filterPtr)),
-		0,
-		uintptr(unsafe.Pointer(&count)),
-		uintptr(unsafe.Pointer(&raw)),
-	)
+	result, callErr := credEnumerate(filterPtr, &count, &raw)
 	if result == 0 {
 		if callErr == errorNotFound {
 			return []credentialEntry{}, nil
@@ -88,7 +85,7 @@ func enumerateCredentials(filter string) ([]credentialEntry, error) {
 	if raw == nil || count == 0 {
 		return []credentialEntry{}, nil
 	}
-	defer credFree.Call(uintptr(unsafe.Pointer(raw)))
+	defer credFreeMemory(raw)
 
 	credentials := unsafe.Slice(raw, int(count))
 	entries := make([]credentialEntry, 0, len(credentials))
@@ -116,6 +113,20 @@ func enumerateCredentials(filter string) ([]credentialEntry, error) {
 	}
 
 	return entries, nil
+}
+
+func callCredEnumerate(filter *uint16, count *uint32, raw ***credential) (uintptr, error) {
+	result, _, callErr := credEnumerateW.Call(
+		uintptr(unsafe.Pointer(filter)),
+		0,
+		uintptr(unsafe.Pointer(count)),
+		uintptr(unsafe.Pointer(raw)),
+	)
+	return result, callErr
+}
+
+func callCredFree(raw **credential) {
+	credFree.Call(uintptr(unsafe.Pointer(raw)))
 }
 
 func decodeCredentialBlob(blob *byte, size uint32) (string, error) {

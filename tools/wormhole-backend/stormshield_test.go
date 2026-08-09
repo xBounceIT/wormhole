@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -98,6 +99,88 @@ func TestNormalizeStormshieldProfileAndTransportOverride(t *testing.T) {
 	}
 	if strings.Contains(tcpOnly, "1194 udp") || !strings.Contains(tcpOnly, "443 tcp") || !strings.Contains(tcpOnly, "proto tcp-client") {
 		t.Fatalf("transport override failed:\n%s", tcpOnly)
+	}
+}
+
+func TestStormshieldLegacyCompressionStubPreservesFraming(t *testing.T) {
+	if _, err := applyStormshieldLegacyCompressionStub(""); err == nil {
+		t.Fatal("empty Stormshield profile was accepted")
+	}
+	profile, err := applyStormshieldLegacyCompressionStub("client\n<ca>\ncompress inside-certificate\n</ca>\nremote vpn.example 443\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(profile, "comp-lzo no") || !strings.Contains(profile, "compress inside-certificate") {
+		t.Fatalf("legacy compression profile = %s", profile)
+	}
+	framed, err := applyStormshieldLegacyCompressionStub("client\ncompress stub-v2\n")
+	if err != nil || strings.Count(framed, "compress") != 1 || strings.Contains(framed, "comp-lzo no") {
+		t.Fatalf("existing compression framing changed: %s, %v", framed, err)
+	}
+}
+
+func TestStormshieldTransportOverrideRewritesConnectionBlocks(t *testing.T) {
+	profile := strings.Join([]string{
+		"client",
+		"<connection>",
+		"remote tcp.example 443 tcp-client",
+		"proto tcp-client",
+		"</connection>",
+		"<connection>",
+		"remote udp.example 1194 udp",
+		"</connection>",
+		"<ca>",
+		"remote certificate-text 1 tcp",
+		"</ca>",
+	}, "\n")
+	tcpProfile, err := applyStormshieldTransportOverride(profile, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(tcpProfile, "tcp.example") || strings.Contains(tcpProfile, "udp.example") || !strings.Contains(tcpProfile, "remote certificate-text") {
+		t.Fatalf("TCP override = %s", tcpProfile)
+	}
+	udpProfile, err := applyStormshieldTransportOverride(profile, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(udpProfile, "udp.example") || strings.Contains(udpProfile, "tcp.example") {
+		t.Fatalf("UDP override = %s", udpProfile)
+	}
+	if unchanged, err := applyStormshieldTransportOverride(profile, 0); err != nil || unchanged != profile {
+		t.Fatalf("unchanged override = %q, %v", unchanged, err)
+	}
+	if _, err := applyStormshieldTransportOverride("<connection>\nremote vpn.example 443\n", 1); err == nil {
+		t.Fatal("unterminated connection block was accepted")
+	}
+	if _, err := applyStormshieldTransportOverride("remote udp.example 1194 udp\n", 1); err == nil {
+		t.Fatal("profile without requested TCP remote was accepted")
+	}
+
+	rewritten, sawRemote, keptRemote := rewriteStormshieldConnectionBlock([]string{
+		"<connection>", "remote vpn.example 443", "</connection>",
+	}, "tcp", "tcp-client")
+	if !sawRemote || !keptRemote || !strings.Contains(strings.Join(rewritten, "\n"), "proto tcp-client") {
+		t.Fatalf("rewritten unqualified block = %#v, %v, %v", rewritten, sawRemote, keptRemote)
+	}
+}
+
+func TestStormshieldPortalErrorAndEndpointValidation(t *testing.T) {
+	portalErr := &stormshieldPortalRequestError{cause: context.DeadlineExceeded}
+	if portalErr.Error() == "" || !errors.Is(portalErr, context.DeadlineExceeded) {
+		t.Fatalf("portal error = %v", portalErr)
+	}
+	for _, values := range []map[string]any{
+		{"Host": ""},
+		{"Host": "bad\nhost"},
+		{"Host": "vpn.example", "Port": 70000},
+		{"Host": "vpn.example", "ServerCertSha256Pin": "invalid"},
+	} {
+		settings := stormshieldTestSettings(t, values)
+		if _, _, closeTransport, err := stormshieldPortalEndpoint(settings, "/path", ""); err == nil {
+			closeTransport()
+			t.Fatalf("invalid endpoint settings were accepted: %#v", values)
+		}
 	}
 }
 

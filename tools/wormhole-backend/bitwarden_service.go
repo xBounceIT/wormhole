@@ -19,6 +19,11 @@ type bitwardenResolvedCredential struct {
 
 var errBitwardenSessionInvalidated = errors.New("Bitwarden session was cleared; unlock the vault and try again")
 
+var (
+	installBitwardenCliForService = installBitwardenCliLatestWrapped
+	ensureBitwardenCliForService  = ensureBitwardenCliInstalled
+)
+
 func (m *vncManager) handleBitwarden(command backendCommand, expectedGeneration uint64) {
 	if command.Action == "bitwarden.clear-session" {
 		m.clearBitwardenSession()
@@ -56,7 +61,7 @@ func (m *vncManager) handleBitwarden(command backendCommand, expectedGeneration 
 				m.resetBitwardenSession()
 			} else {
 				if state.Installed == nil {
-					_, _ = ensureBitwardenCliInstalled(m.databasePath)
+					_, _ = ensureBitwardenCliForService(m.databasePath)
 					state, _ = readBitwardenCliState(m.databasePath)
 				}
 				if state.Installed != nil {
@@ -74,9 +79,9 @@ func (m *vncManager) handleBitwarden(command backendCommand, expectedGeneration 
 			m.resetBitwardenSession()
 		}
 	case "bitwarden.install":
-		result, err = installBitwardenCliLatestWrapped(m.databasePath)
+		result, err = installBitwardenCliForService(m.databasePath)
 	case "bitwarden.ensure-installed":
-		result, err = ensureBitwardenCliInstalled(m.databasePath)
+		result, err = ensureBitwardenCliForService(m.databasePath)
 	case "bitwarden.status":
 		result, err = bitwardenCliStatusOperation(m.databasePath)
 		if err == nil {

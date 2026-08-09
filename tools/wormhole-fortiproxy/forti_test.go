@@ -2,14 +2,23 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -461,3 +470,218 @@ func TestStartFortinet_RejectsAmbiguousSamlCredentialsBeforeNetwork(t *testing.T
 		}
 	}
 }
+
+func TestFortiLoginCompletesAuthConfigAndTunnelUpgrade(t *testing.T) {
+	paths := make(chan string, 4)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths <- r.URL.Path
+		if r.UserAgent() != fortinetUserAgent {
+			t.Errorf("user agent = %q", r.UserAgent())
+		}
+		switch r.URL.Path {
+		case "/remote/logincheck":
+			http.SetCookie(w, &http.Cookie{Name: "SVPNCOOKIE", Value: "session", Path: "/remote"})
+			_, _ = io.WriteString(w, "ret=1")
+		case "/remote/fortisslvpn_xml":
+			_, _ = io.WriteString(w, `<sslvpn-tunnel mtu="1400"><ipv4 assigned-addr="10.0.0.2"><dns ip="10.0.0.1"/></ipv4></sslvpn-tunnel>`)
+		case "/remote/sslvpn-tunnel":
+			if !strings.Contains(r.Header.Get("Cookie"), "SVPNCOOKIE=session") {
+				t.Errorf("tunnel cookie = %q", r.Header.Get("Cookie"))
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	serverURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, portText, err := net.SplitHostPort(serverURL.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, _ := strconv.Atoi(portText)
+	got, err := fortiLogin(context.Background(), config{
+		Host:                   host,
+		Port:                   port,
+		Username:               "alice",
+		Password:               "secret",
+		TrustServerCertificate: true,
+	})
+	if err != nil {
+		t.Fatalf("fortiLogin returned %v", err)
+	}
+	defer got.Conn.Close()
+	if got.AssignedIP.String() != "10.0.0.2" || got.MTU != 1400 || len(got.DNS) != 1 {
+		t.Fatalf("session = %#v", got)
+	}
+	for _, want := range []string{"/remote/logincheck", "/remote/fortisslvpn_xml", "/remote/sslvpn-tunnel"} {
+		select {
+		case path := <-paths:
+			if path != want {
+				t.Fatalf("path = %q, want %q", path, want)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("missing request for %s", want)
+		}
+	}
+}
+
+func TestBuildTLSConfigModesAndPinVerification(t *testing.T) {
+	cfg, err := buildTLSConfig(config{Host: "vpn.example.test"})
+	if err != nil || cfg.ServerName != "vpn.example.test" || cfg.MinVersion != tls.VersionTLS12 || cfg.InsecureSkipVerify {
+		t.Fatalf("default TLS config = %#v, %v", cfg, err)
+	}
+	cfg, err = buildTLSConfig(config{Host: "vpn.example.test", TrustServerCertificate: true})
+	if err != nil || !cfg.InsecureSkipVerify {
+		t.Fatalf("trusted TLS config = %#v, %v", cfg, err)
+	}
+
+	invalid := "not-hex"
+	if _, err := buildTLSConfig(config{ServerCertSha256Pin: &invalid}); err == nil {
+		t.Fatal("invalid certificate pin was accepted")
+	}
+	short := "0102"
+	if _, err := buildTLSConfig(config{ServerCertSha256Pin: &short}); err == nil {
+		t.Fatal("short certificate pin was accepted")
+	}
+
+	rawCertificate := []byte("certificate bytes")
+	want := sha256.Sum256(rawCertificate)
+	pin := hex.EncodeToString(want[:])
+	cfg, err = buildTLSConfig(config{Host: "vpn.example.test", ServerCertSha256Pin: &pin})
+	if err != nil || cfg.VerifyConnection == nil || !cfg.InsecureSkipVerify {
+		t.Fatalf("pinned TLS config = %#v, %v", cfg, err)
+	}
+	if err := cfg.VerifyConnection(tls.ConnectionState{}); err == nil {
+		t.Fatal("pin verifier accepted no peer certificate")
+	}
+	if err := cfg.VerifyConnection(tls.ConnectionState{PeerCertificates: []*x509.Certificate{{Raw: []byte("wrong")}}}); err == nil {
+		t.Fatal("pin verifier accepted the wrong certificate")
+	}
+	if err := cfg.VerifyConnection(tls.ConnectionState{PeerCertificates: []*x509.Certificate{{Raw: rawCertificate}}}); err != nil {
+		t.Fatalf("pin verifier rejected matching certificate: %v", err)
+	}
+}
+
+func TestBytesEqual(t *testing.T) {
+	if !bytesEqual([]byte{1, 2}, []byte{1, 2}) || bytesEqual([]byte{1}, []byte{1, 2}) || bytesEqual([]byte{1, 2}, []byte{1, 3}) {
+		t.Fatal("bytesEqual returned an incorrect result")
+	}
+}
+
+func TestCookieDiagnosticsAndHeader(t *testing.T) {
+	jar, _ := cookiejar.New(nil)
+	target, _ := url.Parse("https://vpn.example.test/remote/sslvpn-tunnel")
+	if hasSvpnCookie(jar, target) {
+		t.Fatal("empty cookie jar reported an SVPNCOOKIE")
+	}
+	jar.SetCookies(target, []*http.Cookie{{Name: "first", Value: "one", Path: "/remote"}, {Name: "SVPNCOOKIE", Value: "session", Path: "/remote"}})
+	if got := cookieHeader(jar, target); got != "first=one; SVPNCOOKIE=session" {
+		t.Fatalf("cookieHeader = %q", got)
+	}
+	if got := cookieNames(jar, target); !reflect.DeepEqual(got, []string{"first", "SVPNCOOKIE"}) {
+		t.Fatalf("cookieNames = %#v", got)
+	}
+}
+
+func TestReadBoundedBodyAcceptsLimitAndRejectsOverflow(t *testing.T) {
+	got, err := readBoundedBody(strings.NewReader(strings.Repeat("a", maxResponseBody)), "test")
+	if err != nil || len(got) != maxResponseBody {
+		t.Fatalf("exact limit = %d bytes, %v", len(got), err)
+	}
+	if _, err := readBoundedBody(strings.NewReader(strings.Repeat("a", maxResponseBody+1)), "test"); err == nil {
+		t.Fatal("overflowing body was accepted")
+	}
+	if _, err := readBoundedBody(errorReader{}, "test"); err == nil {
+		t.Fatal("reader error was ignored")
+	}
+}
+
+func TestObtainFortinetCookieHandlesTOTPChallenge(t *testing.T) {
+	requests := 0
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		if requests == 1 {
+			_, _ = io.WriteString(w, "ret=2,reqid=1234,magic=challenge")
+			return
+		}
+		if len(r.Form.Get("code")) != 6 || r.Form.Get("magic") != "challenge" {
+			t.Errorf("challenge form = %#v", r.Form)
+		}
+		http.SetCookie(w, &http.Cookie{Name: "SVPNCOOKIE", Value: "session", Path: "/remote"})
+		_, _ = io.WriteString(w, "ret=1")
+	}))
+	defer server.Close()
+	baseURL, _ := url.Parse(server.URL)
+	baseURL.Path = "/"
+	tunnelURL := baseURL.JoinPath("remote", "sslvpn-tunnel")
+	jar, _ := cookiejar.New(nil)
+	client := server.Client()
+	client.Jar = jar
+	secret := "JBSWY3DPEHPK3PXP"
+	err := obtainFortinetCookie(context.Background(), client, jar, baseURL, tunnelURL, config{Username: "alice", Password: "secret", TotpSecret: &secret})
+	if err != nil || requests != 2 {
+		t.Fatalf("obtainFortinetCookie = %v after %d requests", err, requests)
+	}
+}
+
+func TestObtainFortinetCookieRejectsMissingOrInvalidTOTP(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "ret=2,reqid=1234,magic=challenge")
+	}))
+	defer server.Close()
+	baseURL, _ := url.Parse(server.URL)
+	baseURL.Path = "/"
+	tunnelURL := baseURL.JoinPath("remote", "sslvpn-tunnel")
+	for _, secret := range []*string{nil, func() *string { value := "not base32!"; return &value }()} {
+		jar, _ := cookiejar.New(nil)
+		client := server.Client()
+		client.Jar = jar
+		err := obtainFortinetCookie(context.Background(), client, jar, baseURL, tunnelURL, config{Username: "alice", Password: "secret", TotpSecret: secret})
+		if err == nil {
+			t.Fatal("invalid TOTP configuration was accepted")
+		}
+	}
+}
+
+func TestHTTPHelpersSurfaceTransportStatusAndBodyErrors(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("transport failed")
+	})}
+	if _, err := postForm(context.Background(), client, "post", ":", url.Values{}, config{}); err == nil {
+		t.Fatal("postForm accepted an invalid URL")
+	}
+	if _, err := httpGet(context.Background(), client, "get", ":", config{}); err == nil {
+		t.Fatal("httpGet accepted an invalid URL")
+	}
+	if _, err := postForm(context.Background(), client, "post", "https://example.test", url.Values{}, config{}); err == nil {
+		t.Fatal("postForm ignored transport error")
+	}
+	if _, err := httpGet(context.Background(), client, "get", "https://example.test", config{}); err == nil {
+		t.Fatal("httpGet ignored transport error")
+	}
+
+	client.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 500, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("failure"))}, nil
+	})
+	if _, err := httpGet(context.Background(), client, "get", "https://example.test", config{}); err == nil || !strings.Contains(err.Error(), "HTTP 500") {
+		t.Fatalf("httpGet status error = %v", err)
+	}
+
+	client.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(errorReader{})}, nil
+	})
+	if _, err := postForm(context.Background(), client, "post", "https://example.test", url.Values{}, config{}); err == nil {
+		t.Fatal("postForm ignored body read error")
+	}
+}
+
+type errorReader struct{}
+
+func (errorReader) Read([]byte) (int, error) { return 0, errors.New("read failed") }

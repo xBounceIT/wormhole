@@ -44,6 +44,121 @@ func TestValidateAuthSecretMatchesWinUiRules(t *testing.T) {
 	}
 }
 
+func TestAuthModeNamesValuesAndMessages(t *testing.T) {
+	for _, test := range []struct {
+		input string
+		value int
+	}{
+		{input: "disabled", value: 0},
+		{input: " PIN ", value: 1},
+		{input: "password", value: 2},
+		{input: "windowshello", value: 3},
+		{input: "windows-hello", value: 3},
+		{input: "hello", value: 3},
+	} {
+		value, err := authModeValue(test.input)
+		if err != nil {
+			t.Fatalf("authModeValue(%q): %v", test.input, err)
+		}
+		if value != test.value {
+			t.Fatalf("authModeValue(%q) = %d, want %d", test.input, value, test.value)
+		}
+	}
+	if _, err := authModeValue("unsupported"); err == nil {
+		t.Fatal("authModeValue accepted an unsupported mode")
+	}
+
+	for _, test := range []struct {
+		value int
+		name  string
+	}{
+		{value: 0, name: "disabled"},
+		{value: 1, name: "pin"},
+		{value: 2, name: "password"},
+		{value: 3, name: "windowsHello"},
+		{value: 99, name: "disabled"},
+	} {
+		if name := authModeName(test.value); name != test.name {
+			t.Fatalf("authModeName(%d) = %q, want %q", test.value, name, test.name)
+		}
+	}
+
+	for _, test := range []struct {
+		input string
+		value int
+	}{
+		{input: " PIN ", value: 0},
+		{input: "password", value: 1},
+	} {
+		value, err := authFallbackValue(test.input)
+		if err != nil {
+			t.Fatalf("authFallbackValue(%q): %v", test.input, err)
+		}
+		if value != test.value {
+			t.Fatalf("authFallbackValue(%q) = %d, want %d", test.input, value, test.value)
+		}
+	}
+	if _, err := authFallbackValue("unsupported"); err == nil {
+		t.Fatal("authFallbackValue accepted an unsupported fallback")
+	}
+	if name := authFallbackName(0); name != "pin" {
+		t.Fatalf("authFallbackName(0) = %q, want pin", name)
+	}
+	if name := authFallbackName(1); name != "password" {
+		t.Fatalf("authFallbackName(1) = %q, want password", name)
+	}
+	if name := authFallbackName(99); name != "pin" {
+		t.Fatalf("authFallbackName(99) = %q, want pin", name)
+	}
+
+	if message := invalidAuthSecretMessage(0); message != "Invalid PIN." {
+		t.Fatalf("invalidAuthSecretMessage(0) = %q", message)
+	}
+	if message := invalidAuthSecretMessage(1); message != "Invalid password." {
+		t.Fatalf("invalidAuthSecretMessage(1) = %q", message)
+	}
+	if message := requiredAuthSecretMessage(1, 1); message != "Set a PIN before enabling this unlock method." {
+		t.Fatalf("unexpected PIN requirement: %q", message)
+	}
+	if message := requiredAuthSecretMessage(3, 0); message != "Set a PIN before enabling this unlock method." {
+		t.Fatalf("unexpected Windows Hello PIN requirement: %q", message)
+	}
+	if message := requiredAuthSecretMessage(2, 0); message != "Set a password before enabling this unlock method." {
+		t.Fatalf("unexpected password requirement: %q", message)
+	}
+}
+
+func TestAuthConfiguredRequiresTheVerifierSelectedByTheMode(t *testing.T) {
+	pin := &authVerifier{}
+	password := &authVerifier{}
+	document := authDocument{Pin: pin, Password: password}
+
+	for _, test := range []struct {
+		settings authSettings
+		want     bool
+	}{
+		{settings: authSettings{Mode: 0}, want: false},
+		{settings: authSettings{Mode: 1}, want: true},
+		{settings: authSettings{Mode: 2}, want: true},
+		{settings: authSettings{Mode: 3, Fallback: 0}, want: true},
+		{settings: authSettings{Mode: 3, Fallback: 1}, want: true},
+	} {
+		if configured := authConfigured(test.settings, document); configured != test.want {
+			t.Fatalf("authConfigured(%+v) = %t, want %t", test.settings, configured, test.want)
+		}
+	}
+
+	if authConfigured(authSettings{Mode: 1}, authDocument{}) {
+		t.Fatal("PIN mode was configured without a PIN verifier")
+	}
+	if authConfigured(authSettings{Mode: 2}, authDocument{}) {
+		t.Fatal("password mode was configured without a password verifier")
+	}
+	if authConfigured(authSettings{Mode: 3, Fallback: 1}, authDocument{}) {
+		t.Fatal("Windows Hello was configured without its fallback verifier")
+	}
+}
+
 func TestAuthSettingsPreserveLegacySettings(t *testing.T) {
 	settingsPath := filepath.Join(t.TempDir(), "settings.json")
 	initial := map[string]any{

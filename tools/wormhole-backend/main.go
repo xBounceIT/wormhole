@@ -220,56 +220,71 @@ func operationNeedsProcessInitialization(operation string) bool {
 }
 
 func main() {
-	operation := flag.String("operation", "workspace", "backend operation: startup, startup-unlock, workspace, workspace-duplicate-node, workspace-delete-node, workspace-delete-nodes, workspace-show-credentials, backup-*, credential-*, tunnel-*, workspace-node-*, workspace-update-node-*, web-target, migrate, mcp-status, ssh, serial, ssh-trust-host-key, logs-info, settings-set-log-retention, settings-set-log-level, open-log-file, open-logs-folder, serve, rdp, extension-*, bitwarden-*, or auth-*")
-	databasePath := flag.String("database", "", "path to the Wormhole SQLite database")
-	electronUserDataPath := flag.String("electron-user-data", "", "path to the Electron user-data directory")
-	credentialReader := flag.String("credential-reader", "", "path to the Windows Credential Manager reader")
-	rdpHost := flag.String("rdp-host", "", "path to the Windows ActiveX RDP host")
-	freerdpPath := flag.String("freerdp", "", "path to the FreeRDP client")
-	flag.Parse()
+	os.Exit(runBackendCLI(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
+}
+
+func runBackendCLI(args []string, input io.Reader, output io.Writer, errorOutput io.Writer) int {
+	flags := flag.NewFlagSet("wormhole-backend", flag.ContinueOnError)
+	flags.SetOutput(errorOutput)
+	operation := flags.String("operation", "workspace", "backend operation: startup, startup-unlock, workspace, workspace-duplicate-node, workspace-delete-node, workspace-delete-nodes, workspace-show-credentials, backup-*, credential-*, tunnel-*, workspace-node-*, workspace-update-node-*, web-target, migrate, mcp-status, ssh, serial, ssh-trust-host-key, logs-info, settings-set-log-retention, settings-set-log-level, open-log-file, open-logs-folder, serve, rdp, extension-*, bitwarden-*, or auth-*")
+	databasePath := flags.String("database", "", "path to the Wormhole SQLite database")
+	electronUserDataPath := flags.String("electron-user-data", "", "path to the Electron user-data directory")
+	credentialReader := flags.String("credential-reader", "", "path to the Windows Credential Manager reader")
+	rdpHost := flags.String("rdp-host", "", "path to the Windows ActiveX RDP host")
+	freerdpPath := flags.String("freerdp", "", "path to the FreeRDP client")
+	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+	decodeInput := func(target any) error {
+		return decodeInputReader(input, target)
+	}
+	decodeOptionalInput := func(target any) error {
+		return decodeOptionalInputReader(input, target)
+	}
 
 	if *databasePath == "" {
-		writeError("database path is required")
-		os.Exit(1)
-		return
+		writeErrorTo(errorOutput, "database path is required")
+		return 1
 	}
 	if operationNeedsProcessInitialization(*operation) {
 		initAppLogging(*databasePath)
 		defer closeAppLog()
 		if err := ensureElectronWorkspaceSchema(*databasePath); err != nil {
-			writeError(err.Error())
-			os.Exit(1)
-			return
+			writeErrorTo(errorOutput, err.Error())
+			return 1
 		}
 	}
 	if *operation == "ssh" {
 		logInfo("SSH service started")
-		if err := serveSSH(*databasePath, os.Stdin, os.Stdout, *electronUserDataPath); err != nil {
+		if err := serveSSH(*databasePath, input, output, *electronUserDataPath); err != nil {
 			logError("SSH service failed: %v", err)
-			writeError(err.Error())
-			os.Exit(1)
+			writeErrorTo(errorOutput, err.Error())
+			return 1
 		}
 		logInfo("SSH service stopped")
-		return
+		return 0
 	}
 	if *operation == "serial" {
 		logInfo("serial service started")
-		if err := serveSerial(*databasePath, os.Stdin, os.Stdout, *electronUserDataPath); err != nil {
+		if err := serveSerial(*databasePath, input, output, *electronUserDataPath); err != nil {
 			logError("serial service failed: %v", err)
-			writeError(err.Error())
-			os.Exit(1)
+			writeErrorTo(errorOutput, err.Error())
+			return 1
 		}
 		logInfo("serial service stopped")
-		return
+		return 0
 	}
 	if *operation == "update-download" {
 		// The download streams JSON progress lines to stdout and can run for minutes, so it
 		// deliberately bypasses the one-shot result envelope of the other operations.
-		if err := serveUpdateDownload(*databasePath, os.Stdin, os.Stdout); err != nil {
-			writeError(err.Error())
-			os.Exit(1)
+		if err := serveUpdateDownload(*databasePath, input, output); err != nil {
+			writeErrorTo(errorOutput, err.Error())
+			return 1
 		}
-		return
+		return 0
 	}
 	var result any
 	var err error
@@ -308,7 +323,7 @@ func main() {
 		}
 	case "workspace-delete-nodes":
 		var request workspaceNodesRequest
-		err = decodeInputLimit(os.Stdin, &request, workspaceDeleteNodesMaxRequestBytes)
+		err = decodeInputLimit(input, &request, workspaceDeleteNodesMaxRequestBytes)
 		if err == nil {
 			result, err = deleteWorkspaceNodes(*databasePath, request)
 		}
@@ -483,7 +498,7 @@ func main() {
 		}
 	case "tunnel-create":
 		var request tunnelWriteRequest
-		err = decodeInputLimit(os.Stdin, &request, backendMaxTunnelRequestBytes)
+		err = decodeInputLimit(input, &request, backendMaxTunnelRequestBytes)
 		if err == nil {
 			result, err = createTunnel(*databasePath, request)
 		}
@@ -495,7 +510,7 @@ func main() {
 		}
 	case "tunnel-update":
 		var request tunnelWriteRequest
-		err = decodeInputLimit(os.Stdin, &request, backendMaxTunnelRequestBytes)
+		err = decodeInputLimit(input, &request, backendMaxTunnelRequestBytes)
 		if err == nil {
 			result, err = updateTunnel(*databasePath, request)
 		}
@@ -762,13 +777,13 @@ func main() {
 		}
 	case "serve":
 		logInfo("VNC service started")
-		if err := serveBackend(*databasePath, *electronUserDataPath); err != nil {
+		if err := serveBackendIO(*databasePath, input, output, *electronUserDataPath); err != nil {
 			logError("VNC service failed: %v", err)
-			writeError(err.Error())
-			os.Exit(1)
+			writeErrorTo(errorOutput, err.Error())
+			return 1
 		}
 		logInfo("VNC service stopped")
-		return
+		return 0
 	case "rdp":
 		err = runRdpController(*databasePath, *rdpHost, *freerdpPath)
 	default:
@@ -777,25 +792,21 @@ func main() {
 
 	if err != nil {
 		logError("service operation %s failed: %v", *operation, err)
-		writeError(err.Error())
-		os.Exit(1)
-		return
+		writeErrorTo(errorOutput, err.Error())
+		return 1
 	}
 	logDebug("service operation %s completed", *operation)
 
-	if err := json.NewEncoder(os.Stdout).Encode(result); err != nil {
+	if err := json.NewEncoder(output).Encode(result); err != nil {
 		logError("failed to encode service response: %v", err)
-		writeError("Wormhole could not complete the request")
-		os.Exit(1)
+		writeErrorTo(errorOutput, "Wormhole could not complete the request")
+		return 1
 	}
+	return 0
 }
 
-func decodeInput[T any](target *T) error {
-	return decodeInputReader(os.Stdin, target)
-}
-
-func decodeOptionalInput[T any](target *T) error {
-	contents, err := io.ReadAll(io.LimitReader(os.Stdin, backendMaxRequestBytes+1))
+func decodeOptionalInputReader(reader io.Reader, target any) error {
+	contents, err := io.ReadAll(io.LimitReader(reader, backendMaxRequestBytes+1))
 	if err != nil || len(contents) > backendMaxRequestBytes {
 		return errors.New("Wormhole request was invalid")
 	}
@@ -808,11 +819,11 @@ func decodeOptionalInput[T any](target *T) error {
 	return nil
 }
 
-func decodeInputReader[T any](reader io.Reader, target *T) error {
+func decodeInputReader(reader io.Reader, target any) error {
 	return decodeInputLimit(reader, target, backendMaxRequestBytes)
 }
 
-func decodeInputLimit[T any](reader io.Reader, target *T, limit int64) error {
+func decodeInputLimit(reader io.Reader, target any, limit int64) error {
 	contents, err := io.ReadAll(io.LimitReader(reader, limit+1))
 	if err != nil || len(contents) > int(limit) {
 		return errors.New("Wormhole request was invalid")
@@ -830,9 +841,13 @@ func decodeInputLimit[T any](reader io.Reader, target *T, limit int64) error {
 var rdpOutputMu sync.Mutex
 
 func writeError(message string) {
+	writeErrorTo(os.Stderr, message)
+}
+
+func writeErrorTo(writer io.Writer, message string) {
 	// Backend errors are intentionally generic at the process boundary. In particular, never
 	// include a credential value or a helper's raw output in stderr.
-	_, _ = fmt.Fprintln(os.Stderr, message)
+	_, _ = fmt.Fprintln(writer, message)
 }
 
 func openDatabase(databasePath string, readOnly bool) (*sql.DB, error) {

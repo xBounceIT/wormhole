@@ -21,6 +21,11 @@ const (
 	fortinetSAMLMaxHeaderBytes      = 16 * 1024
 )
 
+var (
+	openExternalURLForFortinet = openExternalURL
+	newExternalURLCommand      = exec.CommandContext
+)
+
 func authenticateFortinetExternalSAML(ctx context.Context, host string, port, callbackPort int) (string, error) {
 	listener, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(callbackPort)))
 	if err != nil {
@@ -35,7 +40,7 @@ func authenticateFortinetExternalSAML(ctx context.Context, host string, port, ca
 	start.Path = "/remote/saml/start"
 	start.RawQuery = "redirect=1"
 	startURL := start.String()
-	if err := openExternalURL(ctx, startURL); err != nil {
+	if err := openExternalURLForFortinet(ctx, startURL); err != nil {
 		return "", err
 	}
 	return waitForFortinetSAMLCallback(ctx, listener)
@@ -123,11 +128,11 @@ func openExternalURL(ctx context.Context, target string) error {
 	var command *exec.Cmd
 	switch runtime.GOOS {
 	case "windows":
-		command = exec.CommandContext(ctx, "rundll32.exe", "url.dll,FileProtocolHandler", target)
+		command = newExternalURLCommand(ctx, "rundll32.exe", "url.dll,FileProtocolHandler", target)
 	case "darwin":
-		command = exec.CommandContext(ctx, "open", target)
+		command = newExternalURLCommand(ctx, "open", target)
 	default:
-		command = exec.CommandContext(ctx, "xdg-open", target)
+		command = newExternalURLCommand(ctx, "xdg-open", target)
 	}
 	if err := command.Start(); err != nil {
 		return errors.New("could not open the system browser for Fortinet SAML")

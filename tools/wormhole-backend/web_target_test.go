@@ -93,6 +93,89 @@ func TestBuildWebURLRejectsEmbeddedPortAndPath(t *testing.T) {
 	}
 }
 
+func TestBuildWebURLValidatesProtocolPortAndIPv6Brackets(t *testing.T) {
+	if value, err := buildWebURL("https", "[fd00::1]", 8443); err != nil || value != "https://[fd00::1]:8443/" {
+		t.Fatalf("bracketed IPv6 URL = %q, %v", value, err)
+	}
+	for _, test := range []struct {
+		name   string
+		scheme string
+		host   string
+		port   int
+	}{
+		{name: "protocol", scheme: "ftp", host: "example.test", port: 443},
+		{name: "empty host", scheme: "https", host: "", port: 443},
+		{name: "non IPv6 brackets", scheme: "https", host: "[example.test]", port: 443},
+		{name: "invalid colon host", scheme: "https", host: "not:an:ip", port: 443},
+		{name: "zero port", scheme: "https", host: "example.test", port: 0},
+		{name: "oversized port", scheme: "https", host: "example.test", port: 65536},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := buildWebURL(test.scheme, test.host, test.port); err == nil {
+				t.Fatal("invalid web URL was accepted")
+			}
+		})
+	}
+}
+
+func TestParseWebAddressCoversLegacyAddressForms(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		raw  string
+		host string
+		port int
+	}{
+		{name: "HTTP URL", raw: "http://example.test/admin?q=1", host: "example.test"},
+		{name: "host", raw: "example.test", host: "example.test"},
+		{name: "host and port", raw: "example.test:8443", host: "example.test", port: 8443},
+		{name: "bare IPv6", raw: "fd00::1", host: "fd00::1"},
+		{name: "bracketed IPv6", raw: "[fd00::1]", host: "fd00::1"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			host, port, err := parseWebAddress(test.raw)
+			if err != nil || host != test.host || port != test.port {
+				t.Fatalf("parseWebAddress(%q) = %q, %d, %v", test.raw, host, port, err)
+			}
+		})
+	}
+
+	for _, raw := range []string{
+		"https://",
+		"[",
+		"[example.test]",
+		"[fd00::1]suffix",
+		"[fd00::1]:invalid",
+		":443",
+		"not:an:ipv6",
+	} {
+		if _, _, err := parseWebAddress(raw); err == nil {
+			t.Fatalf("parseWebAddress accepted %q", raw)
+		}
+	}
+}
+
+func TestResolvedProtocolForWebNodeHandlesInheritanceAndCycles(t *testing.T) {
+	const expectedProtocol = int64(4)
+	folder := &webNode{ID: "folder", Protocol: sql.NullInt64{Int64: expectedProtocol, Valid: true}}
+	leaf := &webNode{ID: "leaf", ParentID: sql.NullString{String: "folder", Valid: true}}
+	nodes := map[string]*webNode{"folder": folder, "leaf": leaf}
+	protocol, err := resolvedProtocolForWebNode(leaf, nodes)
+	if err != nil || !protocol.Valid || protocol.Int64 != expectedProtocol {
+		t.Fatalf("inherited protocol = %#v, %v", protocol, err)
+	}
+
+	orphan := &webNode{ID: "orphan", ParentID: sql.NullString{String: "missing", Valid: true}}
+	if protocol, err := resolvedProtocolForWebNode(orphan, nodes); err != nil || protocol.Valid {
+		t.Fatalf("orphan protocol = %#v, %v", protocol, err)
+	}
+
+	first := &webNode{ID: "first", ParentID: sql.NullString{String: "second", Valid: true}}
+	second := &webNode{ID: "second", ParentID: sql.NullString{String: "first", Valid: true}}
+	if _, err := resolvedProtocolForWebNode(first, map[string]*webNode{"first": first, "second": second}); err == nil {
+		t.Fatal("web node cycle was accepted")
+	}
+}
+
 func TestResolveWebTargetParsesQuickConnectAddressInGo(t *testing.T) {
 	target, err := resolveWebTarget("", webTargetRequest{
 		Address:          "https://[fd00::1]:8443/admin?from=bookmark",

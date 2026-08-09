@@ -409,7 +409,8 @@ test('system RDP launches only the verified Windows system executable', () => {
   );
   assert.match(windowsAdapter, /windows\.GetSystemDirectory\(\)/);
   assert.match(windowsAdapter, /filepath\.Join\(systemDirectory, "mstsc\.exe"\)/);
-  assert.match(goSource, /exec\.Command\(executable, args\.\.\.\)/);
+  assert.match(goSource, /newExternalRdpCommand\s+= exec\.Command/);
+  assert.match(goSource, /newExternalRdpCommand\(executable, args\.\.\.\)/);
   assert.doesNotMatch(goSource, /exec\.Command\("mstsc\.exe"/);
 });
 

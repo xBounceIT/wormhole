@@ -2,12 +2,24 @@ package main
 
 import (
 	"bufio"
+	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/http/cookiejar"
+	"net/http/httptest"
 	"net/netip"
+	"net/url"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func strptr(s string) *string { return &s }
@@ -436,5 +448,202 @@ func TestReadCstpConnectResponse_RejectsNon200(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "403") {
 		t.Fatalf("error should surface the status line: %v", err)
+	}
+}
+
+func TestCiscoLoginCompletesAggregateAuthAndCSTPConnect(t *testing.T) {
+	requests := make(chan string, 8)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests <- r.Method + " " + r.URL.Path
+		if r.UserAgent() != ciscoUserAgent {
+			t.Errorf("user agent = %q", r.UserAgent())
+		}
+		switch r.Method {
+		case http.MethodPost:
+			body, _ := io.ReadAll(r.Body)
+			if strings.Contains(string(body), `type="init"`) {
+				_, _ = io.WriteString(w, `<config-auth><opaque is-for="sg"><handle>1</handle></opaque><auth id="main"><form><input type="text" name="username"/><input type="password" name="password"/></form></auth></config-auth>`)
+				return
+			}
+			if !strings.Contains(string(body), "<username>alice</username>") || !strings.Contains(string(body), "<password>secret</password>") {
+				t.Errorf("auth reply = %s", body)
+			}
+			_, _ = io.WriteString(w, `<config-auth><auth id="success"/><session-token>session-cookie</session-token></config-auth>`)
+		case http.MethodConnect:
+			if r.URL.Path != cstpTunnelPath || r.Header.Get("Cookie") != "webvpn=session-cookie" {
+				t.Errorf("CONNECT path=%q cookie=%q", r.URL.Path, r.Header.Get("Cookie"))
+			}
+			w.Header().Set("X-CSTP-Address", "10.0.0.2")
+			w.Header().Set("X-CSTP-DNS", "10.0.0.53")
+			w.Header().Set("X-CSTP-MTU", "1400")
+			w.Header().Set("X-CSTP-DPD", "30")
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.Error(w, "unexpected", http.StatusMethodNotAllowed)
+		}
+	}))
+	defer server.Close()
+
+	serverURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, portText, err := net.SplitHostPort(serverURL.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, _ := strconv.Atoi(portText)
+	sess, err := ciscoLogin(context.Background(), config{Host: host, Port: port, Username: "alice", Password: "secret", TrustServerCertificate: true})
+	if err != nil {
+		t.Fatalf("ciscoLogin returned %v", err)
+	}
+	defer sess.Conn.Close()
+	if sess.AssignedIP.String() != "10.0.0.2" || sess.MTU != 1400 || len(sess.DNS) != 1 || sess.DPDSeconds != 30 {
+		t.Fatalf("session = %#v", sess)
+	}
+	for _, want := range []string{"POST /", "POST /", "CONNECT " + cstpTunnelPath} {
+		select {
+		case got := <-requests:
+			if got != want {
+				t.Fatalf("request = %q, want %q", got, want)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("missing request %q", want)
+		}
+	}
+
+	outerCtx, outerCancel := context.WithCancel(context.Background())
+	dialer, arm, cleanup, err := startCisco(outerCtx, outerCancel, config{Host: host, Port: port, Username: "alice", Password: "secret", TrustServerCertificate: true})
+	if err != nil {
+		t.Fatalf("startCisco returned %v", err)
+	}
+	if dialer == nil || arm == nil || cleanup == nil {
+		t.Fatal("startCisco returned nil lifecycle resources")
+	}
+	arm()
+	cleanup()
+}
+
+func TestBuildTLSConfigCertificatePin(t *testing.T) {
+	invalid := "not-hex"
+	if _, err := buildTLSConfig(config{ServerCertSha256Pin: &invalid}, tlsModeModern); err == nil {
+		t.Fatal("invalid pin was accepted")
+	}
+	short := "0102"
+	if _, err := buildTLSConfig(config{ServerCertSha256Pin: &short}, tlsModeModern); err == nil {
+		t.Fatal("short pin was accepted")
+	}
+	raw := []byte("certificate")
+	digest := sha256.Sum256(raw)
+	pin := hex.EncodeToString(digest[:])
+	cfg, err := buildTLSConfig(config{Host: "vpn.example.test", ServerCertSha256Pin: &pin}, tlsModeModern)
+	if err != nil || cfg.VerifyConnection == nil || !cfg.InsecureSkipVerify {
+		t.Fatalf("pinned config = %#v, %v", cfg, err)
+	}
+	if err := cfg.VerifyConnection(tls.ConnectionState{}); err == nil {
+		t.Fatal("empty certificate chain was accepted")
+	}
+	if err := cfg.VerifyConnection(tls.ConnectionState{PeerCertificates: []*x509.Certificate{{Raw: []byte("wrong")}}}); err == nil {
+		t.Fatal("wrong certificate was accepted")
+	}
+	if err := cfg.VerifyConnection(tls.ConnectionState{PeerCertificates: []*x509.Certificate{{Raw: raw}}}); err != nil {
+		t.Fatalf("matching certificate was rejected: %v", err)
+	}
+}
+
+func TestCookieCaptureDescriptionAndHostNormalization(t *testing.T) {
+	jar, _ := cookiejar.New(nil)
+	baseURL, _ := url.Parse("https://vpn.example.test/")
+	if got := captureWebvpnCookie(jar, baseURL, &xmlConfigAuth{SessionToken: "token"}); got != "token" {
+		t.Fatalf("token fallback = %q", got)
+	}
+	jar.SetCookies(baseURL, []*http.Cookie{{Name: "WEBVPN", Value: "cookie"}})
+	if got := captureWebvpnCookie(jar, baseURL, &xmlConfigAuth{SessionToken: "token"}); got != "cookie" {
+		t.Fatalf("cookie capture = %q", got)
+	}
+	emptyJar, _ := cookiejar.New(nil)
+	if got := captureWebvpnCookie(emptyJar, baseURL, &xmlConfigAuth{}); got != "" {
+		t.Fatalf("empty capture = %q", got)
+	}
+	form := xmlForm{Inputs: []xmlInput{{Name: "username", Type: "text"}, {Name: "password", Type: "password"}}}
+	if got := describeInputs(form); got != "username/text,password/password" {
+		t.Fatalf("describeInputs = %q", got)
+	}
+	for input, want := range map[string]string{" [2001:db8::1] ": "2001:db8::1", " vpn.example.test ": "vpn.example.test"} {
+		if got := stripHostBrackets(input); got != want {
+			t.Fatalf("stripHostBrackets(%q) = %q", input, got)
+		}
+	}
+}
+
+func TestParseConfigAuthAndAuthMessagesHandleInvalidInput(t *testing.T) {
+	if _, err := parseConfigAuth([]byte("<")); err == nil {
+		t.Fatal("invalid XML was accepted")
+	}
+	if _, err := parseConfigAuth([]byte("<other/>")); err == nil {
+		t.Fatal("unexpected root was accepted")
+	}
+	if got := authFailureMessage(nil); got != "" {
+		t.Fatalf("nil failure message = %q", got)
+	}
+	if got := authMessage(nil); got != "unspecified error" {
+		t.Fatalf("nil auth message = %q", got)
+	}
+	if got := authMessage(&xmlConfigAuth{Auth: xmlAuth{Message: " prompt "}}); got != " prompt " {
+		t.Fatalf("auth message = %q", got)
+	}
+}
+
+func TestAnswerFormFallbackAndUnmappableInputs(t *testing.T) {
+	secondary := "654321"
+	values, err := answerForm(config{SecondaryPassword: &secondary}, xmlForm{Inputs: []xmlInput{
+		{Name: "ignored", Type: "hidden"},
+		{Name: "answer", Type: "vendor-extension"},
+	}}, false)
+	if err != nil || len(values) != 1 || values[0].name != "answer" || values[0].value != secondary {
+		t.Fatalf("fallback values = %#v, %v", values, err)
+	}
+	if _, err := answerForm(config{}, xmlForm{Inputs: []xmlInput{{Name: "", Type: "text"}, {Name: "custom", Type: "hidden"}}}, true); err == nil {
+		t.Fatal("unmappable form was accepted")
+	}
+}
+
+type ciscoRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f ciscoRoundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
+
+type ciscoErrorReader struct{}
+
+func (ciscoErrorReader) Read([]byte) (int, error) { return 0, errors.New("read failed") }
+
+func TestPostAuthXMLSurfacesRequestTransportBodySizeAndStatusErrors(t *testing.T) {
+	client := &http.Client{Transport: ciscoRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("transport failed")
+	})}
+	if _, err := postAuthXML(context.Background(), client, "test", ":", "payload"); err == nil {
+		t.Fatal("invalid URL was accepted")
+	}
+	if _, err := postAuthXML(context.Background(), client, "test", "https://example.test", "payload"); err == nil {
+		t.Fatal("transport error was ignored")
+	}
+	client.Transport = ciscoRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(ciscoErrorReader{})}, nil
+	})
+	if _, err := postAuthXML(context.Background(), client, "test", "https://example.test", "payload"); err == nil {
+		t.Fatal("body read error was ignored")
+	}
+	client.Transport = ciscoRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(strings.Repeat("a", (1<<20)+1)))}, nil
+	})
+	if _, err := postAuthXML(context.Background(), client, "test", "https://example.test", "payload"); err == nil {
+		t.Fatal("oversized body was accepted")
+	}
+	client.Transport = ciscoRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 500, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("failed"))}, nil
+	})
+	if _, err := postAuthXML(context.Background(), client, "test", "https://example.test", "payload"); err == nil || !strings.Contains(err.Error(), "HTTP 500") {
+		t.Fatalf("status error = %v", err)
 	}
 }

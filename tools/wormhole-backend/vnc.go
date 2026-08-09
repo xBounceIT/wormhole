@@ -128,7 +128,7 @@ type backendLineWriter struct {
 	writer *bufio.Writer
 }
 
-func newBackendLineWriter(output *os.File) *backendLineWriter {
+func newBackendLineWriter(output io.Writer) *backendLineWriter {
 	return &backendLineWriter{writer: bufio.NewWriterSize(output, 64*1024)}
 }
 
@@ -150,6 +150,10 @@ func (w *backendLineWriter) write(value any) error {
 }
 
 func serveBackend(databasePath string, electronUserDataPath ...string) error {
+	return serveBackendIO(databasePath, os.Stdin, os.Stdout, electronUserDataPath...)
+}
+
+func serveBackendIO(databasePath string, input io.Reader, outputWriter io.Writer, electronUserDataPath ...string) error {
 	database, err := openDatabase(databasePath, true)
 	if err != nil {
 		return err
@@ -158,12 +162,12 @@ func serveBackend(databasePath string, electronUserDataPath ...string) error {
 		defer database.Close()
 	}
 
-	output := newBackendLineWriter(os.Stdout)
+	output := newBackendLineWriter(outputWriter)
 	manager := newVncManager(database, output, electronUserDataPath...)
 	manager.databasePath = databasePath
 	defer manager.close()
 
-	scanner := bufio.NewScanner(os.Stdin)
+	scanner := bufio.NewScanner(input)
 	scanner.Buffer(make([]byte, 64*1024), backendLineLimit)
 	for scanner.Scan() {
 		var command backendCommand

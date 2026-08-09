@@ -35,6 +35,140 @@ func TestBackupOperationsHonorCancellationBeforeSideEffects(t *testing.T) {
 	}
 }
 
+func TestBackupValueConversionsCoverSQLiteRepresentations(t *testing.T) {
+	for _, test := range []struct {
+		value any
+		want  int64
+		ok    bool
+	}{
+		{value: int64(7), want: 7, ok: true},
+		{value: int(8), want: 8, ok: true},
+		{value: true, want: 1, ok: true},
+		{value: false, want: 0, ok: true},
+		{value: []byte("9"), want: 9, ok: true},
+		{value: "10", want: 10, ok: true},
+		{value: "invalid", ok: false},
+		{value: 1.5, ok: false},
+	} {
+		got, ok := backupDatabaseInteger(test.value)
+		if got != test.want || ok != test.ok {
+			t.Fatalf("integer(%#v) = %d,%v want %d,%v", test.value, got, ok, test.want, test.ok)
+		}
+	}
+
+	columns := []backupColumn{
+		{DB: "Name", JSON: "name", Kind: backupString},
+		{DB: "Bytes", JSON: "bytes", Kind: backupString},
+		{DB: "Count", JSON: "count", Kind: backupInteger},
+		{DB: "Enabled", JSON: "enabled", Kind: backupBoolean},
+	}
+	values := []any{"name", []byte("bytes"), "12", int64(1)}
+	for index, column := range columns {
+		encoded, err := backupJSONValue(column, values[index])
+		if err != nil || !json.Valid(encoded) {
+			t.Fatalf("JSON value %s = %s, %v", column.DB, encoded, err)
+		}
+	}
+	if _, err := backupJSONValue(backupColumn{DB: "Count", JSON: "count", Kind: backupInteger}, "invalid"); err == nil {
+		t.Fatal("invalid backup integer was accepted")
+	}
+	if _, err := backupJSONValue(backupColumn{DB: "Enabled", JSON: "enabled", Kind: backupBoolean}, struct{}{}); err == nil {
+		t.Fatal("invalid backup boolean was accepted")
+	}
+}
+
+func TestBackupObjectAccessorsAndDatabaseValues(t *testing.T) {
+	object := backupObject{
+		"name":    json.RawMessage(`"value"`),
+		"count":   json.RawMessage(`12`),
+		"enabled": json.RawMessage(`true`),
+		"numeric": json.RawMessage(`2`),
+		"null":    json.RawMessage(`null`),
+		"invalid": json.RawMessage(`{`),
+	}
+	if backupObjectString(object, "name") != "value" || backupObjectString(object, "missing") != "" || backupObjectString(object, "invalid") != "" {
+		t.Fatalf("unexpected string accessors for %#v", object)
+	}
+	if value := backupObjectOptionalString(object, "name"); value == nil || *value != "value" {
+		t.Fatalf("optional string = %#v", value)
+	}
+	if backupObjectOptionalString(object, "null") != nil || backupObjectOptionalString(object, "invalid") != nil {
+		t.Fatal("invalid optional string was returned")
+	}
+	if value, ok := backupObjectInteger(object, "count"); !ok || value != 12 {
+		t.Fatalf("integer = %d,%v", value, ok)
+	}
+	if _, ok := backupObjectInteger(object, "invalid"); ok {
+		t.Fatal("invalid object integer was accepted")
+	}
+	if value, ok := backupObjectBoolean(object, "enabled"); !ok || !value {
+		t.Fatalf("boolean = %v,%v", value, ok)
+	}
+	if value, ok := backupObjectBoolean(object, "numeric"); !ok || !value {
+		t.Fatalf("numeric boolean = %v,%v", value, ok)
+	}
+	if _, ok := backupObjectBoolean(object, "invalid"); ok {
+		t.Fatal("invalid object boolean was accepted")
+	}
+
+	setBackupObjectValue(object, "added", "text")
+	if backupObjectString(object, "added") != "text" {
+		t.Fatal("backup value was not set")
+	}
+	setBackupObjectValue(object, "added", nil)
+	if _, exists := object["added"]; exists {
+		t.Fatal("nil backup value was not removed")
+	}
+
+	for _, test := range []struct {
+		column backupColumn
+		want   any
+	}{
+		{column: backupColumn{JSON: "name", Kind: backupString}, want: "value"},
+		{column: backupColumn{JSON: "count", Kind: backupInteger}, want: int64(12)},
+		{column: backupColumn{JSON: "enabled", Kind: backupBoolean}, want: int64(1)},
+		{column: backupColumn{JSON: "numeric", Kind: backupBoolean}, want: int64(1)},
+		{column: backupColumn{JSON: "missing", Kind: backupString, Required: true, Default: "fallback"}, want: "fallback"},
+		{column: backupColumn{JSON: "invalid", Kind: backupInteger, Required: true, Default: int64(3)}, want: int64(3)},
+		{column: backupColumn{JSON: "missing", Kind: backupString}, want: nil},
+	} {
+		if got := backupDatabaseValue(object, test.column); got != test.want {
+			t.Fatalf("database value for %#v = %#v, want %#v", test.column, got, test.want)
+		}
+	}
+}
+
+func TestBackupIdentifiersGuidsAndPayloadNormalization(t *testing.T) {
+	valid := "00112233-4455-6677-8899-aabbccddeeff"
+	if got, ok := canonicalBackupID("  " + strings.ToUpper(valid) + " "); !ok || got != valid {
+		t.Fatalf("canonical id = %q,%v", got, ok)
+	}
+	for _, invalid := range []string{"", "00112233_4455-6677-8899-aabbccddeeff", "g0112233-4455-6677-8899-aabbccddeeff"} {
+		if _, ok := canonicalBackupID(invalid); ok {
+			t.Fatalf("invalid backup id %q was accepted", invalid)
+		}
+	}
+	if got := backupDotNetGuidFromBytes([]byte{0x33, 0x22, 0x11, 0x00, 0x55, 0x44, 0x77, 0x66, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff}); got != valid {
+		t.Fatalf(".NET guid = %q", got)
+	}
+	if got := backupDotNetGuidFromBytes([]byte{1, 2}); got != "00000000-0000-0000-0000-000000000000" {
+		t.Fatalf("short .NET guid = %q", got)
+	}
+
+	payload := backupPayload{}
+	normalizeBackupPayloadLists(&payload)
+	encoded, err := json.Marshal(payload)
+	if err != nil || bytes.Contains(encoded, []byte("null")) {
+		t.Fatalf("normalized payload = %s, %v", encoded, err)
+	}
+	node := backupObject{"id": json.RawMessage(`"node"`)}
+	payload.Nodes = []*backupObject{nil, &node}
+	payload.Passwords = []*backupPasswordEntry{nil, {CredentialID: "credential"}}
+	if dropped := filterBackupNulls(&payload); dropped != 2 || len(payload.Nodes) != 1 || len(payload.Passwords) != 1 {
+		t.Fatalf("filtered payload dropped=%d nodes=%d passwords=%d", dropped, len(payload.Nodes), len(payload.Passwords))
+	}
+}
+
 func TestOperationProgressInterpolationIsBounded(t *testing.T) {
 	for _, test := range []struct {
 		completed, total, expected int

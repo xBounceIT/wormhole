@@ -30,8 +30,9 @@ const (
 	rdpMaxCoordinate   = 1_000_000
 	rdpMaxDimension    = 16_384
 	rdpDefaultPort     = 3389
-	rdpDisconnectGrace = 10 * time.Second
 )
+
+var rdpDisconnectGrace = 10 * time.Second
 
 type rdpBounds struct {
 	X      int `json:"x"`
@@ -175,7 +176,16 @@ type rdpController struct {
 	mu             sync.Mutex
 }
 
+var (
+	systemRdpClientExecutableForController = systemRdpClientExecutable
+	newExternalRdpCommand                  = exec.Command
+)
+
 func runRdpController(databasePath, nativeHostPath, freerdpPath string) error {
+	return runRdpControllerIO(databasePath, nativeHostPath, freerdpPath, os.Stdin)
+}
+
+func runRdpControllerIO(databasePath, nativeHostPath, freerdpPath string, input io.Reader) error {
 	controller := &rdpController{
 		databasePath:   databasePath,
 		nativeHostPath: strings.TrimSpace(nativeHostPath),
@@ -183,7 +193,7 @@ func runRdpController(databasePath, nativeHostPath, freerdpPath string) error {
 		processes:      make(map[string]*rdpProcess),
 	}
 
-	scanner := bufio.NewScanner(os.Stdin)
+	scanner := bufio.NewScanner(input)
 	scanner.Buffer(make([]byte, 32*1024), rdpMaxCommandBytes)
 	for scanner.Scan() {
 		var command rdpCommand
@@ -256,7 +266,7 @@ func (c *rdpController) start(command rdpCommand) {
 		if command.Profile.TunnelEnabled == nil && command.Profile.TunnelConfigID != "" {
 			tunnelEnabled = true
 		}
-		capability := evaluateRdpSystemClientCapability(command.Profile, tunnelEnabled, runtime.GOOS, systemRdpClientExecutable)
+		capability := evaluateRdpSystemClientCapability(command.Profile, tunnelEnabled, runtime.GOOS, systemRdpClientExecutableForController)
 		if !capability.Supported {
 			writeRdpEvent(rdpEvent{Type: "error", RequestID: command.RequestID, SessionID: command.SessionID, Message: capability.Reason})
 			return
@@ -607,13 +617,13 @@ func (c *rdpController) startExternalRdp(command rdpCommand) {
 	}()
 	// mstsc has no supported secret-bearing command-line contract. Deliberately pass only the
 	// target; Windows credential roaming or the native prompt owns authentication for this mode.
-	executable, err := systemRdpClientExecutable()
+	executable, err := systemRdpClientExecutableForController()
 	if err != nil {
 		writeRdpEvent(rdpEvent{Type: "error", RequestID: command.RequestID, SessionID: command.SessionID, Backend: "activex", Message: "the system Remote Desktop client is unavailable"})
 		return
 	}
 	args := buildSystemRdpInvocation(command.Profile)
-	cmd := exec.Command(executable, args...)
+	cmd := newExternalRdpCommand(executable, args...)
 	cmd.Env = rdpChildEnvironment(os.Environ())
 	cmd.Stdin = nil
 	cmd.Stdout = io.Discard

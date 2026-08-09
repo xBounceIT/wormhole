@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseAppVersion(t *testing.T) {
@@ -353,5 +354,49 @@ func TestUpdateSettingsMergePreservesKeys(t *testing.T) {
 	}
 	if skipped != nil {
 		t.Fatalf("skipped should be cleared, got %q", *skipped)
+	}
+}
+
+func TestUpdateCacheMaintenanceRemovesOnlyStaleAndSupersededFiles(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	cache := updateCacheDirectory(databasePath)
+	if err := os.MkdirAll(cache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldPart := filepath.Join(cache, "old.part")
+	recentPart := filepath.Join(cache, "recent.part")
+	ordinary := filepath.Join(cache, "ordinary.txt")
+	directoryPart := filepath.Join(cache, "directory.part")
+	for _, path := range []string{oldPart, recentPart, ordinary} {
+		if err := os.WriteFile(path, []byte("fixture"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Mkdir(directoryPart, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-updateStalePartialPartAge - time.Hour)
+	if err := os.Chtimes(oldPart, old, old); err != nil {
+		t.Fatal(err)
+	}
+	cleanupStalePartialDownloads(databasePath)
+	if fileExists(oldPart) || !fileExists(recentPart) || !fileExists(ordinary) || !directoryExists(directoryPart) {
+		t.Fatal("partial-download cleanup removed the wrong cache entries")
+	}
+	cleanupStalePartialDownloads(filepath.Join(t.TempDir(), "missing.db"))
+
+	keepName := "Wormhole-2.0.0-win-x64-setup.exe"
+	removeName := "Wormhole-1.0.0-win-x64-setup.exe"
+	for _, name := range []string{keepName, removeName} {
+		if err := os.WriteFile(filepath.Join(cache, name), []byte("installer"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rotateInstallerCache(databasePath, keepName)
+	if !fileExists(filepath.Join(cache, keepName)) || fileExists(filepath.Join(cache, removeName)) {
+		t.Fatal("installer cache rotation did not preserve only the selected installer")
+	}
+	if architecture := updateTargetArchitecture(); architecture != "x64" && architecture != "arm64" && architecture != "" {
+		t.Fatalf("unexpected update architecture %q", architecture)
 	}
 }

@@ -19,7 +19,135 @@ import (
 	"time"
 
 	vnc "github.com/kward/go-vnc"
+	"github.com/kward/go-vnc/encodings"
 )
+
+func TestServeBackendIOProcessesBoundedCommandStream(t *testing.T) {
+	input := strings.Join([]string{
+		"not-json",
+		`{"id":"unsupported","action":"unknown","sessionId":"unknown"}`,
+		`{"id":"disconnect","action":"vnc.disconnect","sessionId":"missing"}`,
+		`{"id":"pointer","action":"vnc.pointer","sessionId":"missing","x":1,"y":2}`,
+		`{"id":"key","action":"vnc.key","sessionId":"missing","down":true,"keysym":13}`,
+	}, "\n")
+	var output bytes.Buffer
+	if err := serveBackendIO(filepath.Join(t.TempDir(), "missing.db"), strings.NewReader(input), &output); err != nil {
+		t.Fatal(err)
+	}
+
+	decoder := json.NewDecoder(&output)
+	var responses []backendResponse
+	for decoder.More() {
+		var response backendResponse
+		if err := decoder.Decode(&response); err != nil {
+			t.Fatal(err)
+		}
+		responses = append(responses, response)
+	}
+	if len(responses) != 5 || responses[0].OK || responses[1].OK || !responses[2].OK || responses[3].OK || responses[4].OK {
+		t.Fatalf("unexpected backend responses: %#v", responses)
+	}
+	if !strings.Contains(responses[1].Error, "unsupported") || !strings.Contains(responses[3].Error, "not connected") {
+		t.Fatalf("unexpected backend errors: %#v", responses)
+	}
+
+	if err := serveBackendIO(filepath.Join(t.TempDir(), "missing.db"), backendFailingReader{}, io.Discard); err == nil || !strings.Contains(err.Error(), "request stream failed") {
+		t.Fatalf("stream read failure = %v", err)
+	}
+}
+
+func TestVncManagerConnectsRoutesInputAndDisconnects(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	serverInputs := make(chan string, 2)
+	serverDone := make(chan error, 1)
+	go func() { serverDone <- serveFakeVnc(listener, serverInputs) }()
+
+	readPipe, writePipe, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer readPipe.Close()
+	defer writePipe.Close()
+
+	output := newBackendLineWriter(writePipe)
+	manager := newVncManager(nil, output)
+	defer manager.close()
+	reader := bufio.NewReader(readPipe)
+	sessionID := "manager-session"
+	manager.handle(backendCommand{
+		ID: "connect", Action: "vnc.connect", SessionID: sessionID,
+		Host: "127.0.0.1", Port: listener.Addr().(*net.TCPAddr).Port,
+	})
+	readBackendResponse(t, reader, "connect", true)
+	readBackendEvent(t, reader, "connecting")
+	readBackendEvent(t, reader, "connected")
+	readBackendEvent(t, reader, "frame")
+
+	manager.handle(backendCommand{ID: "pointer", Action: "vnc.pointer", SessionID: sessionID, X: 0, Y: 0, Buttons: 1})
+	readBackendResponse(t, reader, "pointer", true)
+	manager.handle(backendCommand{ID: "key", Action: "vnc.key", SessionID: sessionID, Down: true, KeySym: 0xff0d})
+	readBackendResponse(t, reader, "key", true)
+
+	seen := make(map[string]bool)
+	for len(seen) < 2 {
+		select {
+		case input := <-serverInputs:
+			seen[input] = true
+		case <-time.After(2 * time.Second):
+			t.Fatalf("fake VNC server inputs = %#v", seen)
+		}
+	}
+	select {
+	case err := <-serverDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("fake VNC server did not finish")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		manager.mu.Lock()
+		_, active := manager.sessions[sessionID]
+		manager.mu.Unlock()
+		if !active {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("completed VNC session remained registered")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	manager.handle(backendCommand{ID: "disconnect", Action: "vnc.disconnect", SessionID: sessionID})
+	readBackendResponse(t, reader, "disconnect", true)
+}
+
+func readBackendResponse(t *testing.T, reader *bufio.Reader, id string, ok bool) backendResponse {
+	t.Helper()
+	for {
+		line, err := reader.ReadBytes('\n')
+		if err != nil {
+			t.Fatal(err)
+		}
+		var response backendResponse
+		if err := json.Unmarshal(line, &response); err != nil {
+			t.Fatal(err)
+		}
+		if response.ID == "" {
+			continue
+		}
+		if response.ID != id || response.OK != ok {
+			t.Fatalf("response = %#v, want id=%q ok=%v", response, id, ok)
+		}
+		return response
+	}
+}
 
 func TestBackendLongOperationCommandsAreNarrowlyValidated(t *testing.T) {
 	valid := []backendCommand{
@@ -78,6 +206,61 @@ func TestBackendOperationCancellationDoesNotBlockCommandReader(t *testing.T) {
 	}
 	close(done)
 	manager.cleanup.Wait()
+}
+
+func TestBackendOperationRunnerDispatchesAndCleansUp(t *testing.T) {
+	readPipe, writePipe, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer readPipe.Close()
+	defer writePipe.Close()
+	manager := newVncManager(nil, newBackendLineWriter(writePipe))
+	reader := bufio.NewReader(readPipe)
+
+	manager.startBackendOperation(backendCommand{
+		ID: "unsupported", Action: "unsupported.operation", SessionID: "operation",
+	})
+	response := readBackendResponse(t, reader, "unsupported", false)
+	if !strings.Contains(response.Error, "unsupported operation") {
+		t.Fatalf("unsupported operation response = %#v", response)
+	}
+	manager.mu.Lock()
+	_, retained := manager.operations["operation"]
+	manager.mu.Unlock()
+	if retained {
+		t.Fatal("completed backend operation remained registered")
+	}
+
+	_, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	manager.operations["duplicate"] = &pendingBackendOperation{cancel: cancel, done: make(chan struct{})}
+	manager.startBackendOperation(backendCommand{
+		ID: "duplicate", Action: "backup.export", SessionID: "duplicate", Path: "backup.json",
+	})
+	response = readBackendResponse(t, reader, "duplicate", false)
+	if !strings.Contains(response.Error, "already running") {
+		t.Fatalf("duplicate operation response = %#v", response)
+	}
+
+	for _, command := range []backendCommand{
+		{Action: "backup.export", Path: ""},
+		{Action: "backup.import", Path: ""},
+		{Action: "mremote.import.commit", Path: ""},
+	} {
+		if _, err := manager.runBackendOperation(context.Background(), command, nil); err == nil {
+			t.Fatalf("invalid %s operation unexpectedly succeeded", command.Action)
+		}
+	}
+
+	called := false
+	reportOperationProgress(func(phase, detail string, percent int) {
+		called = phase == "phase" && detail == "detail" && percent == 42
+	}, "phase", "detail", 42)
+	reportOperationProgress(nil, "ignored", "ignored", 100)
+	if !called {
+		t.Fatal("operation progress callback was not invoked")
+	}
 }
 
 func TestVncDisconnectWaitsForConnectCleanupBoundary(t *testing.T) {
@@ -564,6 +747,111 @@ func TestVncRawRectangleIsBoundedBeforePayloadAllocation(t *testing.T) {
 	_, err := encoder.Read(nil, &vnc.Rectangle{Width: 4096, Height: 4096})
 	if !errors.Is(err, errVncRawReadLimit) {
 		t.Fatalf("expected raw rectangle limit error, got %v", err)
+	}
+}
+
+func TestVncSessionStateAndRawReadGuardLifecycle(t *testing.T) {
+	session := newVncSession("state", nil, nil)
+	left, right := net.Pipe()
+	defer left.Close()
+	defer right.Close()
+	if !session.setNetworkConnection(left) || session.currentNetwork() != left {
+		t.Fatal("network connection was not retained")
+	}
+	if !session.setTunnel(nil) {
+		t.Fatal("fresh session rejected its tunnel state")
+	}
+	session.clearNetworkConnection(right)
+	if session.currentNetwork() != left {
+		t.Fatal("unrelated network clear removed the active connection")
+	}
+	session.clearNetworkConnection(left)
+	if session.currentNetwork() != nil {
+		t.Fatal("active network connection was not cleared")
+	}
+
+	guard := newVncReadGuard(left)
+	if err := guard.beginRawRead(0); err == nil {
+		t.Fatal("empty raw read was accepted")
+	}
+	if err := guard.beginRawRead(2); err != nil {
+		t.Fatal(err)
+	}
+	if err := guard.beginRawRead(1); err == nil {
+		t.Fatal("nested raw read was accepted")
+	}
+	writeDone := make(chan struct{})
+	go func() {
+		_, _ = right.Write([]byte("abc"))
+		close(writeDone)
+	}()
+	buffer := make([]byte, 4)
+	if count, err := guard.Read(buffer); err != nil || count != 2 || string(buffer[:count]) != "ab" {
+		t.Fatalf("bounded raw read = (%q, %v)", buffer[:count], err)
+	}
+	if _, err := guard.Read(buffer); !errors.Is(err, errVncRawReadLimit) {
+		t.Fatalf("exhausted raw read error = %v", err)
+	}
+	guard.endRawRead()
+	if count, err := guard.Read(buffer); err != nil || count != 1 || string(buffer[:count]) != "c" {
+		t.Fatalf("unbounded follow-up read = (%q, %v)", buffer[:count], err)
+	}
+	<-writeDone
+
+	encoding := &boundedRawEncoding{}
+	if _, err := encoding.Marshal(); err != nil {
+		t.Fatal(err)
+	}
+	if encoding.String() != "BoundedRawEncoding" || encoding.Type() != encodings.Raw {
+		t.Fatalf("bounded encoding identity = %q / %v", encoding.String(), encoding.Type())
+	}
+	if _, err := encoding.Read(nil, &vnc.Rectangle{Width: 1, Height: 1}); err == nil {
+		t.Fatal("raw encoding without a guarded connection was accepted")
+	}
+
+	session.close()
+	if session.setNetworkConnection(left) || session.setTunnel(nil) || session.setVncConnection(nil) {
+		t.Fatal("stopped VNC session accepted new state")
+	}
+}
+
+func TestBackendCommandValidationRejectsEverySensitiveBoundary(t *testing.T) {
+	long := strings.Repeat("x", 5000)
+	invalid := []backendCommand{
+		{ID: "", Action: "vnc.disconnect", SessionID: "session"},
+		{ID: "id", Action: "vnc.connect", SessionID: "session", NodeID: long},
+		{ID: "id", Action: "vnc.connect", SessionID: "session", TunnelConfigID: "invalid"},
+		{ID: "id", Action: "vnc.connect", SessionID: "session", Host: strings.Repeat("h", maxVncHostLength+1)},
+		{ID: "id", Action: "vnc.connect", SessionID: "session", Password: strings.Repeat("p", maxVncPasswordSize+1)},
+		{ID: "id", Action: "vnc.connect", SessionID: "session", Host: "host", Port: 70000},
+		{ID: "id", Action: "vnc.pointer", SessionID: "session", X: -1},
+		{ID: "id", Action: "vnc.key", SessionID: "session"},
+		{ID: "id", Action: "tunnel.acquire", SessionID: "session"},
+		{ID: "id", Action: "tunnel.forward", SessionID: "session", Host: "", Port: 443},
+		{ID: "id", Action: "tunnel.probe", SessionID: "session", Host: "bad host", Port: 443},
+		{ID: "id", Action: "tunnel.prompt-response", SessionID: "session"},
+		{ID: "id", Action: "tunnel.route-response", SessionID: "session", PromptID: "prompt", Value: "invalid"},
+		{ID: "id", Action: "bitwarden.browser-storage-read", ProfilePath: ""},
+		{ID: "id", Action: "bitwarden.browser-storage-capture", ProfilePath: "", SourceRevision: -1},
+		{ID: "id", Action: "bitwarden.browser-profile-seed", ProfilePath: ""},
+		{ID: "id", Action: "bitwarden.browser-profile-register", ProfilePath: ""},
+		{ID: "id", Action: "bitwarden.set-enabled"},
+		{ID: "id", Action: "bitwarden.set-config", ServerRegion: 3},
+		{ID: "id", Action: "bitwarden.login", Email: long},
+		{ID: "id", Action: "bitwarden.unlock"},
+		{ID: "id", Action: "bitwarden.search", Query: long},
+		{ID: "id", Action: "bitwarden.get"},
+		{ID: "id", Action: "bitwarden.resolve-credential", Protocol: "invalid"},
+		{ID: "id", Action: "rdp.resolve-credential", CredentialID: "invalid"},
+		{ID: "id", Action: "bitwarden.resolve-node", Protocol: "ssh"},
+		{ID: "id", Action: "rdp.resolve-profile", NodeID: "invalid"},
+		{ID: "id", Action: "rdp.resolve-system-profile", NodeID: "invalid"},
+		{ID: "id", Action: "unsupported", SessionID: "session"},
+	}
+	for _, command := range invalid {
+		if err := validateBackendCommand(command); err == nil {
+			t.Fatalf("invalid %s command was accepted: %#v", command.Action, command)
+		}
 	}
 }
 

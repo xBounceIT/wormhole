@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -20,6 +21,263 @@ import (
 
 	_ "modernc.org/sqlite"
 )
+
+func init() {
+	mode := os.Getenv("WORMHOLE_TUNNEL_TEST_HELPER")
+	if mode == "" {
+		return
+	}
+	scanner := bufio.NewScanner(os.Stdin)
+	if !scanner.Scan() {
+		os.Exit(3)
+	}
+	switch mode {
+	case "ready":
+		_, _ = fmt.Fprintln(os.Stdout, "READY 32123")
+		_, _ = io.Copy(io.Discard, os.Stdin)
+		os.Exit(0)
+	case "failure":
+		_, _ = fmt.Fprintln(os.Stderr, "AUTH_FAILED fixture rejection")
+		os.Exit(2)
+	case "invalid":
+		_, _ = fmt.Fprintln(os.Stdout, "NOT_READY")
+		_, _ = io.Copy(io.Discard, os.Stdin)
+		os.Exit(0)
+	case "silent":
+		_, _ = io.Copy(io.Discard, os.Stdin)
+		os.Exit(0)
+	default:
+		os.Exit(4)
+	}
+}
+
+func TestStartTunnelProcessSupervisesReadySidecar(t *testing.T) {
+	t.Setenv("WORMHOLE_WGPROXY_PATH", os.Args[0])
+	t.Setenv("WORMHOLE_TUNNEL_TEST_HELPER", "ready")
+	var phases []string
+	ctx := withTunnelProgressHandler(context.Background(), func(_ context.Context, phase, _ string) error {
+		phases = append(phases, phase)
+		return nil
+	})
+	process, err := startTunnelProcess(ctx, tunnelConfigSnapshot{
+		kind: 0,
+		settings: json.RawMessage(`{
+			"InterfacePrivateKey":"private",
+			"InterfaceAddress":"10.0.0.2/32",
+			"PeerPublicKey":"public",
+			"PeerEndpoint":"vpn.example:51820",
+			"AllowedIps":["0.0.0.0/0"]
+		}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if process.socks != "127.0.0.1:32123" || !process.alive() {
+		t.Fatalf("ready sidecar = %#v", process)
+	}
+	if strings.Join(phases, ",") != "preparing,authenticating,starting" {
+		t.Fatalf("progress phases = %#v", phases)
+	}
+	process.close()
+	if process.alive() {
+		t.Fatal("closed sidecar is still alive")
+	}
+}
+
+func TestStartTunnelProcessClassifiesFailureAndInvalidReadiness(t *testing.T) {
+	t.Setenv("WORMHOLE_WGPROXY_PATH", os.Args[0])
+	settings := func() json.RawMessage {
+		return json.RawMessage(`{"InterfacePrivateKey":"private","PeerPublicKey":"public"}`)
+	}
+
+	t.Setenv("WORMHOLE_TUNNEL_TEST_HELPER", "failure")
+	if _, err := startTunnelProcess(context.Background(), tunnelConfigSnapshot{kind: 0, settings: settings()}); err == nil || !strings.Contains(strings.ToLower(err.Error()), "couldn't start") {
+		t.Fatalf("classified startup failure = %v", err)
+	}
+
+	t.Setenv("WORMHOLE_TUNNEL_TEST_HELPER", "invalid")
+	if _, err := startTunnelProcess(context.Background(), tunnelConfigSnapshot{kind: 0, settings: settings()}); err == nil {
+		t.Fatalf("invalid readiness failure = %v", err)
+	}
+}
+
+func TestStartTunnelProcessHonorsCancellationDuringStartup(t *testing.T) {
+	t.Setenv("WORMHOLE_WGPROXY_PATH", os.Args[0])
+	t.Setenv("WORMHOLE_TUNNEL_TEST_HELPER", "silent")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := startTunnelProcess(ctx, tunnelConfigSnapshot{
+			kind:     0,
+			settings: json.RawMessage(`{"InterfacePrivateKey":"private","PeerPublicKey":"public"}`),
+		})
+		done <- err
+	}()
+	time.Sleep(25 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancelled startup = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancelled sidecar startup did not return")
+	}
+}
+
+func TestTunnelSidecarCommandCoversEveryPortableProvider(t *testing.T) {
+	tests := []struct {
+		kind       int64
+		settings   string
+		executable string
+		wantError  bool
+	}{
+		{kind: 0, settings: `{"Dns":"1.1.1.1, 8.8.8.8","AllowedIps":"0.0.0.0/0;::/0"}`, executable: "wormhole-wgproxy"},
+		{kind: 1, settings: `{"ProfileOvpn":"client\n","Username":"u","Password":"p"}`, executable: "wormhole-ovpnproxy"},
+		{kind: 2, settings: `{"Host":"vpn.example","Port":443,"Username":"u","Password":"p"}`, executable: "wormhole-fortiproxy"},
+		{kind: 2, settings: `{"Host":"vpn.example","UseSingleSignOn":true}`, wantError: true},
+		{kind: 3, settings: `{"ProfileOvpn":"client\n","Username":"u","Password":"p","ChallengeResponse":"otp"}`, executable: "wormhole-ovpnproxy"},
+		{kind: 3, settings: `{}`, wantError: true},
+		{kind: 5, settings: `{"ProfileOvpn":"client\n","Password":"token"}`, executable: "wormhole-ovpnproxy"},
+		{kind: 5, settings: `{}`, wantError: true},
+		{kind: 6, settings: `{"Host":"vpn.example","Port":443,"Username":"u","Password":"p","Group":"staff"}`, executable: "wormhole-ciscoproxy"},
+		{kind: 99, settings: `{}`, wantError: true},
+	}
+	for _, test := range tests {
+		executable, payload, err := tunnelSidecarCommand(test.kind, json.RawMessage(test.settings))
+		if test.wantError {
+			if err == nil {
+				t.Fatalf("kind %d unexpectedly returned %s %s", test.kind, executable, payload)
+			}
+			continue
+		}
+		if err != nil || executable != test.executable || !json.Valid(payload) {
+			t.Fatalf("kind %d = executable:%q payload:%s err:%v", test.kind, executable, payload, err)
+		}
+	}
+	if _, _, err := tunnelSidecarCommand(0, json.RawMessage(`{`)); err == nil {
+		t.Fatal("malformed tunnel settings were accepted")
+	}
+}
+
+func TestStormshieldSidecarBindsPhysicalTransportAndValidatesProfile(t *testing.T) {
+	original := physicalTransportAdapterIDsForTunnel
+	t.Cleanup(func() { physicalTransportAdapterIDsForTunnel = original })
+	physicalTransportAdapterIDsForTunnel = func() ([]string, error) { return []string{"adapter-1"}, nil }
+	program, payload, err := tunnelSidecarCommand(4, json.RawMessage(`{
+        "ProfileOvpn":"client\nremote vpn.example.test 443 tcp\n","Username":"user","Password":"password"
+    }`))
+	if err != nil || program != "wormhole-ovpnproxy" {
+		t.Fatalf("Stormshield sidecar = %q, %s, %v", program, payload, err)
+	}
+	var config map[string]any
+	if err := json.Unmarshal(payload, &config); err != nil {
+		t.Fatal(err)
+	}
+	if adapters, ok := config["transport_adapter_ids"].([]any); !ok || len(adapters) != 1 {
+		t.Fatalf("physical adapters missing from payload: %#v", config)
+	}
+	if remotes, ok := config["transport_remotes"].([]any); !ok || len(remotes) != 1 {
+		t.Fatalf("transport remotes missing from payload: %#v", config)
+	}
+	if _, _, err := tunnelSidecarCommand(4, json.RawMessage(`{"ProfileOvpn":"client\n"}`)); err == nil {
+		t.Fatal("Stormshield profile without a transport remote was accepted")
+	}
+	if _, _, err := tunnelSidecarCommand(4, json.RawMessage(`{}`)); err == nil {
+		t.Fatal("missing Stormshield profile was accepted")
+	}
+	physicalTransportAdapterIDsForTunnel = func() ([]string, error) { return nil, errors.New("enumeration failed") }
+	if _, _, err := tunnelSidecarCommand(4, json.RawMessage(`{"ProfileOvpn":"client\nremote vpn.example 443\n"}`)); err == nil {
+		t.Fatal("physical adapter enumeration error was ignored")
+	}
+}
+
+func TestTunnelProcessProbeAndSidecarLookupCoverHealthBoundaries(t *testing.T) {
+	if err := probeTunnelProcess(context.Background(), nil); err == nil {
+		t.Fatal("nil tunnel process was healthy")
+	}
+	closed := make(chan struct{})
+	close(closed)
+	if err := probeTunnelProcess(context.Background(), &tunnelProcess{socks: "127.0.0.1:1", exited: closed}); err == nil {
+		t.Fatal("exited tunnel process was healthy")
+	}
+	if err := probeTunnelProcess(context.Background(), &tunnelProcess{socks: "remote.example:1080", exited: make(chan struct{})}); err == nil {
+		t.Fatal("non-loopback tunnel process was healthy")
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	process := &tunnelProcess{socks: listener.Addr().String(), exited: make(chan struct{})}
+	if err := probeTunnelProcess(context.Background(), process); err != nil {
+		t.Fatalf("live tunnel process probe failed: %v", err)
+	}
+
+	override := filepath.Join(t.TempDir(), "custom-sidecar.exe")
+	if err := os.WriteFile(override, []byte("fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WORMHOLE_CUSTOMPROXY_PATH", override)
+	if path, err := findTunnelSidecar("wormhole-customproxy"); err != nil || path != override {
+		t.Fatalf("sidecar override = %q, %v", path, err)
+	}
+	t.Setenv("WORMHOLE_MISSINGPROXY_PATH", filepath.Join(t.TempDir(), "missing"))
+	if _, err := findTunnelSidecar("wormhole-missingproxy"); err == nil {
+		t.Fatal("missing sidecar override was accepted")
+	}
+}
+
+func TestPrepareFortinetEmbeddedSamlAuthentication(t *testing.T) {
+	ctx := withTunnelPromptHandler(context.Background(), func(_ context.Context, prompt tunnelPrompt) (string, error) {
+		if !prompt.Browser || prompt.CookieName != "SVPNCOOKIE" || len(prompt.URLs) != 1 {
+			t.Fatalf("unexpected Fortinet prompt: %#v", prompt)
+		}
+		return "cookie-value", nil
+	})
+	prepared, err := prepareTunnelAuthentication(ctx, 2, json.RawMessage(`{
+		"Host":"vpn.example","Port":443,"UseSingleSignOn":true,"Realm":"staff",
+		"TrustServerCertificate":true
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(prepared, []byte(`"SvpnCookie":"cookie-value"`)) {
+		t.Fatalf("prepared settings = %s", prepared)
+	}
+
+	if _, err := prepareTunnelAuthentication(context.Background(), 2, json.RawMessage(`{
+		"Host":"vpn.example","UseSingleSignOn":true,"UseExternalBrowser":true,"Realm":"staff"
+	}`)); err == nil {
+		t.Fatal("external SAML realm was accepted")
+	}
+	if _, err := prepareTunnelAuthentication(context.Background(), 2, json.RawMessage(`{`)); err == nil {
+		t.Fatal("malformed Fortinet settings were accepted")
+	}
+}
+
+func TestBoundedTunnelDiagnosticsAndNilRuntimeHelpers(t *testing.T) {
+	builder := &boundedStderrBuilder{limit: 8}
+	if !builder.append("abc") || !builder.append("defghijk") || builder.append("ignored") {
+		t.Fatal("bounded stderr append state was incorrect")
+	}
+	if len(builder.text()) != 8 {
+		t.Fatalf("bounded stderr = %q", builder.text())
+	}
+	var runtime *tunnelRuntime
+	if runtime.socksEndpoint() != "" {
+		t.Fatal("nil runtime exposed a SOCKS endpoint")
+	}
+	select {
+	case <-runtime.exited():
+	default:
+		t.Fatal("nil runtime exit channel was not closed")
+	}
+	if _, err := runtime.dialContext(context.Background(), "tcp", "example:443"); err == nil {
+		t.Fatal("nil runtime accepted a dial")
+	}
+	runtime.close()
+}
 
 func TestWritePrivateFileAtomicReplacesExistingContents(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "tunnels", "secret.dpapi")

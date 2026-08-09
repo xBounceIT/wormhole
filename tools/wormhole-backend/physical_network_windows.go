@@ -47,6 +47,10 @@ var (
 	procDnsRecordListFree       = dnsAPI.NewProc("DnsRecordListFree")
 	physicalDNSConcurrency      = make(chan struct{}, 8)
 	errPhysicalInterfaceChanged = errors.New("physical network interface changed")
+	physicalAdapterSource       = physicalAdapterCandidates
+	physicalHostResolver        = resolvePortalHostOnInterfaces
+	physicalDNSQuery            = queryWindowsDNS
+	physicalCurrentAdapter      = currentPhysicalAdapter
 )
 
 const (
@@ -87,7 +91,7 @@ type dnsRecordHeader struct {
 }
 
 func physicalTransportAdapterIDs() ([]string, error) {
-	candidates, err := physicalAdapterCandidates(true)
+	candidates, err := physicalAdapterSource(true)
 	if err != nil {
 		return nil, err
 	}
@@ -112,7 +116,7 @@ func physicalPortalDialContext(ctx context.Context, network, address string) (ne
 		return (&net.Dialer{}).DialContext(ctx, network, address)
 	}
 	for attempt := 0; attempt < 2; attempt++ {
-		candidates, candidateErr := physicalAdapterCandidates(false)
+		candidates, candidateErr := physicalAdapterSource(false)
 		if candidateErr != nil || len(candidates) == 0 {
 			if candidateErr == nil {
 				candidateErr = errors.New("no active physical network adapter")
@@ -164,7 +168,7 @@ func resolvePortalCandidates(
 	results := make(chan result, len(candidates))
 	for index, candidate := range candidates {
 		go func() {
-			addresses, lookupErr := resolvePortalHostOnInterfaces(ctx, host, candidate.ipv4Index, candidate.ipv6Index)
+			addresses, lookupErr := physicalHostResolver(ctx, host, candidate.ipv4Index, candidate.ipv6Index)
 			results <- result{index: index, addresses: addresses, err: lookupErr}
 		}()
 	}
@@ -274,7 +278,7 @@ func dialPortalCandidates(
 				}
 			}
 			ipv6 := candidate.address.IP.To4() == nil
-			current, currentErr := currentPhysicalAdapter(candidate.adapter.id)
+			current, currentErr := physicalCurrentAdapter(candidate.adapter.id)
 			if currentErr != nil {
 				publishPhysicalDialResult(dialContext, results, physicalDialResult{err: currentErr})
 				return
@@ -337,7 +341,7 @@ func publishPhysicalDialResult(ctx context.Context, results chan<- physicalDialR
 }
 
 func currentPhysicalAdapter(id string) (physicalAdapterCandidate, error) {
-	candidates, err := physicalAdapterCandidates(false)
+	candidates, err := physicalAdapterSource(false)
 	if err != nil {
 		return physicalAdapterCandidate{}, err
 	}
@@ -370,14 +374,14 @@ func resolvePortalHostOnInterfaces(
 		var addresses []net.IPAddr
 		var failures []error
 		if ipv4Index != 0 {
-			resolved, err := queryWindowsDNS(host, ipv4Index, dnsTypeA)
+			resolved, err := physicalDNSQuery(host, ipv4Index, dnsTypeA)
 			addresses = append(addresses, resolved...)
 			if err != nil {
 				failures = append(failures, err)
 			}
 		}
 		if ipv6Index != 0 {
-			resolved, err := queryWindowsDNS(host, ipv6Index, dnsTypeAAAA)
+			resolved, err := physicalDNSQuery(host, ipv6Index, dnsTypeAAAA)
 			addresses = append(addresses, resolved...)
 			if err != nil {
 				failures = append(failures, err)

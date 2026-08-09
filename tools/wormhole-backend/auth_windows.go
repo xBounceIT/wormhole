@@ -39,6 +39,14 @@ var (
 	kernel32ForIdle        = syscall.NewLazyDLL("kernel32.dll")
 	getTickCount64         = kernel32ForIdle.NewProc("GetTickCount64")
 	moveFileEx             = kernel32ForIdle.NewProc("MoveFileExW")
+	windowsHelloRemote     = isRemoteSession
+	windowsHelloOperation  = callWindowsHelloOperation
+	windowsHelloQuery      = comQueryInterface
+	windowsHelloStatus     = readWindowsHelloStatus
+	windowsHelloResult     = readWindowsHelloResult
+	windowsHelloRelease    = comRelease
+	windowsHelloNow        = time.Now
+	windowsHelloSleep      = time.Sleep
 )
 
 const (
@@ -108,11 +116,11 @@ func unqueriedWindowsHelloStatus() authHelloStatus {
 }
 
 func checkWindowsHello() authHelloStatus {
-	if isRemoteSession() {
+	if windowsHelloRemote() {
 		return authHelloStatus{Message: remoteDesktopHelloMessage}
 	}
 
-	result, err := callWindowsHelloOperation(false, "", 0)
+	result, err := windowsHelloOperation(false, "", 0)
 	if err != nil {
 		return authHelloStatus{Message: "Windows Hello isn't available."}
 	}
@@ -133,14 +141,14 @@ func checkWindowsHello() authHelloStatus {
 }
 
 func verifyWindowsHello(request authHelloVerifyRequest) authVerificationResponse {
-	if isRemoteSession() {
+	if windowsHelloRemote() {
 		return authVerificationResponse{Message: remoteDesktopHelloMessage}
 	}
 	ownerWindow, err := parseOwnerWindow(request.OwnerWindow)
 	if err != nil {
 		return authVerificationResponse{Message: "Bring Wormhole to the front and try again."}
 	}
-	result, err := callWindowsHelloOperation(true, "Unlock Wormhole", ownerWindow)
+	result, err := windowsHelloOperation(true, "Unlock Wormhole", ownerWindow)
 	if err != nil {
 		return authVerificationResponse{Message: "Windows Hello isn't available."}
 	}
@@ -245,26 +253,26 @@ func callWindowsHelloOperation(verify bool, message string, ownerWindow uintptr)
 }
 
 func awaitWindowsHelloResult(operation uintptr) (uint32, error) {
-	defer comRelease(operation)
+	defer windowsHelloRelease(operation)
 	var asyncInfo uintptr
-	if _, err := comQueryInterface(operation, &iidAsyncInfo, &asyncInfo); err != nil || asyncInfo == 0 {
+	if _, err := windowsHelloQuery(operation, &iidAsyncInfo, &asyncInfo); err != nil || asyncInfo == 0 {
 		if err != nil {
 			return 0, err
 		}
 		return 0, errors.New("Windows Hello async operation is unavailable")
 	}
-	defer comRelease(asyncInfo)
+	defer windowsHelloRelease(asyncInfo)
 
-	deadline := time.Now().Add(30 * time.Second)
+	deadline := windowsHelloNow().Add(30 * time.Second)
 	for {
-		var status uint32
-		if _, err := comCall(asyncInfo, 7, uintptr(unsafe.Pointer(&status))); err != nil {
+		status, err := windowsHelloStatus(asyncInfo)
+		if err != nil {
 			return 0, errors.New("Windows Hello status could not be read")
 		}
 		switch status {
 		case asyncCompleted:
-			var value uint32
-			if _, err := comCall(operation, 8, uintptr(unsafe.Pointer(&value))); err != nil {
+			value, err := windowsHelloResult(operation)
+			if err != nil {
 				return 0, errors.New("Windows Hello result could not be read")
 			}
 			return value, nil
@@ -273,14 +281,26 @@ func awaitWindowsHelloResult(operation uintptr) (uint32, error) {
 		case asyncError:
 			return 0, errors.New("Windows Hello verification failed")
 		case asyncStarted:
-			if time.Now().After(deadline) {
+			if windowsHelloNow().After(deadline) {
 				return 0, errors.New("Windows Hello timed out")
 			}
-			time.Sleep(10 * time.Millisecond)
+			windowsHelloSleep(10 * time.Millisecond)
 		default:
 			return 0, errors.New("Windows Hello returned an unknown status")
 		}
 	}
+}
+
+func readWindowsHelloStatus(asyncInfo uintptr) (uint32, error) {
+	var status uint32
+	_, err := comCall(asyncInfo, 7, uintptr(unsafe.Pointer(&status)))
+	return status, err
+}
+
+func readWindowsHelloResult(operation uintptr) (uint32, error) {
+	var result uint32
+	_, err := comCall(operation, 8, uintptr(unsafe.Pointer(&result)))
+	return result, err
 }
 
 func comCall(object uintptr, slot int, arguments ...uintptr) (uintptr, error) {

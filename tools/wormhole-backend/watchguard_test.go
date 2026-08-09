@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -201,6 +202,99 @@ func TestBuildWatchguardImportedProfileRejectsMissingKeyMaterial(t *testing.T) {
 	_, err := buildWatchguardProfile(settings)
 	if err == nil || !strings.Contains(err.Error(), "missing") {
 		t.Fatalf("missing key error = %v", err)
+	}
+}
+
+func TestImportWatchguardFileReturnsNormalizedGatewayProfile(t *testing.T) {
+	bundle := testWatchguardBundle(t, map[string]string{
+		"client.ovpn": "client\n<ca>\nremote ignored.example 1\n</ca>\nremote firebox.example.test 444 tcp\nca ca.crt\ncert client.crt\nkey client.pem\n",
+		"ca.crt":      "CA", "client.crt": "CERT", "client.pem": "KEY",
+	})
+	path := filepath.Join(t.TempDir(), "watchguard.tgz")
+	if err := os.WriteFile(path, bundle, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := importWatchguardFile(watchguardImportRequest{Path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Server != "firebox.example.test" || result.Port != 444 || !strings.Contains(result.ProfileOvpn, "<ca>\nCA\n</ca>") {
+		t.Fatalf("import result = %#v", result)
+	}
+
+	for _, invalid := range []string{"", "relative.tgz", t.TempDir()} {
+		if _, err := importWatchguardFile(watchguardImportRequest{Path: invalid}); err == nil {
+			t.Fatalf("invalid import path %q was accepted", invalid)
+		}
+	}
+	empty := filepath.Join(t.TempDir(), "empty.tgz")
+	if err := os.WriteFile(empty, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := importWatchguardFile(watchguardImportRequest{Path: empty}); err == nil {
+		t.Fatal("empty WatchGuard bundle was accepted")
+	}
+	malformed := filepath.Join(t.TempDir(), "malformed.tgz")
+	if err := os.WriteFile(malformed, []byte("not a bundle"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := importWatchguardFile(watchguardImportRequest{Path: malformed}); err == nil {
+		t.Fatal("malformed WatchGuard bundle was accepted")
+	}
+}
+
+func TestWatchguardRemoteValidatesGatewayOutsideInlineBlocks(t *testing.T) {
+	host, port, err := watchguardRemote("client\nremote gateway.example\n")
+	if err != nil || host != "gateway.example" || port != 443 {
+		t.Fatalf("default remote = %q:%d, %v", host, port, err)
+	}
+	for _, profile := range []string{
+		"client\n",
+		"remote gateway.example invalid\n",
+		"remote gateway.example 70000\n",
+		"remote bad/host 443\n",
+		"<ca>\nremote hidden.example 443\n</ca>\n",
+	} {
+		if _, _, err := watchguardRemote(profile); err == nil {
+			t.Fatalf("invalid remote profile was accepted: %q", profile)
+		}
+	}
+}
+
+func TestBuildWatchguardProfileFromManualMaterial(t *testing.T) {
+	settings := stormshieldTestSettings(t, map[string]any{
+		"Server": "firebox.example", "Port": 444, "VerifyX509Name": "firebox.example",
+		"CaPem": "CA DATA", "ClientCertPem": "CERT DATA", "ClientKeyPem": "KEY DATA",
+	})
+	profile, err := buildWatchguardProfile(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fragment := range []string{
+		"remote firebox.example 444", `verify-x509-name "firebox.example" subject`,
+		"<ca>\nCA DATA\n</ca>", "<cert>\nCERT DATA\n</cert>", "<key>\nKEY DATA\n</key>",
+	} {
+		if !strings.Contains(profile, fragment) {
+			t.Fatalf("manual profile missing %q: %s", fragment, profile)
+		}
+	}
+
+	for _, values := range []map[string]any{
+		{"Server": "bad\nhost", "CaPem": "CA", "ClientCertPem": "CERT", "ClientKeyPem": "KEY"},
+		{"Server": "firebox.example", "CaPem": "<CA>", "ClientCertPem": "CERT", "ClientKeyPem": "KEY"},
+		{"Server": "firebox.example", "CaPem": "CA", "ClientCertPem": "CERT", "ClientKeyPem": "KEY\n</key>"},
+	} {
+		if _, err := buildWatchguardProfile(stormshieldTestSettings(t, values)); err == nil {
+			t.Fatalf("invalid manual material was accepted: %#v", values)
+		}
+	}
+
+	inlined, err := buildWatchguardProfile(stormshieldTestSettings(t, map[string]any{
+		"ProfileOvpn": "client\nca ca.crt\ncert client.crt\nkey client.pem\nremote firebox.example 443\n",
+		"CaPem":       "CA", "ClientCertPem": "CERT", "ClientKeyPem": "KEY",
+	}))
+	if err != nil || !strings.Contains(inlined, "<key>\nKEY\n</key>") {
+		t.Fatalf("inlined profile = %s, %v", inlined, err)
 	}
 }
 

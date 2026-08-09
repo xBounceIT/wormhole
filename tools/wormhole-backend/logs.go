@@ -29,6 +29,8 @@ type logsInfoResponse struct {
 	LogLevel           string `json:"logLevel"`
 }
 
+var openLocalLogPath = openLocalPathWithShell
+
 func logsDirectoryPath(databasePath string) string {
 	return filepath.Join(filepath.Dir(databasePath), "logs")
 }
@@ -220,7 +222,7 @@ func openCurrentDayLogFile(databasePath string) error {
 	if err := ensureCurrentDayLogFile(databasePath); err != nil {
 		return err
 	}
-	if err := openLocalPathWithShell(currentDayLogFilePath(databasePath)); err != nil {
+	if err := openLocalLogPath(currentDayLogFilePath(databasePath)); err != nil {
 		return fmt.Errorf("cannot open today's log file: %w", err)
 	}
 	return nil
@@ -231,7 +233,7 @@ func openLogsDirectory(databasePath string) error {
 	if err := os.MkdirAll(path, 0o700); err != nil {
 		return fmt.Errorf("cannot create the Wormhole logs directory: %w", err)
 	}
-	if err := openLocalPathWithShell(path); err != nil {
+	if err := openLocalLogPath(path); err != nil {
 		return fmt.Errorf("cannot open the Wormhole logs folder: %w", err)
 	}
 	return nil

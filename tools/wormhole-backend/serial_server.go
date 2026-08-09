@@ -133,6 +133,11 @@ type serialServer struct {
 	pending  map[string]context.CancelFunc
 }
 
+var (
+	resolveSerialTargetForOpen = resolveSerialTarget
+	openNativeSerialForOpen    = openNativeSerial
+)
+
 func serveSerial(databasePath string, input io.Reader, output io.Writer, electronUserDataPath ...string) error {
 	userDataPath := ""
 	if len(electronUserDataPath) > 0 {
@@ -217,7 +222,7 @@ func (server *serialServer) open(command serialWireCommand) {
 	server.mu.Unlock()
 
 	go func() {
-		target, err := resolveSerialTarget(
+		target, err := resolveSerialTargetForOpen(
 			ctx,
 			server.databasePath,
 			server.electronUserDataPath,
@@ -225,7 +230,7 @@ func (server *serialServer) open(command serialWireCommand) {
 		)
 		if err == nil {
 			var native *serialNativeSession
-			native, err = openNativeSerial(ctx, target, command.Columns, command.Rows)
+			native, err = openNativeSerialForOpen(ctx, target, command.Columns, command.Rows)
 			if err == nil {
 				native.id = command.SessionID
 				native.server = server
@@ -246,7 +251,6 @@ func (server *serialServer) open(command serialWireCommand) {
 					native.close(false)
 					return
 				}
-				native.portName = target.PortName
 				logInfo("serial session connected: %s @ %d baud", target.PortName, target.BaudRate)
 				native.publishTerminalFrame(native.terminal.initialFrame())
 				native.start()
@@ -773,6 +777,7 @@ func newSerialNativeSession(
 	close(readGate)
 	return &serialNativeSession{
 		port:        port,
+		portName:    target.PortName,
 		terminal:    terminal,
 		flow:        target.FlowControl,
 		inputQueue:  make(chan []byte, serialInputQueueCapacity),

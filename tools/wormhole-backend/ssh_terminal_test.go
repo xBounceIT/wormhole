@@ -360,3 +360,64 @@ func TestSSHTerminalEmulatorAlternateScreenDetectionHandlesChunksWithoutRepeatin
 		t.Fatal("alternate-screen transition repeated on later output")
 	}
 }
+
+func TestSSHHistoryHelpersCoverColorsEscapesAndTextRows(t *testing.T) {
+	var colors strings.Builder
+	for _, test := range []struct {
+		foreground bool
+		color      uint16
+	}{
+		{true, uint16(vt10x.DefaultFG)}, {true, 3}, {true, 12}, {true, 200}, {true, 300},
+		{false, uint16(vt10x.DefaultBG)}, {false, 4}, {false, 14}, {false, 201}, {false, 300},
+	} {
+		appendTerminalSgrColor(&colors, test.foreground, test.color)
+	}
+	for _, fragment := range []string{"\x1b[39m", "\x1b[33m", "\x1b[94m", "\x1b[38;5;200m", "\x1b[49m", "\x1b[44m", "\x1b[106m", "\x1b[48;5;201m"} {
+		if !strings.Contains(colors.String(), fragment) {
+			t.Fatalf("SGR seed %q is missing %q", colors.String(), fragment)
+		}
+	}
+
+	emulator := &sshTerminalEmulator{columns: 2}
+	sequences := [][]byte{
+		{0x1b}, {'['}, {'3'}, {'1'}, {'m'},
+		{0x1b}, {']'}, {'t'}, {0x07},
+		{0x1b}, {'P'}, {'x'}, {0x1b}, {'\\'},
+		{0x1b}, {0x1b}, {'x'},
+		{0x1b}, {'['}, {0x1b}, {'x'},
+	}
+	for _, sequence := range sequences {
+		emulator.updateHistoryEscapeMode(sequence)
+	}
+	if emulator.historyEscapeMode != sshTerminalHistoryEscapeNone {
+		t.Fatalf("history escape parser ended in mode %d", emulator.historyEscapeMode)
+	}
+	if emulator.historyInputUnitLength(nil) != 0 || emulator.historyInputUnitLength([]byte{0x1b, '['}) != 1 {
+		t.Fatal("history input control boundary was invalid")
+	}
+	if length := emulator.historyInputUnitLength([]byte("éabc")); length != len([]byte("éa")) {
+		t.Fatalf("history UTF-8 unit length = %d", length)
+	}
+	if !historyUnitIsControl([]byte{0x7f}) || historyUnitIsControl([]byte("x")) || historyUnitIsControl(nil) {
+		t.Fatal("history control classification was invalid")
+	}
+
+	line := sshTerminalScrollbackLineFromCells([]sshTerminalCell{
+		{Character: "A", Foreground: 1, Background: 2},
+		{Character: "", Foreground: 1, Background: 2},
+		{Character: "B", Foreground: 3, Background: 4},
+		{Character: " "},
+	})
+	if text := sshTerminalScrollbackLineText(line); text != "A B" || len(line.Runs) != 2 || line.Runs[0].Cells != 2 {
+		t.Fatalf("scrollback line = %#v / %q", line, text)
+	}
+	textLine := sshTerminalScrollbackLineFromText("hé")
+	if len(textLine.Runs) != 1 || textLine.Runs[0].Cells != 2 || sshTerminalScrollbackLineFromText("").Runs != nil {
+		t.Fatalf("text scrollback line = %#v", textLine)
+	}
+	if !sshTerminalScrollbackRowsMatch([]sshTerminalScrollbackLine{textLine}, []string{"hé"}) ||
+		sshTerminalScrollbackRowsMatch([]sshTerminalScrollbackLine{textLine}, nil) ||
+		sshTerminalScrollbackRowsMatch([]sshTerminalScrollbackLine{textLine}, []string{"other"}) {
+		t.Fatal("scrollback row comparison did not enforce exact text")
+	}
+}

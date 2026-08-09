@@ -1,14 +1,40 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"database/sql"
 	"errors"
+	"fmt"
+	"io"
 	"net"
+	"os"
+	"path/filepath"
 	"reflect"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
+
+func init() {
+	if os.Getenv("WORMHOLE_RDP_TEST_HELPER") != "1" {
+		return
+	}
+	scanner := bufio.NewScanner(os.Stdin)
+	requestID := "start-request"
+	if scanner.Scan() {
+		parsedRequestID, _ := rdpRequestMetadata(scanner.Bytes())
+		if parsedRequestID != "" {
+			requestID = parsedRequestID
+		}
+	}
+	_, _ = fmt.Fprintf(os.Stdout, "{\"type\":\"ack\",\"requestId\":%q}\n", requestID)
+	_, _ = fmt.Fprintln(os.Stdout, `{"type":"connected"}`)
+	_, _ = fmt.Fprintln(os.Stdout, `{"type":"disconnected"}`)
+	os.Exit(0)
+}
 
 func TestSystemRdpCapabilityIsWindowsOnlyAndFailsClosedForUnsupportedRouting(t *testing.T) {
 	available := func() (string, error) { return `C:\\Windows\\System32\\mstsc.exe`, nil }
@@ -270,6 +296,37 @@ func TestRouteRdpThroughTunnelFailsClosedWhenEnabledWithoutConfig(t *testing.T) 
 	}
 }
 
+func TestRouteRdpThroughTunnelRejectsUnsafeClientCombinations(t *testing.T) {
+	enabled := true
+	disabled := false
+	strict := 1
+	const tunnelID = "11111111-2222-4333-8444-555555555555"
+	controller := &rdpController{}
+	direct := &rdpCommand{Profile: rdpProfile{TunnelEnabled: &disabled, TunnelConfigID: tunnelID}}
+	if err := controller.routeRdpThroughTunnel(direct, "rdp.example", rdpDefaultPort); err != nil || direct.forwarder != nil {
+		t.Fatalf("explicitly disabled tunnel = %#v, %v", direct, err)
+	}
+	for name, profile := range map[string]rdpProfile{
+		"non-loopback proxy": {TunnelEnabled: &enabled, TunnelConfigID: tunnelID, SocksEndpoint: "remote.example:1080"},
+		"external client":    {TunnelEnabled: &enabled, TunnelConfigID: tunnelID, SocksEndpoint: "127.0.0.1:1080", UseExternalClient: true},
+		"gateway":            {TunnelEnabled: &enabled, TunnelConfigID: tunnelID, SocksEndpoint: "127.0.0.1:1080", GatewayHostname: "gateway.example", GatewayUsageMethod: 1},
+		"strict auth":        {TunnelEnabled: &enabled, TunnelConfigID: tunnelID, SocksEndpoint: "127.0.0.1:1080", ServerAuthentication: &strict},
+	} {
+		t.Run(name, func(t *testing.T) {
+			command := &rdpCommand{Profile: profile}
+			if err := controller.routeRdpThroughTunnel(command, "rdp.example", rdpDefaultPort); err == nil {
+				t.Fatalf("unsafe tunnel profile was accepted: %#v", profile)
+			}
+		})
+	}
+	missingSaved := &rdpCommand{Profile: rdpProfile{NodeID: "missing"}}
+	if err := (&rdpController{databasePath: filepath.Join(t.TempDir(), "missing.db")}).routeRdpThroughTunnel(
+		missingSaved, "rdp.example", rdpDefaultPort,
+	); err == nil {
+		t.Fatal("missing saved RDP route was accepted")
+	}
+}
+
 func TestDisconnectCanMarkTheCurrentProcessTerminalBeforeExit(t *testing.T) {
 	process := &rdpProcess{sessionID: "session-1", backend: "activex"}
 	controller := &rdpController{processes: map[string]*rdpProcess{process.sessionID: process}}
@@ -411,6 +468,29 @@ func TestRdpDisconnectFallbackClaimsAndFinalizesStalledNativeHost(t *testing.T) 
 	}
 	if controller.completeRequestedRdpDisconnect(process, "disconnect-1") {
 		t.Fatal("stalled RDP disconnect fallback completed twice")
+	}
+}
+
+func TestRdpDisconnectFallbackTimerFinalizesStalledNativeHost(t *testing.T) {
+	originalGrace := rdpDisconnectGrace
+	rdpDisconnectGrace = time.Millisecond
+	t.Cleanup(func() { rdpDisconnectGrace = originalGrace })
+	closed := make(chan struct{})
+	process := &rdpProcess{
+		sessionID: "session", lifecycleID: "lifecycle", backend: "activex",
+		stdin: closeWriterFunc(func() error {
+			close(closed)
+			return nil
+		}),
+	}
+	if !process.beginDisconnect("disconnect-timer") {
+		t.Fatal("could not register timed RDP disconnect")
+	}
+	(&rdpController{}).scheduleRequestedRdpDisconnectFallback(process, "disconnect-timer")
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("RDP disconnect fallback timer did not close the process")
 	}
 }
 
@@ -640,6 +720,355 @@ func TestRdpTargetRejectsArgumentChannelInjection(t *testing.T) {
 		}
 	}
 }
+
+func TestRdpControllerStartRejectsInvalidAndDuplicateSessions(t *testing.T) {
+	controller := &rdpController{processes: make(map[string]*rdpProcess)}
+	valid := rdpCommand{
+		Op: "start", RequestID: "request", SessionID: "session", LifecycleID: "lifecycle",
+		Bounds:  rdpBounds{Width: 800, Height: 600},
+		Profile: rdpProfile{Host: "rdp.example"},
+	}
+
+	commands := []rdpCommand{
+		{Op: "start", RequestID: "missing-session", Profile: rdpProfile{Host: "rdp.example"}},
+		{Op: "start", RequestID: "missing-host", SessionID: "session"},
+		{Op: "start", RequestID: "bad-port", SessionID: "session", Profile: rdpProfile{Host: "rdp.example:bad"}},
+		{Op: "start", RequestID: "bad-profile", SessionID: "session", Profile: rdpProfile{Host: "rdp.example", Username: "bad\nuser"}},
+		{Op: "start", RequestID: "bad-bounds", SessionID: "session", Bounds: rdpBounds{Width: rdpMaxDimension + 1, Height: 1}, Profile: rdpProfile{Host: "rdp.example"}},
+	}
+	for _, command := range commands {
+		controller.start(command)
+	}
+
+	controller.processes[valid.SessionID] = &rdpProcess{sessionID: valid.SessionID}
+	controller.start(valid)
+	if len(controller.processes) != 1 {
+		t.Fatalf("invalid starts changed process count: %d", len(controller.processes))
+	}
+}
+
+func TestRdpControllerStartNormalizesAndLaunchesAValidSession(t *testing.T) {
+	t.Setenv("WORMHOLE_RDP_TEST_HELPER", "1")
+	controller := &rdpController{nativeHostPath: os.Args[0], processes: make(map[string]*rdpProcess)}
+	staleInput := &rdpRecordingWriteCloser{}
+	controller.processes["session"] = &rdpProcess{
+		sessionID: "session", lifecycleID: "stale", terminal: true, stdin: staleInput,
+	}
+	controller.start(rdpCommand{
+		Op: "start", RequestID: "valid-start", SessionID: "session", LifecycleID: "current",
+		Profile: rdpProfile{
+			Host: "rdp.example:3390", ColorDepth: 32, KeyboardHookMode: 2, ConnectionSpeed: 7,
+			ServerAuthentication: intPointer(2),
+		},
+	})
+	if !staleInput.closed {
+		t.Fatal("terminal previous RDP process was not replaced")
+	}
+	waitForRdpProcessExit(t, controller, "session")
+}
+
+func TestRdpControllerStartLaunchesValidatedExternalClient(t *testing.T) {
+	t.Setenv("WORMHOLE_RDP_TEST_HELPER", "1")
+	originalExecutable := systemRdpClientExecutableForController
+	t.Cleanup(func() { systemRdpClientExecutableForController = originalExecutable })
+	systemRdpClientExecutableForController = func() (string, error) { return os.Args[0], nil }
+	controller := &rdpController{processes: make(map[string]*rdpProcess)}
+	controller.start(rdpCommand{
+		Op: "start", RequestID: "external", SessionID: "external", LifecycleID: "lifecycle",
+		Bounds: rdpBounds{Width: 1024, Height: 768},
+		Profile: rdpProfile{
+			Host: "rdp.example", UseExternalClient: true, ColorDepth: 32,
+			KeyboardHookMode: 2, ConnectionSpeed: 7, ServerAuthentication: intPointer(2),
+		},
+	})
+	waitForRdpProcessExit(t, controller, "external")
+}
+
+func TestRdpControllerHandleAndForwardLifecycleCommands(t *testing.T) {
+	controller := &rdpController{processes: make(map[string]*rdpProcess)}
+	for _, command := range []rdpCommand{
+		{Op: "resize", RequestID: "resize", SessionID: "missing"},
+		{Op: "show", RequestID: "show", SessionID: "missing"},
+		{Op: "unsupported", RequestID: "unsupported", SessionID: "missing"},
+		{Op: "shutdown", RequestID: "shutdown", LifecycleID: "lifecycle"},
+	} {
+		controller.handle(command)
+	}
+
+	stdin := &rdpRecordingWriteCloser{}
+	process := &rdpProcess{sessionID: "session", lifecycleID: "current", backend: "test", stdin: stdin}
+	controller.processes[process.sessionID] = process
+	controller.forward(rdpCommand{Op: "show", RequestID: "stale", SessionID: process.sessionID, LifecycleID: "stale"})
+	controller.forward(rdpCommand{Op: "show", RequestID: "show", SessionID: process.sessionID, LifecycleID: process.lifecycleID})
+	if !bytes.Contains(stdin.Bytes(), []byte(`"op":"show"`)) {
+		t.Fatalf("forwarded command = %q", stdin.Bytes())
+	}
+
+	external := &rdpProcess{sessionID: "external", backend: "activex", external: true, stdin: &rdpRecordingWriteCloser{}}
+	controller.processes[external.sessionID] = external
+	controller.forward(rdpCommand{Op: "disconnect", RequestID: "disconnect-external", SessionID: external.sessionID})
+	if !external.disconnectRequested {
+		t.Fatal("external disconnect was not recorded")
+	}
+
+	freerdp := &rdpProcess{sessionID: "freerdp", backend: "freerdp", stdin: &rdpRecordingWriteCloser{}}
+	controller.processes[freerdp.sessionID] = freerdp
+	controller.forward(rdpCommand{Op: "disconnect", RequestID: "disconnect-freerdp", SessionID: freerdp.sessionID})
+	if !freerdp.disconnectRequested {
+		t.Fatal("FreeRDP disconnect was not recorded")
+	}
+
+	failing := &rdpProcess{sessionID: "failing", backend: "test", stdin: rdpFailingWriteCloser{}}
+	controller.processes[failing.sessionID] = failing
+	controller.forward(rdpCommand{Op: "focus", RequestID: "focus", SessionID: failing.sessionID})
+	controller.forward(rdpCommand{Op: "disconnect", RequestID: "disconnect", SessionID: failing.sessionID})
+
+	alreadyDisconnecting := &rdpProcess{sessionID: "disconnecting", backend: "activex", stdin: &rdpRecordingWriteCloser{}}
+	if !alreadyDisconnecting.beginDisconnect("first") {
+		t.Fatal("could not prime disconnect state")
+	}
+	controller.processes[alreadyDisconnecting.sessionID] = alreadyDisconnecting
+	controller.forward(rdpCommand{Op: "disconnect", RequestID: "second", SessionID: alreadyDisconnecting.sessionID})
+
+	controller.closeAll()
+	if !stdin.closed {
+		t.Fatal("controller shutdown did not close process stdin")
+	}
+}
+
+func TestRdpControllerStreamRejectsMalformedCommandsAndCloses(t *testing.T) {
+	input := strings.Join([]string{
+		`{"requestId":"malformed","sessionId":"session"`,
+		`{"op":"unsupported","requestId":"unsupported","sessionId":"session"}`,
+		`{"op":"shutdown","requestId":"shutdown"}`,
+	}, "\n")
+	if err := runRdpControllerIO("", "", "", strings.NewReader(input)); err != nil {
+		t.Fatal(err)
+	}
+	if err := runRdpControllerIO("", "", "", backendFailingReader{}); err == nil {
+		t.Fatal("RDP controller ignored an input stream failure")
+	}
+}
+
+func TestRdpNativeEventReaderNormalizesAndFiltersEvents(t *testing.T) {
+	controller := &rdpController{processes: make(map[string]*rdpProcess)}
+	process := &rdpProcess{
+		sessionID: "session", lifecycleID: "lifecycle", backend: "activex",
+		startRequestID: "start", nativeEventsDone: make(chan struct{}), lifecycleGeneration: 4,
+	}
+	controller.processes[process.sessionID] = process
+	input := strings.Join([]string{
+		"not-json",
+		`{"type":"ack","requestId":"start"}`,
+		`{"type":"logonError","code":0}`,
+		`{"type":"connected"}`,
+		`{"type":"disconnected"}`,
+		`{"type":"connected"}`,
+	}, "\n")
+	controller.readNativeEvents(process, io.NopCloser(strings.NewReader(input)))
+	if process.unansweredStartRequestID() != "" {
+		t.Fatal("native start acknowledgement was not recorded")
+	}
+	if !process.terminal {
+		t.Fatal("terminal native event did not mark the process")
+	}
+	select {
+	case <-process.nativeEventsDone:
+	default:
+		t.Fatal("native event completion was not signalled")
+	}
+}
+
+func TestRdpNativeAndFreeRdpLaunchersSuperviseHelperProcess(t *testing.T) {
+	t.Setenv("WORMHOLE_RDP_TEST_HELPER", "1")
+
+	t.Run("native", func(t *testing.T) {
+		controller := &rdpController{nativeHostPath: os.Args[0], processes: make(map[string]*rdpProcess)}
+		controller.startNative(rdpCommand{
+			Op: "start", RequestID: "native-start", SessionID: "native", LifecycleID: "lifecycle",
+			Bounds: rdpBounds{Width: 800, Height: 600}, Profile: rdpProfile{Host: "rdp.example", Port: rdpDefaultPort},
+		})
+		waitForRdpProcessExit(t, controller, "native")
+	})
+
+	t.Run("freerdp", func(t *testing.T) {
+		controller := &rdpController{freerdpPath: os.Args[0], processes: make(map[string]*rdpProcess)}
+		controller.startFreeRdp(rdpCommand{
+			Op: "start", RequestID: "freerdp-start", SessionID: "freerdp", LifecycleID: "lifecycle",
+			Bounds: rdpBounds{Width: 800, Height: 600}, Profile: rdpProfile{Host: "rdp.example", Port: rdpDefaultPort},
+		})
+		waitForRdpProcessExit(t, controller, "freerdp")
+	})
+}
+
+func TestRdpLaunchersReportMissingExecutables(t *testing.T) {
+	controller := &rdpController{
+		nativeHostPath: filepath.Join(t.TempDir(), "missing-rdp-host.exe"),
+		freerdpPath:    filepath.Join(t.TempDir(), "missing-freerdp.exe"),
+		processes:      make(map[string]*rdpProcess),
+	}
+	command := rdpCommand{
+		RequestID: "start", SessionID: "session", LifecycleID: "lifecycle",
+		Bounds: rdpBounds{Width: 800, Height: 600}, Profile: rdpProfile{Host: "rdp.example", Port: rdpDefaultPort},
+	}
+	controller.startNative(command)
+	controller.startFreeRdp(command)
+	if len(controller.processes) != 0 {
+		t.Fatalf("missing executables left processes behind: %#v", controller.processes)
+	}
+}
+
+func TestRdpExternalLauncherSupervisesSystemClient(t *testing.T) {
+	t.Setenv("WORMHOLE_RDP_TEST_HELPER", "1")
+	originalExecutable := systemRdpClientExecutableForController
+	originalCommand := newExternalRdpCommand
+	t.Cleanup(func() {
+		systemRdpClientExecutableForController = originalExecutable
+		newExternalRdpCommand = originalCommand
+	})
+	systemRdpClientExecutableForController = func() (string, error) { return os.Args[0], nil }
+
+	controller := &rdpController{processes: make(map[string]*rdpProcess)}
+	controller.startExternalRdp(rdpCommand{
+		RequestID: "external-start", SessionID: "external", LifecycleID: "lifecycle",
+		LifecycleGeneration: 7, Profile: rdpProfile{Host: "rdp.example", Port: rdpDefaultPort},
+	})
+	waitForRdpProcessExit(t, controller, "external")
+
+	systemRdpClientExecutableForController = func() (string, error) { return "", errors.New("missing") }
+	controller.startExternalRdp(rdpCommand{RequestID: "missing", SessionID: "missing", Profile: rdpProfile{Host: "rdp.example"}})
+	if len(controller.processes) != 0 {
+		t.Fatalf("failed external launch left processes behind: %#v", controller.processes)
+	}
+
+	systemRdpClientExecutableForController = func() (string, error) { return "missing-system-rdp.exe", nil }
+	controller.startExternalRdp(rdpCommand{RequestID: "start-failure", SessionID: "start-failure", Profile: rdpProfile{Host: "rdp.example"}})
+	if len(controller.processes) != 0 {
+		t.Fatalf("unstartable external launch left processes behind: %#v", controller.processes)
+	}
+}
+
+func TestRdpNodeMetadataResolvesInheritanceCyclesAndFallbacks(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "wormhole.db")
+	database, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = database.Exec(`
+CREATE TABLE Nodes (
+    Id TEXT PRIMARY KEY, ParentId TEXT NULL, Name TEXT NULL,
+    TunnelEnabled INTEGER NULL, TunnelConfigId TEXT NULL
+);
+CREATE TABLE TunnelConfigs (Id TEXT PRIMARY KEY, Name TEXT NULL);
+INSERT INTO TunnelConfigs (Id, Name) VALUES
+    ('11111111-1111-4111-8111-111111111111', '  Corporate VPN  '),
+    ('22222222-2222-4222-8222-222222222222', '');
+INSERT INTO Nodes (Id, ParentId, Name, TunnelEnabled, TunnelConfigId) VALUES
+    ('folder', NULL, '  Production  ', 1, '11111111-1111-4111-8111-111111111111'),
+    ('connection', 'folder', '', NULL, NULL),
+    ('disabled', 'folder', 'Disabled', 0, NULL),
+    ('cycle-a', 'cycle-b', '', NULL, NULL),
+    ('cycle-b', 'cycle-a', '', NULL, NULL);`)
+	if err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	tunnelID, enabled, err := resolveNodeTunnel(path, "CONNECTION")
+	if err != nil || !enabled || tunnelID != "11111111-1111-4111-8111-111111111111" {
+		t.Fatalf("inherited tunnel = (%q, %v, %v)", tunnelID, enabled, err)
+	}
+	if _, enabled, err = resolveNodeTunnel(path, "disabled"); err != nil || enabled {
+		t.Fatalf("disabled child tunnel = (%v, %v)", enabled, err)
+	}
+	if _, _, err = resolveNodeTunnel(path, "missing"); err == nil {
+		t.Fatal("missing RDP node was accepted")
+	}
+	if _, _, err = resolveNodeTunnel(path, "cycle-a"); err == nil || !strings.Contains(err.Error(), "cycle") {
+		t.Fatalf("cycle error = %v", err)
+	}
+
+	if name := resolveNodeDisplayName(path, "connection"); name != "Production" {
+		t.Fatalf("inherited display name = %q", name)
+	}
+	for _, nodeID := range []string{"missing", "cycle-a"} {
+		if name := resolveNodeDisplayName(path, nodeID); name != "the target" {
+			t.Fatalf("fallback display name for %q = %q", nodeID, name)
+		}
+	}
+	if name := tunnelConfigName(path, "11111111-1111-4111-8111-111111111111"); name != "Corporate VPN" {
+		t.Fatalf("tunnel name = %q", name)
+	}
+	for _, id := range []string{"", "22222222-2222-4222-8222-222222222222", "missing"} {
+		if name := tunnelConfigName(path, id); name != "the configured VPN tunnel" {
+			t.Fatalf("fallback tunnel name for %q = %q", id, name)
+		}
+	}
+	if name := resolveNodeDisplayName(filepath.Join(t.TempDir(), "missing.db"), "node"); name != "the target" {
+		t.Fatalf("missing database display name = %q", name)
+	}
+}
+
+func TestRdpPortableHelpersCoverEveryPolicyBranch(t *testing.T) {
+	if candidates := freeRdpCandidates(); len(candidates) == 0 {
+		t.Fatal("current platform returned no FreeRDP candidates")
+	}
+	for speed, expected := range map[int]string{
+		1: "modem", 2: "broadband-low", 3: "satellite", 4: "broadband-high",
+		5: "wan", 6: "lan", 0: "auto", 99: "auto",
+	} {
+		if actual := freeRdpNetworkName(speed); actual != expected {
+			t.Fatalf("network name for %d = %q, want %q", speed, actual, expected)
+		}
+	}
+	if architectureName() == "" {
+		t.Fatal("architecture name was empty")
+	}
+	if runtime.GOOS == "windows" && executableSuffix() != ".exe" {
+		t.Fatalf("Windows executable suffix = %q", executableSuffix())
+	}
+	if got := formatRdpTarget("2001:db8::1", 3389); got != "[2001:db8::1]:3389" {
+		t.Fatalf("IPv6 target = %q", got)
+	}
+	if sibling := bundledSibling("a-file-that-must-not-exist"); sibling != "" {
+		t.Fatalf("missing bundled sibling = %q", sibling)
+	}
+}
+
+func waitForRdpProcessExit(t *testing.T, controller *rdpController, sessionID string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		controller.mu.Lock()
+		_, running := controller.processes[sessionID]
+		controller.mu.Unlock()
+		if !running {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("RDP helper %q did not exit", sessionID)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+type rdpRecordingWriteCloser struct {
+	bytes.Buffer
+	closed bool
+}
+
+func (writer *rdpRecordingWriteCloser) Close() error {
+	writer.closed = true
+	return nil
+}
+
+type rdpFailingWriteCloser struct{}
+
+func (rdpFailingWriteCloser) Write([]byte) (int, error) { return 0, errors.New("write failed") }
+func (rdpFailingWriteCloser) Close() error              { return nil }
 
 func contains(values []string, wanted string) bool {
 	for _, value := range values {

@@ -6,11 +6,331 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestRunBackendCLIValidatesProcessContract(t *testing.T) {
+	t.Run("flag parse failure", func(t *testing.T) {
+		var stderr bytes.Buffer
+		if code := runBackendCLI([]string{"-unknown"}, strings.NewReader(""), io.Discard, &stderr); code != 2 {
+			t.Fatalf("exit code = %d, want 2", code)
+		}
+		if !strings.Contains(stderr.String(), "flag provided but not defined") {
+			t.Fatalf("unexpected flag error: %q", stderr.String())
+		}
+	})
+
+	t.Run("help", func(t *testing.T) {
+		var stderr bytes.Buffer
+		if code := runBackendCLI([]string{"-h"}, strings.NewReader(""), io.Discard, &stderr); code != 0 {
+			t.Fatalf("exit code = %d, want 0", code)
+		}
+		if !strings.Contains(stderr.String(), "Usage of wormhole-backend") {
+			t.Fatalf("help did not include usage: %q", stderr.String())
+		}
+	})
+
+	t.Run("missing database", func(t *testing.T) {
+		var stderr bytes.Buffer
+		if code := runBackendCLI(nil, strings.NewReader(""), io.Discard, &stderr); code != 1 {
+			t.Fatalf("exit code = %d, want 1", code)
+		}
+		if stderr.String() != "database path is required\n" {
+			t.Fatalf("unexpected database error: %q", stderr.String())
+		}
+	})
+
+	t.Run("unsupported operation", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+		code := runBackendCLI(
+			[]string{"-database", databasePath, "-operation", "unknown"},
+			strings.NewReader(""), &stdout, &stderr,
+		)
+		if code != 1 || !strings.Contains(stderr.String(), "unsupported operation") {
+			t.Fatalf("exit code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+		}
+	})
+}
+
+func TestRunBackendCLIRejectsMalformedRequestsForEveryInputOperation(t *testing.T) {
+	operations := []string{
+		"startup-unlock",
+		"workspace-duplicate-node",
+		"workspace-delete-node",
+		"workspace-delete-nodes",
+		"workspace-show-credentials",
+		"mremote-import-inspect",
+		"mremote-import-analyze",
+		"mremote-import-commit",
+		"backup-inspect",
+		"backup-export",
+		"backup-import",
+		"web-target",
+		"watchguard-import",
+		"azure-vpn-import",
+		"rdp-external-client-requirement",
+		"cisco-profile-import",
+		"ovpn-file-import",
+		"credential-create",
+		"credential-update",
+		"credential-delete",
+		"credentials-for-protocol",
+		"workspace-update-node",
+		"workspace-update-node-web-settings",
+		"workspace-update-node-tunnel",
+		"workspace-update-node-credential",
+		"workspace-update-node-inline-credential",
+		"workspace-node-create",
+		"workspace-node-update",
+		"tunnel-create",
+		"tunnel-read",
+		"tunnel-update",
+		"tunnel-delete",
+		"auth-verify",
+		"auth-set-secret",
+		"auth-update-settings",
+		"settings-set-theme",
+		"settings-set-prompt-before-tunnel",
+		"settings-set-auto-copy-on-select",
+		"settings-set-confirm-on-tab-close",
+		"settings-set-sidebar-width",
+		"settings-set-update-preferences",
+		"update-check",
+		"settings-set-log-retention",
+		"settings-set-log-level",
+		"bitwarden-onboarding-read",
+		"extension-set-enabled",
+		"extension-import-zip",
+		"extension-import-folder",
+		"auth-hello-verify",
+		"ssh-trust-host-key",
+	}
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	for _, operation := range operations {
+		t.Run(operation, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := runBackendCLI(
+				[]string{"-database", databasePath, "-operation", operation},
+				strings.NewReader("{"), &stdout, &stderr,
+			)
+			if code != 1 || stderr.String() != "Wormhole request was invalid\n" {
+				t.Fatalf("exit code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
+func TestRunBackendCLIDispatchesSemanticallyInvalidRequests(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	missingPath := filepath.Join(t.TempDir(), "missing")
+	tests := []struct {
+		operation string
+		input     string
+	}{
+		{operation: "startup-unlock", input: `{}`},
+		{operation: "workspace-duplicate-node", input: `{}`},
+		{operation: "workspace-delete-node", input: `{}`},
+		{operation: "workspace-delete-nodes", input: `{}`},
+		{operation: "workspace-show-credentials", input: `{}`},
+		{operation: "mremote-import-inspect", input: `{}`},
+		{operation: "mremote-import-analyze", input: `{}`},
+		{operation: "mremote-import-commit", input: `{}`},
+		{operation: "backup-inspect", input: `{}`},
+		{operation: "backup-export", input: `{}`},
+		{operation: "backup-import", input: `{}`},
+		{operation: "web-target", input: `{}`},
+		{operation: "watchguard-import", input: `{}`},
+		{operation: "azure-vpn-import", input: `{}`},
+		{operation: "rdp-external-client-requirement", input: `{}`},
+		{operation: "cisco-profile-import", input: `{}`},
+		{operation: "ovpn-file-import", input: `{}`},
+		{operation: "credential-create", input: `{}`},
+		{operation: "credential-update", input: `{}`},
+		{operation: "credential-delete", input: `{}`},
+		{operation: "credentials-for-protocol", input: `{}`},
+		{operation: "workspace-update-node", input: `{}`},
+		{operation: "workspace-update-node-web-settings", input: `{}`},
+		{operation: "workspace-update-node-tunnel", input: `{}`},
+		{operation: "workspace-update-node-credential", input: `{}`},
+		{operation: "workspace-update-node-inline-credential", input: `{}`},
+		{operation: "workspace-node-create", input: `{}`},
+		{operation: "workspace-node-update", input: `{}`},
+		{operation: "tunnel-create", input: `{}`},
+		{operation: "tunnel-read", input: `{}`},
+		{operation: "tunnel-update", input: `{}`},
+		{operation: "tunnel-delete", input: `{}`},
+		{operation: "auth-verify", input: `{}`},
+		{operation: "auth-set-secret", input: `{}`},
+		{operation: "auth-update-settings", input: `{}`},
+		{operation: "settings-set-theme", input: `{"theme":"invalid"}`},
+		{operation: "settings-set-confirm-on-tab-close", input: `{}`},
+		{operation: "settings-set-sidebar-width", input: `{}`},
+		{operation: "settings-set-update-preferences", input: `{"skippedUpdateVersion":42}`},
+		{operation: "settings-set-log-retention", input: `{"days":-1}`},
+		{operation: "settings-set-log-level", input: `{"level":"invalid"}`},
+		{operation: "bitwarden-onboarding-read", input: `{}`},
+		{operation: "extension-set-enabled", input: `{}`},
+		{operation: "extension-import-zip", input: fmt.Sprintf(`{"path":%q}`, missingPath)},
+		{operation: "extension-import-folder", input: fmt.Sprintf(`{"path":%q}`, missingPath)},
+		{operation: "auth-hello-verify", input: `{}`},
+		{operation: "ssh-trust-host-key", input: `{}`},
+	}
+	for _, test := range tests {
+		t.Run(test.operation, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := runBackendCLI(
+				[]string{"-database", databasePath, "-operation", test.operation},
+				strings.NewReader(test.input), &stdout, &stderr,
+			)
+			if code == 0 {
+				if !json.Valid(stdout.Bytes()) {
+					t.Fatalf("successful response is not JSON: %q", stdout.String())
+				}
+			} else if strings.TrimSpace(stderr.String()) == "" {
+				t.Fatalf("failed operation returned no error; stdout=%q", stdout.String())
+			}
+		})
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runBackendCLI(
+		[]string{"-database", databasePath, "-operation", "migrate", "-credential-reader", missingPath},
+		strings.NewReader(""), &stdout, &stderr,
+	)
+	if code != 1 || strings.TrimSpace(stderr.String()) == "" {
+		t.Fatalf("missing migration reader: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestRunBackendCLIExecutesSafeOneShotOperations(t *testing.T) {
+	tests := []struct {
+		name      string
+		operation string
+		input     string
+	}{
+		{name: "startup", operation: "startup", input: ""},
+		{name: "workspace", operation: "workspace"},
+		{name: "auth status", operation: "auth-status"},
+		{name: "settings read", operation: "settings-read"},
+		{name: "settings migrate", operation: "settings-migrate"},
+		{name: "set theme", operation: "settings-set-theme", input: `{"theme":"dark"}`},
+		{name: "set tunnel prompt", operation: "settings-set-prompt-before-tunnel", input: `{"enabled":false}`},
+		{name: "set auto copy", operation: "settings-set-auto-copy-on-select", input: `{"enabled":true}`},
+		{name: "set tab confirmation", operation: "settings-set-confirm-on-tab-close", input: `{"enabled":false}`},
+		{name: "set sidebar width", operation: "settings-set-sidebar-width", input: `{"width":420}`},
+		{name: "set update preferences", operation: "settings-set-update-preferences", input: `{"autoCheckForUpdates":false,"skippedUpdateVersion":"9.9.9"}`},
+		{name: "logs info", operation: "logs-info"},
+		{name: "set log retention", operation: "settings-set-log-retention", input: `{"days":14}`},
+		{name: "set log level", operation: "settings-set-log-level", input: `{"level":"debug"}`},
+		{name: "dismiss bitwarden onboarding", operation: "bitwarden-onboarding-dismiss"},
+		{name: "extension state", operation: "extension-read"},
+		{name: "system idle", operation: "auth-system-idle"},
+	}
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := runBackendCLI(
+				[]string{"-database", databasePath, "-operation", test.operation},
+				strings.NewReader(test.input), &stdout, &stderr,
+			)
+			if code != 0 {
+				t.Fatalf("exit code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+			}
+			if !json.Valid(stdout.Bytes()) {
+				t.Fatalf("stdout is not JSON: %q", stdout.String())
+			}
+		})
+	}
+}
+
+type backendFailingWriter struct{}
+
+func (backendFailingWriter) Write([]byte) (int, error) {
+	return 0, errors.New("write failed")
+}
+
+type backendFailingReader struct{}
+
+func (backendFailingReader) Read([]byte) (int, error) {
+	return 0, errors.New("read failed")
+}
+
+func TestRunBackendCLIReportsResponseEncodingFailure(t *testing.T) {
+	var stderr bytes.Buffer
+	code := runBackendCLI(
+		[]string{"-database", filepath.Join(t.TempDir(), "wormhole.db"), "-operation", "workspace"},
+		strings.NewReader(""), backendFailingWriter{}, &stderr,
+	)
+	if code != 1 || stderr.String() != "Wormhole could not complete the request\n" {
+		t.Fatalf("exit code = %d, stderr = %q", code, stderr.String())
+	}
+}
+
+func TestDecodeOptionalInputReader(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		input io.Reader
+		valid bool
+	}{
+		{name: "empty", input: strings.NewReader(""), valid: true},
+		{name: "whitespace", input: strings.NewReader(" \n\t"), valid: true},
+		{name: "json", input: strings.NewReader(`{"legacyTheme":"dark"}`), valid: true},
+		{name: "malformed", input: strings.NewReader("{"), valid: false},
+		{name: "oversized", input: strings.NewReader(strings.Repeat("x", backendMaxRequestBytes+1)), valid: false},
+		{name: "read failure", input: backendFailingReader{}, valid: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var request startupRequest
+			err := decodeOptionalInputReader(test.input, &request)
+			if (err == nil) != test.valid {
+				t.Fatalf("error = %v, valid = %v", err, test.valid)
+			}
+		})
+	}
+}
+
+func TestProtocolAndTunnelNamesCoverKnownAndUnknownValues(t *testing.T) {
+	for _, test := range []struct {
+		value sql.NullInt64
+		name  string
+	}{
+		{value: sql.NullInt64{}, name: "ssh"},
+		{value: sql.NullInt64{Int64: 0, Valid: true}, name: "ssh"},
+		{value: sql.NullInt64{Int64: 1, Valid: true}, name: "rdp"},
+		{value: sql.NullInt64{Int64: 3, Valid: true}, name: "http"},
+		{value: sql.NullInt64{Int64: 4, Valid: true}, name: "https"},
+		{value: sql.NullInt64{Int64: 5, Valid: true}, name: "serial"},
+		{value: sql.NullInt64{Int64: 6, Valid: true}, name: "vnc"},
+	} {
+		if name := protocolName(test.value); name != test.name {
+			t.Fatalf("protocolName(%+v) = %q, want %q", test.value, name, test.name)
+		}
+	}
+
+	for _, test := range []struct {
+		value int64
+		name  string
+	}{
+		{value: 0, name: "WireGuard"},
+		{value: 1, name: "OpenVPN"},
+		{value: 2, name: "Fortinet"},
+		{value: 3, name: "WatchGuard"},
+		{value: 4, name: "Stormshield"},
+		{value: 5, name: "Azure VPN"},
+		{value: 6, name: "Cisco Secure Client"},
+		{value: 99, name: "Unknown"},
+	} {
+		if name := tunnelName(test.value); name != test.name {
+			t.Fatalf("tunnelName(%d) = %q, want %q", test.value, name, test.name)
+		}
+	}
+}
 
 func TestDecodeInputRejectsOversizedRequest(t *testing.T) {
 	var request authVerifyRequest

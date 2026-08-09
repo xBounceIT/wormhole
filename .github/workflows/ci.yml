@@ -61,6 +61,9 @@ jobs:
       - name: Test Electron, backend, and sidecars
         run: npm run test:electron
 
+      - name: Enforce 80% unit and backend coverage
+        run: npm run test:coverage
+
       - name: Build application
         run: npm run build
 

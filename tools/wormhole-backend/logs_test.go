@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -210,5 +211,35 @@ func TestEnsureCurrentDayLogFileCreatesFileAndDirectory(t *testing.T) {
 	}
 	if err := ensureCurrentDayLogFile(databasePath); err != nil {
 		t.Fatalf("ensuring an existing log file failed: %v", err)
+	}
+}
+
+func TestOpenLogTargetsCreatesPathsAndWrapsShellFailures(t *testing.T) {
+	original := openLocalLogPath
+	t.Cleanup(func() { openLocalLogPath = original })
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	var opened []string
+	openLocalLogPath = func(path string) error {
+		opened = append(opened, path)
+		return nil
+	}
+	if err := openCurrentDayLogFile(databasePath); err != nil {
+		t.Fatal(err)
+	}
+	if err := openLogsDirectory(databasePath); err != nil {
+		t.Fatal(err)
+	}
+	if len(opened) != 2 || opened[0] != currentDayLogFilePath(databasePath) || opened[1] != logsDirectoryPath(databasePath) {
+		t.Fatalf("opened log paths = %#v", opened)
+	}
+	if !fileExists(currentDayLogFilePath(databasePath)) || !directoryExists(logsDirectoryPath(databasePath)) {
+		t.Fatal("log targets were not created before opening")
+	}
+	openLocalLogPath = func(string) error { return errors.New("shell failed") }
+	if err := openCurrentDayLogFile(databasePath); err == nil || !strings.Contains(err.Error(), "today's log file") {
+		t.Fatalf("current log shell error = %v", err)
+	}
+	if err := openLogsDirectory(databasePath); err == nil || !strings.Contains(err.Error(), "logs folder") {
+		t.Fatalf("logs directory shell error = %v", err)
 	}
 }

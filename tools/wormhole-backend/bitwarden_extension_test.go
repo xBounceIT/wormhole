@@ -826,3 +826,109 @@ func bitwardenTestAssertNoBackups(t *testing.T, installRoot string) {
 		}
 	}
 }
+
+func TestFindBitwardenExtensionRootHandlesArchiveLayouts(t *testing.T) {
+	empty := t.TempDir()
+	if _, err := findBitwardenExtensionRoot(empty); err == nil {
+		t.Fatal("archive without a manifest was accepted")
+	}
+
+	direct := t.TempDir()
+	if err := os.WriteFile(filepath.Join(direct, "manifest.json"), []byte(validBitwardenManifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if root, err := findBitwardenExtensionRoot(direct); err != nil || root != direct {
+		t.Fatalf("direct extension root = %q, %v", root, err)
+	}
+
+	nested := t.TempDir()
+	nestedRoot := filepath.Join(nested, "extension")
+	if err := os.MkdirAll(nestedRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nestedRoot, "manifest.json"), []byte(validBitwardenManifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if root, err := findBitwardenExtensionRoot(nested); err != nil || root != nestedRoot {
+		t.Fatalf("nested extension root = %q, %v", root, err)
+	}
+
+	multiple := t.TempDir()
+	otherRoot := filepath.Join(multiple, "other")
+	bitwardenRoot := filepath.Join(multiple, "bitwarden")
+	for _, directory := range []string{otherRoot, bitwardenRoot} {
+		if err := os.MkdirAll(directory, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	otherManifest := strings.Replace(validBitwardenManifest, "Bitwarden Password Manager", "Unrelated Extension", 1)
+	if err := os.WriteFile(filepath.Join(otherRoot, "manifest.json"), []byte(otherManifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bitwardenRoot, "manifest.json"), []byte(validBitwardenManifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if root, err := findBitwardenExtensionRoot(multiple); err != nil || root != bitwardenRoot {
+		t.Fatalf("preferred extension root = %q, %v", root, err)
+	}
+	if err := os.WriteFile(filepath.Join(bitwardenRoot, "manifest.json"), []byte(otherManifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := findBitwardenExtensionRoot(multiple); err == nil {
+		t.Fatal("ambiguous non-Bitwarden manifests were accepted")
+	}
+}
+
+func TestBitwardenInstallPathsReplaceAndRollbackAtomically(t *testing.T) {
+	installRoot := t.TempDir()
+	base := filepath.Join(installRoot, "2026.8.0")
+	for _, directory := range []string{base, base + "-2"} {
+		if err := os.MkdirAll(directory, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if path := bitwardenUniqueInstallPath(installRoot, "2026.8.0"); path != base+"-3" {
+		t.Fatalf("unique install path = %q", path)
+	}
+	if path := bitwardenReplacementPath(base, installRoot); path != base {
+		t.Fatalf("replacement path = %q", path)
+	}
+	for _, path := range []string{"", installRoot, filepath.Join(t.TempDir(), "outside")} {
+		if replacement := bitwardenReplacementPath(path, installRoot); replacement != "" {
+			t.Fatalf("unsafe replacement path %q became %q", path, replacement)
+		}
+	}
+
+	staging := filepath.Join(installRoot, "staging")
+	if err := os.MkdirAll(staging, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staging, "new.txt"), []byte("new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(base, "old.txt"), []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	backup, err := replaceOrMoveBitwardenInstall(staging, base, installRoot)
+	if err != nil || backup == "" || !fileExists(filepath.Join(base, "new.txt")) || !fileExists(filepath.Join(backup, "old.txt")) {
+		t.Fatalf("replacement = backup:%q err:%v", backup, err)
+	}
+	if err := rollbackBitwardenInstall(base, backup); err != nil {
+		t.Fatal(err)
+	}
+	if !fileExists(filepath.Join(base, "old.txt")) || fileExists(filepath.Join(base, "new.txt")) {
+		t.Fatal("rollback did not restore the previous installation")
+	}
+
+	freshStaging := filepath.Join(installRoot, "fresh-staging")
+	freshFinal := filepath.Join(installRoot, "fresh-final")
+	if err := os.MkdirAll(freshStaging, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if backup, err := replaceOrMoveBitwardenInstall(freshStaging, freshFinal, installRoot); err != nil || backup != "" || !directoryExists(freshFinal) {
+		t.Fatalf("fresh move = backup:%q err:%v", backup, err)
+	}
+	if err := rollbackBitwardenInstall(freshFinal, ""); err != nil || directoryExists(freshFinal) {
+		t.Fatalf("fresh rollback error = %v", err)
+	}
+}

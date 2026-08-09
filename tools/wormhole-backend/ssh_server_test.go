@@ -13,12 +13,14 @@ import (
 	"io"
 	"net"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -894,7 +896,7 @@ func TestReadLocalDirectoryCapsNativeEnumeration(t *testing.T) {
 }
 
 func TestSftpTransferBatchTerminalEventHasNoStaleItem(t *testing.T) {
-	var output bytes.Buffer
+	var output synchronizedBuffer
 	server := &sshServer{output: &sshEventWriter{encoder: json.NewEncoder(&output)}}
 	command := sshWireCommand{
 		SessionID:  "session",
@@ -925,6 +927,167 @@ func TestSftpTransferItemIDsStayBoundedAndScoped(t *testing.T) {
 	}
 	if got := sftpTransferItemID(4095); len(got) > 128 {
 		t.Fatalf("transfer item id exceeded the renderer limit: %q", got)
+	}
+}
+
+func TestServeSSHDispatchesInvalidAndDisconnectedCommands(t *testing.T) {
+	commands := []sshWireCommand{
+		{Type: "input", SessionID: ""},
+		{Type: "unsupported", SessionID: "session"},
+		{Type: "input", SessionID: "session", Data: "%%%"},
+		{Type: "input", SessionID: "session", Data: "YQ=="},
+		{Type: "resize", SessionID: "session", Columns: 80, Rows: 24},
+		{Type: "snapshot", SessionID: "session"},
+		{Type: "sftp-open", SessionID: "session", RequestID: "open"},
+		{Type: "sftp-list", SessionID: "session", RequestID: "list", Path: "/"},
+		{Type: "sftp-local-list", SessionID: "session", RequestID: "local", Path: t.TempDir()},
+		{Type: "sftp-operation", SessionID: "session", RequestID: "operation", Pane: "local", Operation: "delete", Path: filepath.Join(t.TempDir(), "missing")},
+		{Type: "sftp-transfer", SessionID: "session", TransferID: "transfer", Direction: "remote-to-local", DestinationPath: t.TempDir(), Items: []sshSftpTransferItem{{SourcePath: "/file", Name: "file"}}},
+		{Type: "sftp-transfer-decision", SessionID: "session", TransferID: "missing", ItemID: "item", Decision: "skip"},
+		{Type: "sftp-transfer-cancel", SessionID: "session", TransferID: "missing", ItemID: "item"},
+		{Type: "sftp-close", SessionID: "session"},
+		{Type: "auto-sudo-cancel", SessionID: "session"},
+		{Type: "app-lock", SessionID: "session"},
+		{Type: "close", SessionID: "session"},
+		{Type: "open", SessionID: "session"},
+	}
+	var input strings.Builder
+	input.WriteString("{\n")
+	for _, command := range commands {
+		encoded, err := json.Marshal(command)
+		if err != nil {
+			t.Fatal(err)
+		}
+		input.Write(encoded)
+		input.WriteByte('\n')
+	}
+	var output synchronizedBuffer
+	if err := serveSSH("", strings.NewReader(input.String()), &output, "userdata"); err != nil {
+		t.Fatalf("serveSSH returned %v", err)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(output.Bytes()))
+	events := 0
+	for {
+		var event sshWireEvent
+		err := decoder.Decode(&event)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		events++
+	}
+	if events < 10 {
+		t.Fatalf("serveSSH emitted only %d events: %s", events, output.String())
+	}
+}
+
+func TestSSHServerOpensFakeNativeSessionAndDispatchesConnectedCommands(t *testing.T) {
+	var output synchronizedBuffer
+	server := &sshServer{
+		output:     &sshEventWriter{encoder: json.NewEncoder(&output)},
+		sessions:   make(map[string]*sshNativeSession),
+		pending:    make(map[string]context.CancelFunc),
+		lifecycles: make(map[string]*sshReconnectState),
+		transfers:  make(map[string]*sshSftpTransfer),
+	}
+	terminal, err := newSSHTerminalEmulator(80, 24)
+	if err != nil {
+		t.Fatal(err)
+	}
+	native := &sshNativeSession{
+		terminal:         terminal,
+		mcpReplay:        newMcpReplayBuffer(mcpReplayCapacity),
+		mcpCommandReplay: newMcpReplayBuffer(mcpReplayCapacity),
+		inputQueue:       make(chan []byte, sshInputQueueCapacity),
+		done:             make(chan struct{}),
+		started:          true,
+	}
+	server.openSSH = func(context.Context, *sshReconnectState) (*sshNativeSession, sshTarget, error) {
+		return native, sshTarget{host: "127.0.0.1", port: 22, username: "alice", title: "Test", knownHostFingerprint: "SHA256:test"}, nil
+	}
+	server.handle(sshWireCommand{Type: "open", SessionID: "session", Host: "127.0.0.1", Port: 22, Username: "alice", Password: "secret"})
+	deadline := time.Now().Add(time.Second)
+	for {
+		server.mu.Lock()
+		connected := server.sessions["session"] == native
+		server.mu.Unlock()
+		if connected {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("fake SSH session did not connect: %s", output.String())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if !server.isActive(native) || server.session("session") != native {
+		t.Fatal("connected SSH session was not active")
+	}
+	server.handle(sshWireCommand{Type: "input", SessionID: "session", Data: "aGVsbG8="})
+	if len(native.inputQueue) != 1 {
+		t.Fatalf("input queue length = %d", len(native.inputQueue))
+	}
+	server.handle(sshWireCommand{Type: "snapshot", SessionID: "session"})
+	server.handle(sshWireCommand{Type: "auto-sudo-cancel", SessionID: "session"})
+	server.handle(sshWireCommand{Type: "close", SessionID: "session"})
+	if !native.isClosed() || server.session("session") != nil {
+		t.Fatal("SSH close did not close and remove the native session")
+	}
+	if !strings.Contains(output.String(), `"type":"connected"`) || !strings.Contains(output.String(), `"type":"screen"`) || !strings.Contains(output.String(), `"type":"closed"`) {
+		t.Fatalf("expected lifecycle events were not emitted: %s", output.String())
+	}
+}
+
+func TestSSHServerReportsInitialHostKeyMismatch(t *testing.T) {
+	var output synchronizedBuffer
+	server := &sshServer{
+		output:     &sshEventWriter{encoder: json.NewEncoder(&output)},
+		sessions:   make(map[string]*sshNativeSession),
+		pending:    make(map[string]context.CancelFunc),
+		lifecycles: make(map[string]*sshReconnectState),
+		transfers:  make(map[string]*sshSftpTransfer),
+	}
+	server.openSSH = func(context.Context, *sshReconnectState) (*sshNativeSession, sshTarget, error) {
+		return nil, sshTarget{}, &sshHostKeyMismatchError{expected: "old", received: "new"}
+	}
+	server.open(sshWireCommand{Type: "open", SessionID: "session", Host: "127.0.0.1", Port: 22, Username: "alice", Password: "secret"})
+	deadline := time.Now().Add(time.Second)
+	for !strings.Contains(output.String(), `"type":"error"`) && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	var event sshWireEvent
+	if err := json.NewDecoder(bytes.NewReader(output.Bytes())).Decode(&event); err != nil {
+		t.Fatal(err)
+	}
+	if event.HostKeyExpected != "old" || event.HostKeyReceived != "new" {
+		t.Fatalf("mismatch event = %#v", event)
+	}
+}
+
+func TestSSHServerRejectsDuplicateOpenStates(t *testing.T) {
+	for name, configure := range map[string]func(*sshServer){
+		"session": func(server *sshServer) { server.sessions["session"] = &sshNativeSession{} },
+		"pending": func(server *sshServer) { server.pending["session"] = func() {} },
+		"lifecycle": func(server *sshServer) {
+			server.lifecycles["session"] = &sshReconnectState{command: sshWireCommand{SessionID: "session"}}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var output synchronizedBuffer
+			server := &sshServer{
+				output:     &sshEventWriter{encoder: json.NewEncoder(&output)},
+				sessions:   make(map[string]*sshNativeSession),
+				pending:    make(map[string]context.CancelFunc),
+				lifecycles: make(map[string]*sshReconnectState),
+				transfers:  make(map[string]*sshSftpTransfer),
+			}
+			configure(server)
+			server.open(sshWireCommand{SessionID: "session", Host: "127.0.0.1", Port: 22, Username: "alice", Password: "secret"})
+			if !strings.Contains(output.String(), `"type":"error"`) {
+				t.Fatalf("duplicate %s state was accepted", name)
+			}
+		})
 	}
 }
 
@@ -984,7 +1147,7 @@ func TestSftpTransferDecisionIsScopedToItsConflict(t *testing.T) {
 }
 
 func TestSftpRequestErrorEventCarriesRequestID(t *testing.T) {
-	var output bytes.Buffer
+	var output synchronizedBuffer
 	server := &sshServer{output: &sshEventWriter{encoder: json.NewEncoder(&output)}}
 	server.writeSftpRequestError("session", "remote-7", "directory failed", "/home/operator")
 
@@ -1002,7 +1165,7 @@ func TestSftpOpenStateErrorsCarryRequestID(t *testing.T) {
 		"closed":  {id: "session", closed: true},
 		"opening": {id: "session", sftpOpening: true},
 	} {
-		var output bytes.Buffer
+		var output synchronizedBuffer
 		server := &sshServer{output: &sshEventWriter{encoder: json.NewEncoder(&output)}}
 		native.server = server
 		native.startSftpOpen("open-7")
@@ -1018,7 +1181,7 @@ func TestSftpOpenStateErrorsCarryRequestID(t *testing.T) {
 }
 
 func TestSftpLocalListWithoutSessionEmitsRequestScopedError(t *testing.T) {
-	var output bytes.Buffer
+	var output synchronizedBuffer
 	server := &sshServer{
 		output:   &sshEventWriter{encoder: json.NewEncoder(&output)},
 		sessions: make(map[string]*sshNativeSession),
@@ -1039,7 +1202,7 @@ func TestSftpLocalListWithoutSessionEmitsRequestScopedError(t *testing.T) {
 }
 
 func TestSftpOperationWithoutSessionEmitsRequestScopedError(t *testing.T) {
-	var output bytes.Buffer
+	var output synchronizedBuffer
 	server := &sshServer{
 		output:   &sshEventWriter{encoder: json.NewEncoder(&output)},
 		sessions: make(map[string]*sshNativeSession),
@@ -1165,7 +1328,7 @@ func TestSftpLocalListingUsesQuickPathCache(t *testing.T) {
 }
 
 func TestSftpTransferWithoutSessionEmitsBatchFailure(t *testing.T) {
-	var output bytes.Buffer
+	var output synchronizedBuffer
 	server := &sshServer{
 		output:   &sshEventWriter{encoder: json.NewEncoder(&output)},
 		sessions: make(map[string]*sshNativeSession),
@@ -1303,6 +1466,570 @@ func TestLocalTransferDoesNotTruncateItsOwnSource(t *testing.T) {
 	if string(contents) != "preserve me" {
 		t.Fatalf("same-file transfer changed the source: %q", contents)
 	}
+}
+
+func TestLocalSftpTransferCopiesDirectoryAndPublishesProgress(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	destination := filepath.Join(root, "destination")
+	if err := os.MkdirAll(filepath.Join(source, "nested", "empty"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "nested", "report.txt"), []byte("report contents"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	server, native, output := newLocalTransferTestServer()
+	command := sshWireCommand{
+		SessionID:       native.id,
+		TransferID:      "copy-directory",
+		Direction:       "local-to-local",
+		DestinationPath: destination,
+		Items: []sshSftpTransferItem{{
+			SourcePath:  source,
+			Name:        "copied",
+			IsDirectory: true,
+		}},
+	}
+	server.sftpTransfer(command)
+	server.transferWG.Wait()
+
+	contents, err := os.ReadFile(filepath.Join(destination, "copied", "nested", "report.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != "report contents" {
+		t.Fatalf("copied contents = %q", contents)
+	}
+	if info, err := os.Stat(filepath.Join(destination, "copied", "nested", "empty")); err != nil || !info.IsDir() {
+		t.Fatalf("empty directory was not copied: info=%v err=%v", info, err)
+	}
+
+	events := decodeSSHEvents(t, output.Bytes())
+	states := make(map[string]bool)
+	for _, event := range events {
+		states[event.TransferState] = true
+	}
+	for _, state := range []string{"running", "progress", "completed", "batch-completed"} {
+		if !states[state] {
+			t.Fatalf("missing %q event in %#v", state, events)
+		}
+	}
+}
+
+func TestLocalSftpTransferAppliesConflictDecisionToAllItems(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	destination := filepath.Join(root, "destination")
+	if err := os.MkdirAll(source, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(destination, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"one.txt", "two.txt"} {
+		if err := os.WriteFile(filepath.Join(source, name), []byte("new "+name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(destination, name), []byte("old "+name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	server, native, output := newLocalTransferTestServer()
+	command := sshWireCommand{
+		SessionID:       native.id,
+		TransferID:      "overwrite-all",
+		Direction:       "local-to-local",
+		DestinationPath: destination,
+		Items: []sshSftpTransferItem{
+			{SourcePath: filepath.Join(source, "one.txt"), Name: "one.txt"},
+			{SourcePath: filepath.Join(source, "two.txt"), Name: "two.txt"},
+		},
+	}
+	server.sftpTransfer(command)
+	server.sftpTransferDecision(sshWireCommand{
+		SessionID: native.id, TransferID: command.TransferID, ItemID: "item-0",
+		Decision: "overwrite", ApplyToAll: true,
+	})
+	server.transferWG.Wait()
+
+	for _, name := range []string{"one.txt", "two.txt"} {
+		contents, err := os.ReadFile(filepath.Join(destination, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(contents) != "new "+name {
+			t.Fatalf("%s contents = %q", name, contents)
+		}
+	}
+	conflicts := 0
+	for _, event := range decodeSSHEvents(t, output.Bytes()) {
+		if event.Type == "sftp.conflict" {
+			conflicts++
+		}
+	}
+	if conflicts != 1 {
+		t.Fatalf("conflict events = %d, want 1", conflicts)
+	}
+}
+
+func TestLocalSftpTransferCanSkipConflictAndCancelBatch(t *testing.T) {
+	t.Run("skip", func(t *testing.T) {
+		root := t.TempDir()
+		source := filepath.Join(root, "source.txt")
+		destination := filepath.Join(root, "destination")
+		if err := os.WriteFile(source, []byte("new"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(destination, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		target := filepath.Join(destination, "source.txt")
+		if err := os.WriteFile(target, []byte("old"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		server, native, _ := newLocalTransferTestServer()
+		command := sshWireCommand{
+			SessionID: native.id, TransferID: "skip", Direction: "local-to-local",
+			DestinationPath: destination,
+			Items:           []sshSftpTransferItem{{SourcePath: source, Name: "source.txt"}},
+		}
+		server.sftpTransfer(command)
+		server.sftpTransferDecision(sshWireCommand{
+			SessionID: native.id, TransferID: command.TransferID, ItemID: "item-0", Decision: "skip",
+		})
+		server.transferWG.Wait()
+		contents, err := os.ReadFile(target)
+		if err != nil || string(contents) != "old" {
+			t.Fatalf("skipped target = %q, %v", contents, err)
+		}
+	})
+
+	t.Run("cancel", func(t *testing.T) {
+		root := t.TempDir()
+		source := filepath.Join(root, "source.txt")
+		if err := os.WriteFile(source, []byte(strings.Repeat("x", 1024)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		server, native, output := newLocalTransferTestServer()
+		command := sshWireCommand{
+			SessionID: native.id, TransferID: "cancel", Direction: "local-to-local",
+			DestinationPath: filepath.Join(root, "destination"),
+			Items:           []sshSftpTransferItem{{SourcePath: source, Name: "source.txt"}},
+		}
+		server.sftpTransfer(command)
+		server.sftpTransferCancel(sshWireCommand{SessionID: native.id, TransferID: command.TransferID})
+		server.transferWG.Wait()
+		events := decodeSSHEvents(t, output.Bytes())
+		if len(events) == 0 || events[len(events)-1].TransferState != "batch-cancelled" {
+			t.Fatalf("unexpected cancellation events: %#v", events)
+		}
+	})
+}
+
+func TestSftpTransferRejectsDuplicateAndClosedRemoteSession(t *testing.T) {
+	server, native, output := newLocalTransferTestServer()
+	command := sshWireCommand{
+		SessionID: native.id, TransferID: "duplicate", Direction: "local-to-local",
+		DestinationPath: t.TempDir(),
+		Items:           []sshSftpTransferItem{{SourcePath: filepath.Join(t.TempDir(), "missing"), Name: "missing"}},
+	}
+	server.transfers[command.TransferID] = &sshSftpTransfer{sessionID: native.id}
+	server.sftpTransfer(command)
+	delete(server.transfers, command.TransferID)
+
+	server.runSftpTransfer(native, sshWireCommand{
+		SessionID: native.id, TransferID: "remote", Direction: "remote-to-local",
+	}, &sshSftpTransfer{}, context.Background())
+
+	events := decodeSSHEvents(t, output.Bytes())
+	if len(events) != 2 || events[0].TransferState != "batch-failed" || events[1].TransferState != "batch-failed" {
+		t.Fatalf("unexpected transfer failures: %#v", events)
+	}
+}
+
+func TestLocalSftpOperationsCreateRenameAndDelete(t *testing.T) {
+	root := t.TempDir()
+	native := &sshNativeSession{}
+	directory := filepath.Join(root, "folder")
+	file := filepath.Join(directory, "report.txt")
+	renamed := filepath.Join(directory, "renamed.txt")
+	commands := []sshWireCommand{
+		{Pane: "local", Operation: "mkdir", Path: directory},
+		{Pane: "local", Operation: "file", Path: file},
+		{Pane: "local", Operation: "rename", Path: file, DestinationPath: renamed},
+		{Pane: "local", Operation: "delete", Path: renamed},
+	}
+	for _, command := range commands {
+		if err := native.runSftpOperation(command); err != nil {
+			t.Fatalf("%s failed: %v", command.Operation, err)
+		}
+	}
+	if _, err := os.Stat(renamed); !os.IsNotExist(err) {
+		t.Fatalf("deleted local file still exists: %v", err)
+	}
+	for _, command := range []sshWireCommand{
+		{Pane: "invalid", Operation: "mkdir", Path: directory},
+		{Pane: "local", Operation: "invalid", Path: directory},
+		{Pane: "remote", Operation: "open", Path: "/tmp/report.txt"},
+		{Pane: "remote", Operation: "mkdir", Path: ""},
+	} {
+		if err := native.runSftpOperation(command); err == nil {
+			t.Fatalf("invalid command was accepted: %#v", command)
+		}
+	}
+}
+
+func TestLocalTransferFilesystemHelpers(t *testing.T) {
+	root := t.TempDir()
+	directory := filepath.Join(root, "folder")
+	file := filepath.Join(directory, "report.txt")
+	if err := ensureTransferDirectory(nil, "local-to-local", directory); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, []byte("report"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	exists, isDirectory, size, err := transferDestinationInfo(nil, "local-to-local", file)
+	if err != nil || !exists || isDirectory || size != 6 {
+		t.Fatalf("file info = exists:%v directory:%v size:%d err:%v", exists, isDirectory, size, err)
+	}
+	exists, _, _, err = transferDestinationInfo(nil, "local-to-local", filepath.Join(root, "missing"))
+	if err != nil || exists {
+		t.Fatalf("missing info = exists:%v err:%v", exists, err)
+	}
+	if err := ensureTransferParent(nil, "local-to-local", filepath.Join(root, "nested", "report.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeTransferDestinationSymlink(nil, "local-to-local", filepath.Join(root, "missing")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWriteTransferBytesHandlesPartialAndFailedWriters(t *testing.T) {
+	var output synchronizedBuffer
+	partial := &partialSSHWriter{writer: &output, maximum: 2}
+	if err := writeTransferBytes(partial, []byte("abcdef")); err != nil || output.String() != "abcdef" {
+		t.Fatalf("partial write = %q, %v", output.String(), err)
+	}
+	if err := writeTransferBytes(backendFailingWriter{}, []byte("data")); err == nil {
+		t.Fatal("writer failure was ignored")
+	}
+	if err := writeTransferBytes(zeroSSHWriter{}, []byte("data")); !errors.Is(err, io.ErrShortWrite) {
+		t.Fatalf("zero write error = %v", err)
+	}
+}
+
+type partialSSHWriter struct {
+	writer  io.Writer
+	maximum int
+}
+
+func (writer *partialSSHWriter) Write(data []byte) (int, error) {
+	if len(data) > writer.maximum {
+		data = data[:writer.maximum]
+	}
+	return writer.writer.Write(data)
+}
+
+type zeroSSHWriter struct{}
+
+func (zeroSSHWriter) Write([]byte) (int, error) { return 0, nil }
+
+func newLocalTransferTestServer() (*sshServer, *sshNativeSession, *synchronizedBuffer) {
+	output := &synchronizedBuffer{}
+	server := &sshServer{
+		output:    &sshEventWriter{encoder: json.NewEncoder(output)},
+		sessions:  make(map[string]*sshNativeSession),
+		transfers: make(map[string]*sshSftpTransfer),
+	}
+	native := &sshNativeSession{id: "session", server: server}
+	server.sessions[native.id] = native
+	return server, native, output
+}
+
+func decodeSSHEvents(t *testing.T, data []byte) []sshWireEvent {
+	t.Helper()
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	var events []sshWireEvent
+	for {
+		var event sshWireEvent
+		if err := decoder.Decode(&event); errors.Is(err, io.EOF) {
+			return events
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		events = append(events, event)
+	}
+}
+
+func TestRemoteSftpOperationsAndDirectoryListing(t *testing.T) {
+	client := newSftpTestClient(t)
+	root := sftpTestPath(t.TempDir())
+	if err := client.MkdirAll(root); err != nil {
+		t.Fatal(err)
+	}
+	var output synchronizedBuffer
+	server := &sshServer{output: &sshEventWriter{encoder: json.NewEncoder(&output)}}
+	native := &sshNativeSession{
+		id: "remote-session", server: server, sftpClient: client,
+		sftpGeneration: 1, sftpListSeq: 1,
+	}
+
+	directory := pathpkg.Join(root, "folder")
+	file := pathpkg.Join(directory, "report.txt")
+	renamed := pathpkg.Join(directory, "renamed.txt")
+	for _, command := range []sshWireCommand{
+		{Pane: "remote", Operation: "mkdir", Path: directory},
+		{Pane: "remote", Operation: "file", Path: file},
+		{Pane: "remote", Operation: "rename", Path: file, DestinationPath: renamed},
+	} {
+		if err := native.runSftpOperation(command); err != nil {
+			t.Fatalf("remote %s failed: %v", command.Operation, err)
+		}
+	}
+	writer, err := client.OpenFile(pathpkg.Join(directory, "zeta.txt"), os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write([]byte("contents")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Mkdir(pathpkg.Join(directory, "alpha")); err != nil {
+		t.Fatal(err)
+	}
+
+	resolved, entries, truncated, err := readSftpDirectory(client, directory)
+	if err != nil || resolved != directory || truncated || len(entries) != 3 || !entries[0].IsDirectory {
+		t.Fatalf("remote listing = path:%q entries:%#v truncated:%v err:%v", resolved, entries, truncated, err)
+	}
+	native.listSftp(directory, 1, 1, "list-request")
+	events := decodeSSHEvents(t, output.Bytes())
+	if len(events) != 1 || events[0].Type != "sftp.ready" || events[0].RequestID != "list-request" {
+		t.Fatalf("remote listing events = %#v", events)
+	}
+
+	if err := native.runSftpOperation(sshWireCommand{Pane: "remote", Operation: "delete", Path: directory}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Stat(directory); !os.IsNotExist(err) {
+		t.Fatalf("remote directory still exists: %v", err)
+	}
+}
+
+func TestSftpLifecyclePublishesRequestScopedEvents(t *testing.T) {
+	client := newSftpTestClient(t)
+	root := sftpTestPath(t.TempDir())
+	if err := client.MkdirAll(root); err != nil {
+		t.Fatal(err)
+	}
+
+	reader, writer := io.Pipe()
+	defer reader.Close()
+	defer writer.Close()
+	server := &sshServer{output: &sshEventWriter{encoder: json.NewEncoder(writer)}}
+	native := &sshNativeSession{id: "lifecycle", server: server, sftpClient: client, done: make(chan struct{})}
+	decoder := json.NewDecoder(reader)
+	readEvent := func(wantType, wantRequest string) sshWireEvent {
+		t.Helper()
+		var event sshWireEvent
+		if err := decoder.Decode(&event); err != nil {
+			t.Fatal(err)
+		}
+		if event.Type != wantType || event.RequestID != wantRequest || event.SessionID != native.id {
+			t.Fatalf("SFTP event = %#v, want type=%q request=%q", event, wantType, wantRequest)
+		}
+		return event
+	}
+
+	go native.startSftpOpen("open")
+	readEvent("sftp.opening", "open")
+	ready := readEvent("sftp.ready", "open")
+	if ready.Path == "" {
+		t.Fatalf("initial SFTP path was empty: %#v", ready)
+	}
+
+	go native.startSftpList(root, 0, "list")
+	if event := readEvent("sftp.ready", "list"); event.Path != root {
+		t.Fatalf("listed path = %q, want %q", event.Path, root)
+	}
+	go native.startSftpList("relative", 0, "invalid-list")
+	if event := readEvent("sftp.error", "invalid-list"); event.Path != "relative" {
+		t.Fatalf("invalid-list event = %#v", event)
+	}
+
+	localDirectory := filepath.Join(t.TempDir(), "created")
+	go native.startSftpOperation(sshWireCommand{
+		RequestID: "operation", Pane: "local", Operation: "mkdir", Path: localDirectory,
+	})
+	if event := readEvent("sftp.operation", "operation"); event.Error != "" {
+		t.Fatalf("local operation event = %#v", event)
+	}
+	if info, err := os.Stat(localDirectory); err != nil || !info.IsDir() {
+		t.Fatalf("local directory was not created: %v", err)
+	}
+
+	go native.writeLocalSftpError("local-error", localDirectory, errors.New("private filesystem detail"))
+	if event := readEvent("sftp.local.error", "local-error"); event.Error == "" || strings.Contains(event.Error, localDirectory) {
+		t.Fatalf("local error event = %#v", event)
+	}
+	go native.closeSftp(true)
+	readEvent("sftp.closed", "")
+	go native.startSftpListWithGeneration(root, native.sftpGeneration, "closed-list")
+	readEvent("sftp.error", "closed-list")
+}
+
+func TestSftpTransfersCopyBetweenLocalAndRemoteFilesystems(t *testing.T) {
+	client := newSftpTestClient(t)
+	remoteRoot := sftpTestPath(t.TempDir())
+	if err := client.MkdirAll(remoteRoot); err != nil {
+		t.Fatal(err)
+	}
+	server, native, output := newLocalTransferTestServer()
+	native.sftpClient = client
+	native.sftpGeneration = 1
+
+	localRoot := t.TempDir()
+	localSource := filepath.Join(localRoot, "upload.txt")
+	if err := os.WriteFile(localSource, []byte("uploaded through SFTP"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	upload := sshWireCommand{
+		SessionID: native.id, TransferID: "upload", Direction: "local-to-remote",
+		DestinationPath: pathpkg.Join(remoteRoot, "uploads"),
+		Items:           []sshSftpTransferItem{{SourcePath: localSource, Name: "upload.txt", Size: 21}},
+	}
+	server.runSftpTransfer(native, upload, newSftpTransferForTest(upload), context.Background())
+	remoteUpload := pathpkg.Join(upload.DestinationPath, "upload.txt")
+	remoteContents, err := readSftpTestFile(client, remoteUpload)
+	if err != nil || string(remoteContents) != "uploaded through SFTP" {
+		t.Fatalf("remote upload = %q, %v", remoteContents, err)
+	}
+
+	remoteFolder := pathpkg.Join(remoteRoot, "download")
+	if err := client.MkdirAll(pathpkg.Join(remoteFolder, "nested")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeSftpTestFile(client, pathpkg.Join(remoteFolder, "nested", "report.txt"), []byte("downloaded through SFTP")); err != nil {
+		t.Fatal(err)
+	}
+	localDestination := filepath.Join(localRoot, "downloads")
+	download := sshWireCommand{
+		SessionID: native.id, TransferID: "download", Direction: "remote-to-local",
+		DestinationPath: localDestination,
+		Items:           []sshSftpTransferItem{{SourcePath: remoteFolder, Name: "folder", IsDirectory: true}},
+	}
+	plans, err := buildSftpTransferPlans(client, download, context.Background())
+	if err != nil || len(plans) != 3 {
+		t.Fatalf("remote plans = %#v, %v", plans, err)
+	}
+	server.runSftpTransfer(native, download, newSftpTransferForTest(download), context.Background())
+	downloaded, err := os.ReadFile(filepath.Join(localDestination, "folder", "nested", "report.txt"))
+	if err != nil || string(downloaded) != "downloaded through SFTP" {
+		t.Fatalf("local download = %q, %v", downloaded, err)
+	}
+
+	states := make(map[string]bool)
+	for _, event := range decodeSSHEvents(t, output.Bytes()) {
+		states[event.TransferState] = true
+	}
+	if !states["running"] || !states["progress"] || !states["completed"] || !states["batch-completed"] {
+		t.Fatalf("transfer states = %#v", states)
+	}
+}
+
+func TestRemoteSftpHelpersHandleMissingAndExistingDestinations(t *testing.T) {
+	client := newSftpTestClient(t)
+	root := sftpTestPath(t.TempDir())
+	directory := pathpkg.Join(root, "nested")
+	file := pathpkg.Join(directory, "report.txt")
+	if err := ensureTransferDirectory(client, "local-to-remote", directory); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureTransferParent(client, "local-to-remote", file); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeSftpTestFile(client, file, []byte("report")); err != nil {
+		t.Fatal(err)
+	}
+	exists, isDirectory, size, err := transferDestinationInfo(client, "local-to-remote", file)
+	if err != nil || !exists || isDirectory || size != 6 {
+		t.Fatalf("remote destination = exists:%v directory:%v size:%d err:%v", exists, isDirectory, size, err)
+	}
+	exists, _, _, err = transferDestinationInfo(client, "local-to-remote", pathpkg.Join(root, "missing"))
+	if err != nil || exists {
+		t.Fatalf("missing remote destination = exists:%v err:%v", exists, err)
+	}
+	if err := removeTransferDestinationSymlink(client, "local-to-remote", pathpkg.Join(root, "missing")); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeTransferDestinationSymlink(client, "local-to-remote", file); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func newSftpTransferForTest(command sshWireCommand) *sshSftpTransfer {
+	return &sshSftpTransfer{
+		id: command.TransferID, sessionID: command.SessionID,
+		decisions:   make(chan sshSftpTransferDecision, 1),
+		itemCancels: make(map[string]context.CancelFunc), cancelledItems: make(map[string]struct{}),
+	}
+}
+
+func newSftpTestClient(t *testing.T) *sftp.Client {
+	t.Helper()
+	serverConnection, clientConnection := net.Pipe()
+	server, err := sftp.NewServer(serverConnection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverDone := make(chan error, 1)
+	go func() { serverDone <- server.Serve() }()
+	client, err := sftp.NewClientPipe(clientConnection, clientConnection)
+	if err != nil {
+		_ = server.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = client.Close()
+		_ = server.Close()
+		select {
+		case <-serverDone:
+		case <-time.After(time.Second):
+			t.Error("SFTP fixture did not stop")
+		}
+	})
+	return client
+}
+
+func sftpTestPath(localPath string) string {
+	return "/" + filepath.ToSlash(localPath)
+}
+
+func writeSftpTestFile(client *sftp.Client, path string, contents []byte) error {
+	file, err := client.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
+	if err != nil {
+		return err
+	}
+	if _, err := file.Write(contents); err != nil {
+		_ = file.Close()
+		return err
+	}
+	return file.Close()
+}
+
+func readSftpTestFile(client *sftp.Client, path string) ([]byte, error) {
+	file, err := client.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	return io.ReadAll(file)
 }
 
 func (input *blockingSSHInput) Write(data []byte) (int, error) {
@@ -1514,7 +2241,7 @@ func TestDialNativeSSHReportsStructuredHostKeyMismatch(t *testing.T) {
 }
 
 func TestSSHNativeSessionSnapshotPublishesAFullFrame(t *testing.T) {
-	var output bytes.Buffer
+	var output synchronizedBuffer
 	server := &sshServer{
 		output:   &sshEventWriter{encoder: json.NewEncoder(&output)},
 		sessions: make(map[string]*sshNativeSession),
@@ -1549,7 +2276,7 @@ func TestSSHNativeSessionSnapshotPublishesAFullFrame(t *testing.T) {
 func TestSSHUnexpectedCloseRetriesThreeTimesBeforeTerminalFailure(t *testing.T) {
 	reconnectDelay := time.Duration(0)
 
-	var output bytes.Buffer
+	var output synchronizedBuffer
 	var callsMu sync.Mutex
 	calls := 0
 	server := &sshServer{
@@ -1623,7 +2350,7 @@ func TestSSHUnexpectedCloseRetriesThreeTimesBeforeTerminalFailure(t *testing.T) 
 func TestSSHExplicitCloseCancelsAPendingAutomaticReconnect(t *testing.T) {
 	reconnectDelay := time.Hour
 
-	var output bytes.Buffer
+	var output synchronizedBuffer
 	var callsMu sync.Mutex
 	calls := 0
 	server := &sshServer{
@@ -1674,7 +2401,7 @@ func TestSSHExplicitCloseCancelsAPendingAutomaticReconnect(t *testing.T) {
 }
 
 func TestSSHAppLockClearsReconnectSecretsWithoutClosingAnActiveSession(t *testing.T) {
-	var output bytes.Buffer
+	var output synchronizedBuffer
 	calls := 0
 	server := &sshServer{
 		output:     &sshEventWriter{encoder: json.NewEncoder(&output)},
@@ -1716,7 +2443,7 @@ func TestSSHAppLockClearsReconnectSecretsWithoutClosingAnActiveSession(t *testin
 }
 
 func TestSSHSnapshotIgnoresAClosedSession(t *testing.T) {
-	var output bytes.Buffer
+	var output synchronizedBuffer
 	server := &sshServer{
 		output:   &sshEventWriter{encoder: json.NewEncoder(&output)},
 		sessions: make(map[string]*sshNativeSession),
@@ -1730,7 +2457,7 @@ func TestSSHSnapshotIgnoresAClosedSession(t *testing.T) {
 }
 
 func TestSSHNativeSessionDropsFramesAfterClose(t *testing.T) {
-	var output bytes.Buffer
+	var output synchronizedBuffer
 	server := &sshServer{
 		output:   &sshEventWriter{encoder: json.NewEncoder(&output)},
 		sessions: make(map[string]*sshNativeSession),
@@ -1808,7 +2535,7 @@ func TestDialNativeSSHHonorsContextCancellationDuringHandshake(t *testing.T) {
 
 func TestServeSSHRejectsMalformedAndUnsupportedCommands(t *testing.T) {
 	input := strings.NewReader("not-json\n{" + `"type":"wat","session_id":"session"` + "}\n")
-	var output bytes.Buffer
+	var output synchronizedBuffer
 	if err := serveSSH(filepath.Join(t.TempDir(), "wormhole.db"), input, &output); err != nil {
 		t.Fatal(err)
 	}
@@ -1856,6 +2583,83 @@ INSERT INTO Nodes (Id, Name, Kind, Protocol, Host) VALUES ('leaf', 'SSH leaf', 1
 	}
 	if nodes["leaf"] == nil || nodes["leaf"].host != "ssh.example" {
 		t.Fatalf("optional-column node was not loaded: %#v", nodes)
+	}
+}
+
+func TestLoadSSHCredentialCoversOverridesProvidersAndSecretFailures(t *testing.T) {
+	database, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := loadSSHCredential(database, "wormhole.db", "", &sshTarget{}, "", "", false, false); err == nil {
+		t.Fatal("empty SSH credential id was accepted")
+	}
+	target := sshTarget{}
+	if err := loadSSHCredential(database, "wormhole.db", "missing", &target, "override", "secret", true, true); err != nil {
+		t.Fatalf("manual override without a credential table failed: %v", err)
+	}
+	if target.username != "override" || target.password != "secret" {
+		t.Fatalf("manual SSH override = %#v", target)
+	}
+	if err := loadSSHCredential(database, "wormhole.db", "missing", &sshTarget{}, "", "", false, false); err == nil {
+		t.Fatal("missing credential table returned no error")
+	}
+
+	_, err = database.Exec(`
+CREATE TABLE CredentialProfiles (
+    Id TEXT PRIMARY KEY, Username TEXT NULL, Kind INTEGER NULL,
+    Protocol INTEGER NULL, SecretProvider INTEGER NULL
+);
+INSERT INTO CredentialProfiles (Id, Username, Kind, Protocol, SecretProvider) VALUES
+    ('11111111-1111-4111-8111-111111111111', 'vault-user', 0, 0, 1),
+    ('22222222-2222-4222-8222-222222222222', 'rdp-user', 0, 1, 0),
+    ('33333333-3333-4333-8333-333333333333', 'key-user', 1, 0, 0),
+    ('44444444-4444-4444-8444-444444444444', 'password-user', 0, 0, 0);`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := loadSSHCredential(database, "wormhole.db", "missing", &sshTarget{}, "", "", false, false); err == nil {
+		t.Fatal("unknown SSH credential returned no error")
+	}
+	if err := loadSSHCredential(database, "wormhole.db", "11111111-1111-4111-8111-111111111111", &sshTarget{}, "", "", false, false); err == nil {
+		t.Fatal("locked Bitwarden credential returned no error")
+	}
+	target = sshTarget{}
+	if err := loadSSHCredential(
+		database, "wormhole.db", "11111111-1111-4111-8111-111111111111", &target,
+		"manual-user", "manual-password", true, false,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if target.username != "manual-user" || target.password != "manual-password" {
+		t.Fatalf("Bitwarden override target = %#v", target)
+	}
+	if err := loadSSHCredential(database, "wormhole.db", "22222222-2222-4222-8222-222222222222", &sshTarget{}, "", "", false, false); err == nil {
+		t.Fatal("RDP credential was accepted for SSH")
+	}
+	if err := loadSSHCredential(database, "wormhole.db", "33333333-3333-4333-8333-333333333333", &sshTarget{}, "", "", false, false); err == nil {
+		t.Fatal("missing protected key returned no error")
+	}
+	if err := loadSSHCredential(database, "wormhole.db", "44444444-4444-4444-8444-444444444444", &sshTarget{}, "", "", false, false); err == nil {
+		t.Fatal("missing protected password returned no error")
+	}
+	if secret, err := readOptionalCredentialSecret(database, "missing"); err != nil || secret != nil {
+		t.Fatalf("optional missing secret = %q, %v", secret, err)
+	}
+
+	_, err = database.Exec(`
+CREATE TABLE CredentialSecrets (Id TEXT PRIMARY KEY, Secret TEXT NOT NULL, Encoding TEXT NOT NULL);
+INSERT INTO CredentialSecrets (Id, Secret, Encoding)
+VALUES ('44444444-4444-4444-8444-444444444444', 'opaque', 'unsupported');`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readCredentialSecret(database, "44444444-4444-4444-8444-444444444444"); err == nil {
+		t.Fatal("unsupported required secret encoding returned no error")
+	}
+	if _, err := readOptionalCredentialSecret(database, "44444444-4444-4444-8444-444444444444"); err == nil {
+		t.Fatal("unsupported optional secret encoding returned no error")
 	}
 }
 
@@ -1915,15 +2719,19 @@ func TestDialNativeSSHUsesGoSSHClientForPasswordAndPTY(t *testing.T) {
 					switch request.Type {
 					case "pty-req":
 						_ = request.Reply(true, nil)
+					case "window-change":
+						_ = request.Reply(true, nil)
 					case "shell":
 						_ = request.Reply(true, nil)
 						_, _ = channel.Write([]byte("native ready\r\n"))
-						buffer := make([]byte, 128)
-						count, readErr := channel.Read(buffer)
-						if readErr == nil && strings.Contains(string(buffer[:count]), "echo test") {
-							_, _ = channel.Write([]byte("native response\r\n"))
-						}
-						return
+						go func() {
+							buffer := make([]byte, 128)
+							count, readErr := channel.Read(buffer)
+							if readErr == nil && strings.Contains(string(buffer[:count]), "echo test") {
+								_, _ = channel.Write([]byte("native response\r\n"))
+							}
+							_ = channel.Close()
+						}()
 					default:
 						_ = request.Reply(false, nil)
 					}
@@ -1943,37 +2751,56 @@ func TestDialNativeSSHUsesGoSSHClientForPasswordAndPTY(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer native.close(false)
 	if fingerprint != ssh.FingerprintSHA256(signer.PublicKey()) {
 		t.Fatalf("unexpected host fingerprint: %q", fingerprint)
 	}
-
-	ready := readNativeSSHOutput(t, native.stdout)
-	if !strings.Contains(string(ready), "native ready") {
-		t.Fatalf("unexpected initial terminal output: %q", ready)
+	var output synchronizedBuffer
+	server := &sshServer{
+		output: &sshEventWriter{encoder: json.NewEncoder(&output)},
+		sessions: map[string]*sshNativeSession{
+			"native": native,
+		},
 	}
+	native.id = "native"
+	native.server = server
+	native.start()
+	native.start()
+	if err := native.resize(100, 30); err != nil {
+		t.Fatalf("native resize failed: %v", err)
+	}
+	native.snapshot()
 	if err := native.write([]byte("echo test\r")); err != nil {
 		t.Fatal(err)
 	}
-	response := readNativeSSHOutput(t, native.stdout)
-	if !strings.Contains(string(response), "native response") {
-		t.Fatalf("unexpected command output: %q", response)
-	}
-}
-
-func readNativeSSHOutput(t *testing.T, reader io.Reader) []byte {
-	t.Helper()
-	result := make(chan []byte, 1)
-	go func() {
-		buffer := make([]byte, 1024)
-		count, _ := reader.Read(buffer)
-		result <- buffer[:count]
-	}()
 	select {
-	case output := <-result:
-		return output
+	case <-native.done:
 	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for SSH terminal output")
-		return nil
+		t.Fatal("native SSH lifecycle did not finish")
+	}
+	native.waitForOutputDrain()
+	native.close(true)
+	if replay := string(native.mcpReplay.snapshotTail(4096)); !strings.Contains(replay, "native ready") || !strings.Contains(replay, "native response") {
+		t.Fatalf("unexpected terminal replay: %q", replay)
+	}
+	events := decodeSSHEvents(t, output.Bytes())
+	var screens, closed int
+	for _, event := range events {
+		switch event.Type {
+		case "screen":
+			screens++
+		case "closed":
+			closed++
+		}
+	}
+	if screens == 0 || closed != 1 {
+		t.Fatalf("native lifecycle events = %#v", events)
+	}
+	select {
+	case err := <-serverDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("SSH test server did not stop")
 	}
 }

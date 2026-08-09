@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -270,6 +272,139 @@ func TestMcpPresentationFilterDrainPendingFailsOpen(t *testing.T) {
 	}
 	if !filter.complete {
 		t.Fatal("presentation filter did not complete after drain")
+	}
+}
+
+func TestMcpPresentationFilterHandlesFragmentedLineEndingsAndMarkers(t *testing.T) {
+	capture, payload, err := newMcpCommandCapture("printf result")
+	if err != nil {
+		t.Fatal(err)
+	}
+	filter := newMcpCommandPresentationFilter("printf result", payload, capture.start, capture.endPrefix)
+	echo := bytes.TrimSuffix(payload, []byte("\r"))
+	if visible := filter.filter(append(append([]byte{}, echo...), '\r')); len(visible) != 0 {
+		t.Fatalf("fragmented echo became visible: %q", visible)
+	}
+	if visible := filter.filter(append([]byte("\n"), append(capture.start, '\r')...)); string(visible) != "printf result\r\n" {
+		t.Fatalf("fragmented start marker output = %q", visible)
+	}
+	if visible := filter.filter([]byte("\nbody")); string(visible) != "body" {
+		t.Fatalf("fragmented start line ending output = %q", visible)
+	}
+	end := append(append([]byte(" tail"), capture.endPrefix...), []byte("17@@\r")...)
+	if visible := filter.filter(end); string(visible) != " tail" {
+		t.Fatalf("fragmented end marker output = %q", visible)
+	}
+	if visible := filter.filter([]byte("\nafter")); string(visible) != "after" || !filter.complete {
+		t.Fatalf("end line ending output = %q complete=%v", visible, filter.complete)
+	}
+	if visible := filter.filter([]byte(" pass-through")); string(visible) != " pass-through" {
+		t.Fatalf("completed filter output = %q", visible)
+	}
+}
+
+func TestMcpPresentationFilterFailsOpenAtEverySpeculativeBoundary(t *testing.T) {
+	capture, payload, err := newMcpCommandCapture("echo x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	echo := bytes.TrimSuffix(payload, []byte("\r"))
+	for name, input := range map[string][]byte{
+		"echo-line-ending": append(append([]byte{}, echo...), 'x'),
+		"start-marker":     append(append(append([]byte{}, echo...), '\n'), []byte("not-a-marker")...),
+	} {
+		t.Run(name, func(t *testing.T) {
+			filter := newMcpCommandPresentationFilter("echo x", payload, capture.start, capture.endPrefix)
+			if visible := filter.filter(input); len(visible) == 0 || !filter.complete {
+				t.Fatalf("filter did not fail open: visible=%q complete=%v", visible, filter.complete)
+			}
+		})
+	}
+
+	large := newMcpCommandPresentationFilter(
+		"large", bytes.Repeat([]byte{'x'}, mcpMaxSpeculativeEchoBytes+2), capture.start, capture.endPrefix,
+	)
+	if visible := large.filter([]byte("ordinary")); string(visible) != "ordinary" || !large.complete {
+		t.Fatalf("oversized echo filter = %q complete=%v", visible, large.complete)
+	}
+}
+
+func TestMcpEndMarkerSearchRetainsOnlyARealPrefixSuffix(t *testing.T) {
+	filter := &mcpCommandPresentationFilter{endMarkerPrefix: []byte("@@END_")}
+	for _, test := range []struct {
+		pending string
+		keep    int
+	}{
+		{"ordinary", 0},
+		{"ordinary@@E", 3},
+		{"ordinary@@END", 5},
+		{"ordinary@@ENx", 0},
+	} {
+		filter.pending = []byte(test.pending)
+		if actual := filter.longestPrefixSuffixLength(); actual != test.keep {
+			t.Fatalf("suffix retained for %q = %d, want %d", test.pending, actual, test.keep)
+		}
+	}
+	for _, pending := range []string{
+		"@@END_", "@@END_x@@", "@@END_123", "@@END_123@", "@@END_123@x",
+		"@@END_12345678901@@", "noise@@EN",
+	} {
+		filter.pending = []byte(pending)
+		if search := filter.findEndMarker(); search.found {
+			t.Fatalf("invalid marker %q was accepted: %#v", pending, search)
+		}
+	}
+	filter.pending = []byte("noise@@END_255@@tail")
+	if search := filter.findEndMarker(); !search.found || search.start != 5 {
+		t.Fatalf("valid end marker search = %#v", search)
+	}
+}
+
+func TestMcpReplayCaptureAndAnsiHelpersCoverInvalidBoundaries(t *testing.T) {
+	if newMcpReplayBuffer(0).capacity != mcpReplayCapacity {
+		t.Fatal("default replay capacity was not applied")
+	}
+	var nilBuffer *mcpReplayBuffer
+	if nilBuffer.position() != 0 || nilBuffer.snapshotTail(10) != nil {
+		t.Fatal("nil replay buffer returned data")
+	}
+	if data, position, notify, dropped := nilBuffer.since(7); data != nil || position != 7 || notify != nil || dropped {
+		t.Fatalf("nil replay cursor = (%q, %d, %v, %v)", data, position, notify, dropped)
+	}
+	nilBuffer.append([]byte("ignored"))
+
+	utf8Buffer := newMcpReplayBuffer(4)
+	utf8Buffer.append([]byte("a€"))
+	if tail := utf8Buffer.snapshotTail(2); len(tail) != 0 {
+		t.Fatalf("UTF-8 continuation tail = %q", tail)
+	}
+
+	for _, command := range []string{"", strings.Repeat("x", mcpMaxCommandBytes+1)} {
+		if _, _, err := newMcpCommandCapture(command); err == nil {
+			t.Fatalf("invalid command length %d was accepted", len(command))
+		}
+	}
+	capture := mcpCommandCapture{
+		endPrefix: []byte("@@END_"), captured: make([]byte, mcpCommandCaptureBytes-1),
+	}
+	capture.push([]byte("overflow"))
+	if !capture.truncated || len(capture.captured) != mcpCommandCaptureBytes {
+		t.Fatalf("capture truncation = %v, bytes=%d", capture.truncated, len(capture.captured))
+	}
+	capture.completed = true
+	capture.push([]byte("ignored"))
+
+	for _, marker := range []string{"missing", "@@END_@@", "@@END_x@@", "@@END_256@@"} {
+		if code, ok := parseMcpEndMarker([]byte(marker), []byte("@@END_")); ok || code != nil {
+			t.Fatalf("invalid marker %q parsed as %v", marker, code)
+		}
+	}
+	if indexBytes([]byte("abc"), nil) != 0 || indexBytes([]byte("abc"), []byte("z")) != -1 {
+		t.Fatal("byte search boundary result was invalid")
+	}
+	input := []byte("A\rB\r\n\x1b[31mC\x1b]title\aD\x1b]title\x1b\\E\x1bxF")
+	if output := string(stripMcpAnsi(input)); output != "AB\nCDEF" {
+		t.Fatalf("ANSI-stripped output = %q", output)
 	}
 }
 
@@ -615,4 +750,186 @@ func TestMcpBearerMiddlewareRejectsAndAcceptsRequests(t *testing.T) {
 	if authorized.Code != http.StatusNoContent {
 		t.Fatalf("expected authorized request, got %d", authorized.Code)
 	}
+}
+
+func TestMcpControllerLifecycleServesBearerProtectedLoopbackEndpoint(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	var output bytes.Buffer
+	ssh := &sshServer{
+		databasePath: databasePath,
+		output:       &sshEventWriter{encoder: json.NewEncoder(&output)},
+		sessions:     make(map[string]*sshNativeSession),
+	}
+	controller := newMcpController(ssh)
+	ssh.mcp = controller
+	port := reserveMcpTestPort(t)
+
+	initial, err := controller.status()
+	if err != nil || initial.Running || initial.Port != McpDefaultPort {
+		t.Fatalf("initial status = %#v, %v", initial, err)
+	}
+	configured, err := controller.setPort(port)
+	if err != nil || configured.Port != port || configured.Running {
+		t.Fatalf("configured status = %#v, %v", configured, err)
+	}
+	if err := controller.start(port, true); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = controller.stop(false) })
+	if err := controller.start(port, true); err != nil {
+		t.Fatalf("idempotent start failed: %v", err)
+	}
+	if err := controller.start(reserveMcpTestPort(t), false); err == nil {
+		t.Fatal("running MCP server changed ports")
+	}
+	if _, err := controller.setPort(reserveMcpTestPort(t)); err == nil {
+		t.Fatal("running MCP server accepted a port change")
+	}
+
+	status, err := controller.status()
+	if err != nil || !status.Enabled || !status.Running || status.Endpoint != mcpEndpointURL(port) {
+		t.Fatalf("running status = %#v, %v", status, err)
+	}
+	token := controller.currentToken()
+	if token == "" {
+		t.Fatal("MCP start did not provision a token")
+	}
+
+	unauthorized, err := http.Get(status.Endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = unauthorized.Body.Close()
+	if unauthorized.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthorized status = %d", unauthorized.StatusCode)
+	}
+	request, err := http.NewRequest(http.MethodGet, status.Endpoint, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	authorized, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, authorized.Body)
+	_ = authorized.Body.Close()
+	if authorized.StatusCode == http.StatusUnauthorized {
+		t.Fatal("valid MCP bearer token was rejected")
+	}
+
+	regenerated, err := controller.regenerateToken()
+	if err != nil || regenerated == "" || regenerated == token || controller.currentToken() != regenerated {
+		t.Fatalf("regenerated token = %q, %v", regenerated, err)
+	}
+	if err := controller.stop(true); err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.stop(false); err != nil {
+		t.Fatalf("idempotent stop failed: %v", err)
+	}
+	stopped, err := controller.status()
+	if err != nil || stopped.Enabled || stopped.Running || stopped.Port != port {
+		t.Fatalf("stopped status = %#v, %v", stopped, err)
+	}
+}
+
+func TestMcpControllerListsAndResolvesLiveSessions(t *testing.T) {
+	server := &sshServer{
+		output:   &sshEventWriter{encoder: json.NewEncoder(io.Discard)},
+		sessions: make(map[string]*sshNativeSession),
+	}
+	controller := newMcpController(server)
+	if _, err := controller.listSessions(); err == nil {
+		t.Fatal("locked MCP controller exposed sessions")
+	}
+	controller.setLocked(false)
+	server.sessions["two"] = &sshNativeSession{id: "two", mcpSession: mcpSessionInfo{ID: "two", Host: "two.example"}}
+	server.sessions["one"] = &sshNativeSession{id: "one", mcpSession: mcpSessionInfo{ID: "one", Host: "one.example"}}
+	closed := &sshNativeSession{id: "closed", mcpSession: mcpSessionInfo{ID: "closed"}, closed: true}
+	server.sessions["closed"] = closed
+
+	sessions, err := controller.listSessions()
+	if err != nil || len(sessions) != 2 || sessions[0].ID != "one" || sessions[1].ID != "two" {
+		t.Fatalf("sessions = %#v, %v", sessions, err)
+	}
+	resolved, err := controller.resolveSession("one")
+	if err != nil || resolved != server.sessions["one"] {
+		t.Fatalf("resolved = %#v, %v", resolved, err)
+	}
+	for _, sessionID := range []string{"", " spaced ", strings.Repeat("x", 129), "missing", "closed"} {
+		if _, err := controller.resolveSession(sessionID); err == nil {
+			t.Fatalf("invalid session %q was resolved", sessionID)
+		}
+	}
+}
+
+func TestHandleMcpDispatchesControllerOperations(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	var output bytes.Buffer
+	server := &sshServer{
+		databasePath: databasePath,
+		output:       &sshEventWriter{encoder: json.NewEncoder(&output)},
+		sessions:     make(map[string]*sshNativeSession),
+	}
+	server.handleMcp(sshWireCommand{Type: "mcp.status", RequestID: ""})
+	server.handleMcp(sshWireCommand{Type: "mcp.status", RequestID: "no-controller"})
+	server.mcp = newMcpController(server)
+	port := reserveMcpTestPort(t)
+	commands := []sshWireCommand{
+		{Type: "mcp.status", RequestID: "status"},
+		{Type: "mcp.set-port", RequestID: "set-port", Port: port},
+		{Type: "mcp.get-token", RequestID: "get-token"},
+		{Type: "mcp.regenerate-token", RequestID: "regenerate-token"},
+		{Type: "mcp.unlock", RequestID: "unlock"},
+		{Type: "mcp.lock", RequestID: "lock"},
+		{Type: "mcp.approve", RequestID: "approve-missing", ApprovalID: "missing", Approved: true},
+		{Type: "mcp.unsupported", RequestID: "unsupported"},
+		{Type: "mcp.start", RequestID: "start", Port: port},
+		{Type: "mcp.stop", RequestID: "stop"},
+	}
+	for _, command := range commands {
+		server.handleMcp(command)
+	}
+	t.Cleanup(func() { _ = server.mcp.stop(false) })
+
+	decoder := json.NewDecoder(&output)
+	var events []sshWireEvent
+	for decoder.More() {
+		var event sshWireEvent
+		if err := decoder.Decode(&event); err != nil {
+			t.Fatal(err)
+		}
+		events = append(events, event)
+	}
+	if len(events) != len(commands)+2 {
+		t.Fatalf("MCP events = %d, want %d", len(events), len(commands)+2)
+	}
+	byID := make(map[string]sshWireEvent, len(events))
+	for _, event := range events {
+		byID[event.RequestID] = event
+	}
+	for _, id := range []string{"status", "set-port", "get-token", "regenerate-token", "unlock", "lock", "start", "stop"} {
+		if byID[id].Error != "" {
+			t.Fatalf("MCP command %s failed: %#v", id, byID[id])
+		}
+	}
+	for _, id := range []string{"", "no-controller", "approve-missing", "unsupported"} {
+		if byID[id].Error == "" {
+			t.Fatalf("MCP command %q did not report an error", id)
+		}
+	}
+}
+
+func reserveMcpTestPort(t *testing.T) int {
+	t.Helper()
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return port
 }

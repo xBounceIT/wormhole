@@ -527,3 +527,95 @@ func TestResolveViaVPNQuery_CNAMELoopBounded(t *testing.T) {
 		t.Errorf("expected the hop loop to iterate a bounded number of times, got %d call(s)", calls)
 	}
 }
+
+func TestNewNetstackValidatesAndBuildsIPv4Stack(t *testing.T) {
+	for _, address := range []netip.Addr{{}, netip.MustParseAddr("2001:db8::1")} {
+		if stack, endpoint, err := newNetstack(address, 1500); err == nil || stack != nil || endpoint != nil {
+			t.Fatalf("newNetstack(%v) = %#v, %#v, %v", address, stack, endpoint, err)
+		}
+	}
+	for _, mtu := range []int{0, fortinetMaxPayloadLen + 100} {
+		stack, endpoint, err := newNetstack(netip.MustParseAddr("10.0.0.2"), mtu)
+		if err != nil || stack == nil || endpoint == nil {
+			t.Fatalf("newNetstack(mtu=%d) = %#v, %#v, %v", mtu, stack, endpoint, err)
+		}
+		stack.Close()
+	}
+}
+
+func TestNetstackDialerRejectsInvalidDialRequests(t *testing.T) {
+	dialer := netstackDialer{}
+	tests := []struct {
+		network string
+		address string
+		want    string
+	}{
+		{network: "udp", address: "host:53", want: "unsupported network"},
+		{network: "tcp", address: "missing-port", want: "split host:port"},
+		{network: "tcp4", address: "host:not-a-port", want: "port"},
+		{network: "tcp", address: "[2001:db8::1]:443", want: "only IPv4"},
+		{network: "tcp", address: "internal.example:443", want: "refusing to use host OS resolver"},
+	}
+	for _, test := range tests {
+		if _, err := dialer.DialContext(context.Background(), test.network, test.address); err == nil || !strings.Contains(err.Error(), test.want) {
+			t.Fatalf("DialContext(%q, %q) error = %v", test.network, test.address, err)
+		}
+	}
+}
+
+func TestDNSResponseErrorAndAdapter(t *testing.T) {
+	want := errors.New("bad response")
+	wrapped := &dnsResponseError{err: want}
+	if wrapped.Error() != want.Error() || !errors.Is(wrapped, want) {
+		t.Fatalf("dnsResponseError = %v", wrapped)
+	}
+	addr := netip.MustParseAddr("10.0.0.1")
+	got, cname, err := answerOrResponseErr(addr, "alias.example.", nil)
+	if err != nil || got != addr || cname != "alias.example." {
+		t.Fatalf("answerOrResponseErr success = %v, %q, %v", got, cname, err)
+	}
+	if _, _, err := answerOrResponseErr(netip.Addr{}, "", want); err == nil || !errors.As(err, &wrapped) {
+		t.Fatalf("answerOrResponseErr error = %v", err)
+	}
+}
+
+func TestPackAQueryProducesStandardAQuestion(t *testing.T) {
+	name := dnsmessage.MustNewName("host.example.")
+	wire, id, err := packAQuery(name)
+	if err != nil || len(wire) == 0 {
+		t.Fatalf("packAQuery = %d bytes id=%d error=%v", len(wire), id, err)
+	}
+	var parser dnsmessage.Parser
+	header, err := parser.Start(wire)
+	if err != nil || header.ID != id || !header.RecursionDesired {
+		t.Fatalf("query header = %#v, %v", header, err)
+	}
+	question, err := parser.Question()
+	if err != nil || question.Name.String() != name.String() || question.Type != dnsmessage.TypeA {
+		t.Fatalf("query question = %#v, %v", question, err)
+	}
+}
+
+func TestDNSQueriesFailWithinDeadlineWithoutGateway(t *testing.T) {
+	stack, _, err := newNetstack(netip.MustParseAddr("10.0.0.2"), 1500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stack.Close()
+	name := dnsmessage.MustNewName("host.example.")
+	server := netip.MustParseAddr("10.0.0.1")
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if _, _, err := queryAOne(ctx, stack, netip.MustParseAddr("2001:db8::1"), name, time.Millisecond); err == nil {
+		t.Fatal("queryAOne accepted an IPv6 DNS server")
+	}
+	if _, _, err := queryAOneTCPByName(ctx, stack, netip.MustParseAddr("2001:db8::1"), name, time.Millisecond); err == nil {
+		t.Fatal("queryAOneTCPByName accepted an IPv6 DNS server")
+	}
+	if _, _, err := queryAOne(ctx, stack, server, name, 2*time.Millisecond); err == nil {
+		t.Fatal("queryAOne unexpectedly resolved without a gateway")
+	}
+	if _, _, err := queryAOneTCPByName(ctx, stack, server, name, 2*time.Millisecond); err == nil {
+		t.Fatal("queryAOneTCPByName unexpectedly resolved without a gateway")
+	}
+}

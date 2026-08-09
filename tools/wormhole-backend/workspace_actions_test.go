@@ -631,3 +631,65 @@ VALUES ('credential-id', 'First', 'first-user', 0, 0, 0),
 		t.Fatal("show credentials unexpectedly selected one of two case-insensitive profiles")
 	}
 }
+
+func TestWorkspaceActionHelpersNormalizeDatabaseValuesAndSecrets(t *testing.T) {
+	if id, err := normalizeWorkspaceNodeID("  ABC-123  "); err != nil || id != "abc-123" {
+		t.Fatalf("normalized workspace id = %q, %v", id, err)
+	}
+	for _, value := range []string{"", "bad\nid", strings.Repeat("x", 129)} {
+		if _, err := normalizeWorkspaceNodeID(value); err == nil {
+			t.Fatalf("invalid workspace id %q was accepted", value)
+		}
+	}
+	if quoted := workspaceQuotedIdentifier(`a"b`); quoted != `"a""b"` {
+		t.Fatalf("quoted identifier = %q", quoted)
+	}
+	columns := map[string]struct{}{"MixedCase": {}}
+	if expression := workspaceColumnExpression(columns, "mixedcase"); expression != `"MixedCase"` {
+		t.Fatalf("column expression = %q", expression)
+	}
+	if expression := workspaceColumnExpression(columns, "missing"); expression != "NULL" {
+		t.Fatalf("missing column expression = %q", expression)
+	}
+	if workspaceNodeValueString([]byte("bytes")) != "bytes" || workspaceNodeValueString(42) != "" {
+		t.Fatal("workspace string conversion did not preserve its type boundary")
+	}
+	for _, test := range []struct {
+		value    any
+		expected int64
+	}{
+		{int64(1), 1}, {int32(2), 2}, {int(3), 3}, {[]byte("4"), 4}, {"5", 5},
+	} {
+		actual, ok := workspaceNodeValueInt64(test.value)
+		if !ok || actual != test.expected {
+			t.Fatalf("workspace integer %T(%v) = %d, %v", test.value, test.value, actual, ok)
+		}
+	}
+	for _, value := range []any{[]byte("invalid"), "invalid", true} {
+		if _, ok := workspaceNodeValueInt64(value); ok {
+			t.Fatalf("invalid workspace integer %T(%v) was accepted", value, value)
+		}
+	}
+	for _, protocol := range []int64{0, 1, 6} {
+		if !workspaceProtocolCredentialValue(protocol) || !workspaceCredentialProtocolMatches(protocol, protocol) {
+			t.Fatalf("credential protocol %d was not supported", protocol)
+		}
+	}
+	if workspaceProtocolCredentialValue(99) || workspaceCredentialProtocolMatches(0, 1) {
+		t.Fatal("incompatible credential protocol was accepted")
+	}
+
+	secret := []byte("secret")
+	revealed := workspaceCredentialRevealFromSecret(
+		workspaceCredentialRevealResponse{ConnectionName: "connection"}, "operator", "Password", secret,
+	)
+	if !revealed.Found || revealed.Secret != "secret" || revealed.Username != "operator" {
+		t.Fatalf("revealed credential = %#v", revealed)
+	}
+	if !bytes.Equal(secret, make([]byte, len(secret))) {
+		t.Fatalf("source secret was not cleared: %v", secret)
+	}
+	if empty := workspaceCredentialRevealFromSecret(workspaceCredentialRevealResponse{}, "", "Password", nil); empty.Found {
+		t.Fatal("empty secret was reported as found")
+	}
+}

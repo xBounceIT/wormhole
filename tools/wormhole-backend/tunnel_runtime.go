@@ -27,6 +27,8 @@ const (
 	tunnelSidecarStderrWaitTimeout = 500 * time.Millisecond
 )
 
+var physicalTransportAdapterIDsForTunnel = physicalTransportAdapterIDs
+
 // tunnelRuntime is a ref-counted lease over a process-local shared VPN sidecar. Every long-lived
 // Go backend coalesces concurrent sessions for the same config and closes the sidecar when its
 // final lease closes. No route or VPN secret crosses the Go/renderer boundary.
@@ -1073,7 +1075,7 @@ func tunnelSidecarCommand(kind int64, raw json.RawMessage) (string, []byte, erro
 		if strings.TrimSpace(profile) == "" {
 			return "", nil, errors.New("Stormshield OpenVPN profile is missing")
 		}
-		adapters, err := physicalTransportAdapterIDs()
+		adapters, err := physicalTransportAdapterIDsForTunnel()
 		if err != nil {
 			return "", nil, err
 		}
