@@ -355,6 +355,55 @@ VALUES ('33333333-3333-4333-8333-333333333333', 'Unexpected HTTP credential', 0,
 	}
 }
 
+func TestWorkspaceProjectsCredentialKindsAndFiltersKeysFromPasswordOnlyProtocols(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureCredentialWriteSchema(database); err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`
+INSERT INTO CredentialProfiles (Id, Name, Kind, Protocol, SecretProvider, CreatedAt) VALUES
+    ('10000000-0000-4000-8000-000000000001', 'SSH key', 1, 0, 0, 'now'),
+    ('10000000-0000-4000-8000-000000000002', 'Invalid RDP key', 1, 1, 0, 'now'),
+    ('10000000-0000-4000-8000-000000000003', 'RDP password', 0, 1, 0, 'now'),
+    ('10000000-0000-4000-8000-000000000004', 'Invalid VNC key', 1, 6, 0, 'now'),
+    ('10000000-0000-4000-8000-000000000005', 'VNC password', 0, 6, 0, 'now'),
+    ('10000000-0000-4000-8000-000000000006', 'Unsupported SSH credential', 9, 0, 0, 'now');`); err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	database.Close()
+
+	workspace, err := loadWorkspace(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(workspace.Credentials) != 6 {
+		t.Fatalf("credentials = %#v", workspace.Credentials)
+	}
+	kinds := make(map[string]string, len(workspace.Credentials))
+	for _, credential := range workspace.Credentials {
+		kinds[credential.Name] = credential.Kind
+	}
+	if kinds["SSH key"] != "sshKey" || kinds["Invalid RDP key"] != "sshKey" ||
+		kinds["RDP password"] != "password" || kinds["Unsupported SSH credential"] != "unsupported" {
+		t.Fatalf("credential kinds = %#v", kinds)
+	}
+	if options := workspace.CredentialOptions["ssh"]; len(options) != 1 || options[0].Name != "SSH key" {
+		t.Fatalf("SSH options = %#v", options)
+	}
+	if options := workspace.CredentialOptions["rdp"]; len(options) != 1 || options[0].Name != "RDP password" {
+		t.Fatalf("RDP options = %#v", options)
+	}
+	if options := workspace.CredentialOptions["vnc"]; len(options) != 1 || options[0].Name != "VNC password" {
+		t.Fatalf("VNC options = %#v", options)
+	}
+}
+
 func TestWorkspaceNodeSshAutoSudoUpdateRequiresMigration(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
 	database, err := openDatabase(databasePath, false)
@@ -615,7 +664,8 @@ func TestCredentialCrudStoresOnlyProtectedReferences(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !validCredentialID(created.ID) || created.Protocol != "ssh" || created.Username != "operator" || created.Provider != "Local" {
+	if !validCredentialID(created.ID) || created.Protocol != "ssh" || created.Kind != "password" ||
+		created.Username != "operator" || created.Provider != "Local" {
 		t.Fatalf("unexpected created credential: %#v", created)
 	}
 
@@ -642,7 +692,7 @@ func TestCredentialCrudStoresOnlyProtectedReferences(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if updated.ID != created.ID || updated.Protocol != "rdp" || updated.Domain != "CORP" {
+	if updated.ID != created.ID || updated.Protocol != "rdp" || updated.Kind != "password" || updated.Domain != "CORP" {
 		t.Fatalf("credential update was not returned: %#v", updated)
 	}
 

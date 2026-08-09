@@ -208,6 +208,24 @@ export function MRemoteImportDialog({
         </DialogHeader>
 
         <div className="grid min-h-0 gap-4 overflow-y-auto pr-1">
+          <section className="grid gap-2 rounded-md border border-border/70 p-3 text-xs text-muted-foreground">
+            <p className="text-sm font-medium text-foreground">Exporting from mRemoteNG</p>
+            <ol className="grid list-decimal gap-1 pl-5">
+              <li>Right-click the root Connections node and choose Export Connections…</li>
+              <li>Choose an XML destination file and select the mRemoteNG XML format.</li>
+              <li>
+                Enable every Export Properties option, including username, password, domain, and
+                inheritance.
+              </li>
+              <li>Complete the export, then select the resulting XML file below.</li>
+            </ol>
+            <p>
+              mRemoteNG uses the password configured under Tools → Options → Security. Wormhole
+              tries the default automatically and prompts only when the export uses a custom
+              password.
+            </p>
+          </section>
+
           <div className="flex items-center gap-3 rounded-md border border-border/70 p-3">
             <FileSearch className="size-5 shrink-0 text-muted-foreground" />
             <div className="min-w-0 flex-1">

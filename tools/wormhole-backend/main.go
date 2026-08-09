@@ -143,6 +143,7 @@ type credentialRecord struct {
 	ID                 string `json:"id"`
 	Name               string `json:"name"`
 	Protocol           string `json:"protocol"`
+	Kind               string `json:"kind"`
 	Username           string `json:"username"`
 	Domain             string `json:"domain,omitempty"`
 	Provider           string `json:"provider"`
@@ -151,6 +152,15 @@ type credentialRecord struct {
 	BitwardenItemID    string `json:"bitwardenItemId,omitempty"`
 	BitwardenItemName  string `json:"bitwardenItemName,omitempty"`
 	IsVirtualBitwarden bool   `json:"isVirtualBitwarden,omitempty"`
+}
+
+type credentialBindingMetadata struct {
+	protocol int64
+	kind     int64
+}
+
+type credentialMetadataQueryer interface {
+	QueryRow(query string, args ...any) *sql.Row
 }
 
 type tunnelRecord struct {
@@ -1802,15 +1812,20 @@ func updateWorkspaceNodeCredentialSettings(
 		return fmt.Errorf("could not read workspace node: %w", err)
 	}
 	if credentialID != "" {
-		credentialProtocol, found, err := credentialProtocolByID(database, credentialID)
+		credential, found, err := credentialMetadataByID(database, credentialID)
 		if err != nil {
 			return err
 		}
 		if !found {
 			return errors.New("selected credential was not found")
 		}
-		if kind == 1 && nodeProtocol.Valid && nodeProtocol.Int64 != credentialProtocol {
-			return errors.New("selected credential does not match the connection protocol")
+		if kind == workspaceNodeConnection && nodeProtocol.Valid {
+			if nodeProtocol.Int64 != credential.protocol {
+				return errors.New("selected credential does not match the connection protocol")
+			}
+			if !workspaceCredentialKindSupportsProtocol(credential.kind, nodeProtocol.Int64) {
+				return errors.New("selected credential type is invalid for the connection protocol")
+			}
 		}
 	}
 	var storedID any
@@ -1843,47 +1858,37 @@ func updateWorkspaceNodeCredentialSettings(
 	return nil
 }
 
-func credentialProtocolByID(database *sql.DB, credentialID string) (int64, bool, error) {
-	var protocol int64
-	profilesExist, err := tableExists(database, "CredentialProfiles")
-	if err != nil {
-		return 0, false, err
+func credentialMetadataByID(queryer credentialMetadataQueryer, credentialID string) (credentialBindingMetadata, bool, error) {
+	var credential credentialBindingMetadata
+	err := queryer.QueryRow(
+		"SELECT COALESCE(Protocol, 0), COALESCE(Kind, 0) FROM CredentialProfiles WHERE lower(Id) = ? LIMIT 1;",
+		credentialID,
+	).Scan(&credential.protocol, &credential.kind)
+	if err == nil {
+		return credential, true, nil
 	}
-	if profilesExist {
-		err = database.QueryRow(
-			"SELECT COALESCE(Protocol, 0) FROM CredentialProfiles WHERE lower(Id) = ? LIMIT 1;",
-			credentialID,
-		).Scan(&protocol)
-		if err == nil {
-			return protocol, true, nil
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			return 0, false, fmt.Errorf("could not validate selected credential: %w", err)
-		}
-	}
-	exists, err := tableExists(database, "BitwardenCredentialCache")
-	if err != nil || !exists {
-		return 0, false, err
+	if !errors.Is(err, sql.ErrNoRows) && !strings.Contains(strings.ToLower(err.Error()), "no such table") {
+		return credentialBindingMetadata{}, false, fmt.Errorf("could not validate selected credential: %w", err)
 	}
 	var sshID, rdpID, vncID string
-	err = database.QueryRow(`
+	err = queryer.QueryRow(`
 SELECT SshCredentialId, RdpCredentialId, VncCredentialId
 FROM BitwardenCredentialCache
 WHERE lower(SshCredentialId) = ? OR lower(RdpCredentialId) = ? OR lower(VncCredentialId) = ?
 LIMIT 1;`, credentialID, credentialID, credentialID).Scan(&sshID, &rdpID, &vncID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return 0, false, nil
+	if errors.Is(err, sql.ErrNoRows) || (err != nil && strings.Contains(strings.ToLower(err.Error()), "no such table")) {
+		return credentialBindingMetadata{}, false, nil
 	}
 	if err != nil {
-		return 0, false, fmt.Errorf("could not validate virtual Bitwarden credential: %w", err)
+		return credentialBindingMetadata{}, false, fmt.Errorf("could not validate virtual Bitwarden credential: %w", err)
 	}
 	switch credentialID {
 	case normalizeID(rdpID):
-		return 1, true, nil
+		return credentialBindingMetadata{protocol: 1}, true, nil
 	case normalizeID(vncID):
-		return 6, true, nil
+		return credentialBindingMetadata{protocol: 6}, true, nil
 	default:
-		return 0, true, nil
+		return credentialBindingMetadata{protocol: 0}, true, nil
 	}
 }
 
@@ -1909,6 +1914,7 @@ func loadCredentials(database *sql.DB, databasePath string) ([]credentialRecord,
 				ID:                 entry.SshCredentialID,
 				Name:               entry.Name,
 				Protocol:           "ssh",
+				Kind:               "password",
 				Username:           displayCredentialUsername(entry.Username),
 				Provider:           "Bitwarden",
 				BitwardenItemID:    entry.ItemID,
@@ -1980,6 +1986,7 @@ FROM CredentialProfiles ORDER BY Name, Id;`)
 			ID:       row.ID,
 			Name:     row.Name,
 			Protocol: protocolName(sql.NullInt64{Int64: row.Protocol, Valid: true}),
+			Kind:     credentialKindName(row.Kind),
 			Username: username,
 			Domain:   nullableString(row.Domain),
 			Provider: providerName(row.Provider),
@@ -2035,7 +2042,7 @@ func loadCredentialsForProtocolFromDatabase(
 	profiles := make([]credentialRecord, 0)
 	linkedItems := make(map[string]struct{})
 	for _, credential := range storedCredentials {
-		if credential.Protocol != protocol {
+		if credential.Protocol != protocol || !credentialKindSupportsProtocol(credential.Kind, protocol) {
 			continue
 		}
 		profiles = append(profiles, credential)
@@ -2065,6 +2072,7 @@ func loadCredentialsForProtocolFromDatabase(
 			ID:                 credentialID,
 			Name:               entry.Name,
 			Protocol:           protocol,
+			Kind:               "password",
 			Username:           displayCredentialUsername(entry.Username),
 			Provider:           "Bitwarden",
 			BitwardenItemID:    entry.ItemID,
@@ -2137,6 +2145,21 @@ func providerName(value int64) string {
 		return "Bitwarden"
 	}
 	return "Local"
+}
+
+func credentialKindName(value int64) string {
+	switch value {
+	case 0:
+		return "password"
+	case 1:
+		return "sshKey"
+	default:
+		return "unsupported"
+	}
+}
+
+func credentialKindSupportsProtocol(kind, protocol string) bool {
+	return kind == "password" || (protocol == "ssh" && kind == "sshKey")
 }
 
 func tunnelName(value int64) string {

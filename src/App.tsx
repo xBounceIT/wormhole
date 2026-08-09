@@ -19,7 +19,13 @@ import './index.css';
 import { backupExportPasswordsMatch } from './backup-state';
 import wormholeIcon from '../Assets/Wormhole.png';
 import bitwardenIcon from '../Assets/Bitwarden/bitwarden-icon.png';
-import { mergeCredential } from './credential-state';
+import {
+  credentialCanUseProtocol,
+  effectiveSshAutoSudoMode,
+  mergeCredential,
+  sshAutoSudoAvailable,
+  type CredentialKind,
+} from './credential-state';
 import {
   createLogLevelSaveState,
   drainLogLevelChanges,
@@ -593,6 +599,7 @@ type CredentialRecord = {
   id: string;
   name: string;
   protocol: Protocol;
+  kind: CredentialKind;
   username: string;
   domain?: string;
   provider: 'Local' | 'Bitwarden';
@@ -607,9 +614,15 @@ type CredentialOptionGroups = Record<CredentialProtocol, CredentialRecord[]>;
 
 function workspaceCredentialOptions(workspace: WormholeWorkspaceSnapshot): CredentialOptionGroups {
   return {
-    ssh: workspace.credentialOptions.ssh as CredentialRecord[],
-    rdp: workspace.credentialOptions.rdp as CredentialRecord[],
-    vnc: workspace.credentialOptions.vnc as CredentialRecord[],
+    ssh: (workspace.credentialOptions.ssh as CredentialRecord[]).filter((credential) =>
+      credentialCanUseProtocol(credential.kind, 'ssh'),
+    ),
+    rdp: (workspace.credentialOptions.rdp as CredentialRecord[]).filter((credential) =>
+      credentialCanUseProtocol(credential.kind, 'rdp'),
+    ),
+    vnc: (workspace.credentialOptions.vnc as CredentialRecord[]).filter((credential) =>
+      credentialCanUseProtocol(credential.kind, 'vnc'),
+    ),
   };
 }
 
@@ -626,7 +639,12 @@ function mergeCredentialOption(
     rdp: groups.rdp.filter((candidate) => candidate.id !== credential.id),
     vnc: groups.vnc.filter((candidate) => candidate.id !== credential.id),
   };
-  if (!isCredentialProtocol(credential.protocol)) return next;
+  if (
+    !isCredentialProtocol(credential.protocol) ||
+    !credentialCanUseProtocol(credential.kind, credential.protocol)
+  ) {
+    return next;
+  }
   next[credential.protocol] = mergeCredential(
     next[credential.protocol].filter(
       (candidate) =>
@@ -1658,6 +1676,14 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       })),
     ];
   }, [credentialOptions, newConnectionForm.protocol]);
+  const selectedConnectionCredential = useMemo(() => {
+    const selection = newConnectionForm.credential;
+    if (selection === 'inherit' || selection === 'none') return undefined;
+    return credentials.find((credential) => credential.id === selection);
+  }, [credentials, newConnectionForm.credential]);
+  const canConfigureConnectionSshAutoSudo =
+    newConnectionForm.protocol === 'ssh' &&
+    sshAutoSudoAvailable(newConnectionForm.useSavedCredentials, selectedConnectionCredential?.kind);
   const folderCredentialOptions = useMemo(() => {
     const byID = new Map<string, CredentialRecord>();
     for (const protocol of ['ssh', 'rdp', 'vnc'] as const) {
@@ -4959,6 +4985,13 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       newConnectionForm.credential !== 'none'
         ? newConnectionForm.credential
         : undefined;
+    const quickAutoSudo =
+      effectiveSshAutoSudoMode(
+        newConnectionForm.protocol,
+        canConfigureConnectionSshAutoSudo,
+        newConnectionForm.sshAutoSudo,
+        'off',
+      ) === 'on';
     if (
       newConnectionForm.protocol === 'ssh' &&
       !credentialId &&
@@ -4991,7 +5024,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       host,
       port,
       credentialId,
-      sshAutoSudo: newConnectionForm.protocol === 'ssh' && newConnectionForm.sshAutoSudo === 'on',
+      sshAutoSudo: quickAutoSudo,
       tunnelConfigId,
       canTransfer: newConnectionForm.protocol === 'ssh',
       backendSessionId,
@@ -5029,7 +5062,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           host,
           port,
           credentialId,
-          autoSudo: newConnectionForm.sshAutoSudo === 'on',
+          autoSudo: quickAutoSudo,
           tunnelConfigId,
           frontendSessionId: id,
         });
@@ -5040,7 +5073,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           port,
           username: newConnectionForm.username,
           password: newConnectionForm.inlinePassword,
-          autoSudo: newConnectionForm.sshAutoSudo === 'on',
+          autoSudo: quickAutoSudo,
           tunnelConfigId,
         });
       } else {
@@ -5085,8 +5118,13 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     setEditorError('');
 
     try {
-      const connectionAutoSudo =
-        newConnectionForm.protocol === 'ssh' ? newConnectionForm.sshAutoSudo : 'inherit';
+      const editingNode = editingId ? findTreeNode(tree, editingId) : undefined;
+      const connectionAutoSudo = effectiveSshAutoSudoMode(
+        newConnectionForm.protocol,
+        canConfigureConnectionSshAutoSudo,
+        newConnectionForm.sshAutoSudo,
+        editingNode ? autoSudoModeFor(editingNode.sshAutoSudo) : 'inherit',
+      );
       const connectionTunnel =
         newConnectionForm.protocol === 'serial' ? 'off' : newConnectionForm.tunnel;
       const connectionCredential: CredentialSelection =
@@ -5098,7 +5136,6 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       if (!window.wormhole) throw new Error('The native workspace bridge is unavailable.');
       const tunnel = tunnelValueFor(connectionTunnel);
       const credential = credentialSettingsFor(connectionCredential);
-      const editingNode = editingId ? findTreeNode(tree, editingId) : undefined;
       const usingInlinePassword =
         !newConnectionForm.useSavedCredentials &&
         (newConnectionForm.protocol === 'ssh' || newConnectionForm.protocol === 'rdp');
@@ -6631,7 +6668,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                       </div>
                     ) : null}
 
-                    {newConnectionForm.protocol === 'ssh' ? (
+                    {canConfigureConnectionSshAutoSudo ? (
                       <AutoSudoField
                         id="connection-auto-sudo"
                         mode={newConnectionForm.sshAutoSudo}

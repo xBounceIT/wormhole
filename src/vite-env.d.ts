@@ -142,6 +142,7 @@ interface WormholeWorkspaceCredential {
   id: string;
   name: string;
   protocol: WormholeProtocol;
+  kind: 'password' | 'sshKey' | 'unsupported';
   username: string;
   domain?: string;
   provider: 'Local' | 'Bitwarden';

@@ -133,7 +133,7 @@ VALUES (?, ?, ?, ?, 0, NULL, ?, ?, ?, ?, ?, ?);`,
 	committed = true
 	return credentialRecord{
 		ID: id, Name: draft.name, Protocol: draft.protocol, Username: displayCredentialUsername(draft.username),
-		Domain: draft.domain, Provider: providerName(draft.provider), CanEdit: true, CanDelete: true,
+		Kind: "password", Domain: draft.domain, Provider: providerName(draft.provider), CanEdit: true, CanDelete: true,
 		BitwardenItemID: draft.itemID, BitwardenItemName: draft.itemName,
 	}, nil
 }
@@ -252,7 +252,7 @@ WHERE lower(Id) = ? AND COALESCE(Kind, 0) = 0 AND COALESCE(SecretProvider, 0) IN
 	}
 	return credentialRecord{
 		ID: id, Name: draft.name, Protocol: draft.protocol, Username: displayCredentialUsername(draft.username),
-		Domain: draft.domain, Provider: providerName(draft.provider), CanEdit: true, CanDelete: true,
+		Kind: "password", Domain: draft.domain, Provider: providerName(draft.provider), CanEdit: true, CanDelete: true,
 		BitwardenItemID: draft.itemID, BitwardenItemName: draft.itemName,
 	}, nil
 }

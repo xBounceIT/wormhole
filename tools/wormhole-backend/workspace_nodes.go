@@ -523,64 +523,42 @@ func validateWorkspaceNodeReferences(tx *sql.Tx, node normalizedWorkspaceNode, u
 		}
 	}
 	if id, ok := node.credentialID.(string); ok && id != "" {
-		protocol, found, err := workspaceCredentialProtocol(tx, id)
+		credential, found, err := credentialMetadataByID(tx, id)
 		if err != nil {
 			return err
 		}
 		if !found {
 			return errors.New("selected credential was not found")
 		}
-		if node.kind == workspaceNodeConnection && node.protocol.Valid && protocol != node.protocol.Int64 {
-			return errors.New("selected credential does not match the connection protocol")
+		if node.kind == workspaceNodeConnection && node.protocol.Valid {
+			if credential.protocol != node.protocol.Int64 {
+				return errors.New("selected credential does not match the connection protocol")
+			}
+			if !workspaceCredentialKindSupportsProtocol(credential.kind, node.protocol.Int64) {
+				return errors.New("selected credential type is invalid for the connection protocol")
+			}
 		}
 	}
 	if node.rdp != nil && node.rdp.GatewayCredentialID != "" {
-		protocol, found, err := workspaceCredentialProtocol(tx, node.rdp.GatewayCredentialID)
+		credential, found, err := credentialMetadataByID(tx, node.rdp.GatewayCredentialID)
 		if err != nil {
 			return err
 		}
 		if !found {
 			return errors.New("selected RDP Gateway credential was not found")
 		}
-		if protocol != rdpProtocolValue {
+		if credential.protocol != rdpProtocolValue {
 			return errors.New("selected RDP Gateway credential is not an RDP credential")
+		}
+		if !workspaceCredentialKindSupportsProtocol(credential.kind, rdpProtocolValue) {
+			return errors.New("selected RDP Gateway credential type is invalid")
 		}
 	}
 	return nil
 }
 
-func workspaceCredentialProtocol(tx *sql.Tx, credentialID string) (int64, bool, error) {
-	var protocol int64
-	err := tx.QueryRow(
-		"SELECT COALESCE(Protocol, 0) FROM CredentialProfiles WHERE lower(Id) = ? LIMIT 1;",
-		credentialID,
-	).Scan(&protocol)
-	if err == nil {
-		return protocol, true, nil
-	}
-	if err != nil && !errors.Is(err, sql.ErrNoRows) && !strings.Contains(strings.ToLower(err.Error()), "no such table") {
-		return 0, false, fmt.Errorf("could not validate selected credential: %w", err)
-	}
-	var sshID, rdpID, vncID string
-	err = tx.QueryRow(`
-SELECT SshCredentialId, RdpCredentialId, VncCredentialId
-FROM BitwardenCredentialCache
-WHERE lower(SshCredentialId) = ? OR lower(RdpCredentialId) = ? OR lower(VncCredentialId) = ?
-LIMIT 1;`, credentialID, credentialID, credentialID).Scan(&sshID, &rdpID, &vncID)
-	if errors.Is(err, sql.ErrNoRows) || (err != nil && strings.Contains(strings.ToLower(err.Error()), "no such table")) {
-		return 0, false, nil
-	}
-	if err != nil {
-		return 0, false, fmt.Errorf("could not validate virtual Bitwarden credential: %w", err)
-	}
-	switch credentialID {
-	case normalizeID(rdpID):
-		return 1, true, nil
-	case normalizeID(vncID):
-		return 6, true, nil
-	default:
-		return 0, true, nil
-	}
+func workspaceCredentialKindSupportsProtocol(kind, protocol int64) bool {
+	return kind == 0 || (protocol == 0 && kind == 1)
 }
 
 func nextWorkspaceNodeSortOrder(tx *sql.Tx, parentID string) (int64, error) {

@@ -296,6 +296,105 @@ func TestWorkspaceNodeUpdateIsAtomicWhenCredentialProtocolDoesNotMatch(t *testin
 	}
 }
 
+func TestWorkspaceNodeWriteRejectsCredentialKindsUnsupportedByConnectionProtocol(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	createWorkspaceNodeTestSchema(t, databasePath)
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`
+INSERT INTO CredentialProfiles (Id, Protocol, Kind) VALUES
+    ('20000000-0000-4000-8000-000000000001', 0, 1),
+    ('20000000-0000-4000-8000-000000000002', 1, 1),
+    ('20000000-0000-4000-8000-000000000003', 6, 1),
+    ('20000000-0000-4000-8000-000000000004', 0, 9);`); err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	database.Close()
+
+	if _, err := createWorkspaceNode(databasePath, workspaceNodeWriteRequest{
+		Name: "SSH key", Kind: "connection", Protocol: "ssh", Host: "ssh.example",
+		CredentialMode: 2, CredentialID: "20000000-0000-4000-8000-000000000001",
+	}); err != nil {
+		t.Fatalf("valid SSH key was rejected: %v", err)
+	}
+	for _, test := range []struct {
+		name       string
+		protocol   string
+		credential string
+	}{
+		{name: "RDP key", protocol: "rdp", credential: "20000000-0000-4000-8000-000000000002"},
+		{name: "VNC key", protocol: "vnc", credential: "20000000-0000-4000-8000-000000000003"},
+		{name: "unsupported SSH kind", protocol: "ssh", credential: "20000000-0000-4000-8000-000000000004"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := createWorkspaceNode(databasePath, workspaceNodeWriteRequest{
+				Name: test.name, Kind: "connection", Protocol: test.protocol, Host: "target.example",
+				CredentialMode: 2, CredentialID: test.credential,
+			}); err == nil {
+				t.Fatal("unsupported credential kind was accepted")
+			}
+		})
+	}
+
+	rdp := defaultWorkspaceRdpSettings()
+	rdp.GatewayCredentialID = "20000000-0000-4000-8000-000000000002"
+	if _, err := createWorkspaceNode(databasePath, workspaceNodeWriteRequest{
+		Name: "RDP gateway", Kind: "connection", Protocol: "rdp", Host: "rdp.example",
+		CredentialMode: 0, RDP: &rdp,
+	}); err == nil {
+		t.Fatal("SSH-key RDP Gateway credential was accepted")
+	}
+}
+
+func TestWorkspaceNodeCredentialSettingRejectsSshKeyForPasswordOnlyProtocol(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	createWorkspaceNodeTestSchema(t, databasePath)
+	nodeID, err := createWorkspaceNode(databasePath, workspaceNodeWriteRequest{
+		Name: "RDP", Kind: "connection", Protocol: "rdp", Host: "rdp.example", CredentialMode: 0,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	credentialID := "30000000-0000-4000-8000-000000000001"
+	if _, err := database.Exec(
+		"INSERT INTO CredentialProfiles (Id, Protocol, Kind) VALUES (?, 1, 1);",
+		credentialID,
+	); err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	database.Close()
+
+	if err := updateWorkspaceNodeCredentialSettings(databasePath, workspaceNodeCredentialSettingsRequest{
+		NodeID: nodeID, Mode: 2, CredentialID: credentialID,
+	}); err == nil {
+		t.Fatal("RDP connection accepted an SSH-key credential through the credential-only write path")
+	}
+	database, err = openDatabase(databasePath, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var mode sql.NullInt64
+	var storedID sql.NullString
+	if err := database.QueryRow(
+		"SELECT CredentialMode, CredentialId FROM Nodes WHERE Id = ?;",
+		nodeID,
+	).Scan(&mode, &storedID); err != nil {
+		t.Fatal(err)
+	}
+	if !mode.Valid || mode.Int64 != 0 || storedID.Valid {
+		t.Fatalf("rejected credential-only update changed the node: mode=%#v id=%#v", mode, storedID)
+	}
+}
+
 func TestWorkspaceInlineSecretReplacementRollsBackOnNodeWriteFailure(t *testing.T) {
 	previousStore := credentialSecretStore
 	previousDelete := credentialSecretDelete

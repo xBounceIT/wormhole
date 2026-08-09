@@ -3,6 +3,38 @@ type NamedCredential = {
   name: string;
 };
 
+export type CredentialKind = 'password' | 'sshKey' | 'unsupported';
+export type CredentialProtocol = 'ssh' | 'rdp' | 'vnc';
+export type SshAutoSudoMode = 'inherit' | 'on' | 'off';
+
+export function credentialCanUseProtocol(
+  kind: CredentialKind,
+  protocol: CredentialProtocol,
+): boolean {
+  return kind === 'password' || (protocol === 'ssh' && kind === 'sshKey');
+}
+
+export function sshAutoSudoAvailable(
+  useSavedCredentials: boolean,
+  selectedCredentialKind?: CredentialKind,
+): boolean {
+  return (
+    !useSavedCredentials ||
+    selectedCredentialKind === undefined ||
+    selectedCredentialKind === 'password'
+  );
+}
+
+export function effectiveSshAutoSudoMode(
+  protocol: string,
+  available: boolean,
+  requested: SshAutoSudoMode,
+  hiddenFallback: SshAutoSudoMode,
+): SshAutoSudoMode {
+  if (protocol !== 'ssh') return 'inherit';
+  return available ? requested : hiddenFallback;
+}
+
 const textEncoder = new TextEncoder();
 
 function compareBytes(leftBytes: Uint8Array, rightBytes: Uint8Array): number {

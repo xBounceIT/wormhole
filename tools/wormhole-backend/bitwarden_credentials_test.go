@@ -64,7 +64,7 @@ func TestBitwardenCredentialCacheFullSyncPrunesAndProjectsVirtualProfile(t *test
 	}
 	credential := workspace.Credentials[0]
 	if credential.ID != bitwardenVirtualCredentialID("item-2", 0) ||
-		credential.Name != "Two updated" || credential.Username != "robert" ||
+		credential.Name != "Two updated" || credential.Kind != "password" || credential.Username != "robert" ||
 		!credential.IsVirtualBitwarden || credential.CanEdit || credential.CanDelete {
 		t.Fatalf("virtual credential = %#v", credential)
 	}

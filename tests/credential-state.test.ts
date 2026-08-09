@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { mergeCredential } from '../src/credential-state.ts';
+import {
+  credentialCanUseProtocol,
+  effectiveSshAutoSudoMode,
+  mergeCredential,
+  sshAutoSudoAvailable,
+} from '../src/credential-state.ts';
 import {
   bitwardenCliIsLoggedIn,
   bitwardenCliServerRegionCode,
@@ -39,6 +44,31 @@ test('credential merge replaces an existing id without duplicating it', () => {
     { id: '2', name: 'Second' },
     { id: '1', name: 'Updated' },
   ]);
+});
+
+test('SSH keys are accepted only by SSH password-capable controls', () => {
+  assert.equal(credentialCanUseProtocol('sshKey', 'ssh'), true);
+  assert.equal(credentialCanUseProtocol('sshKey', 'rdp'), false);
+  assert.equal(credentialCanUseProtocol('sshKey', 'vnc'), false);
+  assert.equal(credentialCanUseProtocol('password', 'rdp'), true);
+  assert.equal(credentialCanUseProtocol('password', 'vnc'), true);
+  assert.equal(credentialCanUseProtocol('unsupported', 'ssh'), false);
+});
+
+test('Auto sudo remains available for inline and inherited credentials but not a selected SSH key', () => {
+  assert.equal(sshAutoSudoAvailable(false, 'sshKey'), true);
+  assert.equal(sshAutoSudoAvailable(true, undefined), true);
+  assert.equal(sshAutoSudoAvailable(true, 'password'), true);
+  assert.equal(sshAutoSudoAvailable(true, 'sshKey'), false);
+  assert.equal(sshAutoSudoAvailable(true, 'unsupported'), false);
+});
+
+test('hidden Auto sudo ignores stale quick-connect state and preserves only a loaded saved override', () => {
+  assert.equal(effectiveSshAutoSudoMode('ssh', false, 'on', 'off'), 'off');
+  assert.equal(effectiveSshAutoSudoMode('ssh', false, 'off', 'on'), 'on');
+  assert.equal(effectiveSshAutoSudoMode('ssh', false, 'on', 'inherit'), 'inherit');
+  assert.equal(effectiveSshAutoSudoMode('ssh', true, 'on', 'inherit'), 'on');
+  assert.equal(effectiveSshAutoSudoMode('rdp', true, 'on', 'on'), 'inherit');
 });
 
 test('Bitwarden login and vault labels distinguish authentication from lock state', () => {

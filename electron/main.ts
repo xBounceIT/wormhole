@@ -522,6 +522,7 @@ type WorkspaceCredential = {
   id: string;
   name: string;
   protocol: CredentialProtocol;
+  kind: 'password' | 'sshKey' | 'unsupported';
   username: string;
   domain?: string;
   provider: 'Local' | 'Bitwarden';
