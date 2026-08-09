@@ -16,6 +16,7 @@ $installerScript    = Join-Path $repoRoot "installer\Wormhole.Electron.iss"
 $rendererDir        = Join-Path $repoRoot "dist"
 $electronDir        = Join-Path $repoRoot "dist-electron"
 $electronRuntimeDir = Join-Path $repoRoot "node_modules\electron\dist"
+$runtimeDependencyManifest = Join-Path $repoRoot "installer\electron-runtime-dependencies.json"
 $assetsDir          = Join-Path $repoRoot "Assets"
 $stagingDir         = Join-Path $repoRoot "artifacts\electron-app\$Architecture\Wormhole"
 $installerOutputDir = Join-Path $repoRoot "installer\output"
@@ -62,6 +63,7 @@ Assert-PathExists (Join-Path $electronDir "main.js") "the Electron main build (r
 Assert-PathExists (Join-Path $electronDir "preload.cjs") "the Electron preload build"
 Assert-PathExists (Join-Path $electronDir "wormhole-backend-$Architecture.exe") "the Go backend build for $Architecture (run 'npm run build:backend')"
 Assert-PathExists (Join-Path $electronRuntimeDir "electron.exe") "the Electron runtime (run 'node node_modules/electron/install.js')"
+Assert-PathExists $runtimeDependencyManifest "the Electron runtime dependency manifest"
 Assert-PathExists (Join-Path $assetsDir "Wormhole.ico") "the Wormhole icon"
 Assert-PathExists $IsccPath "the Inno Setup 6 compiler"
 
@@ -83,8 +85,8 @@ if (-not $node) {
 if ($LASTEXITCODE -ne 0) { throw "Failed to patch the Electron executable with resedit." }
 
 # The packaged application: package.json (main -> dist-electron/main.js) + renderer + Go backend
-# + sidecars + helpers + static assets. The staged version is pinned to the release version so
-# app.getVersion() matches the tag, even if the repo's package.json is behind.
+# + sidecars + helpers + runtime Node dependencies + static assets. The staged version is pinned
+# to the release version so app.getVersion() matches the tag, even if the repo's package.json is behind.
 Copy-Item -Path $rendererDir -Destination (Join-Path $appResourcesDir "dist") -Recurse -Force
 $appElectronDir = Join-Path $appResourcesDir "dist-electron"
 New-Item -ItemType Directory -Path $appElectronDir -Force | Out-Null
@@ -99,6 +101,12 @@ foreach ($item in Get-ChildItem -LiteralPath $electronDir) {
     Copy-Item -LiteralPath $item.FullName -Destination (Join-Path $appElectronDir $item.Name) -Recurse -Force
 }
 Copy-Item -Path $assetsDir -Destination (Join-Path $appResourcesDir "Assets") -Recurse -Force
+& node `
+    (Join-Path $scriptRoot "stage-electron-runtime-dependencies.mjs") `
+    $runtimeDependencyManifest `
+    (Join-Path $repoRoot "node_modules") `
+    (Join-Path $appResourcesDir "node_modules")
+if ($LASTEXITCODE -ne 0) { throw "Failed to stage Electron runtime dependencies." }
 $stagedPackage = [ordered]@{
     name    = "wormhole-electron"
     version = $AppVersion

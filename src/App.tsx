@@ -1,5 +1,7 @@
 import {
+  lazy,
   memo,
+  Suspense,
   useCallback,
   useDeferredValue,
   useEffect,
@@ -227,15 +229,16 @@ import {
   requiresSshKeyPassphrasePrompt,
   sshCredentialPromptTarget,
 } from './runtime-credential-errors';
-import { VncSurface } from './components/VncSurface';
-import { RdpSurface, type RdpUiStatus } from './components/RdpSurface';
-import { WebSurface } from './components/WebSurface';
+import { RdpSurface } from './components/RdpSurface';
 import { ConnectionStepper } from './components/ConnectionStepper';
-import { MRemoteImportDialog } from './components/MRemoteImportDialog';
 import { SearchableCombobox, type SearchableComboboxOption } from './components/SearchableCombobox';
 import { VirtualCardGrid } from './components/VirtualCardGrid';
 import { applyTheme, getSystemTheme, isTheme, type ResolvedTheme, type Theme } from './theme';
-import { applyRdpBackendEvent, applyRdpSystemClientOpenFailure } from './rdp-state';
+import {
+  applyRdpBackendEvent,
+  applyRdpSystemClientOpenFailure,
+  type RdpUiStatus,
+} from './rdp-state';
 import { formatSftpDate, formatSftpSize } from './sftp-format';
 import { hasSftpDragPayload, sftpDragDataType } from './sftp-dnd';
 import { cn } from '@/lib/utils';
@@ -272,6 +275,18 @@ import {
   userFacingTunnelError,
   type TunnelMode,
 } from './tunnel-state';
+
+const MRemoteImportDialog = lazy(() =>
+  import('./components/MRemoteImportDialog').then((module) => ({
+    default: module.MRemoteImportDialog,
+  })),
+);
+const VncSurface = lazy(() =>
+  import('./components/VncSurface').then((module) => ({ default: module.VncSurface })),
+);
+const WebSurface = lazy(() =>
+  import('./components/WebSurface').then((module) => ({ default: module.WebSurface })),
+);
 
 type Protocol = QuickConnectProtocol;
 type CredentialProtocol = Extract<Protocol, 'ssh' | 'rdp' | 'vnc'>;
@@ -6613,11 +6628,13 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         </ResizablePanelGroup>
 
         {mremoteImportOpen ? (
-          <MRemoteImportDialog
-            onImported={applyWorkspaceSnapshot}
-            onOpenChange={setMremoteImportOpen}
-            open
-          />
+          <Suspense fallback={null}>
+            <MRemoteImportDialog
+              onImported={applyWorkspaceSnapshot}
+              onOpenChange={setMremoteImportOpen}
+              open
+            />
+          </Suspense>
         ) : null}
 
         <Dialog
@@ -10481,6 +10498,14 @@ function SessionDropPreview({
   );
 }
 
+function SessionSurfaceFallback({ protocol }: { protocol: Protocol }) {
+  return (
+    <div className="grid h-full place-items-center text-xs text-muted-foreground" role="status">
+      Loading {protocolLabel(protocol)} session…
+    </div>
+  );
+}
+
 function SessionSurface({
   autoCopyOnSelect,
   bitwardenOpen,
@@ -10641,41 +10666,45 @@ function SessionSurface({
   }
   if (session.protocol === 'vnc') {
     return (
-      <VncSurface
-        bitwardenUnlockPending={bitwardenUnlockPending}
-        connectionGeneration={session.vncConnectionGeneration ?? 0}
-        disconnected={session.status === 'closed'}
-        isAuthorized={isAuthorized}
-        onBitwardenUnlockRequired={(reason, retry) =>
-          onBitwardenUnlockRequired(session.id, reason, retry)
-        }
-        onReconnect={() => onReconnectSession(session.id)}
-        onStatusChange={(status) =>
-          status === 'idle'
-            ? undefined
-            : onVncStatusChange(session.id, status === 'disconnected' ? 'closed' : status)
-        }
-        session={{
-          id: session.id,
-          nodeId: session.nodeId,
-          credentialId: session.credentialId,
-          host: session.host,
-          port: session.port,
-          tunnelConfigId: session.tunnelConfigId,
-          tunnelProgress: session.tunnelProgress,
-        }}
-      />
+      <Suspense fallback={<SessionSurfaceFallback protocol="vnc" />}>
+        <VncSurface
+          bitwardenUnlockPending={bitwardenUnlockPending}
+          connectionGeneration={session.vncConnectionGeneration ?? 0}
+          disconnected={session.status === 'closed'}
+          isAuthorized={isAuthorized}
+          onBitwardenUnlockRequired={(reason, retry) =>
+            onBitwardenUnlockRequired(session.id, reason, retry)
+          }
+          onReconnect={() => onReconnectSession(session.id)}
+          onStatusChange={(status) =>
+            status === 'idle'
+              ? undefined
+              : onVncStatusChange(session.id, status === 'disconnected' ? 'closed' : status)
+          }
+          session={{
+            id: session.id,
+            nodeId: session.nodeId,
+            credentialId: session.credentialId,
+            host: session.host,
+            port: session.port,
+            tunnelConfigId: session.tunnelConfigId,
+            tunnelProgress: session.tunnelProgress,
+          }}
+        />
+      </Suspense>
     );
   }
   if (session.protocol === 'http' || session.protocol === 'https') {
     return (
-      <WebSurface
-        bitwardenOpen={bitwardenOpen}
-        isActive={nativeSurfaceActive}
-        isAuthorized={isAuthorized && isWebSurfaceVisible}
-        onReconnect={onReconnectSession}
-        session={session}
-      />
+      <Suspense fallback={<SessionSurfaceFallback protocol={session.protocol} />}>
+        <WebSurface
+          bitwardenOpen={bitwardenOpen}
+          isActive={nativeSurfaceActive}
+          isAuthorized={isAuthorized && isWebSurfaceVisible}
+          onReconnect={onReconnectSession}
+          session={session}
+        />
+      </Suspense>
     );
   }
   return (

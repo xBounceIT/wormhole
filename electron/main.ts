@@ -18,7 +18,7 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { createInterface, type Interface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
-import { ElectronChromeExtensions } from 'electron-chrome-extensions';
+import type { ElectronChromeExtensions } from 'electron-chrome-extensions';
 import { AuthSession } from './auth-session.js';
 import { initializeLocalCrashDiagnostics } from './crash-diagnostics.js';
 import { isAppTheme, parseThemeStartupRequest, type AppTheme } from './theme-settings.js';
@@ -138,6 +138,7 @@ const nativeBackendCommandTimeoutMs = 15_000;
 // stopping the resulting sidecar. Keep the broker alive long enough to finish that cleanup.
 const nativeBackendShutdownTimeoutMs = 20_000;
 const startupUpdateDelayMs = 10_000;
+const startupBackgroundDelayMs = 1_500;
 const bitwardenBrowserNavigationTimeoutMs = 15_000;
 const bitwardenExtensionReadyTimeoutMs = 15_000;
 const bitwardenExtensionHostMaxListeners = 64;
@@ -173,6 +174,7 @@ let updateCheckInFlight: Promise<UpdateCheckResult> | undefined;
 let updateDownloadChild: ChildProcessWithoutNullStreams | undefined;
 let startupUpdateTimer: NodeJS.Timeout | undefined;
 let startupUpdateScheduled = false;
+let startupBackgroundTimer: NodeJS.Timeout | undefined;
 let webSharedSessionReady: Promise<void> | undefined;
 const startupReadyWindows = new WeakSet<BrowserWindow>();
 
@@ -231,12 +233,12 @@ type BackendOperation =
   | 'settings-set-log-level'
   | 'open-log-file'
   | 'open-logs-folder'
-  | 'settings-migrate'
   | 'settings-set-auto-copy-on-select'
   | 'settings-set-confirm-on-tab-close'
   | 'settings-set-sidebar-width'
   | 'bitwarden-onboarding-read'
   | 'bitwarden-onboarding-dismiss'
+  | 'mcp-status'
   | 'extension-read'
   | 'extension-set-enabled'
   | 'extension-install'
@@ -4723,6 +4725,7 @@ class WebSurfaceManager {
   private async ensureChromeExtensionApis(partition: string): Promise<ElectronChromeExtensions> {
     const existing = this.chromeExtensionApis.get(partition);
     if (existing) return existing;
+    const { ElectronChromeExtensions } = await import('electron-chrome-extensions');
     const session = electronSession.fromPartition(partition, { cache: true });
     let instance!: ElectronChromeExtensions;
     instance = new ElectronChromeExtensions({
@@ -5920,6 +5923,9 @@ class NativeSshBackend {
   }
 
   async mcpStatus(): Promise<McpStatusResponse> {
+    if (!this.child || this.child.killed) {
+      return runBackend<McpStatusResponse>('mcp-status');
+    }
     const response = await this.sendMcpControl({ type: 'mcp.status' });
     if (!response.status) throw new Error('MCP service returned no status.');
     return response.status;
@@ -5964,13 +5970,21 @@ class NativeSshBackend {
     await this.sendMcpControl({ type: locked ? 'mcp.lock' : 'mcp.unlock' });
   }
 
-  async syncMcpAfterUnlock(): Promise<void> {
+  async syncMcpAfterUnlock(authorizationEpoch: number): Promise<void> {
     let startError: unknown;
     try {
       const status = await this.mcpStatus();
+      if (!isAuthorizationEpochCurrent(authorizationEpoch)) {
+        await this.setMcpLocked(true).catch(() => undefined);
+        return;
+      }
       if (status.enabled && !status.running) await this.startMcp(status.port);
     } catch (error) {
       startError = error;
+    }
+    if (!isAuthorizationEpochCurrent(authorizationEpoch)) {
+      await this.setMcpLocked(true).catch(() => undefined);
+      return;
     }
     await this.setMcpLocked(false);
     if (startError instanceof Error) throw startError;
@@ -6330,32 +6344,6 @@ function parseMcpApproval(value: unknown): { requestId: string; approved: boolea
   return { requestId, approved: value.approved };
 }
 
-async function runFirstLaunchMigrations(): Promise<void> {
-  try {
-    const settings = await runBackend<{ updated: boolean }>('settings-migrate');
-    if (settings.updated)
-      console.info('[Wormhole] Legacy settings migrated to the current schema.');
-  } catch (error) {
-    // Every Go settings reader still applies the compatibility transform in memory, so a
-    // temporarily unwritable settings file cannot block launch.
-    const message = error instanceof Error ? error.message : String(error);
-    console.warn('[Wormhole] Legacy settings migration could not be persisted.', message);
-  }
-
-  // The legacy Credential Manager is a Windows-only source. Keeping this guard in the Electron
-  // main process also prevents the Windows backend/helper from being loaded on other platforms.
-  if (process.platform !== 'win32') return;
-
-  const result = await runBackend<MigrationResponse>('migrate');
-  if (result.status === 'completed') {
-    console.info(
-      `[Wormhole] Credential Manager migration completed: ${result.migrated} migrated, ${result.missing} missing.`,
-    );
-  } else if (result.status === 'already-completed') {
-    console.info('[Wormhole] Credential Manager migration already completed.');
-  }
-}
-
 function registerIpcHandlers(sshBackend: NativeSshBackend): void {
   ipcMain.on('lifecycle:close-confirmation-ready', (event) => {
     const owner = BrowserWindow.fromWebContents(event.sender);
@@ -6388,6 +6376,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     if (!owner || owner.isDestroyed()) return;
     startupReadyWindows.add(owner);
     if (owner.isVisible()) owner.setOpacity(1);
+    scheduleUnlockedBackgroundWork();
   });
 
   ipcMain.handle('startup:load', async (_event, value: unknown) => {
@@ -8865,27 +8854,37 @@ function shutdownNativeResources(): Promise<void> {
   return tracked;
 }
 
+function scheduleUnlockedBackgroundWork(): void {
+  const hasReadyWindow = BrowserWindow.getAllWindows().some(
+    (window) => !window.isDestroyed() && startupReadyWindows.has(window),
+  );
+  if (!hasReadyWindow || !authSession.isAccessAllowed || isQuitting || startupBackgroundTimer) {
+    return;
+  }
+  startupBackgroundTimer = setTimeout(() => {
+    startupBackgroundTimer = undefined;
+    const stillHasReadyWindow = BrowserWindow.getAllWindows().some(
+      (window) => !window.isDestroyed() && startupReadyWindows.has(window),
+    );
+    if (!stillHasReadyWindow || !authSession.isAccessAllowed || isQuitting) return;
+    const authorizationEpoch = authSession.authorizationEpoch;
+    startBitwardenBackgroundMaintenance();
+    void showBitwardenOnboardingNoticeIfNeeded();
+    void sshBackend.syncMcpAfterUnlock(authorizationEpoch).catch((error) => {
+      console.error('[Wormhole] Could not synchronize the MCP service after unlock.', error);
+    });
+  }, startupBackgroundDelayMs);
+}
+
 authSession.onUnlocked(() => {
   sshBackend.requestSnapshots();
   serialBackend?.requestSnapshots();
-  void runBitwardenStartupMaintenance();
-  void showBitwardenOnboardingNoticeIfNeeded();
-  void sshBackend.syncMcpAfterUnlock().catch((error) => {
-    console.error('[Wormhole] Could not synchronize the MCP service after unlock.', error);
-  });
+  scheduleUnlockedBackgroundWork();
 });
 
-app.whenReady().then(async () => {
+app.whenReady().then(() => {
   registerIpcHandlers(sshBackend);
-  await ensureWebSharedSessionReady();
-  try {
-    await runFirstLaunchMigrations();
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    console.error('[Wormhole] Credential Manager migration failed.', message);
-  }
   createWindow();
-  startBitwardenBackgroundMaintenance();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -8924,6 +8923,8 @@ app.on('before-quit', (event) => {
     isQuitting = true;
     if (startupUpdateTimer) clearTimeout(startupUpdateTimer);
     startupUpdateTimer = undefined;
+    if (startupBackgroundTimer) clearTimeout(startupBackgroundTimer);
+    startupBackgroundTimer = undefined;
     updateDownloadChild?.kill();
     updateDownloadChild = undefined;
     if (bitwardenBackgroundTimer) {

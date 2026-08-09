@@ -71,8 +71,20 @@ func newMcpController(server *sshServer) *mcpController {
 	}
 }
 
+func loadPersistedMcpStatus(databasePath string) (mcpStatusResponse, error) {
+	settings, err := loadMcpSettings(databasePath)
+	if err != nil {
+		return mcpStatusResponse{}, err
+	}
+	return mcpStatusResponse{
+		Enabled:  settings.Enabled,
+		Port:     settings.Port,
+		Endpoint: mcpEndpointURL(settings.Port),
+	}, nil
+}
+
 func (controller *mcpController) status() (mcpStatusResponse, error) {
-	settings, err := loadMcpSettings(controller.server.databasePath)
+	status, err := loadPersistedMcpStatus(controller.server.databasePath)
 	if err != nil {
 		return mcpStatusResponse{}, err
 	}
@@ -82,14 +94,12 @@ func (controller *mcpController) status() (mcpStatusResponse, error) {
 	port := controller.port
 	controller.lifecycleMu.Unlock()
 	if port <= 0 {
-		port = settings.Port
+		port = status.Port
 	}
-	return mcpStatusResponse{
-		Enabled:  settings.Enabled,
-		Running:  running,
-		Port:     port,
-		Endpoint: mcpEndpointURL(port),
-	}, nil
+	status.Running = running
+	status.Port = port
+	status.Endpoint = mcpEndpointURL(port)
+	return status, nil
 }
 
 func (controller *mcpController) start(port int, persist bool) error {

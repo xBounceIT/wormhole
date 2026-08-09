@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -12,7 +12,33 @@ const execFileAsync = promisify(execFile);
 const testRoot = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.dirname(testRoot);
 const patchScript = path.join(repoRoot, 'scripts', 'patch-electron-exe.mjs');
+const stageRuntimeDependenciesScript = path.join(
+  repoRoot,
+  'scripts',
+  'stage-electron-runtime-dependencies.mjs',
+);
+const runtimeDependenciesManifest = path.join(
+  repoRoot,
+  'installer',
+  'electron-runtime-dependencies.json',
+);
 const iconPath = path.join(repoRoot, 'Assets', 'Wormhole.ico');
+
+async function collectRuntimeDependencyClosure(packageName, dependencyNames = new Set()) {
+  if (dependencyNames.has(packageName)) return dependencyNames;
+  dependencyNames.add(packageName);
+  const packageJsonPath = path.join(
+    repoRoot,
+    'node_modules',
+    ...packageName.split('/'),
+    'package.json',
+  );
+  const packageJson = JSON.parse(await readFile(packageJsonPath, 'utf8'));
+  for (const dependencyName of Object.keys(packageJson.dependencies ?? {})) {
+    await collectRuntimeDependencyClosure(dependencyName, dependencyNames);
+  }
+  return dependencyNames;
+}
 
 async function createExecutableFixture(exePath, { includeVersion = true } = {}) {
   const executable = ResEdit.NtExecutable.createEmpty(false, false);
@@ -170,4 +196,45 @@ test('supports 16-bit version limits and rejects larger components', async (cont
     /numeric version components must be between 0 and 65535/,
   );
   assert.deepEqual(await readFile(exePath), validOutput);
+});
+
+test('stages the complete Chrome extension runtime dependency closure', async (context) => {
+  const declaredDependencies = JSON.parse(await readFile(runtimeDependenciesManifest, 'utf8'));
+  const expectedDependencies = await collectRuntimeDependencyClosure('electron-chrome-extensions');
+  assert.deepEqual([...declaredDependencies].sort(), [...expectedDependencies].sort());
+
+  const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'wormhole-runtime-deps-'));
+  context.after(() => rm(temporaryDirectory, { recursive: true, force: true }));
+  const destination = path.join(temporaryDirectory, 'node_modules');
+  await execFileAsync(process.execPath, [
+    stageRuntimeDependenciesScript,
+    runtimeDependenciesManifest,
+    path.join(repoRoot, 'node_modules'),
+    destination,
+  ]);
+
+  for (const dependencyName of declaredDependencies) {
+    const stagedPackageJson = path.join(destination, ...dependencyName.split('/'), 'package.json');
+    const packageJson = JSON.parse(await readFile(stagedPackageJson, 'utf8'));
+    assert.equal(packageJson.name, dependencyName);
+  }
+});
+
+test('rejects traversal before staging Electron runtime dependencies', async (context) => {
+  const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'wormhole-runtime-deps-invalid-'));
+  context.after(() => rm(temporaryDirectory, { recursive: true, force: true }));
+  const manifest = path.join(temporaryDirectory, 'dependencies.json');
+  const destination = path.join(temporaryDirectory, 'node_modules');
+  await writeFile(manifest, JSON.stringify(['electron-chrome-extensions', '..']));
+
+  await assert.rejects(
+    execFileAsync(process.execPath, [
+      stageRuntimeDependenciesScript,
+      manifest,
+      path.join(repoRoot, 'node_modules'),
+      destination,
+    ]),
+    /Invalid Electron runtime dependency name: \.\./,
+  );
+  await assert.rejects(stat(destination), /ENOENT/);
 });

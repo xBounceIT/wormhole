@@ -33,6 +33,71 @@ import {
 } from '../src/sidebar-settings.ts';
 import { failedSshReconnectState, reconnectingSshState } from '../src/ssh-reconnect-state.ts';
 
+test('startup keeps optional native and renderer work off the first-frame path', () => {
+  const mainSource = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
+  const appSource = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  const imports = mainSource.slice(0, mainSource.indexOf('const __dirname'));
+  const appReady = mainSource.slice(
+    mainSource.indexOf('app.whenReady().then'),
+    mainSource.indexOf('let quitCleanupStarted'),
+  );
+  const extensionLoader = mainSource.slice(
+    mainSource.indexOf('private async ensureChromeExtensionApis'),
+    mainSource.indexOf('private resolveBitwardenSurface'),
+  );
+  const mcpStatus = mainSource.slice(
+    mainSource.indexOf('async mcpStatus()'),
+    mainSource.indexOf('async startMcp'),
+  );
+  const startupReadyHandler = mainSource.slice(
+    mainSource.indexOf("ipcMain.on('startup:ready'"),
+    mainSource.indexOf("ipcMain.handle('startup:load'"),
+  );
+  const mcpUnlockSync = mainSource.slice(
+    mainSource.indexOf('async syncMcpAfterUnlock'),
+    mainSource.indexOf('async dispose()', mainSource.indexOf('async syncMcpAfterUnlock')),
+  );
+  const backgroundScheduler = mainSource.slice(
+    mainSource.indexOf('function scheduleUnlockedBackgroundWork'),
+    mainSource.indexOf('authSession.onUnlocked'),
+  );
+
+  assert.match(imports, /import type \{ ElectronChromeExtensions \}/);
+  assert.doesNotMatch(imports, /import \{ ElectronChromeExtensions \}/);
+  assert.match(extensionLoader, /await import\('electron-chrome-extensions'\)/);
+  assert.match(appReady, /registerIpcHandlers\(sshBackend\);\s*createWindow\(\);/);
+  assert.doesNotMatch(appReady, /\bawait\b|ensureWebSharedSessionReady|runFirstLaunchMigrations/);
+  assert.match(startupReadyHandler, /scheduleUnlockedBackgroundWork\(\)/);
+  assert.match(mcpStatus, /return runBackend<McpStatusResponse>\('mcp-status'\)/);
+  assert.match(mcpUnlockSync, /syncMcpAfterUnlock\(authorizationEpoch: number\)/);
+  const statusIndex = mcpUnlockSync.indexOf('const status = await this.mcpStatus()');
+  const firstGuardIndex = mcpUnlockSync.indexOf(
+    'if (!isAuthorizationEpochCurrent(authorizationEpoch))',
+    statusIndex,
+  );
+  const startMcpIndex = mcpUnlockSync.indexOf('this.startMcp', firstGuardIndex);
+  const secondGuardIndex = mcpUnlockSync.indexOf(
+    'if (!isAuthorizationEpochCurrent(authorizationEpoch))',
+    firstGuardIndex + 1,
+  );
+  const unlockMcpIndex = mcpUnlockSync.indexOf('await this.setMcpLocked(false)', secondGuardIndex);
+  assert.ok(statusIndex >= 0 && statusIndex < firstGuardIndex);
+  assert.ok(firstGuardIndex < startMcpIndex && startMcpIndex < secondGuardIndex);
+  assert.ok(secondGuardIndex < unlockMcpIndex);
+  for (const staleBranch of [
+    mcpUnlockSync.slice(firstGuardIndex, startMcpIndex),
+    mcpUnlockSync.slice(secondGuardIndex, unlockMcpIndex),
+  ]) {
+    assert.match(staleBranch, /await this\.setMcpLocked\(true\)[\s\S]*return;/);
+  }
+  assert.match(
+    backgroundScheduler,
+    /const authorizationEpoch = authSession\.authorizationEpoch;[\s\S]*syncMcpAfterUnlock\(authorizationEpoch\)/,
+  );
+  assert.match(appSource, /lazy\(\(\) =>[\s\S]*import\('\.\/components\/VncSurface'\)/);
+  assert.match(appSource, /mremoteImportOpen \? \([\s\S]*<Suspense fallback=\{null\}>/);
+});
+
 test('SSH automatic reconnect keeps the tab alive and reports terminal exhaustion', () => {
   assert.deepEqual(reconnectingSshState({ attempt: 1, maxAttempts: 3, delaySeconds: 10 }), {
     status: 'connecting',

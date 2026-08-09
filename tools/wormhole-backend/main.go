@@ -215,8 +215,12 @@ type tunnelRow struct {
 	Kind int64
 }
 
+func operationNeedsProcessInitialization(operation string) bool {
+	return operation != "mcp-status"
+}
+
 func main() {
-	operation := flag.String("operation", "workspace", "backend operation: startup, startup-unlock, workspace, workspace-duplicate-node, workspace-delete-node, workspace-delete-nodes, workspace-show-credentials, backup-*, credential-*, tunnel-*, workspace-node-*, workspace-update-node-*, web-target, migrate, ssh, serial, ssh-trust-host-key, logs-info, settings-set-log-retention, settings-set-log-level, open-log-file, open-logs-folder, serve, rdp, extension-*, bitwarden-*, or auth-*")
+	operation := flag.String("operation", "workspace", "backend operation: startup, startup-unlock, workspace, workspace-duplicate-node, workspace-delete-node, workspace-delete-nodes, workspace-show-credentials, backup-*, credential-*, tunnel-*, workspace-node-*, workspace-update-node-*, web-target, migrate, mcp-status, ssh, serial, ssh-trust-host-key, logs-info, settings-set-log-retention, settings-set-log-level, open-log-file, open-logs-folder, serve, rdp, extension-*, bitwarden-*, or auth-*")
 	databasePath := flag.String("database", "", "path to the Wormhole SQLite database")
 	electronUserDataPath := flag.String("electron-user-data", "", "path to the Electron user-data directory")
 	credentialReader := flag.String("credential-reader", "", "path to the Windows Credential Manager reader")
@@ -229,12 +233,14 @@ func main() {
 		os.Exit(1)
 		return
 	}
-	initAppLogging(*databasePath)
-	defer closeAppLog()
-	if err := ensureElectronWorkspaceSchema(*databasePath); err != nil {
-		writeError(err.Error())
-		os.Exit(1)
-		return
+	if operationNeedsProcessInitialization(*operation) {
+		initAppLogging(*databasePath)
+		defer closeAppLog()
+		if err := ensureElectronWorkspaceSchema(*databasePath); err != nil {
+			writeError(err.Error())
+			os.Exit(1)
+			return
+		}
 	}
 	if *operation == "ssh" {
 		logInfo("SSH service started")
@@ -509,6 +515,8 @@ func main() {
 				logInfo("credential migration completed: %d migrated, %d missing", migration.Migrated, migration.Missing)
 			}
 		}
+	case "mcp-status":
+		result, err = loadPersistedMcpStatus(*databasePath)
 	case "auth-status":
 		result, err = authState(*databasePath)
 	case "auth-verify":
@@ -938,6 +946,15 @@ func loadStartupSnapshot(
 	readerPath string,
 	legacyTheme *string,
 ) (startupSnapshot, error) {
+	settingsMigration, settingsMigrationErr := persistLegacySettingsMigration(databasePath)
+	if settingsMigrationErr != nil {
+		// Every settings reader applies the compatibility transform in memory. Persisting the
+		// upgraded document remains best-effort and must not make the application unusable.
+		logWarn("legacy settings migration could not be persisted: %v", settingsMigrationErr)
+	} else if settingsMigration.Updated {
+		logInfo("legacy settings migrated to the current schema")
+	}
+
 	migration, migrationErr := migrateCredentials(databasePath, readerPath)
 	if migrationErr != nil {
 		// Credential migration is retryable and has never been allowed to make the application

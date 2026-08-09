@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -16,6 +17,17 @@ func TestDecodeInputRejectsOversizedRequest(t *testing.T) {
 	input := `{"method":"pin","secret":"` + strings.Repeat("x", backendMaxRequestBytes) + `"}`
 	if err := decodeInputReader(bytes.NewBufferString(input), &request); err == nil {
 		t.Fatal("oversized backend request was accepted")
+	}
+}
+
+func TestMcpStatusSkipsUnneededProcessInitialization(t *testing.T) {
+	if operationNeedsProcessInitialization("mcp-status") {
+		t.Fatal("mcp-status unexpectedly initializes logging or the workspace schema")
+	}
+	for _, operation := range []string{"startup", "workspace", "ssh"} {
+		if !operationNeedsProcessInitialization(operation) {
+			t.Fatalf("%s unexpectedly skips process initialization", operation)
+		}
 	}
 }
 
@@ -102,6 +114,30 @@ func TestLoadStartupSnapshotReturnsUnlockedWorkspaceAndSettings(t *testing.T) {
 	}
 	if startup.Migration.Status != "already-completed" || startup.MigrationFailed {
 		t.Fatalf("unexpected migration result: %#v, failed=%v", startup.Migration, startup.MigrationFailed)
+	}
+}
+
+func TestLoadStartupSnapshotPersistsLegacySettingsInBootstrapProcess(t *testing.T) {
+	databasePath := prepareStartupTestDatabase(t)
+	bitwardenTestWriteSettings(t, databasePath, map[string]any{
+		settingsSchemaVersionKey: 5,
+		bwCliKeyServerRegion:     bitwardenCliServerEurope,
+	})
+
+	if _, err := loadStartupSnapshot(databasePath, "", nil); err != nil {
+		t.Fatal(err)
+	}
+	_, settingsPath := authPaths(databasePath)
+	contents, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(contents, &document); err != nil {
+		t.Fatal(err)
+	}
+	if version := readSettingsInteger(document, settingsSchemaVersionKey); version != currentSettingsSchemaVersion {
+		t.Fatalf("settings schema version = %d", version)
 	}
 }
 

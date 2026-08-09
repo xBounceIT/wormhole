@@ -142,6 +142,21 @@ func TestMcpSettingsPreserveExistingSettings(t *testing.T) {
 	}
 }
 
+func TestLoadPersistedMcpStatusDoesNotReportAResidentServer(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	if err := saveMcpSettings(databasePath, mcpSettings{Enabled: true, Port: 9123}); err != nil {
+		t.Fatal(err)
+	}
+
+	status, err := loadPersistedMcpStatus(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.Enabled || status.Running || status.Port != 9123 || status.Endpoint != "http://127.0.0.1:9123/mcp" {
+		t.Fatalf("unexpected persisted MCP status: %#v", status)
+	}
+}
+
 func TestMcpSettingsRejectInvalidPorts(t *testing.T) {
 	for _, port := range []int{0, -1, 65536} {
 		if validateMcpPort(port) == nil {

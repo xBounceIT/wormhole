@@ -3,7 +3,8 @@
 ; RUNTIME: scripts/Build-ElectronInstaller.ps1 stages the Electron runtime + renderer + Go
 ; backend into a directory (PublishDir) whose root is the app folder: Wormhole.exe (the renamed
 ; Electron runtime binary) with resources\app\ holding package.json, dist\, dist-electron\ (Go
-; backend + sidecars + RDP host + credential reader), and Assets\. No Node.js runtime is needed
+; backend + sidecars + RDP host + credential reader), node_modules\ (main-process dependencies),
+; and Assets\. No standalone Node.js runtime is needed
 ; on the target machine.
 ;
 ; Keep the established Electron AppId so upgrades remain compatible with existing installs.
