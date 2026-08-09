@@ -3462,7 +3462,11 @@ function findBundledExecutable(name: string): string | undefined {
 function backendPath(): string {
   const architecture = process.arch === 'arm64' ? 'arm64' : 'x64';
   const executableName = `wormhole-backend-${architecture}${process.platform === 'win32' ? '.exe' : ''}`;
-  const executablePath = findBundledExecutable(executableName);
+  const executablePath =
+    findBundledExecutable(executableName) ??
+    (process.platform === 'darwin'
+      ? findBundledExecutable('wormhole-backend-universal')
+      : undefined);
   if (!executablePath) {
     throw new Error('A required Wormhole component is missing.');
   }
