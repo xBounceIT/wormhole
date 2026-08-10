@@ -677,6 +677,8 @@ type CredentialRecord = {
 type CredentialOptionGroups = Record<CredentialProtocol, CredentialRecord[]>;
 
 const manualCredentialSelectionValue = '__manual__';
+const bitwardenCredentialCreationError =
+  'Bitwarden credential profiles cannot be created manually.';
 
 function workspaceCredentialOptions(workspace: WormholeWorkspaceSnapshot): CredentialOptionGroups {
   return {
@@ -6023,7 +6025,21 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
 
   async function createCredential(draft: CredentialWriteRequest): Promise<void> {
     if (!window.wormhole) throw new Error('The credential service is unavailable.');
-    const credential = (await window.wormhole.createCredential(draft)) as CredentialRecord;
+    if (draft.provider !== 'Local') {
+      throw new Error(bitwardenCredentialCreationError);
+    }
+    const credential = (await window.wormhole.createCredential({
+      name: draft.name,
+      protocol: draft.protocol,
+      kind: draft.kind,
+      username: draft.username,
+      domain: draft.domain,
+      password: draft.password,
+      passphrase: draft.passphrase,
+      clearPassphrase: draft.clearPassphrase,
+      privateKeySelectionId: draft.privateKeySelectionId || undefined,
+      provider: 'Local',
+    })) as CredentialRecord;
     setCredentials((current) => mergeCredential(current, credential));
     setCredentialOptions((current) => mergeCredentialOption(current, credential));
     void refreshWorkspaceCredentials().catch(() => {
@@ -11028,6 +11044,10 @@ function CredentialsPage({
   async function submitCredential(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (busy) return;
+    if (!editingCredential && credentialForm.provider !== 'Local') {
+      setOperationError(bitwardenCredentialCreationError);
+      return;
+    }
     const draft: CredentialDraft = {
       name: credentialForm.name.trim(),
       protocol: credentialForm.kind === 'sshKey' ? 'ssh' : credentialForm.protocol,
@@ -11405,27 +11425,29 @@ function CredentialsPage({
               </div>
             ) : null}
             {credentialForm.kind === 'password' ? (
-              <div className="grid gap-2">
-                <Label htmlFor="credential-provider">Credential vault</Label>
-                <Select
-                  onValueChange={(value) =>
-                    setCredentialForm((form) => ({
-                      ...form,
-                      provider: value as CredentialDraft['provider'],
-                      password: value === 'Bitwarden' ? '' : form.password,
-                    }))
-                  }
-                  value={credentialForm.provider}
-                >
-                  <SelectTrigger id="credential-provider">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="Local">Local password</SelectItem>
-                    <SelectItem value="Bitwarden">Bitwarden item</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
+              editingCredential ? (
+                <div className="grid gap-2">
+                  <Label htmlFor="credential-provider">Credential vault</Label>
+                  <Select
+                    onValueChange={(value) =>
+                      setCredentialForm((form) => ({
+                        ...form,
+                        provider: value as CredentialDraft['provider'],
+                        password: value === 'Bitwarden' ? '' : form.password,
+                      }))
+                    }
+                    value={credentialForm.provider}
+                  >
+                    <SelectTrigger id="credential-provider">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="Local">Local password</SelectItem>
+                      <SelectItem value="Bitwarden">Bitwarden item</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              ) : null
             ) : (
               <p className="text-[11px] leading-relaxed text-muted-foreground">
                 The private key is copied into Wormhole's encrypted local storage. The source file

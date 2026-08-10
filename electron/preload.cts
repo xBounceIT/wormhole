@@ -150,10 +150,7 @@ const wormholeBridge = {
     passphrase: string;
     clearPassphrase: boolean;
     privateKeySelectionId?: string;
-    provider: 'Local' | 'Bitwarden';
-    bitwardenItemId?: string;
-    bitwardenItemName?: string;
-    bitwardenFieldPath?: string;
+    provider: 'Local';
   }) => ipcRenderer.invoke('workspace:create-credential', request),
   updateCredential: (request: {
     id: string;

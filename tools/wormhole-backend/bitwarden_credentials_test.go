@@ -9,6 +9,45 @@ import (
 	"time"
 )
 
+func seedLegacyBitwardenCredential(
+	t *testing.T,
+	databasePath string,
+	request credentialCreateRequest,
+) credentialRecord {
+	t.Helper()
+	draft, err := normalizeCredentialDraft(request, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if draft.provider != 1 {
+		t.Fatal("legacy Bitwarden fixture needs a Bitwarden provider")
+	}
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := ensureCredentialWriteSchema(database); err != nil {
+		t.Fatal(err)
+	}
+	id, err := newCredentialID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = database.Exec(`
+INSERT INTO CredentialProfiles
+    (Id, Name, Username, Domain, Kind, PrivateKeyFileName, Protocol, SecretProvider,
+     BitwardenItemId, BitwardenItemName, BitwardenFieldPath, CreatedAt)
+VALUES (?, ?, ?, ?, 0, NULL, ?, 1, ?, ?, ?, ?);`,
+		id, draft.name, nullableCredentialField(draft.username), nullableCredentialField(draft.domain),
+		draft.protocolValue, draft.itemID, nullableCredentialField(draft.itemName), draft.fieldPath,
+		time.Now().UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return credentialRecord{ID: id}
+}
+
 func TestBitwardenVirtualCredentialIDsMatchWinUI(t *testing.T) {
 	tests := []struct {
 		protocol int64
@@ -209,13 +248,10 @@ INSERT INTO Nodes (Id, ParentId, Username, RdpDomain, CredentialId, CredentialMo
 
 func TestLinkedBitwardenCredentialSuppressesPageProjectionAndResolvesInheritance(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
-	profile, err := createCredential(databasePath, credentialCreateRequest{
+	profile := seedLegacyBitwardenCredential(t, databasePath, credentialCreateRequest{
 		Name: "RDP vault", Protocol: "rdp", Username: "alice", Domain: "CORP",
 		Provider: "Bitwarden", BitwardenItemID: "item-1", BitwardenItemName: "RDP item",
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if _, err := replaceBitwardenCredentialCache(databasePath, []bitwardenCliLoginItem{
 		{ID: "item-1", Name: "RDP item", Username: "alice"},
 	}, time.Now()); err != nil {

@@ -578,7 +578,7 @@ type WorkspaceCredential = {
   isVirtualBitwarden?: boolean;
 };
 type CredentialProtocol = 'ssh' | 'rdp' | 'vnc';
-type CredentialCreateRequest = {
+type CredentialWriteRequest = {
   name: string;
   protocol: CredentialProtocol;
   kind: 'password' | 'sshKey';
@@ -593,7 +593,11 @@ type CredentialCreateRequest = {
   bitwardenItemName?: string;
   bitwardenFieldPath?: string;
 };
-type CredentialUpdateRequest = CredentialCreateRequest & { id: string };
+type CredentialCreateRequest = Omit<
+  CredentialWriteRequest,
+  'provider' | 'bitwardenItemId' | 'bitwardenItemName' | 'bitwardenFieldPath'
+> & { provider: 'Local' };
+type CredentialUpdateRequest = CredentialWriteRequest & { id: string };
 type CredentialDeleteRequest = { id: string };
 type WorkspaceNodeRequest = { nodeId: string };
 type WorkspaceDuplicateNodeResponse = { nodeId: string; name: string };
@@ -1480,7 +1484,7 @@ function sshPrivateKeyDisplayName(filePath: string): string {
   return fileName;
 }
 
-function parseCredentialCreateRequest(value: unknown, updating = false): CredentialCreateRequest {
+function parseCredentialWriteRequest(value: unknown, updating = false): CredentialWriteRequest {
   if (!isRecord(value)) throw new Error('Credential details are invalid.');
   const name = value.name;
   const protocol = value.protocol;
@@ -1550,6 +1554,25 @@ function parseCredentialCreateRequest(value: unknown, updating = false): Credent
     bitwardenItemId,
     bitwardenItemName,
     bitwardenFieldPath: 'login.password',
+  };
+}
+
+function parseCredentialCreateRequest(value: unknown): CredentialCreateRequest {
+  const request = parseCredentialWriteRequest(value);
+  if (request.provider !== 'Local') {
+    throw new Error('Bitwarden credential profiles cannot be created manually.');
+  }
+  return {
+    name: request.name,
+    protocol: request.protocol,
+    kind: request.kind,
+    username: request.username,
+    domain: request.domain,
+    password: request.password,
+    passphrase: request.passphrase,
+    clearPassphrase: request.clearPassphrase,
+    privateKeySelectionId: request.privateKeySelectionId,
+    provider: 'Local',
   };
 }
 
@@ -1692,7 +1715,7 @@ function isWorkspaceNodeInlineCredentialRequest(
 }
 
 function parseCredentialUpdateRequest(value: unknown): CredentialUpdateRequest {
-  const request = parseCredentialCreateRequest(value, true);
+  const request = parseCredentialWriteRequest(value, true);
   const id = isRecord(value) ? value.id : undefined;
   if (!isUuid(id)) {
     throw new Error('Credential id is invalid.');

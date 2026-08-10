@@ -614,6 +614,39 @@ test('credential mutations do not remount and orphan an active batch operation',
   );
 });
 
+test('new credential flow cannot create Bitwarden-backed profiles', () => {
+  const emptyDraft = sourceBetween(
+    appSource,
+    'function emptyCredentialDraft',
+    'function credentialSelectionFor',
+  );
+  const credentialsPage = sourceBetween(
+    appSource,
+    'function CredentialsPage(',
+    'function tunnelKindLabel',
+  );
+  const providerSelector = sourceBetween(
+    credentialsPage,
+    "{credentialForm.kind === 'password' ? (",
+    "{credentialForm.protocol !== 'vnc' ? (",
+  );
+  const createParser = sourceBetween(
+    mainSource,
+    'function parseCredentialCreateRequest',
+    'function parseWorkspaceNodeWriteRequest',
+  );
+  const preloadCreate = sourceBetween(preloadSource, 'createCredential:', 'updateCredential:');
+
+  assert.match(emptyDraft, /provider: 'Local'/);
+  assert.match(providerSelector, /editingCredential \? \(/);
+  assert.match(providerSelector, /<SelectItem value="Bitwarden">Bitwarden item<\/SelectItem>/);
+  assert.match(providerSelector, /\) : null/);
+  assert.match(credentialsPage, /!editingCredential && credentialForm\.provider !== 'Local'/);
+  assert.match(createParser, /request\.provider !== 'Local'/);
+  assert.match(preloadCreate, /provider: 'Local'/);
+  assert.doesNotMatch(preloadCreate, /Bitwarden/);
+});
+
 test('virtual card grids label the semantic list rather than a generic scroll container', () => {
   const virtualGridSource = readFileSync(
     new URL('../src/components/VirtualCardGrid.tsx', import.meta.url),
