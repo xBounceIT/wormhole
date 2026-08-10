@@ -709,6 +709,29 @@ test('VPN editor keeps WatchGuard SSO and Stormshield OTP layout contracts expli
   assert.match(appSource, /field\.fullWidth\) && 'md:col-span-2'/);
 });
 
+test('VPN editor keeps expanded provider fields inside its scrolling body', () => {
+  const editor = sourceBetween(
+    appSource,
+    'function TunnelEditorDialog',
+    '// Tunnel CRUD, test progress, and editor lifecycle form',
+  );
+  const dialogContent = sourceBetween(editor, '<DialogContent', '>');
+  const form = sourceBetween(editor, '<form', '</form>');
+
+  assert.match(dialogContent, /max-h-\[calc\(100dvh-2rem\)\]/);
+  assert.match(dialogContent, /flex-col/);
+  assert.match(dialogContent, /overflow-hidden/);
+  assert.match(form, /className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto pr-3"/);
+  assert.match(form, /id="tunnel-editor-form"/);
+  assert.match(form, /Manual profile fallback & advanced/);
+  assert.doesNotMatch(form, /role="alert"|<DialogFooter>/);
+  assert.match(editor, /<Button[^>]*form="tunnel-editor-form" type="submit">/);
+  const afterForm = editor.slice(editor.indexOf('</form>'));
+  const alertPosition = afterForm.indexOf('role="alert"');
+  const footerPosition = afterForm.indexOf('<DialogFooter>');
+  assert.ok(alertPosition >= 0 && alertPosition < footerPosition);
+});
+
 test('backup and mRemoteNG mutations expose cooperative progress and cancellation', () => {
   assert.match(preloadSource, /cancelBackupExport/);
   assert.match(preloadSource, /cancelBackupImport/);
