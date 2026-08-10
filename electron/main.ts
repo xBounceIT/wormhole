@@ -6326,13 +6326,6 @@ async function requireWorkspaceAuth(): Promise<void> {
   authSession.requireUnlocked();
 }
 
-const defaultMcpStatus: McpStatusResponse = {
-  enabled: false,
-  running: false,
-  port: 8765,
-  endpoint: 'http://127.0.0.1:8765/mcp',
-};
-
 function parseMcpPort(value: unknown): number {
   if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > 65535) {
     throw new Error('MCP port must be an integer between 1 and 65535.');
@@ -7576,14 +7569,12 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     return runBackend('auth-system-idle');
   });
   ipcMain.handle('mcp:status', async () => {
-    if (process.platform !== 'win32') return defaultMcpStatus;
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
       return sshBackend.mcpStatus();
     });
   });
   ipcMain.handle('mcp:start', async (_event, port: unknown) => {
-    if (process.platform !== 'win32') throw new Error('MCP is available on Windows builds.');
     const parsedPort = parseMcpPort(port);
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
@@ -7591,14 +7582,12 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     });
   });
   ipcMain.handle('mcp:stop', async () => {
-    if (process.platform !== 'win32') throw new Error('MCP is available on Windows builds.');
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
       return sshBackend.stopMcp();
     });
   });
   ipcMain.handle('mcp:set-port', async (_event, port: unknown) => {
-    if (process.platform !== 'win32') throw new Error('MCP is available on Windows builds.');
     const parsedPort = parseMcpPort(port);
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
@@ -7606,21 +7595,18 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     });
   });
   ipcMain.handle('mcp:get-token', async () => {
-    if (process.platform !== 'win32') throw new Error('MCP is available on Windows builds.');
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
       return sshBackend.getMcpToken();
     });
   });
   ipcMain.handle('mcp:regenerate-token', async () => {
-    if (process.platform !== 'win32') throw new Error('MCP is available on Windows builds.');
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
       return sshBackend.regenerateMcpToken();
     });
   });
   ipcMain.handle('mcp:approval', async (_event, value: unknown) => {
-    if (process.platform !== 'win32') throw new Error('MCP is available on Windows builds.');
     const approval = parseMcpApproval(value);
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
@@ -7632,7 +7618,6 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     if (!isWorkspaceNodeWebSettingsRequest(request)) {
       throw new Error('Workspace web node settings are invalid.');
     }
-    if (process.platform !== 'win32') return { updated: false };
     return serializeAuthOperation(async () => {
       await ensureAuthSession();
       authSession.requireUnlocked();

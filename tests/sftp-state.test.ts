@@ -3,6 +3,8 @@ import test from 'node:test';
 
 import {
   compareSftpEntries,
+  isInvalidLocalSftpDropDestination,
+  isLocalSftpRootPath,
   isSftpTransferTerminal,
   nextSftpOperationRefreshRequests,
   nextSftpSelection,
@@ -145,6 +147,47 @@ test('local SFTP parent navigation preserves Windows roots', () => {
   assert.equal(parentLocalSftpPath('\\\\server\\share'), '\\\\server\\share');
   assert.equal(parentLocalSftpPath('\\\\server\\share\\'), '\\\\server\\share');
   assert.equal(parentLocalSftpPath('\\\\server\\share\\folder'), '\\\\server\\share');
+});
+
+test('local SFTP parent navigation preserves POSIX roots and separators', () => {
+  assert.equal(parentLocalSftpPath('/'), '/');
+  assert.equal(parentLocalSftpPath('/home'), '/');
+  assert.equal(parentLocalSftpPath('/home/operator'), '/home');
+  assert.equal(parentLocalSftpPath('/home/operator/'), '/home');
+  assert.equal(isLocalSftpRootPath('/'), true);
+  assert.equal(isLocalSftpRootPath('/home'), false);
+});
+
+test('local SFTP drops reject recursive destinations on Windows and POSIX hosts', () => {
+  const directory = (sourcePath: string, name: string) => ({
+    sourcePath,
+    name,
+    isDirectory: true,
+  });
+  assert.equal(
+    isInvalidLocalSftpDropDestination(
+      'C:\\Users\\operator\\folder\\nested',
+      [directory('C:\\Users\\operator\\folder', 'folder')],
+      'win32',
+    ),
+    true,
+  );
+  assert.equal(
+    isInvalidLocalSftpDropDestination(
+      '/home/operator/folder/nested',
+      [directory('/home/operator/folder', 'folder')],
+      'linux',
+    ),
+    true,
+  );
+  assert.equal(
+    isInvalidLocalSftpDropDestination(
+      '/home/operator/other',
+      [directory('/home/operator/folder', 'folder')],
+      'linux',
+    ),
+    false,
+  );
 });
 
 test('SFTP transfer terminal states are stable for queue cleanup', () => {

@@ -82,6 +82,19 @@ func enforceAzureAdRdpExternalClient(profile *rdpProfile, operatingSystem string
 	return true
 }
 
+func normalizeRdpExternalClientForOS(profile *rdpProfile, operatingSystem string) bool {
+	if profile == nil {
+		return false
+	}
+	if operatingSystem != "windows" {
+		// RdpUseExternalClient means mstsc, not the FreeRDP process used by non-Windows builds.
+		// Ignore a preference that may have roamed with the shared workspace database.
+		profile.UseExternalClient = false
+		return false
+	}
+	return enforceAzureAdRdpExternalClient(profile, operatingSystem)
+}
+
 func clearRdpExternalClientCredentials(profile *rdpProfile) {
 	if profile == nil {
 		return
@@ -571,7 +584,7 @@ func (m *vncManager) resolveRdpProfile(
 		AutoReconnect: settings.AutoReconnect, ServerAuthentication: rdpIntPointer(settings.ServerAuthentication),
 		GatewayUsageMethod: settings.GatewayUsageMethod, GatewayHostname: settings.GatewayHostname,
 		GatewayBypassLocal: settings.GatewayBypassLocal, GatewayUseSameCreds: settings.GatewayUseSameCreds,
-		UseExternalClient: settings.UseExternalClient,
+		UseExternalClient: settings.UseExternalClient && runtime.GOOS == "windows",
 	}
 	if enabled, ok := firstInt("TunnelEnabled"); ok {
 		value := enabled != 0

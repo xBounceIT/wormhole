@@ -43,6 +43,7 @@ import {
   formatBitwardenVaultStatus,
 } from './bitwarden-cli-view';
 import { writeClipboardText } from './clipboard';
+import { buildMcpConfig, type McpClient } from './mcp-config';
 import {
   normalizeTerminalPasteText,
   shouldAutoCopyTerminalSelection,
@@ -76,6 +77,8 @@ import {
 import {
   parentLocalSftpPath,
   parentSftpPath,
+  isInvalidLocalSftpDropDestination,
+  isLocalSftpRootPath,
   isSftpTransferTerminal,
   shouldApplySftpClosed,
   shouldApplySftpError,
@@ -7718,29 +7721,35 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                             ))}
                           </div>
                         ) : null}
-                        <label className="flex items-center gap-2 text-xs">
-                          <Checkbox
-                            checked={
-                              rdpExternalClientRequired || newConnectionForm.rdp.useExternalClient
-                            }
-                            disabled={rdpExternalClientRequired}
-                            onCheckedChange={(checked) =>
-                              setNewConnectionForm((form) => ({
-                                ...form,
-                                rdp: {
-                                  ...form.rdp,
-                                  useExternalClient: checked === true,
-                                },
-                              }))
-                            }
-                          />
-                          <span>Open with system Remote Desktop (mstsc.exe)</span>
-                        </label>
-                        {rdpExternalClientRequired ? (
-                          <p className="text-[11px] leading-relaxed text-muted-foreground">
-                            Azure AD credentials require the system Remote Desktop client. Wormhole
-                            enforces this route to avoid the embedded Windows host failure.
-                          </p>
+                        {window.wormhole?.platform === 'win32' ? (
+                          <>
+                            <label className="flex items-center gap-2 text-xs">
+                              <Checkbox
+                                checked={
+                                  rdpExternalClientRequired ||
+                                  newConnectionForm.rdp.useExternalClient
+                                }
+                                disabled={rdpExternalClientRequired}
+                                onCheckedChange={(checked) =>
+                                  setNewConnectionForm((form) => ({
+                                    ...form,
+                                    rdp: {
+                                      ...form.rdp,
+                                      useExternalClient: checked === true,
+                                    },
+                                  }))
+                                }
+                              />
+                              <span>Open with system Remote Desktop (mstsc.exe)</span>
+                            </label>
+                            {rdpExternalClientRequired ? (
+                              <p className="text-[11px] leading-relaxed text-muted-foreground">
+                                Azure AD credentials require the system Remote Desktop client.
+                                Wormhole enforces this route to avoid the embedded Windows host
+                                failure.
+                              </p>
+                            ) : null}
+                          </>
                         ) : null}
                         <label className="flex items-center gap-2 text-xs">
                           <Checkbox
@@ -8852,13 +8861,7 @@ function clearSftpCancelRequestsForBrowser(
 
 function isSftpPaneRoot(pane: SftpPaneKind, path: string): boolean {
   if (pane === 'remote') return !path || path === '/';
-  const normalized = path.replaceAll('/', '\\').replace(/[\\]+$/, '');
-  return (
-    !path ||
-    /^[A-Za-z]:$/.test(normalized) ||
-    /^\\\\[^\\]+\\[^\\]+$/.test(normalized) ||
-    parentLocalSftpPath(path) === path
-  );
+  return isLocalSftpRootPath(path);
 }
 
 function joinSftpPanePath(pane: SftpPaneKind, parent: string, name: string): string {
@@ -8922,31 +8925,6 @@ function parseSftpDragPayload(data: DataTransfer): SftpDragPayload | undefined {
     return result;
   }, []);
   return items.length > 0 ? { sourcePane: 'local', items, external: true } : undefined;
-}
-
-function normalizeLocalDropPath(value: string): string {
-  const normalized = value.replaceAll('/', '\\');
-  if (/^[A-Za-z]:\\$/.test(normalized)) return normalized;
-  return normalized.replace(/[\\]+$/, '');
-}
-
-function localDropPathContains(parent: string, candidate: string): boolean {
-  const normalizedParent = normalizeLocalDropPath(parent).toLowerCase();
-  const normalizedCandidate = normalizeLocalDropPath(candidate).toLowerCase();
-  if (normalizedParent === normalizedCandidate) return true;
-  const prefix = normalizedParent.endsWith('\\') ? normalizedParent : `${normalizedParent}\\`;
-  return normalizedCandidate.startsWith(prefix);
-}
-
-function isInvalidLocalDropDestination(destination: string, items: SftpTransferItem[]): boolean {
-  if (!/^(?:[A-Za-z]:[\\/]|\\\\)/.test(destination)) return false;
-  for (const item of items) {
-    if (!/^(?:[A-Za-z]:[\\/]|\\\\)/.test(item.sourcePath)) continue;
-    const target = joinSftpPanePath('local', destination, item.name);
-    if (localDropPathContains(item.sourcePath, target)) return true;
-    if (item.isDirectory && localDropPathContains(item.sourcePath, destination)) return true;
-  }
-  return false;
 }
 
 function isValidSftpNameInput(name: string): boolean {
@@ -9811,7 +9789,7 @@ function SftpBrowserSurface({
     if (
       targetPane === 'local' &&
       payload.sourcePane === 'local' &&
-      isInvalidLocalDropDestination(targetPath, payload.items)
+      isInvalidLocalSftpDropDestination(targetPath, payload.items, window.wormhole?.platform ?? '')
     ) {
       return;
     }
@@ -13168,19 +13146,16 @@ function logsErrorMessage(error: unknown): string {
 }
 
 function LogLevelSetting({
-  error,
   initialValue,
   loaded,
-  onErrorChange,
   onSaved,
 }: {
-  error: string;
   initialValue: LogLevel;
   loaded: boolean;
-  onErrorChange: (error: string) => void;
   onSaved: (level: LogLevel) => void;
 }) {
   const [logLevel, setLogLevel] = useState<LogLevel>(initialValue);
+  const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
   const saveState = useLazyRef(() => createLogLevelSaveState(initialValue));
@@ -13207,7 +13182,7 @@ function LogLevelSetting({
     } catch (error) {
       saveState.current.desired = saveState.current.persisted;
       setLogLevel(saveState.current.persisted);
-      onErrorChange(logsErrorMessage(error));
+      setError(logsErrorMessage(error));
     } finally {
       busyRef.current = false;
       setBusy(false);
@@ -13218,7 +13193,7 @@ function LogLevelSetting({
     if (!loaded || !isLogLevel(next) || next === saveState.current.desired) return;
     saveState.current.desired = next;
     setLogLevel(next);
-    if (error) onErrorChange('');
+    if (error) setError('');
     void persistDesiredLogLevel();
   }
 
@@ -13486,57 +13461,7 @@ function BitwardenOperationDialog({
   );
 }
 
-type McpClient = 'claude-code' | 'claude-desktop' | 'codex';
-
 const mcpTokenPlaceholder = '<bearer-token — click Reveal or Copy config>';
-
-function buildMcpConfig(client: McpClient, endpoint: string, token: string): string {
-  if (client === 'codex') {
-    const escapeToml = (value: string) => value.replaceAll('\\', '\\\\').replaceAll('"', '\\"');
-    return (
-      '[mcp_servers.wormhole]\n' +
-      `url = "${escapeToml(endpoint)}"\n` +
-      `http_headers = { Authorization = "${escapeToml(`Bearer ${token}`)}" }\n`
-    );
-  }
-
-  if (client === 'claude-desktop') {
-    return JSON.stringify(
-      {
-        mcpServers: {
-          wormhole: {
-            command: 'cmd',
-            args: [
-              '/c',
-              'npx',
-              'mcp-remote@latest',
-              endpoint,
-              '--header',
-              'Authorization:${WORMHOLE_MCP_TOKEN}',
-            ],
-            env: { WORMHOLE_MCP_TOKEN: `Bearer ${token}` },
-          },
-        },
-      },
-      null,
-      2,
-    );
-  }
-
-  return JSON.stringify(
-    {
-      mcpServers: {
-        wormhole: {
-          type: 'http',
-          url: endpoint,
-          headers: { Authorization: `Bearer ${token}` },
-        },
-      },
-    },
-    null,
-    2,
-  );
-}
 
 function mcpClientCopyDetails(client: McpClient): {
   label: string;
@@ -14009,7 +13934,8 @@ function SettingsPage({
   const [logsOpenBusy, setLogsOpenBusy] = useState(false);
   const [retentionBusy, setRetentionBusy] = useState(false);
   const savedLogLevel = useRef<LogLevel>('info');
-  const [logsError, setLogsError] = useState('');
+  const [logsActionError, setLogsActionError] = useState('');
+  const [retentionError, setRetentionError] = useState('');
   const [backupExportOpen, setBackupExportOpen] = useState(false);
   const [backupExportPassword, setBackupExportPassword] = useState('');
   const [backupExportConfirmation, setBackupExportConfirmation] = useState('');
@@ -14164,10 +14090,10 @@ function SettingsPage({
         if (isLogLevel(info.logLevel)) savedLogLevel.current = info.logLevel;
         setLogsInfo(info);
         setRetentionDays(String(info.logRetentionDays));
-        setLogsError('');
+        setLogsActionError('');
       })
       .catch((error) => {
-        if (active) setLogsError(logsErrorMessage(error));
+        if (active) setLogsActionError(logsErrorMessage(error));
       });
     return () => {
       active = false;
@@ -14895,7 +14821,9 @@ function SettingsPage({
     try {
       const token = await window.wormhole.getMcpToken();
       if (authGateRef.current !== 'unlocked') return;
-      await copyTextToClipboard(buildMcpConfig(mcpClient, mcpEndpoint, token));
+      await copyTextToClipboard(
+        buildMcpConfig(mcpClient, mcpEndpoint, token, window.wormhole.platform),
+      );
       setMcpMessage('MCP client configuration copied with the current bearer token.');
     } catch (error) {
       setMcpError(authSettingsErrorMessage(error));
@@ -14907,11 +14835,11 @@ function SettingsPage({
   async function openCurrentLogFile() {
     if (logsOpenBusy || retentionBusy || !window.wormhole) return;
     setLogsOpenBusy(true);
-    setLogsError('');
+    setLogsActionError('');
     try {
       await window.wormhole.openCurrentLogFile();
     } catch (error) {
-      setLogsError(logsErrorMessage(error));
+      setLogsActionError(logsErrorMessage(error));
     } finally {
       setLogsOpenBusy(false);
     }
@@ -14920,11 +14848,11 @@ function SettingsPage({
   async function openLogsFolder() {
     if (logsOpenBusy || retentionBusy || !window.wormhole) return;
     setLogsOpenBusy(true);
-    setLogsError('');
+    setLogsActionError('');
     try {
       await window.wormhole.openLogsFolder();
     } catch (error) {
-      setLogsError(logsErrorMessage(error));
+      setLogsActionError(logsErrorMessage(error));
     } finally {
       setLogsOpenBusy(false);
     }
@@ -14936,12 +14864,12 @@ function SettingsPage({
     const days = Number(retentionDays);
     if (!Number.isInteger(days) || days < 1 || days > 365) {
       setRetentionDays(String(saved));
-      setLogsError('Log retention must be a whole number between 1 and 365 days.');
+      setRetentionError('Log retention must be a whole number between 1 and 365 days.');
       return;
     }
     if (days === saved) return;
     setRetentionBusy(true);
-    setLogsError('');
+    setRetentionError('');
     try {
       const result = await window.wormhole.setLogRetentionDays(days);
       setRetentionDays(String(result.logRetentionDays));
@@ -14950,7 +14878,7 @@ function SettingsPage({
       );
     } catch (error) {
       setRetentionDays(String(saved));
-      setLogsError(logsErrorMessage(error));
+      setRetentionError(logsErrorMessage(error));
     } finally {
       setRetentionBusy(false);
     }
@@ -15106,6 +15034,7 @@ function SettingsPage({
     mcpClient,
     mcpEndpoint,
     mcpTokenRevealed && mcpToken ? mcpToken : mcpTokenPlaceholder,
+    window.wormhole?.platform ?? '',
   );
   const mcpConfigDetails = mcpClientCopyDetails(mcpClient);
   const updateAvailable = Boolean(
@@ -15261,7 +15190,13 @@ function SettingsPage({
                   <SelectItem value="disabled">Disabled</SelectItem>
                   <SelectItem value="pin">PIN</SelectItem>
                   <SelectItem value="password">Password</SelectItem>
-                  <SelectItem value="windowsHello">Windows Hello</SelectItem>
+                  {window.wormhole?.platform === 'win32' ? (
+                    <SelectItem value="windowsHello">Windows Hello</SelectItem>
+                  ) : authMethod === 'windowsHello' ? (
+                    <SelectItem disabled value="windowsHello">
+                      Windows Hello (Windows only)
+                    </SelectItem>
+                  ) : null}
                 </SelectContent>
               </Select>
             </div>
@@ -15371,7 +15306,7 @@ function SettingsPage({
                 Turning this on installs the official Bitwarden CLI automatically.
               </p>
               <div className="grid gap-2">
-                <Label htmlFor="settings-bitwarden-path">bw.exe path</Label>
+                <Label htmlFor="settings-bitwarden-path">Bitwarden CLI path</Label>
                 <Input
                   disabled={bitwardenBusy}
                   id="settings-bitwarden-path"
@@ -15714,10 +15649,7 @@ function SettingsPage({
                 id="settings-log-file"
                 readOnly
                 spellCheck={false}
-                value={
-                  logsInfo?.currentLogFilePath ??
-                  '%LOCALAPPDATA%\\Wormhole\\logs\\wormhole-YYYYMMDD.log'
-                }
+                value={logsInfo?.currentLogFilePath ?? 'Loading the current log path…'}
               />
             </div>
             <div className="flex flex-wrap gap-2">
@@ -15739,13 +15671,14 @@ function SettingsPage({
                 Open log folder
               </Button>
             </div>
+            {logsActionError ? (
+              <p className="text-[11px] text-destructive">{logsActionError}</p>
+            ) : null}
           </SettingsSection>
 
           <LogLevelSetting
-            error={logsError}
             initialValue={savedLogLevel.current}
             loaded={logsInfo !== null}
-            onErrorChange={setLogsError}
             onSaved={(level) => {
               savedLogLevel.current = level;
             }}
@@ -15775,7 +15708,9 @@ function SettingsPage({
               Logs rotate daily. Retention changes are saved now and apply after restarting
               Wormhole.
             </p>
-            {logsError ? <p className="text-[11px] text-destructive">{logsError}</p> : null}
+            {retentionError ? (
+              <p className="text-[11px] text-destructive">{retentionError}</p>
+            ) : null}
           </SettingsSection>
         </SettingsTabPanel>
 

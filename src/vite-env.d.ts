@@ -694,6 +694,7 @@ interface WormholeTunnelTestProgress {
 
 interface Window {
   wormhole?: {
+    platform: string;
     loadStartup(legacyTheme?: 'system' | 'light' | 'dark'): Promise<WormholeStartupSnapshot>;
     unlockStartup(request: WormholeAuthVerificationRequest): Promise<WormholeStartupUnlock>;
     markStartupReady(): void;

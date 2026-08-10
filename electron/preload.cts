@@ -57,6 +57,7 @@ type WorkspaceRdpSettings = {
 };
 
 const wormholeBridge = {
+  platform: process.platform,
   loadStartup: (legacyTheme?: 'system' | 'light' | 'dark') =>
     ipcRenderer.invoke('startup:load', { legacyTheme }),
   unlockStartup: (request: { method: 'pin' | 'password'; secret: string }) =>

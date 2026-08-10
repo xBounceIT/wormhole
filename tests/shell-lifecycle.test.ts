@@ -12,6 +12,7 @@ import {
   WindowCloseReasonTracker,
 } from '../electron/window-lifecycle.ts';
 import { createLogLevelSaveState, drainLogLevelChanges } from '../src/log-level-settings.ts';
+import { buildMcpConfig } from '../src/mcp-config.ts';
 import {
   canDisconnectRemoteDesktopSession,
   canOpenRdpSystemClient,
@@ -96,6 +97,48 @@ test('startup keeps optional native and renderer work off the first-frame path',
   );
   assert.match(appSource, /lazy\(\(\) =>[\s\S]*import\('\.\/components\/VncSurface'\)/);
   assert.match(appSource, /mremoteImportOpen \? \([\s\S]*<Suspense fallback=\{null\}>/);
+});
+
+test('cross-platform backend features are not gated by Windows-only IPC handlers', () => {
+  const mainSource = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
+  const preloadSource = readFileSync(new URL('../electron/preload.cts', import.meta.url), 'utf8');
+  const handlers = mainSource.slice(
+    mainSource.indexOf("ipcMain.handle('mcp:status'"),
+    mainSource.indexOf("ipcMain.handle('tree-tooltip:show'"),
+  );
+
+  assert.doesNotMatch(handlers, /process\.platform|available on Windows builds/);
+  for (const call of [
+    'sshBackend.mcpStatus()',
+    'sshBackend.startMcp(parsedPort)',
+    'sshBackend.stopMcp()',
+    'sshBackend.setMcpPort(parsedPort)',
+    'sshBackend.getMcpToken()',
+    'sshBackend.regenerateMcpToken()',
+    "runBackend<{ updated: boolean }>('workspace-update-node-web-settings', request)",
+  ]) {
+    assert.ok(handlers.includes(call), `missing cross-platform handler call: ${call}`);
+  }
+  assert.match(preloadSource, /platform: process\.platform/);
+});
+
+test('MCP client configuration uses the host platform command contract', () => {
+  const windows = JSON.parse(
+    buildMcpConfig('claude-desktop', 'http://127.0.0.1:8765/mcp', 'token', 'win32'),
+  );
+  const linux = JSON.parse(
+    buildMcpConfig('claude-desktop', 'http://127.0.0.1:8765/mcp', 'token', 'linux'),
+  );
+
+  assert.equal(windows.mcpServers.wormhole.command, 'cmd');
+  assert.deepEqual(windows.mcpServers.wormhole.args.slice(0, 3), [
+    '/c',
+    'npx',
+    'mcp-remote@latest',
+  ]);
+  assert.equal(linux.mcpServers.wormhole.command, 'npx');
+  assert.equal(linux.mcpServers.wormhole.args[0], 'mcp-remote@latest');
+  assert.equal(linux.mcpServers.wormhole.env.WORMHOLE_MCP_TOKEN, 'Bearer token');
 });
 
 test('SSH automatic reconnect keeps the tab alive and reports terminal exhaustion', () => {
@@ -196,11 +239,15 @@ test('log level changes stay isolated without disrupting Radix select close focu
   assert.match(settingSource, /const \[logLevel, setLogLevel\] = useState/);
   assert.match(settingSource, /busyRef\.current/);
   assert.match(settingSource, /drainLogLevelChanges/);
+  assert.match(settingSource, /const \[error, setError\] = useState\(''\)/);
   assert.match(settingSource, /disabled=\{!loaded\}/);
   assert.match(settingSource, /aria-busy=\{busy\}/);
   assert.doesNotMatch(settingSource, /disabled=\{busy\}/);
   assert.match(settingsPageSource, /<SettingsTabPanel forceMount value="logs">/);
   assert.match(settingsPageSource, /loaded=\{logsInfo !== null\}/);
+  assert.match(settingsPageSource, /logsActionError/);
+  assert.match(settingsPageSource, /retentionError/);
+  assert.doesNotMatch(settingsPageSource, /\blogsError\b|\bsetLogsError\b/);
   assert.doesNotMatch(settingsPageSource, /setLogLevelState|function commitLogLevel/);
 });
 
