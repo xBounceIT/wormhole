@@ -946,8 +946,18 @@ func TestValidateTunnelWriteRequestMatchesProviderRequirements(t *testing.T) {
 			missing:  "Username",
 		},
 		{
+			name: "WatchGuard explicit non-SSO automatic mode", kind: 3,
+			settings: `{"Server":"firebox.example.test","AuthMode":0,"UseSingleSignOn":false}`,
+			missing:  "Username",
+		},
+		{
 			name: "Stormshield automatic credentials", kind: 4,
 			settings: `{"Server":"sns.example.test","Mode":0}`,
+			missing:  "Username",
+		},
+		{
+			name: "Stormshield obsolete SSO", kind: 4,
+			settings: `{"Server":"sns.example.test","Mode":0,"UseSingleSignOn":true}`,
 			missing:  "Username",
 		},
 		{
@@ -980,6 +990,60 @@ func TestValidateTunnelWriteRequestRejectsFortinetEmbeddedSSOPin(t *testing.T) {
 	err := validateTunnelWriteRequest(&request, false)
 	if err == nil || !strings.Contains(err.Error(), "server certificate pin") {
 		t.Fatalf("validateTunnelWriteRequest() error = %v, want embedded SSO pin rejection", err)
+	}
+}
+
+func TestValidateTunnelWriteRequestCanonicalizesWatchGuardSSO(t *testing.T) {
+	request := tunnelWriteRequest{
+		Name: "watchguard sso",
+		Kind: 3,
+		Settings: json.RawMessage(`{
+            "Server":"firebox.example.test",
+            "AuthMode":1,
+            "UseSingleSignOn":true,
+            "Username":"must-go",
+            "Password":"must-go"
+        }`),
+	}
+	if err := validateTunnelWriteRequest(&request, false); err != nil {
+		t.Fatalf("WatchGuard SSO settings were rejected: %v", err)
+	}
+	var settings map[string]json.RawMessage
+	if err := json.Unmarshal(request.Settings, &settings); err != nil {
+		t.Fatal(err)
+	}
+	if !tunnelSettingBool(settings, "UseSingleSignOn") || tunnelSettingNumber(settings, "AuthMode") != 2 {
+		t.Fatalf("WatchGuard SSO mode was not canonicalized: %s", request.Settings)
+	}
+	if _, found := settings["Username"]; found {
+		t.Fatalf("WatchGuard SSO retained the username: %s", request.Settings)
+	}
+	if _, found := settings["Password"]; found {
+		t.Fatalf("WatchGuard SSO retained the password: %s", request.Settings)
+	}
+}
+
+func TestValidateTunnelWriteRequestRemovesObsoleteStormshieldSSO(t *testing.T) {
+	request := tunnelWriteRequest{
+		Name: "stormshield credentials",
+		Kind: 4,
+		Settings: json.RawMessage(`{
+            "Server":"sns.example.test",
+            "Mode":0,
+            "UseSingleSignOn":true,
+            "Username":"alice",
+            "Password":"secret"
+        }`),
+	}
+	if err := validateTunnelWriteRequest(&request, false); err != nil {
+		t.Fatalf("Stormshield credentials were rejected: %v", err)
+	}
+	var settings map[string]json.RawMessage
+	if err := json.Unmarshal(request.Settings, &settings); err != nil {
+		t.Fatal(err)
+	}
+	if _, found := settings["UseSingleSignOn"]; found {
+		t.Fatalf("Stormshield retained obsolete SSO state: %s", request.Settings)
 	}
 }
 
@@ -1067,25 +1131,26 @@ func TestProviderCacheIdentityIgnoresRotatedPasswordsButTracksSiteTrust(t *testi
 func TestValidateTunnelWriteRequestRejectsMalformedProviderTypes(t *testing.T) {
 	tests := []struct {
 		name     string
+		kind     int64
 		settings string
 		field    string
 	}{
 		{
-			name: "boolean", field: "UseSingleSignOn",
+			name: "Fortinet boolean", kind: 2, field: "UseSingleSignOn",
 			settings: `{"Host":"vpn.example.test","Username":"user","Password":"password","UseSingleSignOn":"false"}`,
 		},
 		{
-			name: "enum", field: "Mode",
+			name: "WatchGuard boolean", kind: 3, field: "UseSingleSignOn",
+			settings: `{"Server":"firebox.example.test","AuthMode":0,"UseSingleSignOn":"false"}`,
+		},
+		{
+			name: "Stormshield enum", kind: 4, field: "Mode",
 			settings: `{"Server":"sns.example.test","Username":"user","Password":"password","Mode":3}`,
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			kind := int64(2)
-			if test.field == "Mode" {
-				kind = 4
-			}
-			request := tunnelWriteRequest{Name: test.name, Kind: kind, Settings: json.RawMessage(test.settings)}
+			request := tunnelWriteRequest{Name: test.name, Kind: test.kind, Settings: json.RawMessage(test.settings)}
 			if err := validateTunnelWriteRequest(&request, false); err == nil || !strings.Contains(err.Error(), test.field) {
 				t.Fatalf("validateTunnelWriteRequest() error = %v, want invalid %s", err, test.field)
 			}

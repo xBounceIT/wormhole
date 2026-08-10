@@ -155,7 +155,7 @@ func prepareWatchguardProfile(
 	settingsHash := providerCacheIdentity(3, settings)
 	cacheState := providerCacheState(3, settings)
 	authMode := tunnelSettingNumber(settings, "AuthMode")
-	if authMode == 2 {
+	if watchguardUsesSingleSignOn(settings) {
 		return prepareWatchguardSAML(ctx, settings)
 	}
 	if authMode == 0 && (strings.TrimSpace(tunnelSettingString(settings, "Username")) == "" || tunnelSettingString(settings, "Password") == "") {
@@ -281,6 +281,10 @@ func prepareWatchguardProfile(
 	settings["Password"], _ = json.Marshal(dataPlanePassword)
 	delete(settings, "ChallengeResponse")
 	return json.Marshal(settings)
+}
+
+func watchguardUsesSingleSignOn(settings map[string]json.RawMessage) bool {
+	return tunnelSettingBool(settings, "UseSingleSignOn") || tunnelSettingNumber(settings, "AuthMode") == 2
 }
 
 func prepareWatchguardSAML(

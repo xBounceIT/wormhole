@@ -4,6 +4,10 @@ export type TunnelSettings =
   | { tunnelEnabled: false; tunnelConfigId: '' }
   | { tunnelEnabled: true; tunnelConfigId: string };
 
+export function watchguardUsesSso(settings: Record<string, unknown>): boolean {
+  return settings.UseSingleSignOn === true || settings.AuthMode === 2;
+}
+
 export function tunnelModeFor(node: {
   tunnelEnabled?: boolean | null;
   tunnelConfigId?: string;
@@ -93,12 +97,21 @@ export function normalizeTunnelEditorSettings(
     stripAll('TotpSecret');
     stripAll('ServerCertSha256Pin');
   } else if (kind === 3) {
-    trimCrlf('Password');
+    const useSso = watchguardUsesSso(settings);
+    settings.UseSingleSignOn = useSso;
+    if (useSso) {
+      settings.AuthMode = 2;
+      delete settings.Username;
+      delete settings.Password;
+    } else {
+      trimCrlf('Password');
+    }
     deleteIfBlank('Domain');
     if (!(settings.VerifyX509Name as string | undefined)?.trim()) {
       settings.VerifyX509Name = '/O=WatchGuard_Technologies/OU=Fireware/CN=Fireware_SSLVPN_Server';
     }
   } else if (kind === 4) {
+    delete settings.UseSingleSignOn;
     trimCrlf('Password');
     if (!(settings.AppToken as string | undefined)?.trim()) settings.AppToken = 'sslclient';
   } else if (kind === 5) {
@@ -117,6 +130,43 @@ export function normalizeTunnelEditorSettings(
     stripAll('ServerCertSha256Pin');
   }
   return settings;
+}
+
+export function updateTunnelEditorSetting(
+  kind: number,
+  input: Record<string, unknown>,
+  key: string,
+  next: unknown,
+): Record<string, unknown> {
+  const settings = { ...input, [key]: next };
+  if (kind !== 3) return settings;
+
+  if (key === 'UseSingleSignOn') {
+    const enabled = next === true;
+    settings.AuthMode = enabled ? 2 : settings.AuthMode === 2 ? 0 : settings.AuthMode;
+    if (enabled) {
+      delete settings.Username;
+      delete settings.Password;
+    }
+  } else if (key === 'AuthMode') {
+    settings.UseSingleSignOn = next === 2;
+    if (next === 2) {
+      delete settings.Username;
+      delete settings.Password;
+    }
+  }
+  return settings;
+}
+
+export function watchguardSsoEnabledForEditor(settings: Record<string, unknown>): boolean {
+  if (watchguardUsesSso(settings)) return true;
+  if (Object.hasOwn(settings, 'UseSingleSignOn') || (settings.AuthMode ?? 0) !== 0) return false;
+  const blank = (key: string) =>
+    typeof settings[key] !== 'string' || !(settings[key] as string).trim();
+  const hasManualProfile = ['ProfileOvpn', 'CaPem', 'ClientCertPem', 'ClientKeyPem'].some(
+    (key) => !blank(key),
+  );
+  return !hasManualProfile && (blank('Username') || blank('Password'));
 }
 
 export function missingTunnelFields(value: {
@@ -170,24 +220,24 @@ export function missingTunnelFields(value: {
       }
       break;
     }
-    case 3:
+    case 3: {
       if (blank('Server')) missing.push('Server');
       if (!validPort('Port')) missing.push('Port (1-65535)');
-      if (settings.AuthMode === 1) {
+      const useSso = watchguardUsesSso(settings);
+      if (!useSso) {
         if (blank('Username')) missing.push('Username');
         if (blank('Password')) missing.push('Password');
       }
       break;
+    }
     case 4:
       if (settings.Mode === 1) {
         if (blank('ProfileOvpn')) missing.push('OpenVPN profile');
       } else {
         if (blank('Server')) missing.push('Server');
         if (!validPort('Port')) missing.push('Port (1-65535)');
-        if (settings.UseSingleSignOn !== true) {
-          if (blank('Username')) missing.push('Username');
-          if (blank('Password')) missing.push('Password');
-        }
+        if (blank('Username')) missing.push('Username');
+        if (blank('Password')) missing.push('Password');
       }
       break;
     case 5: {
