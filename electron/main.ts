@@ -20,6 +20,7 @@ import { createInterface, type Interface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import type { ElectronChromeExtensions } from 'electron-chrome-extensions';
 import { AuthSession } from './auth-session.js';
+import { hasValidCredentialSecretLength } from './credential-secret-length.js';
 import { initializeLocalCrashDiagnostics } from './crash-diagnostics.js';
 import { isAppTheme, parseThemeStartupRequest, type AppTheme } from './theme-settings.js';
 import {
@@ -1372,7 +1373,7 @@ function hasValidSshKeyPassphraseOverride(value: Record<string, unknown>): boole
     (value.keyPassphrase === undefined ||
       (typeof value.keyPassphrase === 'string' &&
         value.keyPassphrase.length > 0 &&
-        Buffer.byteLength(value.keyPassphrase, 'utf8') <= credentialMaxPasswordLength)) &&
+        hasValidCredentialSecretLength(value.keyPassphrase))) &&
     (value.manualKeyPassphrase === true) === (value.keyPassphrase !== undefined)
   );
 }
@@ -1510,7 +1511,7 @@ function parseCredentialCreateRequest(value: unknown, updating = false): Credent
     typeof password !== 'string' ||
     password.length > credentialMaxPasswordLength ||
     typeof passphrase !== 'string' ||
-    Buffer.byteLength(passphrase, 'utf8') > credentialMaxPasswordLength ||
+    !hasValidCredentialSecretLength(passphrase) ||
     typeof clearPassphrase !== 'boolean' ||
     provider === undefined ||
     (privateKeySelectionId !== undefined && !isUuid(privateKeySelectionId)) ||

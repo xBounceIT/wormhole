@@ -13,6 +13,7 @@ import {
   mergeCredential,
   sshAutoSudoAvailable,
 } from '../src/credential-state.ts';
+import { hasValidCredentialSecretLength } from '../electron/credential-secret-length.ts';
 import {
   bitwardenCliIsLoggedIn,
   bitwardenCliServerRegionCode,
@@ -123,6 +124,13 @@ test('Auto sudo remains available for inline and inherited credentials but not a
   assert.equal(sshAutoSudoAvailable(true, 'unsupported'), false);
 });
 
+test('SSH key passphrase limits count Unicode code points instead of encoded bytes', () => {
+  assert.equal(hasValidCredentialSecretLength('é'.repeat(4096)), true);
+  assert.equal(hasValidCredentialSecretLength('é'.repeat(4097)), false);
+  assert.equal(hasValidCredentialSecretLength('🔐'.repeat(4096)), true);
+  assert.equal(hasValidCredentialSecretLength('🔐'.repeat(4097)), false);
+});
+
 test('hidden Auto sudo ignores stale quick-connect state and preserves only a loaded saved override', () => {
   assert.equal(effectiveSshAutoSudoMode('ssh', false, 'on', 'off'), 'off');
   assert.equal(effectiveSshAutoSudoMode('ssh', false, 'off', 'on'), 'on');
@@ -143,6 +151,7 @@ test('SSH key credential import keeps key paths and material behind the native b
   assert.match(appSource, /<SelectItem value="sshKey">SSH private key<\/SelectItem>/);
   assert.match(appSource, /selectSshPrivateKey\(\)/);
   assert.match(appSource, /Key passphrase \(optional\)/);
+  assert.match(appSource, /id="credential-key-passphrase"[\s\S]*?maxLength=\{8192\}/);
   assert.doesNotMatch(appSource, /privateKeyPath/);
 
   const credentialDraft = appSource.match(/type CredentialDraft = \{[\s\S]*?\n\};/)?.[0];
@@ -172,9 +181,13 @@ test('SSH key credential import keeps key paths and material behind the native b
   assert.match(mainSource, /sshPrivateKeySelections\.delete\(event\.sender\)/);
   assert.match(mainSource, /clearPassphrase/);
   assert.match(mainSource, /sshPrivateKeyDisplayName/);
+  assert.doesNotMatch(
+    mainSource,
+    /Buffer\.byteLength\((?:value\.keyPassphrase|passphrase), 'utf8'\)/,
+  );
 
   assert.match(backendSource, /ssh\.ParsePrivateKeyWithPassphrase/);
-  assert.match(backendSource, /credentialPrivateKeyProtect/);
+  assert.match(backendSource, /credentialPrivateKeyStageProtect/);
   assert.match(backendSource, /maxSshPrivateKeyBytes/);
   assert.match(backendSource, /ClearPassphrase/);
 });

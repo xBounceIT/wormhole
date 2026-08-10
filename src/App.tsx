@@ -11506,7 +11506,7 @@ function CredentialsPage({
                     autoComplete="off"
                     disabled={credentialForm.clearPassphrase}
                     id="credential-key-passphrase"
-                    maxLength={4096}
+                    maxLength={8192}
                     name="credential-key-passphrase"
                     ref={credentialKeyPassphraseInput}
                     type="password"
