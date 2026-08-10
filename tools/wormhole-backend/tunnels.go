@@ -362,7 +362,8 @@ func providerCacheState(kind int64, settings map[string]json.RawMessage) string 
 	state := providerCacheIdentity(kind, settings)
 	switch kind {
 	case 3:
-		return fmt.Sprintf("%s\n%d\n%t\n%t", state, tunnelSettingNumber(settings, "AuthMode"),
+		return fmt.Sprintf("%s\n%d\n%t\n%t\n%t", state, tunnelSettingNumber(settings, "AuthMode"),
+			tunnelSettingBool(settings, "UseSingleSignOn"),
 			watchguardHasManualMaterial(settings), strings.TrimSpace(tunnelSettingString(settings, "ProfileOvpn")) != "")
 	case 4:
 		return fmt.Sprintf("%s\n%d\n%t", state, tunnelSettingNumber(settings, "Mode"), tunnelSettingBool(settings, "UseOtp"))
@@ -545,7 +546,7 @@ func validateTunnelSettings(kind int64, settings map[string]json.RawMessage) err
 	}
 	boolFields := map[int64][]string{
 		2: {"UseSingleSignOn", "UseExternalBrowser", "TrustServerCertificate"},
-		3: {"TrustServerCertificate"},
+		3: {"UseSingleSignOn", "TrustServerCertificate"},
 		4: {"UseSingleSignOn", "UseOtp", "TrustServerCertificate"},
 		6: {"TrustServerCertificate"},
 	}
@@ -599,6 +600,13 @@ func validateTunnelSettings(kind int64, settings map[string]json.RawMessage) err
 		if err := required("Server"); err != nil {
 			return err
 		}
+		useSSO := watchguardUsesSingleSignOn(settings)
+		if useSSO {
+			settings["UseSingleSignOn"] = json.RawMessage("true")
+			settings["AuthMode"] = json.RawMessage("2")
+			delete(settings, "Username")
+			delete(settings, "Password")
+		}
 		if hasTunnelDirectiveDelimiter(tunnelSettingString(settings, "Server"), false) ||
 			hasTunnelDirectiveDelimiter(tunnelSettingString(settings, "VerifyX509Name"), false) {
 			return errors.New("WatchGuard server and certificate subject contain a forbidden character")
@@ -608,19 +616,18 @@ func validateTunnelSettings(kind int64, settings map[string]json.RawMessage) err
 				return errors.New("WatchGuard PEM material contains an invalid angle bracket")
 			}
 		}
-		if tunnelSettingNumber(settings, "AuthMode") == 1 {
+		if !useSSO {
 			return required("Username", "Password")
 		}
 	case 4:
+		delete(settings, "UseSingleSignOn")
 		if tunnelSettingNumber(settings, "Mode") == 1 {
 			return required("ProfileOvpn")
 		}
 		if err := required("Server"); err != nil {
 			return err
 		}
-		if !tunnelSettingBool(settings, "UseSingleSignOn") {
-			return required("Username", "Password")
-		}
+		return required("Username", "Password")
 	case 5:
 		if err := required("TenantId", "Audience"); err != nil {
 			return err

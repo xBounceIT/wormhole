@@ -675,6 +675,40 @@ test('VPN diagnostics expose target probing and cancellation across the bridge',
   );
 });
 
+test('VPN editor keeps WatchGuard SSO and Stormshield OTP layout contracts explicit', () => {
+  const fields = sourceBetween(
+    appSource,
+    'function tunnelEditorFields',
+    'function tunnelDefaultSettings',
+  );
+  const watchguard = sourceBetween(fields, 'case 3:', 'case 4:');
+  const stormshield = sourceBetween(fields, 'case 4:', 'case 5:');
+
+  assert.ok(watchguard.indexOf("key: 'UseSingleSignOn'") < watchguard.indexOf("key: 'Username'"));
+  assert.match(
+    watchguard,
+    /key: 'UseSingleSignOn'[\s\S]{0,180}label: 'Use SSO'[\s\S]{0,180}fullWidth: true/,
+  );
+  assert.doesNotMatch(watchguard, /not required for SAML/i);
+  const watchguardRender = sourceBetween(
+    appSource,
+    '{value.kind === 3 ? (',
+    '{value.kind === 4 ? (',
+  );
+  assert.match(
+    watchguardRender,
+    /useWatchguardSso[\s\S]{0,160}field\.key === 'Username'[\s\S]{0,120}field\.key === 'Password'/,
+  );
+
+  const otp = stormshield.indexOf("key: 'UseOtp'");
+  const username = stormshield.indexOf("key: 'Username'");
+  const password = stormshield.indexOf("key: 'Password'");
+  assert.ok(otp >= 0 && otp < username && username < password);
+  assert.match(stormshield, /key: 'UseOtp'[\s\S]{0,180}fullWidth: true/);
+  assert.doesNotMatch(stormshield, /UseSingleSignOn|Connect with single sign-on/i);
+  assert.match(appSource, /field\.fullWidth\) && 'md:col-span-2'/);
+});
+
 test('backup and mRemoteNG mutations expose cooperative progress and cancellation', () => {
   assert.match(preloadSource, /cancelBackupExport/);
   assert.match(preloadSource, /cancelBackupImport/);

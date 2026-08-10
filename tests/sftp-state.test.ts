@@ -3,9 +3,11 @@ import test from 'node:test';
 
 import {
   compareSftpEntries,
-  isInvalidLocalSftpDropDestination,
-  isLocalSftpRootPath,
   isSftpTransferTerminal,
+  isLocalSftpPathRoot,
+  isInvalidLocalSftpDropDestination,
+  isValidSftpNameInput,
+  joinLocalSftpPath,
   nextSftpOperationRefreshRequests,
   nextSftpSelection,
   nextSftpTransferRefreshRequests,
@@ -149,41 +151,70 @@ test('local SFTP parent navigation preserves Windows roots', () => {
   assert.equal(parentLocalSftpPath('\\\\server\\share\\folder'), '\\\\server\\share');
 });
 
-test('local SFTP parent navigation preserves POSIX roots and separators', () => {
+test('local SFTP navigation preserves POSIX separators and roots', () => {
   assert.equal(parentLocalSftpPath('/'), '/');
   assert.equal(parentLocalSftpPath('/home'), '/');
   assert.equal(parentLocalSftpPath('/home/operator'), '/home');
   assert.equal(parentLocalSftpPath('/home/operator/'), '/home');
-  assert.equal(isLocalSftpRootPath('/'), true);
-  assert.equal(isLocalSftpRootPath('/home'), false);
+  assert.equal(isLocalSftpPathRoot('/'), true);
+  assert.equal(isLocalSftpPathRoot('///'), true);
+  assert.equal(isLocalSftpPathRoot('/home'), false);
+  assert.equal(isLocalSftpPathRoot('C:\\'), true);
+  assert.equal(isLocalSftpPathRoot('\\\\server\\share'), true);
 });
 
-test('local SFTP drops reject recursive destinations on Windows and POSIX hosts', () => {
-  const directory = (sourcePath: string, name: string) => ({
-    sourcePath,
-    name,
+test('local SFTP path joins preserve the native path style', () => {
+  assert.equal(joinLocalSftpPath('/home/operator', 'file.txt'), '/home/operator/file.txt');
+  assert.equal(joinLocalSftpPath('/', 'file.txt'), '/file.txt');
+  assert.equal(
+    joinLocalSftpPath('C:\\Users\\operator', 'file.txt'),
+    'C:\\Users\\operator\\file.txt',
+  );
+  assert.equal(joinLocalSftpPath('C:/Users/operator', 'file.txt'), 'C:/Users/operator/file.txt');
+});
+
+test('SFTP name input follows the pane path style', () => {
+  assert.equal(isValidSftpNameInput('report:2026.txt', 'local', '/home/operator'), true);
+  assert.equal(isValidSftpNameInput('report\\2026.txt', 'local', '/home/operator'), true);
+  assert.equal(isValidSftpNameInput('report:2026.txt', 'local', 'C:\\Users\\operator'), false);
+  assert.equal(isValidSftpNameInput('report\\2026.txt', 'local', 'C:\\Users\\operator'), false);
+  assert.equal(isValidSftpNameInput('report:2026.txt', 'remote', '/home/operator'), true);
+  assert.equal(isValidSftpNameInput('report\\2026.txt', 'remote', '/home/operator'), false);
+  assert.equal(isValidSftpNameInput('nested/report.txt', 'local', '/home/operator'), false);
+  assert.equal(isValidSftpNameInput('bad\u0000name', 'local', '/home/operator'), false);
+});
+
+test('local SFTP drops reject self-copy on POSIX and Windows paths', () => {
+  const posixDirectory = {
+    sourcePath: '/home/operator/project',
+    name: 'project',
     isDirectory: true,
-  });
+  };
+  assert.equal(isInvalidLocalSftpDropDestination('/home/operator', [posixDirectory]), true);
   assert.equal(
-    isInvalidLocalSftpDropDestination('C:\\Users\\operator\\folder\\nested', [
-      directory('C:\\Users\\operator\\folder', 'folder'),
-    ]),
+    isInvalidLocalSftpDropDestination('/home/operator/project/child', [posixDirectory]),
     true,
   );
+  assert.equal(isInvalidLocalSftpDropDestination('/home/operator/target', [posixDirectory]), false);
   assert.equal(
-    isInvalidLocalSftpDropDestination('/home/operator/folder/nested', [
-      directory('/home/operator/folder', 'folder'),
-    ]),
-    true,
-  );
-  assert.equal(
-    isInvalidLocalSftpDropDestination('/home/operator/other', [
-      directory('/home/operator/folder', 'folder'),
+    isInvalidLocalSftpDropDestination('/home/operator/project', [
+      { ...posixDirectory, sourcePath: '/home/operator/Project' },
     ]),
     false,
   );
+
+  const windowsDirectory = {
+    sourcePath: 'C:\\Users\\operator\\Project',
+    name: 'Project',
+    isDirectory: true,
+  };
+  assert.equal(isInvalidLocalSftpDropDestination('c:\\users\\operator', [windowsDirectory]), true);
   assert.equal(
-    isInvalidLocalSftpDropDestination('/Volumes/work/foo', [directory('/Volumes/work/Foo', 'Foo')]),
+    isInvalidLocalSftpDropDestination('C:\\Users\\operator\\Project\\child', [windowsDirectory]),
+    true,
+  );
+  assert.equal(
+    isInvalidLocalSftpDropDestination('C:\\Users\\operator\\target', [windowsDirectory]),
     false,
   );
 });

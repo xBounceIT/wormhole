@@ -145,9 +145,7 @@ func prepareStormshieldProfileCore(
 		return nil, errors.New("VPN tunnel settings are invalid")
 	}
 	defer clearTunnelSettingsMap(settings)
-	if tunnelSettingBool(settings, "UseSingleSignOn") {
-		return nil, errors.New("Stormshield single sign-on is not available yet")
-	}
+	delete(settings, "UseSingleSignOn")
 	profile := tunnelSettingString(settings, "ProfileOvpn")
 	automatic := tunnelSettingNumber(settings, "Mode") == 0
 	useOTP := tunnelSettingBool(settings, "UseOtp")

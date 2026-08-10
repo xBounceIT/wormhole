@@ -1964,7 +1964,7 @@ func readLocalDirectory(path string) ([]sshSftpEntry, bool, error) {
 	result := make([]sshSftpEntry, 0, len(entries))
 	for _, entry := range entries {
 		name := entry.Name()
-		if !isSafeSftpName(name) {
+		if !isSafeLocalSftpName(name) {
 			continue
 		}
 		info, err := entry.Info()
@@ -2056,7 +2056,7 @@ func validateSftpTransferCommand(command sshWireCommand) error {
 		return err
 	}
 	for _, item := range command.Items {
-		if !isSafeTransferName(item.Name) {
+		if !isSafeTransferName(command.Direction, item.Name) {
 			return errors.New("SFTP transfer item name is invalid")
 		}
 		if item.SourcePath == "" {
@@ -2076,11 +2076,11 @@ func validateSftpTransferCommand(command sshWireCommand) error {
 	return nil
 }
 
-func isSafeTransferName(name string) bool {
-	if name == "" || name == "." || name == ".." || len([]byte(name)) > sshSftpMaxNameBytes {
-		return false
+func isSafeTransferName(direction, name string) bool {
+	if direction == "local-to-remote" {
+		return isSafeSftpName(name)
 	}
-	return !strings.ContainsAny(name, "/\\:\x00")
+	return isSafeLocalSftpName(name)
 }
 
 func (server *sshServer) writeTransferBatchError(command sshWireCommand, err error) {
@@ -2333,7 +2333,7 @@ func appendLocalTransferPlans(direction, destination string, item sshSftpTransfe
 			return err
 		}
 		relative = filepath.ToSlash(relative)
-		if !isSafeTransferRelativePath(relative) {
+		if !isSafeTransferRelativePath(direction, relative) {
 			return fmt.Errorf("local transfer path is unsafe: %s", relative)
 		}
 		displayName := item.Name + "/" + relative
@@ -2362,10 +2362,17 @@ func validateLocalTransferDestination(source, destination, target string, source
 }
 
 func sameLocalPath(left, right string) bool {
-	if runtime.GOOS == "windows" {
-		return strings.EqualFold(filepath.Clean(left), filepath.Clean(right))
+	left = filepath.Clean(left)
+	right = filepath.Clean(right)
+	if left == right {
+		return true
 	}
-	return filepath.Clean(left) == filepath.Clean(right)
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(left, right)
+	}
+	leftInfo, leftErr := os.Stat(left)
+	rightInfo, rightErr := os.Stat(right)
+	return leftErr == nil && rightErr == nil && os.SameFile(leftInfo, rightInfo)
 }
 
 func localPathContains(parent, candidate string) bool {
@@ -2380,19 +2387,15 @@ func localPathContains(parent, candidate string) bool {
 		return true
 	}
 
-	// filepath.Rel is deliberately lexical. On case-insensitive macOS volumes, or when a path is
-	// reached through an alias, two spellings can still refer to the same directory. Walk existing
-	// ancestors by file identity so a local copy cannot target its own source through such a path.
 	parentInfo, err := os.Stat(parent)
 	if err != nil {
 		return false
 	}
 	for current := candidate; ; current = filepath.Dir(current) {
-		if info, statErr := os.Stat(current); statErr == nil && os.SameFile(parentInfo, info) {
+		if currentInfo, statErr := os.Stat(current); statErr == nil && os.SameFile(parentInfo, currentInfo) {
 			return true
 		}
-		next := filepath.Dir(current)
-		if sameLocalPath(next, current) {
+		if filepath.Dir(current) == current {
 			return false
 		}
 	}
@@ -2462,7 +2465,7 @@ func walkRemoteTransferPlans(client *sftp.Client, source, destination, relativeR
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if !isSafeTransferName(entry.Name()) {
+		if !isSafeSftpName(entry.Name()) || !isSafeTransferName("remote-to-local", entry.Name()) {
 			continue
 		}
 		if len(*plans) >= sshSftpMaxTransferPlanCount {
@@ -2486,12 +2489,12 @@ func walkRemoteTransferPlans(client *sftp.Client, source, destination, relativeR
 	return nil
 }
 
-func isSafeTransferRelativePath(value string) bool {
+func isSafeTransferRelativePath(direction, value string) bool {
 	if value == "" || strings.HasPrefix(value, "/") || strings.ContainsRune(value, '\x00') {
 		return false
 	}
 	for _, segment := range strings.Split(value, "/") {
-		if !isSafeTransferName(segment) {
+		if !isSafeTransferName(direction, segment) {
 			return false
 		}
 	}
@@ -2756,13 +2759,21 @@ func readSftpDirectory(client *sftp.Client, requestedPath string) (string, []ssh
 }
 
 func isSafeSftpName(name string) bool {
-	if name == "" || name == "." || name == ".." || len([]byte(name)) > sshSftpMaxNameBytes {
+	if !hasSafeSftpNameShape(name) {
 		return false
 	}
-	// Remote names are also used as Windows local destination segments. Reject ':'
-	// to prevent a malicious or unusual POSIX filename from becoming an NTFS
-	// alternate-data-stream path during Remote-to-Local transfer.
-	return !strings.ContainsAny(name, "/\\:\x00")
+	return !strings.ContainsAny(name, "/\\\x00")
+}
+
+func isSafeLocalSftpName(name string) bool {
+	if !hasSafeSftpNameShape(name) || strings.ContainsAny(name, "/\x00") {
+		return false
+	}
+	return runtime.GOOS != "windows" || !strings.ContainsAny(name, "\\:")
+}
+
+func hasSafeSftpNameShape(name string) bool {
+	return name != "" && name != "." && name != ".." && len([]byte(name)) <= sshSftpMaxNameBytes
 }
 
 func resolveDirectSSHTarget(command sshWireCommand) (sshTarget, error) {

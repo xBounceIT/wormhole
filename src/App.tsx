@@ -82,9 +82,11 @@ import {
 import {
   parentLocalSftpPath,
   parentSftpPath,
+  isLocalSftpPathRoot,
   isInvalidLocalSftpDropDestination,
-  isLocalSftpRootPath,
   isSftpTransferTerminal,
+  isValidSftpNameInput,
+  joinLocalSftpPath,
   shouldApplySftpClosed,
   shouldApplySftpError,
   shouldApplySftpFailure,
@@ -280,7 +282,10 @@ import {
   tunnelTestPhaseLabel,
   tunnelModeFor,
   tunnelValueFor,
+  updateTunnelEditorSetting,
   userFacingTunnelError,
+  watchguardSsoEnabledForEditor,
+  watchguardUsesSso,
   type TunnelMode,
 } from './tunnel-state';
 
@@ -8873,15 +8878,12 @@ function clearSftpCancelRequestsForBrowser(
 
 function isSftpPaneRoot(pane: SftpPaneKind, path: string): boolean {
   if (pane === 'remote') return !path || path === '/';
-  return isLocalSftpRootPath(path);
+  return isLocalSftpPathRoot(path);
 }
 
 function joinSftpPanePath(pane: SftpPaneKind, parent: string, name: string): string {
   if (pane === 'remote') return parent === '/' ? `/${name}` : `${parent}/${name}`;
-  const separator = parent.includes('\\') ? '\\' : '/';
-  return parent.endsWith('\\') || parent.endsWith('/')
-    ? `${parent}${name}`
-    : `${parent}${separator}${name}`;
+  return joinLocalSftpPath(parent, name);
 }
 
 function parseSftpDragPayload(data: DataTransfer): SftpDragPayload | undefined {
@@ -8937,18 +8939,6 @@ function parseSftpDragPayload(data: DataTransfer): SftpDragPayload | undefined {
     return result;
   }, []);
   return items.length > 0 ? { sourcePane: 'local', items, external: true } : undefined;
-}
-
-function isValidSftpNameInput(name: string): boolean {
-  return (
-    name.length > 0 &&
-    name !== '.' &&
-    name !== '..' &&
-    !name.includes('/') &&
-    !name.includes('\\') &&
-    !name.includes(':') &&
-    !name.includes(String.fromCharCode(0))
-  );
 }
 
 // Virtualization, selection, drag/drop, and keyboard navigation share one pane coordinate system;
@@ -9122,7 +9112,7 @@ function SftpFilePane({
     if (renameCommitPath.current === editingPath) return;
     renameCommitPath.current = editingPath;
     const name = editingName.trim();
-    if (!isValidSftpNameInput(name)) {
+    if (!isValidSftpNameInput(name, pane, state.path)) {
       setEditingPath(undefined);
       return;
     }
@@ -9134,7 +9124,7 @@ function SftpFilePane({
 
   function submitPrompt() {
     const name = promptValue.trim();
-    if (!prompt || !isValidSftpNameInput(name)) return;
+    if (!prompt || !isValidSftpNameInput(name, pane, state.path)) return;
     onOperation(prompt === 'folder' ? 'mkdir' : 'file', joinSftpPanePath(pane, state.path, name));
     setPrompt(undefined);
     setPromptValue('');
@@ -11475,6 +11465,7 @@ type TunnelField = {
   options?: { value: number; label: string }[];
   placeholder?: string;
   hint?: string;
+  fullWidth?: boolean;
 };
 
 function tunnelKindLabel(kind: number) {
@@ -11708,13 +11699,19 @@ function tunnelEditorFields(kind: number): TunnelField[] {
           type: 'number',
           placeholder: '443',
         },
+        {
+          key: 'UseSingleSignOn',
+          label: 'Use SSO',
+          section: 'Credentials',
+          type: 'checkbox',
+          fullWidth: true,
+        },
         { key: 'Username', label: 'Username', section: 'Credentials' },
         {
           key: 'Password',
           label: 'Password',
           section: 'Credentials',
           type: 'password',
-          hint: 'not required for SAML',
         },
         {
           key: 'Domain',
@@ -11790,10 +11787,11 @@ function tunnelEditorFields(kind: number): TunnelField[] {
           section: 'Gateway',
         },
         {
-          key: 'UseSingleSignOn',
-          label: 'Connect with single sign-on',
+          key: 'UseOtp',
+          label: 'Use an OTP',
           section: 'Authentication',
           type: 'checkbox',
+          fullWidth: true,
         },
         { key: 'Username', label: 'Username', section: 'Authentication' },
         {
@@ -11801,12 +11799,6 @@ function tunnelEditorFields(kind: number): TunnelField[] {
           label: 'Password',
           section: 'Authentication',
           type: 'password',
-        },
-        {
-          key: 'UseOtp',
-          label: 'Use an OTP',
-          section: 'Authentication',
-          type: 'checkbox',
         },
         {
           key: 'ProfileOvpn',
@@ -11967,6 +11959,7 @@ function tunnelDefaultSettings(kind: number): Record<string, unknown> {
       return {
         Port: 443,
         AuthMode: 0,
+        UseSingleSignOn: false,
         VerifyX509Name: '/O=WatchGuard_Technologies/OU=Fireware/CN=Fireware_SSLVPN_Server',
       };
     case 4:
@@ -11991,11 +11984,15 @@ function blankTunnelEditor(): TunnelEditorValue {
 }
 
 function tunnelEditorFromDetails(details: WormholeTunnelDetails): TunnelEditorValue {
+  const settings = { ...tunnelDefaultSettings(details.kind), ...details.settings };
+  if (details.kind === 3 && watchguardSsoEnabledForEditor(details.settings)) {
+    settings.UseSingleSignOn = true;
+  }
   return {
     id: details.id,
     name: details.name,
     kind: details.kind,
-    settings: { ...tunnelDefaultSettings(details.kind), ...details.settings },
+    settings,
   };
 }
 
@@ -12020,7 +12017,12 @@ function TunnelFieldRow({
   onChange: (key: string, next: unknown) => void;
 }) {
   return (
-    <div className={field.type === 'textarea' ? 'grid gap-2 md:col-span-2' : 'grid gap-2'}>
+    <div
+      className={cn(
+        'grid gap-2',
+        (field.type === 'textarea' || field.fullWidth) && 'md:col-span-2',
+      )}
+    >
       <Label htmlFor={`tunnel-${field.key}`}>{field.label}</Label>
       {field.type === 'checkbox' ? (
         <Checkbox
@@ -12150,7 +12152,6 @@ function TunnelEditorDialog({
   const missing = useMemo(() => missingTunnelFields(value), [value]);
   const canSave = missing.length === 0;
   const fields = tunnelEditorFields(value.kind);
-  const fieldByKey = (key: string) => fields.find((field) => field.key === key);
   const rows = (
     section: string,
     options?: {
@@ -12171,13 +12172,14 @@ function TunnelEditorDialog({
           ]
         : [],
     );
-  const useSso = value.settings.UseSingleSignOn === true;
-  const useExternalBrowser = useSso && value.settings.UseExternalBrowser === true;
+  const useFortinetSso = value.settings.UseSingleSignOn === true;
+  const useFortinetExternalBrowser = useFortinetSso && value.settings.UseExternalBrowser === true;
+  const useWatchguardSso = value.kind === 3 && watchguardUsesSso(value.settings);
 
   function setSetting(key: string, next: unknown) {
     setValue((current) => ({
       ...current,
-      settings: { ...current.settings, [key]: next },
+      settings: updateTunnelEditorSetting(current.kind, current.settings, key, next),
     }));
   }
 
@@ -12456,18 +12458,19 @@ function TunnelEditorDialog({
                     {rows('Credentials', {
                       disabled: (field) =>
                         field.key === 'Realm'
-                          ? useExternalBrowser &&
+                          ? useFortinetExternalBrowser &&
                             !(
                               typeof value.settings.Realm === 'string' &&
                               value.settings.Realm.trim()
                             )
-                          : useSso,
+                          : useFortinetSso,
                     })}
                   </TunnelSection>
                   <div className="grid gap-2 rounded-lg border border-border/70 bg-muted/20 px-3 py-2">
                     {rows('Single sign-on', {
-                      disabled: (field) => field.key === 'UseExternalBrowser' && !useSso,
-                      hidden: (field) => field.key === 'SamlRedirectPort' && !useExternalBrowser,
+                      disabled: (field) => field.key === 'UseExternalBrowser' && !useFortinetSso,
+                      hidden: (field) =>
+                        field.key === 'SamlRedirectPort' && !useFortinetExternalBrowser,
                     })}
                     <p className="text-[11px] leading-relaxed text-muted-foreground">
                       The embedded option uses a dedicated browser profile. External-browser
@@ -12480,7 +12483,7 @@ function TunnelEditorDialog({
                     open={advancedOpen}
                   >
                     {rows('Advanced', {
-                      disabled: (field) => field.key === 'TotpSecret' && useSso,
+                      disabled: (field) => field.key === 'TotpSecret' && useFortinetSso,
                     })}
                   </TunnelAdvanced>
                 </>
@@ -12488,7 +12491,12 @@ function TunnelEditorDialog({
               {value.kind === 3 ? (
                 <>
                   <TunnelSection title="Gateway">{rows('Gateway')}</TunnelSection>
-                  <TunnelSection title="Credentials">{rows('Credentials')}</TunnelSection>
+                  <TunnelSection title="Credentials">
+                    {rows('Credentials', {
+                      hidden: (field) =>
+                        useWatchguardSso && (field.key === 'Username' || field.key === 'Password'),
+                    })}
+                  </TunnelSection>
                   <TunnelAdvanced
                     label="Manual profile fallback & advanced"
                     onOpenChange={setAdvancedOpen}
@@ -12502,29 +12510,7 @@ function TunnelEditorDialog({
                 <>
                   <TunnelSection>{rows('Connection mode')}</TunnelSection>
                   <TunnelSection title="Gateway">{rows('Gateway')}</TunnelSection>
-                  <TunnelSection title="Authentication">
-                    {fieldByKey('UseSingleSignOn') ? (
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <div>
-                            <TunnelFieldRow
-                              disabled
-                              field={fieldByKey('UseSingleSignOn')!}
-                              onChange={setSetting}
-                              value={value.settings}
-                            />
-                          </div>
-                        </TooltipTrigger>
-                        <TooltipContent side="bottom">
-                          Single sign-on (browser/OIDC) is not yet supported — use username/password
-                          or import a profile.
-                        </TooltipContent>
-                      </Tooltip>
-                    ) : null}
-                    {rows('Authentication', {
-                      hidden: (field) => field.key === 'UseSingleSignOn',
-                    })}
-                  </TunnelSection>
+                  <TunnelSection title="Authentication">{rows('Authentication')}</TunnelSection>
                   {value.settings.Mode === 1 ? (
                     <div className="grid gap-3">
                       <div className="flex flex-wrap items-center justify-between gap-2">

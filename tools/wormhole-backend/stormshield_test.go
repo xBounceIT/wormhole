@@ -243,7 +243,7 @@ func TestPrepareStormshieldAutomaticProducesSidecarReadyProfile(t *testing.T) {
 	serverURL, _ := url.Parse(server.URL)
 	raw, _ := json.Marshal(map[string]any{
 		"Server": serverURL.Hostname(), "Port": mustTestPort(t, serverURL.Port()), "Mode": 0,
-		"Username": "alice", "Password": "secret", "TrustServerCertificate": true,
+		"Username": "alice", "Password": "secret", "UseSingleSignOn": true, "TrustServerCertificate": true,
 	})
 	prepared, err := prepareStormshieldProfile(context.Background(), raw)
 	if err != nil {
@@ -253,6 +253,9 @@ func TestPrepareStormshieldAutomaticProducesSidecarReadyProfile(t *testing.T) {
 	_ = json.Unmarshal(prepared, &settings)
 	if !strings.Contains(tunnelSettingString(settings, "ProfileOvpn"), "data-ciphers") || tunnelSettingString(settings, "Password") != "secret" {
 		t.Fatalf("prepared settings are incomplete: %s", prepared)
+	}
+	if _, found := settings["UseSingleSignOn"]; found {
+		t.Fatalf("prepared settings retained obsolete SSO state: %s", prepared)
 	}
 }
 
