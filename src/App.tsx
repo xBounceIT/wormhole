@@ -18,7 +18,7 @@ import {
   type ReactNode,
 } from 'react';
 import './index.css';
-import { backupExportPasswordsMatch } from './backup-state';
+import { backupExportPasswordIsValid, backupExportRequiresEncryption } from './backup-state';
 import wormholeIcon from '../Assets/Wormhole.png';
 import bitwardenIcon from '../Assets/Bitwarden/bitwarden-icon.png';
 import {
@@ -6627,6 +6627,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
               ) : activePage === 'settings' ? (
                 <SettingsPage
                   autoCopyOnSelect={autoCopyOnSelect}
+                  backupEncryptionRequired={backupExportRequiresEncryption(credentials)}
                   confirmOnTabClose={confirmOnTabClose}
                   authGate={authGate}
                   authState={authState}
@@ -14102,6 +14103,7 @@ function ReleaseNotesMarkdown({ markdown }: { markdown: string }) {
 // react-doctor-disable-next-line react-doctor/no-giant-component, react-doctor/prefer-useReducer
 function SettingsPage({
   autoCopyOnSelect,
+  backupEncryptionRequired,
   confirmOnTabClose,
   theme,
   onThemeChange,
@@ -14122,6 +14124,7 @@ function SettingsPage({
   onWorkspaceCredentialsChanged,
 }: {
   autoCopyOnSelect: boolean;
+  backupEncryptionRequired: boolean;
   confirmOnTabClose: boolean;
   theme: Theme;
   onThemeChange: (theme: Theme) => void;
@@ -15196,7 +15199,17 @@ function SettingsPage({
 
   async function exportWormholeBackup() {
     if (backupExportBusy || !window.wormhole) return;
-    if (!backupExportPasswordsMatch(backupExportPassword, backupExportConfirmation)) {
+    if (backupEncryptionRequired && backupExportPassword.length === 0) {
+      setBackupExportError('Enter an encryption password to export SSH private keys.');
+      return;
+    }
+    if (
+      !backupExportPasswordIsValid(
+        backupExportPassword,
+        backupExportConfirmation,
+        backupEncryptionRequired,
+      )
+    ) {
       setBackupExportError('The password confirmation does not match.');
       return;
     }
@@ -15325,9 +15338,10 @@ function SettingsPage({
   const newerReleaseWithoutInstaller = Boolean(
     update.result && hasNewerReleaseWithoutInstaller(update.result),
   );
-  const backupExportPasswordConfirmed = backupExportPasswordsMatch(
+  const backupExportPasswordValid = backupExportPasswordIsValid(
     backupExportPassword,
     backupExportConfirmation,
+    backupEncryptionRequired,
   );
   const bitwardenLoggedIn = bitwardenCliIsLoggedIn(bitwardenCliStatus?.status);
   const currentBitwardenServerRegion = bitwardenCliServerRegionCode(bitwardenCliStatus?.serverUrl);
@@ -16037,8 +16051,9 @@ function SettingsPage({
               </Button>
             </div>
             <p className="max-w-2xl text-[11px] leading-relaxed text-muted-foreground">
-              Add a password to encrypt every connection name and secret; plaintext exports contain
-              readable credentials.
+              {backupEncryptionRequired
+                ? 'This workspace contains SSH private keys, so exports require a password.'
+                : 'Add a password to encrypt every connection name and secret; plaintext exports contain readable credentials.'}
             </p>
             {backupSectionError ? (
               <p className="text-[11px] text-destructive">{backupSectionError}</p>
@@ -16235,7 +16250,11 @@ function SettingsPage({
               }}
             >
               <div className="grid gap-2">
-                <Label htmlFor="backup-export-password">Encryption password (optional)</Label>
+                <Label htmlFor="backup-export-password">
+                  {backupEncryptionRequired
+                    ? 'Encryption password'
+                    : 'Encryption password (optional)'}
+                </Label>
                 <Input
                   autoComplete="new-password"
                   autoFocus
@@ -16246,7 +16265,12 @@ function SettingsPage({
                     setBackupExportPassword(password);
                     if (password.length === 0) setBackupExportConfirmation('');
                   }}
-                  placeholder="Leave blank for a plaintext backup"
+                  placeholder={
+                    backupEncryptionRequired
+                      ? 'Required to export SSH private keys'
+                      : 'Leave blank for a plaintext backup'
+                  }
+                  required={backupEncryptionRequired}
                   type="password"
                   value={backupExportPassword}
                 />
@@ -16263,14 +16287,23 @@ function SettingsPage({
                 />
               </div>
               {backupExportPassword.length === 0 ? (
-                <div className="flex gap-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3">
-                  <AlertCircle className="mt-0.5 size-4 shrink-0 text-amber-400" />
-                  <p className="text-[11px] leading-relaxed text-muted-foreground">
-                    Without a password, connection names, passwords, private keys, and VPN payloads
-                    are readable in the JSON file.
-                  </p>
-                </div>
-              ) : !backupExportPasswordConfirmed ? (
+                backupEncryptionRequired ? (
+                  <div className="flex gap-3 rounded-lg border border-destructive/30 bg-destructive/5 p-3">
+                    <AlertCircle className="mt-0.5 size-4 shrink-0 text-destructive" />
+                    <p className="text-[11px] leading-relaxed text-destructive">
+                      A password is required because this workspace contains SSH private keys.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="flex gap-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3">
+                    <AlertCircle className="mt-0.5 size-4 shrink-0 text-amber-400" />
+                    <p className="text-[11px] leading-relaxed text-muted-foreground">
+                      Without a password, connection names, passwords, and VPN payloads are readable
+                      in the JSON file.
+                    </p>
+                  </div>
+                )
+              ) : !backupExportPasswordValid ? (
                 <p className="text-[11px] text-destructive">The passwords do not match.</p>
               ) : null}
               {backupExportBusy ? (
@@ -16309,7 +16342,7 @@ function SettingsPage({
                     : 'Cancel'}
                 </Button>
                 <Button
-                  disabled={backupExportBusy || !backupExportPasswordConfirmed}
+                  disabled={backupExportBusy || !backupExportPasswordValid}
                   size="sm"
                   type="submit"
                 >
