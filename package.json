@@ -132,6 +132,7 @@
       "!dist-electron/wormhole-*",
       "!dist-electron/rdp-host-*",
       "Assets/**/*",
+      "!Assets/LinuxIcons/**/*",
       "package.json"
     ],
     "extraResources": [
@@ -151,7 +152,7 @@
       "artifactName": "Wormhole-${version}-${os}-${arch}.${ext}",
       "category": "Utility",
       "executableName": "wormhole",
-      "icon": "Assets/Wormhole.png",
+      "icon": "Assets/LinuxIcons",
       "syncDesktopName": true,
       "target": [
         "AppImage",

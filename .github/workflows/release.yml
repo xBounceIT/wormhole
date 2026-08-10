@@ -317,6 +317,46 @@ jobs:
             fi
           done
 
+          deb_packages=( release/Wormhole-*-linux-*.deb )
+          if [[ ${#deb_packages[@]} -ne 1 ]]; then
+            echo "Expected exactly one Debian package, found ${#deb_packages[@]}." >&2
+            exit 1
+          fi
+
+          package_root="$(mktemp -d)"
+          trap 'rm -rf "$package_root"' EXIT
+          dpkg-deb --extract "${deb_packages[0]}" "$package_root"
+
+          for size in 16x16 24x24 32x32 48x48 64x64 96x96 128x128 256x256 512x512 1024x1024; do
+            icon_path="$package_root/usr/share/icons/hicolor/$size/apps/wormhole.png"
+            if [[ ! -f "$icon_path" || -L "$icon_path" ]]; then
+              echo "Debian package is missing a regular icon at ${icon_path#"$package_root"}." >&2
+              exit 1
+            fi
+
+            icon_width="${size%x*}"
+            icon_height="${size#*x}"
+            icon_type="$(LC_ALL=C file --brief "$icon_path")"
+            if [[ "$icon_type" != "PNG image data, $icon_width x $icon_height,"* ]]; then
+              echo "Debian package has an invalid $size icon: $icon_type" >&2
+              exit 1
+            fi
+            if ! cmp -s "Assets/LinuxIcons/$size.png" "$icon_path"; then
+              echo "Debian package icon $size differs from its reviewed source asset." >&2
+              exit 1
+            fi
+          done
+
+          desktop_entry="$package_root/usr/share/applications/com.xbounceit.wormhole.desktop"
+          if [[ ! -f "$desktop_entry" || -L "$desktop_entry" ]]; then
+            echo "Debian package is missing its regular desktop entry." >&2
+            exit 1
+          fi
+          if ! grep -Fxq 'Icon=wormhole' "$desktop_entry"; then
+            echo "Debian desktop entry does not reference the packaged Wormhole icon." >&2
+            exit 1
+          fi
+
       - name: Generate installer SHA-256 sidecar
         shell: pwsh
         run: |
