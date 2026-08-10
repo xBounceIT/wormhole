@@ -4,6 +4,10 @@ import test from 'node:test';
 import {
   compareSftpEntries,
   isSftpTransferTerminal,
+  isLocalSftpPathRoot,
+  isInvalidLocalSftpDropDestination,
+  isValidSftpNameInput,
+  joinLocalSftpPath,
   nextSftpOperationRefreshRequests,
   nextSftpSelection,
   nextSftpTransferRefreshRequests,
@@ -145,6 +149,74 @@ test('local SFTP parent navigation preserves Windows roots', () => {
   assert.equal(parentLocalSftpPath('\\\\server\\share'), '\\\\server\\share');
   assert.equal(parentLocalSftpPath('\\\\server\\share\\'), '\\\\server\\share');
   assert.equal(parentLocalSftpPath('\\\\server\\share\\folder'), '\\\\server\\share');
+});
+
+test('local SFTP navigation preserves POSIX separators and roots', () => {
+  assert.equal(parentLocalSftpPath('/'), '/');
+  assert.equal(parentLocalSftpPath('/home'), '/');
+  assert.equal(parentLocalSftpPath('/home/operator'), '/home');
+  assert.equal(parentLocalSftpPath('/home/operator/'), '/home');
+  assert.equal(isLocalSftpPathRoot('/'), true);
+  assert.equal(isLocalSftpPathRoot('///'), true);
+  assert.equal(isLocalSftpPathRoot('/home'), false);
+  assert.equal(isLocalSftpPathRoot('C:\\'), true);
+  assert.equal(isLocalSftpPathRoot('\\\\server\\share'), true);
+});
+
+test('local SFTP path joins preserve the native path style', () => {
+  assert.equal(joinLocalSftpPath('/home/operator', 'file.txt'), '/home/operator/file.txt');
+  assert.equal(joinLocalSftpPath('/', 'file.txt'), '/file.txt');
+  assert.equal(
+    joinLocalSftpPath('C:\\Users\\operator', 'file.txt'),
+    'C:\\Users\\operator\\file.txt',
+  );
+  assert.equal(joinLocalSftpPath('C:/Users/operator', 'file.txt'), 'C:/Users/operator/file.txt');
+});
+
+test('SFTP name input follows the pane path style', () => {
+  assert.equal(isValidSftpNameInput('report:2026.txt', 'local', '/home/operator'), true);
+  assert.equal(isValidSftpNameInput('report\\2026.txt', 'local', '/home/operator'), true);
+  assert.equal(isValidSftpNameInput('report:2026.txt', 'local', 'C:\\Users\\operator'), false);
+  assert.equal(isValidSftpNameInput('report\\2026.txt', 'local', 'C:\\Users\\operator'), false);
+  assert.equal(isValidSftpNameInput('report:2026.txt', 'remote', '/home/operator'), true);
+  assert.equal(isValidSftpNameInput('report\\2026.txt', 'remote', '/home/operator'), false);
+  assert.equal(isValidSftpNameInput('nested/report.txt', 'local', '/home/operator'), false);
+  assert.equal(isValidSftpNameInput('bad\u0000name', 'local', '/home/operator'), false);
+});
+
+test('local SFTP drops reject self-copy on POSIX and Windows paths', () => {
+  const posixDirectory = {
+    sourcePath: '/home/operator/project',
+    name: 'project',
+    isDirectory: true,
+  };
+  assert.equal(isInvalidLocalSftpDropDestination('/home/operator', [posixDirectory]), true);
+  assert.equal(
+    isInvalidLocalSftpDropDestination('/home/operator/project/child', [posixDirectory]),
+    true,
+  );
+  assert.equal(isInvalidLocalSftpDropDestination('/home/operator/target', [posixDirectory]), false);
+  assert.equal(
+    isInvalidLocalSftpDropDestination('/home/operator/project', [
+      { ...posixDirectory, sourcePath: '/home/operator/Project' },
+    ]),
+    false,
+  );
+
+  const windowsDirectory = {
+    sourcePath: 'C:\\Users\\operator\\Project',
+    name: 'Project',
+    isDirectory: true,
+  };
+  assert.equal(isInvalidLocalSftpDropDestination('c:\\users\\operator', [windowsDirectory]), true);
+  assert.equal(
+    isInvalidLocalSftpDropDestination('C:\\Users\\operator\\Project\\child', [windowsDirectory]),
+    true,
+  );
+  assert.equal(
+    isInvalidLocalSftpDropDestination('C:\\Users\\operator\\target', [windowsDirectory]),
+    false,
+  );
 });
 
 test('SFTP transfer terminal states are stable for queue cleanup', () => {

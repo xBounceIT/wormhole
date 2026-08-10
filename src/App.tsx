@@ -76,7 +76,11 @@ import {
 import {
   parentLocalSftpPath,
   parentSftpPath,
+  isLocalSftpPathRoot,
+  isInvalidLocalSftpDropDestination,
   isSftpTransferTerminal,
+  isValidSftpNameInput,
+  joinLocalSftpPath,
   shouldApplySftpClosed,
   shouldApplySftpError,
   shouldApplySftpFailure,
@@ -8855,21 +8859,12 @@ function clearSftpCancelRequestsForBrowser(
 
 function isSftpPaneRoot(pane: SftpPaneKind, path: string): boolean {
   if (pane === 'remote') return !path || path === '/';
-  const normalized = path.replaceAll('/', '\\').replace(/[\\]+$/, '');
-  return (
-    !path ||
-    /^[A-Za-z]:$/.test(normalized) ||
-    /^\\\\[^\\]+\\[^\\]+$/.test(normalized) ||
-    parentLocalSftpPath(path) === path
-  );
+  return isLocalSftpPathRoot(path);
 }
 
 function joinSftpPanePath(pane: SftpPaneKind, parent: string, name: string): string {
   if (pane === 'remote') return parent === '/' ? `/${name}` : `${parent}/${name}`;
-  const separator = parent.includes('\\') ? '\\' : '/';
-  return parent.endsWith('\\') || parent.endsWith('/')
-    ? `${parent}${name}`
-    : `${parent}${separator}${name}`;
+  return joinLocalSftpPath(parent, name);
 }
 
 function parseSftpDragPayload(data: DataTransfer): SftpDragPayload | undefined {
@@ -8925,43 +8920,6 @@ function parseSftpDragPayload(data: DataTransfer): SftpDragPayload | undefined {
     return result;
   }, []);
   return items.length > 0 ? { sourcePane: 'local', items, external: true } : undefined;
-}
-
-function normalizeLocalDropPath(value: string): string {
-  const normalized = value.replaceAll('/', '\\');
-  if (/^[A-Za-z]:\\$/.test(normalized)) return normalized;
-  return normalized.replace(/[\\]+$/, '');
-}
-
-function localDropPathContains(parent: string, candidate: string): boolean {
-  const normalizedParent = normalizeLocalDropPath(parent).toLowerCase();
-  const normalizedCandidate = normalizeLocalDropPath(candidate).toLowerCase();
-  if (normalizedParent === normalizedCandidate) return true;
-  const prefix = normalizedParent.endsWith('\\') ? normalizedParent : `${normalizedParent}\\`;
-  return normalizedCandidate.startsWith(prefix);
-}
-
-function isInvalidLocalDropDestination(destination: string, items: SftpTransferItem[]): boolean {
-  if (!/^(?:[A-Za-z]:[\\/]|\\\\)/.test(destination)) return false;
-  for (const item of items) {
-    if (!/^(?:[A-Za-z]:[\\/]|\\\\)/.test(item.sourcePath)) continue;
-    const target = joinSftpPanePath('local', destination, item.name);
-    if (localDropPathContains(item.sourcePath, target)) return true;
-    if (item.isDirectory && localDropPathContains(item.sourcePath, destination)) return true;
-  }
-  return false;
-}
-
-function isValidSftpNameInput(name: string): boolean {
-  return (
-    name.length > 0 &&
-    name !== '.' &&
-    name !== '..' &&
-    !name.includes('/') &&
-    !name.includes('\\') &&
-    !name.includes(':') &&
-    !name.includes(String.fromCharCode(0))
-  );
 }
 
 // Virtualization, selection, drag/drop, and keyboard navigation share one pane coordinate system;
@@ -9135,7 +9093,7 @@ function SftpFilePane({
     if (renameCommitPath.current === editingPath) return;
     renameCommitPath.current = editingPath;
     const name = editingName.trim();
-    if (!isValidSftpNameInput(name)) {
+    if (!isValidSftpNameInput(name, pane, state.path)) {
       setEditingPath(undefined);
       return;
     }
@@ -9147,7 +9105,7 @@ function SftpFilePane({
 
   function submitPrompt() {
     const name = promptValue.trim();
-    if (!prompt || !isValidSftpNameInput(name)) return;
+    if (!prompt || !isValidSftpNameInput(name, pane, state.path)) return;
     onOperation(prompt === 'folder' ? 'mkdir' : 'file', joinSftpPanePath(pane, state.path, name));
     setPrompt(undefined);
     setPromptValue('');
@@ -9814,7 +9772,7 @@ function SftpBrowserSurface({
     if (
       targetPane === 'local' &&
       payload.sourcePane === 'local' &&
-      isInvalidLocalDropDestination(targetPath, payload.items)
+      isInvalidLocalSftpDropDestination(targetPath, payload.items)
     ) {
       return;
     }
