@@ -8,7 +8,8 @@ import (
 	"github.com/zalando/go-keyring"
 )
 
-func TestLinuxCredentialSecretRoundTripUsesDBusKeyring(t *testing.T) {
+func installLinuxCredentialStoreMock(t *testing.T) map[string]string {
+	t.Helper()
 	previousStore := linuxCredentialStore
 	stored := make(map[string]string)
 	linuxCredentialStore.set = func(service, account, value string) error {
@@ -39,6 +40,11 @@ func TestLinuxCredentialSecretRoundTripUsesDBusKeyring(t *testing.T) {
 		return nil
 	}
 	t.Cleanup(func() { linuxCredentialStore = previousStore })
+	return stored
+}
+
+func TestLinuxCredentialSecretRoundTripUsesDBusKeyring(t *testing.T) {
+	stored := installLinuxCredentialStoreMock(t)
 
 	reference, encoding, err := storeCredentialSecret(credentialSecretKeyringTestID, "manual-password")
 	if err != nil {

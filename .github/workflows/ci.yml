@@ -31,7 +31,7 @@ jobs:
         working-directory: tools/wormhole-backend
         run: >-
           go test -run
-          '^(TestCredentialSecretKeyringRoundTrip|TestCredentialSecretKeyringErrorsDoNotExposePassword|TestLinuxCredentialSecretRoundTripUsesDBusKeyring)$'
+          '^(TestCredentialSecretKeyringRoundTrip|TestCredentialSecretKeyringErrorsDoNotExposePassword|TestLinuxCredentialSecretRoundTripUsesDBusKeyring|TestMcpTokenLifecycleUsesLinuxSecretService)$'
           ./...
 
   verify:
