@@ -49,10 +49,12 @@ The Credentials page supports creating, editing, and deleting local password
 profiles for SSH, RDP, and VNC. The password crosses only the isolated preload
 bridge and Go writes the profile and secret reference together. Windows keeps
 the DPAPI-protected `CredentialSecrets` format; macOS uses Keychain in a
-cgo-enabled build; Linux uses the freedesktop Secret Service through
-`secret-tool`. There is deliberately no plaintext fallback when the platform
-secret service is unavailable. SSH-key and Bitwarden-backed profiles are
-resolved by Go without exposing their secrets to the renderer.
+cgo-enabled build; Linux uses the freedesktop Secret Service directly over
+D-Bus, without requiring the optional `secret-tool` executable. There is
+deliberately no plaintext fallback when the platform secret service is
+unavailable; references written by older releases retain a compatibility reader.
+SSH-key and Bitwarden-backed profiles are resolved by Go without exposing their
+secrets to the renderer.
 
 Saved SSH connections opened from the tree use a persistent Go backend process
 over a JSON-lines stdio channel. The backend resolves inherited connection data,

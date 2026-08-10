@@ -14,6 +14,26 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  linux-backend-contract:
+    name: Linux credential storage contract
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: tools/wormhole-backend/go.mod
+          cache: false
+
+      - name: Test Linux credential storage adapter
+        working-directory: tools/wormhole-backend
+        run: >-
+          go test -run
+          '^(TestCredentialSecretKeyringRoundTrip|TestCredentialSecretKeyringErrorsDoNotExposePassword|TestLinuxCredentialSecretRoundTripUsesDBusKeyring)$'
+          ./...
+
   verify:
     name: Electron, Go, and RDP helper
     runs-on: windows-2025
