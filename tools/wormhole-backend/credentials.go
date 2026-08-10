@@ -63,6 +63,9 @@ var credentialSecretStore = storeCredentialSecret
 var credentialSecretDelete = deleteStoredCredentialSecret
 
 func createCredential(databasePath string, request credentialCreateRequest) (credentialRecord, error) {
+	if strings.EqualFold(strings.TrimSpace(request.Provider), "bitwarden") {
+		return credentialRecord{}, errors.New("Bitwarden credential profiles cannot be created manually")
+	}
 	draft, err := normalizeCredentialDraft(request, false)
 	if err != nil {
 		return credentialRecord{}, err

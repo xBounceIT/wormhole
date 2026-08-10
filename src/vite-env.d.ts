@@ -784,10 +784,7 @@ interface Window {
       username: string;
       domain: string;
       password: string;
-      provider: 'Local' | 'Bitwarden';
-      bitwardenItemId?: string;
-      bitwardenItemName?: string;
-      bitwardenFieldPath?: string;
+      provider: 'Local';
     }): Promise<WormholeWorkspaceCredential>;
     updateCredential(request: {
       id: string;

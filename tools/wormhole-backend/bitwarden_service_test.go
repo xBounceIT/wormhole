@@ -184,13 +184,10 @@ func TestBitwardenServiceResolvesLinkedCredentialsAndRefreshesStaleCache(t *test
 	if err := ensureElectronWorkspaceSchema(databasePath); err != nil {
 		t.Fatal(err)
 	}
-	profile, err := createCredential(databasePath, credentialCreateRequest{
+	profile := seedLegacyBitwardenCredential(t, databasePath, credentialCreateRequest{
 		Name: "RDP vault", Protocol: "rdp", Username: "alice", Domain: "CORP",
 		Provider: "Bitwarden", BitwardenItemID: "item-1", BitwardenItemName: "RDP item",
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	helper := buildBitwardenServiceHelper(t)
 	oldSync := time.Now().Add(-time.Hour).UTC()
 	settings := bitwardenCliSettings{

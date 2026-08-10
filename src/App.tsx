@@ -672,6 +672,8 @@ type CredentialRecord = {
 type CredentialOptionGroups = Record<CredentialProtocol, CredentialRecord[]>;
 
 const manualCredentialSelectionValue = '__manual__';
+const bitwardenCredentialCreationError =
+  'Bitwarden credential profiles cannot be created manually.';
 
 function workspaceCredentialOptions(workspace: WormholeWorkspaceSnapshot): CredentialOptionGroups {
   return {
@@ -5988,7 +5990,17 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
 
   async function createCredential(draft: CredentialDraft): Promise<void> {
     if (!window.wormhole) throw new Error('The credential service is unavailable.');
-    const credential = (await window.wormhole.createCredential(draft)) as CredentialRecord;
+    if (draft.provider !== 'Local') {
+      throw new Error(bitwardenCredentialCreationError);
+    }
+    const credential = (await window.wormhole.createCredential({
+      name: draft.name,
+      protocol: draft.protocol,
+      username: draft.username,
+      domain: draft.domain,
+      password: draft.password,
+      provider: 'Local',
+    })) as CredentialRecord;
     setCredentials((current) => mergeCredential(current, credential));
     setCredentialOptions((current) => mergeCredentialOption(current, credential));
     void refreshWorkspaceCredentials().catch(() => {
@@ -10947,6 +10959,10 @@ function CredentialsPage({
   async function submitCredential(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (busy) return;
+    if (!editingCredential && credentialForm.provider !== 'Local') {
+      setOperationError(bitwardenCredentialCreationError);
+      return;
+    }
     const draft: CredentialDraft = {
       name: credentialForm.name.trim(),
       protocol: credentialForm.protocol,
@@ -11243,27 +11259,29 @@ function CredentialsPage({
                 </SelectContent>
               </Select>
             </div>
-            <div className="grid gap-2">
-              <Label htmlFor="credential-provider">Credential vault</Label>
-              <Select
-                onValueChange={(value) =>
-                  setCredentialForm((form) => ({
-                    ...form,
-                    provider: value as CredentialDraft['provider'],
-                    password: value === 'Bitwarden' ? '' : form.password,
-                  }))
-                }
-                value={credentialForm.provider}
-              >
-                <SelectTrigger id="credential-provider">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="Local">Local password</SelectItem>
-                  <SelectItem value="Bitwarden">Bitwarden item</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
+            {editingCredential ? (
+              <div className="grid gap-2">
+                <Label htmlFor="credential-provider">Credential vault</Label>
+                <Select
+                  onValueChange={(value) =>
+                    setCredentialForm((form) => ({
+                      ...form,
+                      provider: value as CredentialDraft['provider'],
+                      password: value === 'Bitwarden' ? '' : form.password,
+                    }))
+                  }
+                  value={credentialForm.provider}
+                >
+                  <SelectTrigger id="credential-provider">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="Local">Local password</SelectItem>
+                    <SelectItem value="Bitwarden">Bitwarden item</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            ) : null}
             {credentialForm.protocol !== 'vnc' ? (
               <div className="grid gap-2">
                 <Label htmlFor="credential-username">Username</Label>

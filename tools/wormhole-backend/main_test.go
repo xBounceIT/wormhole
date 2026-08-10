@@ -1082,6 +1082,28 @@ func TestCredentialCrudStoresOnlyProtectedReferences(t *testing.T) {
 	}
 }
 
+func TestCredentialCreationRejectsBitwardenProfiles(t *testing.T) {
+	for _, provider := range []string{"Bitwarden", " bitwarden ", "BITWARDEN"} {
+		t.Run(provider, func(t *testing.T) {
+			databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+			_, err := createCredential(databasePath, credentialCreateRequest{
+				Name:              "Vault item",
+				Protocol:          "ssh",
+				Username:          "operator",
+				Provider:          provider,
+				BitwardenItemID:   "vault-item",
+				BitwardenItemName: "Production",
+			})
+			if err == nil || err.Error() != "Bitwarden credential profiles cannot be created manually" {
+				t.Fatalf("Bitwarden credential creation should be rejected, got %v", err)
+			}
+			if _, statErr := os.Stat(databasePath); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("rejected Bitwarden creation touched credential storage: %v", statErr)
+			}
+		})
+	}
+}
+
 func TestCredentialUpdateKeepsPreviousSecretWhenDatabaseWriteFails(t *testing.T) {
 	previousStore := credentialSecretStore
 	previousDelete := credentialSecretDelete
