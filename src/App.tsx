@@ -772,13 +772,16 @@ type CredentialDraft = {
   username: string;
   domain: string;
   password: string;
-  passphrase: string;
   clearPassphrase: boolean;
   privateKeySelectionId: string;
   privateKeyFileName: string;
   provider: 'Local' | 'Bitwarden';
   bitwardenItemId: string;
   bitwardenItemName: string;
+};
+
+type CredentialWriteRequest = CredentialDraft & {
+  passphrase: string;
 };
 
 function emptyCredentialDraft(): CredentialDraft {
@@ -789,7 +792,6 @@ function emptyCredentialDraft(): CredentialDraft {
     username: '',
     domain: '',
     password: '',
-    passphrase: '',
     clearPassphrase: false,
     privateKeySelectionId: '',
     privateKeyFileName: '',
@@ -797,6 +799,17 @@ function emptyCredentialDraft(): CredentialDraft {
     bitwardenItemId: '',
     bitwardenItemName: '',
   };
+}
+
+function clearSecretInput(input: HTMLInputElement | null): void {
+  if (input) input.value = '';
+}
+
+function takeOneShotSecret(input: HTMLInputElement | null): string {
+  if (!input) return '';
+  const secret = input.value;
+  clearSecretInput(input);
+  return secret;
 }
 
 function credentialSelectionFor(node: Pick<TreeNode, 'credentialMode' | 'credentialId'>) {
@@ -1722,7 +1735,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   const [sshKeyPassphrasePrompt, setSshKeyPassphrasePrompt] = useState<SshStartRequest | null>(
     null,
   );
-  const [sshKeyPassphrase, setSshKeyPassphrase] = useState('');
+  const sshKeyPassphraseInput = useRef<HTMLInputElement>(null);
   const [bitwardenUnlockPrompt, setBitwardenUnlockPrompt] = useState<{
     reason: string;
   } | null>(null);
@@ -2733,8 +2746,8 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     editingFolderGeneration.current += 1;
     setSshCredentialPrompt(null);
     setSshCredentialForm({ username: '', password: '' });
+    clearSecretInput(sshKeyPassphraseInput.current);
     setSshKeyPassphrasePrompt(null);
-    setSshKeyPassphrase('');
     setRdpCredentialPrompt(null);
     setRdpCredentialForm({ username: '', domain: '', password: '' });
     rdpSavedCredentialAttempts.current.clear();
@@ -3019,7 +3032,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       .catch((error: unknown) => {
         const message = error instanceof Error ? error.message : String(error);
         if (requiresSshKeyPassphrasePrompt(message) && !request.manualKeyPassphrase) {
-          setSshKeyPassphrase('');
+          clearSecretInput(sshKeyPassphraseInput.current);
           setSshKeyPassphrasePrompt(request);
         } else if (isBitwardenUnlockError(message)) {
           requestRuntimeBitwardenUnlock(`ssh:${request.sessionId}`, message, () =>
@@ -3067,10 +3080,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   function submitSshKeyPassphrase(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const request = sshKeyPassphrasePrompt;
-    if (!request || !sshKeyPassphrase) return;
-    const passphrase = sshKeyPassphrase;
+    const passphrase = takeOneShotSecret(sshKeyPassphraseInput.current);
+    if (!request || !passphrase) return;
     setSshKeyPassphrasePrompt(null);
-    setSshKeyPassphrase('');
     setSessions((current) =>
       current.map((session) =>
         session.backendSessionId === request.sessionId
@@ -3811,8 +3823,8 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         setSshCredentialForm({ username: '', password: '' });
       }
       if (sshKeyPassphrasePrompt?.sessionId === closing.backendSessionId) {
+        clearSecretInput(sshKeyPassphraseInput.current);
         setSshKeyPassphrasePrompt(null);
-        setSshKeyPassphrase('');
       }
       await releaseSessionResources(closing);
       setSessions((current) => current.filter((session) => session.id !== id));
@@ -5596,8 +5608,8 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
             setSshCredentialForm({ username: '', password: '' });
           }
           if (sshKeyPassphrasePrompt?.sessionId === editedSession.backendSessionId) {
+            clearSecretInput(sshKeyPassphraseInput.current);
             setSshKeyPassphrasePrompt(null);
-            setSshKeyPassphrase('');
           }
           if (runtimeBitwardenRetries.isEmpty && bitwardenUnlockPrompt) {
             dismissRuntimeBitwardenUnlock();
@@ -6009,7 +6021,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     });
   }
 
-  async function createCredential(draft: CredentialDraft): Promise<void> {
+  async function createCredential(draft: CredentialWriteRequest): Promise<void> {
     if (!window.wormhole) throw new Error('The credential service is unavailable.');
     const credential = (await window.wormhole.createCredential(draft)) as CredentialRecord;
     setCredentials((current) => mergeCredential(current, credential));
@@ -6019,7 +6031,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     });
   }
 
-  async function updateCredential(id: string, draft: CredentialDraft): Promise<void> {
+  async function updateCredential(id: string, draft: CredentialWriteRequest): Promise<void> {
     if (!window.wormhole) throw new Error('The credential service is unavailable.');
     const credential = (await window.wormhole.updateCredential({
       ...draft,
@@ -6756,8 +6768,8 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         <Dialog
           onOpenChange={(open) => {
             if (!open) {
+              clearSecretInput(sshKeyPassphraseInput.current);
               setSshKeyPassphrasePrompt(null);
-              setSshKeyPassphrase('');
             }
           }}
           open={sshKeyPassphrasePrompt !== null}
@@ -6776,24 +6788,24 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                   autoFocus
                   autoComplete="off"
                   id="ssh-key-passphrase"
-                  onChange={(event) => setSshKeyPassphrase(event.target.value)}
+                  name="ssh-key-passphrase"
+                  ref={sshKeyPassphraseInput}
                   required
                   type="password"
-                  value={sshKeyPassphrase}
                 />
               </div>
               <DialogFooter>
                 <Button
                   onClick={() => {
+                    clearSecretInput(sshKeyPassphraseInput.current);
                     setSshKeyPassphrasePrompt(null);
-                    setSshKeyPassphrase('');
                   }}
                   type="button"
                   variant="ghost"
                 >
                   Cancel
                 </Button>
-                <Button disabled={!sshKeyPassphrase} type="submit">
+                <Button type="submit">
                   <Power data-icon="inline-start" />
                   Connect
                 </Button>
@@ -10768,8 +10780,8 @@ function CredentialsPage({
 }: {
   initialCredentials: CredentialRecord[];
   isAuthorized: boolean;
-  onCreate: (draft: CredentialDraft) => Promise<void>;
-  onUpdate: (id: string, draft: CredentialDraft) => Promise<void>;
+  onCreate: (draft: CredentialWriteRequest) => Promise<void>;
+  onUpdate: (id: string, draft: CredentialWriteRequest) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
   // react-doctor-disable-next-line react-doctor/prefer-useReducer
 }) {
@@ -10787,6 +10799,7 @@ function CredentialsPage({
   const [bitwardenSearchStatus, setBitwardenSearchStatus] = useState('');
   const [bitwardenSearching, setBitwardenSearching] = useState(false);
   const [privateKeySelecting, setPrivateKeySelecting] = useState(false);
+  const credentialKeyPassphraseInput = useRef<HTMLInputElement>(null);
   const bitwardenSearchAttempts = useLazyRef(() => new WebSessionAttemptTracker());
 
   // App lock is an external security boundary. Scrub every renderer-held secret without
@@ -10794,6 +10807,7 @@ function CredentialsPage({
   // react-doctor-disable-next-line react-hooks-js/set-state-in-effect, react-doctor/no-adjust-state-on-prop-change
   useEffect(() => {
     if (isAuthorized) return;
+    clearSecretInput(credentialKeyPassphraseInput.current);
     setEditorOpen(false); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
     setEditingCredential(null); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
     setCredentialForm(emptyCredentialDraft()); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
@@ -10872,6 +10886,7 @@ function CredentialsPage({
   }
 
   function openNewCredential() {
+    clearSecretInput(credentialKeyPassphraseInput.current);
     setEditingCredential(null);
     setCredentialForm(emptyCredentialDraft());
     setOperationError('');
@@ -10881,6 +10896,7 @@ function CredentialsPage({
 
   function openEditCredential(credential: CredentialRecord) {
     if (!credential.canEdit) return;
+    clearSecretInput(credentialKeyPassphraseInput.current);
     const protocol = credential.protocol as CredentialDraft['protocol'];
     setEditingCredential(credential);
     setCredentialForm({
@@ -10891,7 +10907,6 @@ function CredentialsPage({
       domain: credential.domain ?? '',
       // The renderer never reads saved secrets. Leaving this blank preserves a local secret.
       password: '',
-      passphrase: '',
       clearPassphrase: false,
       privateKeySelectionId: '',
       privateKeyFileName: credential.privateKeyFileName ?? '',
@@ -10905,6 +10920,7 @@ function CredentialsPage({
   }
 
   function closeCredentialEditor() {
+    clearSecretInput(credentialKeyPassphraseInput.current);
     discardPrivateKeySelection(credentialForm.privateKeySelectionId);
     setEditorOpen(false);
     setEditingCredential(null);
@@ -10925,6 +10941,7 @@ function CredentialsPage({
     try {
       const selected = await window.wormhole.selectSshPrivateKey();
       if (!selected) return;
+      clearSecretInput(credentialKeyPassphraseInput.current);
       discardPrivateKeySelection(credentialForm.privateKeySelectionId);
       setCredentialForm((form) => ({
         ...form,
@@ -11024,7 +11041,6 @@ function CredentialsPage({
           ? credentialForm.domain.trim()
           : '',
       password: credentialForm.kind === 'password' ? credentialForm.password : '',
-      passphrase: credentialForm.kind === 'sshKey' ? credentialForm.passphrase : '',
       clearPassphrase: credentialForm.kind === 'sshKey' ? credentialForm.clearPassphrase : false,
       privateKeySelectionId:
         credentialForm.kind === 'sshKey' ? credentialForm.privateKeySelectionId : '',
@@ -11068,13 +11084,18 @@ function CredentialsPage({
       setOperationError('RDP credentials need a domain.');
       return;
     }
+    const request: CredentialWriteRequest = {
+      ...draft,
+      passphrase:
+        draft.kind === 'sshKey' ? takeOneShotSecret(credentialKeyPassphraseInput.current) : '',
+    };
     setBusy(true);
     setOperationError('');
     try {
       if (editingCredential) {
-        await onUpdate(editingCredential.id, draft);
+        await onUpdate(editingCredential.id, request);
       } else {
-        await onCreate(draft);
+        await onCreate(request);
       }
       closeCredentialEditor();
     } catch (error) {
@@ -11324,13 +11345,13 @@ function CredentialsPage({
                 disabled={credentialForm.kind === 'sshKey'}
                 onValueChange={(value) => {
                   if (value !== 'ssh') {
+                    clearSecretInput(credentialKeyPassphraseInput.current);
                     discardPrivateKeySelection(credentialForm.privateKeySelectionId);
                   }
                   setCredentialForm((form) => ({
                     ...form,
                     protocol: value as CredentialDraft['protocol'],
                     kind: value === 'ssh' ? form.kind : 'password',
-                    passphrase: value === 'ssh' ? form.passphrase : '',
                     clearPassphrase: value === 'ssh' ? form.clearPassphrase : false,
                     privateKeySelectionId: value === 'ssh' ? form.privateKeySelectionId : '',
                     privateKeyFileName: value === 'ssh' ? form.privateKeyFileName : '',
@@ -11356,6 +11377,7 @@ function CredentialsPage({
                   onValueChange={(value) => {
                     const kind = value as CredentialDraft['kind'];
                     if (kind === 'password') {
+                      clearSecretInput(credentialKeyPassphraseInput.current);
                       discardPrivateKeySelection(credentialForm.privateKeySelectionId);
                     }
                     setCredentialForm((form) => ({
@@ -11363,7 +11385,6 @@ function CredentialsPage({
                       kind,
                       provider: kind === 'sshKey' ? 'Local' : form.provider,
                       password: kind === 'sshKey' ? '' : form.password,
-                      passphrase: kind === 'password' ? '' : form.passphrase,
                       clearPassphrase: kind === 'password' ? false : form.clearPassphrase,
                       privateKeySelectionId: kind === 'password' ? '' : form.privateKeySelectionId,
                       privateKeyFileName: kind === 'password' ? '' : form.privateKeyFileName,
@@ -11486,27 +11507,23 @@ function CredentialsPage({
                     disabled={credentialForm.clearPassphrase}
                     id="credential-key-passphrase"
                     maxLength={4096}
-                    onChange={(event) =>
-                      setCredentialForm((form) => ({
-                        ...form,
-                        passphrase: event.target.value,
-                        clearPassphrase: false,
-                      }))
-                    }
+                    name="credential-key-passphrase"
+                    ref={credentialKeyPassphraseInput}
                     type="password"
-                    value={credentialForm.passphrase}
                   />
                   {editingCredential && !credentialForm.privateKeySelectionId ? (
                     <label className="flex items-center gap-2 text-xs text-muted-foreground">
                       <Checkbox
                         checked={credentialForm.clearPassphrase}
-                        onCheckedChange={(checked) =>
+                        onCheckedChange={(checked) => {
+                          if (checked === true) {
+                            clearSecretInput(credentialKeyPassphraseInput.current);
+                          }
                           setCredentialForm((form) => ({
                             ...form,
-                            passphrase: checked === true ? '' : form.passphrase,
                             clearPassphrase: checked === true,
-                          }))
-                        }
+                          }));
+                        }}
                       />
                       Forget the saved passphrase and ask when connecting
                     </label>

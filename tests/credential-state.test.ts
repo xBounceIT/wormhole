@@ -145,6 +145,23 @@ test('SSH key credential import keeps key paths and material behind the native b
   assert.match(appSource, /Key passphrase \(optional\)/);
   assert.doesNotMatch(appSource, /privateKeyPath/);
 
+  const credentialDraft = appSource.match(/type CredentialDraft = \{[\s\S]*?\n\};/)?.[0];
+  assert.ok(credentialDraft);
+  assert.doesNotMatch(credentialDraft, /passphrase/);
+  assert.match(appSource, /takeOneShotSecret\(credentialKeyPassphraseInput\.current\)/);
+  assert.match(appSource, /takeOneShotSecret\(sshKeyPassphraseInput\.current\)/);
+  assert.match(appSource, /input\.value = '';/);
+  assert.match(
+    appSource,
+    /clearSecretInput\(credentialKeyPassphraseInput\.current\);\s+setEditorOpen\(false\)/,
+  );
+  assert.match(
+    appSource,
+    /clearSecretInput\(sshKeyPassphraseInput\.current\);\s+setSshKeyPassphrasePrompt\(null\)/,
+  );
+  assert.doesNotMatch(appSource, /setSshKeyPassphrase\(/);
+  assert.doesNotMatch(appSource, /credentialForm\.passphrase/);
+
   assert.match(preloadSource, /credential:select-ssh-private-key/);
   assert.match(preloadSource, /credential:discard-ssh-private-key/);
   assert.doesNotMatch(preloadSource, /privateKeyPath/);
