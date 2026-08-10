@@ -75,6 +75,7 @@ import { RdpBackendClient, stopChildProcess } from './rdp.js';
 import { settleTunnelCleanup, TunnelLeaseRegistry } from './tunnel-lease-registry.js';
 import { isTunnelIdentifier, parseTunnelTestRequest } from './tunnel-test-contract.js';
 import {
+  isSameCertificateHostname,
   isMatchingOAuthRedirect,
   tunnelAuthPartition,
   type TunnelBrowserCompletion,
@@ -2437,14 +2438,25 @@ async function runTunnelBrowserAuth(
   const fireboxOrigin = initialURLs[0].origin;
   const cookieScopeURL = initialURLs[0].toString();
   const fireboxHost = initialURLs[0].hostname;
-  const partition = tunnelAuthPartition(event.completion);
+  const partition =
+    event.completion === 'query-token'
+      ? tunnelAuthPartition({
+          completion: event.completion,
+          origin: fireboxOrigin,
+          ignoreCertificateErrors: event.ignoreCertificateErrors,
+        })
+      : tunnelAuthPartition({ completion: event.completion });
   const browserSession = electronSession.fromPartition(partition, { cache: false });
   browserSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
   browserSession.setPermissionCheckHandler(() => false);
-  // Persistent sessions retain handlers too. Always replace the verifier so a prior explicit
-  // trust opt-in cannot leak into the next tunnel using the same provider partition.
+  // The partition isolates WatchGuard origin and trust policy. Still replace the verifier so a
+  // reused same-policy partition cannot retain a stale callback from an earlier authentication.
   browserSession.setCertificateVerifyProc((request, callback) => {
-    callback(event.ignoreCertificateErrors && request.hostname === fireboxHost ? 0 : -3);
+    callback(
+      event.ignoreCertificateErrors && isSameCertificateHostname(request.hostname, fireboxHost)
+        ? 0
+        : -3,
+    );
   });
   const parent = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
   const authWindow = new BrowserWindow({

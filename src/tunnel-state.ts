@@ -5,7 +5,44 @@ export type TunnelSettings =
   | { tunnelEnabled: true; tunnelConfigId: string };
 
 export function watchguardUsesSso(settings: Record<string, unknown>): boolean {
-  return settings.UseSingleSignOn === true || settings.AuthMode === 2;
+  return settings.AuthMode === 2;
+}
+
+export function watchguardAuthModeForEditor(settings: Record<string, unknown>): 1 | 2 {
+  if (settings.UseSingleSignOn === true || settings.AuthMode === 2) return 2;
+  if (settings.UseSingleSignOn === false || settings.AuthMode === 1) return 1;
+
+  const blank = (key: string) =>
+    typeof settings[key] !== 'string' || !(settings[key] as string).trim();
+  const hasManualProfile = ['ProfileOvpn', 'CaPem', 'ClientCertPem', 'ClientKeyPem'].some(
+    (key) => !blank(key),
+  );
+  return !hasManualProfile && (blank('Username') || blank('Password')) ? 2 : 1;
+}
+
+export function normalizeWatchguardEditorSettings(
+  input: Record<string, unknown>,
+): Record<string, unknown> {
+  const settings = { ...input };
+  const useSso = watchguardAuthModeForEditor(settings) === 2;
+  delete settings.UseSingleSignOn;
+  settings.AuthMode = useSso ? 2 : 1;
+  if (useSso) {
+    delete settings.Username;
+    delete settings.Password;
+  }
+  return settings;
+}
+
+export function watchguardEditorSettingsFromDetails(
+  defaults: Record<string, unknown>,
+  persisted: Record<string, unknown>,
+): Record<string, unknown> {
+  return normalizeWatchguardEditorSettings({
+    ...defaults,
+    ...persisted,
+    AuthMode: watchguardAuthModeForEditor(persisted),
+  });
 }
 
 export function tunnelModeFor(node: {
@@ -32,7 +69,7 @@ export function normalizeTunnelEditorSettings(
   kind: number,
   input: Record<string, unknown>,
 ): Record<string, unknown> {
-  const settings = { ...input };
+  let settings = { ...input };
   for (const key of ['AllowedIps', 'Dns']) {
     if (typeof settings[key] === 'string') {
       settings[key] = settings[key]
@@ -97,13 +134,8 @@ export function normalizeTunnelEditorSettings(
     stripAll('TotpSecret');
     stripAll('ServerCertSha256Pin');
   } else if (kind === 3) {
-    const useSso = watchguardUsesSso(settings);
-    settings.UseSingleSignOn = useSso;
-    if (useSso) {
-      settings.AuthMode = 2;
-      delete settings.Username;
-      delete settings.Password;
-    } else {
+    settings = normalizeWatchguardEditorSettings(settings);
+    if (!watchguardUsesSso(settings)) {
       trimCrlf('Password');
     }
     deleteIfBlank('Domain');
@@ -141,32 +173,8 @@ export function updateTunnelEditorSetting(
   const settings = { ...input, [key]: next };
   if (kind !== 3) return settings;
 
-  if (key === 'UseSingleSignOn') {
-    const enabled = next === true;
-    settings.AuthMode = enabled ? 2 : settings.AuthMode === 2 ? 0 : settings.AuthMode;
-    if (enabled) {
-      delete settings.Username;
-      delete settings.Password;
-    }
-  } else if (key === 'AuthMode') {
-    settings.UseSingleSignOn = next === 2;
-    if (next === 2) {
-      delete settings.Username;
-      delete settings.Password;
-    }
-  }
-  return settings;
-}
-
-export function watchguardSsoEnabledForEditor(settings: Record<string, unknown>): boolean {
-  if (watchguardUsesSso(settings)) return true;
-  if (Object.hasOwn(settings, 'UseSingleSignOn') || (settings.AuthMode ?? 0) !== 0) return false;
-  const blank = (key: string) =>
-    typeof settings[key] !== 'string' || !(settings[key] as string).trim();
-  const hasManualProfile = ['ProfileOvpn', 'CaPem', 'ClientCertPem', 'ClientKeyPem'].some(
-    (key) => !blank(key),
-  );
-  return !hasManualProfile && (blank('Username') || blank('Password'));
+  if (key === 'AuthMode') settings.AuthMode = next === 2 ? 2 : 1;
+  return normalizeWatchguardEditorSettings(settings);
 }
 
 export function missingTunnelFields(value: {

@@ -6,13 +6,15 @@ import {
   isTunnelTestNotice,
   missingTunnelFields,
   normalizeTunnelEditorSettings,
+  normalizeWatchguardEditorSettings,
   parseTunnelProbeTarget,
   tunnelModeFor,
   tunnelTestPhaseLabel,
   tunnelValueFor,
   updateTunnelEditorSetting,
   userFacingTunnelError,
-  watchguardSsoEnabledForEditor,
+  watchguardAuthModeForEditor,
+  watchguardEditorSettingsFromDetails,
 } from '../src/tunnel-state.ts';
 
 const tunnelId = 'b2a0a6b0-69c8-4f3e-a4cb-f3395aa0a9f7';
@@ -119,7 +121,22 @@ test('VPN editor removes WatchGuard credentials for SSO and obsolete Stormshield
     {
       Server: 'firebox.example.com',
       AuthMode: 2,
-      UseSingleSignOn: true,
+      VerifyX509Name: '/O=WatchGuard_Technologies/OU=Fireware/CN=Fireware_SSLVPN_Server',
+    },
+  );
+  assert.deepEqual(
+    normalizeTunnelEditorSettings(3, {
+      Server: 'firebox.example.com',
+      AuthMode: 0,
+      UseSingleSignOn: false,
+      Username: 'alice',
+      Password: 'secret\r\n',
+    }),
+    {
+      Server: 'firebox.example.com',
+      AuthMode: 1,
+      Username: 'alice',
+      Password: 'secret',
       VerifyX509Name: '/O=WatchGuard_Technologies/OU=Fireware/CN=Fireware_SSLVPN_Server',
     },
   );
@@ -140,38 +157,62 @@ test('VPN editor removes WatchGuard credentials for SSO and obsolete Stormshield
   );
 });
 
-test('WatchGuard editor keeps the SSO checkbox, authentication mode, and credentials atomic', () => {
+test('WatchGuard editor keeps authentication mode and credentials atomic', () => {
   const credentials = { AuthMode: 1, Username: 'alice', Password: 'secret' };
-  assert.deepEqual(updateTunnelEditorSetting(3, credentials, 'UseSingleSignOn', true), {
-    AuthMode: 2,
-    UseSingleSignOn: true,
-  });
-  assert.deepEqual(
-    updateTunnelEditorSetting(3, { AuthMode: 2, UseSingleSignOn: true }, 'UseSingleSignOn', false),
-    { AuthMode: 0, UseSingleSignOn: false },
-  );
   assert.deepEqual(updateTunnelEditorSetting(3, credentials, 'AuthMode', 2), {
     AuthMode: 2,
-    UseSingleSignOn: true,
   });
+  assert.deepEqual(updateTunnelEditorSetting(3, { AuthMode: 2 }, 'AuthMode', 1), {
+    AuthMode: 1,
+  });
+  assert.deepEqual(
+    normalizeWatchguardEditorSettings({
+      AuthMode: 2,
+      UseSingleSignOn: true,
+      Username: 'legacy-user',
+      Password: 'legacy-password',
+    }),
+    { AuthMode: 2 },
+  );
+  assert.deepEqual(
+    updateTunnelEditorSetting(
+      3,
+      { AuthMode: 2, UseSingleSignOn: true, Username: 'must-go', Password: 'must-go' },
+      'TrustServerCertificate',
+      true,
+    ),
+    { AuthMode: 2, TrustServerCertificate: true },
+  );
   assert.deepEqual(updateTunnelEditorSetting(4, credentials, 'UseOtp', true), {
     ...credentials,
     UseOtp: true,
   });
 });
 
-test('WatchGuard editor preserves legacy automatic SSO without reclassifying manual profiles', () => {
-  assert.equal(watchguardSsoEnabledForEditor({ AuthMode: 0 }), true);
+test('WatchGuard editor maps legacy automatic settings to one explicit authentication mode', () => {
+  assert.equal(watchguardAuthModeForEditor({ AuthMode: 0 }), 2);
   assert.equal(
-    watchguardSsoEnabledForEditor({ AuthMode: 0, Username: 'alice', Password: 'secret' }),
-    false,
+    watchguardAuthModeForEditor({ AuthMode: 0, Username: 'alice', Password: 'secret' }),
+    1,
   );
   assert.equal(
-    watchguardSsoEnabledForEditor({ AuthMode: 0, ProfileOvpn: 'client\nremote firebox 443' }),
-    false,
+    watchguardAuthModeForEditor({ AuthMode: 0, ProfileOvpn: 'client\nremote firebox 443' }),
+    1,
   );
-  assert.equal(watchguardSsoEnabledForEditor({ AuthMode: 0, UseSingleSignOn: false }), false);
-  assert.equal(watchguardSsoEnabledForEditor({ AuthMode: 2 }), true);
+  assert.equal(watchguardAuthModeForEditor({ AuthMode: 0, UseSingleSignOn: false }), 1);
+  assert.equal(watchguardAuthModeForEditor({ AuthMode: 0, UseSingleSignOn: true }), 2);
+  assert.equal(watchguardAuthModeForEditor({ AuthMode: 2 }), 2);
+  assert.deepEqual(watchguardEditorSettingsFromDetails({ Port: 443, AuthMode: 1 }, {}), {
+    Port: 443,
+    AuthMode: 2,
+  });
+  assert.deepEqual(
+    watchguardEditorSettingsFromDetails(
+      { Port: 443, AuthMode: 1 },
+      { Username: 'alice', Password: 'secret' },
+    ),
+    { Port: 443, AuthMode: 1, Username: 'alice', Password: 'secret' },
+  );
 });
 
 test('missing tunnel fields match the WinUI required-field gates', () => {
@@ -213,7 +254,6 @@ test('missing tunnel fields match the WinUI required-field gates', () => {
         Server: 'firebox.example.com',
         Port: 443,
         AuthMode: 2,
-        UseSingleSignOn: true,
       },
     }),
     [],
@@ -225,8 +265,7 @@ test('missing tunnel fields match the WinUI required-field gates', () => {
       settings: {
         Server: 'firebox.example.com',
         Port: 443,
-        AuthMode: 0,
-        UseSingleSignOn: false,
+        AuthMode: 1,
       },
     }),
     ['Username', 'Password'],
