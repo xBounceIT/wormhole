@@ -2362,10 +2362,17 @@ func validateLocalTransferDestination(source, destination, target string, source
 }
 
 func sameLocalPath(left, right string) bool {
-	if runtime.GOOS == "windows" {
-		return strings.EqualFold(filepath.Clean(left), filepath.Clean(right))
+	left = filepath.Clean(left)
+	right = filepath.Clean(right)
+	if left == right {
+		return true
 	}
-	return filepath.Clean(left) == filepath.Clean(right)
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(left, right)
+	}
+	leftInfo, leftErr := os.Stat(left)
+	rightInfo, rightErr := os.Stat(right)
+	return leftErr == nil && rightErr == nil && os.SameFile(leftInfo, rightInfo)
 }
 
 func localPathContains(parent, candidate string) bool {
@@ -2375,10 +2382,23 @@ func localPathContains(parent, candidate string) bool {
 		return true
 	}
 	relative, err := filepath.Rel(parent, candidate)
-	if err != nil || filepath.IsAbs(relative) {
+	if err == nil && !filepath.IsAbs(relative) &&
+		relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return true
+	}
+
+	parentInfo, err := os.Stat(parent)
+	if err != nil {
 		return false
 	}
-	return relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+	for current := candidate; ; current = filepath.Dir(current) {
+		if currentInfo, statErr := os.Stat(current); statErr == nil && os.SameFile(parentInfo, currentInfo) {
+			return true
+		}
+		if filepath.Dir(current) == current {
+			return false
+		}
+	}
 }
 
 func validateLocalTransferDestinationParents(path string) error {

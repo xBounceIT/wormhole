@@ -1430,6 +1430,35 @@ func TestAppendLocalTransferPlansRejectsFolderIntoItself(t *testing.T) {
 	}
 }
 
+func TestLocalSftpSelfCopyGuardUsesFilesystemCaseSemantics(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "Project")
+	if err := os.Mkdir(source, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	alternateCase := filepath.Join(root, "project")
+	target := filepath.Join(alternateCase, "Project")
+
+	_, statErr := os.Stat(alternateCase)
+	caseInsensitive := statErr == nil
+	if statErr != nil && !os.IsNotExist(statErr) {
+		t.Fatal(statErr)
+	}
+	if got := sameLocalPath(source, alternateCase); got != caseInsensitive {
+		t.Fatalf("sameLocalPath() = %v on case-insensitive=%v filesystem", got, caseInsensitive)
+	}
+	if got := localPathContains(source, filepath.Join(alternateCase, "nested")); got != caseInsensitive {
+		t.Fatalf("localPathContains() = %v on case-insensitive=%v filesystem", got, caseInsensitive)
+	}
+	err := validateLocalTransferDestination(source, alternateCase, target, true)
+	if caseInsensitive && (err == nil || !strings.Contains(err.Error(), "copy a folder into itself")) {
+		t.Fatalf("case-insensitive self-copy was not rejected: %v", err)
+	}
+	if !caseInsensitive && err != nil {
+		t.Fatalf("case-sensitive paths were treated as equivalent: %v", err)
+	}
+}
+
 func TestLocalTransferRejectsSymlinkedDestinationParents(t *testing.T) {
 	root := t.TempDir()
 	outside := t.TempDir()
