@@ -346,12 +346,12 @@ function normalizeLocalContainmentPath(path: string, style: LocalPathStyle): str
   return path === '/' ? path : path.replace(/\/+$/, '');
 }
 
-function localPathContains(parent: string, candidate: string, platform: string): boolean {
+function localPathContains(parent: string, candidate: string): boolean {
   const style = localPathStyle(parent);
   if (!style || localPathStyle(candidate) !== style) return false;
   let normalizedParent = normalizeLocalContainmentPath(parent, style);
   let normalizedCandidate = normalizeLocalContainmentPath(candidate, style);
-  if (style === 'windows' || platform === 'darwin') {
+  if (style === 'windows') {
     normalizedParent = normalizedParent.toLowerCase();
     normalizedCandidate = normalizedCandidate.toLowerCase();
   }
@@ -367,7 +367,6 @@ function localPathContains(parent: string, candidate: string, platform: string):
 export function isInvalidLocalSftpDropDestination(
   destination: string,
   items: readonly { sourcePath: string; name: string; isDirectory: boolean }[],
-  platform: string,
 ): boolean {
   const style = localPathStyle(destination);
   if (!style) return false;
@@ -377,8 +376,8 @@ export function isInvalidLocalSftpDropDestination(
     const target = destination.endsWith(separator)
       ? `${destination}${item.name}`
       : `${destination}${separator}${item.name}`;
-    if (localPathContains(item.sourcePath, target, platform)) return true;
-    if (item.isDirectory && localPathContains(item.sourcePath, destination, platform)) return true;
+    if (localPathContains(item.sourcePath, target)) return true;
+    if (item.isDirectory && localPathContains(item.sourcePath, destination)) return true;
   }
   return false;
 }

@@ -76,8 +76,8 @@ func TestFindInstallerAsset(t *testing.T) {
 	release := githubRelease{Assets: []githubReleaseAsset{
 		{Name: "Wormhole-0.9.1-win-x64-setup.exe", BrowserDownloadUrl: "https://example/x64.exe", Size: 10},
 		{Name: "Wormhole-0.9.1-win-arm64-setup.exe", BrowserDownloadUrl: "https://example/arm64.exe"},
-		{Name: "Wormhole-0.9.1-linux-x86_64-setup.AppImage", BrowserDownloadUrl: "https://example/linux-x64"},
-		{Name: "Wormhole-0.9.1-linux-arm64-setup.AppImage", BrowserDownloadUrl: "https://example/linux-arm64"},
+		{Name: "Wormhole-0.9.1-linux-x86_64.AppImage", BrowserDownloadUrl: "https://example/linux-x64"},
+		{Name: "Wormhole-0.9.1-linux-arm64.AppImage", BrowserDownloadUrl: "https://example/linux-arm64"},
 		{Name: "Wormhole-0.9.1-mac-universal-setup.dmg", BrowserDownloadUrl: "https://example/mac"},
 		{Name: "Wormhole-0.9.1-win-x64-setup.exe.sha256", BrowserDownloadUrl: "https://example/x64.sha256"},
 		{Name: "README.txt"},
@@ -90,8 +90,8 @@ func TestFindInstallerAsset(t *testing.T) {
 	}{
 		{goos: "windows", arch: "x64", name: "Wormhole-0.9.1-win-x64-setup.exe"},
 		{goos: "windows", arch: "arm64", name: "Wormhole-0.9.1-win-arm64-setup.exe"},
-		{goos: "linux", arch: "x64", name: "Wormhole-0.9.1-linux-x86_64-setup.AppImage"},
-		{goos: "linux", arch: "arm64", name: "Wormhole-0.9.1-linux-arm64-setup.AppImage"},
+		{goos: "linux", arch: "x64", name: "Wormhole-0.9.1-linux-x86_64.AppImage"},
+		{goos: "linux", arch: "arm64", name: "Wormhole-0.9.1-linux-arm64.AppImage"},
 		{goos: "darwin", arch: "x64", name: "Wormhole-0.9.1-mac-universal-setup.dmg"},
 		{goos: "darwin", arch: "arm64", name: "Wormhole-0.9.1-mac-universal-setup.dmg"},
 	} {
@@ -167,7 +167,7 @@ func TestCheckForUpdate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("checkForUpdate failed: %v", err)
 	}
-	if !result.IsUpdateAvailable || result.CheckFailed {
+	if !result.IsNewerRelease || !result.IsUpdateAvailable || result.CheckFailed {
 		t.Fatalf("expected an available update, got %+v", result)
 	}
 	if result.LatestVersion != "9.9.9" || result.CurrentVersion != "0.9.0" {
@@ -210,7 +210,7 @@ func TestCheckForUpdateRejectsInstallerWithoutDigest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.IsUpdateAvailable || result.InstallerUrl != "" || result.InstallerFileName != "" || result.InstallerSha256 != "" {
+	if !result.IsNewerRelease || result.IsUpdateAvailable || result.InstallerUrl != "" || result.InstallerFileName != "" || result.InstallerSha256 != "" {
 		t.Fatalf("unverified installer was exposed: %+v", result)
 	}
 	if result.LatestVersion != "9.9.9" || result.ReleaseUrl == "" {
@@ -236,7 +236,7 @@ func TestCheckForUpdatePreservesMetadataWithoutCompatibleAsset(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.IsUpdateAvailable || result.LatestVersion != "9.9.9" || result.ReleaseUrl == "" ||
+	if !result.IsNewerRelease || result.IsUpdateAvailable || result.LatestVersion != "9.9.9" || result.ReleaseUrl == "" ||
 		result.ReleaseNotes != "Release notes" {
 		t.Fatalf("newer release metadata was not preserved: %+v", result)
 	}
@@ -265,12 +265,13 @@ func TestCheckForUpdateFailureDoesNotPersistMarker(t *testing.T) {
 
 func TestCheckForUpdateSkipsDraftAndMissingAsset(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		release githubRelease
+		name         string
+		release      githubRelease
+		newerRelease bool
 	}{
 		{name: "draft", release: githubRelease{TagName: "v9.9.9", Draft: true}},
 		{name: "prerelease", release: githubRelease{TagName: "v9.9.9", Prerelease: true}},
-		{name: "no asset", release: githubRelease{TagName: "v9.9.9"}},
+		{name: "no asset", release: githubRelease{TagName: "v9.9.9"}, newerRelease: true},
 		{name: "older tag", release: githubRelease{TagName: "v0.8.0"}},
 		{name: "bad tag", release: githubRelease{TagName: "not-a-version"}},
 	} {
@@ -289,7 +290,7 @@ func TestCheckForUpdateSkipsDraftAndMissingAsset(t *testing.T) {
 			if err != nil {
 				t.Fatalf("checkForUpdate failed: %v", err)
 			}
-			if result.IsUpdateAvailable || result.CheckFailed {
+			if result.IsNewerRelease != tc.newerRelease || result.IsUpdateAvailable || result.CheckFailed {
 				t.Fatalf("expected no update, got %+v", result)
 			}
 		})
@@ -393,8 +394,8 @@ func TestServeUpdateDownloadShaMismatch(t *testing.T) {
 func TestServeUpdateDownloadRequiresDigest(t *testing.T) {
 	t.Parallel()
 	request, _ := json.Marshal(updateDownloadRequest{
-		InstallerUrl:      "https://example.invalid/Wormhole-9.9.9-linux-x86_64-setup.AppImage",
-		InstallerFileName: "Wormhole-9.9.9-linux-x86_64-setup.AppImage",
+		InstallerUrl:      "https://example.invalid/Wormhole-9.9.9-linux-x86_64.AppImage",
+		InstallerFileName: "Wormhole-9.9.9-linux-x86_64.AppImage",
 	})
 	err := serveUpdateDownload(filepath.Join(t.TempDir(), "wormhole.db"), bytes.NewReader(request), &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "requires a valid SHA-256") {
@@ -497,10 +498,10 @@ func TestUpdateCacheMaintenanceRemovesOnlyStaleAndSupersededFiles(t *testing.T) 
 	}
 	cleanupStalePartialDownloads(filepath.Join(t.TempDir(), "missing.db"))
 
-	keepName := "Wormhole-2.0.0-linux-x86_64-setup.AppImage"
+	keepName := "Wormhole-2.0.0-linux-x86_64.AppImage"
 	removeNames := []string{
 		"Wormhole-1.0.0-win-x64-setup.exe",
-		"Wormhole-1.0.0-linux-x86_64-setup.AppImage",
+		"Wormhole-1.0.0-linux-x86_64.AppImage",
 		"Wormhole-1.0.0-mac-universal-setup.dmg",
 	}
 	for _, name := range append([]string{keepName}, removeNames...) {

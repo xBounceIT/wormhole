@@ -157,7 +157,7 @@ test('update installers use verified platform-specific cache and launch contract
   for (const [platform, fileName, action] of [
     ['win32', 'Wormhole-2.0.1-win-x64-setup.exe', 'execute'],
     ['darwin', 'Wormhole-2.0.1-mac-universal-setup.dmg', 'open'],
-    ['linux', 'Wormhole-2.0.1-linux-x86_64-setup.AppImage', 'reveal'],
+    ['linux', 'Wormhole-2.0.1-linux-x86_64.AppImage', 'reveal'],
   ] as const) {
     assert.equal(
       isSafeUpdateInstallerPath(path.join(cacheRoot, fileName), cacheRoot, platform),
@@ -205,33 +205,40 @@ test('update installers use verified platform-specific cache and launch contract
   );
 });
 
-test('update availability compares versions from the same backend result', () => {
+test('update availability uses the backend version decision from the same result', () => {
   assert.equal(
     hasNewerReleaseWithoutInstaller({
-      currentVersion: '2.0.0',
       latestVersion: '2.1.0',
+      isNewerRelease: true,
       isUpdateAvailable: false,
     }),
     true,
   );
   assert.equal(
     hasNewerReleaseWithoutInstaller({
-      currentVersion: '2.0.0',
       latestVersion: '2.0.0',
+      isNewerRelease: false,
       isUpdateAvailable: false,
     }),
     false,
   );
   assert.equal(
     hasNewerReleaseWithoutInstaller({
-      currentVersion: '2.0.0',
       latestVersion: '2.1.0',
+      isNewerRelease: true,
       isUpdateAvailable: true,
     }),
     false,
   );
+  assert.equal(
+    hasNewerReleaseWithoutInstaller({
+      latestVersion: '2.0.0',
+      isNewerRelease: false,
+      isUpdateAvailable: false,
+    }),
+    false,
+  );
   const installable = {
-    currentVersion: '2.0.0',
     latestVersion: '2.1.0',
     isUpdateAvailable: true,
   };

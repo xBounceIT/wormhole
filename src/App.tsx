@@ -9801,7 +9801,7 @@ function SftpBrowserSurface({
     if (
       targetPane === 'local' &&
       payload.sourcePane === 'local' &&
-      isInvalidLocalSftpDropDestination(targetPath, payload.items, window.wormhole?.platform ?? '')
+      isInvalidLocalSftpDropDestination(targetPath, payload.items)
     ) {
       return;
     }

@@ -165,27 +165,25 @@ test('local SFTP drops reject recursive destinations on Windows and POSIX hosts'
     isDirectory: true,
   });
   assert.equal(
-    isInvalidLocalSftpDropDestination(
-      'C:\\Users\\operator\\folder\\nested',
-      [directory('C:\\Users\\operator\\folder', 'folder')],
-      'win32',
-    ),
+    isInvalidLocalSftpDropDestination('C:\\Users\\operator\\folder\\nested', [
+      directory('C:\\Users\\operator\\folder', 'folder'),
+    ]),
     true,
   );
   assert.equal(
-    isInvalidLocalSftpDropDestination(
-      '/home/operator/folder/nested',
-      [directory('/home/operator/folder', 'folder')],
-      'linux',
-    ),
+    isInvalidLocalSftpDropDestination('/home/operator/folder/nested', [
+      directory('/home/operator/folder', 'folder'),
+    ]),
     true,
   );
   assert.equal(
-    isInvalidLocalSftpDropDestination(
-      '/home/operator/other',
-      [directory('/home/operator/folder', 'folder')],
-      'linux',
-    ),
+    isInvalidLocalSftpDropDestination('/home/operator/other', [
+      directory('/home/operator/folder', 'folder'),
+    ]),
+    false,
+  );
+  assert.equal(
+    isInvalidLocalSftpDropDestination('/Volumes/work/foo', [directory('/Volumes/work/Foo', 'Foo')]),
     false,
   );
 });

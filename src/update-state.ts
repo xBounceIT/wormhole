@@ -1,13 +1,9 @@
 export function hasNewerReleaseWithoutInstaller(result: {
-  currentVersion: string;
   latestVersion: string;
+  isNewerRelease: boolean;
   isUpdateAvailable: boolean;
 }): boolean {
-  return Boolean(
-    result.latestVersion &&
-    result.latestVersion !== result.currentVersion &&
-    !result.isUpdateAvailable,
-  );
+  return Boolean(result.latestVersion && result.isNewerRelease && !result.isUpdateAvailable);
 }
 
 export function isUpdateInstallable(result: {

@@ -476,6 +476,7 @@ type StartupUnlockResponse = {
 type UpdateCheckResult = {
   currentVersion: string;
   latestVersion: string;
+  isNewerRelease: boolean;
   isUpdateAvailable: boolean;
   checkFailed: boolean;
   releaseTag?: string;

@@ -30,7 +30,7 @@ const (
 
 var updateInstallerCachePatterns = []string{
 	"Wormhole-*-win-*-setup.exe",
-	"Wormhole-*-linux-*-setup.AppImage",
+	"Wormhole-*-linux-*.AppImage",
 	"Wormhole-*-mac-*-setup.dmg",
 }
 
@@ -42,12 +42,13 @@ type updateCheckRequest struct {
 	CurrentVersion string `json:"currentVersion"`
 }
 
-// updateCheckResponse is shared by every Electron host. latestVersion is empty when the check
-// found nothing newer; installer fields are populated only for a verified asset matching the
+// updateCheckResponse is shared by every Electron host. isNewerRelease is the authoritative
+// version comparison; installer fields are populated only for a verified asset matching the
 // running operating system and architecture.
 type updateCheckResponse struct {
 	CurrentVersion    string `json:"currentVersion"`
 	LatestVersion     string `json:"latestVersion,omitempty"`
+	IsNewerRelease    bool   `json:"isNewerRelease"`
 	IsUpdateAvailable bool   `json:"isUpdateAvailable"`
 	CheckFailed       bool   `json:"checkFailed"`
 	ReleaseTag        string `json:"releaseTag,omitempty"`
@@ -168,7 +169,7 @@ func updateInstallerAssetSuffix(operatingSystem, arch string) string {
 			arch = "x86_64"
 		}
 		if arch == "x86_64" || arch == "arm64" {
-			return "-linux-" + arch + "-setup.AppImage"
+			return "-linux-" + arch + ".AppImage"
 		}
 	case "darwin":
 		if arch == "x64" || arch == "arm64" {
@@ -332,6 +333,7 @@ func checkForUpdate(databasePath string, request updateCheckRequest) (updateChec
 	newerRelease := updateCheckResponse{
 		CurrentVersion: currentVersion.String(),
 		LatestVersion:  latestVersion.String(),
+		IsNewerRelease: true,
 		ReleaseTag:     release.TagName,
 		ReleaseName:    release.Name,
 		ReleaseUrl:     release.HtmlUrl,

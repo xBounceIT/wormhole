@@ -561,6 +561,7 @@ interface WormholeMcpApproval {
 interface WormholeUpdateCheckResult {
   currentVersion: string;
   latestVersion: string;
+  isNewerRelease: boolean;
   isUpdateAvailable: boolean;
   checkFailed: boolean;
   releaseTag?: string;
