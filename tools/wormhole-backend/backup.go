@@ -109,6 +109,15 @@ type backupCredentialPasswordSnapshot struct {
 	seen     bool
 }
 
+type backupPasswordMutation struct {
+	id               string
+	encoded          string
+	encoding         string
+	replace          bool
+	previousEncoded  sql.NullString
+	previousEncoding sql.NullString
+}
+
 type backupInlinePasswordEntry struct {
 	NodeID   string `json:"nodeId"`
 	Password string `json:"password"`
@@ -1932,7 +1941,6 @@ func restoreBackupSecretsContext(
 	result *backupImportResult,
 ) error {
 	passwordSnapshots := indexBackupCredentialPasswordSnapshots(payload.Passwords)
-	restoredCredentialPasswords := make(map[string]string)
 	for _, entry := range payload.Passwords {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -1951,6 +1959,12 @@ func restoreBackupSecretsContext(
 				fmt.Sprintf("Password for credential %s exceeded the protected-store limit and was skipped.", id))
 			continue
 		}
+		// SSH key passphrases are committed with their matching protected key below. Keeping them
+		// out of this independent password pass prevents either half of the snapshot from changing
+		// when staging the other half fails.
+		if kind == 1 {
+			continue
+		}
 		shouldRestore, warning, err := shouldRestoreBackupPassword(database, id, insertedCredentials, state.credentialIDs)
 		if warning != "" {
 			addBackupWarning(result, warning)
@@ -1964,7 +1978,6 @@ func restoreBackupSecretsContext(
 		if err := storeBackupPassword(database, id, entry.Password); err != nil {
 			return fmt.Errorf("Could not restore a credential password: %w", err)
 		}
-		restoredCredentialPasswords[id] = entry.Password
 		result.PasswordsImported++
 	}
 	for _, entry := range payload.InlinePasswords {
@@ -2014,14 +2027,30 @@ func restoreBackupSecretsContext(
 			continue
 		}
 		path := credentialPrivateKeyPath(databasePath, id)
-		repairing := false
-		if _, inserted := insertedCredentials[id]; !inserted {
+		passphrase := passwordSnapshots[id]
+		_, creating := insertedCredentials[id]
+		repairing := !creating
+		if repairing {
 			existing, err := readBackupPrivateKey(path)
 			if err == nil {
 				clearBytes(existing)
-				continue
+				if !passphrase.found {
+					continue
+				}
+				shouldRestore, warning, err := shouldRestoreBackupPassword(
+					database, id, insertedCredentials, state.credentialIDs,
+				)
+				if warning != "" {
+					addBackupWarning(result, warning)
+				}
+				if err != nil {
+					return err
+				}
+				if !shouldRestore {
+					continue
+				}
 			}
-			if !errors.Is(err, os.ErrNotExist) {
+			if err != nil && !errors.Is(err, os.ErrNotExist) {
 				addBackupWarning(result,
 					fmt.Sprintf("Existing private key for credential %s could not be read; restoring it from backup.", id))
 			}
@@ -2034,32 +2063,23 @@ func restoreBackupSecretsContext(
 				fmt.Sprintf("Private key for credential %s was malformed and was skipped.", id))
 			continue
 		}
-		if repairing {
-			passphrase := passwordSnapshots[id]
-			if passphrase.seen && !passphrase.found {
-				clearBytes(keyBytes)
-				addBackupWarning(result,
-					fmt.Sprintf("Private key for credential %s could not be repaired because its backup passphrase was invalid.", id))
-				continue
-			}
-			if passphrase.found {
-				if restored, ok := restoredCredentialPasswords[id]; !ok || restored != passphrase.password {
-					if err := storeBackupPassword(database, id, passphrase.password); err != nil {
-						clearBytes(keyBytes)
-						return fmt.Errorf("Could not restore an SSH key passphrase: %w", err)
-					}
-					result.PasswordsImported++
-				}
-			} else if err := clearBackupPassword(database, id); err != nil {
-				clearBytes(keyBytes)
-				return fmt.Errorf("Could not clear an obsolete SSH key passphrase: %w", err)
-			}
-		}
-		if err := protectFile(path, keyBytes); err != nil {
+		if repairing && passphrase.seen && !passphrase.found {
 			clearBytes(keyBytes)
-			return errors.New("Could not restore an SSH private key")
+			addBackupWarning(result,
+				fmt.Sprintf("Private key for credential %s could not be repaired because its backup passphrase was invalid.", id))
+			continue
+		}
+		passphraseImported, err := restoreBackupSshKeySnapshot(
+			database, databasePath, id, keyBytes, passphrase, creating,
+		)
+		if err != nil {
+			clearBytes(keyBytes)
+			return err
 		}
 		clearBytes(keyBytes)
+		if passphraseImported {
+			result.PasswordsImported++
+		}
 		result.PrivateKeysImported++
 	}
 	for _, entry := range payload.TunnelPayloads {
@@ -2126,6 +2146,66 @@ func backupIDExists(id string, inserted, existing map[string]struct{}) bool {
 	return ok
 }
 
+func restoreBackupSshKeySnapshot(
+	database *sql.DB,
+	databasePath, id string,
+	keyBytes []byte,
+	passphrase backupCredentialPasswordSnapshot,
+	creating bool,
+) (bool, error) {
+	staged, err := stageCredentialPrivateKeyWrite(databasePath, id, keyBytes)
+	if err != nil {
+		return false, errors.New("Could not restore an SSH private key")
+	}
+	rollbackStage := staged.rollback
+	if creating {
+		rollbackStage = staged.rollbackCreation
+	}
+	var password *string
+	if passphrase.found {
+		password = &passphrase.password
+	}
+	mutation, err := prepareBackupPasswordMutation(id, password)
+	if err != nil {
+		rollbackStage()
+		return false, fmt.Errorf("Could not restore an SSH key passphrase: %w", err)
+	}
+	transaction, err := database.Begin()
+	if err != nil {
+		mutation.discardNewSecret()
+		rollbackStage()
+		return false, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = transaction.Rollback()
+			mutation.discardNewSecret()
+			rollbackStage()
+		}
+	}()
+	if err := mutation.apply(transaction); err != nil {
+		return false, err
+	}
+	if creating {
+		err = recordCredentialPrivateKeyCreation(transaction, staged)
+	} else {
+		err = recordCredentialPrivateKeyReplacement(transaction, staged)
+	}
+	if err != nil {
+		return false, err
+	}
+	if err := transaction.Commit(); err != nil {
+		return false, err
+	}
+	committed = true
+	defer mutation.deletePreviousSecret()
+	if err := finalizeCredentialPrivateKeyWrite(database, staged); err != nil {
+		return false, err
+	}
+	return passphrase.found, nil
+}
+
 func shouldRestoreBackupPassword(
 	database *sql.DB,
 	id string,
@@ -2165,45 +2245,88 @@ func indexBackupCredentialPasswordSnapshots(
 	return snapshots
 }
 
-func storeBackupPassword(database *sql.DB, id, password string) error {
-	encoded, encoding, err := credentialSecretStore(id, password)
+func prepareBackupPasswordMutation(id string, password *string) (*backupPasswordMutation, error) {
+	mutation := &backupPasswordMutation{id: id}
+	if password == nil {
+		return mutation, nil
+	}
+	encoded, encoding, err := credentialSecretStore(id, *password)
 	if err != nil {
-		return errors.New("the platform could not protect the password")
+		return nil, errors.New("the platform could not protect the password")
+	}
+	mutation.encoded = encoded
+	mutation.encoding = encoding
+	mutation.replace = true
+	return mutation, nil
+}
+
+func (mutation *backupPasswordMutation) apply(transaction *sql.Tx) error {
+	readErr := transaction.QueryRow(
+		"SELECT Secret, Encoding FROM CredentialSecrets WHERE lower(Id) = lower(?) LIMIT 1;", mutation.id,
+	).Scan(&mutation.previousEncoded, &mutation.previousEncoding)
+	if readErr != nil && !errors.Is(readErr, sql.ErrNoRows) {
+		return readErr
+	}
+	if mutation.replace {
+		return upsertCredentialSecret(
+			transaction, mutation.id, mutation.encoded, mutation.encoding,
+		)
+	}
+	_, err := transaction.Exec(
+		"DELETE FROM CredentialSecrets WHERE lower(Id) = lower(?);", mutation.id,
+	)
+	return err
+}
+
+func (mutation *backupPasswordMutation) discardNewSecret() {
+	if mutation.replace {
+		_ = credentialSecretDelete(mutation.id, mutation.encoded, mutation.encoding)
+	}
+}
+
+func (mutation *backupPasswordMutation) deletePreviousSecret() {
+	if mutation.previousEncoded.Valid && mutation.previousEncoding.Valid &&
+		(!mutation.replace || mutation.previousEncoded.String != mutation.encoded ||
+			mutation.previousEncoding.String != mutation.encoding) {
+		_ = credentialSecretDelete(
+			mutation.id, mutation.previousEncoded.String, mutation.previousEncoding.String,
+		)
+	}
+}
+
+func storeBackupPassword(database *sql.DB, id, password string) error {
+	mutation, err := prepareBackupPasswordMutation(id, &password)
+	if err != nil {
+		return err
 	}
 	transaction, err := database.Begin()
 	if err != nil {
-		_ = credentialSecretDelete(id, encoded, encoding)
+		mutation.discardNewSecret()
 		return err
 	}
 	committed := false
 	defer func() {
 		if !committed {
 			_ = transaction.Rollback()
-			_ = credentialSecretDelete(id, encoded, encoding)
+			mutation.discardNewSecret()
 		}
 	}()
-	var previousEncoded, previousEncoding sql.NullString
-	readErr := transaction.QueryRow(
-		"SELECT Secret, Encoding FROM CredentialSecrets WHERE lower(Id) = lower(?) LIMIT 1;", id,
-	).Scan(&previousEncoded, &previousEncoding)
-	if readErr != nil && !errors.Is(readErr, sql.ErrNoRows) {
-		return readErr
-	}
-	if err := upsertCredentialSecret(transaction, id, encoded, encoding); err != nil {
+	if err := mutation.apply(transaction); err != nil {
 		return err
 	}
 	if err := transaction.Commit(); err != nil {
 		return err
 	}
 	committed = true
-	if previousEncoded.Valid && previousEncoding.Valid &&
-		(previousEncoded.String != encoded || previousEncoding.String != encoding) {
-		_ = credentialSecretDelete(id, previousEncoded.String, previousEncoding.String)
-	}
+	mutation.deletePreviousSecret()
 	return nil
 }
 
 func clearBackupPassword(database *sql.DB, id string) error {
+	mutation, err := prepareBackupPasswordMutation(id, nil)
+	if err != nil {
+		return err
+	}
 	transaction, err := database.Begin()
 	if err != nil {
 		return err
@@ -2214,23 +2337,14 @@ func clearBackupPassword(database *sql.DB, id string) error {
 			_ = transaction.Rollback()
 		}
 	}()
-	var encoded, encoding sql.NullString
-	readErr := transaction.QueryRow(
-		"SELECT Secret, Encoding FROM CredentialSecrets WHERE lower(Id) = lower(?) LIMIT 1;", id,
-	).Scan(&encoded, &encoding)
-	if readErr != nil && !errors.Is(readErr, sql.ErrNoRows) {
-		return readErr
-	}
-	if _, err := transaction.Exec("DELETE FROM CredentialSecrets WHERE lower(Id) = lower(?);", id); err != nil {
+	if err := mutation.apply(transaction); err != nil {
 		return err
 	}
 	if err := transaction.Commit(); err != nil {
 		return err
 	}
 	committed = true
-	if encoded.Valid && encoding.Valid {
-		_ = credentialSecretDelete(id, encoded.String, encoding.String)
-	}
+	mutation.deletePreviousSecret()
 	return nil
 }
 

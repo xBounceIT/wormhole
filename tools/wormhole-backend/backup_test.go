@@ -617,6 +617,110 @@ func TestBackupKeyRepairClearsPassphraseMissingFromSnapshot(t *testing.T) {
 	clearBytes(key)
 }
 
+func TestBackupKeyPassphraseRepairRestoresMatchingReadableKeySnapshot(t *testing.T) {
+	installBackupTestSecretStore(t)
+	sourcePath := filepath.Join(t.TempDir(), "source.db")
+	source := openBackupTestDatabase(t, sourcePath)
+	seedBackupTestDatabase(t, source, sourcePath)
+	source.Close()
+
+	backupPath := filepath.Join(t.TempDir(), "backup.json")
+	const backupPassword = "missing-passphrase-repair"
+	if _, err := exportBackup(sourcePath, backupRequest{Path: backupPath, Password: backupPassword}); err != nil {
+		t.Fatal(err)
+	}
+	destinationPath := filepath.Join(t.TempDir(), "destination.db")
+	if _, err := importBackup(destinationPath, backupRequest{Path: backupPath, Password: backupPassword}); err != nil {
+		t.Fatal(err)
+	}
+	destination := openBackupTestDatabase(t, destinationPath)
+	if err := clearBackupPassword(destination, backupTestKeyID); err != nil {
+		destination.Close()
+		t.Fatal(err)
+	}
+	destination.Close()
+	keyPath := credentialPrivateKeyPath(destinationPath, backupTestKeyID)
+	if err := protectFile(keyPath, []byte("locally-replaced-key")); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := importBackup(destinationPath, backupRequest{Path: backupPath, Password: backupPassword})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.PasswordsImported != 1 || result.PrivateKeysImported != 1 {
+		t.Fatalf("SSH key snapshot repair summary = %#v", result)
+	}
+	destination = openBackupTestDatabase(t, destinationPath)
+	defer destination.Close()
+	passphrase, found, err := readBackupPassword(destination, backupTestKeyID)
+	if err != nil || !found || passphrase != "key-passphrase" {
+		t.Fatalf("repaired passphrase = %q, %t, %v", passphrase, found, err)
+	}
+	key, err := unprotectFile(keyPath)
+	if err != nil || !bytes.Equal(key, []byte("private-key-material")) {
+		t.Fatalf("matching repaired key = %q, %v", key, err)
+	}
+	clearBytes(key)
+}
+
+func TestBackupKeyRepairPreservesPassphraseWhenKeyStagingFails(t *testing.T) {
+	installBackupTestSecretStore(t)
+	sourcePath := filepath.Join(t.TempDir(), "source.db")
+	source := openBackupTestDatabase(t, sourcePath)
+	seedBackupTestDatabase(t, source, sourcePath)
+	source.Close()
+
+	backupPath := filepath.Join(t.TempDir(), "backup.json")
+	const backupPassword = "failed-repair-password"
+	if _, err := exportBackup(sourcePath, backupRequest{Path: backupPath, Password: backupPassword}); err != nil {
+		t.Fatal(err)
+	}
+	destinationPath := filepath.Join(t.TempDir(), "destination.db")
+	if _, err := importBackup(destinationPath, backupRequest{Path: backupPath, Password: backupPassword}); err != nil {
+		t.Fatal(err)
+	}
+	destination := openBackupTestDatabase(t, destinationPath)
+	if err := storeBackupPassword(destination, backupTestKeyID, "rotated-key-passphrase"); err != nil {
+		destination.Close()
+		t.Fatal(err)
+	}
+	destination.Close()
+	keyPath := credentialPrivateKeyPath(destinationPath, backupTestKeyID)
+	if err := os.Truncate(keyPath, backupMaxFileBytes+1); err != nil {
+		t.Fatal(err)
+	}
+
+	previousStageProtect := credentialPrivateKeyStageProtect
+	credentialPrivateKeyStageProtect = func(string, string, []byte) error {
+		return errors.New("injected key staging failure")
+	}
+	t.Cleanup(func() { credentialPrivateKeyStageProtect = previousStageProtect })
+	if _, err := importBackup(
+		destinationPath,
+		backupRequest{Path: backupPath, Password: backupPassword},
+	); err == nil {
+		t.Fatal("key repair unexpectedly succeeded after staging failed")
+	}
+
+	destination = openBackupTestDatabase(t, destinationPath)
+	defer destination.Close()
+	passphrase, found, err := readBackupPassword(destination, backupTestKeyID)
+	if err != nil || !found || passphrase != "rotated-key-passphrase" {
+		t.Fatalf("passphrase changed after failed key staging = %q, %t, %v", passphrase, found, err)
+	}
+	if _, err := os.Stat(keyPath + credentialPrivateKeyPendingSuffix); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed key staging left a pending file: %v", err)
+	}
+	var pendingOperations int
+	if err := destination.QueryRow(
+		"SELECT COUNT(*) FROM CredentialPrivateKeyOperations WHERE lower(CredentialId) = lower(?);",
+		backupTestKeyID,
+	).Scan(&pendingOperations); err != nil || pendingOperations != 0 {
+		t.Fatalf("failed key staging left %d journal rows: %v", pendingOperations, err)
+	}
+}
+
 func TestBackupDecryptsWinUIAesGcmVector(t *testing.T) {
 	// Independently generated with the .NET APIs used by BackupService: NFC-normalized UTF-8
 	// password, Rfc2898DeriveBytes.Pbkdf2(SHA-256, 600k), and AesGcm with a 16-byte tag.
