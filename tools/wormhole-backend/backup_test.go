@@ -1183,7 +1183,7 @@ func TestBackupPreservesEarlyElectronTunnelSecretFallback(t *testing.T) {
 	storeFallback := func(database *sql.DB, value string) {
 		t.Helper()
 		secretID := tunnelSecretID(backupTestTunnelID)
-		encoded, encoding, err := credentialSecretStore(secretID, value)
+		encoded, encoding, err := credentialSecretStore(secretID, "", value)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1383,10 +1383,11 @@ func writeBackupTestPayload(t *testing.T, payload *backupPayload) string {
 
 func installBackupTestSecretStore(t *testing.T) {
 	t.Helper()
+	installUnjournaledCredentialSecretStoreTest(t)
 	previousStore := credentialSecretStore
 	previousDelete := credentialSecretDelete
 	previousUnprotect := backupUnprotectStoredSecret
-	credentialSecretStore = func(_ string, password string) (string, string, error) {
+	credentialSecretStore = func(_, _ string, password string) (string, string, error) {
 		return base64.StdEncoding.EncodeToString([]byte(password)), "backup-test-v1", nil
 	}
 	credentialSecretDelete = func(string, string, string) error { return nil }

@@ -46,7 +46,7 @@ func installLinuxCredentialStoreMock(t *testing.T) map[string]string {
 func TestLinuxCredentialSecretRoundTripUsesDBusKeyring(t *testing.T) {
 	stored := installLinuxCredentialStoreMock(t)
 
-	reference, encoding, err := storeCredentialSecret(credentialSecretKeyringTestID, "manual-password")
+	reference, encoding, err := storeCredentialSecret(credentialSecretKeyringTestID, "", "manual-password")
 	if err != nil {
 		t.Fatal(err)
 	}

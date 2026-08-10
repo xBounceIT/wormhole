@@ -94,10 +94,16 @@ import (
 	"unsafe"
 )
 
-const darwinKeychainEncoding = "macos-keychain-v1"
-
-func storeCredentialSecret(id, value string) (string, string, error) {
+func prepareCredentialSecretStorage(id string) (string, string, error) {
 	reference, err := newCredentialSecretReference(id)
+	return reference, darwinKeychainEncoding, err
+}
+
+func storeCredentialSecret(id, reference, value string) (string, string, error) {
+	var err error
+	if reference == "" {
+		reference, err = newCredentialSecretReference(id)
+	}
 	if err != nil {
 		return "", "", err
 	}
@@ -145,7 +151,7 @@ func deleteStoredCredentialSecret(id, encoded, encoding string) error {
 	}
 	accountValue := C.CString(account)
 	defer C.free(unsafe.Pointer(accountValue))
-	if status := C.wh_delete(accountValue); status != 0 {
+	if status := C.wh_delete(accountValue); status != 0 && status != C.errSecItemNotFound {
 		return errors.New("the macOS Keychain is unavailable")
 	}
 	return nil

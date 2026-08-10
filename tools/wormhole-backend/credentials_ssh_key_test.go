@@ -46,8 +46,16 @@ func testProtectedKeyContents(plaintext []byte) []byte {
 	return append([]byte("protected-key-placeholder-"), []byte(hex.EncodeToString(digest[:]))...)
 }
 
+func installUnjournaledCredentialSecretStoreTest(t *testing.T) {
+	t.Helper()
+	previousPrepare := credentialSecretPrepare
+	credentialSecretPrepare = func(string) (string, string, error) { return "", "", nil }
+	t.Cleanup(func() { credentialSecretPrepare = previousPrepare })
+}
+
 func installSshKeyCredentialTestStores(t *testing.T) (*int, *[]string, *[][]byte, *[]string) {
 	t.Helper()
+	installUnjournaledCredentialSecretStoreTest(t)
 	previousStore := credentialSecretStore
 	previousDelete := credentialSecretDelete
 	previousStageProtect := credentialPrivateKeyStageProtect
@@ -56,7 +64,7 @@ func installSshKeyCredentialTestStores(t *testing.T) (*int, *[]string, *[][]byte
 	deletedSecrets := make([]string, 0)
 	protectedKeys := make([][]byte, 0)
 	storedSecrets := make([]string, 0)
-	credentialSecretStore = func(id, value string) (string, string, error) {
+	credentialSecretStore = func(id, _ string, value string) (string, string, error) {
 		secretStores++
 		storedSecrets = append(storedSecrets, value)
 		return "protected-secret-" + id + "-" + strconv.Itoa(secretStores), "test-protected-v1", nil
@@ -286,6 +294,258 @@ END;`); err != nil {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("failed create left protected key files: %#v", entries)
+	}
+}
+
+func TestSshKeyCredentialCreateJournalsPassphraseBeforePlatformStore(t *testing.T) {
+	installSshKeyCredentialTestStores(t)
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	keyPath := filepath.Join(t.TempDir(), "id_ed25519")
+	if err := os.WriteFile(keyPath, testSshPrivateKey(t, "passphrase"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	previousPrepare := credentialSecretPrepare
+	previousStore := credentialSecretStore
+	credentialSecretPrepare = func(id string) (string, string, error) {
+		return id + ":aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "test-keyring-v1", nil
+	}
+	journalObserved := false
+	credentialSecretStore = func(id, reference, value string) (string, string, error) {
+		if value != "passphrase" {
+			t.Fatalf("stored passphrase = %q", value)
+		}
+		database, err := openDatabase(databasePath, true)
+		if err != nil {
+			return "", "", err
+		}
+		defer database.Close()
+		var count int
+		if err := database.QueryRow(`
+SELECT COUNT(*) FROM CredentialSecretOperations
+WHERE CredentialId = ? AND SecretReference = ? AND Encoding = 'test-keyring-v1';`,
+			id, reference).Scan(&count); err != nil {
+			return "", "", err
+		}
+		journalObserved = count == 1
+		return reference, "test-keyring-v1", nil
+	}
+	t.Cleanup(func() {
+		credentialSecretPrepare = previousPrepare
+		credentialSecretStore = previousStore
+	})
+
+	created, err := createCredential(databasePath, credentialCreateRequest{
+		Name: "Journaled key", Protocol: "ssh", Kind: "sshKey", Username: "operator",
+		Passphrase: "passphrase", PrivateKeyPath: keyPath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !journalObserved {
+		t.Fatal("platform store ran before its recovery journal was committed")
+	}
+	database, err := openDatabase(databasePath, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var operations int
+	if err := database.QueryRow("SELECT COUNT(*) FROM CredentialSecretOperations;").Scan(&operations); err != nil {
+		t.Fatal(err)
+	}
+	if operations != 0 {
+		t.Fatalf("committed credential secret journal rows = %d", operations)
+	}
+	var storedReference string
+	if err := database.QueryRow("SELECT Secret FROM CredentialSecrets WHERE Id = ?;", created.ID).Scan(&storedReference); err != nil {
+		t.Fatal(err)
+	}
+	if storedReference != created.ID+":aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" {
+		t.Fatalf("stored credential reference = %q", storedReference)
+	}
+}
+
+func TestCredentialSecretRecoveryRemovesInterruptedPlatformStore(t *testing.T) {
+	installUnjournaledCredentialSecretStoreTest(t)
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	if err := ensureElectronWorkspaceSchema(databasePath); err != nil {
+		t.Fatal(err)
+	}
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := "11111111-1111-4111-8111-111111111111"
+	reference := id + ":bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+	stored := make(map[string]string)
+	deleteUnavailable := true
+	previousPrepare := credentialSecretPrepare
+	previousStore := credentialSecretStore
+	previousDelete := credentialSecretDelete
+	credentialSecretPrepare = func(string) (string, string, error) {
+		return reference, "test-keyring-v1", nil
+	}
+	credentialSecretStore = func(_, preparedReference, value string) (string, string, error) {
+		stored[preparedReference] = value
+		return preparedReference, "test-keyring-v1", nil
+	}
+	credentialSecretDelete = func(_, encoded, _ string) error {
+		if deleteUnavailable {
+			return errCredentialSecretStoreUnavailable
+		}
+		delete(stored, encoded)
+		return nil
+	}
+	t.Cleanup(func() {
+		credentialSecretPrepare = previousPrepare
+		credentialSecretStore = previousStore
+		credentialSecretDelete = previousDelete
+	})
+
+	if _, err := stageCredentialSecretWrite(database, id, "passphrase"); err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	database.Close()
+	if stored[reference] != "passphrase" {
+		t.Fatalf("staged keyring value = %q", stored[reference])
+	}
+	if err := recoverCredentialPrivateKeyOperations(databasePath); err != nil {
+		t.Fatal(err)
+	}
+	if stored[reference] != "passphrase" {
+		t.Fatalf("unavailable keyring cleanup removed staged entry: %#v", stored)
+	}
+	database, err = openDatabase(databasePath, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var operations int
+	if err := database.QueryRow("SELECT COUNT(*) FROM CredentialSecretOperations;").Scan(&operations); err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	database.Close()
+	if operations != 1 {
+		t.Fatalf("unavailable keyring recovery journal rows = %d", operations)
+	}
+
+	deleteUnavailable = false
+	if err := recoverCredentialPrivateKeyOperations(databasePath); err != nil {
+		t.Fatal(err)
+	}
+	if len(stored) != 0 {
+		t.Fatalf("interrupted keyring entries = %#v", stored)
+	}
+	database, err = openDatabase(databasePath, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.QueryRow("SELECT COUNT(*) FROM CredentialSecretOperations;").Scan(&operations); err != nil {
+		t.Fatal(err)
+	}
+	if operations != 0 {
+		t.Fatalf("recovered credential secret journal rows = %d", operations)
+	}
+}
+
+func TestCredentialSecretRecoveryKeepsCommittedCurrentReference(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	if err := ensureElectronWorkspaceSchema(databasePath); err != nil {
+		t.Fatal(err)
+	}
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := "11111111-1111-4111-8111-111111111111"
+	reference := id + ":cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+	createdAt := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := database.Exec(
+		"INSERT INTO CredentialSecrets (Id, Secret, Encoding, UpdatedAt) VALUES (?, ?, ?, ?);",
+		id, reference, "test-keyring-v1", createdAt,
+	); err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`
+INSERT INTO CredentialSecretOperations (SecretReference, CredentialId, Encoding, CreatedAtUtc)
+VALUES (?, ?, ?, ?);`, reference, id, "test-keyring-v1", createdAt); err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	database.Close()
+	previousDelete := credentialSecretDelete
+	credentialSecretDelete = func(_, _, _ string) error {
+		t.Fatal("recovery tried to delete the currently committed credential secret")
+		return nil
+	}
+	t.Cleanup(func() { credentialSecretDelete = previousDelete })
+
+	if err := recoverCredentialPrivateKeyOperations(databasePath); err != nil {
+		t.Fatal(err)
+	}
+	database, err = openDatabase(databasePath, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var secrets, operations int
+	if err := database.QueryRow("SELECT COUNT(*) FROM CredentialSecrets WHERE Id = ?;", id).Scan(&secrets); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.QueryRow("SELECT COUNT(*) FROM CredentialSecretOperations;").Scan(&operations); err != nil {
+		t.Fatal(err)
+	}
+	if secrets != 1 || operations != 0 {
+		t.Fatalf("committed recovery state = secrets:%d operations:%d", secrets, operations)
+	}
+}
+
+func TestSshKeyCredentialCreateReturnsCommittedRecordWhenKeyFinalizationIsDeferred(t *testing.T) {
+	installSshKeyCredentialTestStores(t)
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	keyPath := filepath.Join(t.TempDir(), "id_ed25519")
+	if err := os.WriteFile(keyPath, testSshPrivateKey(t, ""), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousPromote := credentialPrivateKeyPromote
+	credentialPrivateKeyPromote = func(string, string) error { return os.ErrPermission }
+	t.Cleanup(func() { credentialPrivateKeyPromote = previousPromote })
+
+	created, err := createCredential(databasePath, credentialCreateRequest{
+		Name: "Deferred key", Protocol: "ssh", Kind: "sshKey", Username: "operator",
+		PrivateKeyPath: keyPath,
+	})
+	if err != nil || created.ID == "" || created.Name != "Deferred key" {
+		t.Fatalf("deferred create result = %#v, %v", created, err)
+	}
+	database, err := openDatabase(databasePath, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var profiles, operations int
+	if err := database.QueryRow("SELECT COUNT(*) FROM CredentialProfiles WHERE Id = ?;", created.ID).Scan(&profiles); err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	if err := database.QueryRow("SELECT COUNT(*) FROM CredentialPrivateKeyOperations WHERE CredentialId = ?;", created.ID).Scan(&operations); err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	database.Close()
+	if profiles != 1 || operations != 1 {
+		t.Fatalf("deferred create state = profiles:%d operations:%d", profiles, operations)
+	}
+	if _, err := os.Stat(credentialPrivateKeyPath(databasePath, created.ID) + credentialPrivateKeyPendingSuffix); err != nil {
+		t.Fatalf("deferred create stage = %v", err)
+	}
+
+	credentialPrivateKeyPromote = previousPromote
+	if err := recoverCredentialPrivateKeyOperations(databasePath); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -1176,7 +1436,7 @@ func TestSshKeyCredentialUpdateReplacesKeyAndSecretAtomically(t *testing.T) {
 	}
 }
 
-func TestSshKeyCredentialUpdateCleansPreviousSecretWhenKeyFinalizationFails(t *testing.T) {
+func TestSshKeyCredentialUpdateReturnsCommittedRecordWhenKeyFinalizationIsDeferred(t *testing.T) {
 	_, deletedSecrets, _, _ := installSshKeyCredentialTestStores(t)
 	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
 	firstPath := filepath.Join(t.TempDir(), "first.pem")
@@ -1200,15 +1460,16 @@ func TestSshKeyCredentialUpdateCleansPreviousSecretWhenKeyFinalizationFails(t *t
 	previousPromote := credentialPrivateKeyPromote
 	credentialPrivateKeyPromote = func(string, string) error { return os.ErrPermission }
 	t.Cleanup(func() { credentialPrivateKeyPromote = previousPromote })
-	_, err = updateCredential(databasePath, credentialUpdateRequest{
+	updated, err := updateCredential(databasePath, credentialUpdateRequest{
 		ID: created.ID,
 		credentialCreateRequest: credentialCreateRequest{
 			Name: "Replacement", Protocol: "ssh", Kind: "sshKey", Username: "operator",
 			Passphrase: "second-passphrase", PrivateKeyPath: secondPath,
 		},
 	})
-	if err == nil || !strings.Contains(err.Error(), "activate the SSH private key write") {
-		t.Fatalf("replacement finalization error = %v", err)
+	if err != nil || updated.ID != created.ID || updated.Name != "Replacement" ||
+		updated.PrivateKeyFileName != "second.pem" {
+		t.Fatalf("replacement result = %#v, %v", updated, err)
 	}
 	if len(*deletedSecrets) != 1 || (*deletedSecrets)[0] != previousSecret {
 		t.Fatalf("post-commit secret cleanup = %#v, want only %q", *deletedSecrets, previousSecret)
@@ -1267,15 +1528,15 @@ func TestSshKeyCredentialUpdateKeepsJournalUntilPromotionDirectorySync(t *testin
 	previousDirectorySync := privateFileDirectorySync
 	privateFileDirectorySync = func(string) error { return os.ErrPermission }
 	t.Cleanup(func() { privateFileDirectorySync = previousDirectorySync })
-	_, err = updateCredential(databasePath, credentialUpdateRequest{
+	updated, err := updateCredential(databasePath, credentialUpdateRequest{
 		ID: created.ID,
 		credentialCreateRequest: credentialCreateRequest{
 			Name: "Replacement", Protocol: "ssh", Kind: "sshKey", Username: "operator",
 			PrivateKeyPath: secondPath,
 		},
 	})
-	if err == nil || !strings.Contains(err.Error(), "activate the SSH private key write") {
-		t.Fatalf("promotion directory sync error = %v", err)
+	if err != nil || updated.ID != created.ID || updated.Name != "Replacement" {
+		t.Fatalf("promotion directory sync result = %#v, %v", updated, err)
 	}
 
 	database, err := openDatabase(databasePath, true)

@@ -249,7 +249,7 @@ func commitMRemoteImportContextWithProgress(
 			cleanup()
 			return mremoteImportResult{}, err
 		}
-		encoded, encoding, storeErr := credentialSecretStore(credential.ID, credential.Password)
+		encoded, encoding, storeErr := credentialSecretStore(credential.ID, "", credential.Password)
 		if storeErr != nil {
 			cleanup()
 			return mremoteImportResult{}, errors.New("could not protect an imported credential password; no changes were saved")

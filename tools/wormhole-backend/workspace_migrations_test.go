@@ -19,7 +19,7 @@ func TestEnsureElectronWorkspaceSchemaCreatesWinUICompatibleFreshDatabase(t *tes
 
 	for _, table := range []string{
 		"Nodes", "CredentialProfiles", "TunnelConfigs", "BitwardenCredentialCache",
-		"CredentialSecrets", "CredentialPrivateKeyOperations",
+		"CredentialSecrets", "CredentialPrivateKeyOperations", "CredentialSecretOperations",
 	} {
 		exists, err := tableExists(database, table)
 		if err != nil || !exists {
@@ -30,6 +30,7 @@ func TestEnsureElectronWorkspaceSchemaCreatesWinUICompatibleFreshDatabase(t *tes
 		"Nodes":                          {"CredentialMode", "SshAutoSudo", "HttpIgnoreCertErrors", "SerialFlowControl", "RdpGatewayCredentialId"},
 		"CredentialProfiles":             {"Protocol", "SecretProvider", "BitwardenItemId", "BitwardenFieldPath"},
 		"CredentialPrivateKeyOperations": {"CredentialId", "OperationKind", "ProtectedSha256", "CreatedAtUtc"},
+		"CredentialSecretOperations":     {"SecretReference", "CredentialId", "Encoding", "CreatedAtUtc"},
 	} {
 		columns, err := tableColumns(database, table)
 		if err != nil {
@@ -45,7 +46,7 @@ func TestEnsureElectronWorkspaceSchemaCreatesWinUICompatibleFreshDatabase(t *tes
 	if err := database.QueryRow("SELECT COUNT(*) FROM __migration_history;").Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != 18 {
+	if count != 19 {
 		t.Fatalf("migration history count = %d", count)
 	}
 	if err := ensureElectronWorkspaceSchema(databasePath); err != nil {
@@ -101,6 +102,7 @@ CREATE TABLE BitwardenCredentialCache (
 	for _, id := range []string{
 		"0001_initial", "0002_credential_protocol", "0014_bitwarden_credentials",
 		"0015_bitwarden_credential_cache", "0016_credential_private_key_operations",
+		"0017_credential_secret_operations",
 	} {
 		var present int
 		if err := database.QueryRow("SELECT COUNT(*) FROM __migration_history WHERE Id = ?;", id).Scan(&present); err != nil || present != 1 {

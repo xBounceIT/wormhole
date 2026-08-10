@@ -990,11 +990,12 @@ func TestOpenDatabaseReadOnlyDoesNotCreateMissingFile(t *testing.T) {
 }
 
 func TestCredentialCrudStoresOnlyProtectedReferences(t *testing.T) {
+	installUnjournaledCredentialSecretStoreTest(t)
 	previousStore := credentialSecretStore
 	previousDelete := credentialSecretDelete
 	deleted := make([]string, 0)
 	storeCount := 0
-	credentialSecretStore = func(id, password string) (string, string, error) {
+	credentialSecretStore = func(id, _ string, password string) (string, string, error) {
 		if password == "" {
 			t.Fatal("the password should have been validated before storing")
 		}
@@ -1105,11 +1106,12 @@ func TestCredentialCreationRejectsBitwardenProfiles(t *testing.T) {
 }
 
 func TestCredentialUpdateKeepsPreviousSecretWhenDatabaseWriteFails(t *testing.T) {
+	installUnjournaledCredentialSecretStoreTest(t)
 	previousStore := credentialSecretStore
 	previousDelete := credentialSecretDelete
 	deleted := make([]string, 0)
 	storeCount := 0
-	credentialSecretStore = func(id, password string) (string, string, error) {
+	credentialSecretStore = func(id, _ string, password string) (string, string, error) {
 		storeCount++
 		return fmt.Sprintf("reference-%d", storeCount), "test-protected-v1", nil
 	}
@@ -1174,9 +1176,10 @@ WHERE p.Id = ?;`, created.ID).Scan(&name, &storedReference); err != nil {
 }
 
 func TestCredentialUpdateWithoutNewPasswordDoesNotDeleteExistingPlatformSecretOnFailure(t *testing.T) {
+	installUnjournaledCredentialSecretStoreTest(t)
 	previousStore := credentialSecretStore
 	previousDelete := credentialSecretDelete
-	credentialSecretStore = func(_ string, _ string) (string, string, error) {
+	credentialSecretStore = func(_, _, _ string) (string, string, error) {
 		return "existing-reference", "test-protected-v1", nil
 	}
 	deleteCount := 0
@@ -1226,10 +1229,11 @@ END;`); err != nil {
 }
 
 func TestCredentialUpdateRechecksReadOnlyStateAtWrite(t *testing.T) {
+	installUnjournaledCredentialSecretStoreTest(t)
 	previousStore := credentialSecretStore
 	previousDelete := credentialSecretDelete
 	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
-	credentialSecretStore = func(id, password string) (string, string, error) {
+	credentialSecretStore = func(id, _ string, password string) (string, string, error) {
 		if password == "initial" {
 			return "original-reference", "test-protected-v1", nil
 		}
@@ -1288,9 +1292,10 @@ func TestCredentialUpdateRechecksReadOnlyStateAtWrite(t *testing.T) {
 }
 
 func TestCredentialUpdateCanonicalizesLegacySecretIDCase(t *testing.T) {
+	installUnjournaledCredentialSecretStoreTest(t)
 	previousStore := credentialSecretStore
 	previousDelete := credentialSecretDelete
-	credentialSecretStore = func(_ string, _ string) (string, string, error) {
+	credentialSecretStore = func(_, _, _ string) (string, string, error) {
 		return "replacement-reference", "test-protected-v1", nil
 	}
 	credentialSecretDelete = func(string, string, string) error { return nil }

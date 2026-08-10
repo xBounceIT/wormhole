@@ -49,7 +49,7 @@ func installMcpTestSecretStore(t *testing.T) *mcpTestSecretStore {
 	})
 
 	secretStore := &mcpTestSecretStore{values: make(map[string]string)}
-	credentialSecretStore = func(id, value string) (string, string, error) {
+	credentialSecretStore = func(id, _ string, value string) (string, string, error) {
 		if id != mcpTokenCredentialID {
 			t.Fatalf("stored secret id = %q", id)
 		}
@@ -270,7 +270,7 @@ func TestMcpReadableLegacyTokenSurvivesMigrationFailure(t *testing.T) {
 		}
 		return []byte(expected), nil
 	}
-	credentialSecretStore = func(id, value string) (string, string, error) {
+	credentialSecretStore = func(id, _ string, value string) (string, string, error) {
 		if id != mcpTokenCredentialID || value != expected {
 			t.Fatalf("unexpected migration write: id:%q expected-token:%t", id, value == expected)
 		}

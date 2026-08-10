@@ -4,7 +4,11 @@ package main
 
 import "errors"
 
-func storeCredentialSecret(string, string) (string, string, error) {
+func prepareCredentialSecretStorage(string) (string, string, error) {
+	return "", "", nil
+}
+
+func storeCredentialSecret(string, string, string) (string, string, error) {
 	return "", "", errors.New("the macOS Keychain requires a compatible Wormhole build")
 }
 

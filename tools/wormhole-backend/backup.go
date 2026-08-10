@@ -111,9 +111,11 @@ type backupCredentialPasswordSnapshot struct {
 
 type backupPasswordMutation struct {
 	id               string
+	database         *sql.DB
 	encoded          string
 	encoding         string
 	replace          bool
+	stagedSecret     *stagedCredentialSecretWrite
 	previousEncoded  sql.NullString
 	previousEncoding sql.NullString
 }
@@ -1311,7 +1313,7 @@ func importBackupContext(
 		addBackupWarning(&result,
 			fmt.Sprintf("Dropped %d null entries from the backup payload (malformed or hand-edited file).", nullDrops))
 	}
-	if len(payload.PrivateKeys) > 0 {
+	if len(payload.PrivateKeys) > 0 || len(payload.Passwords) > 0 || len(payload.InlinePasswords) > 0 {
 		release, err := acquireRecoveredCredentialPrivateKeyLock(databasePath)
 		if err != nil {
 			return result, err
@@ -2165,7 +2167,7 @@ func restoreBackupSshKeySnapshot(
 	if passphrase.found {
 		password = &passphrase.password
 	}
-	mutation, err := prepareBackupPasswordMutation(id, password)
+	mutation, err := prepareBackupPasswordMutation(database, id, password)
 	if err != nil {
 		rollbackStage()
 		return false, fmt.Errorf("Could not restore an SSH key passphrase: %w", err)
@@ -2200,7 +2202,7 @@ func restoreBackupSshKeySnapshot(
 	}
 	committed = true
 	defer mutation.deletePreviousSecret()
-	if err := finalizeCredentialPrivateKeyWrite(database, staged); err != nil {
+	if err := finalizeCommittedCredentialPrivateKeyWrite(database, staged); err != nil {
 		return false, err
 	}
 	return passphrase.found, nil
@@ -2245,17 +2247,22 @@ func indexBackupCredentialPasswordSnapshots(
 	return snapshots
 }
 
-func prepareBackupPasswordMutation(id string, password *string) (*backupPasswordMutation, error) {
-	mutation := &backupPasswordMutation{id: id}
+func prepareBackupPasswordMutation(
+	database *sql.DB,
+	id string,
+	password *string,
+) (*backupPasswordMutation, error) {
+	mutation := &backupPasswordMutation{id: id, database: database}
 	if password == nil {
 		return mutation, nil
 	}
-	encoded, encoding, err := credentialSecretStore(id, *password)
+	staged, err := stageCredentialSecretWrite(database, id, *password)
 	if err != nil {
 		return nil, errors.New("the platform could not protect the password")
 	}
-	mutation.encoded = encoded
-	mutation.encoding = encoding
+	mutation.stagedSecret = staged
+	mutation.encoded = staged.encoded
+	mutation.encoding = staged.encoding
 	mutation.replace = true
 	return mutation, nil
 }
@@ -2267,10 +2274,22 @@ func (mutation *backupPasswordMutation) apply(transaction *sql.Tx) error {
 	if readErr != nil && !errors.Is(readErr, sql.ErrNoRows) {
 		return readErr
 	}
+	if mutation.previousEncoded.Valid && mutation.previousEncoding.Valid &&
+		(!mutation.replace || mutation.previousEncoded.String != mutation.encoded ||
+			mutation.previousEncoding.String != mutation.encoding) {
+		if err := recordCredentialSecretCleanup(
+			transaction, mutation.id, mutation.previousEncoded.String, mutation.previousEncoding.String,
+		); err != nil {
+			return err
+		}
+	}
 	if mutation.replace {
-		return upsertCredentialSecret(
+		if err := upsertCredentialSecret(
 			transaction, mutation.id, mutation.encoded, mutation.encoding,
-		)
+		); err != nil {
+			return err
+		}
+		return mutation.stagedSecret.complete(transaction)
 	}
 	_, err := transaction.Exec(
 		"DELETE FROM CredentialSecrets WHERE lower(Id) = lower(?);", mutation.id,
@@ -2279,8 +2298,8 @@ func (mutation *backupPasswordMutation) apply(transaction *sql.Tx) error {
 }
 
 func (mutation *backupPasswordMutation) discardNewSecret() {
-	if mutation.replace {
-		_ = credentialSecretDelete(mutation.id, mutation.encoded, mutation.encoding)
+	if mutation.stagedSecret != nil {
+		mutation.stagedSecret.rollback(mutation.database)
 	}
 }
 
@@ -2288,14 +2307,15 @@ func (mutation *backupPasswordMutation) deletePreviousSecret() {
 	if mutation.previousEncoded.Valid && mutation.previousEncoding.Valid &&
 		(!mutation.replace || mutation.previousEncoded.String != mutation.encoded ||
 			mutation.previousEncoding.String != mutation.encoding) {
-		_ = credentialSecretDelete(
+		finalizeCredentialSecretCleanup(
+			mutation.database,
 			mutation.id, mutation.previousEncoded.String, mutation.previousEncoding.String,
 		)
 	}
 }
 
 func storeBackupPassword(database *sql.DB, id, password string) error {
-	mutation, err := prepareBackupPasswordMutation(id, &password)
+	mutation, err := prepareBackupPasswordMutation(database, id, &password)
 	if err != nil {
 		return err
 	}
@@ -2323,7 +2343,7 @@ func storeBackupPassword(database *sql.DB, id, password string) error {
 }
 
 func clearBackupPassword(database *sql.DB, id string) error {
-	mutation, err := prepareBackupPasswordMutation(id, nil)
+	mutation, err := prepareBackupPasswordMutation(database, id, nil)
 	if err != nil {
 		return err
 	}
