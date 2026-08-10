@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -50,8 +51,9 @@ const (
 )
 
 var (
-	errBackupPasswordRequired = errors.New("Backup file is encrypted; password required.")
-	errBackupBadPassword      = errors.New("Backup password is incorrect or the file is corrupt.")
+	errBackupPasswordRequired           = errors.New("Backup file is encrypted; password required.")
+	errBackupBadPassword                = errors.New("Backup password is incorrect or the file is corrupt.")
+	errBackupPrivateKeyPasswordRequired = errors.New("A backup password is required to export SSH private keys.")
 
 	// Tests replace this indirection so backup semantics can be exercised on hosts without an
 	// interactive OS keychain. Production always delegates to the platform secret implementation.
@@ -100,6 +102,23 @@ type backupPayload struct {
 type backupPasswordEntry struct {
 	CredentialID string `json:"credentialId"`
 	Password     string `json:"password"`
+}
+
+type backupCredentialPasswordSnapshot struct {
+	password string
+	found    bool
+	seen     bool
+}
+
+type backupPasswordMutation struct {
+	id               string
+	database         *sql.DB
+	encoded          string
+	encoding         string
+	replace          bool
+	stagedSecret     *stagedCredentialSecretWrite
+	previousEncoded  sql.NullString
+	previousEncoding sql.NullString
 }
 
 type backupInlinePasswordEntry struct {
@@ -322,40 +341,18 @@ func exportBackupContext(
 	if err := validateBackupRequest(request, true); err != nil {
 		return backupExportResult{}, err
 	}
-	if isBackupDatabaseFile(databasePath, request.Path) {
-		return backupExportResult{}, errors.New("The backup destination cannot be a Wormhole database file.")
+	if isBackupWorkspaceStoragePath(databasePath, request.Path) {
+		return backupExportResult{}, errors.New("The backup destination cannot be Wormhole workspace storage.")
 	}
 	if err := ctx.Err(); err != nil {
 		return backupExportResult{}, err
 	}
 	reportOperationProgress(progress, "reading", "Reading workspace metadata…", 10)
 
-	database, err := openDatabase(databasePath, true)
-	if err != nil {
-		return backupExportResult{}, err
-	}
+	encrypted := request.Password != ""
 	payload := newBackupPayload()
-	if database != nil {
-		defer database.Close()
-		if payload.Nodes, err = loadBackupObjectsContext(ctx, database, "Nodes", backupNodeColumns); err != nil {
-			return backupExportResult{}, err
-		}
-		if payload.Credentials, err = loadBackupObjectsContext(ctx, database, "CredentialProfiles", backupCredentialColumns); err != nil {
-			return backupExportResult{}, err
-		}
-		if payload.Tunnels, err = loadBackupObjectsContext(ctx, database, "TunnelConfigs", backupTunnelColumns); err != nil {
-			return backupExportResult{}, err
-		}
-		if payload.BitwardenCredentialCache, err = loadBackupObjectsContext(ctx, database, "BitwardenCredentialCache", backupBitwardenColumns); err != nil {
-			return backupExportResult{}, err
-		}
-		if err := ctx.Err(); err != nil {
-			return backupExportResult{}, err
-		}
-		reportOperationProgress(progress, "secrets", "Reading protected secrets…", 35)
-		if err := exportBackupSecretsContext(ctx, database, databasePath, payload); err != nil {
-			return backupExportResult{}, err
-		}
+	if err := populateBackupPayloadContext(ctx, databasePath, payload, progress, encrypted); err != nil {
+		return backupExportResult{}, err
 	}
 	if err := ctx.Err(); err != nil {
 		return backupExportResult{}, err
@@ -369,7 +366,6 @@ func exportBackupContext(
 		Encryption:    backupEncryptionNone,
 		Payload:       payload,
 	}
-	encrypted := request.Password != ""
 	if encrypted {
 		plaintext, marshalErr := json.Marshal(payload)
 		if marshalErr != nil {
@@ -412,6 +408,67 @@ func exportBackupContext(
 		result.NodeCount, result.CredentialCount, result.TunnelCount, encrypted)
 	reportOperationProgress(progress, "complete", "Backup export complete.", 100)
 	return result, nil
+}
+
+func populateBackupPayloadContext(
+	ctx context.Context,
+	databasePath string,
+	payload *backupPayload,
+	progress operationProgress,
+	privateKeysEncrypted bool,
+) error {
+	release, err := acquireRecoveredCredentialPrivateKeyLock(databasePath)
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	database, err := openDatabase(databasePath, true)
+	if err != nil {
+		return err
+	}
+	if database == nil {
+		return nil
+	}
+	defer database.Close()
+	if payload.Nodes, err = loadBackupObjectsContext(ctx, database, "Nodes", backupNodeColumns); err != nil {
+		return err
+	}
+	if payload.Credentials, err = loadBackupObjectsContext(ctx, database, "CredentialProfiles", backupCredentialColumns); err != nil {
+		return err
+	}
+	if !privateKeysEncrypted && backupContainsLocalSshKeyCredential(payload.Credentials) {
+		return errBackupPrivateKeyPasswordRequired
+	}
+	if payload.Tunnels, err = loadBackupObjectsContext(ctx, database, "TunnelConfigs", backupTunnelColumns); err != nil {
+		return err
+	}
+	if payload.BitwardenCredentialCache, err = loadBackupObjectsContext(ctx, database, "BitwardenCredentialCache", backupBitwardenColumns); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	reportOperationProgress(progress, "secrets", "Reading protected secrets…", 35)
+	return exportBackupSecretsContext(ctx, database, databasePath, payload)
+}
+
+func backupContainsLocalSshKeyCredential(credentials []*backupObject) bool {
+	for _, credential := range credentials {
+		if credential == nil {
+			continue
+		}
+		if isLocalSshKeyBackupCredential(*credential) {
+			return true
+		}
+	}
+	return false
+}
+
+func isLocalSshKeyBackupCredential(credential backupObject) bool {
+	kind, _ := backupObjectInteger(credential, "kind")
+	provider, _ := backupObjectInteger(credential, "secretProvider")
+	return kind == 1 && provider == 0
 }
 
 func encodeBackupDocument(document backupDocument, maximumBytes int64) ([]byte, error) {
@@ -611,7 +668,7 @@ func exportBackupSecretsContext(ctx context.Context, database *sql.DB, databaseP
 		id := backupObjectString(*credential, "id")
 		kind, _ := backupObjectInteger(*credential, "kind")
 		provider, _ := backupObjectInteger(*credential, "secretProvider")
-		if kind == 0 && provider != 1 {
+		if (kind == 0 || kind == 1) && provider != 1 {
 			password, found, err := readBackupPassword(database, id)
 			if err != nil {
 				return fmt.Errorf("Could not read a credential secret for backup: %w", err)
@@ -620,10 +677,10 @@ func exportBackupSecretsContext(ctx context.Context, database *sql.DB, databaseP
 				passwordEntries[index] = &backupPasswordEntry{CredentialID: id, Password: password}
 			}
 		}
-		if kind != 1 {
+		if !isLocalSshKeyBackupCredential(*credential) {
 			return nil
 		}
-		keyPath := backupPrivateKeyPath(databasePath, id)
+		keyPath := credentialPrivateKeyPath(databasePath, id)
 		keyBytes, err := readBackupPrivateKey(keyPath)
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
@@ -709,14 +766,7 @@ func exportBackupSecretsContext(ctx context.Context, database *sql.DB, databaseP
 }
 
 func readBackupPrivateKey(path string) ([]byte, error) {
-	if info, err := os.Stat(path); err == nil {
-		if !info.Mode().IsRegular() || info.Size() > backupMaxFileBytes {
-			return nil, errors.New("SSH private key exceeds the supported size")
-		}
-	} else {
-		return nil, err
-	}
-	return unprotectFile(path)
+	return unprotectSshPrivateKey(path)
 }
 
 func runBackupSecretReads(count int, read func(index int) error) error {
@@ -1011,25 +1061,71 @@ func canonicalBackupPath(path string) string {
 	if err != nil {
 		absolute = filepath.Clean(path)
 	}
-	resolvedDirectory, err := filepath.EvalSymlinks(filepath.Dir(absolute))
-	if err != nil {
-		return absolute
+	directory := filepath.Dir(absolute)
+	var unresolved []string
+	for {
+		resolvedDirectory, err := filepath.EvalSymlinks(directory)
+		if err == nil {
+			for index := len(unresolved) - 1; index >= 0; index-- {
+				resolvedDirectory = filepath.Join(resolvedDirectory, unresolved[index])
+			}
+			return filepath.Join(resolvedDirectory, filepath.Base(absolute))
+		}
+		if !os.IsNotExist(err) {
+			return absolute
+		}
+		parent := filepath.Dir(directory)
+		if parent == directory {
+			return absolute
+		}
+		unresolved = append(unresolved, filepath.Base(directory))
+		directory = parent
 	}
-	return filepath.Join(resolvedDirectory, filepath.Base(absolute))
 }
 
-func isBackupDatabaseFile(databasePath, targetPath string) bool {
+func isBackupWorkspaceStoragePath(databasePath, targetPath string) bool {
 	for _, reserved := range []string{
 		databasePath,
 		databasePath + "-journal",
 		databasePath + "-shm",
 		databasePath + "-wal",
+		credentialPrivateKeyLockPath(databasePath),
 	} {
 		if sameBackupFile(reserved, targetPath) {
 			return true
 		}
 	}
-	return false
+	keysDirectory := filepath.Join(filepath.Dir(databasePath), "keys")
+	return backupPathWithinDirectory(
+		canonicalBackupPath(keysDirectory),
+		canonicalBackupPath(targetPath),
+	)
+}
+
+func backupPathWithinDirectory(directory, target string) bool {
+	directory = filepath.Clean(directory)
+	target = filepath.Clean(target)
+	directoryVolume := filepath.VolumeName(directory)
+	targetVolume := filepath.VolumeName(target)
+	if !equalBackupPaths(directoryVolume, targetVolume) {
+		return false
+	}
+	split := func(path string) []string {
+		return strings.FieldsFunc(path, func(character rune) bool {
+			return character < utf8.RuneSelf && os.IsPathSeparator(uint8(character))
+		})
+	}
+	directoryParts := split(strings.TrimPrefix(directory, directoryVolume))
+	targetParts := split(strings.TrimPrefix(target, targetVolume))
+	if len(targetParts) < len(directoryParts) {
+		return false
+	}
+	for index, part := range directoryParts {
+		if !equalBackupPaths(part, targetParts[index]) {
+			return false
+		}
+	}
+	return true
 }
 
 func validateBackupEncryption(encryption string) error {
@@ -1059,11 +1155,6 @@ func validateBackupDocumentMetadata(document backupDocument) error {
 
 func quoteBackupIdentifier(value string) string {
 	return `"` + strings.ReplaceAll(value, `"`, `""`) + `"`
-}
-
-func backupPrivateKeyPath(databasePath, id string) string {
-	compact := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(id)), "-", "")
-	return filepath.Join(filepath.Dir(databasePath), "keys", compact+".dpapi")
 }
 
 func backupObjectString(object backupObject, key string) string {
@@ -1223,6 +1314,13 @@ func importBackupContext(
 		addBackupWarning(&result,
 			fmt.Sprintf("Dropped %d null entries from the backup payload (malformed or hand-edited file).", nullDrops))
 	}
+	if len(payload.PrivateKeys) > 0 || len(payload.Passwords) > 0 || len(payload.InlinePasswords) > 0 {
+		release, err := acquireRecoveredCredentialPrivateKeyLock(databasePath)
+		if err != nil {
+			return result, err
+		}
+		defer release()
+	}
 
 	database, err := openDatabase(databasePath, false)
 	if err != nil {
@@ -1336,6 +1434,7 @@ func filterBackupPointers[T any](values []*T, dropped int) ([]*T, int) {
 type backupImportState struct {
 	credentialIDs         map[string]struct{}
 	credentialNames       map[string]struct{}
+	credentialKinds       map[string]int64
 	credentialProviders   map[string]int64
 	tunnelIDs             map[string]struct{}
 	tunnelNames           map[string]struct{}
@@ -1349,6 +1448,7 @@ func loadBackupImportStateContext(ctx context.Context, database *sql.DB) (*backu
 	state := &backupImportState{
 		credentialIDs:         map[string]struct{}{},
 		credentialNames:       map[string]struct{}{},
+		credentialKinds:       map[string]int64{},
 		credentialProviders:   map[string]int64{},
 		tunnelIDs:             map[string]struct{}{},
 		tunnelNames:           map[string]struct{}{},
@@ -1375,6 +1475,8 @@ func loadBackupImportStateContext(ctx context.Context, database *sql.DB) (*backu
 		state.credentialIDs[id] = struct{}{}
 		state.resolvableCredentials[id] = struct{}{}
 		state.credentialNames[backupObjectString(*credential, "name")] = struct{}{}
+		kind, _ := backupObjectInteger(*credential, "kind")
+		state.credentialKinds[id] = kind
 		provider, _ := backupObjectInteger(*credential, "secretProvider")
 		state.credentialProviders[id] = provider
 	}
@@ -1466,6 +1568,8 @@ func importBackupCredentialsContext(
 		state.credentialIDs[id] = struct{}{}
 		state.resolvableCredentials[id] = struct{}{}
 		state.credentialNames[name] = struct{}{}
+		kind, _ := backupObjectInteger(object, "kind")
+		state.credentialKinds[id] = kind
 		provider, _ := backupObjectInteger(object, "secretProvider")
 		state.credentialProviders[id] = provider
 		inserted[id] = struct{}{}
@@ -1839,6 +1943,7 @@ func restoreBackupSecretsContext(
 	insertedNodes map[string]struct{},
 	result *backupImportResult,
 ) error {
+	passwordSnapshots := indexBackupCredentialPasswordSnapshots(payload.Passwords)
 	for _, entry := range payload.Passwords {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -1848,12 +1953,19 @@ func restoreBackupSecretsContext(
 			addBackupWarning(result, "A password entry with an invalid credential ID was skipped.")
 			continue
 		}
-		if state.credentialProviders[id] == 1 {
+		kind := state.credentialKinds[id]
+		if (kind != 0 && kind != 1) || state.credentialProviders[id] == 1 {
 			continue
 		}
 		if len(entry.Password) > maxStoredCredentialBytes {
 			addBackupWarning(result,
 				fmt.Sprintf("Password for credential %s exceeded the protected-store limit and was skipped.", id))
+			continue
+		}
+		// SSH key passphrases are committed with their matching protected key below. Keeping them
+		// out of this independent password pass prevents either half of the snapshot from changing
+		// when staging the other half fails.
+		if kind == 1 {
 			continue
 		}
 		shouldRestore, warning, err := shouldRestoreBackupPassword(database, id, insertedCredentials, state.credentialIDs)
@@ -1912,30 +2024,82 @@ func restoreBackupSecretsContext(
 		if !backupIDExists(id, insertedCredentials, state.credentialIDs) {
 			continue
 		}
-		path := backupPrivateKeyPath(databasePath, id)
-		if _, inserted := insertedCredentials[id]; !inserted {
-			existing, err := readBackupPrivateKey(path)
-			if err == nil {
-				clearBytes(existing)
-				continue
-			}
-			if !errors.Is(err, os.ErrNotExist) {
-				addBackupWarning(result,
-					fmt.Sprintf("Existing private key for credential %s could not be read; restoring it from backup.", id))
-			}
+		if state.credentialKinds[id] != 1 || state.credentialProviders[id] != 0 {
+			addBackupWarning(result,
+				fmt.Sprintf("Private key for credential %s did not match a local SSH key profile and was skipped.", id))
+			continue
 		}
 		keyBytes, err := base64.StdEncoding.DecodeString(entry.DataB64)
-		if err != nil || len(keyBytes) == 0 {
+		if err != nil || len(keyBytes) == 0 || len(keyBytes) > maxSshPrivateKeyBytes {
 			clearBytes(keyBytes)
 			addBackupWarning(result,
 				fmt.Sprintf("Private key for credential %s was malformed and was skipped.", id))
 			continue
 		}
-		if err := protectFile(path, keyBytes); err != nil {
+		passphrase := passwordSnapshots[id]
+		validationPassphrase := ""
+		if passphrase.found {
+			validationPassphrase = passphrase.password
+		}
+		if err := validateSshPrivateKey(keyBytes, validationPassphrase); err != nil {
 			clearBytes(keyBytes)
-			return errors.New("Could not restore an SSH private key")
+			addBackupWarning(result,
+				fmt.Sprintf("Private key for credential %s was invalid or its passphrase did not match and was skipped.", id))
+			continue
+		}
+		path := credentialPrivateKeyPath(databasePath, id)
+		_, creating := insertedCredentials[id]
+		repairing := !creating
+		if repairing {
+			existing, readErr := readBackupPrivateKey(path)
+			if readErr == nil {
+				matchesBackup := bytes.Equal(existing, keyBytes)
+				clearBytes(existing)
+				if matchesBackup && passphrase.found {
+					shouldRestore, warning, err := shouldRestoreBackupPassword(
+						database, id, insertedCredentials, state.credentialIDs,
+					)
+					if warning != "" {
+						addBackupWarning(result, warning)
+					}
+					if err != nil {
+						clearBytes(keyBytes)
+						return err
+					}
+					if shouldRestore {
+						if err := storeBackupPassword(database, id, passphrase.password); err != nil {
+							clearBytes(keyBytes)
+							return fmt.Errorf("Could not restore an SSH key passphrase: %w", err)
+						}
+						result.PasswordsImported++
+					}
+				}
+				clearBytes(keyBytes)
+				continue
+			}
+			if !errors.Is(readErr, os.ErrNotExist) {
+				addBackupWarning(result,
+					fmt.Sprintf("Existing private key for credential %s could not be read; restoring it from backup.", id))
+			}
+			repairing = true
+		}
+		if repairing && passphrase.seen && !passphrase.found {
+			clearBytes(keyBytes)
+			addBackupWarning(result,
+				fmt.Sprintf("Private key for credential %s could not be repaired because its backup passphrase was invalid.", id))
+			continue
+		}
+		passphraseImported, err := restoreBackupSshKeySnapshot(
+			database, databasePath, id, keyBytes, passphrase, creating,
+		)
+		if err != nil {
+			clearBytes(keyBytes)
+			return err
 		}
 		clearBytes(keyBytes)
+		if passphraseImported {
+			result.PasswordsImported++
+		}
 		result.PrivateKeysImported++
 	}
 	for _, entry := range payload.TunnelPayloads {
@@ -2002,6 +2166,66 @@ func backupIDExists(id string, inserted, existing map[string]struct{}) bool {
 	return ok
 }
 
+func restoreBackupSshKeySnapshot(
+	database *sql.DB,
+	databasePath, id string,
+	keyBytes []byte,
+	passphrase backupCredentialPasswordSnapshot,
+	creating bool,
+) (bool, error) {
+	staged, err := stageCredentialPrivateKeyWrite(databasePath, id, keyBytes)
+	if err != nil {
+		return false, errors.New("Could not restore an SSH private key")
+	}
+	rollbackStage := staged.rollback
+	if creating {
+		rollbackStage = staged.rollbackCreation
+	}
+	var password *string
+	if passphrase.found {
+		password = &passphrase.password
+	}
+	mutation, err := prepareBackupPasswordMutation(database, id, password)
+	if err != nil {
+		rollbackStage()
+		return false, fmt.Errorf("Could not restore an SSH key passphrase: %w", err)
+	}
+	transaction, err := database.Begin()
+	if err != nil {
+		mutation.discardNewSecret()
+		rollbackStage()
+		return false, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = transaction.Rollback()
+			mutation.discardNewSecret()
+			rollbackStage()
+		}
+	}()
+	if err := mutation.apply(transaction); err != nil {
+		return false, err
+	}
+	if creating {
+		err = recordCredentialPrivateKeyCreation(transaction, staged)
+	} else {
+		err = recordCredentialPrivateKeyReplacement(transaction, staged)
+	}
+	if err != nil {
+		return false, err
+	}
+	if err := transaction.Commit(); err != nil {
+		return false, err
+	}
+	committed = true
+	defer mutation.deletePreviousSecret()
+	if err := finalizeCommittedCredentialPrivateKeyWrite(database, staged); err != nil {
+		return false, err
+	}
+	return passphrase.found, nil
+}
+
 func shouldRestoreBackupPassword(
 	database *sql.DB,
 	id string,
@@ -2021,41 +2245,144 @@ func shouldRestoreBackupPassword(
 	return !found, "", nil
 }
 
-func storeBackupPassword(database *sql.DB, id, password string) error {
-	encoded, encoding, err := credentialSecretStore(id, password)
+func indexBackupCredentialPasswordSnapshots(
+	entries []*backupPasswordEntry,
+) map[string]backupCredentialPasswordSnapshot {
+	snapshots := make(map[string]backupCredentialPasswordSnapshot)
+	for _, entry := range entries {
+		entryID, ok := canonicalBackupID(entry.CredentialID)
+		if !ok {
+			continue
+		}
+		snapshot := snapshots[entryID]
+		snapshot.seen = true
+		if len(entry.Password) <= maxStoredCredentialBytes {
+			snapshot.password = entry.Password
+			snapshot.found = true
+		}
+		snapshots[entryID] = snapshot
+	}
+	return snapshots
+}
+
+func prepareBackupPasswordMutation(
+	database *sql.DB,
+	id string,
+	password *string,
+) (*backupPasswordMutation, error) {
+	mutation := &backupPasswordMutation{id: id, database: database}
+	if password == nil {
+		return mutation, nil
+	}
+	staged, err := stageCredentialSecretWrite(database, id, *password)
 	if err != nil {
-		return errors.New("the platform could not protect the password")
+		return nil, errors.New("the platform could not protect the password")
+	}
+	mutation.stagedSecret = staged
+	mutation.encoded = staged.encoded
+	mutation.encoding = staged.encoding
+	mutation.replace = true
+	return mutation, nil
+}
+
+func (mutation *backupPasswordMutation) apply(transaction *sql.Tx) error {
+	readErr := transaction.QueryRow(
+		"SELECT Secret, Encoding FROM CredentialSecrets WHERE lower(Id) = lower(?) LIMIT 1;", mutation.id,
+	).Scan(&mutation.previousEncoded, &mutation.previousEncoding)
+	if readErr != nil && !errors.Is(readErr, sql.ErrNoRows) {
+		return readErr
+	}
+	if mutation.previousEncoded.Valid && mutation.previousEncoding.Valid &&
+		(!mutation.replace || mutation.previousEncoded.String != mutation.encoded ||
+			mutation.previousEncoding.String != mutation.encoding) {
+		if err := recordCredentialSecretCleanup(
+			transaction, mutation.id, mutation.previousEncoded.String, mutation.previousEncoding.String,
+		); err != nil {
+			return err
+		}
+	}
+	if mutation.replace {
+		if err := upsertCredentialSecret(
+			transaction, mutation.id, mutation.encoded, mutation.encoding,
+		); err != nil {
+			return err
+		}
+		return mutation.stagedSecret.complete(transaction)
+	}
+	_, err := transaction.Exec(
+		"DELETE FROM CredentialSecrets WHERE lower(Id) = lower(?);", mutation.id,
+	)
+	return err
+}
+
+func (mutation *backupPasswordMutation) discardNewSecret() {
+	if mutation.stagedSecret != nil {
+		mutation.stagedSecret.rollback(mutation.database)
+	}
+}
+
+func (mutation *backupPasswordMutation) deletePreviousSecret() {
+	if mutation.previousEncoded.Valid && mutation.previousEncoding.Valid &&
+		(!mutation.replace || mutation.previousEncoded.String != mutation.encoded ||
+			mutation.previousEncoding.String != mutation.encoding) {
+		finalizeCredentialSecretCleanup(
+			mutation.database,
+			mutation.id, mutation.previousEncoded.String, mutation.previousEncoding.String,
+		)
+	}
+}
+
+func storeBackupPassword(database *sql.DB, id, password string) error {
+	mutation, err := prepareBackupPasswordMutation(database, id, &password)
+	if err != nil {
+		return err
 	}
 	transaction, err := database.Begin()
 	if err != nil {
-		_ = credentialSecretDelete(id, encoded, encoding)
+		mutation.discardNewSecret()
 		return err
 	}
 	committed := false
 	defer func() {
 		if !committed {
 			_ = transaction.Rollback()
-			_ = credentialSecretDelete(id, encoded, encoding)
+			mutation.discardNewSecret()
 		}
 	}()
-	var previousEncoded, previousEncoding sql.NullString
-	readErr := transaction.QueryRow(
-		"SELECT Secret, Encoding FROM CredentialSecrets WHERE lower(Id) = lower(?) LIMIT 1;", id,
-	).Scan(&previousEncoded, &previousEncoding)
-	if readErr != nil && !errors.Is(readErr, sql.ErrNoRows) {
-		return readErr
-	}
-	if err := upsertCredentialSecret(transaction, id, encoded, encoding); err != nil {
+	if err := mutation.apply(transaction); err != nil {
 		return err
 	}
 	if err := transaction.Commit(); err != nil {
 		return err
 	}
 	committed = true
-	if previousEncoded.Valid && previousEncoding.Valid &&
-		(previousEncoded.String != encoded || previousEncoding.String != encoding) {
-		_ = credentialSecretDelete(id, previousEncoded.String, previousEncoding.String)
+	mutation.deletePreviousSecret()
+	return nil
+}
+
+func clearBackupPassword(database *sql.DB, id string) error {
+	mutation, err := prepareBackupPasswordMutation(database, id, nil)
+	if err != nil {
+		return err
 	}
+	transaction, err := database.Begin()
+	if err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = transaction.Rollback()
+		}
+	}()
+	if err := mutation.apply(transaction); err != nil {
+		return err
+	}
+	if err := transaction.Commit(); err != nil {
+		return err
+	}
+	committed = true
+	mutation.deletePreviousSecret()
 	return nil
 }
 

@@ -143,23 +143,34 @@ const wormholeBridge = {
   createCredential: (request: {
     name: string;
     protocol: 'ssh' | 'rdp' | 'vnc';
+    kind: 'password' | 'sshKey';
     username: string;
     domain: string;
     password: string;
+    passphrase: string;
+    clearPassphrase: boolean;
+    privateKeySelectionId?: string;
     provider: 'Local';
   }) => ipcRenderer.invoke('workspace:create-credential', request),
   updateCredential: (request: {
     id: string;
     name: string;
     protocol: 'ssh' | 'rdp' | 'vnc';
+    kind: 'password' | 'sshKey';
     username: string;
     domain: string;
     password: string;
+    passphrase: string;
+    clearPassphrase: boolean;
+    privateKeySelectionId?: string;
     provider: 'Local' | 'Bitwarden';
     bitwardenItemId?: string;
     bitwardenItemName?: string;
     bitwardenFieldPath?: string;
   }) => ipcRenderer.invoke('workspace:update-credential', request),
+  selectSshPrivateKey: () => ipcRenderer.invoke('credential:select-ssh-private-key'),
+  discardSshPrivateKeySelection: (request: { selectionId: string }) =>
+    ipcRenderer.invoke('credential:discard-ssh-private-key', request),
   deleteCredential: (request: { id: string }) =>
     ipcRenderer.invoke('workspace:delete-credential', request),
   updateWorkspaceNodeSshSettings: (request: { nodeId: string; sshAutoSudo: boolean | null }) =>
@@ -735,7 +746,9 @@ const wormholeBridge = {
     ipcRenderer.invoke('rdp:open-system', request) as Promise<RdpSystemClientOpenResult>,
   resizeRdpSession: (request: RdpCommandRequest) => ipcRenderer.invoke('rdp:resize', request),
   commandRdpSession: (
-    request: RdpCommandRequest & { operation: 'show' | 'hide' | 'focus' | 'disconnect' },
+    request: RdpCommandRequest & {
+      operation: 'show' | 'hide' | 'focus' | 'disconnect';
+    },
   ) => ipcRenderer.invoke('rdp:command', request),
   onRdpEvent: (listener: (event: RdpBackendEvent) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, value: RdpBackendEvent) => listener(value);

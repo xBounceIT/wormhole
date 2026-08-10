@@ -640,7 +640,7 @@ func storeMcpToken(database *sql.DB, token string) error {
 		return fmt.Errorf("could not read the previous MCP bearer token: %w", err)
 	}
 
-	encoded, encoding, err := credentialSecretStore(mcpTokenCredentialID, token)
+	encoded, encoding, err := credentialSecretStore(mcpTokenCredentialID, "", token)
 	if err != nil {
 		return errors.New("could not protect MCP bearer token")
 	}

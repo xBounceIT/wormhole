@@ -151,6 +151,7 @@ interface WormholeWorkspaceCredential {
   canDelete: boolean;
   bitwardenItemId?: string;
   bitwardenItemName?: string;
+  privateKeyFileName?: string;
   isVirtualBitwarden?: boolean;
 }
 
@@ -354,8 +355,17 @@ type WormholeSshEvent =
       hostKeyExpected?: string;
       hostKeyReceived?: string;
     }
-  | { type: 'tunnel.progress'; sessionId: string; phase: string; detail?: string }
-  | { type: 'sftp.opening' | 'sftp.closed'; sessionId: string; requestId?: string }
+  | {
+      type: 'tunnel.progress';
+      sessionId: string;
+      phase: string;
+      detail?: string;
+    }
+  | {
+      type: 'sftp.opening' | 'sftp.closed';
+      sessionId: string;
+      requestId?: string;
+    }
   | {
       type: 'sftp.ready';
       sessionId: string;
@@ -364,7 +374,13 @@ type WormholeSshEvent =
       truncated: boolean;
       requestId?: string;
     }
-  | { type: 'sftp.error'; sessionId: string; error: string; path?: string; requestId?: string }
+  | {
+      type: 'sftp.error';
+      sessionId: string;
+      error: string;
+      path?: string;
+      requestId?: string;
+    }
   | {
       type: 'sftp.local.ready';
       sessionId: string;
@@ -492,7 +508,13 @@ type WormholeVncCommand =
       passwordProvided?: boolean;
     }
   | { action: 'vnc.disconnect'; sessionId: string }
-  | { action: 'vnc.pointer'; sessionId: string; x: number; y: number; buttons: number }
+  | {
+      action: 'vnc.pointer';
+      sessionId: string;
+      x: number;
+      y: number;
+      buttons: number;
+    }
   | { action: 'vnc.key'; sessionId: string; down: boolean; keysym: number };
 
 interface WormholeBackendResponse {
@@ -781,23 +803,38 @@ interface Window {
     createCredential(request: {
       name: string;
       protocol: 'ssh' | 'rdp' | 'vnc';
+      kind: 'password' | 'sshKey';
       username: string;
       domain: string;
       password: string;
+      passphrase: string;
+      clearPassphrase: boolean;
+      privateKeySelectionId?: string;
       provider: 'Local';
     }): Promise<WormholeWorkspaceCredential>;
     updateCredential(request: {
       id: string;
       name: string;
       protocol: 'ssh' | 'rdp' | 'vnc';
+      kind: 'password' | 'sshKey';
       username: string;
       domain: string;
       password: string;
+      passphrase: string;
+      clearPassphrase: boolean;
+      privateKeySelectionId?: string;
       provider: 'Local' | 'Bitwarden';
       bitwardenItemId?: string;
       bitwardenItemName?: string;
       bitwardenFieldPath?: string;
     }): Promise<WormholeWorkspaceCredential>;
+    selectSshPrivateKey(): Promise<{
+      selectionId: string;
+      fileName: string;
+    } | null>;
+    discardSshPrivateKeySelection(request: {
+      selectionId: string;
+    }): Promise<{ discarded: boolean }>;
     deleteCredential(request: { id: string }): Promise<{ deleted: boolean; error?: string }>;
     updateWorkspaceNodeSshSettings(request: {
       nodeId: string;
@@ -936,7 +973,10 @@ interface Window {
       autoCheckForUpdates?: boolean;
       skippedUpdateVersion?: string | null;
     }): Promise<{ updated: boolean }>;
-    updateStatus(): Promise<{ currentVersion: string; result: WormholeUpdateCheckResult | null }>;
+    updateStatus(): Promise<{
+      currentVersion: string;
+      result: WormholeUpdateCheckResult | null;
+    }>;
     checkForUpdates(): Promise<WormholeUpdateCheckResult>;
     downloadUpdate(request: {
       installerUrl: string;

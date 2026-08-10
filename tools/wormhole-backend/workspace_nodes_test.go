@@ -580,7 +580,7 @@ func TestWorkspaceInlineSecretReplacementRollsBackOnNodeWriteFailure(t *testing.
 	previousDelete := credentialSecretDelete
 	storeCount := 0
 	deleted := make([]string, 0)
-	credentialSecretStore = func(_ string, _ string) (string, string, error) {
+	credentialSecretStore = func(_, _, _ string) (string, string, error) {
 		storeCount++
 		return fmt.Sprintf("protected-%d", storeCount), "test-protected-v1", nil
 	}

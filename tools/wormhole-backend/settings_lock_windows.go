@@ -9,10 +9,10 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-func acquireSettingsFileLock(lockPath string) (func(), error) {
+func acquireExclusiveFileLock(lockPath string) (func(), error) {
 	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
-		return nil, fmt.Errorf("cannot open the Wormhole settings lock: %w", err)
+		return nil, fmt.Errorf("cannot open the Wormhole data lock: %w", err)
 	}
 	overlapped := new(windows.Overlapped)
 	if err := windows.LockFileEx(
@@ -24,7 +24,7 @@ func acquireSettingsFileLock(lockPath string) (func(), error) {
 		overlapped,
 	); err != nil {
 		_ = file.Close()
-		return nil, fmt.Errorf("cannot lock Wormhole settings: %w", err)
+		return nil, fmt.Errorf("cannot lock Wormhole data: %w", err)
 	}
 	return func() {
 		_ = windows.UnlockFileEx(windows.Handle(file.Fd()), 0, 1, 0, overlapped)

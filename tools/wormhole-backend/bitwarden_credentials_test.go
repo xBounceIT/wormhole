@@ -369,9 +369,10 @@ INSERT INTO Nodes (Id, ParentId, Protocol, CredentialId, CredentialMode) VALUES
 }
 
 func TestCredentialCanTransitionBetweenLocalAndBitwardenWithoutOrphanedSecret(t *testing.T) {
+	installUnjournaledCredentialSecretStoreTest(t)
 	previousStore := credentialSecretStore
 	previousDelete := credentialSecretDelete
-	credentialSecretStore = func(_ string, password string) (string, string, error) {
+	credentialSecretStore = func(_, _ string, password string) (string, string, error) {
 		return "protected-" + password, "test-protected-v1", nil
 	}
 	deleted := make([]string, 0)
@@ -463,9 +464,10 @@ WHERE p.Id = ?;`, created.ID).Scan(&provider, &itemID, &encoded); err != nil {
 }
 
 func TestCredentialBlankEditRequiresAnExistingLocalSecret(t *testing.T) {
+	installUnjournaledCredentialSecretStoreTest(t)
 	previousStore := credentialSecretStore
 	previousDelete := credentialSecretDelete
-	credentialSecretStore = func(_ string, password string) (string, string, error) {
+	credentialSecretStore = func(_, _ string, password string) (string, string, error) {
 		return "protected-" + password, "test-protected-v1", nil
 	}
 	credentialSecretDelete = func(_, _, _ string) error { return nil }

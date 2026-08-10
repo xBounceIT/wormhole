@@ -50,7 +50,12 @@ func protectSecret(value string) (string, error) {
 // Windows stores Electron-created credential values in the same DPAPI-protected SQLite format
 // used by the first-launch migration. The id is deliberately not part of the cryptographic
 // payload so existing rows remain readable by the SSH and VNC providers.
-func storeCredentialSecret(_ string, value string) (string, string, error) {
+func prepareCredentialSecretStorage(string) (string, string, error) {
+	// DPAPI returns ciphertext kept only in SQLite, so it has no external record to journal.
+	return "", protectedSecretEncoding, nil
+}
+
+func storeCredentialSecret(_, _ string, value string) (string, string, error) {
 	encoded, err := protectSecret(value)
 	if err != nil {
 		return "", "", err
@@ -264,6 +269,11 @@ func unprotectFile(path string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer clearBytes(protected)
+	return unprotectFileContents(path, protected)
+}
+
+func unprotectFileContents(_ string, protected []byte) ([]byte, error) {
 	if len(protected) == 0 {
 		return nil, errors.New("protected file is empty")
 	}
@@ -293,11 +303,16 @@ func unprotectFile(path string) ([]byte, error) {
 }
 
 func protectFile(path string, plaintext []byte) error {
-	protected, err := protectDpapi(plaintext, nil)
+	protected, err := protectFileContents(path, plaintext)
 	if err != nil {
 		return err
 	}
+	defer clearBytes(protected)
 	return writePrivateFileAtomic(path, protected)
+}
+
+func protectFileContents(_ string, plaintext []byte) ([]byte, error) {
+	return protectDpapi(plaintext, nil)
 }
 
 func deleteFileProtectionKey(string) {}

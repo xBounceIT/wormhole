@@ -166,6 +166,10 @@ func writeTunnel(databasePath string, request tunnelWriteRequest, create bool) (
 	}
 
 	if err := protectFile(secretPath, request.Settings); err != nil {
+		// The atomic writer can fail to synchronize the directory after its rename has already
+		// replaced the destination. Record that side effect so rollback restores the protected
+		// payload alongside the SQLite metadata.
+		secretWritten = privateFileDestinationWasReplaced(err)
 		return tunnelDetails{}, errors.New("could not protect VPN tunnel settings")
 	}
 	secretWritten = true
@@ -775,11 +779,46 @@ func legacyTunnelSecretPath(databasePath, id string) string {
 }
 
 func writePrivateFileAtomic(path string, contents []byte) error {
+	return writePrivateFileAtomicWithTemporaryPattern(
+		path,
+		".tunnel-*.tmp",
+		func(temporary *os.File) error {
+			_, err := temporary.Write(contents)
+			return err
+		},
+		nil,
+	)
+}
+
+var privateFileDirectorySync = syncPrivateFileDirectory
+
+type privateFileDestinationReplacedError struct {
+	err error
+}
+
+func (err *privateFileDestinationReplacedError) Error() string {
+	return err.err.Error()
+}
+
+func (err *privateFileDestinationReplacedError) Unwrap() error {
+	return err.err
+}
+
+func privateFileDestinationWasReplaced(err error) bool {
+	var replaced *privateFileDestinationReplacedError
+	return errors.As(err, &replaced)
+}
+
+func writePrivateFileAtomicWithTemporaryPattern(
+	path, pattern string,
+	writeContents func(*os.File) error,
+	onAbort func(),
+) error {
 	directory := filepath.Dir(path)
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return err
 	}
-	temporary, err := os.CreateTemp(directory, ".tunnel-*.tmp")
+	temporary, err := os.CreateTemp(directory, pattern)
 	if err != nil {
 		return err
 	}
@@ -788,13 +827,18 @@ func writePrivateFileAtomic(path string, contents []byte) error {
 	defer func() {
 		_ = temporary.Close()
 		if !committed {
-			_ = os.Remove(temporaryPath)
+			if onAbort != nil {
+				onAbort()
+			}
+			if os.Remove(temporaryPath) == nil {
+				_ = privateFileDirectorySync(directory)
+			}
 		}
 	}()
 	if err := temporary.Chmod(0o600); err != nil {
 		return err
 	}
-	if _, err := temporary.Write(contents); err != nil {
+	if err := writeContents(temporary); err != nil {
 		return err
 	}
 	if err := temporary.Sync(); err != nil {
@@ -803,8 +847,11 @@ func writePrivateFileAtomic(path string, contents []byte) error {
 	if err := temporary.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(temporaryPath, path); err != nil {
+	if err := replaceFileWithWriteThrough(temporaryPath, path); err != nil {
 		return err
+	}
+	if err := privateFileDirectorySync(directory); err != nil {
+		return &privateFileDestinationReplacedError{err: err}
 	}
 	committed = true
 	return nil

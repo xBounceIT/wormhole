@@ -652,6 +652,25 @@ func TestSSHAutoSudoDriverStartsWithoutShellOutput(t *testing.T) {
 	}
 }
 
+func TestSSHAutoSudoDriverUsesNonInteractiveSudoWithoutLoginPassword(t *testing.T) {
+	input := &recordingSSHInput{}
+	native := &sshNativeSession{stdin: input}
+	driver := newSSHAutoSudoDriver(native, "")
+	if driver == nil {
+		t.Fatal("expected auto-sudo driver for an SSH key credential")
+	}
+	native.autoSudo = driver
+	defer driver.dispose()
+
+	if err := native.write([]byte("whoami\r")); err != nil {
+		t.Fatalf("buffering terminal input failed: %v", err)
+	}
+	driver.start()
+	if got := input.String(); got != "sudo -n su\rwhoami\r" {
+		t.Fatalf("passwordless auto sudo input = %q", got)
+	}
+}
+
 func TestSSHAutoSudoDriverStartIsIdempotent(t *testing.T) {
 	input := &recordingSSHInput{}
 	native := &sshNativeSession{stdin: input}
@@ -2683,22 +2702,23 @@ INSERT INTO Nodes (Id, Name, Kind, Protocol, Host) VALUES ('leaf', 'SSH leaf', 1
 }
 
 func TestLoadSSHCredentialCoversOverridesProvidersAndSecretFailures(t *testing.T) {
-	database, err := sql.Open("sqlite", ":memory:")
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	database, err := openDatabase(databasePath, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer database.Close()
-	if err := loadSSHCredential(database, "wormhole.db", "", &sshTarget{}, "", "", false, false); err == nil {
+	if err := loadSSHCredential(database, databasePath, "", &sshTarget{}, "", "", false, false); err == nil {
 		t.Fatal("empty SSH credential id was accepted")
 	}
 	target := sshTarget{}
-	if err := loadSSHCredential(database, "wormhole.db", "missing", &target, "override", "secret", true, true); err != nil {
+	if err := loadSSHCredential(database, databasePath, "missing", &target, "override", "secret", true, true); err != nil {
 		t.Fatalf("manual override without a credential table failed: %v", err)
 	}
 	if target.username != "override" || target.password != "secret" {
 		t.Fatalf("manual SSH override = %#v", target)
 	}
-	if err := loadSSHCredential(database, "wormhole.db", "missing", &sshTarget{}, "", "", false, false); err == nil {
+	if err := loadSSHCredential(database, databasePath, "missing", &sshTarget{}, "", "", false, false); err == nil {
 		t.Fatal("missing credential table returned no error")
 	}
 
@@ -2715,15 +2735,15 @@ INSERT INTO CredentialProfiles (Id, Username, Kind, Protocol, SecretProvider) VA
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := loadSSHCredential(database, "wormhole.db", "missing", &sshTarget{}, "", "", false, false); err == nil {
+	if err := loadSSHCredential(database, databasePath, "missing", &sshTarget{}, "", "", false, false); err == nil {
 		t.Fatal("unknown SSH credential returned no error")
 	}
-	if err := loadSSHCredential(database, "wormhole.db", "11111111-1111-4111-8111-111111111111", &sshTarget{}, "", "", false, false); err == nil {
+	if err := loadSSHCredential(database, databasePath, "11111111-1111-4111-8111-111111111111", &sshTarget{}, "", "", false, false); err == nil {
 		t.Fatal("locked Bitwarden credential returned no error")
 	}
 	target = sshTarget{}
 	if err := loadSSHCredential(
-		database, "wormhole.db", "11111111-1111-4111-8111-111111111111", &target,
+		database, databasePath, "11111111-1111-4111-8111-111111111111", &target,
 		"manual-user", "manual-password", true, false,
 	); err != nil {
 		t.Fatal(err)
@@ -2731,13 +2751,13 @@ INSERT INTO CredentialProfiles (Id, Username, Kind, Protocol, SecretProvider) VA
 	if target.username != "manual-user" || target.password != "manual-password" {
 		t.Fatalf("Bitwarden override target = %#v", target)
 	}
-	if err := loadSSHCredential(database, "wormhole.db", "22222222-2222-4222-8222-222222222222", &sshTarget{}, "", "", false, false); err == nil {
+	if err := loadSSHCredential(database, databasePath, "22222222-2222-4222-8222-222222222222", &sshTarget{}, "", "", false, false); err == nil {
 		t.Fatal("RDP credential was accepted for SSH")
 	}
-	if err := loadSSHCredential(database, "wormhole.db", "33333333-3333-4333-8333-333333333333", &sshTarget{}, "", "", false, false); err == nil {
+	if err := loadSSHCredential(database, databasePath, "33333333-3333-4333-8333-333333333333", &sshTarget{}, "", "", false, false); err == nil {
 		t.Fatal("missing protected key returned no error")
 	}
-	if err := loadSSHCredential(database, "wormhole.db", "44444444-4444-4444-8444-444444444444", &sshTarget{}, "", "", false, false); err == nil {
+	if err := loadSSHCredential(database, databasePath, "44444444-4444-4444-8444-444444444444", &sshTarget{}, "", "", false, false); err == nil {
 		t.Fatal("missing protected password returned no error")
 	}
 	if secret, err := readOptionalCredentialSecret(database, "missing"); err != nil || secret != nil {
@@ -2756,6 +2776,224 @@ VALUES ('44444444-4444-4444-8444-444444444444', 'opaque', 'unsupported');`)
 	}
 	if _, err := readOptionalCredentialSecret(database, "44444444-4444-4444-8444-444444444444"); err == nil {
 		t.Fatal("unsupported optional secret encoding returned no error")
+	}
+}
+
+func TestLoadSSHCredentialSnapshotsKeyAndPassphraseAgainstConcurrentReplacement(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	oldKeyPath := filepath.Join(t.TempDir(), "old.pem")
+	oldKey := testSshPrivateKey(t, "old-passphrase")
+	if err := os.WriteFile(oldKeyPath, oldKey, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	created, err := createCredential(databasePath, credentialCreateRequest{
+		Name: "Runtime key", Protocol: "ssh", Kind: "sshKey", Username: "operator",
+		Passphrase: "old-passphrase", PrivateKeyPath: oldKeyPath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	database, err := openDatabase(databasePath, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	keyRead := make(chan struct{})
+	continueLoad := make(chan struct{})
+	defer func() {
+		select {
+		case <-continueLoad:
+		default:
+			close(continueLoad)
+		}
+	}()
+	previousUnprotect := credentialPrivateKeyUnprotect
+	credentialPrivateKeyUnprotect = func(path string) ([]byte, error) {
+		key, err := previousUnprotect(path)
+		if err == nil {
+			close(keyRead)
+			<-continueLoad
+		}
+		return key, err
+	}
+	t.Cleanup(func() { credentialPrivateKeyUnprotect = previousUnprotect })
+
+	previousStageProtect := credentialPrivateKeyStageProtect
+	replacementStaged := make(chan struct{}, 1)
+	credentialPrivateKeyStageProtect = func(finalPath, pendingPath string, plaintext []byte) error {
+		if err := previousStageProtect(finalPath, pendingPath, plaintext); err != nil {
+			return err
+		}
+		replacementStaged <- struct{}{}
+		return nil
+	}
+	t.Cleanup(func() { credentialPrivateKeyStageProtect = previousStageProtect })
+
+	target := sshTarget{}
+	loadDone := make(chan error, 1)
+	go func() {
+		loadDone <- loadSSHCredential(database, databasePath, created.ID, &target, "", "", false, false)
+	}()
+	select {
+	case <-keyRead:
+	case <-time.After(5 * time.Second):
+		t.Fatal("runtime credential load did not reach the SSH private key")
+	}
+
+	replacementPath := filepath.Join(t.TempDir(), "replacement.pem")
+	if err := os.WriteFile(replacementPath, testSshPrivateKey(t, "replacement-passphrase"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	updateDone := make(chan error, 1)
+	go func() {
+		_, err := updateCredential(databasePath, credentialUpdateRequest{
+			ID: created.ID,
+			credentialCreateRequest: credentialCreateRequest{
+				Name: "Runtime key", Protocol: "ssh", Kind: "sshKey", Username: "operator",
+				Passphrase: "replacement-passphrase", PrivateKeyPath: replacementPath,
+			},
+		})
+		updateDone <- err
+	}()
+
+	select {
+	case <-replacementStaged:
+		close(continueLoad)
+		t.Fatal("SSH key replacement reached staging during runtime credential loading")
+	case err := <-updateDone:
+		close(continueLoad)
+		t.Fatalf("SSH key replacement did not wait for runtime credential loading: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(continueLoad)
+	select {
+	case err := <-loadDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("runtime credential load did not finish")
+	}
+	select {
+	case err := <-updateDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("SSH key replacement did not resume after runtime credential loading")
+	}
+	defer clearBytes(target.privateKey)
+	if target.keyPassphrase != "old-passphrase" || !bytes.Equal(target.privateKey, oldKey) {
+		t.Fatalf("runtime SSH key snapshot = passphrase:%q key-bytes:%d", target.keyPassphrase, len(target.privateKey))
+	}
+}
+
+func TestLoadSSHCredentialWaitsForReplacementBeforeReadingProfile(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	oldKeyPath := filepath.Join(t.TempDir(), "old.pem")
+	if err := os.WriteFile(oldKeyPath, testSshPrivateKey(t, "old-passphrase"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	created, err := createCredential(databasePath, credentialCreateRequest{
+		Name: "Runtime key", Protocol: "ssh", Kind: "sshKey", Username: "old-user",
+		Passphrase: "old-passphrase", PrivateKeyPath: oldKeyPath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	database, err := openDatabase(databasePath, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	replacementPath := filepath.Join(t.TempDir(), "replacement.pem")
+	replacementKey := testSshPrivateKey(t, "replacement-passphrase")
+	if err := os.WriteFile(replacementPath, replacementKey, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	replacementStaged := make(chan struct{})
+	continueUpdate := make(chan struct{})
+	defer func() {
+		select {
+		case <-continueUpdate:
+		default:
+			close(continueUpdate)
+		}
+	}()
+	previousStageProtect := credentialPrivateKeyStageProtect
+	credentialPrivateKeyStageProtect = func(finalPath, pendingPath string, plaintext []byte) error {
+		if err := previousStageProtect(finalPath, pendingPath, plaintext); err != nil {
+			return err
+		}
+		close(replacementStaged)
+		<-continueUpdate
+		return nil
+	}
+	t.Cleanup(func() { credentialPrivateKeyStageProtect = previousStageProtect })
+
+	updateDone := make(chan error, 1)
+	go func() {
+		_, err := updateCredential(databasePath, credentialUpdateRequest{
+			ID: created.ID,
+			credentialCreateRequest: credentialCreateRequest{
+				Name: "Runtime key", Protocol: "ssh", Kind: "sshKey", Username: "new-user",
+				Passphrase: "replacement-passphrase", PrivateKeyPath: replacementPath,
+			},
+		})
+		updateDone <- err
+	}()
+	select {
+	case <-replacementStaged:
+	case <-time.After(5 * time.Second):
+		t.Fatal("SSH key replacement did not reach staging")
+	}
+
+	lockAttempted := make(chan struct{})
+	previousRuntimeLock := sshCredentialPrivateKeyLock
+	sshCredentialPrivateKeyLock = func(path string) (func(), error) {
+		close(lockAttempted)
+		return previousRuntimeLock(path)
+	}
+	t.Cleanup(func() { sshCredentialPrivateKeyLock = previousRuntimeLock })
+	target := sshTarget{}
+	loadDone := make(chan error, 1)
+	go func() {
+		loadDone <- loadSSHCredential(database, databasePath, created.ID, &target, "", "", false, false)
+	}()
+	select {
+	case <-lockAttempted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("runtime credential load did not attempt to acquire the snapshot lock")
+	}
+	close(continueUpdate)
+
+	select {
+	case err := <-updateDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("SSH key replacement did not finish")
+	}
+	select {
+	case err := <-loadDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("runtime credential load did not resume")
+	}
+	defer clearBytes(target.privateKey)
+	if target.username != "new-user" || target.keyPassphrase != "replacement-passphrase" ||
+		!bytes.Equal(target.privateKey, replacementKey) {
+		t.Fatalf(
+			"runtime SSH credential snapshot = user:%q passphrase:%q key-bytes:%d",
+			target.username,
+			target.keyPassphrase,
+			len(target.privateKey),
+		)
 	}
 }
 

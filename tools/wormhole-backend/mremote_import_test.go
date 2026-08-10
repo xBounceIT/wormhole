@@ -41,7 +41,7 @@ func TestMRemoteImportValidEncryptedFixturePlansAndCommitsMappings(t *testing.T)
 	request.PlanToken = plan.PlanToken
 	previousStore, previousDelete := credentialSecretStore, credentialSecretDelete
 	stored := map[string]string{}
-	credentialSecretStore = func(id, password string) (string, string, error) {
+	credentialSecretStore = func(id, _ string, password string) (string, string, error) {
 		stored[id] = password
 		return "protected-" + id, "test", nil
 	}
@@ -165,7 +165,7 @@ func TestMRemoteImportStructureOnlyNeverStoresDecryptedSecrets(t *testing.T) {
 	}
 	request.PlanToken = plan.PlanToken
 	previousStore := credentialSecretStore
-	credentialSecretStore = func(_, _ string) (string, string, error) {
+	credentialSecretStore = func(_, _, _ string) (string, string, error) {
 		t.Fatal("secret store must not be called")
 		return "", "", nil
 	}
@@ -183,7 +183,7 @@ func TestMRemoteImportDuplicateAllocatesCollisionFreeCredentialNames(t *testing.
 	databasePath := newMRemoteTestDatabase(t)
 	fixture := writeMRemoteFixture(t, validMRemoteFixture(t))
 	previousStore, previousDelete := credentialSecretStore, credentialSecretDelete
-	credentialSecretStore = func(id, password string) (string, string, error) { return "protected-" + id, "test", nil }
+	credentialSecretStore = func(id, _ string, _ string) (string, string, error) { return "protected-" + id, "test", nil }
 	credentialSecretDelete = func(_, _, _ string) error { return nil }
 	t.Cleanup(func() { credentialSecretStore = previousStore; credentialSecretDelete = previousDelete })
 	for index, nonce := range []string{"55555555-5555-4555-8555-555555555555", "66666666-6666-4666-8666-666666666666"} {
@@ -228,7 +228,10 @@ func TestMRemoteImportCancellationAndFailureRollbackAtomically(t *testing.T) {
 
 	previousStore, previousDelete := credentialSecretStore, credentialSecretDelete
 	stored := map[string]bool{}
-	credentialSecretStore = func(id, _ string) (string, string, error) { stored[id] = true; return "protected-" + id, "test", nil }
+	credentialSecretStore = func(id, _, _ string) (string, string, error) {
+		stored[id] = true
+		return "protected-" + id, "test", nil
+	}
 	credentialSecretDelete = func(id, _, _ string) error { delete(stored, id); return nil }
 	t.Cleanup(func() { credentialSecretStore = previousStore; credentialSecretDelete = previousDelete })
 	db, err := openDatabase(databasePath, false)

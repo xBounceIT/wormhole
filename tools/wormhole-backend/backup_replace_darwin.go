@@ -3,7 +3,6 @@
 package main
 
 import (
-	"os"
 	"strings"
 )
 
@@ -12,5 +11,5 @@ func equalBackupPaths(left, right string) bool {
 }
 
 func replaceBackupFile(temporaryPath, targetPath string) error {
-	return os.Rename(temporaryPath, targetPath)
+	return replaceFileWithWriteThrough(temporaryPath, targetPath)
 }

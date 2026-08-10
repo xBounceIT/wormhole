@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import {
@@ -12,6 +13,7 @@ import {
   mergeCredential,
   sshAutoSudoAvailable,
 } from '../src/credential-state.ts';
+import { hasValidCredentialSecretLength } from '../electron/credential-secret-length.ts';
 import {
   bitwardenCliIsLoggedIn,
   bitwardenCliServerRegionCode,
@@ -114,12 +116,19 @@ test('SSH keys are accepted only by SSH password-capable controls', () => {
   assert.equal(credentialCanUseProtocol('unsupported', 'ssh'), false);
 });
 
-test('Auto sudo remains available for inline and inherited credentials but not a selected SSH key', () => {
+test('Auto sudo remains available for password and SSH key credentials', () => {
   assert.equal(sshAutoSudoAvailable(false, 'sshKey'), true);
   assert.equal(sshAutoSudoAvailable(true, undefined), true);
   assert.equal(sshAutoSudoAvailable(true, 'password'), true);
-  assert.equal(sshAutoSudoAvailable(true, 'sshKey'), false);
+  assert.equal(sshAutoSudoAvailable(true, 'sshKey'), true);
   assert.equal(sshAutoSudoAvailable(true, 'unsupported'), false);
+});
+
+test('SSH key passphrase limits count Unicode code points instead of encoded bytes', () => {
+  assert.equal(hasValidCredentialSecretLength('é'.repeat(4096)), true);
+  assert.equal(hasValidCredentialSecretLength('é'.repeat(4097)), false);
+  assert.equal(hasValidCredentialSecretLength('🔐'.repeat(4096)), true);
+  assert.equal(hasValidCredentialSecretLength('🔐'.repeat(4097)), false);
 });
 
 test('hidden Auto sudo ignores stale quick-connect state and preserves only a loaded saved override', () => {
@@ -128,6 +137,76 @@ test('hidden Auto sudo ignores stale quick-connect state and preserves only a lo
   assert.equal(effectiveSshAutoSudoMode('ssh', false, 'on', 'inherit'), 'inherit');
   assert.equal(effectiveSshAutoSudoMode('ssh', true, 'on', 'inherit'), 'on');
   assert.equal(effectiveSshAutoSudoMode('rdp', true, 'on', 'on'), 'inherit');
+});
+
+test('SSH key credential import keeps key paths and material behind the native boundary', () => {
+  const appSource = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  const preloadSource = readFileSync(new URL('../electron/preload.cts', import.meta.url), 'utf8');
+  const mainSource = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
+  const backendSource = readFileSync(
+    new URL('../tools/wormhole-backend/credentials.go', import.meta.url),
+    'utf8',
+  );
+
+  assert.match(appSource, /<SelectItem value="sshKey">SSH private key<\/SelectItem>/);
+  assert.match(appSource, /selectSshPrivateKey\(\)/);
+  assert.match(appSource, /Key passphrase \(optional\)/);
+  assert.match(appSource, /id="credential-key-passphrase"[\s\S]*?maxLength=\{8192\}/);
+  assert.doesNotMatch(appSource, /privateKeyPath/);
+
+  const credentialDraft = appSource.match(/type CredentialDraft = \{[\s\S]*?\n\};/)?.[0];
+  assert.ok(credentialDraft);
+  assert.doesNotMatch(credentialDraft, /passphrase/);
+  assert.match(appSource, /takeOneShotSecret\(credentialKeyPassphraseInput\.current\)/);
+  assert.match(
+    appSource,
+    /failedSelectionId = request\.kind === 'sshKey' \? request\.privateKeySelectionId : ''[\s\S]*selectionMustBeRepeated = failedSelectionId\.length > 0[\s\S]*discardPrivateKeySelection\(failedSelectionId\)[\s\S]*privateKeySelectionId: ''[\s\S]*setPrivateKeySelectionRetryRequired\(true\)/,
+  );
+  assert.match(
+    appSource,
+    /const privateKeySelectionRequired = !editingCredential \|\| privateKeySelectionRetryRequired/,
+  );
+  assert.match(
+    appSource,
+    /privateKeyPassphraseRetryRequired && !draft\.clearPassphrase && !passphrase/,
+  );
+  assert.match(
+    appSource,
+    /passphraseMustBeRepeated = request\.kind === 'sshKey' && request\.passphrase\.length > 0/,
+  );
+  assert.match(appSource, /disabled=\{busy \|\| privateKeySelecting\}/);
+  assert.match(appSource, /takeOneShotSecret\(sshKeyPassphraseInput\.current\)/);
+  assert.match(appSource, /input\.value = '';/);
+  assert.match(
+    appSource,
+    /clearSecretInput\(credentialKeyPassphraseInput\.current\);\s+setEditorOpen\(false\)/,
+  );
+  assert.match(
+    appSource,
+    /clearSecretInput\(sshKeyPassphraseInput\.current\);\s+setSshKeyPassphrasePrompt\(null\)/,
+  );
+  assert.doesNotMatch(appSource, /setSshKeyPassphrase\(/);
+  assert.doesNotMatch(appSource, /credentialForm\.passphrase/);
+
+  assert.match(preloadSource, /credential:select-ssh-private-key/);
+  assert.match(preloadSource, /credential:discard-ssh-private-key/);
+  assert.doesNotMatch(preloadSource, /privateKeyPath/);
+
+  assert.match(mainSource, /dialog\.showOpenDialog\(owner, options\)/);
+  assert.match(mainSource, /sshPrivateKeySelections\.get\(event\.sender\)/);
+  assert.match(mainSource, /privateKeyPath: selection\.path/);
+  assert.match(mainSource, /sshPrivateKeySelections\.delete\(event\.sender\)/);
+  assert.match(mainSource, /clearPassphrase/);
+  assert.match(mainSource, /sshPrivateKeyDisplayName/);
+  assert.doesNotMatch(
+    mainSource,
+    /Buffer\.byteLength\((?:value\.keyPassphrase|passphrase), 'utf8'\)/,
+  );
+
+  assert.match(backendSource, /ssh\.ParsePrivateKeyWithPassphrase/);
+  assert.match(backendSource, /credentialPrivateKeyStageProtect/);
+  assert.match(backendSource, /maxSshPrivateKeyBytes/);
+  assert.match(backendSource, /ClearPassphrase/);
 });
 
 test('Bitwarden login and vault labels distinguish authentication from lock state', () => {

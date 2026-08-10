@@ -1432,11 +1432,10 @@ const (
 )
 
 // sshAutoSudoDriver intentionally lives in the Go backend. The renderer must never receive the
-// saved login password. Auto Sudo first writes the ordinary `sudo su` command, then queues the
-// password only after sudo emits its standard `[sudo] ...:` prompt. Requiring sudo's prefix avoids
-// treating a login banner or unrelated password text as permission to send the secret. If sudo is
-// configured as NOPASSWD (or a cached timestamp skips the prompt), the timeout clears the password
-// without sending it into the root shell.
+// saved login password. Password credentials first write `sudo su` and queue the password only
+// after sudo emits its standard `[sudo] ...:` prompt. Requiring sudo's prefix avoids treating a
+// login banner or unrelated password text as permission to send the secret. Key credentials have
+// no login password, so they use `sudo -n su` and can elevate only when sudo permits NOPASSWD.
 type sshAutoSudoDriver struct {
 	session  *sshNativeSession
 	password string
@@ -1451,7 +1450,7 @@ type sshAutoSudoDriver struct {
 func newSSHAutoSudoDriver(session *sshNativeSession, password string) *sshAutoSudoDriver {
 	// A line-oriented sudo prompt cannot safely carry a password containing a newline. Refuse to
 	// automate such a credential rather than risk turning the suffix into a shell command.
-	if password == "" || strings.ContainsAny(password, "\r\n") {
+	if strings.ContainsAny(password, "\r\n") {
 		return nil
 	}
 	return &sshAutoSudoDriver{
@@ -1470,6 +1469,11 @@ func (driver *sshAutoSudoDriver) start() {
 
 func (driver *sshAutoSudoDriver) startLocked() {
 	if driver.state != sshAutoSudoWaitingForShell {
+		return
+	}
+	if driver.password == "" {
+		_ = driver.session.writeRaw([]byte("sudo -n su\r"))
+		driver.finishLocked(nil)
 		return
 	}
 	driver.state = sshAutoSudoWaitingForPassword
@@ -2884,6 +2888,7 @@ func openNativeSSH(
 	if err != nil {
 		return nil, sshTarget{}, err
 	}
+	defer clearBytes(target.privateKey)
 	if keyPassphraseOverride != "" {
 		target.keyPassphrase = keyPassphraseOverride
 	}
@@ -2919,6 +2924,8 @@ func openNativeSSH(
 		}
 	}
 	target.knownHostFingerprint = fingerprint
+	target.privateKey = nil
+	target.keyPassphrase = ""
 	return native, target, nil
 }
 
@@ -2951,10 +2958,12 @@ func dialNativeSSH(
 	if len(target.privateKey) > 0 {
 		signer, parseErr := ssh.ParsePrivateKey(target.privateKey)
 		if parseErr != nil && target.keyPassphrase != "" {
+			passphrase := []byte(target.keyPassphrase)
 			signer, parseErr = ssh.ParsePrivateKeyWithPassphrase(
 				target.privateKey,
-				[]byte(target.keyPassphrase),
+				passphrase,
 			)
+			clearBytes(passphrase)
 		}
 		if parseErr != nil {
 			var missing *ssh.PassphraseMissingError
@@ -3448,6 +3457,11 @@ func loadSSHCredential(
 		}
 		return errors.New("Wormhole database has no SSH credentials")
 	}
+	release, err := sshCredentialPrivateKeyLock(databasePath)
+	if err != nil {
+		return err
+	}
+	defer release()
 	columns, err := tableColumns(database, "CredentialProfiles")
 	if err != nil {
 		return err
@@ -3505,20 +3519,25 @@ func loadSSHCredential(
 	}
 
 	if row.Kind.Valid && row.Kind.Int64 == 1 {
+		if err := recoverCredentialPrivateKeyOperationsUnlocked(databasePath); err != nil {
+			return err
+		}
 		stem, err := protectedCredentialFileStem(credentialID)
 		if err != nil {
 			return err
 		}
 		keyPath := filepath.Join(filepath.Dir(databasePath), "keys", stem+".dpapi")
-		key, err := unprotectFile(keyPath)
+		key, err := credentialPrivateKeyUnprotect(keyPath)
 		if err != nil {
 			return errors.New("could not read the SSH private key")
 		}
-		target.privateKey = key
 		passphrase, err := readOptionalCredentialSecret(database, credentialID, electronUserDataPath...)
 		if err != nil {
+			clearBytes(key)
 			return fmt.Errorf("could not read the SSH key passphrase: %w", err)
 		}
+		defer clearBytes(passphrase)
+		target.privateKey = key
 		target.keyPassphrase = string(passphrase)
 		return nil
 	}
@@ -3529,6 +3548,10 @@ func loadSSHCredential(
 	target.password = string(secret)
 	return nil
 }
+
+// This indirection lets concurrency tests observe lock acquisition without changing the
+// production locking behavior.
+var sshCredentialPrivateKeyLock = acquireCredentialPrivateKeyLock
 
 func applySSHCredentialOverride(
 	target *sshTarget,

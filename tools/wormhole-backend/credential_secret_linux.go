@@ -19,10 +19,8 @@ import (
 // optional libsecret-tools package. There is deliberately no plaintext fallback when a Secret
 // Service is unavailable.
 const (
-	linuxLegacySecretServiceEncoding = "linux-secret-service-v1"
-	linuxSecretServiceEncoding       = "linux-secret-service-dbus-v1"
-	linuxSecretServiceName           = "Wormhole"
-	linuxSecretToolTimeout           = 20 * time.Second
+	linuxSecretServiceName = "Wormhole"
+	linuxSecretToolTimeout = 20 * time.Second
 )
 
 var linuxCredentialStore = credentialSecretKeyring{
@@ -34,8 +32,19 @@ var linuxCredentialStore = credentialSecretKeyring{
 	notFound: keyring.ErrNotFound,
 }
 
-func storeCredentialSecret(id, value string) (string, string, error) {
-	return linuxCredentialStore.store(id, value)
+func prepareCredentialSecretStorage(id string) (string, string, error) {
+	reference, err := newCredentialSecretReference(id)
+	return reference, linuxSecretServiceEncoding, err
+}
+
+func storeCredentialSecret(id, reference, value string) (string, string, error) {
+	if reference == "" {
+		return linuxCredentialStore.store(id, value)
+	}
+	if err := linuxCredentialStore.storeAtReference(id, reference, value); err != nil {
+		return "", "", err
+	}
+	return reference, linuxSecretServiceEncoding, nil
 }
 
 func unprotectPlatformCredentialSecret(id, encoded, encoding string) ([]byte, error) {

@@ -218,7 +218,7 @@ func updateSettingsDocumentWithOptions(
 	if err := os.MkdirAll(filepath.Dir(cleanPath), 0o700); err != nil {
 		return fmt.Errorf("cannot create the Wormhole data directory: %w", err)
 	}
-	release, err := acquireSettingsFileLock(cleanPath + ".lock")
+	release, err := acquireExclusiveFileLock(cleanPath + ".lock")
 	if err != nil {
 		return err
 	}

@@ -627,8 +627,8 @@ test('new credential flow cannot create Bitwarden-backed profiles', () => {
   );
   const providerSelector = sourceBetween(
     credentialsPage,
-    '{editingCredential ? (',
-    '{credentialForm.protocol',
+    "{credentialForm.kind === 'password' ? (",
+    "{credentialForm.protocol !== 'vnc' ? (",
   );
   const createParser = sourceBetween(
     mainSource,
@@ -638,8 +638,9 @@ test('new credential flow cannot create Bitwarden-backed profiles', () => {
   const preloadCreate = sourceBetween(preloadSource, 'createCredential:', 'updateCredential:');
 
   assert.match(emptyDraft, /provider: 'Local'/);
+  assert.match(providerSelector, /editingCredential \? \(/);
   assert.match(providerSelector, /<SelectItem value="Bitwarden">Bitwarden item<\/SelectItem>/);
-  assert.match(providerSelector, /\) : null\}/);
+  assert.match(providerSelector, /\) : null/);
   assert.match(credentialsPage, /!editingCredential && credentialForm\.provider !== 'Local'/);
   assert.match(createParser, /request\.provider !== 'Local'/);
   assert.match(preloadCreate, /provider: 'Local'/);
