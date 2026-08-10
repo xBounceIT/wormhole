@@ -160,6 +160,7 @@ type credentialRecord struct {
 	CanDelete          bool   `json:"canDelete"`
 	BitwardenItemID    string `json:"bitwardenItemId,omitempty"`
 	BitwardenItemName  string `json:"bitwardenItemName,omitempty"`
+	PrivateKeyFileName string `json:"privateKeyFileName,omitempty"`
 	IsVirtualBitwarden bool   `json:"isVirtualBitwarden,omitempty"`
 }
 
@@ -2136,7 +2137,11 @@ func loadStoredCredentials(database *sql.DB) ([]credentialRecord, map[string]str
 	if _, ok := columns["BitwardenItemName"]; ok {
 		bitwardenItemNameExpression = "BitwardenItemName"
 	}
-	rows, err := database.Query(`SELECT Id, Name, Username, Domain, ` + protocolExpression + `, ` + providerExpression + `, ` + kindExpression + `, ` + bitwardenItemIDExpression + `, ` + bitwardenItemNameExpression + `
+	privateKeyFileNameExpression := "NULL"
+	if _, ok := columns["PrivateKeyFileName"]; ok {
+		privateKeyFileNameExpression = "PrivateKeyFileName"
+	}
+	rows, err := database.Query(`SELECT Id, Name, Username, Domain, ` + protocolExpression + `, ` + providerExpression + `, ` + kindExpression + `, ` + bitwardenItemIDExpression + `, ` + bitwardenItemNameExpression + `, ` + privateKeyFileNameExpression + `
 FROM CredentialProfiles ORDER BY Name, Id;`)
 	if err != nil {
 		return nil, nil, fmt.Errorf("cannot read credentials: %w", err)
@@ -2144,8 +2149,8 @@ FROM CredentialProfiles ORDER BY Name, Id;`)
 	defer rows.Close()
 	for rows.Next() {
 		var row credentialRow
-		var itemID, itemName sql.NullString
-		if err := rows.Scan(&row.ID, &row.Name, &row.Username, &row.Domain, &row.Protocol, &row.Provider, &row.Kind, &itemID, &itemName); err != nil {
+		var itemID, itemName, privateKeyFileName sql.NullString
+		if err := rows.Scan(&row.ID, &row.Name, &row.Username, &row.Domain, &row.Protocol, &row.Provider, &row.Kind, &itemID, &itemName, &privateKeyFileName); err != nil {
 			return nil, nil, fmt.Errorf("cannot read a credential: %w", err)
 		}
 		username := "No username"
@@ -2160,11 +2165,13 @@ FROM CredentialProfiles ORDER BY Name, Id;`)
 			Username: username,
 			Domain:   nullableString(row.Domain),
 			Provider: providerName(row.Provider),
-			CanEdit: row.Kind == 0 && (row.Provider == 0 || row.Provider == 1) &&
-				(row.Protocol == 0 || row.Protocol == 1 || row.Protocol == 6),
-			CanDelete:         (row.Kind == 0 || row.Kind == 1) && (row.Provider == 0 || row.Provider == 1),
-			BitwardenItemID:   strings.TrimSpace(nullableString(itemID)),
-			BitwardenItemName: strings.TrimSpace(nullableString(itemName)),
+			CanEdit: (row.Kind == 0 && (row.Provider == 0 || row.Provider == 1) &&
+				(row.Protocol == 0 || row.Protocol == 1 || row.Protocol == 6)) ||
+				(row.Kind == 1 && row.Provider == 0 && row.Protocol == 0),
+			CanDelete:          (row.Kind == 0 || row.Kind == 1) && (row.Provider == 0 || row.Provider == 1),
+			BitwardenItemID:    strings.TrimSpace(nullableString(itemID)),
+			BitwardenItemName:  strings.TrimSpace(nullableString(itemName)),
+			PrivateKeyFileName: credentialPrivateKeyDisplayName(nullableString(privateKeyFileName)),
 		}
 		credentials = append(credentials, record)
 		if row.Provider == 1 && record.BitwardenItemID != "" {

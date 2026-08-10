@@ -295,10 +295,14 @@ const MRemoteImportDialog = lazy(() =>
   })),
 );
 const VncSurface = lazy(() =>
-  import('./components/VncSurface').then((module) => ({ default: module.VncSurface })),
+  import('./components/VncSurface').then((module) => ({
+    default: module.VncSurface,
+  })),
 );
 const WebSurface = lazy(() =>
-  import('./components/WebSurface').then((module) => ({ default: module.WebSurface })),
+  import('./components/WebSurface').then((module) => ({
+    default: module.WebSurface,
+  })),
 );
 
 type Protocol = QuickConnectProtocol;
@@ -661,6 +665,7 @@ type CredentialRecord = {
   canDelete: boolean;
   bitwardenItemId?: string;
   bitwardenItemName?: string;
+  privateKeyFileName?: string;
   isVirtualBitwarden?: boolean;
 };
 
@@ -720,11 +725,19 @@ type CredentialDialogState =
   | { kind: 'error'; message: string };
 type CredentialCopyField = 'username' | 'secret';
 
-function CredentialProviderIcon({ provider }: { provider: CredentialRecord['provider'] }) {
+function CredentialProviderIcon({
+  provider,
+  kind,
+}: {
+  provider: CredentialRecord['provider'];
+  kind: CredentialRecord['kind'];
+}) {
   const isBitwarden = provider === 'Bitwarden';
   const label = isBitwarden
     ? 'Stored in Bitwarden'
-    : "Stored in Wormhole's local credential database";
+    : kind === 'sshKey'
+      ? "Stored in Wormhole's encrypted local key storage"
+      : "Stored in Wormhole's local credential database";
 
   return (
     <Tooltip>
@@ -750,9 +763,14 @@ function CredentialProviderIcon({ provider }: { provider: CredentialRecord['prov
 type CredentialDraft = {
   name: string;
   protocol: 'ssh' | 'rdp' | 'vnc';
+  kind: Extract<CredentialKind, 'password' | 'sshKey'>;
   username: string;
   domain: string;
   password: string;
+  passphrase: string;
+  clearPassphrase: boolean;
+  privateKeySelectionId: string;
+  privateKeyFileName: string;
   provider: 'Local' | 'Bitwarden';
   bitwardenItemId: string;
   bitwardenItemName: string;
@@ -762,9 +780,14 @@ function emptyCredentialDraft(): CredentialDraft {
   return {
     name: '',
     protocol: 'ssh',
+    kind: 'password',
     username: '',
     domain: '',
     password: '',
+    passphrase: '',
+    clearPassphrase: false,
+    privateKeySelectionId: '',
+    privateKeyFileName: '',
     provider: 'Local',
     bitwardenItemId: '',
     bitwardenItemName: '',
@@ -10732,6 +10755,7 @@ function CredentialsPage({
   const [bitwardenUnlockPassword, setBitwardenUnlockPassword] = useState('');
   const [bitwardenSearchStatus, setBitwardenSearchStatus] = useState('');
   const [bitwardenSearching, setBitwardenSearching] = useState(false);
+  const [privateKeySelecting, setPrivateKeySelecting] = useState(false);
   const bitwardenSearchAttempts = useLazyRef(() => new WebSessionAttemptTracker());
 
   // App lock is an external security boundary. Scrub every renderer-held secret without
@@ -10749,6 +10773,7 @@ function CredentialsPage({
     setBitwardenUnlockPassword(''); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
     setBitwardenSearchStatus(''); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
     setBitwardenSearching(false); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
+    setPrivateKeySelecting(false); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
     bitwardenSearchAttempts.current.cancel('credential-search');
   }, [bitwardenSearchAttempts, isAuthorized]);
 
@@ -10765,7 +10790,14 @@ function CredentialsPage({
       credentialSearchActive
         ? credentials.map((credential) => ({
             item: credential,
-            text: [credential.name, credential.username, credential.domain, credential.provider]
+            text: [
+              credential.name,
+              credential.username,
+              credential.domain,
+              credential.provider,
+              credential.kind === 'sshKey' ? 'SSH key' : 'Password',
+              credential.privateKeyFileName,
+            ]
               .filter(Boolean)
               .join('\u0000')
               .toLowerCase(),
@@ -10823,10 +10855,15 @@ function CredentialsPage({
     setCredentialForm({
       name: credential.name,
       protocol,
+      kind: credential.kind === 'sshKey' ? 'sshKey' : 'password',
       username: credential.username === 'No username' ? '' : credential.username,
       domain: credential.domain ?? '',
       // The renderer never reads saved secrets. Leaving this blank preserves a local secret.
       password: '',
+      passphrase: '',
+      clearPassphrase: false,
+      privateKeySelectionId: '',
+      privateKeyFileName: credential.privateKeyFileName ?? '',
       provider: credential.provider,
       bitwardenItemId: credential.bitwardenItemId ?? '',
       bitwardenItemName: credential.bitwardenItemName ?? '',
@@ -10837,11 +10874,38 @@ function CredentialsPage({
   }
 
   function closeCredentialEditor() {
+    discardPrivateKeySelection(credentialForm.privateKeySelectionId);
     setEditorOpen(false);
     setEditingCredential(null);
     setCredentialForm(emptyCredentialDraft());
     setOperationError('');
     resetBitwardenSearch();
+  }
+
+  function discardPrivateKeySelection(selectionId: string) {
+    if (!selectionId) return;
+    void window.wormhole?.discardSshPrivateKeySelection({ selectionId }).catch(() => undefined);
+  }
+
+  async function selectPrivateKey() {
+    if (privateKeySelecting || !window.wormhole) return;
+    setPrivateKeySelecting(true);
+    setOperationError('');
+    try {
+      const selected = await window.wormhole.selectSshPrivateKey();
+      if (!selected) return;
+      discardPrivateKeySelection(credentialForm.privateKeySelectionId);
+      setCredentialForm((form) => ({
+        ...form,
+        clearPassphrase: false,
+        privateKeySelectionId: selected.selectionId,
+        privateKeyFileName: selected.fileName,
+      }));
+    } catch (error) {
+      setOperationError(error instanceof Error ? error.message : 'Could not select the SSH key.');
+    } finally {
+      setPrivateKeySelecting(false);
+    }
   }
 
   function resetBitwardenSearch() {
@@ -10918,28 +10982,50 @@ function CredentialsPage({
     if (busy) return;
     const draft: CredentialDraft = {
       name: credentialForm.name.trim(),
-      protocol: credentialForm.protocol,
-      username: credentialForm.protocol === 'vnc' ? '' : credentialForm.username.trim(),
-      domain: credentialForm.protocol === 'rdp' ? credentialForm.domain.trim() : '',
-      password: credentialForm.password,
-      provider: credentialForm.provider,
+      protocol: credentialForm.kind === 'sshKey' ? 'ssh' : credentialForm.protocol,
+      kind: credentialForm.kind,
+      username:
+        credentialForm.kind === 'password' && credentialForm.protocol === 'vnc'
+          ? ''
+          : credentialForm.username.trim(),
+      domain:
+        credentialForm.kind === 'password' && credentialForm.protocol === 'rdp'
+          ? credentialForm.domain.trim()
+          : '',
+      password: credentialForm.kind === 'password' ? credentialForm.password : '',
+      passphrase: credentialForm.kind === 'sshKey' ? credentialForm.passphrase : '',
+      clearPassphrase: credentialForm.kind === 'sshKey' ? credentialForm.clearPassphrase : false,
+      privateKeySelectionId:
+        credentialForm.kind === 'sshKey' ? credentialForm.privateKeySelectionId : '',
+      privateKeyFileName: credentialForm.kind === 'sshKey' ? credentialForm.privateKeyFileName : '',
+      provider: credentialForm.kind === 'sshKey' ? 'Local' : credentialForm.provider,
       bitwardenItemId:
-        credentialForm.provider === 'Bitwarden' ? credentialForm.bitwardenItemId.trim() : '',
+        credentialForm.kind === 'password' && credentialForm.provider === 'Bitwarden'
+          ? credentialForm.bitwardenItemId.trim()
+          : '',
       bitwardenItemName:
-        credentialForm.provider === 'Bitwarden' ? credentialForm.bitwardenItemName.trim() : '',
+        credentialForm.kind === 'password' && credentialForm.provider === 'Bitwarden'
+          ? credentialForm.bitwardenItemName.trim()
+          : '',
     };
     const localPasswordRequired =
-      draft.provider === 'Local' && (!editingCredential || editingCredential.provider !== 'Local');
+      draft.kind === 'password' &&
+      draft.provider === 'Local' &&
+      (!editingCredential || editingCredential.provider !== 'Local');
     if (
       !draft.name ||
-      (draft.provider === 'Local'
-        ? localPasswordRequired && !draft.password
-        : !draft.bitwardenItemId)
+      (draft.kind === 'sshKey'
+        ? !editingCredential && !draft.privateKeySelectionId
+        : draft.provider === 'Local'
+          ? localPasswordRequired && !draft.password
+          : !draft.bitwardenItemId)
     ) {
       setOperationError(
-        draft.provider === 'Local'
-          ? 'Enter a name and password.'
-          : 'Enter a name and select a Bitwarden login item.',
+        draft.kind === 'sshKey'
+          ? 'Enter a name and select an SSH private key.'
+          : draft.provider === 'Local'
+            ? 'Enter a name and password.'
+            : 'Enter a name and select a Bitwarden login item.',
       );
       return;
     }
@@ -11077,7 +11163,7 @@ function CredentialsPage({
                 </h3>
                 <p className="text-xs leading-relaxed text-muted-foreground">
                   {credentials.length === 0
-                    ? 'Add a credential to reuse a username and password across SSH, RDP, and VNC connections.'
+                    ? 'Add a password or SSH key credential to reuse across your connections.'
                     : 'Try a different name, username, domain, or provider.'}
                 </p>
               </div>
@@ -11111,7 +11197,13 @@ function CredentialsPage({
                       {credential.domain ? (
                         <Badge variant="outline">Domain · {credential.domain}</Badge>
                       ) : null}
-                      <CredentialProviderIcon provider={credential.provider} />
+                      <Badge variant="outline">
+                        {credential.kind === 'sshKey' ? 'SSH key' : 'Password'}
+                      </Badge>
+                      <CredentialProviderIcon
+                        kind={credential.kind}
+                        provider={credential.provider}
+                      />
                     </div>
                   </CardContent>
                   <CardFooter className="justify-between gap-2">
@@ -11166,11 +11258,15 @@ function CredentialsPage({
           <DialogHeader>
             <DialogTitle>{editingCredential ? 'Edit credential' : 'Add credential'}</DialogTitle>
             <DialogDescription>
-              {credentialForm.provider === 'Bitwarden'
-                ? 'Link this profile to a Bitwarden login. Wormhole stores only the item reference.'
-                : editingCredential
-                  ? 'Leave the password blank to keep the current one. Saved passwords are never returned to the renderer.'
-                  : 'Store a reusable local password for SSH, RDP, or VNC.'}
+              {credentialForm.kind === 'sshKey'
+                ? editingCredential
+                  ? 'Update this SSH key profile or select a replacement private key. Key material never enters the renderer.'
+                  : 'Import an SSH private key into protected local storage.'
+                : credentialForm.provider === 'Bitwarden'
+                  ? 'Link this profile to a Bitwarden login. Wormhole stores only the item reference.'
+                  : editingCredential
+                    ? 'Leave the password blank to keep the current one. Saved passwords are never returned to the renderer.'
+                    : 'Store a reusable local password for SSH, RDP, or VNC.'}
             </DialogDescription>
           </DialogHeader>
           <form className="grid gap-4" onSubmit={submitCredential}>
@@ -11194,12 +11290,21 @@ function CredentialsPage({
             <div className="grid gap-2">
               <Label htmlFor="credential-protocol">Protocol</Label>
               <Select
-                onValueChange={(value) =>
+                disabled={credentialForm.kind === 'sshKey'}
+                onValueChange={(value) => {
+                  if (value !== 'ssh') {
+                    discardPrivateKeySelection(credentialForm.privateKeySelectionId);
+                  }
                   setCredentialForm((form) => ({
                     ...form,
                     protocol: value as CredentialDraft['protocol'],
-                  }))
-                }
+                    kind: value === 'ssh' ? form.kind : 'password',
+                    passphrase: value === 'ssh' ? form.passphrase : '',
+                    clearPassphrase: value === 'ssh' ? form.clearPassphrase : false,
+                    privateKeySelectionId: value === 'ssh' ? form.privateKeySelectionId : '',
+                    privateKeyFileName: value === 'ssh' ? form.privateKeyFileName : '',
+                  }));
+                }}
                 value={credentialForm.protocol}
               >
                 <SelectTrigger id="credential-protocol">
@@ -11212,27 +11317,69 @@ function CredentialsPage({
                 </SelectContent>
               </Select>
             </div>
-            <div className="grid gap-2">
-              <Label htmlFor="credential-provider">Credential vault</Label>
-              <Select
-                onValueChange={(value) =>
-                  setCredentialForm((form) => ({
-                    ...form,
-                    provider: value as CredentialDraft['provider'],
-                    password: value === 'Bitwarden' ? '' : form.password,
-                  }))
-                }
-                value={credentialForm.provider}
-              >
-                <SelectTrigger id="credential-provider">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="Local">Local password</SelectItem>
-                  <SelectItem value="Bitwarden">Bitwarden item</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
+            {credentialForm.protocol === 'ssh' ? (
+              <div className="grid gap-2">
+                <Label htmlFor="credential-kind">Authentication</Label>
+                <Select
+                  disabled={Boolean(editingCredential)}
+                  onValueChange={(value) => {
+                    const kind = value as CredentialDraft['kind'];
+                    if (kind === 'password') {
+                      discardPrivateKeySelection(credentialForm.privateKeySelectionId);
+                    }
+                    setCredentialForm((form) => ({
+                      ...form,
+                      kind,
+                      provider: kind === 'sshKey' ? 'Local' : form.provider,
+                      password: kind === 'sshKey' ? '' : form.password,
+                      passphrase: kind === 'password' ? '' : form.passphrase,
+                      clearPassphrase: kind === 'password' ? false : form.clearPassphrase,
+                      privateKeySelectionId: kind === 'password' ? '' : form.privateKeySelectionId,
+                      privateKeyFileName: kind === 'password' ? '' : form.privateKeyFileName,
+                      bitwardenItemId: kind === 'sshKey' ? '' : form.bitwardenItemId,
+                      bitwardenItemName: kind === 'sshKey' ? '' : form.bitwardenItemName,
+                    }));
+                  }}
+                  value={credentialForm.kind}
+                >
+                  <SelectTrigger id="credential-kind">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="password">Password</SelectItem>
+                    <SelectItem value="sshKey">SSH private key</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            ) : null}
+            {credentialForm.kind === 'password' ? (
+              <div className="grid gap-2">
+                <Label htmlFor="credential-provider">Credential vault</Label>
+                <Select
+                  onValueChange={(value) =>
+                    setCredentialForm((form) => ({
+                      ...form,
+                      provider: value as CredentialDraft['provider'],
+                      password: value === 'Bitwarden' ? '' : form.password,
+                    }))
+                  }
+                  value={credentialForm.provider}
+                >
+                  <SelectTrigger id="credential-provider">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="Local">Local password</SelectItem>
+                    <SelectItem value="Bitwarden">Bitwarden item</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            ) : (
+              <p className="text-[11px] leading-relaxed text-muted-foreground">
+                The private key is copied into Wormhole's encrypted local storage. The source file
+                is not used after import.
+              </p>
+            )}
             {credentialForm.protocol !== 'vnc' ? (
               <div className="grid gap-2">
                 <Label htmlFor="credential-username">Username</Label>
@@ -11270,7 +11417,76 @@ function CredentialsPage({
                 />
               </div>
             ) : null}
-            {credentialForm.provider === 'Local' ? (
+            {credentialForm.kind === 'sshKey' ? (
+              <div className="grid gap-4 rounded-lg border border-border/70 bg-muted/20 p-3">
+                <div className="grid gap-2">
+                  <Label>Private key file</Label>
+                  <div className="flex min-w-0 items-center justify-between gap-3 rounded-md border border-input bg-background px-3 py-2">
+                    <span className="min-w-0 truncate text-xs text-foreground/80">
+                      {credentialForm.privateKeyFileName || 'No private key selected'}
+                    </span>
+                    <Button
+                      disabled={privateKeySelecting}
+                      onClick={() => void selectPrivateKey()}
+                      size="sm"
+                      type="button"
+                      variant="outline"
+                    >
+                      <Upload data-icon="inline-start" />
+                      {privateKeySelecting
+                        ? 'Selecting…'
+                        : editingCredential
+                          ? 'Replace…'
+                          : 'Select…'}
+                    </Button>
+                  </div>
+                  <p className="text-[11px] leading-relaxed text-muted-foreground">
+                    OpenSSH and PEM private keys up to 1 MB are supported.
+                  </p>
+                </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="credential-key-passphrase">
+                    {editingCredential && !credentialForm.privateKeySelectionId
+                      ? 'Replacement passphrase (leave blank to keep current)'
+                      : 'Key passphrase (optional)'}
+                  </Label>
+                  <Input
+                    autoComplete="off"
+                    disabled={credentialForm.clearPassphrase}
+                    id="credential-key-passphrase"
+                    maxLength={4096}
+                    onChange={(event) =>
+                      setCredentialForm((form) => ({
+                        ...form,
+                        passphrase: event.target.value,
+                        clearPassphrase: false,
+                      }))
+                    }
+                    type="password"
+                    value={credentialForm.passphrase}
+                  />
+                  {editingCredential && !credentialForm.privateKeySelectionId ? (
+                    <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                      <Checkbox
+                        checked={credentialForm.clearPassphrase}
+                        onCheckedChange={(checked) =>
+                          setCredentialForm((form) => ({
+                            ...form,
+                            passphrase: checked === true ? '' : form.passphrase,
+                            clearPassphrase: checked === true,
+                          }))
+                        }
+                      />
+                      Forget the saved passphrase and ask when connecting
+                    </label>
+                  ) : null}
+                  <p className="text-[11px] leading-relaxed text-muted-foreground">
+                    If an encrypted key is saved without a passphrase, Wormhole asks for it when
+                    connecting.
+                  </p>
+                </div>
+              </div>
+            ) : credentialForm.provider === 'Local' ? (
               <div className="grid gap-2">
                 <Label htmlFor="credential-password">
                   {editingCredential?.provider === 'Local'

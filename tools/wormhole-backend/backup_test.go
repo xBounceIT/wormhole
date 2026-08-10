@@ -205,7 +205,7 @@ func TestBackupPlaintextRoundTripIsLegacyCompatible(t *testing.T) {
 		t.Fatal(err)
 	}
 	if exported.Encrypted || exported.NodeCount != 2 || exported.CredentialCount != 2 ||
-		exported.TunnelCount != 1 || exported.PasswordCount != 2 ||
+		exported.TunnelCount != 1 || exported.PasswordCount != 3 ||
 		exported.PrivateKeyCount != 1 || exported.TunnelPayloadCount != 1 {
 		t.Fatalf("unexpected export summary: %#v", exported)
 	}
@@ -233,7 +233,7 @@ func TestBackupPlaintextRoundTripIsLegacyCompatible(t *testing.T) {
 		t.Fatal(err)
 	}
 	if result.NodesImported != 2 || result.CredentialsImported != 2 || result.TunnelsImported != 1 ||
-		result.PasswordsImported != 2 || result.PrivateKeysImported != 1 || result.TunnelPayloadsImported != 1 {
+		result.PasswordsImported != 3 || result.PrivateKeysImported != 1 || result.TunnelPayloadsImported != 1 {
 		t.Fatalf("unexpected import summary: %#v", result)
 	}
 	destination := openBackupTestDatabase(t, destinationPath)
@@ -253,7 +253,11 @@ func TestBackupPlaintextRoundTripIsLegacyCompatible(t *testing.T) {
 	if err != nil || !found || inline != "inline-secret" {
 		t.Fatalf("inline password = %q, %t, %v", inline, found, err)
 	}
-	key, err := unprotectFile(backupPrivateKeyPath(destinationPath, backupTestKeyID))
+	passphrase, found, err := readBackupPassword(destination, backupTestKeyID)
+	if err != nil || !found || passphrase != "key-passphrase" {
+		t.Fatalf("SSH key passphrase = %q, %t, %v", passphrase, found, err)
+	}
+	key, err := unprotectFile(credentialPrivateKeyPath(destinationPath, backupTestKeyID))
 	if err != nil || !bytes.Equal(key, []byte("private-key-material")) {
 		t.Fatalf("private key = %q, %v", key, err)
 	}
@@ -333,7 +337,7 @@ func TestBackupEncryptedRoundTripAndWrongPasswordFailBeforeWrites(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.NodesImported != 2 || result.PasswordsImported != 2 {
+	if result.NodesImported != 2 || result.PasswordsImported != 3 {
 		t.Fatalf("unexpected encrypted import result: %#v", result)
 	}
 }
@@ -362,7 +366,7 @@ func TestBackupReimportRepairsMissingAndCorruptSecrets(t *testing.T) {
 		t.Fatal(err)
 	}
 	destination.Close()
-	keyPath := backupPrivateKeyPath(destinationPath, backupTestKeyID)
+	keyPath := credentialPrivateKeyPath(destinationPath, backupTestKeyID)
 	if err := os.WriteFile(keyPath, []byte("corrupt"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -394,7 +398,7 @@ func TestBackupReimportRepairsMissingAndCorruptSecrets(t *testing.T) {
 	if err != nil || !found || inline != "inline-secret" {
 		t.Fatalf("recovered inline password = %q, %t, %v", inline, found, err)
 	}
-	key, err := unprotectFile(backupPrivateKeyPath(destinationPath, backupTestKeyID))
+	key, err := unprotectFile(credentialPrivateKeyPath(destinationPath, backupTestKeyID))
 	if err != nil || !bytes.Equal(key, []byte("private-key-material")) {
 		t.Fatalf("recovered private key = %q, %v", key, err)
 	}
@@ -692,10 +696,11 @@ func TestBackupExportRejectsFilesItCannotImport(t *testing.T) {
 	}
 }
 
-func TestBackupImportSkipsOversizedPasswordsAndMalformedTunnelPayloads(t *testing.T) {
+func TestBackupImportSkipsMismatchedAndOversizedSecrets(t *testing.T) {
 	installBackupTestSecretStore(t)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	payload := newBackupPayload()
+	oversizedKeyID := "66666666-6666-4666-8666-666666666666"
 	credential := backupTestObject(map[string]any{
 		"id": backupTestCredentialID, "name": "oversized-password", "kind": 0,
 		"protocol": 0, "secretProvider": 0, "bitwardenFieldPath": "   ", "createdAt": "not-a-timestamp",
@@ -705,11 +710,26 @@ func TestBackupImportSkipsOversizedPasswordsAndMalformedTunnelPayloads(t *testin
 		"createdAt": now, "updatedAt": now,
 	})
 	payload.Credentials = append(payload.Credentials, &credential)
+	oversizedKeyCredential := backupTestObject(map[string]any{
+		"id": oversizedKeyID, "name": "oversized-key", "kind": 1,
+		"protocol": 0, "secretProvider": 0, "createdAt": now,
+	})
+	payload.Credentials = append(payload.Credentials, &oversizedKeyCredential)
 	payload.Tunnels = append(payload.Tunnels, &tunnel)
 	payload.Passwords = append(payload.Passwords, &backupPasswordEntry{
 		CredentialID: backupTestCredentialID,
 		Password:     strings.Repeat("p", maxStoredCredentialBytes+1),
 	})
+	payload.PrivateKeys = append(payload.PrivateKeys,
+		&backupPrivateKeyEntry{
+			CredentialID: backupTestCredentialID,
+			DataB64:      base64.StdEncoding.EncodeToString([]byte("not-for-a-password-profile")),
+		},
+		&backupPrivateKeyEntry{
+			CredentialID: oversizedKeyID,
+			DataB64:      base64.StdEncoding.EncodeToString(make([]byte, maxSshPrivateKeyBytes+1)),
+		},
+	)
 	payload.TunnelPayloads = append(payload.TunnelPayloads, &backupTunnelPayloadEntry{
 		TunnelConfigID: backupTestTunnelID,
 		DataB64:        base64.StdEncoding.EncodeToString([]byte("not-json")),
@@ -720,12 +740,15 @@ func TestBackupImportSkipsOversizedPasswordsAndMalformedTunnelPayloads(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.CredentialsImported != 1 || result.TunnelsImported != 1 ||
-		result.PasswordsImported != 0 || result.TunnelPayloadsImported != 0 {
+	if result.CredentialsImported != 2 || result.TunnelsImported != 1 ||
+		result.PasswordsImported != 0 || result.PrivateKeysImported != 0 ||
+		result.TunnelPayloadsImported != 0 {
 		t.Fatalf("unexpected bounded import result: %#v", result)
 	}
 	warnings := strings.Join(result.Warnings, "\n")
-	if !strings.Contains(warnings, "protected-store limit") || !strings.Contains(warnings, "was malformed") {
+	if !strings.Contains(warnings, "protected-store limit") ||
+		!strings.Contains(warnings, "did not match a local SSH key profile") ||
+		!strings.Contains(warnings, "was malformed") {
 		t.Fatalf("missing bounded-secret warnings: %s", warnings)
 	}
 	database := openBackupTestDatabase(t, databasePath)
@@ -966,7 +989,10 @@ func seedBackupTestDatabase(t *testing.T, database *sql.DB, databasePath string)
 	if err := storeBackupPassword(database, backupTestNodeID, "inline-secret"); err != nil {
 		t.Fatal(err)
 	}
-	if err := protectFile(backupPrivateKeyPath(databasePath, backupTestKeyID), []byte("private-key-material")); err != nil {
+	if err := storeBackupPassword(database, backupTestKeyID, "key-passphrase"); err != nil {
+		t.Fatal(err)
+	}
+	if err := protectFile(credentialPrivateKeyPath(databasePath, backupTestKeyID), []byte("private-key-material")); err != nil {
 		t.Fatal(err)
 	}
 	if err := protectFile(legacyTunnelSecretPath(databasePath, backupTestTunnelID), []byte(`{"PrivateKey":"vpn-secret"}`)); err != nil {

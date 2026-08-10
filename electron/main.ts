@@ -543,7 +543,9 @@ type BackupExportBackendResponse = {
   tunnelPayloadCount: number;
   encrypted: boolean;
 };
-type BackupExportResponse = Omit<BackupExportBackendResponse, 'path'> & { fileName: string };
+type BackupExportResponse = Omit<BackupExportBackendResponse, 'path'> & {
+  fileName: string;
+};
 type BackupImportResponse = {
   nodesImported: number;
   nodesSkipped: number;
@@ -556,7 +558,9 @@ type BackupImportResponse = {
   tunnelPayloadsImported: number;
   warnings: string[];
 };
-type BackupImportSelection = BackupInspectBackendResponse & { fileName: string };
+type BackupImportSelection = BackupInspectBackendResponse & {
+  fileName: string;
+};
 type WorkspaceCredential = {
   id: string;
   name: string;
@@ -569,15 +573,20 @@ type WorkspaceCredential = {
   canDelete: boolean;
   bitwardenItemId?: string;
   bitwardenItemName?: string;
+  privateKeyFileName?: string;
   isVirtualBitwarden?: boolean;
 };
 type CredentialProtocol = 'ssh' | 'rdp' | 'vnc';
 type CredentialCreateRequest = {
   name: string;
   protocol: CredentialProtocol;
+  kind: 'password' | 'sshKey';
   username: string;
   domain: string;
   password: string;
+  passphrase: string;
+  clearPassphrase: boolean;
+  privateKeySelectionId?: string;
   provider: 'Local' | 'Bitwarden';
   bitwardenItemId?: string;
   bitwardenItemName?: string;
@@ -793,6 +802,8 @@ let authOperationQueue: Promise<void> = Promise.resolve();
 let currentAuthState: AuthStateResponse | undefined;
 let authRefreshInFlight: Promise<AuthStateResponse> | undefined;
 const backupImportSelections = new WeakMap<Electron.WebContents, string>();
+type SshPrivateKeySelection = { id: string; path: string; fileName: string };
+const sshPrivateKeySelections = new WeakMap<Electron.WebContents, SshPrivateKeySelection>();
 type MRemoteImportSelection = {
   path: string;
   planNonce?: string;
@@ -927,7 +938,11 @@ type SshBackendEvent =
       hostKeyExpected?: string;
       hostKeyReceived?: string;
     }
-  | { type: 'sftp.opening' | 'sftp.closed'; sessionId: string; requestId?: string }
+  | {
+      type: 'sftp.opening' | 'sftp.closed';
+      sessionId: string;
+      requestId?: string;
+    }
   | {
       type: 'sftp.ready';
       sessionId: string;
@@ -936,7 +951,13 @@ type SshBackendEvent =
       truncated: boolean;
       requestId?: string;
     }
-  | { type: 'sftp.error'; sessionId: string; error: string; path?: string; requestId?: string }
+  | {
+      type: 'sftp.error';
+      sessionId: string;
+      error: string;
+      path?: string;
+      requestId?: string;
+    }
   | {
       type: 'sftp.local.ready';
       sessionId: string;
@@ -1202,6 +1223,10 @@ function isSshSessionId(value: unknown): value is string {
   );
 }
 
+function isUuid(value: unknown): value is string {
+  return typeof value === 'string' && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(value);
+}
+
 // Omit the `persist:` prefix so appliance cookies and cache remain available to tabs during this
 // Electron run but are never written to disk after the app closes.
 const webSharedPartition = 'wormhole-web';
@@ -1211,7 +1236,9 @@ const webMaxSurfaceCoordinate = 100_000;
 
 function ensureWebSharedSessionReady(): Promise<void> {
   if (!webSharedSessionReady) {
-    const browserSession = electronSession.fromPartition(webSharedPartition, { cache: true });
+    const browserSession = electronSession.fromPartition(webSharedPartition, {
+      cache: true,
+    });
     webSharedSessionReady = Promise.all([
       browserSession.clearStorageData(),
       browserSession.clearCache(),
@@ -1436,16 +1463,37 @@ function parseWorkspaceNodeRequest(value: unknown): WorkspaceNodeRequest {
   return { nodeId: value.nodeId };
 }
 
-function parseCredentialCreateRequest(
-  value: unknown,
-  allowMissingLocalPassword = false,
-): CredentialCreateRequest {
+function sshPrivateKeyDisplayName(filePath: string): string {
+  const fileName = path.basename(filePath);
+  const characters = Array.from(fileName);
+  if (
+    fileName.length === 0 ||
+    characters.length > credentialMaxNameLength ||
+    characters.some((character) => {
+      const codePoint = character.codePointAt(0) ?? 0;
+      return codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f);
+    })
+  ) {
+    return 'SSH private key';
+  }
+  return fileName;
+}
+
+function parseCredentialCreateRequest(value: unknown, updating = false): CredentialCreateRequest {
   if (!isRecord(value)) throw new Error('Credential details are invalid.');
   const name = value.name;
   const protocol = value.protocol;
+  const kind =
+    value.kind === 'sshKey' ? 'sshKey' : value.kind === 'password' ? 'password' : undefined;
   const username = value.username;
   const domain = value.domain;
   const password = value.password;
+  const passphrase = value.passphrase;
+  const clearPassphrase = value.clearPassphrase;
+  const privateKeySelectionId =
+    typeof value.privateKeySelectionId === 'string' && value.privateKeySelectionId.length > 0
+      ? value.privateKeySelectionId
+      : undefined;
   const provider =
     value.provider === 'Bitwarden' ? 'Bitwarden' : value.provider === 'Local' ? 'Local' : undefined;
   const bitwardenItemId = typeof value.bitwardenItemId === 'string' ? value.bitwardenItemId : '';
@@ -1454,18 +1502,35 @@ function parseCredentialCreateRequest(
   if (
     typeof name !== 'string' ||
     name.length > credentialMaxNameLength ||
+    kind === undefined ||
     typeof username !== 'string' ||
     username.length > credentialMaxUsernameLength ||
     typeof domain !== 'string' ||
     domain.length > credentialMaxDomainLength ||
     typeof password !== 'string' ||
     password.length > credentialMaxPasswordLength ||
+    typeof passphrase !== 'string' ||
+    Buffer.byteLength(passphrase, 'utf8') > credentialMaxPasswordLength ||
+    typeof clearPassphrase !== 'boolean' ||
     provider === undefined ||
-    (provider === 'Local' && password.length === 0 && !allowMissingLocalPassword) ||
-    (provider === 'Bitwarden' &&
+    (privateKeySelectionId !== undefined && !isUuid(privateKeySelectionId)) ||
+    (kind === 'password' && provider === 'Local' && password.length === 0 && !updating) ||
+    (kind === 'password' &&
+      provider === 'Bitwarden' &&
       (bitwardenItemId.trim().length === 0 ||
         bitwardenItemId.length > credentialMaxBitwardenItemIdLength ||
         bitwardenItemName.length > credentialMaxBitwardenItemNameLength)) ||
+    (kind === 'password' &&
+      (passphrase.length !== 0 || clearPassphrase || privateKeySelectionId !== undefined)) ||
+    (kind === 'sshKey' &&
+      (protocol !== 'ssh' ||
+        provider !== 'Local' ||
+        password.length !== 0 ||
+        domain.trim().length !== 0 ||
+        bitwardenItemId.length !== 0 ||
+        bitwardenItemName.length !== 0 ||
+        (clearPassphrase && (!updating || passphrase.length !== 0)) ||
+        (!updating && privateKeySelectionId === undefined))) ||
     (protocol !== 'ssh' && protocol !== 'rdp' && protocol !== 'vnc')
   ) {
     throw new Error('Credential details are invalid.');
@@ -1473,9 +1538,13 @@ function parseCredentialCreateRequest(
   return {
     name,
     protocol,
+    kind,
     username,
     domain,
     password,
+    passphrase,
+    clearPassphrase,
+    privateKeySelectionId,
     provider,
     bitwardenItemId,
     bitwardenItemName,
@@ -1597,7 +1666,7 @@ function isWorkspaceNodeCredentialSettingsRequest(
     isSshSessionId(value.nodeId) &&
     (value.mode === 0 || value.mode === 1 || value.mode === 2) &&
     typeof value.credentialId === 'string' &&
-    (value.mode !== 2 || /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(value.credentialId))
+    (value.mode !== 2 || isUuid(value.credentialId))
   );
 }
 
@@ -1624,7 +1693,7 @@ function isWorkspaceNodeInlineCredentialRequest(
 function parseCredentialUpdateRequest(value: unknown): CredentialUpdateRequest {
   const request = parseCredentialCreateRequest(value, true);
   const id = isRecord(value) ? value.id : undefined;
-  if (typeof id !== 'string' || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id)) {
+  if (!isUuid(id)) {
     throw new Error('Credential id is invalid.');
   }
   return { ...request, id };
@@ -1632,7 +1701,7 @@ function parseCredentialUpdateRequest(value: unknown): CredentialUpdateRequest {
 
 function parseCredentialDeleteRequest(value: unknown): CredentialDeleteRequest {
   const id = isRecord(value) ? value.id : undefined;
-  if (typeof id !== 'string' || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id)) {
+  if (!isUuid(id)) {
     throw new Error('Credential id is invalid.');
   }
   return { id };
@@ -2446,7 +2515,9 @@ async function runTunnelBrowserAuth(
           ignoreCertificateErrors: event.ignoreCertificateErrors,
         })
       : tunnelAuthPartition({ completion: event.completion });
-  const browserSession = electronSession.fromPartition(partition, { cache: false });
+  const browserSession = electronSession.fromPartition(partition, {
+    cache: false,
+  });
   browserSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
   browserSession.setPermissionCheckHandler(() => false);
   // The partition isolates WatchGuard origin and trust policy. Still replace the verifier so a
@@ -2520,7 +2591,12 @@ async function runTunnelBrowserAuth(
       const code = current.searchParams.get('code') ?? '';
       const oauthError = current.searchParams.get('error') ?? '';
       const description = current.searchParams.get('error_description') ?? '';
-      const value = JSON.stringify({ code, state, error: oauthError, description });
+      const value = JSON.stringify({
+        code,
+        state,
+        error: oauthError,
+        description,
+      });
       await complete(false, value);
       return;
     }
@@ -2630,7 +2706,10 @@ class NativeBackendProcess {
   private requestSequence = 0;
   private readonly pending = new Map<
     string,
-    { resolve: (response: BackendResponse) => void; reject: (error: Error) => void }
+    {
+      resolve: (response: BackendResponse) => void;
+      reject: (error: Error) => void;
+    }
   >();
 
   async send(
@@ -2740,7 +2819,10 @@ class NativeBackendProcess {
   }
 
   async releaseTunnel(leaseId: string): Promise<void> {
-    const response = await this.send({ action: 'tunnel.release', sessionId: leaseId });
+    const response = await this.send({
+      action: 'tunnel.release',
+      sessionId: leaseId,
+    });
     if (!response.ok) throw new Error(response.error || 'Could not release the VPN tunnel.');
   }
 
@@ -3114,10 +3196,11 @@ function showBitwardenOnboardingNoticeIfNeeded(): Promise<void> {
   bitwardenOnboardingPromise ??= (async () => {
     if (isQuitting || !authSession.isAccessAllowed) return;
     const authorizationEpoch = authSession.authorizationEpoch;
-    const notice = await runBackend<{ show: boolean; title?: string; message?: string }>(
-      'bitwarden-onboarding-read',
-      { appVersion: app.getVersion() },
-    );
+    const notice = await runBackend<{
+      show: boolean;
+      title?: string;
+      message?: string;
+    }>('bitwarden-onboarding-read', { appVersion: app.getVersion() });
     if (
       !notice.show ||
       !notice.title ||
@@ -3694,7 +3777,10 @@ function downloadUpdateInstaller(
     let stdoutBytes = 0;
     let stderr = '';
     let settled = false;
-    const lineReader = createInterface({ input: child.stdout!, crlfDelay: Infinity });
+    const lineReader = createInterface({
+      input: child.stdout!,
+      crlfDelay: Infinity,
+    });
 
     function finishResolve(path: string) {
       if (settled) return;
@@ -4284,7 +4370,9 @@ class WebSurfaceManager {
             ? `wormhole-web-isolated-${++this.isolatedPartitionSequence}`
             : webSharedPartition);
       if (partition === webSharedPartition) await ensureWebSharedSessionReady();
-      const browserSession = electronSession.fromPartition(partition, { cache: true });
+      const browserSession = electronSession.fromPartition(partition, {
+        cache: true,
+      });
       if (target.proxyUrl) {
         await browserSession.setProxy({
           proxyRules: target.proxyUrl,
@@ -4579,7 +4667,10 @@ class WebSurfaceManager {
       }
       popup.setVisible(true);
       if (!record.owner.webContents.isDestroyed()) {
-        record.owner.webContents.send('web:bitwarden-popup-state', { sessionId, open: true });
+        record.owner.webContents.send('web:bitwarden-popup-state', {
+          sessionId,
+          open: true,
+        });
       }
     } catch (error) {
       console.warn('[Wormhole] Could not open the Bitwarden browser popup.', error);
@@ -4640,7 +4731,10 @@ class WebSurfaceManager {
     }
     try {
       if (owner && !owner.isDestroyed() && !owner.webContents.isDestroyed()) {
-        owner.webContents.send('web:bitwarden-popup-state', { sessionId, open: false });
+        owner.webContents.send('web:bitwarden-popup-state', {
+          sessionId,
+          open: false,
+        });
       }
     } catch {
       // Sending state to a renderer that is closing is unnecessary.
@@ -4713,7 +4807,9 @@ class WebSurfaceManager {
   ): Promise<void> {
     await this.bitwardenStorageTasks.run(partition, async () => {
       const extensionId = new URL(popupUrl).hostname;
-      const browserSession = electronSession.fromPartition(partition, { cache: true });
+      const browserSession = electronSession.fromPartition(partition, {
+        cache: true,
+      });
       const backgroundContents = electronWebContents.getAllWebContents().find((contents) => {
         if (
           contents.isDestroyed() ||
@@ -5032,7 +5128,9 @@ class WebSurfaceManager {
         // extension until every bridge and popup flush for this profile has finished, or the last
         // vault mutations can be lost while Chromium tears down the old service worker.
         await this.bitwardenStorageTasks.waitForIdle(partition);
-        const browserSession = electronSession.fromPartition(partition, { cache: true });
+        const browserSession = electronSession.fromPartition(partition, {
+          cache: true,
+        });
         const profilePath = browserSession.storagePath;
         if (previousId) {
           browserSession.extensions.removeExtension(previousId);
@@ -5827,11 +5925,20 @@ class NativeSshBackend {
   }
 
   openSftp(sessionId: string, requestId = ''): void {
-    this.write({ type: 'sftp-open', session_id: sessionId, request_id: requestId });
+    this.write({
+      type: 'sftp-open',
+      session_id: sessionId,
+      request_id: requestId,
+    });
   }
 
   listSftp(sessionId: string, path: string, requestId = ''): void {
-    this.write({ type: 'sftp-list', session_id: sessionId, path, request_id: requestId });
+    this.write({
+      type: 'sftp-list',
+      session_id: sessionId,
+      path,
+      request_id: requestId,
+    });
   }
 
   listLocalSftp(sessionId: string, path: string, requestId: string): void {
@@ -6001,13 +6108,19 @@ class NativeSshBackend {
   }
 
   async regenerateMcpToken(): Promise<string> {
-    const response = await this.sendMcpControl({ type: 'mcp.regenerate-token' });
+    const response = await this.sendMcpControl({
+      type: 'mcp.regenerate-token',
+    });
     if (!response.token) throw new Error('MCP service returned no token.');
     return response.token;
   }
 
   async respondMcpApproval(approvalId: string, approved: boolean): Promise<void> {
-    await this.sendMcpControl({ type: 'mcp.approve', approval_id: approvalId, approved });
+    await this.sendMcpControl({
+      type: 'mcp.approve',
+      approval_id: approvalId,
+      approved,
+    });
   }
 
   async setMcpLocked(locked: boolean): Promise<void> {
@@ -6079,7 +6192,10 @@ class NativeSshBackend {
       { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] },
     );
     this.child = child;
-    const lineReader = createInterface({ input: child.stdout, crlfDelay: Infinity });
+    const lineReader = createInterface({
+      input: child.stdout,
+      crlfDelay: Infinity,
+    });
     this.lineReader = lineReader;
     lineReader.on('line', (line) => {
       if (this.child === child) this.handleLine(line);
@@ -6374,7 +6490,10 @@ function parseMcpPort(value: unknown): number {
   return value;
 }
 
-function parseMcpApproval(value: unknown): { requestId: string; approved: boolean } {
+function parseMcpApproval(value: unknown): {
+  requestId: string;
+  approved: boolean;
+} {
   if (!isRecord(value)) throw new Error('MCP approval request is invalid.');
   const requestId = typeof value.requestId === 'string' ? value.requestId.trim() : '';
   if (!requestId || requestId.length > 128) throw new Error('MCP approval request is invalid.');
@@ -6505,7 +6624,10 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       title: 'Import connections from mRemoteNG',
       properties: ['openFile'],
       filters: [
-        { name: 'mRemoteNG connections', extensions: ['xml', 'conf', 'config'] },
+        {
+          name: 'mRemoteNG connections',
+          extensions: ['xml', 'conf', 'config'],
+        },
         { name: 'All files', extensions: ['*'] },
       ],
     };
@@ -6659,7 +6781,9 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
       const inspected = parseBackupInspectResponse(
-        await runBackend<BackupInspectBackendResponse>('backup-inspect', { path: selectedPath }),
+        await runBackend<BackupInspectBackendResponse>('backup-inspect', {
+          path: selectedPath,
+        }),
       );
       backupImportSelections.set(event.sender, selectedPath);
       const response: BackupImportSelection = {
@@ -6729,19 +6853,83 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     });
   });
 
-  ipcMain.handle('workspace:create-credential', async (_event, value: unknown) => {
-    const request = parseCredentialCreateRequest(value);
+  ipcMain.handle('credential:select-ssh-private-key', async (event) => {
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
-      return runBackend<WorkspaceCredential>('credential-create', request);
+      const authorizationEpoch = authSession.authorizationEpoch;
+      const owner = BrowserWindow.fromWebContents(event.sender);
+      const options: Electron.OpenDialogOptions = {
+        title: 'Select SSH private key',
+        properties: ['openFile'],
+        filters: [
+          { name: 'SSH private keys', extensions: ['key', 'pem'] },
+          { name: 'All files', extensions: ['*'] },
+        ],
+      };
+      const selection = owner
+        ? await dialog.showOpenDialog(owner, options)
+        : await dialog.showOpenDialog(options);
+      if (selection.canceled || selection.filePaths.length !== 1) return null;
+      requireAuthorizationEpoch(authorizationEpoch);
+      const selectedPath = selection.filePaths[0];
+      const selected: SshPrivateKeySelection = {
+        id: randomUUID(),
+        path: selectedPath,
+        fileName: sshPrivateKeyDisplayName(selectedPath),
+      };
+      sshPrivateKeySelections.set(event.sender, selected);
+      return { selectionId: selected.id, fileName: selected.fileName };
     });
   });
 
-  ipcMain.handle('workspace:update-credential', async (_event, value: unknown) => {
+  ipcMain.handle('credential:discard-ssh-private-key', (event, value: unknown) => {
+    const selectionId = isRecord(value) ? value.selectionId : undefined;
+    if (!isUuid(selectionId)) {
+      throw new Error('SSH private key selection is invalid.');
+    }
+    const selected = sshPrivateKeySelections.get(event.sender);
+    if (selected?.id !== selectionId) return { discarded: false };
+    sshPrivateKeySelections.delete(event.sender);
+    return { discarded: true };
+  });
+
+  ipcMain.handle('workspace:create-credential', async (event, value: unknown) => {
+    const request = parseCredentialCreateRequest(value);
+    return serializeAuthOperation(async () => {
+      await requireWorkspaceAuth();
+      const selection = request.privateKeySelectionId
+        ? sshPrivateKeySelections.get(event.sender)
+        : undefined;
+      if (request.privateKeySelectionId && selection?.id !== request.privateKeySelectionId) {
+        throw new Error('Select the SSH private key again.');
+      }
+      const { privateKeySelectionId: _selectionId, ...backendRequest } = request;
+      const credential = await runBackend<WorkspaceCredential>('credential-create', {
+        ...backendRequest,
+        ...(selection ? { privateKeyPath: selection.path } : {}),
+      });
+      if (selection) sshPrivateKeySelections.delete(event.sender);
+      return credential;
+    });
+  });
+
+  ipcMain.handle('workspace:update-credential', async (event, value: unknown) => {
     const request = parseCredentialUpdateRequest(value);
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
-      return runBackend<WorkspaceCredential>('credential-update', request);
+      const selection = request.privateKeySelectionId
+        ? sshPrivateKeySelections.get(event.sender)
+        : undefined;
+      if (request.privateKeySelectionId && selection?.id !== request.privateKeySelectionId) {
+        throw new Error('Select the SSH private key again.');
+      }
+      const { privateKeySelectionId: _selectionId, ...backendRequest } = request;
+      const credential = await runBackend<WorkspaceCredential>('credential-update', {
+        ...backendRequest,
+        ...(selection ? { privateKeyPath: selection.path } : {}),
+      });
+      if (selection) sshPrivateKeySelections.delete(event.sender);
+      return credential;
     });
   });
 
@@ -6774,7 +6962,9 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     if (!isAppTheme(value)) throw new Error('Application theme is invalid.');
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
-      return runBackend<{ updated: boolean }>('settings-set-theme', { theme: value });
+      return runBackend<{ updated: boolean }>('settings-set-theme', {
+        theme: value,
+      });
     });
   });
 
@@ -6843,7 +7033,10 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
 
   ipcMain.handle('update:status', async () => {
     return serializeAuthOperation(async () => {
-      return { currentVersion: app.getVersion(), result: latestUpdateCheck ?? null };
+      return {
+        currentVersion: app.getVersion(),
+        result: latestUpdateCheck ?? null,
+      };
     });
   });
 
@@ -6945,7 +7138,9 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
   ipcMain.handle('extensions:set-enabled', async (_event, value: unknown) => {
     if (typeof value !== 'boolean') throw new Error('Bitwarden extension setting is invalid.');
     return runAuthorizedBitwardenExtensionOperation(() =>
-      runBackend<BitwardenExtensionState>('extension-set-enabled', { enabled: value }),
+      runBackend<BitwardenExtensionState>('extension-set-enabled', {
+        enabled: value,
+      }),
     );
   });
 
@@ -7031,7 +7226,9 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       throw new Error('Credential protocol is invalid.');
     }
     return runAuthorizedOperation(async () => {
-      return runBackend<WorkspaceCredential[]>('credentials-for-protocol', { protocol });
+      return runBackend<WorkspaceCredential[]>('credentials-for-protocol', {
+        protocol,
+      });
     });
   });
 
@@ -7064,7 +7261,10 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
   ipcMain.handle('bitwarden:set-enabled', async (_event, value: unknown) => {
     if (typeof value !== 'boolean') throw new Error('Bitwarden vault setting is invalid.');
     return runAuthorizedOperation(
-      () => runBitwardenBackend<BitwardenCliState>('bitwarden.set-enabled', { enabled: value }),
+      () =>
+        runBitwardenBackend<BitwardenCliState>('bitwarden.set-enabled', {
+          enabled: value,
+        }),
       clearBitwardenSessionAfterAuthorizationLoss,
     );
   });
@@ -7081,7 +7281,11 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     )
       throw new Error('Bitwarden CLI configuration is invalid.');
     return runAuthorizedOperation(
-      () => runBitwardenBackend<BitwardenCliState>('bitwarden.set-config', { path, serverRegion }),
+      () =>
+        runBitwardenBackend<BitwardenCliState>('bitwarden.set-config', {
+          path,
+          serverRegion,
+        }),
       clearBitwardenSessionAfterAuthorizationLoss,
     );
   });
@@ -7341,7 +7545,10 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
         title: 'Import WatchGuard Mobile VPN profile',
         properties: ['openFile'],
         filters: [
-          { name: 'WatchGuard SSL VPN profile', extensions: ['wgssl', 'tgz', 'tar', 'gz'] },
+          {
+            name: 'WatchGuard SSL VPN profile',
+            extensions: ['wgssl', 'tgz', 'tar', 'gz'],
+          },
           { name: 'All files', extensions: ['*'] },
         ],
       };
@@ -7387,10 +7594,10 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
         ? await dialog.showOpenDialog(owner, options)
         : await dialog.showOpenDialog(options);
       if (selection.canceled || selection.filePaths.length !== 1) return null;
-      const imported = await runBackend<{ name?: string; settings: Record<string, unknown> }>(
-        'azure-vpn-import',
-        { path: selection.filePaths[0] },
-      );
+      const imported = await runBackend<{
+        name?: string;
+        settings: Record<string, unknown>;
+      }>('azure-vpn-import', { path: selection.filePaths[0] });
       if (
         !isRecord(imported.settings) ||
         (imported.name !== undefined && typeof imported.name !== 'string')
@@ -7512,7 +7719,11 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       throw new Error('VPN tunnel choice is invalid.');
     }
     await requireWorkspaceAuth();
-    await getNativeBackend().respondTunnelRoute({ leaseId, promptId, value: choice });
+    await getNativeBackend().respondTunnelRoute({
+      leaseId,
+      promptId,
+      value: choice,
+    });
   });
 
   ipcMain.handle('auth:status', async () => {
@@ -7554,6 +7765,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       authSession.lock();
       cancelAllUserOperations();
       backupImportSelections.delete(event.sender);
+      sshPrivateKeySelections.delete(event.sender);
       mremoteImportAnalysis.get(event.sender)?.abort();
       mremoteImportAnalysis.delete(event.sender);
       mremoteImportSelections.delete(event.sender);
@@ -7579,14 +7791,20 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
 
   ipcMain.handle('auth:hello-status', async () => {
     if (process.platform !== 'win32') {
-      return { available: false, message: 'Windows Hello only works on Windows.' };
+      return {
+        available: false,
+        message: 'Windows Hello only works on Windows.',
+      };
     }
     return runBackend('auth-hello-status');
   });
 
   ipcMain.handle('auth:hello-verify', async (event) => {
     if (process.platform !== 'win32') {
-      return { succeeded: false, message: 'Windows Hello only works on Windows.' };
+      return {
+        succeeded: false,
+        message: 'Windows Hello only works on Windows.',
+      };
     }
     return serializeAuthOperation(async () => {
       await ensureAuthSession();
@@ -7600,7 +7818,10 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       }
       const ownerWindow = BrowserWindow.fromWebContents(event.sender);
       if (!ownerWindow || ownerWindow.isDestroyed()) {
-        return { succeeded: false, message: 'Bring Wormhole to the front and try again.' };
+        return {
+          succeeded: false,
+          message: 'Bring Wormhole to the front and try again.',
+        };
       }
       if (!ownerWindow.isVisible()) ownerWindow.show();
       ownerWindow.focus();
@@ -7974,7 +8195,11 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
         return { id: '', ok: false, error: 'Wormhole service is stopping.' };
       }
       if (attempt !== undefined && !vncSessionAttempts.isCurrent(command.sessionId!, attempt)) {
-        return { id: '', ok: false, error: 'VNC connection closed before it could start.' };
+        return {
+          id: '',
+          ok: false,
+          error: 'VNC connection closed before it could start.',
+        };
       }
       return getNativeBackend().send(command);
     });
@@ -8457,7 +8682,10 @@ function rememberRdpSurfacePlacement(
   sessionId: string,
   rendererBounds: RdpSurfaceRect,
 ): void {
-  rdpSurfacePlacements.set(sessionId, { owner, rendererBounds: { ...rendererBounds } });
+  rdpSurfacePlacements.set(sessionId, {
+    owner,
+    rendererBounds: { ...rendererBounds },
+  });
 }
 
 function forgetRdpSurfacePlacement(sessionId: string): void {
@@ -8757,6 +8985,7 @@ function createWindow() {
       // native unlock survive into the new context before it proves possession of the secret.
       authSession.lock();
       backupImportSelections.delete(window.webContents);
+      sshPrivateKeySelections.delete(window.webContents);
       mremoteImportAnalysis.get(window.webContents)?.abort();
       mremoteImportAnalysis.delete(window.webContents);
       mremoteImportSelections.delete(window.webContents);

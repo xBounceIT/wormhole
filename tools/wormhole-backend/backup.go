@@ -611,7 +611,7 @@ func exportBackupSecretsContext(ctx context.Context, database *sql.DB, databaseP
 		id := backupObjectString(*credential, "id")
 		kind, _ := backupObjectInteger(*credential, "kind")
 		provider, _ := backupObjectInteger(*credential, "secretProvider")
-		if kind == 0 && provider != 1 {
+		if (kind == 0 || kind == 1) && provider != 1 {
 			password, found, err := readBackupPassword(database, id)
 			if err != nil {
 				return fmt.Errorf("Could not read a credential secret for backup: %w", err)
@@ -620,10 +620,10 @@ func exportBackupSecretsContext(ctx context.Context, database *sql.DB, databaseP
 				passwordEntries[index] = &backupPasswordEntry{CredentialID: id, Password: password}
 			}
 		}
-		if kind != 1 {
+		if kind != 1 || provider != 0 {
 			return nil
 		}
-		keyPath := backupPrivateKeyPath(databasePath, id)
+		keyPath := credentialPrivateKeyPath(databasePath, id)
 		keyBytes, err := readBackupPrivateKey(keyPath)
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
@@ -709,14 +709,7 @@ func exportBackupSecretsContext(ctx context.Context, database *sql.DB, databaseP
 }
 
 func readBackupPrivateKey(path string) ([]byte, error) {
-	if info, err := os.Stat(path); err == nil {
-		if !info.Mode().IsRegular() || info.Size() > backupMaxFileBytes {
-			return nil, errors.New("SSH private key exceeds the supported size")
-		}
-	} else {
-		return nil, err
-	}
-	return unprotectFile(path)
+	return unprotectSshPrivateKey(path)
 }
 
 func runBackupSecretReads(count int, read func(index int) error) error {
@@ -1061,11 +1054,6 @@ func quoteBackupIdentifier(value string) string {
 	return `"` + strings.ReplaceAll(value, `"`, `""`) + `"`
 }
 
-func backupPrivateKeyPath(databasePath, id string) string {
-	compact := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(id)), "-", "")
-	return filepath.Join(filepath.Dir(databasePath), "keys", compact+".dpapi")
-}
-
 func backupObjectString(object backupObject, key string) string {
 	raw, ok := object[key]
 	if !ok || len(raw) == 0 || string(raw) == "null" {
@@ -1336,6 +1324,7 @@ func filterBackupPointers[T any](values []*T, dropped int) ([]*T, int) {
 type backupImportState struct {
 	credentialIDs         map[string]struct{}
 	credentialNames       map[string]struct{}
+	credentialKinds       map[string]int64
 	credentialProviders   map[string]int64
 	tunnelIDs             map[string]struct{}
 	tunnelNames           map[string]struct{}
@@ -1349,6 +1338,7 @@ func loadBackupImportStateContext(ctx context.Context, database *sql.DB) (*backu
 	state := &backupImportState{
 		credentialIDs:         map[string]struct{}{},
 		credentialNames:       map[string]struct{}{},
+		credentialKinds:       map[string]int64{},
 		credentialProviders:   map[string]int64{},
 		tunnelIDs:             map[string]struct{}{},
 		tunnelNames:           map[string]struct{}{},
@@ -1375,6 +1365,8 @@ func loadBackupImportStateContext(ctx context.Context, database *sql.DB) (*backu
 		state.credentialIDs[id] = struct{}{}
 		state.resolvableCredentials[id] = struct{}{}
 		state.credentialNames[backupObjectString(*credential, "name")] = struct{}{}
+		kind, _ := backupObjectInteger(*credential, "kind")
+		state.credentialKinds[id] = kind
 		provider, _ := backupObjectInteger(*credential, "secretProvider")
 		state.credentialProviders[id] = provider
 	}
@@ -1466,6 +1458,8 @@ func importBackupCredentialsContext(
 		state.credentialIDs[id] = struct{}{}
 		state.resolvableCredentials[id] = struct{}{}
 		state.credentialNames[name] = struct{}{}
+		kind, _ := backupObjectInteger(object, "kind")
+		state.credentialKinds[id] = kind
 		provider, _ := backupObjectInteger(object, "secretProvider")
 		state.credentialProviders[id] = provider
 		inserted[id] = struct{}{}
@@ -1848,7 +1842,8 @@ func restoreBackupSecretsContext(
 			addBackupWarning(result, "A password entry with an invalid credential ID was skipped.")
 			continue
 		}
-		if state.credentialProviders[id] == 1 {
+		kind := state.credentialKinds[id]
+		if (kind != 0 && kind != 1) || state.credentialProviders[id] == 1 {
 			continue
 		}
 		if len(entry.Password) > maxStoredCredentialBytes {
@@ -1912,7 +1907,12 @@ func restoreBackupSecretsContext(
 		if !backupIDExists(id, insertedCredentials, state.credentialIDs) {
 			continue
 		}
-		path := backupPrivateKeyPath(databasePath, id)
+		if state.credentialKinds[id] != 1 || state.credentialProviders[id] != 0 {
+			addBackupWarning(result,
+				fmt.Sprintf("Private key for credential %s did not match a local SSH key profile and was skipped.", id))
+			continue
+		}
+		path := credentialPrivateKeyPath(databasePath, id)
 		if _, inserted := insertedCredentials[id]; !inserted {
 			existing, err := readBackupPrivateKey(path)
 			if err == nil {
@@ -1925,7 +1925,7 @@ func restoreBackupSecretsContext(
 			}
 		}
 		keyBytes, err := base64.StdEncoding.DecodeString(entry.DataB64)
-		if err != nil || len(keyBytes) == 0 {
+		if err != nil || len(keyBytes) == 0 || len(keyBytes) > maxSshPrivateKeyBytes {
 			clearBytes(keyBytes)
 			addBackupWarning(result,
 				fmt.Sprintf("Private key for credential %s was malformed and was skipped.", id))

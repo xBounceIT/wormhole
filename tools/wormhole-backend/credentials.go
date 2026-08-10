@@ -5,12 +5,15 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"golang.org/x/crypto/ssh"
 )
 
 const (
@@ -21,14 +24,20 @@ const (
 	maxStoredCredentialBytes    = maxStoredCredentialPassword * utf8.UTFMax
 	maxBitwardenItemIDLength    = 512
 	maxBitwardenItemNameLength  = 1024
+	maxSshPrivateKeyBytes       = 1024 * 1024
+	maxProtectedSshKeyBytes     = maxSshPrivateKeyBytes + (64 * 1024)
 )
 
 type credentialCreateRequest struct {
 	Name               string `json:"name"`
 	Protocol           string `json:"protocol"`
+	Kind               string `json:"kind"`
 	Username           string `json:"username"`
 	Domain             string `json:"domain"`
 	Password           string `json:"password"`
+	Passphrase         string `json:"passphrase"`
+	ClearPassphrase    bool   `json:"clearPassphrase"`
+	PrivateKeyPath     string `json:"privateKeyPath"`
 	Provider           string `json:"provider"`
 	BitwardenItemID    string `json:"bitwardenItemId"`
 	BitwardenItemName  string `json:"bitwardenItemName"`
@@ -45,22 +54,30 @@ type credentialDeleteRequest struct {
 }
 
 type normalizedCredentialDraft struct {
-	name          string
-	protocol      string
-	protocolValue int64
-	username      string
-	domain        string
-	password      string
-	provider      int64
-	itemID        string
-	itemName      string
-	fieldPath     string
+	name               string
+	protocol           string
+	protocolValue      int64
+	kind               int64
+	kindName           string
+	username           string
+	domain             string
+	password           string
+	passphrase         string
+	clearPassphrase    bool
+	privateKeyPath     string
+	privateKeyFileName string
+	provider           int64
+	itemID             string
+	itemName           string
+	fieldPath          string
 }
 
 // These indirections let the database transaction and validation behavior be covered on every
 // platform. Production implementations always use the operating system's protected store.
 var credentialSecretStore = storeCredentialSecret
 var credentialSecretDelete = deleteStoredCredentialSecret
+var credentialPrivateKeyProtect = protectFile
+var credentialPrivateKeyUnprotect = unprotectSshPrivateKey
 
 func createCredential(databasePath string, request credentialCreateRequest) (credentialRecord, error) {
 	draft, err := normalizeCredentialDraft(request, false)
@@ -86,18 +103,45 @@ func createCredential(databasePath string, request credentialCreateRequest) (cre
 	if err != nil {
 		return credentialRecord{}, errors.New("could not allocate a credential identifier")
 	}
-	var encoded, encoding string
-	if draft.provider == 0 {
-		encoded, encoding, err = credentialSecretStore(id, draft.password)
+	var privateKey []byte
+	if draft.kind == 1 {
+		privateKey, err = readAndValidateSshPrivateKey(draft.privateKeyPath, draft.passphrase)
 		if err != nil {
-			return credentialRecord{}, errors.New("could not protect the credential password")
+			return credentialRecord{}, err
 		}
+		defer clearBytes(privateKey)
+	}
+
+	secretValue := draft.password
+	if draft.kind == 1 {
+		secretValue = draft.passphrase
+	}
+	var encoded, encoding string
+	if draft.provider == 0 && secretValue != "" {
+		encoded, encoding, err = credentialSecretStore(id, secretValue)
+		if err != nil {
+			return credentialRecord{}, errors.New("could not protect the credential secret")
+		}
+	}
+	privateKeyStored := false
+	if draft.kind == 1 {
+		if err := credentialPrivateKeyProtect(credentialPrivateKeyPath(databasePath, id), privateKey); err != nil {
+			_ = deleteCredentialPrivateKey(databasePath, id)
+			if encoded != "" {
+				_ = credentialSecretDelete(id, encoded, encoding)
+			}
+			return credentialRecord{}, errors.New("could not protect the SSH private key")
+		}
+		privateKeyStored = true
 	}
 
 	tx, err := database.Begin()
 	if err != nil {
-		if draft.provider == 0 && draft.password != "" {
+		if encoded != "" {
 			_ = credentialSecretDelete(id, encoded, encoding)
+		}
+		if privateKeyStored {
+			_ = deleteCredentialPrivateKey(databasePath, id)
 		}
 		return credentialRecord{}, fmt.Errorf("could not start credential save: %w", err)
 	}
@@ -105,8 +149,11 @@ func createCredential(databasePath string, request credentialCreateRequest) (cre
 	defer func() {
 		if !committed {
 			_ = tx.Rollback()
-			if draft.provider == 0 && draft.password != "" {
+			if encoded != "" {
 				_ = credentialSecretDelete(id, encoded, encoding)
+			}
+			if privateKeyStored {
+				_ = deleteCredentialPrivateKey(databasePath, id)
 			}
 		}
 	}()
@@ -116,13 +163,13 @@ func createCredential(databasePath string, request credentialCreateRequest) (cre
 INSERT INTO CredentialProfiles
     (Id, Name, Username, Domain, Kind, PrivateKeyFileName, Protocol, SecretProvider,
      BitwardenItemId, BitwardenItemName, BitwardenFieldPath, CreatedAt)
-VALUES (?, ?, ?, ?, 0, NULL, ?, ?, ?, ?, ?, ?);`,
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
 		id, draft.name, nullableCredentialField(draft.username), nullableCredentialField(draft.domain),
-		draft.protocolValue, draft.provider, nullableCredentialField(draft.itemID),
+		draft.kind, nullableCredentialField(draft.privateKeyFileName), draft.protocolValue, draft.provider, nullableCredentialField(draft.itemID),
 		nullableCredentialField(draft.itemName), draft.fieldPath, createdAt); err != nil {
 		return credentialRecord{}, normalizeCredentialWriteError(err)
 	}
-	if draft.provider == 0 {
+	if encoded != "" {
 		if err := upsertCredentialSecret(tx, id, encoded, encoding); err != nil {
 			return credentialRecord{}, err
 		}
@@ -133,8 +180,9 @@ VALUES (?, ?, ?, ?, 0, NULL, ?, ?, ?, ?, ?, ?);`,
 	committed = true
 	return credentialRecord{
 		ID: id, Name: draft.name, Protocol: draft.protocol, Username: displayCredentialUsername(draft.username),
-		Kind: "password", Domain: draft.domain, Provider: providerName(draft.provider), CanEdit: true, CanDelete: true,
+		Kind: draft.kindName, Domain: draft.domain, Provider: providerName(draft.provider), CanEdit: true, CanDelete: true,
 		BitwardenItemID: draft.itemID, BitwardenItemName: draft.itemName,
+		PrivateKeyFileName: draft.privateKeyFileName,
 	}, nil
 }
 
@@ -158,20 +206,24 @@ func updateCredential(databasePath string, request credentialUpdateRequest) (cre
 	}
 
 	var kind, provider int64
+	var previousKeyFileName sql.NullString
 	err = database.QueryRow(
-		"SELECT COALESCE(Kind, 0), COALESCE(SecretProvider, 0) FROM CredentialProfiles WHERE lower(Id) = ? LIMIT 1;",
+		"SELECT COALESCE(Kind, 0), COALESCE(SecretProvider, 0), PrivateKeyFileName FROM CredentialProfiles WHERE lower(Id) = ? LIMIT 1;",
 		id,
-	).Scan(&kind, &provider)
+	).Scan(&kind, &provider, &previousKeyFileName)
 	if errors.Is(err, sql.ErrNoRows) {
 		return credentialRecord{}, errors.New("credential was not found")
 	}
 	if err != nil {
 		return credentialRecord{}, fmt.Errorf("could not read credential: %w", err)
 	}
-	if kind != 0 || (provider != 0 && provider != 1) {
-		return credentialRecord{}, errors.New("only password credentials can be edited in Wormhole")
+	if kind != draft.kind {
+		return credentialRecord{}, errors.New("credential authentication type cannot be changed")
 	}
-	if draft.provider == 0 && draft.password == "" && provider != 0 {
+	if (kind == 0 && provider != 0 && provider != 1) || (kind == 1 && provider != 0) || (kind != 0 && kind != 1) {
+		return credentialRecord{}, errors.New("credential type cannot be edited in Wormhole")
+	}
+	if kind == 0 && draft.provider == 0 && draft.password == "" && provider != 0 {
 		return credentialRecord{}, errors.New("a password is required when changing to local storage")
 	}
 	if exists, err := credentialNameExists(database, draft.name, id); err != nil {
@@ -187,42 +239,80 @@ func updateCredential(databasePath string, request credentialUpdateRequest) (cre
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return credentialRecord{}, fmt.Errorf("could not read credential secret: %w", err)
 	}
-	if draft.provider == 0 && draft.password == "" &&
+	if kind == 0 && draft.provider == 0 && draft.password == "" &&
 		(!previousEncoded.Valid || !previousEncoding.Valid) {
 		return credentialRecord{}, errors.New("the stored credential password is missing; enter it again")
 	}
 
-	var encoded, encoding string
-	if draft.provider == 0 && draft.password != "" {
-		encoded, encoding, err = credentialSecretStore(id, draft.password)
+	var privateKey []byte
+	if kind == 1 && draft.privateKeyPath != "" {
+		privateKey, err = readAndValidateSshPrivateKey(draft.privateKeyPath, draft.passphrase)
+	} else if kind == 1 && draft.passphrase != "" {
+		privateKey, err = credentialPrivateKeyUnprotect(credentialPrivateKeyPath(databasePath, id))
+		if err == nil {
+			err = validateSshPrivateKey(privateKey, draft.passphrase)
+		}
 		if err != nil {
-			return credentialRecord{}, errors.New("could not protect the credential password")
+			clearBytes(privateKey)
+			return credentialRecord{}, errors.New("could not validate the stored SSH private key with that passphrase")
+		}
+	}
+	defer clearBytes(privateKey)
+
+	secretValue := draft.password
+	if kind == 1 {
+		secretValue = draft.passphrase
+	}
+	replaceSecret := draft.provider == 0 && secretValue != ""
+	clearSecret := draft.provider != 0 || (kind == 1 &&
+		(draft.clearPassphrase || (draft.privateKeyPath != "" && draft.passphrase == "")))
+	var encoded, encoding string
+	if replaceSecret {
+		encoded, encoding, err = credentialSecretStore(id, secretValue)
+		if err != nil {
+			return credentialRecord{}, errors.New("could not protect the credential secret")
 		}
 	}
 	tx, err := database.Begin()
 	if err != nil {
-		if draft.provider == 0 && draft.password != "" {
+		if replaceSecret {
 			_ = credentialSecretDelete(id, encoded, encoding)
 		}
 		return credentialRecord{}, fmt.Errorf("could not start credential update: %w", err)
 	}
 	committed := false
+	var rollbackPrivateKey func()
 	defer func() {
 		if !committed {
 			_ = tx.Rollback()
-			if draft.provider == 0 && draft.password != "" {
+			if rollbackPrivateKey != nil {
+				rollbackPrivateKey()
+			}
+			if replaceSecret {
 				_ = credentialSecretDelete(id, encoded, encoding)
 			}
 		}
 	}()
-	result, err := tx.Exec(`
+	var result sql.Result
+	if kind == 0 {
+		result, err = tx.Exec(`
 UPDATE CredentialProfiles
 SET Name = ?, Username = ?, Domain = ?, Protocol = ?, SecretProvider = ?,
-    BitwardenItemId = ?, BitwardenItemName = ?, BitwardenFieldPath = ?
+    PrivateKeyFileName = NULL, BitwardenItemId = ?, BitwardenItemName = ?, BitwardenFieldPath = ?
 WHERE lower(Id) = ? AND COALESCE(Kind, 0) = 0 AND COALESCE(SecretProvider, 0) IN (0, 1);`,
-		draft.name, nullableCredentialField(draft.username), nullableCredentialField(draft.domain),
-		draft.protocolValue, draft.provider, nullableCredentialField(draft.itemID),
-		nullableCredentialField(draft.itemName), draft.fieldPath, id)
+			draft.name, nullableCredentialField(draft.username), nullableCredentialField(draft.domain),
+			draft.protocolValue, draft.provider, nullableCredentialField(draft.itemID),
+			nullableCredentialField(draft.itemName), draft.fieldPath, id)
+	} else {
+		result, err = tx.Exec(`
+UPDATE CredentialProfiles
+SET Name = ?, Username = ?, Domain = NULL, Protocol = 0, SecretProvider = 0,
+    PrivateKeyFileName = CASE WHEN ? <> '' THEN ? ELSE PrivateKeyFileName END,
+    BitwardenItemId = NULL, BitwardenItemName = NULL, BitwardenFieldPath = ''
+WHERE lower(Id) = ? AND COALESCE(Kind, 0) = 1 AND COALESCE(SecretProvider, 0) = 0;`,
+			draft.name, nullableCredentialField(draft.username), draft.privateKeyFileName,
+			draft.privateKeyFileName, id)
+	}
 	if err != nil {
 		return credentialRecord{}, normalizeCredentialWriteError(err)
 	}
@@ -231,29 +321,41 @@ WHERE lower(Id) = ? AND COALESCE(Kind, 0) = 0 AND COALESCE(SecretProvider, 0) IN
 		return credentialRecord{}, fmt.Errorf("could not update credential: %w", err)
 	}
 	if count == 0 {
-		return credentialRecord{}, errors.New("credential is no longer an editable local password")
+		return credentialRecord{}, errors.New("credential is no longer editable")
 	}
-	if draft.provider == 0 {
-		if draft.password != "" {
-			if err := upsertCredentialSecret(tx, id, encoded, encoding); err != nil {
-				return credentialRecord{}, err
-			}
+	if replaceSecret {
+		if err := upsertCredentialSecret(tx, id, encoded, encoding); err != nil {
+			return credentialRecord{}, err
 		}
-	} else if _, err := tx.Exec("DELETE FROM CredentialSecrets WHERE lower(Id) = ?;", id); err != nil {
-		return credentialRecord{}, fmt.Errorf("could not remove the obsolete local credential secret: %w", err)
+	} else if clearSecret {
+		if _, err := tx.Exec("DELETE FROM CredentialSecrets WHERE lower(Id) = ?;", id); err != nil {
+			return credentialRecord{}, fmt.Errorf("could not remove the obsolete credential secret: %w", err)
+		}
+	}
+	if kind == 1 && draft.privateKeyPath != "" {
+		rollbackPrivateKey, err = replaceCredentialPrivateKey(databasePath, id, privateKey)
+		if err != nil {
+			return credentialRecord{}, errors.New("could not protect the SSH private key")
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return credentialRecord{}, fmt.Errorf("could not update credential: %w", err)
 	}
 	committed = true
-	if (draft.provider != 0 || draft.password != "") && previousEncoded.Valid && previousEncoding.Valid &&
+	secretChanged := replaceSecret || clearSecret
+	if secretChanged && previousEncoded.Valid && previousEncoding.Valid &&
 		(previousEncoded.String != encoded || previousEncoding.String != encoding) {
 		_ = credentialSecretDelete(id, previousEncoded.String, previousEncoding.String)
 	}
+	keyFileName := draft.privateKeyFileName
+	if keyFileName == "" {
+		keyFileName = credentialPrivateKeyDisplayName(nullableString(previousKeyFileName))
+	}
 	return credentialRecord{
 		ID: id, Name: draft.name, Protocol: draft.protocol, Username: displayCredentialUsername(draft.username),
-		Kind: "password", Domain: draft.domain, Provider: providerName(draft.provider), CanEdit: true, CanDelete: true,
+		Kind: draft.kindName, Domain: draft.domain, Provider: providerName(draft.provider), CanEdit: true, CanDelete: true,
 		BitwardenItemID: draft.itemID, BitwardenItemName: draft.itemName,
+		PrivateKeyFileName: keyFileName,
 	}, nil
 }
 
@@ -276,9 +378,13 @@ func deleteCredential(databasePath string, request credentialDeleteRequest) erro
 		return fmt.Errorf("could not start credential deletion: %w", err)
 	}
 	committed := false
+	var stagedKey *stagedCredentialPrivateKeyDeletion
 	defer func() {
 		if !committed {
 			_ = tx.Rollback()
+			if stagedKey != nil {
+				_ = stagedKey.rollback()
+			}
 		}
 	}()
 	var kind, provider int64
@@ -320,6 +426,12 @@ WHERE lower(Id) = ?
 	if _, err := tx.Exec("DELETE FROM CredentialSecrets WHERE lower(Id) = ?;", id); err != nil {
 		return fmt.Errorf("could not delete credential secret: %w", err)
 	}
+	if kind == 1 && provider == 0 {
+		stagedKey, err = stageCredentialPrivateKeyDeletion(databasePath, id)
+		if err != nil {
+			return errors.New("could not delete the protected SSH private key")
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("could not delete credential: %w", err)
 	}
@@ -329,29 +441,190 @@ WHERE lower(Id) = ?
 	if encoded.Valid && encoding.Valid {
 		_ = credentialSecretDelete(id, encoded.String, encoding.String)
 	}
-	if kind == 1 && provider == 0 {
-		_ = deleteCredentialPrivateKey(databasePath, id)
+	if stagedKey != nil {
+		stagedKey.commit()
 	}
 	return nil
 }
 
-func deleteCredentialPrivateKey(databasePath, id string) error {
-	fileName := strings.ReplaceAll(normalizeID(id), "-", "") + ".dpapi"
-	err := os.Remove(filepath.Join(filepath.Dir(databasePath), "keys", fileName))
+type stagedCredentialPrivateKeyDeletion struct {
+	path      string
+	protected []byte
+	removed   bool
+}
+
+var credentialPrivateKeyStageRemove = os.Remove
+
+func stageCredentialPrivateKeyDeletion(databasePath, id string) (*stagedCredentialPrivateKeyDeletion, error) {
+	path := credentialPrivateKeyPath(databasePath, id)
+	protected, err := readBoundedRegularFile(path, maxProtectedSshKeyBytes)
 	if errors.Is(err, os.ErrNotExist) {
+		return &stagedCredentialPrivateKeyDeletion{path: path}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := credentialPrivateKeyStageRemove(path); err != nil {
+		clearBytes(protected)
+		return nil, err
+	}
+	return &stagedCredentialPrivateKeyDeletion{path: path, protected: protected, removed: true}, nil
+}
+
+func (staged *stagedCredentialPrivateKeyDeletion) rollback() error {
+	defer clearBytes(staged.protected)
+	if !staged.removed {
+		return nil
+	}
+	return writePrivateFileAtomic(staged.path, staged.protected)
+}
+
+func (staged *stagedCredentialPrivateKeyDeletion) commit() {
+	clearBytes(staged.protected)
+	deleteFileProtectionKey(staged.path)
+}
+
+func deleteCredentialPrivateKey(databasePath, id string) error {
+	path := credentialPrivateKeyPath(databasePath, id)
+	err := os.Remove(path)
+	if err == nil || errors.Is(err, os.ErrNotExist) {
+		deleteFileProtectionKey(path)
 		return nil
 	}
 	return err
 }
 
+func credentialPrivateKeyPath(databasePath, id string) string {
+	fileName := strings.ReplaceAll(normalizeID(id), "-", "") + ".dpapi"
+	return filepath.Join(filepath.Dir(databasePath), "keys", fileName)
+}
+
+func readAndValidateSshPrivateKey(path, passphrase string) ([]byte, error) {
+	if path == "" || !filepath.IsAbs(path) {
+		return nil, errors.New("SSH private key path is invalid")
+	}
+	contents, err := readBoundedRegularFile(path, maxSshPrivateKeyBytes)
+	if err != nil || len(contents) == 0 {
+		clearBytes(contents)
+		return nil, errors.New("SSH private key is invalid or too large")
+	}
+	if err := validateSshPrivateKey(contents, passphrase); err != nil {
+		clearBytes(contents)
+		return nil, err
+	}
+	return contents, nil
+}
+
+func readBoundedRegularFile(path string, maximum int64) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() || info.Size() < 0 || info.Size() > maximum {
+		return nil, errors.New("file is not a bounded regular file")
+	}
+	contents, err := io.ReadAll(io.LimitReader(file, maximum+1))
+	if err != nil {
+		clearBytes(contents)
+		return nil, err
+	}
+	if int64(len(contents)) > maximum {
+		clearBytes(contents)
+		return nil, errors.New("file exceeded the safety limit")
+	}
+	return contents, nil
+}
+
+func unprotectSshPrivateKey(path string) ([]byte, error) {
+	protected, err := readBoundedRegularFile(path, maxProtectedSshKeyBytes)
+	if err != nil {
+		return nil, err
+	}
+	defer clearBytes(protected)
+	plaintext, err := unprotectFileContents(path, protected)
+	if err != nil {
+		return nil, err
+	}
+	if len(plaintext) == 0 || len(plaintext) > maxSshPrivateKeyBytes {
+		clearBytes(plaintext)
+		return nil, errors.New("stored SSH private key is invalid")
+	}
+	return plaintext, nil
+}
+
+func validateSshPrivateKey(contents []byte, passphrase string) error {
+	if _, err := ssh.ParsePrivateKey(contents); err == nil {
+		if passphrase != "" {
+			return errors.New("the SSH private key is not encrypted; leave the passphrase blank")
+		}
+		return nil
+	} else {
+		var missingPassphrase *ssh.PassphraseMissingError
+		if !errors.As(err, &missingPassphrase) {
+			return errors.New("the selected file is not a supported SSH private key")
+		}
+	}
+	if passphrase == "" {
+		// Saving an encrypted key without its passphrase is supported. The runtime prompts for the
+		// passphrase on each connection attempt without returning the key to the renderer.
+		return nil
+	}
+	passphraseBytes := []byte(passphrase)
+	defer clearBytes(passphraseBytes)
+	if _, err := ssh.ParsePrivateKeyWithPassphrase(contents, passphraseBytes); err != nil {
+		return errors.New("the SSH private key passphrase is incorrect")
+	}
+	return nil
+}
+
+func replaceCredentialPrivateKey(databasePath, id string, plaintext []byte) (func(), error) {
+	path := credentialPrivateKeyPath(databasePath, id)
+	var previous []byte
+	var err error
+	hadPrevious := false
+	if previous, err = readBoundedRegularFile(path, maxProtectedSshKeyBytes); err == nil {
+		hadPrevious = true
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, errors.New("stored SSH private key is invalid")
+	}
+	if err := credentialPrivateKeyProtect(path, plaintext); err != nil {
+		clearBytes(previous)
+		return nil, err
+	}
+	return func() {
+		defer clearBytes(previous)
+		if hadPrevious {
+			_ = writePrivateFileAtomic(path, previous)
+			return
+		}
+		_ = os.Remove(path)
+		deleteFileProtectionKey(path)
+	}, nil
+}
+
 func normalizeCredentialDraft(
 	request credentialCreateRequest,
-	allowMissingLocalPassword bool,
+	updating bool,
 ) (normalizedCredentialDraft, error) {
 	name := strings.TrimSpace(request.Name)
 	username := strings.TrimSpace(request.Username)
 	domain := strings.TrimSpace(request.Domain)
 	protocol := strings.ToLower(strings.TrimSpace(request.Protocol))
+	kindName := strings.ToLower(strings.TrimSpace(request.Kind))
+	if kindName == "" {
+		kindName = "password"
+	}
+	kind := int64(0)
+	if kindName == "sshkey" {
+		kind = 1
+	} else if kindName != "password" {
+		return normalizedCredentialDraft{}, errors.New("credential authentication type is invalid")
+	}
 	providerName := strings.ToLower(strings.TrimSpace(request.Provider))
 	provider := int64(0)
 	if providerName == "bitwarden" {
@@ -371,8 +644,42 @@ func normalizeCredentialDraft(
 	if !validCredentialText(domain, maxCredentialDomainLength) {
 		return normalizedCredentialDraft{}, errors.New("credential domain is invalid")
 	}
+	if kind == 1 {
+		if protocol != "ssh" || provider != 0 || request.Password != "" || domain != "" || itemID != "" || itemName != "" {
+			return normalizedCredentialDraft{}, errors.New("SSH key credentials must use local SSH authentication")
+		}
+		if utf8.RuneCountInString(request.Passphrase) > maxStoredCredentialPassword {
+			return normalizedCredentialDraft{}, errors.New("SSH private key passphrase is invalid")
+		}
+		if request.ClearPassphrase && (!updating || request.Passphrase != "") {
+			return normalizedCredentialDraft{}, errors.New("SSH private key passphrase update is invalid")
+		}
+		privateKeyPath := request.PrivateKeyPath
+		if !updating && privateKeyPath == "" {
+			return normalizedCredentialDraft{}, errors.New("SSH private key is required")
+		}
+		if privateKeyPath != "" && !filepath.IsAbs(privateKeyPath) {
+			return normalizedCredentialDraft{}, errors.New("SSH private key path is invalid")
+		}
+		if username == "" {
+			return normalizedCredentialDraft{}, errors.New("SSH credentials need a username")
+		}
+		privateKeyFileName := ""
+		if privateKeyPath != "" {
+			privateKeyFileName = credentialPrivateKeyDisplayName(filepath.Base(privateKeyPath))
+		}
+		return normalizedCredentialDraft{
+			name: name, protocol: "ssh", protocolValue: 0, kind: 1, kindName: "sshKey",
+			username: username, passphrase: request.Passphrase, clearPassphrase: request.ClearPassphrase,
+			privateKeyPath:     privateKeyPath,
+			privateKeyFileName: privateKeyFileName, provider: 0,
+		}, nil
+	}
+	if request.Passphrase != "" || request.ClearPassphrase || request.PrivateKeyPath != "" {
+		return normalizedCredentialDraft{}, errors.New("password credentials cannot include an SSH private key")
+	}
 	if provider == 0 {
-		if (!allowMissingLocalPassword && request.Password == "") ||
+		if (!updating && request.Password == "") ||
 			utf8.RuneCountInString(request.Password) > maxStoredCredentialPassword {
 			return normalizedCredentialDraft{}, errors.New("credential password is invalid")
 		}
@@ -409,7 +716,7 @@ func normalizeCredentialDraft(
 		domain = ""
 	}
 	return normalizedCredentialDraft{
-		name: name, protocol: protocol, protocolValue: protocolValue, username: username, domain: domain,
+		name: name, protocol: protocol, protocolValue: protocolValue, kind: 0, kindName: "password", username: username, domain: domain,
 		password: request.Password, provider: provider, itemID: itemID, itemName: itemName,
 		fieldPath: "login.password",
 	}, nil
@@ -519,6 +826,13 @@ func validCredentialText(value string, maximum int) bool {
 		return false
 	}
 	return !strings.ContainsFunc(value, unicode.IsControl)
+}
+
+func credentialPrivateKeyDisplayName(value string) string {
+	if value == "" || validCredentialText(value, maxCredentialNameLength) {
+		return value
+	}
+	return "SSH private key"
 }
 
 func validCredentialID(value string) bool {

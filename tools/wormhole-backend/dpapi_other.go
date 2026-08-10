@@ -40,6 +40,11 @@ func unprotectFile(path string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer clearBytes(protected)
+	return unprotectFileContents(path, protected)
+}
+
+func unprotectFileContents(path string, protected []byte) ([]byte, error) {
 	key, err := fileProtectionKey(path, false)
 	if err != nil {
 		return nil, err

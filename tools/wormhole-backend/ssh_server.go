@@ -2884,6 +2884,7 @@ func openNativeSSH(
 	if err != nil {
 		return nil, sshTarget{}, err
 	}
+	defer clearBytes(target.privateKey)
 	if keyPassphraseOverride != "" {
 		target.keyPassphrase = keyPassphraseOverride
 	}
@@ -2919,6 +2920,8 @@ func openNativeSSH(
 		}
 	}
 	target.knownHostFingerprint = fingerprint
+	target.privateKey = nil
+	target.keyPassphrase = ""
 	return native, target, nil
 }
 
@@ -2951,10 +2954,12 @@ func dialNativeSSH(
 	if len(target.privateKey) > 0 {
 		signer, parseErr := ssh.ParsePrivateKey(target.privateKey)
 		if parseErr != nil && target.keyPassphrase != "" {
+			passphrase := []byte(target.keyPassphrase)
 			signer, parseErr = ssh.ParsePrivateKeyWithPassphrase(
 				target.privateKey,
-				[]byte(target.keyPassphrase),
+				passphrase,
 			)
+			clearBytes(passphrase)
 		}
 		if parseErr != nil {
 			var missing *ssh.PassphraseMissingError
@@ -3510,15 +3515,17 @@ func loadSSHCredential(
 			return err
 		}
 		keyPath := filepath.Join(filepath.Dir(databasePath), "keys", stem+".dpapi")
-		key, err := unprotectFile(keyPath)
+		key, err := unprotectSshPrivateKey(keyPath)
 		if err != nil {
 			return errors.New("could not read the SSH private key")
 		}
-		target.privateKey = key
 		passphrase, err := readOptionalCredentialSecret(database, credentialID, electronUserDataPath...)
 		if err != nil {
+			clearBytes(key)
 			return fmt.Errorf("could not read the SSH key passphrase: %w", err)
 		}
+		defer clearBytes(passphrase)
+		target.privateKey = key
 		target.keyPassphrase = string(passphrase)
 		return nil
 	}

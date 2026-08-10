@@ -264,6 +264,11 @@ func unprotectFile(path string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer clearBytes(protected)
+	return unprotectFileContents(path, protected)
+}
+
+func unprotectFileContents(_ string, protected []byte) ([]byte, error) {
 	if len(protected) == 0 {
 		return nil, errors.New("protected file is empty")
 	}

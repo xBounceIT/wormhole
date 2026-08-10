@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import {
@@ -69,6 +70,37 @@ test('hidden Auto sudo ignores stale quick-connect state and preserves only a lo
   assert.equal(effectiveSshAutoSudoMode('ssh', false, 'on', 'inherit'), 'inherit');
   assert.equal(effectiveSshAutoSudoMode('ssh', true, 'on', 'inherit'), 'on');
   assert.equal(effectiveSshAutoSudoMode('rdp', true, 'on', 'on'), 'inherit');
+});
+
+test('SSH key credential import keeps key paths and material behind the native boundary', () => {
+  const appSource = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  const preloadSource = readFileSync(new URL('../electron/preload.cts', import.meta.url), 'utf8');
+  const mainSource = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
+  const backendSource = readFileSync(
+    new URL('../tools/wormhole-backend/credentials.go', import.meta.url),
+    'utf8',
+  );
+
+  assert.match(appSource, /<SelectItem value="sshKey">SSH private key<\/SelectItem>/);
+  assert.match(appSource, /selectSshPrivateKey\(\)/);
+  assert.match(appSource, /Key passphrase \(optional\)/);
+  assert.doesNotMatch(appSource, /privateKeyPath/);
+
+  assert.match(preloadSource, /credential:select-ssh-private-key/);
+  assert.match(preloadSource, /credential:discard-ssh-private-key/);
+  assert.doesNotMatch(preloadSource, /privateKeyPath/);
+
+  assert.match(mainSource, /dialog\.showOpenDialog\(owner, options\)/);
+  assert.match(mainSource, /sshPrivateKeySelections\.get\(event\.sender\)/);
+  assert.match(mainSource, /privateKeyPath: selection\.path/);
+  assert.match(mainSource, /sshPrivateKeySelections\.delete\(event\.sender\)/);
+  assert.match(mainSource, /clearPassphrase/);
+  assert.match(mainSource, /sshPrivateKeyDisplayName/);
+
+  assert.match(backendSource, /ssh\.ParsePrivateKeyWithPassphrase/);
+  assert.match(backendSource, /credentialPrivateKeyProtect/);
+  assert.match(backendSource, /maxSshPrivateKeyBytes/);
+  assert.match(backendSource, /ClearPassphrase/);
 });
 
 test('Bitwarden login and vault labels distinguish authentication from lock state', () => {
