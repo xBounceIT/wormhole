@@ -63,6 +63,7 @@ import {
 import { KeyedTaskTracker } from './keyed-task-tracker.js';
 import { shouldDeferExtensionReload } from './extension-reload-policy.js';
 import { encodeTerminalClipboardText, isEncodedSshInput } from './terminal-clipboard.js';
+import { isLocalSftpPath, sshMaxSftpPathLength } from './sftp-contract.js';
 import { RdpBackendClient, stopChildProcess } from './rdp.js';
 import { settleTunnelCleanup, TunnelLeaseRegistry } from './tunnel-lease-registry.js';
 import { isTunnelIdentifier, parseTunnelTestRequest } from './tunnel-test-contract.js';
@@ -1021,7 +1022,6 @@ const sshMaxSessionIdLength = 128;
 const sshMaxTerminalCells = 500 * 500;
 const sshMaxTerminalScrollbackLines = 5000;
 const sshMaxTerminalScrollbackLineLength = 2048;
-const sshMaxSftpPathLength = 16 * 1024;
 const sshMaxSftpEntries = 4096;
 const sshMaxSftpEntryNameLength = 4096;
 const sshMaxBackendErrorLength = 4096;
@@ -1614,15 +1614,6 @@ function isSftpPath(value: unknown): value is string {
     Buffer.byteLength(value, 'utf8') <= sshMaxSftpPathLength &&
     (value.length === 0 || value.startsWith('/')) &&
     !value.includes('\\') &&
-    !value.includes('\u0000')
-  );
-}
-
-function isLocalSftpPath(value: unknown, allowEmpty = false): value is string {
-  return (
-    typeof value === 'string' &&
-    Buffer.byteLength(value, 'utf8') <= sshMaxSftpPathLength &&
-    (allowEmpty && value.length === 0 ? true : /^(?:[A-Za-z]:[\\/]|\\\\)/.test(value)) &&
     !value.includes('\u0000')
   );
 }

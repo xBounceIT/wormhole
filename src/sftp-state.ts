@@ -316,6 +316,7 @@ export function parentSftpPath(path: string): string {
 
 export function parentLocalSftpPath(path: string): string {
   if (!path) return '';
+  if (path.startsWith('/')) return parentSftpPath(path);
   const normalized = path.replaceAll('/', '\\').replace(/[\\]+$/, '');
   if (/^[A-Za-z]:$/.test(normalized)) return `${normalized}\\`;
   if (/^[A-Za-z]:\\$/.test(path)) return path;
@@ -325,6 +326,72 @@ export function parentLocalSftpPath(path: string): string {
   if (separator === 0) return '\\';
   if (separator === 2 && /^[A-Za-z]:/.test(normalized)) return `${normalized.slice(0, 3)}`;
   return normalized.slice(0, separator) || '\\';
+}
+
+export function isLocalSftpPathRoot(path: string): boolean {
+  if (!path) return true;
+  if (path.startsWith('/')) return /^\/+$/u.test(path);
+  const normalized = path.replaceAll('/', '\\').replace(/[\\]+$/, '');
+  return (
+    /^[A-Za-z]:$/.test(normalized) ||
+    /^\\\\[^\\]+\\[^\\]+$/.test(normalized) ||
+    parentLocalSftpPath(path) === path
+  );
+}
+
+type LocalSftpPathStyle = 'posix' | 'windows';
+
+function localSftpPathStyle(path: string): LocalSftpPathStyle | undefined {
+  if (path.startsWith('/')) return 'posix';
+  return /^(?:[A-Za-z]:[\\/]|\\\\)/.test(path) ? 'windows' : undefined;
+}
+
+export function joinLocalSftpPath(parent: string, name: string): string {
+  const style = localSftpPathStyle(parent);
+  const separator =
+    style === 'posix' || (style === 'windows' && !parent.includes('\\')) ? '/' : '\\';
+  return parent.endsWith('\\') || parent.endsWith('/')
+    ? `${parent}${name}`
+    : `${parent}${separator}${name}`;
+}
+
+function normalizeLocalContainmentPath(path: string, style: LocalSftpPathStyle): string {
+  if (style === 'posix') return path === '/' ? path : path.replace(/\/+$/, '');
+  const normalized = path.replaceAll('/', '\\');
+  const withoutTrailingSeparators = /^[A-Za-z]:\\$/.test(normalized)
+    ? normalized
+    : normalized.replace(/[\\]+$/, '');
+  return withoutTrailingSeparators.toLowerCase();
+}
+
+function localSftpPathContains(
+  parent: string,
+  candidate: string,
+  style: LocalSftpPathStyle,
+): boolean {
+  const normalizedParent = normalizeLocalContainmentPath(parent, style);
+  const normalizedCandidate = normalizeLocalContainmentPath(candidate, style);
+  if (normalizedParent === normalizedCandidate) return true;
+  const separator = style === 'posix' ? '/' : '\\';
+  const prefix = normalizedParent.endsWith(separator)
+    ? normalizedParent
+    : `${normalizedParent}${separator}`;
+  return normalizedCandidate.startsWith(prefix);
+}
+
+export function isInvalidLocalSftpDropDestination(
+  destination: string,
+  items: readonly { sourcePath: string; name: string; isDirectory: boolean }[],
+): boolean {
+  const style = localSftpPathStyle(destination);
+  if (!style) return false;
+  for (const item of items) {
+    if (localSftpPathStyle(item.sourcePath) !== style) continue;
+    const target = joinLocalSftpPath(destination, item.name);
+    if (localSftpPathContains(item.sourcePath, target, style)) return true;
+    if (item.isDirectory && localSftpPathContains(item.sourcePath, destination, style)) return true;
+  }
+  return false;
 }
 
 export function isSftpTransferTerminal(state: SftpTransferRow['state']): boolean {
