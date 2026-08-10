@@ -12319,7 +12319,11 @@ function TunnelEditorDialog({
             Tunnel credentials stay in encrypted storage and never enter the connection tree.
           </DialogDescription>
         </DialogHeader>
-        <form className="flex min-h-0 flex-1 flex-col gap-4" onSubmit={submit}>
+        <form
+          className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto pr-3"
+          id="tunnel-editor-form"
+          onSubmit={submit}
+        >
           <div className="grid gap-3 md:grid-cols-2">
             <div className="grid gap-2">
               <Label htmlFor="tunnel-name">Name</Label>
@@ -12420,19 +12424,93 @@ function TunnelEditorDialog({
               To save this tunnel, fill in: {missing.join(', ')}.
             </p>
           ) : null}
-          <ScrollArea className="min-h-0 flex-1 pr-3">
-            <div className="grid gap-5 py-1">
-              {value.kind === 0 ? (
-                <>
-                  <TunnelSection title="Interface">{rows('Interface')}</TunnelSection>
-                  <TunnelSection title="Peer">{rows('Peer')}</TunnelSection>
-                </>
-              ) : null}
-              {value.kind === 1 ? (
-                <>
+          <div className="grid gap-5 py-1">
+            {value.kind === 0 ? (
+              <>
+                <TunnelSection title="Interface">{rows('Interface')}</TunnelSection>
+                <TunnelSection title="Peer">{rows('Peer')}</TunnelSection>
+              </>
+            ) : null}
+            {value.kind === 1 ? (
+              <>
+                <div className="grid gap-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <Label htmlFor="tunnel-ProfileOvpn">OpenVPN profile (.ovpn contents)</Label>
+                    <Button
+                      disabled={busy}
+                      onClick={() => void importOvpnProfile()}
+                      size="sm"
+                      type="button"
+                      variant="outline"
+                    >
+                      <Upload data-icon="inline-start" />
+                      Import from file…
+                    </Button>
+                  </div>
+                  {rows('Profile')}
+                </div>
+                <TunnelSection title="Authentication (optional)">
+                  {rows('Authentication')}
+                </TunnelSection>
+              </>
+            ) : null}
+            {value.kind === 2 ? (
+              <>
+                <TunnelSection title="Gateway">{rows('Gateway')}</TunnelSection>
+                <TunnelSection title="Credentials">
+                  {rows('Credentials', {
+                    disabled: (field) =>
+                      field.key === 'Realm'
+                        ? useFortinetExternalBrowser &&
+                          !(typeof value.settings.Realm === 'string' && value.settings.Realm.trim())
+                        : useFortinetSso,
+                  })}
+                </TunnelSection>
+                <div className="grid gap-2 rounded-lg border border-border/70 bg-muted/20 px-3 py-2">
+                  {rows('Single sign-on', {
+                    disabled: (field) => field.key === 'UseExternalBrowser' && !useFortinetSso,
+                    hidden: (field) =>
+                      field.key === 'SamlRedirectPort' && !useFortinetExternalBrowser,
+                  })}
+                  <p className="text-[11px] leading-relaxed text-muted-foreground">
+                    The embedded option uses a dedicated browser profile. External-browser
+                    authentication requires the callback port configured on the FortiGate.
+                  </p>
+                </div>
+                <TunnelAdvanced label="Advanced" onOpenChange={setAdvancedOpen} open={advancedOpen}>
+                  {rows('Advanced', {
+                    disabled: (field) => field.key === 'TotpSecret' && useFortinetSso,
+                  })}
+                </TunnelAdvanced>
+              </>
+            ) : null}
+            {value.kind === 3 ? (
+              <>
+                <TunnelSection title="Gateway">{rows('Gateway')}</TunnelSection>
+                <TunnelSection title="Credentials">
+                  {rows('Credentials', {
+                    hidden: (field) =>
+                      useWatchguardSso && (field.key === 'Username' || field.key === 'Password'),
+                  })}
+                </TunnelSection>
+                <TunnelAdvanced
+                  label="Manual profile fallback & advanced"
+                  onOpenChange={setAdvancedOpen}
+                  open={advancedOpen}
+                >
+                  {rows('Advanced')}
+                </TunnelAdvanced>
+              </>
+            ) : null}
+            {value.kind === 4 ? (
+              <>
+                <TunnelSection>{rows('Connection mode')}</TunnelSection>
+                <TunnelSection title="Gateway">{rows('Gateway')}</TunnelSection>
+                <TunnelSection title="Authentication">{rows('Authentication')}</TunnelSection>
+                {value.settings.Mode === 1 ? (
                   <div className="grid gap-3">
                     <div className="flex flex-wrap items-center justify-between gap-2">
-                      <Label htmlFor="tunnel-ProfileOvpn">OpenVPN profile (.ovpn contents)</Label>
+                      <Label htmlFor="tunnel-ProfileOvpn">Profile</Label>
                       <Button
                         disabled={busy}
                         onClick={() => void importOvpnProfile()}
@@ -12446,155 +12524,70 @@ function TunnelEditorDialog({
                     </div>
                     {rows('Profile')}
                   </div>
-                  <TunnelSection title="Authentication (optional)">
-                    {rows('Authentication')}
-                  </TunnelSection>
-                </>
-              ) : null}
-              {value.kind === 2 ? (
-                <>
-                  <TunnelSection title="Gateway">{rows('Gateway')}</TunnelSection>
-                  <TunnelSection title="Credentials">
-                    {rows('Credentials', {
-                      disabled: (field) =>
-                        field.key === 'Realm'
-                          ? useFortinetExternalBrowser &&
-                            !(
-                              typeof value.settings.Realm === 'string' &&
-                              value.settings.Realm.trim()
-                            )
-                          : useFortinetSso,
-                    })}
-                  </TunnelSection>
-                  <div className="grid gap-2 rounded-lg border border-border/70 bg-muted/20 px-3 py-2">
-                    {rows('Single sign-on', {
-                      disabled: (field) => field.key === 'UseExternalBrowser' && !useFortinetSso,
-                      hidden: (field) =>
-                        field.key === 'SamlRedirectPort' && !useFortinetExternalBrowser,
-                    })}
-                    <p className="text-[11px] leading-relaxed text-muted-foreground">
-                      The embedded option uses a dedicated browser profile. External-browser
-                      authentication requires the callback port configured on the FortiGate.
-                    </p>
-                  </div>
-                  <TunnelAdvanced
-                    label="Advanced"
-                    onOpenChange={setAdvancedOpen}
-                    open={advancedOpen}
-                  >
-                    {rows('Advanced', {
-                      disabled: (field) => field.key === 'TotpSecret' && useFortinetSso,
-                    })}
-                  </TunnelAdvanced>
-                </>
-              ) : null}
-              {value.kind === 3 ? (
-                <>
-                  <TunnelSection title="Gateway">{rows('Gateway')}</TunnelSection>
-                  <TunnelSection title="Credentials">
-                    {rows('Credentials', {
-                      hidden: (field) =>
-                        useWatchguardSso && (field.key === 'Username' || field.key === 'Password'),
-                    })}
-                  </TunnelSection>
-                  <TunnelAdvanced
-                    label="Manual profile fallback & advanced"
-                    onOpenChange={setAdvancedOpen}
-                    open={advancedOpen}
-                  >
-                    {rows('Advanced')}
-                  </TunnelAdvanced>
-                </>
-              ) : null}
-              {value.kind === 4 ? (
-                <>
-                  <TunnelSection>{rows('Connection mode')}</TunnelSection>
-                  <TunnelSection title="Gateway">{rows('Gateway')}</TunnelSection>
-                  <TunnelSection title="Authentication">{rows('Authentication')}</TunnelSection>
-                  {value.settings.Mode === 1 ? (
-                    <div className="grid gap-3">
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <Label htmlFor="tunnel-ProfileOvpn">Profile</Label>
-                        <Button
-                          disabled={busy}
-                          onClick={() => void importOvpnProfile()}
-                          size="sm"
-                          type="button"
-                          variant="outline"
-                        >
-                          <Upload data-icon="inline-start" />
-                          Import from file…
-                        </Button>
-                      </div>
-                      {rows('Profile')}
-                    </div>
-                  ) : null}
-                  <TunnelAdvanced
-                    label="Certificates & advanced"
-                    onOpenChange={setAdvancedOpen}
-                    open={advancedOpen}
-                  >
-                    {rows('Advanced')}
-                  </TunnelAdvanced>
-                </>
-              ) : null}
-              {value.kind === 5 ? (
-                <>
-                  <TunnelSection title="Gateway">{rows('Gateway')}</TunnelSection>
-                  <TunnelSection title="Microsoft Entra ID">
-                    {rows('Microsoft Entra ID')}
-                  </TunnelSection>
-                  <TunnelAdvanced
-                    label="Advanced"
-                    onOpenChange={setAdvancedOpen}
-                    open={advancedOpen}
-                  >
-                    {rows('Advanced')}
-                  </TunnelAdvanced>
-                </>
-              ) : null}
-              {value.kind === 6 ? (
-                <>
-                  <TunnelSection title="Gateway">{rows('Gateway')}</TunnelSection>
-                  <TunnelSection title="Credentials">{rows('Credentials')}</TunnelSection>
-                  <TunnelAdvanced
-                    label="Two-factor & advanced"
-                    onOpenChange={setAdvancedOpen}
-                    open={advancedOpen}
-                  >
-                    <p className="text-[11px] leading-relaxed text-muted-foreground md:col-span-2">
-                      If the gateway prompts for a second factor, provide a TOTP secret (a code is
-                      generated automatically) or a static secondary password. SAML single sign-on
-                      and client-certificate authentication are not supported.
-                    </p>
-                    {rows('Two-factor & advanced')}
-                  </TunnelAdvanced>
-                </>
-              ) : null}
-            </div>
-          </ScrollArea>
-          {error ? <p className="text-[11px] text-destructive">{error}</p> : null}
-          <DialogFooter>
-            <Button
-              disabled={busy}
-              onClick={() => onOpenChange(false)}
-              type="button"
-              variant="ghost"
-            >
-              Cancel
-            </Button>
-            <Button disabled={busy || !canSave} type="submit">
-              {value.id ? <Check data-icon="inline-start" /> : <Plus data-icon="inline-start" />}
-              {busy
-                ? 'Saving…'
-                : value.id
-                  ? 'Save changes'
-                  : canSave
-                    ? 'Add VPN tunnel'
-                    : 'Fill in required fields'}
-            </Button>
-          </DialogFooter>
+                ) : null}
+                <TunnelAdvanced
+                  label="Certificates & advanced"
+                  onOpenChange={setAdvancedOpen}
+                  open={advancedOpen}
+                >
+                  {rows('Advanced')}
+                </TunnelAdvanced>
+              </>
+            ) : null}
+            {value.kind === 5 ? (
+              <>
+                <TunnelSection title="Gateway">{rows('Gateway')}</TunnelSection>
+                <TunnelSection title="Microsoft Entra ID">
+                  {rows('Microsoft Entra ID')}
+                </TunnelSection>
+                <TunnelAdvanced label="Advanced" onOpenChange={setAdvancedOpen} open={advancedOpen}>
+                  {rows('Advanced')}
+                </TunnelAdvanced>
+              </>
+            ) : null}
+            {value.kind === 6 ? (
+              <>
+                <TunnelSection title="Gateway">{rows('Gateway')}</TunnelSection>
+                <TunnelSection title="Credentials">{rows('Credentials')}</TunnelSection>
+                <TunnelAdvanced
+                  label="Two-factor & advanced"
+                  onOpenChange={setAdvancedOpen}
+                  open={advancedOpen}
+                >
+                  <p className="text-[11px] leading-relaxed text-muted-foreground md:col-span-2">
+                    If the gateway prompts for a second factor, provide a TOTP secret (a code is
+                    generated automatically) or a static secondary password. SAML single sign-on and
+                    client-certificate authentication are not supported.
+                  </p>
+                  {rows('Two-factor & advanced')}
+                </TunnelAdvanced>
+              </>
+            ) : null}
+          </div>
         </form>
+        {error ? (
+          <p
+            className="max-h-20 shrink-0 overflow-y-auto text-[11px] text-destructive"
+            role="alert"
+          >
+            {error}
+          </p>
+        ) : null}
+        <DialogFooter>
+          <Button disabled={busy} onClick={() => onOpenChange(false)} type="button" variant="ghost">
+            Cancel
+          </Button>
+          <Button disabled={busy || !canSave} form="tunnel-editor-form" type="submit">
+            {value.id ? <Check data-icon="inline-start" /> : <Plus data-icon="inline-start" />}
+            {busy
+              ? 'Saving…'
+              : value.id
+                ? 'Save changes'
+                : canSave
+                  ? 'Add VPN tunnel'
+                  : 'Fill in required fields'}
+          </Button>
+        </DialogFooter>
       </DialogContent>
     </Dialog>
   );
