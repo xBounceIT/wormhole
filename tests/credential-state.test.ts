@@ -158,6 +158,23 @@ test('SSH key credential import keeps key paths and material behind the native b
   assert.ok(credentialDraft);
   assert.doesNotMatch(credentialDraft, /passphrase/);
   assert.match(appSource, /takeOneShotSecret\(credentialKeyPassphraseInput\.current\)/);
+  assert.match(
+    appSource,
+    /failedSelectionId = request\.kind === 'sshKey' \? request\.privateKeySelectionId : ''[\s\S]*selectionMustBeRepeated = failedSelectionId\.length > 0[\s\S]*discardPrivateKeySelection\(failedSelectionId\)[\s\S]*privateKeySelectionId: ''[\s\S]*setPrivateKeySelectionRetryRequired\(true\)/,
+  );
+  assert.match(
+    appSource,
+    /const privateKeySelectionRequired = !editingCredential \|\| privateKeySelectionRetryRequired/,
+  );
+  assert.match(
+    appSource,
+    /privateKeyPassphraseRetryRequired && !draft\.clearPassphrase && !passphrase/,
+  );
+  assert.match(
+    appSource,
+    /passphraseMustBeRepeated = request\.kind === 'sshKey' && request\.passphrase\.length > 0/,
+  );
+  assert.match(appSource, /disabled=\{busy \|\| privateKeySelecting\}/);
   assert.match(appSource, /takeOneShotSecret\(sshKeyPassphraseInput\.current\)/);
   assert.match(appSource, /input\.value = '';/);
   assert.match(

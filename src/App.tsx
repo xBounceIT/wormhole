@@ -10816,6 +10816,8 @@ function CredentialsPage({
   const [bitwardenSearchStatus, setBitwardenSearchStatus] = useState('');
   const [bitwardenSearching, setBitwardenSearching] = useState(false);
   const [privateKeySelecting, setPrivateKeySelecting] = useState(false);
+  const [privateKeySelectionRetryRequired, setPrivateKeySelectionRetryRequired] = useState(false);
+  const [privateKeyPassphraseRetryRequired, setPrivateKeyPassphraseRetryRequired] = useState(false);
   const credentialKeyPassphraseInput = useRef<HTMLInputElement>(null);
   const bitwardenSearchAttempts = useLazyRef(() => new WebSessionAttemptTracker());
 
@@ -10836,6 +10838,8 @@ function CredentialsPage({
     setBitwardenSearchStatus(''); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
     setBitwardenSearching(false); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
     setPrivateKeySelecting(false); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
+    setPrivateKeySelectionRetryRequired(false); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
+    setPrivateKeyPassphraseRetryRequired(false); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
     bitwardenSearchAttempts.current.cancel('credential-search');
   }, [bitwardenSearchAttempts, isAuthorized]);
 
@@ -10906,6 +10910,8 @@ function CredentialsPage({
     clearSecretInput(credentialKeyPassphraseInput.current);
     setEditingCredential(null);
     setCredentialForm(emptyCredentialDraft());
+    setPrivateKeySelectionRetryRequired(false);
+    setPrivateKeyPassphraseRetryRequired(false);
     setOperationError('');
     resetBitwardenSearch();
     setEditorOpen(true);
@@ -10931,6 +10937,8 @@ function CredentialsPage({
       bitwardenItemId: credential.bitwardenItemId ?? '',
       bitwardenItemName: credential.bitwardenItemName ?? '',
     });
+    setPrivateKeySelectionRetryRequired(false);
+    setPrivateKeyPassphraseRetryRequired(false);
     setOperationError('');
     resetBitwardenSearch();
     setEditorOpen(true);
@@ -10942,6 +10950,8 @@ function CredentialsPage({
     setEditorOpen(false);
     setEditingCredential(null);
     setCredentialForm(emptyCredentialDraft());
+    setPrivateKeySelectionRetryRequired(false);
+    setPrivateKeyPassphraseRetryRequired(false);
     setOperationError('');
     resetBitwardenSearch();
   }
@@ -10966,6 +10976,7 @@ function CredentialsPage({
         privateKeySelectionId: selected.selectionId,
         privateKeyFileName: selected.fileName,
       }));
+      setPrivateKeySelectionRetryRequired(false);
     } catch (error) {
       setOperationError(error instanceof Error ? error.message : 'Could not select the SSH key.');
     } finally {
@@ -11080,10 +11091,11 @@ function CredentialsPage({
       draft.kind === 'password' &&
       draft.provider === 'Local' &&
       (!editingCredential || editingCredential.provider !== 'Local');
+    const privateKeySelectionRequired = !editingCredential || privateKeySelectionRetryRequired;
     if (
       !draft.name ||
       (draft.kind === 'sshKey'
-        ? !editingCredential && !draft.privateKeySelectionId
+        ? privateKeySelectionRequired && !draft.privateKeySelectionId
         : draft.provider === 'Local'
           ? localPasswordRequired && !draft.password
           : !draft.bitwardenItemId)
@@ -11105,10 +11117,15 @@ function CredentialsPage({
       setOperationError('RDP credentials need a domain.');
       return;
     }
+    const passphrase =
+      draft.kind === 'sshKey' ? takeOneShotSecret(credentialKeyPassphraseInput.current) : '';
+    if (privateKeyPassphraseRetryRequired && !draft.clearPassphrase && !passphrase) {
+      setOperationError('Enter the SSH key passphrase again before retrying.');
+      return;
+    }
     const request: CredentialWriteRequest = {
       ...draft,
-      passphrase:
-        draft.kind === 'sshKey' ? takeOneShotSecret(credentialKeyPassphraseInput.current) : '',
+      passphrase,
     };
     setBusy(true);
     setOperationError('');
@@ -11120,7 +11137,29 @@ function CredentialsPage({
       }
       closeCredentialEditor();
     } catch (error) {
-      setOperationError(error instanceof Error ? error.message : 'Could not save the credential.');
+      const message = error instanceof Error ? error.message : 'Could not save the credential.';
+      const failedSelectionId = request.kind === 'sshKey' ? request.privateKeySelectionId : '';
+      const selectionMustBeRepeated = failedSelectionId.length > 0;
+      const passphraseMustBeRepeated = request.kind === 'sshKey' && request.passphrase.length > 0;
+      if (selectionMustBeRepeated) {
+        discardPrivateKeySelection(failedSelectionId);
+        setCredentialForm((form) => ({
+          ...form,
+          clearPassphrase: false,
+          privateKeySelectionId: '',
+          privateKeyFileName: editingCredential?.privateKeyFileName ?? '',
+        }));
+        setPrivateKeySelectionRetryRequired(true);
+      }
+      if (passphraseMustBeRepeated) setPrivateKeyPassphraseRetryRequired(true);
+      const retryInstruction = selectionMustBeRepeated
+        ? passphraseMustBeRepeated
+          ? ' Select the SSH private key and enter its passphrase again before retrying.'
+          : ' Select the SSH private key again before retrying.'
+        : passphraseMustBeRepeated
+          ? ' Enter the SSH key passphrase again before retrying.'
+          : '';
+      setOperationError(`${message}${retryInstruction}`);
     } finally {
       setBusy(false);
     }
@@ -11501,7 +11540,7 @@ function CredentialsPage({
                       {credentialForm.privateKeyFileName || 'No private key selected'}
                     </span>
                     <Button
-                      disabled={privateKeySelecting}
+                      disabled={busy || privateKeySelecting}
                       onClick={() => void selectPrivateKey()}
                       size="sm"
                       type="button"
@@ -11518,6 +11557,11 @@ function CredentialsPage({
                   <p className="text-[11px] leading-relaxed text-muted-foreground">
                     OpenSSH and PEM private keys up to 1 MB are supported.
                   </p>
+                  {privateKeySelectionRetryRequired ? (
+                    <p className="text-[11px] leading-relaxed text-destructive">
+                      Select the private key again before retrying.
+                    </p>
+                  ) : null}
                 </div>
                 <div className="grid gap-2">
                   <Label htmlFor="credential-key-passphrase">
@@ -11541,6 +11585,7 @@ function CredentialsPage({
                         onCheckedChange={(checked) => {
                           if (checked === true) {
                             clearSecretInput(credentialKeyPassphraseInput.current);
+                            setPrivateKeyPassphraseRetryRequired(false);
                           }
                           setCredentialForm((form) => ({
                             ...form,
@@ -11555,6 +11600,11 @@ function CredentialsPage({
                     If an encrypted key is saved without a passphrase, Wormhole asks for it when
                     connecting.
                   </p>
+                  {privateKeyPassphraseRetryRequired ? (
+                    <p className="text-[11px] leading-relaxed text-destructive">
+                      Enter the key passphrase again before retrying.
+                    </p>
+                  ) : null}
                 </div>
               </div>
             ) : credentialForm.provider === 'Local' ? (
