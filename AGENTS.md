@@ -1,12 +1,10 @@
-<!-- This file mirrors CLAUDE.md (the canonical copy). When updating one, update both. -->
+<!-- Canonical agent guide. CLAUDE.md is a symbolic link to this file. -->
 
 # Wormhole — Agent guide
 
 ## Product direction
 
-Wormhole is developed and shipped only as the Electron application. The former
-.NET 10 / WinUI 3 application has been removed. The only managed component is
-the Windows ActiveX RDP host under tools/, a narrow helper used by Electron.
+Wormhole is developed and shipped as an Electron application.
 
 The active architecture has a strict boundary:
 
@@ -36,13 +34,16 @@ domain logic into the frontend.
 - Run lint and formatting checks: npm run lint and npm run format:check
 - Run backend tests directly when iterating: Set-Location
   tools/wormhole-backend, then run go test ./...
-
-.NET is used only to build and test the Windows RDP helper with
-npm run build:rdp-host and npm run test:rdp-host. There is no root .NET solution
-or WinUI validation workflow.
+- Build or test the Windows RDP helper when iterating: npm run build:rdp-host
+  or npm run test:rdp-host
 
 ## Engineering rules
 
+- Every change must work on all supported platforms: Windows, macOS, and Linux.
+  These are the only platforms Wormhole supports or plans to support. For
+  operating-system-dependent features, prioritize a native implementation for
+  each platform behind platform-specific adapters, while keeping shared code
+  free of operating-system assumptions and preserving equivalent behavior.
 - Keep the renderer presentation-focused. It must not open sockets, read
   SQLite, access the filesystem, handle credentials, or implement protocol
   behavior directly.
@@ -68,7 +69,9 @@ or WinUI validation workflow.
   unrestricted sockets.
 - Preserve fail-closed VPN behavior. A tunnel failure must never silently fall
   back to a direct connection.
-- Add focused Go tests for backend behavior and TypeScript tests for pure
+- Every implementation change must include automated tests that cover at least
+  80% of the code introduced or modified, including its critical paths. Add
+  focused Go tests for backend behavior and TypeScript tests for pure
   renderer/bridge state. Run npm run test:electron before handing off changes.
 
 ## Active architecture
@@ -98,15 +101,13 @@ or WinUI validation workflow.
   release workflow.
 - Keep Windows x64 and arm64 packaging working, while preserving the
   cross-platform Go build for other supported Electron hosts.
-- Do not switch the app to MSIX or reintroduce WinUI as the active shell.
+- Do not switch the app to MSIX.
 - Preserve existing user changes in a dirty worktree. Inspect git status before
   editing and avoid destructive reset or checkout commands.
-- When updating this guide, update the mirrored agent guide in the same change
-  so the instructions remain identical.
 
 ## Native compatibility helpers
 
 The C# code under tools/wormhole-rdp-host is part of the Electron application:
 it hosts the Windows mstscax ActiveX control in a separate process. Keep it
-isolated, secret-free, and limited to native surface integration. Do not
-reintroduce the removed WinUI application or move backend behavior into it.
+isolated, secret-free, and limited to native surface integration. Do not move
+backend behavior into it.
