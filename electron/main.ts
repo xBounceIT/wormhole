@@ -117,6 +117,12 @@ const rendererUrl = process.env.VITE_DEV_SERVER_URL;
 const nativeTitlebarColor = '#0a0a0a00';
 const nativeTitlebarSymbolColor = '#ffffff';
 const nativeTitlebarHeight = 48;
+const applicationIconPath = path.join(
+  __dirname,
+  '..',
+  'Assets',
+  process.platform === 'win32' ? 'Wormhole.ico' : 'Wormhole.png',
+);
 const startupWindowOpacity = 0.96;
 const wormholeDataDirectoryName = 'Wormhole';
 const backendTimeoutMs = 30_000;
@@ -8671,7 +8677,7 @@ function createWindow() {
     // oklch(0.145 0 0) ~ #0a0a0a) so a not-yet-painted frame during a resize
     // never flashes white.
     backgroundColor: '#0a0a0a',
-    icon: path.join(__dirname, '..', 'Assets', 'Wormhole.ico'),
+    icon: applicationIconPath,
     title: 'Wormhole',
     titleBarStyle: 'hidden',
     ...(process.platform !== 'darwin'
