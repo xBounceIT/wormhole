@@ -1,11 +1,17 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { readFileSync } from 'node:fs';
+import path from 'node:path';
 import test from 'node:test';
 
 import { selectDialogVisuals } from '../src/dialog-lifecycle.ts';
 import { stopChildProcess } from '../electron/rdp.ts';
 import { TunnelLeaseRegistry } from '../electron/tunnel-lease-registry.ts';
+import {
+  isSafeUpdateInstallerPath,
+  updateInstallAction,
+  updateInstallerExtension,
+} from '../electron/update-installer.ts';
 import {
   runWindowTeardown,
   WindowCloseCoordinator,
@@ -33,6 +39,11 @@ import {
   normalizeSidebarWidth,
 } from '../src/sidebar-settings.ts';
 import { failedSshReconnectState, reconnectingSshState } from '../src/ssh-reconnect-state.ts';
+import {
+  hasNewerReleaseWithoutInstaller,
+  isUpdateInstallable,
+  shouldOfferUpdate,
+} from '../src/update-state.ts';
 
 test('startup keeps optional native and renderer work off the first-frame path', () => {
   const mainSource = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
@@ -139,6 +150,94 @@ test('MCP client configuration uses the host platform command contract', () => {
   assert.equal(linux.mcpServers.wormhole.command, 'npx');
   assert.equal(linux.mcpServers.wormhole.args[0], 'mcp-remote@latest');
   assert.equal(linux.mcpServers.wormhole.env.WORMHOLE_MCP_TOKEN, 'Bearer token');
+});
+
+test('update installers use verified platform-specific cache and launch contracts', () => {
+  const cacheRoot = path.join(process.cwd(), 'cache', 'updates');
+  for (const [platform, fileName, action] of [
+    ['win32', 'Wormhole-2.0.1-win-x64-setup.exe', 'execute'],
+    ['darwin', 'Wormhole-2.0.1-mac-universal-setup.dmg', 'open'],
+    ['linux', 'Wormhole-2.0.1-linux-x86_64-setup.AppImage', 'reveal'],
+  ] as const) {
+    assert.equal(
+      isSafeUpdateInstallerPath(path.join(cacheRoot, fileName), cacheRoot, platform),
+      true,
+    );
+    assert.equal(updateInstallAction(platform), action);
+  }
+  assert.equal(updateInstallerExtension('freebsd'), undefined);
+  assert.equal(updateInstallAction('freebsd'), undefined);
+  assert.equal(
+    isSafeUpdateInstallerPath(
+      path.join(cacheRoot, 'nested', 'Wormhole-2.0.1-win-x64-setup.exe'),
+      cacheRoot,
+      'win32',
+    ),
+    false,
+  );
+  assert.equal(
+    isSafeUpdateInstallerPath(
+      path.join(cacheRoot, 'Wormhole-2.0.1-win-x64-setup.dmg'),
+      cacheRoot,
+      'win32',
+    ),
+    false,
+  );
+
+  const mainSource = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
+  const downloadHandler = mainSource.slice(
+    mainSource.indexOf("ipcMain.handle('update:download'"),
+    mainSource.indexOf("ipcMain.handle('update:install'"),
+  );
+  assert.match(downloadHandler, /expected\?\.isUpdateAvailable/);
+  assert.match(downloadHandler, /installerSha256\.toLowerCase\(\)/);
+  assert.match(downloadHandler, /installerUrl !== expected\.installerUrl/);
+
+  const installerHandler = mainSource.slice(
+    mainSource.indexOf('async function handleDownloadedUpdate'),
+    mainSource.indexOf('function scheduleStartupUpdateCheck'),
+  );
+  assert.match(installerHandler, /await new Promise<void>/);
+  assert.match(installerHandler, /child\.once\('error', reject\)/);
+  assert.match(installerHandler, /child\.once\('spawn'/);
+  assert.ok(
+    installerHandler.indexOf("child.once('spawn'") < installerHandler.indexOf('app.quit()'),
+  );
+});
+
+test('update availability compares versions from the same backend result', () => {
+  assert.equal(
+    hasNewerReleaseWithoutInstaller({
+      currentVersion: '2.0.0',
+      latestVersion: '2.1.0',
+      isUpdateAvailable: false,
+    }),
+    true,
+  );
+  assert.equal(
+    hasNewerReleaseWithoutInstaller({
+      currentVersion: '2.0.0',
+      latestVersion: '2.0.0',
+      isUpdateAvailable: false,
+    }),
+    false,
+  );
+  assert.equal(
+    hasNewerReleaseWithoutInstaller({
+      currentVersion: '2.0.0',
+      latestVersion: '2.1.0',
+      isUpdateAvailable: true,
+    }),
+    false,
+  );
+  const installable = {
+    currentVersion: '2.0.0',
+    latestVersion: '2.1.0',
+    isUpdateAvailable: true,
+  };
+  assert.equal(isUpdateInstallable(installable), true);
+  assert.equal(shouldOfferUpdate(installable, null), true);
+  assert.equal(shouldOfferUpdate(installable, '2.1.0'), false);
 });
 
 test('SSH automatic reconnect keeps the tab alive and reports terminal exhaustion', () => {

@@ -2375,10 +2375,27 @@ func localPathContains(parent, candidate string) bool {
 		return true
 	}
 	relative, err := filepath.Rel(parent, candidate)
-	if err != nil || filepath.IsAbs(relative) {
+	if err == nil && !filepath.IsAbs(relative) &&
+		relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return true
+	}
+
+	// filepath.Rel is deliberately lexical. On case-insensitive macOS volumes, or when a path is
+	// reached through an alias, two spellings can still refer to the same directory. Walk existing
+	// ancestors by file identity so a local copy cannot target its own source through such a path.
+	parentInfo, err := os.Stat(parent)
+	if err != nil {
 		return false
 	}
-	return relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+	for current := candidate; ; current = filepath.Dir(current) {
+		if info, statErr := os.Stat(current); statErr == nil && os.SameFile(parentInfo, info) {
+			return true
+		}
+		next := filepath.Dir(current)
+		if sameLocalPath(next, current) {
+			return false
+		}
+	}
 }
 
 func validateLocalTransferDestinationParents(path string) error {

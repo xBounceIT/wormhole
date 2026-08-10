@@ -375,7 +375,7 @@ const wormholeBridge = {
   }) => ipcRenderer.invoke('update:download', request) as Promise<string>,
   installUpdate: (installerPath: string) =>
     ipcRenderer.invoke('update:install', { path: installerPath }) as Promise<{
-      launched: boolean;
+      appWillQuit: boolean;
     }>,
   openExternal: (url: string) => ipcRenderer.invoke('update:open-release', url) as Promise<void>,
   onUpdateResult: (listener: (result: WormholeUpdateCheckResult) => void) => {

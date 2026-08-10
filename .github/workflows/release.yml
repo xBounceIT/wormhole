@@ -270,11 +270,25 @@ jobs:
       - name: Build ${{ matrix.platform }} installer
         run: npm run package -- --${{ matrix.builder_platform }} --${{ matrix.builder_arch }}
 
+      - name: Generate installer SHA-256 sidecar
+        shell: pwsh
+        run: |
+          $installers = @(Get-ChildItem "${{ matrix.artifact }}" -File)
+          if ($installers.Count -ne 1) {
+            throw "Expected exactly one ${{ matrix.platform }} installer, found $($installers.Count)."
+          }
+          $installers | ForEach-Object {
+            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)" | Set-Content -LiteralPath "$($_.FullName).sha256" -Encoding ascii
+          }
+
       - name: Upload ${{ matrix.platform }} installer
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: wormhole-${{ matrix.platform }}
-          path: ${{ matrix.artifact }}
+          path: |
+            ${{ matrix.artifact }}
+            ${{ matrix.artifact }}.sha256
           if-no-files-found: error
           retention-days: 1
 

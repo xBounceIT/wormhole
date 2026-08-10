@@ -17,15 +17,22 @@ import (
 )
 
 const (
-	updateRepositoryOwner       = "xBounceIT"
-	updateRepositoryName        = "wormhole"
-	updateCheckTimeout          = 30 * time.Second
-	updateDownloadBufferSize    = 81920
-	updateProgressReportStep    = 0.01
-	updateProgressReportWindow  = 100 * time.Millisecond
-	updateStalePartialPartAge   = 24 * time.Hour
-	updateInstallerCachePattern = "Wormhole-*-win-*-setup.exe"
+	updateRepositoryOwner      = "xBounceIT"
+	updateRepositoryName       = "wormhole"
+	updateCheckTimeout         = 30 * time.Second
+	updateDownloadTimeout      = 30 * time.Minute
+	updateDownloadBufferSize   = 81920
+	updateMaxInstallerBytes    = 2 * 1024 * 1024 * 1024
+	updateProgressReportStep   = 0.01
+	updateProgressReportWindow = 100 * time.Millisecond
+	updateStalePartialPartAge  = 24 * time.Hour
 )
+
+var updateInstallerCachePatterns = []string{
+	"Wormhole-*-win-*-setup.exe",
+	"Wormhole-*-linux-*-setup.AppImage",
+	"Wormhole-*-mac-*-setup.dmg",
+}
 
 // updateApiBaseURL is overridden by tests with a local server. The GitHub REST endpoint is the
 // same one the WinUI 3 app queries (base address api.github.com + repos/{owner}/{repo}/releases/latest).
@@ -35,9 +42,9 @@ type updateCheckRequest struct {
 	CurrentVersion string `json:"currentVersion"`
 }
 
-// updateCheckResponse mirrors WinUI 3's UpdateCheckResult record (Models/UpdateCheckResult.cs).
-// latestVersion is an empty string when the check found nothing newer; installer fields are only
-// populated when an installer asset for the running architecture exists.
+// updateCheckResponse is shared by every Electron host. latestVersion is empty when the check
+// found nothing newer; installer fields are populated only for a verified asset matching the
+// running operating system and architecture.
 type updateCheckResponse struct {
 	CurrentVersion    string `json:"currentVersion"`
 	LatestVersion     string `json:"latestVersion,omitempty"`
@@ -150,8 +157,32 @@ func updateTargetArchitecture() string {
 	}
 }
 
-func findInstallerAsset(release githubRelease, arch string) *githubReleaseAsset {
-	suffix := "-win-" + arch + "-setup.exe"
+func updateInstallerAssetSuffix(operatingSystem, arch string) string {
+	switch operatingSystem {
+	case "windows":
+		if arch == "x64" || arch == "arm64" {
+			return "-win-" + arch + "-setup.exe"
+		}
+	case "linux":
+		if arch == "x64" {
+			arch = "x86_64"
+		}
+		if arch == "x86_64" || arch == "arm64" {
+			return "-linux-" + arch + "-setup.AppImage"
+		}
+	case "darwin":
+		if arch == "x64" || arch == "arm64" {
+			return "-mac-universal-setup.dmg"
+		}
+	}
+	return ""
+}
+
+func findInstallerAsset(release githubRelease, operatingSystem, arch string) *githubReleaseAsset {
+	suffix := updateInstallerAssetSuffix(operatingSystem, arch)
+	if suffix == "" {
+		return nil
+	}
 	for index := range release.Assets {
 		asset := &release.Assets[index]
 		name := strings.TrimSpace(asset.Name)
@@ -213,19 +244,24 @@ func cleanupStalePartialDownloads(databasePath string) {
 
 func rotateInstallerCache(databasePath string, keepFileName string) {
 	cacheDirectory := updateCacheDirectory(databasePath)
-	entries, err := filepath.Glob(filepath.Join(cacheDirectory, updateInstallerCachePattern))
-	if err != nil {
-		return
-	}
-	for _, entry := range entries {
-		if strings.EqualFold(filepath.Base(entry), keepFileName) {
+	for _, pattern := range updateInstallerCachePatterns {
+		entries, err := filepath.Glob(filepath.Join(cacheDirectory, pattern))
+		if err != nil {
 			continue
 		}
-		_ = os.Remove(entry)
+		for _, entry := range entries {
+			if strings.EqualFold(filepath.Base(entry), keepFileName) {
+				continue
+			}
+			_ = os.Remove(entry)
+		}
 	}
 }
 
 func stripMarkOfTheWeb(path string) {
+	if runtime.GOOS != "windows" {
+		return
+	}
 	// Deleting the alternate data stream is exactly what the WinUI app does (File.Delete on
 	// "path:Zone.Identifier") so a downloaded installer never triggers SmartScreen blocks.
 	_ = os.Remove(path + ":Zone.Identifier")
@@ -293,40 +329,38 @@ func checkForUpdate(databasePath string, request updateCheckRequest) (updateChec
 			LatestVersion:  latestVersion.String(),
 		}, nil
 	}
-
-	asset := findInstallerAsset(release, arch)
-	if asset == nil || strings.TrimSpace(asset.BrowserDownloadUrl) == "" {
-		return updateCheckResponse{
-			CurrentVersion: currentVersion.String(),
-			LatestVersion:  latestVersion.String(),
-		}, nil
+	newerRelease := updateCheckResponse{
+		CurrentVersion: currentVersion.String(),
+		LatestVersion:  latestVersion.String(),
+		ReleaseTag:     release.TagName,
+		ReleaseName:    release.Name,
+		ReleaseUrl:     release.HtmlUrl,
+		ReleaseNotes:   release.Body,
 	}
 
-	var assetSize *int64
-	if asset.Size > 0 {
-		size := asset.Size
-		assetSize = &size
+	asset := findInstallerAsset(release, runtime.GOOS, arch)
+	if asset == nil || strings.TrimSpace(asset.BrowserDownloadUrl) == "" ||
+		asset.Size <= 0 || asset.Size > updateMaxInstallerBytes {
+		return newerRelease, nil
 	}
+
+	assetSize := asset.Size
 	sha256Sidecar := fetchSha256Sidecar(client, release, asset)
+	if sha256Sidecar == "" {
+		return newerRelease, nil
+	}
 
-	return updateCheckResponse{
-		CurrentVersion:    currentVersion.String(),
-		LatestVersion:     latestVersion.String(),
-		IsUpdateAvailable: true,
-		ReleaseTag:        release.TagName,
-		ReleaseName:       release.Name,
-		ReleaseUrl:        release.HtmlUrl,
-		ReleaseNotes:      release.Body,
-		InstallerUrl:      asset.BrowserDownloadUrl,
-		InstallerFileName: asset.Name,
-		InstallerSize:     assetSize,
-		InstallerSha256:   sha256Sidecar,
-	}, nil
+	newerRelease.IsUpdateAvailable = true
+	newerRelease.InstallerUrl = asset.BrowserDownloadUrl
+	newerRelease.InstallerFileName = asset.Name
+	newerRelease.InstallerSize = &assetSize
+	newerRelease.InstallerSha256 = sha256Sidecar
+	return newerRelease, nil
 }
 
 // fetchSha256Sidecar looks for "{installerName}.sha256" among the release assets and parses the
-// hash out of it. A missing or unreadable sidecar is not an error: the installer download then
-// proceeds without verification, matching WinUI's opportunistic behavior.
+// hash out of it. Missing or unreadable integrity metadata makes the asset unavailable for an
+// in-app update; release metadata remains visible so users can still inspect the release page.
 func fetchSha256Sidecar(client *http.Client, release githubRelease, installerAsset *githubReleaseAsset) string {
 	wanted := installerAsset.Name + ".sha256"
 	var sidecar *githubReleaseAsset
@@ -378,6 +412,15 @@ func serveUpdateDownload(databasePath string, input io.Reader, output io.Writer)
 		return errors.New("update download file name is invalid")
 	}
 	expectedSha := strings.ToLower(strings.TrimSpace(request.InstallerSha256))
+	if len(expectedSha) != sha256.Size*2 {
+		return errors.New("update download requires a valid SHA-256 digest")
+	}
+	if _, err := hex.DecodeString(expectedSha); err != nil {
+		return errors.New("update download requires a valid SHA-256 digest")
+	}
+	if request.InstallerSize <= 0 || request.InstallerSize > updateMaxInstallerBytes {
+		return errors.New("update download size is invalid")
+	}
 
 	cleanupStalePartialDownloads(databasePath)
 	cacheDirectory := updateCacheDirectory(databasePath)
@@ -394,7 +437,7 @@ func serveUpdateDownload(databasePath string, input io.Reader, output io.Writer)
 		return fmt.Errorf("cannot build the installer download request: %w", err)
 	}
 	httpRequest.Header.Set("User-Agent", "Wormhole-Electron")
-	response, err := http.DefaultClient.Do(httpRequest)
+	response, err := (&http.Client{Timeout: updateDownloadTimeout}).Do(httpRequest)
 	if err != nil {
 		return fmt.Errorf("cannot download the installer: %w", err)
 	}
@@ -403,13 +446,13 @@ func serveUpdateDownload(databasePath string, input io.Reader, output io.Writer)
 		return fmt.Errorf("installer download returned %s", response.Status)
 	}
 
-	total := response.ContentLength
-	if total <= 0 {
-		total = request.InstallerSize
+	if response.ContentLength > 0 && response.ContentLength != request.InstallerSize {
+		return fmt.Errorf(
+			"installer download size is invalid: expected %d bytes, got %d",
+			request.InstallerSize, response.ContentLength,
+		)
 	}
-	if total <= 0 {
-		total = -1
-	}
+	total := request.InstallerSize
 
 	file, err := os.OpenFile(partPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
@@ -428,6 +471,10 @@ func serveUpdateDownload(databasePath string, input io.Reader, output io.Writer)
 	for {
 		read, readErr := response.Body.Read(buffer)
 		if read > 0 {
+			if downloaded+int64(read) > request.InstallerSize {
+				removePartial()
+				return fmt.Errorf("installer download exceeded the expected size of %d bytes", request.InstallerSize)
+			}
 			if _, writeErr := file.Write(buffer[:read]); writeErr != nil {
 				removePartial()
 				return fmt.Errorf("cannot write the installer download: %w", writeErr)
@@ -456,20 +503,31 @@ func serveUpdateDownload(databasePath string, input io.Reader, output io.Writer)
 		_ = os.Remove(partPath)
 		return fmt.Errorf("cannot finish the installer download: %w", err)
 	}
+	if downloaded != request.InstallerSize {
+		_ = os.Remove(partPath)
+		return fmt.Errorf(
+			"installer download size is invalid: expected %d bytes, got %d",
+			request.InstallerSize, downloaded,
+		)
+	}
 
 	computedSha := hex.EncodeToString(hash.Sum(nil))
-	if expectedSha != "" {
-		if computedSha != expectedSha {
-			_ = os.Remove(partPath)
-			return fmt.Errorf(
-				"SHA-256 mismatch for %s. Expected %s, got %s.",
-				installerFileName, expectedSha, computedSha,
-			)
-		}
+	if computedSha != expectedSha {
+		_ = os.Remove(partPath)
+		return fmt.Errorf(
+			"SHA-256 mismatch for %s. Expected %s, got %s.",
+			installerFileName, expectedSha, computedSha,
+		)
 	}
 	if err := os.Rename(partPath, finalPath); err != nil {
 		_ = os.Remove(partPath)
 		return fmt.Errorf("cannot finalize the installer download: %w", err)
+	}
+	if runtime.GOOS == "linux" && strings.EqualFold(filepath.Ext(finalPath), ".AppImage") {
+		if err := os.Chmod(finalPath, 0o700); err != nil {
+			_ = os.Remove(finalPath)
+			return fmt.Errorf("cannot make the downloaded AppImage executable: %w", err)
+		}
 	}
 	stripMarkOfTheWeb(finalPath)
 	rotateInstallerCache(databasePath, installerFileName)

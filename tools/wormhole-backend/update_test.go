@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -75,17 +76,31 @@ func TestFindInstallerAsset(t *testing.T) {
 	release := githubRelease{Assets: []githubReleaseAsset{
 		{Name: "Wormhole-0.9.1-win-x64-setup.exe", BrowserDownloadUrl: "https://example/x64.exe", Size: 10},
 		{Name: "Wormhole-0.9.1-win-arm64-setup.exe", BrowserDownloadUrl: "https://example/arm64.exe"},
+		{Name: "Wormhole-0.9.1-linux-x86_64-setup.AppImage", BrowserDownloadUrl: "https://example/linux-x64"},
+		{Name: "Wormhole-0.9.1-linux-arm64-setup.AppImage", BrowserDownloadUrl: "https://example/linux-arm64"},
+		{Name: "Wormhole-0.9.1-mac-universal-setup.dmg", BrowserDownloadUrl: "https://example/mac"},
 		{Name: "Wormhole-0.9.1-win-x64-setup.exe.sha256", BrowserDownloadUrl: "https://example/x64.sha256"},
 		{Name: "README.txt"},
 		{Name: "wormhole-0.9.1-win-x64-setup.exe", BrowserDownloadUrl: "https://example/lower.exe"},
 	}}
-	if asset := findInstallerAsset(release, "x64"); asset == nil || asset.Name != "Wormhole-0.9.1-win-x64-setup.exe" {
-		t.Fatalf("x64 asset not found: %+v", asset)
+	for _, test := range []struct {
+		goos string
+		arch string
+		name string
+	}{
+		{goos: "windows", arch: "x64", name: "Wormhole-0.9.1-win-x64-setup.exe"},
+		{goos: "windows", arch: "arm64", name: "Wormhole-0.9.1-win-arm64-setup.exe"},
+		{goos: "linux", arch: "x64", name: "Wormhole-0.9.1-linux-x86_64-setup.AppImage"},
+		{goos: "linux", arch: "arm64", name: "Wormhole-0.9.1-linux-arm64-setup.AppImage"},
+		{goos: "darwin", arch: "x64", name: "Wormhole-0.9.1-mac-universal-setup.dmg"},
+		{goos: "darwin", arch: "arm64", name: "Wormhole-0.9.1-mac-universal-setup.dmg"},
+	} {
+		asset := findInstallerAsset(release, test.goos, test.arch)
+		if asset == nil || asset.Name != test.name {
+			t.Fatalf("%s/%s asset = %+v, want %q", test.goos, test.arch, asset, test.name)
+		}
 	}
-	if asset := findInstallerAsset(release, "arm64"); asset == nil || asset.Name != "Wormhole-0.9.1-win-arm64-setup.exe" {
-		t.Fatalf("arm64 asset not found: %+v", asset)
-	}
-	if asset := findInstallerAsset(release, "x86"); asset != nil {
+	if asset := findInstallerAsset(release, "linux", "x86"); asset != nil {
 		t.Fatalf("x86 asset should not match: %+v", asset)
 	}
 }
@@ -118,6 +133,7 @@ func TestParseShaSidecar(t *testing.T) {
 
 func TestCheckForUpdate(t *testing.T) {
 	hash := strings.Repeat("cd", 32)
+	installerName := "Wormhole-9.9.9" + updateInstallerAssetSuffix(runtime.GOOS, updateTargetArchitecture())
 	var server *httptest.Server
 	server = httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		switch {
@@ -131,12 +147,12 @@ func TestCheckForUpdate(t *testing.T) {
 				Body:    "Release notes",
 				HtmlUrl: "https://github.com/xBounceIT/wormhole/releases/tag/v9.9.9",
 				Assets: []githubReleaseAsset{
-					{Name: "Wormhole-9.9.9-win-x64-setup.exe", BrowserDownloadUrl: server.URL + "/installer.exe", Size: 123},
-					{Name: "Wormhole-9.9.9-win-x64-setup.exe.sha256", BrowserDownloadUrl: server.URL + "/installer.sha256"},
+					{Name: installerName, BrowserDownloadUrl: server.URL + "/installer", Size: 123},
+					{Name: installerName + ".sha256", BrowserDownloadUrl: server.URL + "/installer.sha256"},
 				},
 			})
 		case strings.HasSuffix(request.URL.Path, "/installer.sha256"):
-			_, _ = writer.Write([]byte(hash + "  Wormhole-9.9.9-win-x64-setup.exe\n"))
+			_, _ = writer.Write([]byte(hash + "  " + installerName + "\n"))
 		default:
 			http.NotFound(writer, request)
 		}
@@ -157,7 +173,7 @@ func TestCheckForUpdate(t *testing.T) {
 	if result.LatestVersion != "9.9.9" || result.CurrentVersion != "0.9.0" {
 		t.Fatalf("unexpected versions: %+v", result)
 	}
-	if result.InstallerFileName != "Wormhole-9.9.9-win-x64-setup.exe" ||
+	if result.InstallerFileName != installerName ||
 		result.InstallerUrl == "" || result.InstallerSize == nil || *result.InstallerSize != 123 {
 		t.Fatalf("installer fields missing: %+v", result)
 	}
@@ -171,6 +187,58 @@ func TestCheckForUpdate(t *testing.T) {
 	_, _, lastCheck, _ := mustReadAppSettings(t, databasePath)
 	if lastCheck == nil || *lastCheck == "" {
 		t.Fatal("LastUpdateCheck was not persisted after a successful check")
+	}
+}
+
+func TestCheckForUpdateRejectsInstallerWithoutDigest(t *testing.T) {
+	installerName := "Wormhole-9.9.9" + updateInstallerAssetSuffix(runtime.GOOS, updateTargetArchitecture())
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(writer).Encode(githubRelease{
+			TagName: "v9.9.9",
+			HtmlUrl: "https://github.com/xBounceIT/wormhole/releases/tag/v9.9.9",
+			Assets: []githubReleaseAsset{{
+				Name: installerName, BrowserDownloadUrl: "https://example.invalid/installer", Size: 123,
+			}},
+		})
+	}))
+	defer server.Close()
+	oldBaseURL := updateApiBaseURL
+	updateApiBaseURL = server.URL
+	defer func() { updateApiBaseURL = oldBaseURL }()
+
+	result, err := checkForUpdate(filepath.Join(t.TempDir(), "wormhole.db"), updateCheckRequest{CurrentVersion: "0.9.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsUpdateAvailable || result.InstallerUrl != "" || result.InstallerFileName != "" || result.InstallerSha256 != "" {
+		t.Fatalf("unverified installer was exposed: %+v", result)
+	}
+	if result.LatestVersion != "9.9.9" || result.ReleaseUrl == "" {
+		t.Fatalf("release metadata was lost with the rejected installer: %+v", result)
+	}
+}
+
+func TestCheckForUpdatePreservesMetadataWithoutCompatibleAsset(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(writer).Encode(githubRelease{
+			TagName: "v9.9.9",
+			Name:    "Wormhole 9.9.9",
+			Body:    "Release notes",
+			HtmlUrl: "https://github.com/xBounceIT/wormhole/releases/tag/v9.9.9",
+		})
+	}))
+	defer server.Close()
+	oldBaseURL := updateApiBaseURL
+	updateApiBaseURL = server.URL
+	defer func() { updateApiBaseURL = oldBaseURL }()
+
+	result, err := checkForUpdate(filepath.Join(t.TempDir(), "wormhole.db"), updateCheckRequest{CurrentVersion: "0.9.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsUpdateAvailable || result.LatestVersion != "9.9.9" || result.ReleaseUrl == "" ||
+		result.ReleaseNotes != "Release notes" {
+		t.Fatalf("newer release metadata was not preserved: %+v", result)
 	}
 }
 
@@ -241,10 +309,12 @@ func TestServeUpdateDownload(t *testing.T) {
 
 	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
 	output := &bytes.Buffer{}
+	installerName := "Wormhole-9.9.9" + updateInstallerAssetSuffix(runtime.GOOS, updateTargetArchitecture())
 	request := updateDownloadRequest{
-		InstallerUrl:      server.URL + "/Wormhole-9.9.9-win-x64-setup.exe",
-		InstallerFileName: "Wormhole-9.9.9-win-x64-setup.exe",
+		InstallerUrl:      server.URL + "/" + installerName,
+		InstallerFileName: installerName,
 		InstallerSha256:   hash,
+		InstallerSize:     int64(len(payload)),
 	}
 	encoded, _ := json.Marshal(request)
 	if err := serveUpdateDownload(databasePath, bytes.NewReader(encoded), output); err != nil {
@@ -279,6 +349,15 @@ func TestServeUpdateDownload(t *testing.T) {
 	if !bytes.Equal(installed, payload) {
 		t.Fatal("installed payload does not match the served bytes")
 	}
+	if runtime.GOOS == "linux" && filepath.Ext(complete.Path) == ".AppImage" {
+		info, statErr := os.Stat(complete.Path)
+		if statErr != nil {
+			t.Fatal(statErr)
+		}
+		if info.Mode().Perm()&0o100 == 0 {
+			t.Fatalf("downloaded AppImage is not executable: mode=%v", info.Mode())
+		}
+	}
 	if _, err := os.Stat(complete.Path + ".part"); !os.IsNotExist(err) {
 		t.Fatal("partial file was not removed")
 	}
@@ -297,6 +376,7 @@ func TestServeUpdateDownloadShaMismatch(t *testing.T) {
 		InstallerUrl:      server.URL + "/Wormhole-9.9.9-win-x64-setup.exe",
 		InstallerFileName: "Wormhole-9.9.9-win-x64-setup.exe",
 		InstallerSha256:   strings.Repeat("00", 32),
+		InstallerSize:     int64(len("payload")),
 	}
 	encoded, _ := json.Marshal(request)
 	err := serveUpdateDownload(databasePath, bytes.NewReader(encoded), output)
@@ -307,6 +387,38 @@ func TestServeUpdateDownloadShaMismatch(t *testing.T) {
 	entries, _ := os.ReadDir(cache)
 	if len(entries) != 0 {
 		t.Fatalf("mismatched download left files behind: %v", entries)
+	}
+}
+
+func TestServeUpdateDownloadRequiresDigest(t *testing.T) {
+	t.Parallel()
+	request, _ := json.Marshal(updateDownloadRequest{
+		InstallerUrl:      "https://example.invalid/Wormhole-9.9.9-linux-x86_64-setup.AppImage",
+		InstallerFileName: "Wormhole-9.9.9-linux-x86_64-setup.AppImage",
+	})
+	err := serveUpdateDownload(filepath.Join(t.TempDir(), "wormhole.db"), bytes.NewReader(request), &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "requires a valid SHA-256") {
+		t.Fatalf("missing update digest was accepted: %v", err)
+	}
+}
+
+func TestServeUpdateDownloadRejectsUnexpectedSize(t *testing.T) {
+	t.Parallel()
+	payload := []byte("payload")
+	hashBytes := sha256.Sum256(payload)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = writer.Write(payload)
+	}))
+	defer server.Close()
+	request, _ := json.Marshal(updateDownloadRequest{
+		InstallerUrl:      server.URL + "/Wormhole-9.9.9-win-x64-setup.exe",
+		InstallerFileName: "Wormhole-9.9.9-win-x64-setup.exe",
+		InstallerSha256:   hex.EncodeToString(hashBytes[:]),
+		InstallerSize:     int64(len(payload) + 1),
+	})
+	err := serveUpdateDownload(filepath.Join(t.TempDir(), "wormhole.db"), bytes.NewReader(request), &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "size is invalid") {
+		t.Fatalf("unexpected update size was accepted: %v", err)
 	}
 }
 
@@ -385,16 +497,25 @@ func TestUpdateCacheMaintenanceRemovesOnlyStaleAndSupersededFiles(t *testing.T) 
 	}
 	cleanupStalePartialDownloads(filepath.Join(t.TempDir(), "missing.db"))
 
-	keepName := "Wormhole-2.0.0-win-x64-setup.exe"
-	removeName := "Wormhole-1.0.0-win-x64-setup.exe"
-	for _, name := range []string{keepName, removeName} {
+	keepName := "Wormhole-2.0.0-linux-x86_64-setup.AppImage"
+	removeNames := []string{
+		"Wormhole-1.0.0-win-x64-setup.exe",
+		"Wormhole-1.0.0-linux-x86_64-setup.AppImage",
+		"Wormhole-1.0.0-mac-universal-setup.dmg",
+	}
+	for _, name := range append([]string{keepName}, removeNames...) {
 		if err := os.WriteFile(filepath.Join(cache, name), []byte("installer"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
 	rotateInstallerCache(databasePath, keepName)
-	if !fileExists(filepath.Join(cache, keepName)) || fileExists(filepath.Join(cache, removeName)) {
-		t.Fatal("installer cache rotation did not preserve only the selected installer")
+	if !fileExists(filepath.Join(cache, keepName)) {
+		t.Fatal("installer cache rotation removed the selected installer")
+	}
+	for _, removeName := range removeNames {
+		if fileExists(filepath.Join(cache, removeName)) {
+			t.Fatalf("installer cache rotation kept superseded %q", removeName)
+		}
 	}
 	if architecture := updateTargetArchitecture(); architecture != "x64" && architecture != "arm64" && architecture != "" {
 		t.Fatalf("unexpected update architecture %q", architecture)

@@ -82,6 +82,7 @@ import {
 } from './serial.js';
 import { WebSessionAttemptTracker } from './web-session-attempt.js';
 import { getInSessionNavigationUrl } from './web-new-window-navigation.js';
+import { isSafeUpdateInstallerPath, updateInstallAction } from './update-installer.js';
 import { parseWorkspaceRdpSettings, type WorkspaceRdpSettings } from './workspace-rdp-contract.js';
 import type {
   RdpBackendEvent,
@@ -3632,12 +3633,7 @@ function updateCacheRoot(): string {
 }
 
 function isSafeInstallerPath(value: string): boolean {
-  const installerPath = path.resolve(value);
-  const cacheRoot = path.resolve(updateCacheRoot());
-  return (
-    path.extname(installerPath).toLowerCase() === '.exe' &&
-    (installerPath === cacheRoot || installerPath.startsWith(cacheRoot + path.sep))
-  );
+  return isSafeUpdateInstallerPath(value, updateCacheRoot(), process.platform);
 }
 
 // downloadUpdateInstaller runs a dedicated backend process that streams the installer to the
@@ -3739,18 +3735,38 @@ function downloadUpdateInstaller(
   });
 }
 
-function launchInstallerAndExit(installerPath: string): void {
-  // Detached + unref so the Inno Setup process survives this app's immediate exit, exactly like
-  // the WinUI app's Process.Start + Environment.Exit(0). /RESTARTAPP is handled by the installer
-  // script, which relaunches the newly installed app when present.
-  const child = spawn(installerPath, ['/SILENT', '/RESTARTAPP'], {
-    detached: true,
-    stdio: 'ignore',
-    windowsHide: true,
-  });
-  child.unref();
-  skipQuitConfirmation = true;
-  app.quit();
+async function handleDownloadedUpdate(installerPath: string): Promise<{ appWillQuit: boolean }> {
+  const action = updateInstallAction(process.platform);
+  if (action === 'execute') {
+    // Detached + unref lets Inno Setup survive the immediate exit. /RESTARTAPP relaunches the
+    // newly installed Windows build when present.
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn(installerPath, ['/SILENT', '/RESTARTAPP'], {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true,
+      });
+      child.once('error', reject);
+      child.once('spawn', () => {
+        child.removeListener('error', reject);
+        child.unref();
+        resolve();
+      });
+    });
+    skipQuitConfirmation = true;
+    app.quit();
+    return { appWillQuit: true };
+  }
+  if (action === 'open') {
+    const error = await shell.openPath(installerPath);
+    if (error) throw new Error(error);
+    return { appWillQuit: false };
+  }
+  if (action === 'reveal') {
+    shell.showItemInFolder(installerPath);
+    return { appWillQuit: false };
+  }
+  throw new Error('Updates are not supported on this platform.');
 }
 
 function scheduleStartupUpdateCheck(settings: AppSettings): void {
@@ -6821,11 +6837,18 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       typeof value.installerSize === 'number' && Number.isInteger(value.installerSize)
         ? value.installerSize
         : null;
+    const expected = latestUpdateCheck;
     if (
       !installerUrl ||
       !installerFileName ||
       path.basename(installerFileName) !== installerFileName ||
-      !/^https:\/\//i.test(installerUrl)
+      !/^https:\/\//i.test(installerUrl) ||
+      !/^[0-9a-f]{64}$/i.test(installerSha256) ||
+      !expected?.isUpdateAvailable ||
+      installerUrl !== expected.installerUrl ||
+      installerFileName !== expected.installerFileName ||
+      installerSha256.toLowerCase() !== expected.installerSha256?.toLowerCase() ||
+      installerSize !== (expected.installerSize ?? null)
     ) {
       throw new Error('The update download request is invalid.');
     }
@@ -6834,7 +6857,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       {
         installerUrl,
         installerFileName,
-        ...(installerSha256 ? { installerSha256 } : {}),
+        installerSha256,
         ...(installerSize !== null ? { installerSize } : {}),
       },
       (downloaded, total) => broadcastUpdateProgress(target, downloaded, total),
@@ -6847,8 +6870,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     }
     const installerPath = path.resolve(value.path);
     if (!existsSync(installerPath)) throw new Error('The installer was not found.');
-    launchInstallerAndExit(installerPath);
-    return { launched: true };
+    return handleDownloadedUpdate(installerPath);
   });
 
   ipcMain.handle('update:open-release', async (_event, value: unknown) => {

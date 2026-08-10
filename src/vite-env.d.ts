@@ -946,7 +946,7 @@ interface Window {
       installerSha256?: string;
       installerSize?: number | null;
     }): Promise<string>;
-    installUpdate(installerPath: string): Promise<{ launched: boolean }>;
+    installUpdate(installerPath: string): Promise<{ appWillQuit: boolean }>;
     openExternal(url: string): Promise<void>;
     onUpdateResult(listener: (result: WormholeUpdateCheckResult) => void): () => void;
     onUpdateProgress(

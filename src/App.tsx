@@ -45,6 +45,11 @@ import {
 import { writeClipboardText } from './clipboard';
 import { buildMcpConfig, type McpClient } from './mcp-config';
 import {
+  hasNewerReleaseWithoutInstaller,
+  isUpdateInstallable,
+  shouldOfferUpdate,
+} from './update-state';
+import {
   normalizeTerminalPasteText,
   shouldAutoCopyTerminalSelection,
   shouldUseTerminalClipboardShortcut,
@@ -1952,9 +1957,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   }, []);
 
   const updateBannerVisible = Boolean(
-    updateResult?.isUpdateAvailable &&
-    updateResult.latestVersion &&
-    updateResult.latestVersion !== skippedUpdateVersion,
+    updateResult && shouldOfferUpdate(updateResult, skippedUpdateVersion),
   );
 
   async function handleCheckForUpdates() {
@@ -1969,7 +1972,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           ? "Couldn't reach the update server. Try again later."
           : result.isUpdateAvailable
             ? `Update available: ${result.latestVersion}`
-            : "You're on the latest version.",
+            : hasNewerReleaseWithoutInstaller(result)
+              ? `Wormhole ${result.latestVersion} is available, but no verified installer is published for this platform.`
+              : "You're on the latest version.",
       );
       const settings = await window.wormhole.readAppSettings();
       setLastUpdateCheck(settings.lastUpdateCheck);
@@ -2024,10 +2029,17 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         ...(latest.installerSha256 ? { installerSha256: latest.installerSha256 } : {}),
         ...(latest.installerSize != null ? { installerSize: latest.installerSize } : {}),
       });
-      setUpdateStatus('Launching installer…');
-      // The app quits immediately after launching the installer, so the IPC reply may never
-      // arrive. Fire it and let the status line speak for itself.
-      void window.wormhole.installUpdate(installerPath);
+      const platform = window.wormhole.platform;
+      setUpdateStatus(platform === 'linux' ? 'Opening download location…' : 'Launching installer…');
+      const installation = await window.wormhole.installUpdate(installerPath);
+      if (installation.appWillQuit) return;
+      setUpdateStatus(
+        platform === 'darwin'
+          ? 'Installer opened. Drag Wormhole to Applications to finish the update.'
+          : 'AppImage downloaded. Replace your current AppImage with the verified download.',
+      );
+      setUpdateBusy(false);
+      setUpdateDownloadProgress(null);
     } catch (error) {
       setUpdateStatus(`Install failed: ${error instanceof Error ? error.message : String(error)}`);
       setUpdateBusy(false);
@@ -14867,7 +14879,10 @@ function SettingsPage({
       setRetentionError('Log retention must be a whole number between 1 and 365 days.');
       return;
     }
-    if (days === saved) return;
+    if (days === saved) {
+      setRetentionError('');
+      return;
+    }
     setRetentionBusy(true);
     setRetentionError('');
     try {
@@ -15037,10 +15052,12 @@ function SettingsPage({
     window.wormhole?.platform ?? '',
   );
   const mcpConfigDetails = mcpClientCopyDetails(mcpClient);
-  const updateAvailable = Boolean(
-    update.result?.isUpdateAvailable &&
-    update.result.latestVersion &&
-    update.result.latestVersion !== update.skippedUpdateVersion,
+  const updateAvailable = Boolean(update.result && isUpdateInstallable(update.result));
+  const updateDismissible = Boolean(
+    update.result && shouldOfferUpdate(update.result, update.skippedUpdateVersion),
+  );
+  const newerReleaseWithoutInstaller = Boolean(
+    update.result && hasNewerReleaseWithoutInstaller(update.result),
   );
   const backupExportPasswordConfirmed = backupExportPasswordsMatch(
     backupExportPassword,
@@ -15604,17 +15621,17 @@ function SettingsPage({
                 onClick={onInstallUpdate}
                 size="sm"
               >
-                Install update
+                {window.wormhole?.platform === 'linux' ? 'Download AppImage' : 'Install update'}
               </Button>
               <Button
-                disabled={!updateAvailable}
+                disabled={!update.result?.releaseUrl}
                 onClick={onOpenReleaseNotes}
                 size="sm"
                 variant="outline"
               >
                 View release notes
               </Button>
-              {updateAvailable ? (
+              {updateDismissible ? (
                 <Button disabled={update.busy} onClick={onDismissUpdate} size="sm" variant="ghost">
                   Not now
                 </Button>
@@ -15632,9 +15649,11 @@ function SettingsPage({
                 <p className="text-[11px] leading-relaxed text-muted-foreground">
                   {update.result?.checkFailed
                     ? "Couldn't reach the update server. Try again later."
-                    : update.result?.latestVersion
-                      ? "You're on the latest version."
-                      : 'Update information will appear here when a new release is available.'}
+                    : newerReleaseWithoutInstaller
+                      ? `Wormhole ${update.result?.latestVersion} is available, but no verified installer is published for this platform.`
+                      : update.result?.latestVersion
+                        ? "You're on the latest version."
+                        : 'Update information will appear here when a new release is available.'}
                 </p>
               )}
             </Card>
