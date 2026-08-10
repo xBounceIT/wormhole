@@ -846,6 +846,9 @@ func TestBackupExportProtectsTheDatabaseAndSiblingFiles(t *testing.T) {
 func TestBackupWorkspaceStoragePathUsesPlatformCaseRules(t *testing.T) {
 	directory := t.TempDir()
 	databasePath := filepath.Join(directory, "wormhole.db")
+	if err := os.MkdirAll(filepath.Join(directory, "keys"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	caseVariant := filepath.Join(directory, "KEYS", "credential.dpapi")
 	wantReserved := runtime.GOOS == "windows" || runtime.GOOS == "darwin"
 	if reserved := isBackupWorkspaceStoragePath(databasePath, caseVariant); reserved != wantReserved {
