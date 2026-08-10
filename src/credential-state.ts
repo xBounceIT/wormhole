@@ -3,9 +3,67 @@ type NamedCredential = {
   name: string;
 };
 
+type SavedCredential = NamedCredential & {
+  provider: string;
+};
+
+type CredentialSelectionOption = {
+  value: string;
+  label: string;
+};
+
 export type CredentialKind = 'password' | 'sshKey' | 'unsupported';
 export type CredentialProtocol = 'ssh' | 'rdp' | 'vnc';
 export type SshAutoSudoMode = 'inherit' | 'on' | 'off';
+
+export function buildConnectionCredentialSelectionOptions(
+  credentials: SavedCredential[],
+  includeInheritance: boolean,
+): CredentialSelectionOption[] {
+  return [
+    ...(includeInheritance ? [{ value: 'inherit', label: 'Inherit from folder' }] : []),
+    ...credentials.map((credential) => ({
+      value: credential.id,
+      label: `${credential.name} · ${credential.provider}`,
+    })),
+  ];
+}
+
+export function connectionUsesSavedCredentials(
+  credentialMode: number | undefined,
+  hasInlineCredential: boolean | undefined,
+): boolean {
+  return credentialMode !== 1 && hasInlineCredential !== true;
+}
+
+export function connectionCredentialSelectionAfterSavedToggle(
+  useSavedCredentials: boolean,
+  editorMode: 'saved' | 'quick',
+  currentSelection: string,
+): string {
+  if (useSavedCredentials && editorMode === 'saved' && currentSelection === 'none') {
+    return 'inherit';
+  }
+  return currentSelection;
+}
+
+export function connectionInlinePasswordAction(
+  useSavedCredentials: boolean,
+  protocol: string,
+  inlinePassword: string,
+  hasInlineCredential: boolean | undefined,
+): 'preserve' | 'set' | 'clear' {
+  const supportsInlineCredentials = protocol === 'ssh' || protocol === 'rdp';
+  if (useSavedCredentials || !supportsInlineCredentials) return 'clear';
+  if (inlinePassword) return 'set';
+  return hasInlineCredential ? 'preserve' : 'clear';
+}
+
+export function connectionInlinePasswordPlaceholder(
+  hasInlineCredential: boolean | undefined,
+): string {
+  return hasInlineCredential ? 'Leave blank to keep stored password' : '(optional)';
+}
 
 export function credentialCanUseProtocol(
   kind: CredentialKind,

@@ -22,6 +22,11 @@ import { backupExportPasswordsMatch } from './backup-state';
 import wormholeIcon from '../Assets/Wormhole.png';
 import bitwardenIcon from '../Assets/Bitwarden/bitwarden-icon.png';
 import {
+  buildConnectionCredentialSelectionOptions,
+  connectionCredentialSelectionAfterSavedToggle,
+  connectionInlinePasswordAction,
+  connectionInlinePasswordPlaceholder,
+  connectionUsesSavedCredentials,
   credentialCanUseProtocol,
   effectiveSshAutoSudoMode,
   mergeCredential,
@@ -1805,6 +1810,13 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     () => filterTree(tree, searchText.trim().toLowerCase()),
     [searchText, tree],
   );
+  const editingConnectionHasInlineCredential = useMemo(
+    () =>
+      editingConnectionId
+        ? findTreeNode(tree, editingConnectionId)?.hasInlineCredential === true
+        : false,
+    [editingConnectionId, tree],
+  );
 
   useEffect(() => () => sidebarWriter.cancel(), [sidebarWriter]);
   useEffect(() => {
@@ -1870,15 +1882,8 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     const options = isCredentialProtocol(newConnectionForm.protocol)
       ? credentialOptions[newConnectionForm.protocol]
       : [];
-    return [
-      { value: 'inherit', label: 'Inherit from folder' },
-      { value: 'none', label: 'No saved credential' },
-      ...options.map((credential) => ({
-        value: credential.id,
-        label: `${credential.name} · ${credential.provider}`,
-      })),
-    ];
-  }, [credentialOptions, newConnectionForm.protocol]);
+    return buildConnectionCredentialSelectionOptions(options, connectionEditorMode === 'saved');
+  }, [connectionEditorMode, credentialOptions, newConnectionForm.protocol]);
   const selectedConnectionCredential = useMemo(() => {
     const selection = newConnectionForm.credential;
     if (selection === 'inherit' || selection === 'none') return undefined;
@@ -5251,7 +5256,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       sshAutoSudo: autoSudoModeFor(node.sshAutoSudo),
       httpIgnoreCertErrors: node.httpIgnoreCertErrors === true,
       tunnel: tunnelModeFor(node),
-      useSavedCredentials: !node.hasInlineCredential,
+      useSavedCredentials: connectionUsesSavedCredentials(
+        node.credentialMode,
+        node.hasInlineCredential,
+      ),
       credential: credentialSelectionFor(node),
       serial: serialSettingsFromNode(node),
       rdp: { ...defaultRdpSettings, ...(node.rdp ?? {}) },
@@ -5503,19 +5511,12 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       if (!window.wormhole) throw new Error('The workspace service is unavailable.');
       const tunnel = tunnelValueFor(connectionTunnel);
       const credential = credentialSettingsFor(connectionCredential);
-      const usingInlinePassword =
-        !newConnectionForm.useSavedCredentials &&
-        (newConnectionForm.protocol === 'ssh' || newConnectionForm.protocol === 'rdp');
-      const inlinePasswordAction: 'preserve' | 'set' | 'clear' | null = usingInlinePassword
-        ? newConnectionForm.inlinePassword
-          ? 'set'
-          : editingNode?.hasInlineCredential
-            ? 'preserve'
-            : null
-        : 'clear';
-      if (!inlinePasswordAction) {
-        throw new Error('Enter a password for this connection.');
-      }
+      const inlinePasswordAction = connectionInlinePasswordAction(
+        newConnectionForm.useSavedCredentials,
+        newConnectionForm.protocol,
+        newConnectionForm.inlinePassword,
+        editingNode?.hasInlineCredential,
+      );
       const nodeWrite = {
         parentId: newConnectionForm.folder,
         name,
@@ -7038,12 +7039,18 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                         <label className="flex items-center gap-2 text-xs">
                           <Checkbox
                             checked={newConnectionForm.useSavedCredentials}
-                            onCheckedChange={(checked) =>
+                            onCheckedChange={(checked) => {
+                              const useSavedCredentials = checked === true;
                               setNewConnectionForm((form) => ({
                                 ...form,
-                                useSavedCredentials: checked === true,
-                              }))
-                            }
+                                useSavedCredentials,
+                                credential: connectionCredentialSelectionAfterSavedToggle(
+                                  useSavedCredentials,
+                                  connectionEditorMode,
+                                  form.credential,
+                                ),
+                              }));
+                            }}
                           />
                           <span>Use saved credentials</span>
                         </label>
@@ -7060,13 +7067,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                                   credential,
                                 }))
                               }
-                              options={
-                                connectionEditorMode === 'quick'
-                                  ? connectionCredentialSelectionOptions.filter(
-                                      (option) => option.value !== 'inherit',
-                                    )
-                                  : connectionCredentialSelectionOptions
-                              }
+                              options={connectionCredentialSelectionOptions}
                               placeholder="Select a credential"
                               searchPlaceholder="Search credentials…"
                               value={newConnectionForm.credential}
@@ -7105,9 +7106,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                                 inlinePassword: event.target.value,
                               }))
                             }
-                            placeholder={
-                              editingConnectionId ? 'Leave blank to keep stored password' : ''
-                            }
+                            placeholder={connectionInlinePasswordPlaceholder(
+                              editingConnectionHasInlineCredential,
+                            )}
                             type="password"
                             value={newConnectionForm.inlinePassword}
                           />

@@ -2,6 +2,11 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  buildConnectionCredentialSelectionOptions,
+  connectionCredentialSelectionAfterSavedToggle,
+  connectionInlinePasswordAction,
+  connectionInlinePasswordPlaceholder,
+  connectionUsesSavedCredentials,
   credentialCanUseProtocol,
   effectiveSshAutoSudoMode,
   mergeCredential,
@@ -15,6 +20,59 @@ import {
   formatBitwardenSyncResult,
   formatBitwardenVaultStatus,
 } from '../src/bitwarden-cli-view.ts';
+
+test('connection credential choices expose inheritance and saved credentials only', () => {
+  assert.deepEqual(
+    buildConnectionCredentialSelectionOptions(
+      [{ id: 'credential-1', name: 'Server account', provider: 'Bitwarden' }],
+      true,
+    ),
+    [
+      { value: 'inherit', label: 'Inherit from folder' },
+      { value: 'credential-1', label: 'Server account · Bitwarden' },
+    ],
+  );
+  assert.deepEqual(
+    buildConnectionCredentialSelectionOptions(
+      [{ id: 'credential-1', name: 'Server account', provider: 'Bitwarden' }],
+      false,
+    ),
+    [{ value: 'credential-1', label: 'Server account · Bitwarden' }],
+  );
+});
+
+test('connections without a saved or inline credential reopen with saved credentials disabled', () => {
+  assert.equal(connectionUsesSavedCredentials(1, false), false);
+  assert.equal(connectionUsesSavedCredentials(1, true), false);
+  assert.equal(connectionUsesSavedCredentials(0, false), true);
+  assert.equal(connectionUsesSavedCredentials(2, false), true);
+  assert.equal(connectionUsesSavedCredentials(undefined, true), false);
+});
+
+test('enabling saved credentials replaces the removed connection-only none selection', () => {
+  assert.equal(connectionCredentialSelectionAfterSavedToggle(true, 'saved', 'none'), 'inherit');
+  assert.equal(connectionCredentialSelectionAfterSavedToggle(false, 'saved', 'none'), 'none');
+  assert.equal(connectionCredentialSelectionAfterSavedToggle(true, 'quick', 'none'), 'none');
+  assert.equal(
+    connectionCredentialSelectionAfterSavedToggle(true, 'saved', 'credential-1'),
+    'credential-1',
+  );
+});
+
+test('blank manual credential fields clear an absent password and preserve an existing one', () => {
+  assert.equal(connectionInlinePasswordAction(false, 'ssh', '', false), 'clear');
+  assert.equal(connectionInlinePasswordAction(false, 'rdp', '', undefined), 'clear');
+  assert.equal(connectionInlinePasswordAction(false, 'ssh', '', true), 'preserve');
+  assert.equal(connectionInlinePasswordAction(false, 'rdp', 'secret', false), 'set');
+  assert.equal(connectionInlinePasswordAction(true, 'ssh', 'ignored', true), 'clear');
+  assert.equal(connectionInlinePasswordAction(false, 'vnc', 'ignored', true), 'clear');
+});
+
+test('blank password copy only promises preservation when an inline password exists', () => {
+  assert.equal(connectionInlinePasswordPlaceholder(true), 'Leave blank to keep stored password');
+  assert.equal(connectionInlinePasswordPlaceholder(false), '(optional)');
+  assert.equal(connectionInlinePasswordPlaceholder(undefined), '(optional)');
+});
 
 test('credential merge matches SQLite BINARY ordering for Unicode names', () => {
   const merged = mergeCredential(
