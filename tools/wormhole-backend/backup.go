@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -2028,42 +2029,49 @@ func restoreBackupSecretsContext(
 				fmt.Sprintf("Private key for credential %s did not match a local SSH key profile and was skipped.", id))
 			continue
 		}
-		path := credentialPrivateKeyPath(databasePath, id)
-		passphrase := passwordSnapshots[id]
-		_, creating := insertedCredentials[id]
-		repairing := !creating
-		if repairing {
-			existing, err := readBackupPrivateKey(path)
-			if err == nil {
-				clearBytes(existing)
-				if !passphrase.found {
-					continue
-				}
-				shouldRestore, warning, err := shouldRestoreBackupPassword(
-					database, id, insertedCredentials, state.credentialIDs,
-				)
-				if warning != "" {
-					addBackupWarning(result, warning)
-				}
-				if err != nil {
-					return err
-				}
-				if !shouldRestore {
-					continue
-				}
-			}
-			if err != nil && !errors.Is(err, os.ErrNotExist) {
-				addBackupWarning(result,
-					fmt.Sprintf("Existing private key for credential %s could not be read; restoring it from backup.", id))
-			}
-			repairing = true
-		}
 		keyBytes, err := base64.StdEncoding.DecodeString(entry.DataB64)
 		if err != nil || len(keyBytes) == 0 || len(keyBytes) > maxSshPrivateKeyBytes {
 			clearBytes(keyBytes)
 			addBackupWarning(result,
 				fmt.Sprintf("Private key for credential %s was malformed and was skipped.", id))
 			continue
+		}
+		path := credentialPrivateKeyPath(databasePath, id)
+		passphrase := passwordSnapshots[id]
+		_, creating := insertedCredentials[id]
+		repairing := !creating
+		if repairing {
+			existing, readErr := readBackupPrivateKey(path)
+			if readErr == nil {
+				matchesBackup := bytes.Equal(existing, keyBytes)
+				clearBytes(existing)
+				if matchesBackup && passphrase.found {
+					shouldRestore, warning, err := shouldRestoreBackupPassword(
+						database, id, insertedCredentials, state.credentialIDs,
+					)
+					if warning != "" {
+						addBackupWarning(result, warning)
+					}
+					if err != nil {
+						clearBytes(keyBytes)
+						return err
+					}
+					if shouldRestore {
+						if err := storeBackupPassword(database, id, passphrase.password); err != nil {
+							clearBytes(keyBytes)
+							return fmt.Errorf("Could not restore an SSH key passphrase: %w", err)
+						}
+						result.PasswordsImported++
+					}
+				}
+				clearBytes(keyBytes)
+				continue
+			}
+			if !errors.Is(readErr, os.ErrNotExist) {
+				addBackupWarning(result,
+					fmt.Sprintf("Existing private key for credential %s could not be read; restoring it from backup.", id))
+			}
+			repairing = true
 		}
 		if repairing && passphrase.seen && !passphrase.found {
 			clearBytes(keyBytes)

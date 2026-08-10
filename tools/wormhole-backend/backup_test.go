@@ -617,7 +617,7 @@ func TestBackupKeyRepairClearsPassphraseMissingFromSnapshot(t *testing.T) {
 	clearBytes(key)
 }
 
-func TestBackupKeyPassphraseRepairRestoresMatchingReadableKeySnapshot(t *testing.T) {
+func TestBackupReimportPreservesReadableReplacementWithoutSavedPassphrase(t *testing.T) {
 	installBackupTestSecretStore(t)
 	sourcePath := filepath.Join(t.TempDir(), "source.db")
 	source := openBackupTestDatabase(t, sourcePath)
@@ -648,18 +648,61 @@ func TestBackupKeyPassphraseRepairRestoresMatchingReadableKeySnapshot(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.PasswordsImported != 1 || result.PrivateKeysImported != 1 {
-		t.Fatalf("SSH key snapshot repair summary = %#v", result)
+	if result.PasswordsImported != 0 || result.PrivateKeysImported != 0 {
+		t.Fatalf("readable replacement import summary = %#v", result)
+	}
+	destination = openBackupTestDatabase(t, destinationPath)
+	defer destination.Close()
+	passphrase, found, err := readBackupPassword(destination, backupTestKeyID)
+	if err != nil || found || passphrase != "" {
+		t.Fatalf("replacement passphrase = %q, %t, %v", passphrase, found, err)
+	}
+	key, err := unprotectFile(keyPath)
+	if err != nil || !bytes.Equal(key, []byte("locally-replaced-key")) {
+		t.Fatalf("preserved replacement key = %q, %v", key, err)
+	}
+	clearBytes(key)
+}
+
+func TestBackupReimportRestoresPassphraseOnlyForMatchingReadableKey(t *testing.T) {
+	installBackupTestSecretStore(t)
+	sourcePath := filepath.Join(t.TempDir(), "source.db")
+	source := openBackupTestDatabase(t, sourcePath)
+	seedBackupTestDatabase(t, source, sourcePath)
+	source.Close()
+
+	backupPath := filepath.Join(t.TempDir(), "backup.json")
+	const backupPassword = "matching-passphrase-repair"
+	if _, err := exportBackup(sourcePath, backupRequest{Path: backupPath, Password: backupPassword}); err != nil {
+		t.Fatal(err)
+	}
+	destinationPath := filepath.Join(t.TempDir(), "destination.db")
+	if _, err := importBackup(destinationPath, backupRequest{Path: backupPath, Password: backupPassword}); err != nil {
+		t.Fatal(err)
+	}
+	destination := openBackupTestDatabase(t, destinationPath)
+	if err := clearBackupPassword(destination, backupTestKeyID); err != nil {
+		destination.Close()
+		t.Fatal(err)
+	}
+	destination.Close()
+
+	result, err := importBackup(destinationPath, backupRequest{Path: backupPath, Password: backupPassword})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.PasswordsImported != 1 || result.PrivateKeysImported != 0 {
+		t.Fatalf("matching passphrase import summary = %#v", result)
 	}
 	destination = openBackupTestDatabase(t, destinationPath)
 	defer destination.Close()
 	passphrase, found, err := readBackupPassword(destination, backupTestKeyID)
 	if err != nil || !found || passphrase != "key-passphrase" {
-		t.Fatalf("repaired passphrase = %q, %t, %v", passphrase, found, err)
+		t.Fatalf("matching passphrase = %q, %t, %v", passphrase, found, err)
 	}
-	key, err := unprotectFile(keyPath)
+	key, err := unprotectFile(credentialPrivateKeyPath(destinationPath, backupTestKeyID))
 	if err != nil || !bytes.Equal(key, []byte("private-key-material")) {
-		t.Fatalf("matching repaired key = %q, %v", key, err)
+		t.Fatalf("matching readable key = %q, %v", key, err)
 	}
 	clearBytes(key)
 }
