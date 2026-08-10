@@ -296,6 +296,111 @@ func TestWritePrivateFileAtomicReplacesExistingContents(t *testing.T) {
 	}
 }
 
+func TestWritePrivateFileAtomicReportsReplacementBeforeDirectorySyncFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tunnels", "secret.dpapi")
+	if err := writePrivateFileAtomic(path, []byte("old")); err != nil {
+		t.Fatal(err)
+	}
+
+	previousDirectorySync := privateFileDirectorySync
+	privateFileDirectorySync = func(string) error { return os.ErrPermission }
+	t.Cleanup(func() { privateFileDirectorySync = previousDirectorySync })
+	err := writePrivateFileAtomic(path, []byte("new"))
+	if !privateFileDestinationWasReplaced(err) {
+		t.Fatalf("directory sync error did not report its completed replacement: %v", err)
+	}
+	contents, readErr := os.ReadFile(path)
+	if readErr != nil || string(contents) != "new" {
+		t.Fatalf("replacement after directory sync failure = %q, %v", contents, readErr)
+	}
+}
+
+func TestUpdateTunnelRestoresMetadataAndSecretAfterDirectorySyncFailure(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	original, err := createTunnel(databasePath, tunnelWriteRequest{
+		Name: "original",
+		Kind: 0,
+		Settings: json.RawMessage(`{
+            "InterfacePrivateKey":"private",
+            "InterfaceAddress":"10.0.0.2/32",
+            "PeerPublicKey":"public",
+            "PeerEndpoint":"old.example.test:51820"
+        }`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	previousDirectorySync := privateFileDirectorySync
+	privateFileDirectorySync = func(string) error { return os.ErrPermission }
+	t.Cleanup(func() { privateFileDirectorySync = previousDirectorySync })
+	_, err = updateTunnel(databasePath, tunnelWriteRequest{
+		ID:   original.ID,
+		Name: "replacement",
+		Kind: 0,
+		Settings: json.RawMessage(`{
+            "InterfacePrivateKey":"replacement-private",
+            "InterfaceAddress":"10.0.0.3/32",
+            "PeerPublicKey":"replacement-public",
+            "PeerEndpoint":"new.example.test:51820"
+        }`),
+	})
+	privateFileDirectorySync = previousDirectorySync
+	if err == nil {
+		t.Fatal("tunnel update succeeded despite the directory sync failure")
+	}
+
+	current, err := readTunnel(databasePath, tunnelReadRequest{ID: original.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Name != original.Name || current.Kind != original.Kind ||
+		!bytes.Equal(current.Settings, original.Settings) {
+		t.Fatalf("tunnel after rollback = %#v, want %#v", current, original)
+	}
+}
+
+func TestCreateTunnelRemovesReplacedSecretAfterDirectorySyncFailure(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	previousDirectorySync := privateFileDirectorySync
+	privateFileDirectorySync = func(string) error { return os.ErrPermission }
+	t.Cleanup(func() { privateFileDirectorySync = previousDirectorySync })
+	_, err := createTunnel(databasePath, tunnelWriteRequest{
+		Name: "not committed",
+		Kind: 0,
+		Settings: json.RawMessage(`{
+            "InterfacePrivateKey":"private",
+            "InterfaceAddress":"10.0.0.2/32",
+            "PeerPublicKey":"public",
+            "PeerEndpoint":"vpn.example.test:51820"
+        }`),
+	})
+	privateFileDirectorySync = previousDirectorySync
+	if err == nil {
+		t.Fatal("tunnel creation succeeded despite the directory sync failure")
+	}
+
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var tunnels int
+	if err := database.QueryRow("SELECT COUNT(*) FROM TunnelConfigs;").Scan(&tunnels); err != nil {
+		t.Fatal(err)
+	}
+	if tunnels != 0 {
+		t.Fatalf("tunnels committed after directory sync failure = %d", tunnels)
+	}
+	secretPaths, err := filepath.Glob(filepath.Join(filepath.Dir(databasePath), "tunnels", "*.dpapi"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(secretPaths) != 0 {
+		t.Fatalf("orphaned tunnel secrets after rollback = %#v", secretPaths)
+	}
+}
+
 func TestReadTunnelProtectedFileRejectsOversizedPayload(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "oversized.dpapi")
 	if err := os.WriteFile(path, make([]byte, maxTunnelProtectedBytes+1), 0o600); err != nil {

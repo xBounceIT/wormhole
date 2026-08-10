@@ -166,6 +166,10 @@ func writeTunnel(databasePath string, request tunnelWriteRequest, create bool) (
 	}
 
 	if err := protectFile(secretPath, request.Settings); err != nil {
+		// The atomic writer can fail to synchronize the directory after its rename has already
+		// replaced the destination. Record that side effect so rollback restores the protected
+		// payload alongside the SQLite metadata.
+		secretWritten = privateFileDestinationWasReplaced(err)
 		return tunnelDetails{}, errors.New("could not protect VPN tunnel settings")
 	}
 	secretWritten = true
@@ -788,6 +792,23 @@ func writePrivateFileAtomic(path string, contents []byte) error {
 
 var privateFileDirectorySync = syncPrivateFileDirectory
 
+type privateFileDestinationReplacedError struct {
+	err error
+}
+
+func (err *privateFileDestinationReplacedError) Error() string {
+	return err.err.Error()
+}
+
+func (err *privateFileDestinationReplacedError) Unwrap() error {
+	return err.err
+}
+
+func privateFileDestinationWasReplaced(err error) bool {
+	var replaced *privateFileDestinationReplacedError
+	return errors.As(err, &replaced)
+}
+
 func writePrivateFileAtomicWithTemporaryPattern(
 	path, pattern string,
 	writeContents func(*os.File) error,
@@ -830,7 +851,7 @@ func writePrivateFileAtomicWithTemporaryPattern(
 		return err
 	}
 	if err := privateFileDirectorySync(directory); err != nil {
-		return err
+		return &privateFileDestinationReplacedError{err: err}
 	}
 	committed = true
 	return nil
