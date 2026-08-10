@@ -2036,8 +2036,18 @@ func restoreBackupSecretsContext(
 				fmt.Sprintf("Private key for credential %s was malformed and was skipped.", id))
 			continue
 		}
-		path := credentialPrivateKeyPath(databasePath, id)
 		passphrase := passwordSnapshots[id]
+		validationPassphrase := ""
+		if passphrase.found {
+			validationPassphrase = passphrase.password
+		}
+		if err := validateSshPrivateKey(keyBytes, validationPassphrase); err != nil {
+			clearBytes(keyBytes)
+			addBackupWarning(result,
+				fmt.Sprintf("Private key for credential %s was invalid or its passphrase did not match and was skipped.", id))
+			continue
+		}
+		path := credentialPrivateKeyPath(databasePath, id)
 		_, creating := insertedCredentials[id]
 		repairing := !creating
 		if repairing {
