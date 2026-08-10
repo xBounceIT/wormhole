@@ -103,6 +103,12 @@ type backupPasswordEntry struct {
 	Password     string `json:"password"`
 }
 
+type backupCredentialPasswordSnapshot struct {
+	password string
+	found    bool
+	seen     bool
+}
+
 type backupInlinePasswordEntry struct {
 	NodeID   string `json:"nodeId"`
 	Password string `json:"password"`
@@ -1883,6 +1889,8 @@ func restoreBackupSecretsContext(
 	insertedNodes map[string]struct{},
 	result *backupImportResult,
 ) error {
+	passwordSnapshots := indexBackupCredentialPasswordSnapshots(payload.Passwords)
+	restoredCredentialPasswords := make(map[string]string)
 	for _, entry := range payload.Passwords {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -1914,6 +1922,7 @@ func restoreBackupSecretsContext(
 		if err := storeBackupPassword(database, id, entry.Password); err != nil {
 			return fmt.Errorf("Could not restore a credential password: %w", err)
 		}
+		restoredCredentialPasswords[id] = entry.Password
 		result.PasswordsImported++
 	}
 	for _, entry := range payload.InlinePasswords {
@@ -1963,6 +1972,7 @@ func restoreBackupSecretsContext(
 			continue
 		}
 		path := credentialPrivateKeyPath(databasePath, id)
+		repairing := false
 		if _, inserted := insertedCredentials[id]; !inserted {
 			existing, err := readBackupPrivateKey(path)
 			if err == nil {
@@ -1973,6 +1983,7 @@ func restoreBackupSecretsContext(
 				addBackupWarning(result,
 					fmt.Sprintf("Existing private key for credential %s could not be read; restoring it from backup.", id))
 			}
+			repairing = true
 		}
 		keyBytes, err := base64.StdEncoding.DecodeString(entry.DataB64)
 		if err != nil || len(keyBytes) == 0 || len(keyBytes) > maxSshPrivateKeyBytes {
@@ -1980,6 +1991,27 @@ func restoreBackupSecretsContext(
 			addBackupWarning(result,
 				fmt.Sprintf("Private key for credential %s was malformed and was skipped.", id))
 			continue
+		}
+		if repairing {
+			passphrase := passwordSnapshots[id]
+			if passphrase.seen && !passphrase.found {
+				clearBytes(keyBytes)
+				addBackupWarning(result,
+					fmt.Sprintf("Private key for credential %s could not be repaired because its backup passphrase was invalid.", id))
+				continue
+			}
+			if passphrase.found {
+				if restored, ok := restoredCredentialPasswords[id]; !ok || restored != passphrase.password {
+					if err := storeBackupPassword(database, id, passphrase.password); err != nil {
+						clearBytes(keyBytes)
+						return fmt.Errorf("Could not restore an SSH key passphrase: %w", err)
+					}
+					result.PasswordsImported++
+				}
+			} else if err := clearBackupPassword(database, id); err != nil {
+				clearBytes(keyBytes)
+				return fmt.Errorf("Could not clear an obsolete SSH key passphrase: %w", err)
+			}
 		}
 		if err := protectFile(path, keyBytes); err != nil {
 			clearBytes(keyBytes)
@@ -2071,6 +2103,26 @@ func shouldRestoreBackupPassword(
 	return !found, "", nil
 }
 
+func indexBackupCredentialPasswordSnapshots(
+	entries []*backupPasswordEntry,
+) map[string]backupCredentialPasswordSnapshot {
+	snapshots := make(map[string]backupCredentialPasswordSnapshot)
+	for _, entry := range entries {
+		entryID, ok := canonicalBackupID(entry.CredentialID)
+		if !ok {
+			continue
+		}
+		snapshot := snapshots[entryID]
+		snapshot.seen = true
+		if len(entry.Password) <= maxStoredCredentialBytes {
+			snapshot.password = entry.Password
+			snapshot.found = true
+		}
+		snapshots[entryID] = snapshot
+	}
+	return snapshots
+}
+
 func storeBackupPassword(database *sql.DB, id, password string) error {
 	encoded, encoding, err := credentialSecretStore(id, password)
 	if err != nil {
@@ -2105,6 +2157,37 @@ func storeBackupPassword(database *sql.DB, id, password string) error {
 	if previousEncoded.Valid && previousEncoding.Valid &&
 		(previousEncoded.String != encoded || previousEncoding.String != encoding) {
 		_ = credentialSecretDelete(id, previousEncoded.String, previousEncoding.String)
+	}
+	return nil
+}
+
+func clearBackupPassword(database *sql.DB, id string) error {
+	transaction, err := database.Begin()
+	if err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = transaction.Rollback()
+		}
+	}()
+	var encoded, encoding sql.NullString
+	readErr := transaction.QueryRow(
+		"SELECT Secret, Encoding FROM CredentialSecrets WHERE lower(Id) = lower(?) LIMIT 1;", id,
+	).Scan(&encoded, &encoding)
+	if readErr != nil && !errors.Is(readErr, sql.ErrNoRows) {
+		return readErr
+	}
+	if _, err := transaction.Exec("DELETE FROM CredentialSecrets WHERE lower(Id) = lower(?);", id); err != nil {
+		return err
+	}
+	if err := transaction.Commit(); err != nil {
+		return err
+	}
+	committed = true
+	if encoded.Valid && encoding.Valid {
+		_ = credentialSecretDelete(id, encoded.String, encoding.String)
 	}
 	return nil
 }
