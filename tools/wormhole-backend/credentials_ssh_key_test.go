@@ -1016,6 +1016,75 @@ func TestSshKeyCredentialUpdateReplacesKeyAndSecretAtomically(t *testing.T) {
 	}
 }
 
+func TestSshKeyCredentialUpdateCleansPreviousSecretWhenKeyFinalizationFails(t *testing.T) {
+	_, deletedSecrets, _, _ := installSshKeyCredentialTestStores(t)
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	firstPath := filepath.Join(t.TempDir(), "first.pem")
+	secondPath := filepath.Join(t.TempDir(), "second.pem")
+	if err := os.WriteFile(firstPath, testSshPrivateKey(t, "first-passphrase"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(secondPath, testSshPrivateKey(t, "second-passphrase"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	created, err := createCredential(databasePath, credentialCreateRequest{
+		Name: "SSH key", Protocol: "ssh", Kind: "sshKey", Username: "operator",
+		Passphrase: "first-passphrase", PrivateKeyPath: firstPath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	previousSecret := "protected-secret-" + created.ID + "-1"
+	currentSecret := "protected-secret-" + created.ID + "-2"
+
+	previousPromote := credentialPrivateKeyPromote
+	credentialPrivateKeyPromote = func(string, string) error { return os.ErrPermission }
+	t.Cleanup(func() { credentialPrivateKeyPromote = previousPromote })
+	_, err = updateCredential(databasePath, credentialUpdateRequest{
+		ID: created.ID,
+		credentialCreateRequest: credentialCreateRequest{
+			Name: "Replacement", Protocol: "ssh", Kind: "sshKey", Username: "operator",
+			Passphrase: "second-passphrase", PrivateKeyPath: secondPath,
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "activate the SSH private key write") {
+		t.Fatalf("replacement finalization error = %v", err)
+	}
+	if len(*deletedSecrets) != 1 || (*deletedSecrets)[0] != previousSecret {
+		t.Fatalf("post-commit secret cleanup = %#v, want only %q", *deletedSecrets, previousSecret)
+	}
+
+	database, err := openDatabase(databasePath, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var storedSecret, fileName string
+	var operations int
+	if err := database.QueryRow(`
+SELECT s.Secret, p.PrivateKeyFileName
+FROM CredentialProfiles p JOIN CredentialSecrets s ON s.Id = p.Id
+WHERE p.Id = ?;`, created.ID).Scan(&storedSecret, &fileName); err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	if err := database.QueryRow("SELECT COUNT(*) FROM CredentialPrivateKeyOperations WHERE CredentialId = ?;", created.ID).Scan(&operations); err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	database.Close()
+	if storedSecret != currentSecret || fileName != "second.pem" || operations != 1 {
+		t.Fatalf("committed replacement = secret:%q file:%q operations:%d", storedSecret, fileName, operations)
+	}
+	if _, err := os.Stat(credentialPrivateKeyPath(databasePath, created.ID) + credentialPrivateKeyPendingSuffix); err != nil {
+		t.Fatalf("failed finalization did not preserve its recovery stage: %v", err)
+	}
+
+	credentialPrivateKeyPromote = previousPromote
+	if err := recoverCredentialPrivateKeyOperations(databasePath); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSshKeyCredentialUpdateCanForgetSavedPassphrase(t *testing.T) {
 	_, deletedSecrets, protectedKeys, _ := installSshKeyCredentialTestStores(t)
 	databasePath := filepath.Join(t.TempDir(), "wormhole.db")

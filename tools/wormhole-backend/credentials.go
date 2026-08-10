@@ -392,15 +392,17 @@ WHERE lower(Id) = ? AND COALESCE(Kind, 0) = 1 AND COALESCE(SecretProvider, 0) = 
 		return credentialRecord{}, fmt.Errorf("could not update credential: %w", err)
 	}
 	committed = true
+	secretChanged := replaceSecret || clearSecret
+	if secretChanged && previousEncoded.Valid && previousEncoding.Valid &&
+		(previousEncoded.String != encoded || previousEncoding.String != encoding) {
+		defer func() {
+			_ = credentialSecretDelete(id, previousEncoded.String, previousEncoding.String)
+		}()
+	}
 	if stagedReplacement != nil {
 		if err := finalizeCredentialPrivateKeyWrite(database, stagedReplacement); err != nil {
 			return credentialRecord{}, err
 		}
-	}
-	secretChanged := replaceSecret || clearSecret
-	if secretChanged && previousEncoded.Valid && previousEncoding.Valid &&
-		(previousEncoded.String != encoded || previousEncoding.String != encoding) {
-		_ = credentialSecretDelete(id, previousEncoded.String, previousEncoding.String)
 	}
 	keyFileName := draft.privateKeyFileName
 	if keyFileName == "" {
