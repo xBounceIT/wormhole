@@ -27,8 +27,9 @@ func TestEnsureElectronWorkspaceSchemaCreatesWinUICompatibleFreshDatabase(t *tes
 		}
 	}
 	for table, names := range map[string][]string{
-		"Nodes":              {"CredentialMode", "SshAutoSudo", "HttpIgnoreCertErrors", "SerialFlowControl", "RdpGatewayCredentialId"},
-		"CredentialProfiles": {"Protocol", "SecretProvider", "BitwardenItemId", "BitwardenFieldPath"},
+		"Nodes":                          {"CredentialMode", "SshAutoSudo", "HttpIgnoreCertErrors", "SerialFlowControl", "RdpGatewayCredentialId"},
+		"CredentialProfiles":             {"Protocol", "SecretProvider", "BitwardenItemId", "BitwardenFieldPath"},
+		"CredentialPrivateKeyOperations": {"CredentialId", "OperationKind", "ProtectedSha256", "CreatedAtUtc"},
 	} {
 		columns, err := tableColumns(database, table)
 		if err != nil {

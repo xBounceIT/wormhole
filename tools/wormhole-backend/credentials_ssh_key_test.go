@@ -499,6 +499,72 @@ func TestSshKeyCredentialRecoveryRecognizesPromotedReplacement(t *testing.T) {
 	}
 }
 
+func TestSshKeyCredentialDeleteWaitsForCommittedReplacement(t *testing.T) {
+	installSshKeyCredentialTestStores(t)
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	keyPath := filepath.Join(t.TempDir(), "encrypted.pem")
+	if err := os.WriteFile(keyPath, testSshPrivateKey(t, "saved-passphrase"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	created, err := createCredential(databasePath, credentialCreateRequest{
+		Name: "Concurrent replacement", Protocol: "ssh", Kind: "sshKey", Username: "operator",
+		Passphrase: "saved-passphrase", PrivateKeyPath: keyPath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	finalPath := credentialPrivateKeyPath(databasePath, created.ID)
+	before, err := os.ReadFile(finalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	staged, err := stageCredentialPrivateKeyReplacement(databasePath, created.ID, []byte("replacement"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := database.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := recordCredentialPrivateKeyReplacement(tx, staged); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	_ = database.Close()
+
+	if _, err := updateCredential(databasePath, credentialUpdateRequest{
+		ID: created.ID,
+		credentialCreateRequest: credentialCreateRequest{
+			Name: "Concurrent replacement", Protocol: "ssh", Kind: "sshKey", Username: "operator",
+		},
+	}); err == nil || !strings.Contains(err.Error(), "still being finalized") {
+		t.Fatalf("update during replacement error = %v", err)
+	}
+	if err := deleteCredential(databasePath, credentialDeleteRequest{ID: created.ID}); err == nil ||
+		!strings.Contains(err.Error(), "still being finalized") {
+		t.Fatalf("delete during replacement error = %v", err)
+	}
+	current, err := os.ReadFile(finalPath)
+	if err != nil || !bytes.Equal(current, before) {
+		t.Fatalf("concurrent delete changed protected key to %q: %v", current, err)
+	}
+	if _, err := os.Stat(staged.pendingPath); err != nil {
+		t.Fatalf("concurrent delete removed replacement stage: %v", err)
+	}
+	if err := recoverCredentialPrivateKeyOperations(databasePath); err != nil {
+		t.Fatal(err)
+	}
+	if err := deleteCredential(databasePath, credentialDeleteRequest{ID: created.ID}); err != nil {
+		t.Fatalf("delete after replacement recovery: %v", err)
+	}
+}
+
 func TestSshKeyCredentialRecoveryRejectsAlteredReplacement(t *testing.T) {
 	installSshKeyCredentialTestStores(t)
 	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
@@ -557,6 +623,215 @@ func TestSshKeyCredentialRecoveryRejectsAlteredReplacement(t *testing.T) {
 	}
 	if operations != 1 {
 		t.Fatalf("failed recovery operations = %d, want 1", operations)
+	}
+}
+
+func TestSshKeyCredentialDeleteRollbackRestoresDurableStage(t *testing.T) {
+	installSshKeyCredentialTestStores(t)
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	keyPath := filepath.Join(t.TempDir(), "encrypted.pem")
+	if err := os.WriteFile(keyPath, testSshPrivateKey(t, "saved-passphrase"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	created, err := createCredential(databasePath, credentialCreateRequest{
+		Name: "Rejected deletion", Protocol: "ssh", Kind: "sshKey", Username: "operator",
+		Passphrase: "saved-passphrase", PrivateKeyPath: keyPath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`
+CREATE TRIGGER reject_private_key_deletion_journal
+BEFORE INSERT ON CredentialPrivateKeyOperations
+WHEN NEW.OperationKind = 'delete'
+BEGIN
+    SELECT RAISE(FAIL, 'simulated deletion journal failure');
+END;`); err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	_ = database.Close()
+
+	if err := deleteCredential(databasePath, credentialDeleteRequest{ID: created.ID}); err == nil {
+		t.Fatal("SSH key deletion should fail when its journal insert is rejected")
+	}
+	finalPath := credentialPrivateKeyPath(databasePath, created.ID)
+	if _, err := os.Stat(finalPath); err != nil {
+		t.Fatalf("rollback did not restore protected SSH key: %v", err)
+	}
+	if _, err := os.Stat(finalPath + credentialPrivateKeyDeletingSuffix); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("rollback left durable deletion stage: %v", err)
+	}
+	database, err = openDatabase(databasePath, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var profiles int
+	if err := database.QueryRow("SELECT COUNT(*) FROM CredentialProfiles WHERE Id = ?;", created.ID).Scan(&profiles); err != nil {
+		t.Fatal(err)
+	}
+	if profiles != 1 {
+		t.Fatalf("rollback profile count = %d, want 1", profiles)
+	}
+}
+
+func TestSshKeyCredentialDeletionStagingRejectsChangedFile(t *testing.T) {
+	installSshKeyCredentialTestStores(t)
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	id := "11111111-1111-4111-8111-111111111111"
+	finalPath := credentialPrivateKeyPath(databasePath, id)
+	if err := os.MkdirAll(filepath.Dir(finalPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(finalPath, []byte("original-protected-key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousDelete := credentialPrivateKeyStageDelete
+	credentialPrivateKeyStageDelete = func(source, target string) error {
+		if err := os.Rename(source, target); err != nil {
+			return err
+		}
+		return os.WriteFile(target, []byte("changed-protected-key"), 0o600)
+	}
+	t.Cleanup(func() { credentialPrivateKeyStageDelete = previousDelete })
+
+	if _, err := stageCredentialPrivateKeyDeletion(databasePath, id); err == nil {
+		t.Fatal("changed SSH private key deletion stage was accepted")
+	}
+	if _, err := os.Stat(finalPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("changed deletion stage was restored over the original path: %v", err)
+	}
+	if _, err := os.Stat(finalPath + credentialPrivateKeyDeletingSuffix); err != nil {
+		t.Fatalf("changed deletion stage evidence was not preserved: %v", err)
+	}
+}
+
+func TestSshKeyCredentialRecoveryRestoresUncommittedDeletion(t *testing.T) {
+	installSshKeyCredentialTestStores(t)
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	keyPath := filepath.Join(t.TempDir(), "encrypted.pem")
+	if err := os.WriteFile(keyPath, testSshPrivateKey(t, "saved-passphrase"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	created, err := createCredential(databasePath, credentialCreateRequest{
+		Name: "Interrupted deletion", Protocol: "ssh", Kind: "sshKey", Username: "operator",
+		Passphrase: "saved-passphrase", PrivateKeyPath: keyPath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	finalPath := credentialPrivateKeyPath(databasePath, created.ID)
+	before, err := os.ReadFile(finalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := database.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec("DELETE FROM CredentialProfiles WHERE Id = ?;", created.ID); err != nil {
+		t.Fatal(err)
+	}
+	staged, err := stageCredentialPrivateKeyDeletion(databasePath, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := recordCredentialPrivateKeyDeletion(tx, staged); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	_ = database.Close()
+	if _, err := os.Stat(finalPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("interrupted deletion unexpectedly retained final key: %v", err)
+	}
+	if err := recoverCredentialPrivateKeyOperations(databasePath); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(finalPath)
+	if err != nil || !bytes.Equal(after, before) {
+		t.Fatalf("recovery restored protected key %q, want %q: %v", after, before, err)
+	}
+	if _, err := os.Stat(staged.stagedPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("uncommitted deletion stage survived recovery: %v", err)
+	}
+}
+
+func TestSshKeyCredentialRecoveryFinishesCommittedDeletion(t *testing.T) {
+	installSshKeyCredentialTestStores(t)
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	keyPath := filepath.Join(t.TempDir(), "encrypted.pem")
+	if err := os.WriteFile(keyPath, testSshPrivateKey(t, "saved-passphrase"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	created, err := createCredential(databasePath, credentialCreateRequest{
+		Name: "Committed deletion", Protocol: "ssh", Kind: "sshKey", Username: "operator",
+		Passphrase: "saved-passphrase", PrivateKeyPath: keyPath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	finalPath := credentialPrivateKeyPath(databasePath, created.ID)
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := database.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec("DELETE FROM CredentialProfiles WHERE Id = ?;", created.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec("DELETE FROM CredentialSecrets WHERE Id = ?;", created.ID); err != nil {
+		t.Fatal(err)
+	}
+	staged, err := stageCredentialPrivateKeyDeletion(databasePath, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := recordCredentialPrivateKeyDeletion(tx, staged); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	_ = database.Close()
+	if _, err := os.Stat(staged.stagedPath); err != nil {
+		t.Fatalf("committed deletion lost its durable stage before recovery: %v", err)
+	}
+	if err := recoverCredentialPrivateKeyOperations(databasePath); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{finalPath, staged.stagedPath} {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("committed deletion left protected key %q: %v", path, err)
+		}
+	}
+	database, err = openDatabase(databasePath, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var profiles, operations int
+	if err := database.QueryRow("SELECT COUNT(*) FROM CredentialProfiles WHERE Id = ?;", created.ID).Scan(&profiles); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.QueryRow("SELECT COUNT(*) FROM CredentialPrivateKeyOperations;").Scan(&operations); err != nil {
+		t.Fatal(err)
+	}
+	if profiles != 0 || operations != 0 {
+		t.Fatalf("completed deletion left profiles:%d operations:%d, want 0 each", profiles, operations)
 	}
 }
 
@@ -678,9 +953,9 @@ func TestSshKeyCredentialDeletePreservesProfileWhenKeyRemovalFails(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	previousRemove := credentialPrivateKeyStageRemove
-	credentialPrivateKeyStageRemove = func(string) error { return os.ErrPermission }
-	t.Cleanup(func() { credentialPrivateKeyStageRemove = previousRemove })
+	previousDelete := credentialPrivateKeyStageDelete
+	credentialPrivateKeyStageDelete = func(string, string) error { return os.ErrPermission }
+	t.Cleanup(func() { credentialPrivateKeyStageDelete = previousDelete })
 
 	err = deleteCredential(databasePath, credentialDeleteRequest{ID: created.ID})
 	if err == nil || !strings.Contains(err.Error(), "protected SSH private key") {
