@@ -61,6 +61,9 @@ type mcpController struct {
 	pendingByTarget map[string]*mcpApprovalWaiter
 }
 
+// This indirection keeps legacy-token read tests independent of the host operating system.
+var mcpUnprotectStoredSecret = unprotectStoredSecret
+
 func newMcpController(server *sshServer) *mcpController {
 	return &mcpController{
 		server:          server,
@@ -248,14 +251,24 @@ func (controller *mcpController) getOrCreateToken() (string, error) {
 		normalizeID(mcpTokenCredentialID),
 	).Scan(&encoded, &encoding)
 	if err == nil {
-		secret, decodeErr := unprotectStoredSecret(mcpTokenCredentialID, encoded, encoding, controller.server.electronUserDataPath)
+		legacySafeStorage := strings.TrimSpace(encoding) == electronSafeStorageSecretEncoding
+		secret, decodeErr := mcpUnprotectStoredSecret(mcpTokenCredentialID, encoded, encoding, controller.server.electronUserDataPath)
 		if decodeErr != nil {
-			return "", fmt.Errorf("stored MCP token could not be decrypted: %w", decodeErr)
-		}
-		defer clearBytes(secret)
-		if len(secret) > 0 && len(secret) <= 4096 {
-			controller.token = string(secret)
-			return controller.token, nil
+			if !legacySafeStorage {
+				return "", fmt.Errorf("stored MCP token could not be decrypted: %w", decodeErr)
+			}
+		} else {
+			defer clearBytes(secret)
+			if len(secret) > 0 && len(secret) <= 4096 {
+				token := string(secret)
+				if legacySafeStorage {
+					// The legacy value is still protected and usable. A failed best-effort rewrite
+					// must not disable MCP; a later process can retry the migration.
+					_ = storeMcpToken(database, token)
+				}
+				controller.token = token
+				return controller.token, nil
+			}
 		}
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return "", fmt.Errorf("cannot read the stored MCP token: %w", err)
@@ -618,25 +631,52 @@ func generateMcpToken() (string, error) {
 }
 
 func storeMcpToken(database *sql.DB, token string) error {
-	protected, err := protectSecret(token)
+	var previousEncoded, previousEncoding sql.NullString
+	err := database.QueryRow(
+		"SELECT Secret, Encoding FROM CredentialSecrets WHERE lower(Id) = ? LIMIT 1;",
+		normalizeID(mcpTokenCredentialID),
+	).Scan(&previousEncoded, &previousEncoding)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("could not read the previous MCP bearer token: %w", err)
+	}
+
+	encoded, encoding, err := credentialSecretStore(mcpTokenCredentialID, token)
 	if err != nil {
 		return errors.New("could not protect MCP bearer token")
 	}
-	defer clearBytes([]byte(protected))
-	_, err = database.Exec(`
-INSERT INTO CredentialSecrets (Id, Secret, Encoding, UpdatedAt)
-VALUES (?, ?, ?, ?)
-ON CONFLICT(Id) DO UPDATE SET
-    Secret = excluded.Secret,
-    Encoding = excluded.Encoding,
-    UpdatedAt = excluded.UpdatedAt;`,
-		normalizeID(mcpTokenCredentialID),
-		protected,
-		protectedSecretEncoding,
-		time.Now().UTC().Format(time.RFC3339Nano),
-	)
+
+	transaction, err := database.Begin()
 	if err != nil {
+		_ = credentialSecretDelete(mcpTokenCredentialID, encoded, encoding)
+		return fmt.Errorf("could not start the MCP bearer token save: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = transaction.Rollback()
+			_ = credentialSecretDelete(mcpTokenCredentialID, encoded, encoding)
+		}
+	}()
+	if err := upsertCredentialSecret(
+		transaction,
+		normalizeID(mcpTokenCredentialID),
+		encoded,
+		encoding,
+	); err != nil {
 		return fmt.Errorf("could not store MCP bearer token: %w", err)
+	}
+	if err := transaction.Commit(); err != nil {
+		return fmt.Errorf("could not store MCP bearer token: %w", err)
+	}
+	committed = true
+
+	if previousEncoded.Valid && previousEncoding.Valid &&
+		(previousEncoded.String != encoded || previousEncoding.String != encoding) {
+		_ = credentialSecretDelete(
+			mcpTokenCredentialID,
+			previousEncoded.String,
+			previousEncoding.String,
+		)
 	}
 	return nil
 }
