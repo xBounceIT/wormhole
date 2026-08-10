@@ -55,6 +55,7 @@ import {
   selectBitwardenCookiesForTarget,
 } from './bitwarden-cookie-seed.js';
 import { ExtensionMutationGuard } from './extension-mutation-guard.js';
+import { readDarwinHardwareModel, shouldDisableHardwareAcceleration } from './gpu-compatibility.js';
 import { KeyedSingleFlight } from './keyed-single-flight.js';
 import {
   parseWorkspaceNodesRequest,
@@ -168,6 +169,25 @@ initializeLocalCrashDiagnostics({
   processId: process.pid,
   localAppData: process.env.LOCALAPPDATA,
 });
+
+const forceSoftwareRendering = process.env.WORMHOLE_DISABLE_HARDWARE_ACCELERATION === '1';
+const useSoftwareRendering =
+  forceSoftwareRendering ||
+  shouldDisableHardwareAcceleration({
+    platform: process.platform,
+    architecture: process.arch,
+    hardwareModel: readDarwinHardwareModel(),
+    systemVersion: process.getSystemVersion(),
+  });
+if (useSoftwareRendering) {
+  // This must run synchronously before Electron readiness; Chromium cannot change GPU mode later.
+  app.disableHardwareAcceleration();
+  console.warn(
+    forceSoftwareRendering
+      ? '[Wormhole] Hardware acceleration disabled by startup override.'
+      : '[Wormhole] Hardware acceleration disabled for legacy Intel macOS GPU compatibility.',
+  );
+}
 
 let rdpClient: RdpBackendClient | undefined;
 const rdpTunnelLeases = new TunnelLeaseRegistry();
