@@ -5,6 +5,10 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { selectDialogVisuals } from '../src/dialog-lifecycle.ts';
+import {
+  readDarwinHardwareModel,
+  shouldDisableHardwareAcceleration,
+} from '../electron/gpu-compatibility.ts';
 import { stopChildProcess } from '../electron/rdp.ts';
 import { TunnelLeaseRegistry } from '../electron/tunnel-lease-registry.ts';
 import {
@@ -44,6 +48,93 @@ import {
   isUpdateInstallable,
   shouldOfferUpdate,
 } from '../src/update-state.ts';
+
+test('unsupported macOS on legacy Intel MacBook Air selects software rendering before ready', () => {
+  for (const [hardwareModel, systemVersion] of [
+    ['MacBookAir7,1', '13.0'],
+    [' MacBookAir7,2\n', '17.0.1'],
+    ['MacBookAir7,2', '26'],
+    ['MacBookAir7,2', 'unknown'],
+  ]) {
+    assert.equal(
+      shouldDisableHardwareAcceleration({
+        platform: 'darwin',
+        architecture: 'x64',
+        hardwareModel,
+        systemVersion,
+      }),
+      true,
+    );
+  }
+
+  for (const context of [
+    {
+      platform: 'darwin',
+      architecture: 'x64',
+      hardwareModel: 'MacBookAir7,2',
+      systemVersion: '12.7.6',
+    },
+    {
+      platform: 'darwin',
+      architecture: 'x64',
+      hardwareModel: 'MacBookAir8,1',
+      systemVersion: '17.0',
+    },
+    {
+      platform: 'darwin',
+      architecture: 'arm64',
+      hardwareModel: 'MacBookAir7,2',
+      systemVersion: '17.0',
+    },
+    {
+      platform: 'win32',
+      architecture: 'x64',
+      hardwareModel: 'MacBookAir7,2',
+      systemVersion: '17.0',
+    },
+  ] as const) {
+    assert.equal(shouldDisableHardwareAcceleration(context), false);
+  }
+
+  assert.equal(
+    readDarwinHardwareModel('win32', () => 'MacBookAir7,2'),
+    undefined,
+  );
+  assert.equal(
+    readDarwinHardwareModel('darwin', () => ' MacBookAir7,2\n'),
+    'MacBookAir7,2',
+  );
+  assert.equal(
+    readDarwinHardwareModel('darwin', () => {
+      throw new Error('sysctl unavailable');
+    }),
+    undefined,
+  );
+
+  const mainSource = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
+  const crashDiagnostics = mainSource.indexOf('initializeLocalCrashDiagnostics({');
+  const overrideDecision = mainSource.indexOf('const useSoftwareRendering =');
+  const modelDetection = mainSource.indexOf('hardwareModel: readDarwinHardwareModel()');
+  const disableHardwareAcceleration = mainSource.indexOf('app.disableHardwareAcceleration()');
+  const readiness = mainSource.indexOf('app.whenReady().then');
+  for (const position of [
+    crashDiagnostics,
+    overrideDecision,
+    modelDetection,
+    disableHardwareAcceleration,
+    readiness,
+  ]) {
+    assert.notEqual(position, -1);
+  }
+  assert.match(
+    mainSource.slice(overrideDecision, modelDetection),
+    /forceSoftwareRendering\s*\|\|\s*shouldDisableHardwareAcceleration/,
+  );
+  assert.ok(crashDiagnostics < overrideDecision);
+  assert.ok(overrideDecision < modelDetection);
+  assert.ok(modelDetection < disableHardwareAcceleration);
+  assert.ok(disableHardwareAcceleration < readiness);
+});
 
 test('startup keeps optional native and renderer work off the first-frame path', () => {
   const mainSource = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
