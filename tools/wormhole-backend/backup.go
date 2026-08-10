@@ -1049,11 +1049,26 @@ func canonicalBackupPath(path string) string {
 	if err != nil {
 		absolute = filepath.Clean(path)
 	}
-	resolvedDirectory, err := filepath.EvalSymlinks(filepath.Dir(absolute))
-	if err != nil {
-		return absolute
+	directory := filepath.Dir(absolute)
+	var unresolved []string
+	for {
+		resolvedDirectory, err := filepath.EvalSymlinks(directory)
+		if err == nil {
+			for index := len(unresolved) - 1; index >= 0; index-- {
+				resolvedDirectory = filepath.Join(resolvedDirectory, unresolved[index])
+			}
+			return filepath.Join(resolvedDirectory, filepath.Base(absolute))
+		}
+		if !os.IsNotExist(err) {
+			return absolute
+		}
+		parent := filepath.Dir(directory)
+		if parent == directory {
+			return absolute
+		}
+		unresolved = append(unresolved, filepath.Base(directory))
+		directory = parent
 	}
-	return filepath.Join(resolvedDirectory, filepath.Base(absolute))
 }
 
 func isBackupWorkspaceStoragePath(databasePath, targetPath string) bool {
