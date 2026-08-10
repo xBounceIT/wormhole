@@ -39,6 +39,7 @@ test('electron-builder produces portable and installable Linux packages', () => 
 });
 
 test('electron-builder produces the supported macOS installer', () => {
+  assert.equal(packageJson.productName, 'Wormhole');
   assert.equal(packageJson.build.mac.target, 'dmg');
   assert.equal(packageJson.scripts.package, 'electron-builder --publish never');
 });
