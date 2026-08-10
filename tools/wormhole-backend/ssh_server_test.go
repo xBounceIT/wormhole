@@ -1522,6 +1522,23 @@ func TestLocalTransferRejectsSymlinkedDestinationParents(t *testing.T) {
 	}
 }
 
+func TestLocalTransferDestinationRejectsFilesystemAliasIntoSource(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	if err := os.MkdirAll(filepath.Join(source, "nested"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(root, "source-alias")
+	if err := os.Symlink(source, alias); err != nil {
+		t.Skipf("symbolic links are unavailable in this environment: %v", err)
+	}
+	destination := filepath.Join(alias, "nested")
+	target := filepath.Join(destination, filepath.Base(source))
+	if err := validateLocalTransferDestination(source, destination, target, true); err == nil {
+		t.Fatal("filesystem alias allowed a local folder copy back into its own source")
+	}
+}
+
 func TestLocalTransferDoesNotTruncateItsOwnSource(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, "source.txt")

@@ -37,9 +37,11 @@ func TestAzureAdRdpRoutingStripsQuickConnectCredentialsAtTheGoBoundary(t *testin
 		profile.GatewayUsername != "" || profile.GatewayPassword != "" {
 		t.Fatalf("system-client profile retained credential material: %#v", profile)
 	}
-	nonWindows := rdpProfile{Username: "AzureAD\\operator@example.com", Password: "secret"}
-	if enforceAzureAdRdpExternalClient(&nonWindows, "linux") || nonWindows.UseExternalClient || nonWindows.Password == "" {
-		t.Fatalf("Windows-only compatibility route changed a non-Windows profile: %#v", nonWindows)
+	nonWindows := rdpProfile{
+		Username: "AzureAD\\operator@example.com", Password: "secret", UseExternalClient: true,
+	}
+	if normalizeRdpExternalClientForOS(&nonWindows, "linux") || nonWindows.UseExternalClient || nonWindows.Password == "" {
+		t.Fatalf("Windows-only system-client preference was not neutralized safely: %#v", nonWindows)
 	}
 }
 
@@ -69,9 +71,13 @@ func TestExplicitExternalRdpProfileNeverReturnsManualCredentials(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !profile.UseExternalClient || profile.Username != "" || profile.Domain != "" || profile.Password != "" ||
-		profile.GatewayUsername != "" || profile.GatewayPassword != "" {
-		t.Fatalf("external RDP profile returned credential material: %#v", profile)
+	if runtime.GOOS == "windows" {
+		if !profile.UseExternalClient || profile.Username != "" || profile.Domain != "" || profile.Password != "" ||
+			profile.GatewayUsername != "" || profile.GatewayPassword != "" {
+			t.Fatalf("external RDP profile returned credential material: %#v", profile)
+		}
+	} else if profile.UseExternalClient || profile.Username != "operator" || profile.Domain != "CONTOSO" || profile.Password != "manual-secret" {
+		t.Fatalf("non-Windows RDP profile did not fall back to FreeRDP credentials: %#v", profile)
 	}
 }
 

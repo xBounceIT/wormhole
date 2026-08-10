@@ -222,6 +222,7 @@ jobs:
             builder_platform: linux
             builder_arch: x64
             backend_arch: x64
+            updater_artifact: release/Wormhole-*-linux-x86_64.AppImage
             artifacts: |
               release/*.AppImage
               release/*.deb
@@ -231,6 +232,7 @@ jobs:
             builder_platform: linux
             builder_arch: arm64
             backend_arch: arm64
+            updater_artifact: release/Wormhole-*-linux-arm64.AppImage
             artifacts: |
               release/*.AppImage
               release/*.deb
@@ -240,6 +242,7 @@ jobs:
             builder_platform: mac
             builder_arch: universal
             backend_arch: universal
+            updater_artifact: release/Wormhole-*-mac-universal-setup.dmg
             artifacts: release/Wormhole-*-mac-universal-setup.dmg
 
     steps:
@@ -314,11 +317,25 @@ jobs:
             fi
           done
 
+      - name: Generate installer SHA-256 sidecar
+        shell: pwsh
+        run: |
+          $installers = @(Get-ChildItem "${{ matrix.updater_artifact }}" -File)
+          if ($installers.Count -ne 1) {
+            throw "Expected exactly one ${{ matrix.platform }} updater installer, found $($installers.Count)."
+          }
+          $installers | ForEach-Object {
+            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)" | Set-Content -LiteralPath "$($_.FullName).sha256" -Encoding ascii
+          }
+
       - name: Upload ${{ matrix.platform }} packages
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: wormhole-${{ matrix.platform }}
-          path: ${{ matrix.artifacts }}
+          path: |
+            ${{ matrix.artifacts }}
+            ${{ matrix.updater_artifact }}.sha256
           if-no-files-found: error
           retention-days: 1
 

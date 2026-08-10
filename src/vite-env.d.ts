@@ -561,6 +561,7 @@ interface WormholeMcpApproval {
 interface WormholeUpdateCheckResult {
   currentVersion: string;
   latestVersion: string;
+  isNewerRelease: boolean;
   isUpdateAvailable: boolean;
   checkFailed: boolean;
   releaseTag?: string;
@@ -694,6 +695,7 @@ interface WormholeTunnelTestProgress {
 
 interface Window {
   wormhole?: {
+    platform: string;
     loadStartup(legacyTheme?: 'system' | 'light' | 'dark'): Promise<WormholeStartupSnapshot>;
     unlockStartup(request: WormholeAuthVerificationRequest): Promise<WormholeStartupUnlock>;
     markStartupReady(): void;
@@ -945,7 +947,7 @@ interface Window {
       installerSha256?: string;
       installerSize?: number | null;
     }): Promise<string>;
-    installUpdate(installerPath: string): Promise<{ launched: boolean }>;
+    installUpdate(installerPath: string): Promise<{ appWillQuit: boolean }>;
     openExternal(url: string): Promise<void>;
     onUpdateResult(listener: (result: WormholeUpdateCheckResult) => void): () => void;
     onUpdateProgress(

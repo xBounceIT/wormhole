@@ -1,17 +1,24 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { readFileSync } from 'node:fs';
+import path from 'node:path';
 import test from 'node:test';
 
 import { selectDialogVisuals } from '../src/dialog-lifecycle.ts';
 import { stopChildProcess } from '../electron/rdp.ts';
 import { TunnelLeaseRegistry } from '../electron/tunnel-lease-registry.ts';
 import {
+  isSafeUpdateInstallerPath,
+  updateInstallAction,
+  updateInstallerExtension,
+} from '../electron/update-installer.ts';
+import {
   runWindowTeardown,
   WindowCloseCoordinator,
   WindowCloseReasonTracker,
 } from '../electron/window-lifecycle.ts';
 import { createLogLevelSaveState, drainLogLevelChanges } from '../src/log-level-settings.ts';
+import { buildMcpConfig } from '../src/mcp-config.ts';
 import {
   canDisconnectRemoteDesktopSession,
   canOpenRdpSystemClient,
@@ -32,6 +39,11 @@ import {
   normalizeSidebarWidth,
 } from '../src/sidebar-settings.ts';
 import { failedSshReconnectState, reconnectingSshState } from '../src/ssh-reconnect-state.ts';
+import {
+  hasNewerReleaseWithoutInstaller,
+  isUpdateInstallable,
+  shouldOfferUpdate,
+} from '../src/update-state.ts';
 
 test('startup keeps optional native and renderer work off the first-frame path', () => {
   const mainSource = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
@@ -96,6 +108,143 @@ test('startup keeps optional native and renderer work off the first-frame path',
   );
   assert.match(appSource, /lazy\(\(\) =>[\s\S]*import\('\.\/components\/VncSurface'\)/);
   assert.match(appSource, /mremoteImportOpen \? \([\s\S]*<Suspense fallback=\{null\}>/);
+});
+
+test('cross-platform backend features are not gated by Windows-only IPC handlers', () => {
+  const mainSource = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
+  const preloadSource = readFileSync(new URL('../electron/preload.cts', import.meta.url), 'utf8');
+  const handlers = mainSource.slice(
+    mainSource.indexOf("ipcMain.handle('mcp:status'"),
+    mainSource.indexOf("ipcMain.handle('tree-tooltip:show'"),
+  );
+
+  assert.doesNotMatch(handlers, /process\.platform|available on Windows builds/);
+  for (const call of [
+    'sshBackend.mcpStatus()',
+    'sshBackend.startMcp(parsedPort)',
+    'sshBackend.stopMcp()',
+    'sshBackend.setMcpPort(parsedPort)',
+    'sshBackend.getMcpToken()',
+    'sshBackend.regenerateMcpToken()',
+    "runBackend<{ updated: boolean }>('workspace-update-node-web-settings', request)",
+  ]) {
+    assert.ok(handlers.includes(call), `missing cross-platform handler call: ${call}`);
+  }
+  assert.match(preloadSource, /platform: process\.platform/);
+});
+
+test('MCP client configuration uses the host platform command contract', () => {
+  const windows = JSON.parse(
+    buildMcpConfig('claude-desktop', 'http://127.0.0.1:8765/mcp', 'token', 'win32'),
+  );
+  const linux = JSON.parse(
+    buildMcpConfig('claude-desktop', 'http://127.0.0.1:8765/mcp', 'token', 'linux'),
+  );
+
+  assert.equal(windows.mcpServers.wormhole.command, 'cmd');
+  assert.deepEqual(windows.mcpServers.wormhole.args.slice(0, 3), [
+    '/c',
+    'npx',
+    'mcp-remote@latest',
+  ]);
+  assert.equal(linux.mcpServers.wormhole.command, 'npx');
+  assert.equal(linux.mcpServers.wormhole.args[0], 'mcp-remote@latest');
+  assert.equal(linux.mcpServers.wormhole.env.WORMHOLE_MCP_TOKEN, 'Bearer token');
+});
+
+test('update installers use verified platform-specific cache and launch contracts', () => {
+  const cacheRoot = path.join(process.cwd(), 'cache', 'updates');
+  for (const [platform, fileName, action] of [
+    ['win32', 'Wormhole-2.0.1-win-x64-setup.exe', 'execute'],
+    ['darwin', 'Wormhole-2.0.1-mac-universal-setup.dmg', 'open'],
+    ['linux', 'Wormhole-2.0.1-linux-x86_64.AppImage', 'reveal'],
+  ] as const) {
+    assert.equal(
+      isSafeUpdateInstallerPath(path.join(cacheRoot, fileName), cacheRoot, platform),
+      true,
+    );
+    assert.equal(updateInstallAction(platform), action);
+  }
+  assert.equal(updateInstallerExtension('freebsd'), undefined);
+  assert.equal(updateInstallAction('freebsd'), undefined);
+  assert.equal(
+    isSafeUpdateInstallerPath(
+      path.join(cacheRoot, 'nested', 'Wormhole-2.0.1-win-x64-setup.exe'),
+      cacheRoot,
+      'win32',
+    ),
+    false,
+  );
+  assert.equal(
+    isSafeUpdateInstallerPath(
+      path.join(cacheRoot, 'Wormhole-2.0.1-win-x64-setup.dmg'),
+      cacheRoot,
+      'win32',
+    ),
+    false,
+  );
+
+  const mainSource = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
+  const downloadHandler = mainSource.slice(
+    mainSource.indexOf("ipcMain.handle('update:download'"),
+    mainSource.indexOf("ipcMain.handle('update:install'"),
+  );
+  assert.match(downloadHandler, /expected\?\.isUpdateAvailable/);
+  assert.match(downloadHandler, /installerSha256\.toLowerCase\(\)/);
+  assert.match(downloadHandler, /installerUrl !== expected\.installerUrl/);
+
+  const installerHandler = mainSource.slice(
+    mainSource.indexOf('async function handleDownloadedUpdate'),
+    mainSource.indexOf('function scheduleStartupUpdateCheck'),
+  );
+  assert.match(installerHandler, /await new Promise<void>/);
+  assert.match(installerHandler, /child\.once\('error', reject\)/);
+  assert.match(installerHandler, /child\.once\('spawn'/);
+  assert.ok(
+    installerHandler.indexOf("child.once('spawn'") < installerHandler.indexOf('app.quit()'),
+  );
+});
+
+test('update availability uses the backend version decision from the same result', () => {
+  assert.equal(
+    hasNewerReleaseWithoutInstaller({
+      latestVersion: '2.1.0',
+      isNewerRelease: true,
+      isUpdateAvailable: false,
+    }),
+    true,
+  );
+  assert.equal(
+    hasNewerReleaseWithoutInstaller({
+      latestVersion: '2.0.0',
+      isNewerRelease: false,
+      isUpdateAvailable: false,
+    }),
+    false,
+  );
+  assert.equal(
+    hasNewerReleaseWithoutInstaller({
+      latestVersion: '2.1.0',
+      isNewerRelease: true,
+      isUpdateAvailable: true,
+    }),
+    false,
+  );
+  assert.equal(
+    hasNewerReleaseWithoutInstaller({
+      latestVersion: '2.0.0',
+      isNewerRelease: false,
+      isUpdateAvailable: false,
+    }),
+    false,
+  );
+  const installable = {
+    latestVersion: '2.1.0',
+    isUpdateAvailable: true,
+  };
+  assert.equal(isUpdateInstallable(installable), true);
+  assert.equal(shouldOfferUpdate(installable, null), true);
+  assert.equal(shouldOfferUpdate(installable, '2.1.0'), false);
 });
 
 test('SSH automatic reconnect keeps the tab alive and reports terminal exhaustion', () => {
@@ -196,11 +345,15 @@ test('log level changes stay isolated without disrupting Radix select close focu
   assert.match(settingSource, /const \[logLevel, setLogLevel\] = useState/);
   assert.match(settingSource, /busyRef\.current/);
   assert.match(settingSource, /drainLogLevelChanges/);
+  assert.match(settingSource, /const \[error, setError\] = useState\(''\)/);
   assert.match(settingSource, /disabled=\{!loaded\}/);
   assert.match(settingSource, /aria-busy=\{busy\}/);
   assert.doesNotMatch(settingSource, /disabled=\{busy\}/);
   assert.match(settingsPageSource, /<SettingsTabPanel forceMount value="logs">/);
   assert.match(settingsPageSource, /loaded=\{logsInfo !== null\}/);
+  assert.match(settingsPageSource, /logsActionError/);
+  assert.match(settingsPageSource, /retentionError/);
+  assert.doesNotMatch(settingsPageSource, /\blogsError\b|\bsetLogsError\b/);
   assert.doesNotMatch(settingsPageSource, /setLogLevelState|function commitLogLevel/);
 });
 

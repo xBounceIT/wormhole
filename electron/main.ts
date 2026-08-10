@@ -89,6 +89,7 @@ import {
 } from './serial.js';
 import { WebSessionAttemptTracker } from './web-session-attempt.js';
 import { getInSessionNavigationUrl } from './web-new-window-navigation.js';
+import { isSafeUpdateInstallerPath, updateInstallAction } from './update-installer.js';
 import { parseWorkspaceRdpSettings, type WorkspaceRdpSettings } from './workspace-rdp-contract.js';
 import type {
   RdpBackendEvent,
@@ -482,6 +483,7 @@ type StartupUnlockResponse = {
 type UpdateCheckResult = {
   currentVersion: string;
   latestVersion: string;
+  isNewerRelease: boolean;
   isUpdateAvailable: boolean;
   checkFailed: boolean;
   releaseTag?: string;
@@ -3624,12 +3626,7 @@ function updateCacheRoot(): string {
 }
 
 function isSafeInstallerPath(value: string): boolean {
-  const installerPath = path.resolve(value);
-  const cacheRoot = path.resolve(updateCacheRoot());
-  return (
-    path.extname(installerPath).toLowerCase() === '.exe' &&
-    (installerPath === cacheRoot || installerPath.startsWith(cacheRoot + path.sep))
-  );
+  return isSafeUpdateInstallerPath(value, updateCacheRoot(), process.platform);
 }
 
 // downloadUpdateInstaller runs a dedicated backend process that streams the installer to the
@@ -3731,18 +3728,38 @@ function downloadUpdateInstaller(
   });
 }
 
-function launchInstallerAndExit(installerPath: string): void {
-  // Detached + unref so the Inno Setup process survives this app's immediate exit, exactly like
-  // the WinUI app's Process.Start + Environment.Exit(0). /RESTARTAPP is handled by the installer
-  // script, which relaunches the newly installed app when present.
-  const child = spawn(installerPath, ['/SILENT', '/RESTARTAPP'], {
-    detached: true,
-    stdio: 'ignore',
-    windowsHide: true,
-  });
-  child.unref();
-  skipQuitConfirmation = true;
-  app.quit();
+async function handleDownloadedUpdate(installerPath: string): Promise<{ appWillQuit: boolean }> {
+  const action = updateInstallAction(process.platform);
+  if (action === 'execute') {
+    // Detached + unref lets Inno Setup survive the immediate exit. /RESTARTAPP relaunches the
+    // newly installed Windows build when present.
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn(installerPath, ['/SILENT', '/RESTARTAPP'], {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true,
+      });
+      child.once('error', reject);
+      child.once('spawn', () => {
+        child.removeListener('error', reject);
+        child.unref();
+        resolve();
+      });
+    });
+    skipQuitConfirmation = true;
+    app.quit();
+    return { appWillQuit: true };
+  }
+  if (action === 'open') {
+    const error = await shell.openPath(installerPath);
+    if (error) throw new Error(error);
+    return { appWillQuit: false };
+  }
+  if (action === 'reveal') {
+    shell.showItemInFolder(installerPath);
+    return { appWillQuit: false };
+  }
+  throw new Error('Updates are not supported on this platform.');
 }
 
 function scheduleStartupUpdateCheck(settings: AppSettings): void {
@@ -6318,13 +6335,6 @@ async function requireWorkspaceAuth(): Promise<void> {
   authSession.requireUnlocked();
 }
 
-const defaultMcpStatus: McpStatusResponse = {
-  enabled: false,
-  running: false,
-  port: 8765,
-  endpoint: 'http://127.0.0.1:8765/mcp',
-};
-
 function parseMcpPort(value: unknown): number {
   if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > 65535) {
     throw new Error('MCP port must be an integer between 1 and 65535.');
@@ -6820,11 +6830,18 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       typeof value.installerSize === 'number' && Number.isInteger(value.installerSize)
         ? value.installerSize
         : null;
+    const expected = latestUpdateCheck;
     if (
       !installerUrl ||
       !installerFileName ||
       path.basename(installerFileName) !== installerFileName ||
-      !/^https:\/\//i.test(installerUrl)
+      !/^https:\/\//i.test(installerUrl) ||
+      !/^[0-9a-f]{64}$/i.test(installerSha256) ||
+      !expected?.isUpdateAvailable ||
+      installerUrl !== expected.installerUrl ||
+      installerFileName !== expected.installerFileName ||
+      installerSha256.toLowerCase() !== expected.installerSha256?.toLowerCase() ||
+      installerSize !== (expected.installerSize ?? null)
     ) {
       throw new Error('The update download request is invalid.');
     }
@@ -6833,7 +6850,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       {
         installerUrl,
         installerFileName,
-        ...(installerSha256 ? { installerSha256 } : {}),
+        installerSha256,
         ...(installerSize !== null ? { installerSize } : {}),
       },
       (downloaded, total) => broadcastUpdateProgress(target, downloaded, total),
@@ -6846,8 +6863,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     }
     const installerPath = path.resolve(value.path);
     if (!existsSync(installerPath)) throw new Error('The installer was not found.');
-    launchInstallerAndExit(installerPath);
-    return { launched: true };
+    return handleDownloadedUpdate(installerPath);
   });
 
   ipcMain.handle('update:open-release', async (_event, value: unknown) => {
@@ -7568,14 +7584,12 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     return runBackend('auth-system-idle');
   });
   ipcMain.handle('mcp:status', async () => {
-    if (process.platform !== 'win32') return defaultMcpStatus;
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
       return sshBackend.mcpStatus();
     });
   });
   ipcMain.handle('mcp:start', async (_event, port: unknown) => {
-    if (process.platform !== 'win32') throw new Error('MCP is available on Windows builds.');
     const parsedPort = parseMcpPort(port);
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
@@ -7583,14 +7597,12 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     });
   });
   ipcMain.handle('mcp:stop', async () => {
-    if (process.platform !== 'win32') throw new Error('MCP is available on Windows builds.');
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
       return sshBackend.stopMcp();
     });
   });
   ipcMain.handle('mcp:set-port', async (_event, port: unknown) => {
-    if (process.platform !== 'win32') throw new Error('MCP is available on Windows builds.');
     const parsedPort = parseMcpPort(port);
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
@@ -7598,21 +7610,18 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     });
   });
   ipcMain.handle('mcp:get-token', async () => {
-    if (process.platform !== 'win32') throw new Error('MCP is available on Windows builds.');
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
       return sshBackend.getMcpToken();
     });
   });
   ipcMain.handle('mcp:regenerate-token', async () => {
-    if (process.platform !== 'win32') throw new Error('MCP is available on Windows builds.');
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
       return sshBackend.regenerateMcpToken();
     });
   });
   ipcMain.handle('mcp:approval', async (_event, value: unknown) => {
-    if (process.platform !== 'win32') throw new Error('MCP is available on Windows builds.');
     const approval = parseMcpApproval(value);
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
@@ -7624,7 +7633,6 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     if (!isWorkspaceNodeWebSettingsRequest(request)) {
       throw new Error('Workspace web node settings are invalid.');
     }
-    if (process.platform !== 'win32') return { updated: false };
     return serializeAuthOperation(async () => {
       await ensureAuthSession();
       authSession.requireUnlocked();

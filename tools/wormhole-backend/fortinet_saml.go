@@ -125,15 +125,8 @@ func openExternalURL(ctx context.Context, target string) error {
 	if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" {
 		return errors.New("Fortinet SAML URL is invalid")
 	}
-	var command *exec.Cmd
-	switch runtime.GOOS {
-	case "windows":
-		command = newExternalURLCommand(ctx, "rundll32.exe", "url.dll,FileProtocolHandler", target)
-	case "darwin":
-		command = newExternalURLCommand(ctx, "open", target)
-	default:
-		command = newExternalURLCommand(ctx, "xdg-open", target)
-	}
+	program, arguments := externalOpenCommand(runtime.GOOS, target)
+	command := newExternalURLCommand(ctx, program, arguments...)
 	if err := command.Start(); err != nil {
 		return errors.New("could not open the system browser for Fortinet SAML")
 	}

@@ -82,6 +82,9 @@ test('release workflow builds and publishes every desktop package', () => {
   }
   assert.match(releaseWorkflow, /gh release upload/);
   assert.match(releaseWorkflow, /gh release edit/);
+  assert.match(releaseWorkflow, /Generate installer SHA-256 sidecar/);
+  assert.match(releaseWorkflow, /\$installers\.Count -ne 1/);
+  assert.match(releaseWorkflow, /\$\{\{ matrix\.updater_artifact \}\}\.sha256/);
   assert.equal((releaseWorkflow.match(/Verify tag matches package version/g) ?? []).length, 1);
   assert.match(releaseWorkflow, /build:\r?\n[\s\S]*?needs: checks/);
   assert.match(releaseWorkflow, /packages:\r?\n[\s\S]*?needs: checks/);

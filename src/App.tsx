@@ -43,6 +43,12 @@ import {
   formatBitwardenVaultStatus,
 } from './bitwarden-cli-view';
 import { writeClipboardText } from './clipboard';
+import { buildMcpConfig, type McpClient } from './mcp-config';
+import {
+  hasNewerReleaseWithoutInstaller,
+  isUpdateInstallable,
+  shouldOfferUpdate,
+} from './update-state';
 import {
   normalizeTerminalPasteText,
   shouldAutoCopyTerminalSelection,
@@ -1956,9 +1962,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   }, []);
 
   const updateBannerVisible = Boolean(
-    updateResult?.isUpdateAvailable &&
-    updateResult.latestVersion &&
-    updateResult.latestVersion !== skippedUpdateVersion,
+    updateResult && shouldOfferUpdate(updateResult, skippedUpdateVersion),
   );
 
   async function handleCheckForUpdates() {
@@ -1973,7 +1977,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           ? "Couldn't reach the update server. Try again later."
           : result.isUpdateAvailable
             ? `Update available: ${result.latestVersion}`
-            : "You're on the latest version.",
+            : hasNewerReleaseWithoutInstaller(result)
+              ? `Wormhole ${result.latestVersion} is available, but no verified installer is published for this platform.`
+              : "You're on the latest version.",
       );
       const settings = await window.wormhole.readAppSettings();
       setLastUpdateCheck(settings.lastUpdateCheck);
@@ -2028,10 +2034,17 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         ...(latest.installerSha256 ? { installerSha256: latest.installerSha256 } : {}),
         ...(latest.installerSize != null ? { installerSize: latest.installerSize } : {}),
       });
-      setUpdateStatus('Launching installer…');
-      // The app quits immediately after launching the installer, so the IPC reply may never
-      // arrive. Fire it and let the status line speak for itself.
-      void window.wormhole.installUpdate(installerPath);
+      const platform = window.wormhole.platform;
+      setUpdateStatus(platform === 'linux' ? 'Opening download location…' : 'Launching installer…');
+      const installation = await window.wormhole.installUpdate(installerPath);
+      if (installation.appWillQuit) return;
+      setUpdateStatus(
+        platform === 'darwin'
+          ? 'Installer opened. Drag Wormhole to Applications to finish the update.'
+          : 'AppImage downloaded. Replace your current AppImage with the verified download.',
+      );
+      setUpdateBusy(false);
+      setUpdateDownloadProgress(null);
     } catch (error) {
       setUpdateStatus(`Install failed: ${error instanceof Error ? error.message : String(error)}`);
       setUpdateBusy(false);
@@ -7725,29 +7738,35 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                             ))}
                           </div>
                         ) : null}
-                        <label className="flex items-center gap-2 text-xs">
-                          <Checkbox
-                            checked={
-                              rdpExternalClientRequired || newConnectionForm.rdp.useExternalClient
-                            }
-                            disabled={rdpExternalClientRequired}
-                            onCheckedChange={(checked) =>
-                              setNewConnectionForm((form) => ({
-                                ...form,
-                                rdp: {
-                                  ...form.rdp,
-                                  useExternalClient: checked === true,
-                                },
-                              }))
-                            }
-                          />
-                          <span>Open with system Remote Desktop (mstsc.exe)</span>
-                        </label>
-                        {rdpExternalClientRequired ? (
-                          <p className="text-[11px] leading-relaxed text-muted-foreground">
-                            Azure AD credentials require the system Remote Desktop client. Wormhole
-                            enforces this route to avoid the embedded Windows host failure.
-                          </p>
+                        {window.wormhole?.platform === 'win32' ? (
+                          <>
+                            <label className="flex items-center gap-2 text-xs">
+                              <Checkbox
+                                checked={
+                                  rdpExternalClientRequired ||
+                                  newConnectionForm.rdp.useExternalClient
+                                }
+                                disabled={rdpExternalClientRequired}
+                                onCheckedChange={(checked) =>
+                                  setNewConnectionForm((form) => ({
+                                    ...form,
+                                    rdp: {
+                                      ...form.rdp,
+                                      useExternalClient: checked === true,
+                                    },
+                                  }))
+                                }
+                              />
+                              <span>Open with system Remote Desktop (mstsc.exe)</span>
+                            </label>
+                            {rdpExternalClientRequired ? (
+                              <p className="text-[11px] leading-relaxed text-muted-foreground">
+                                Azure AD credentials require the system Remote Desktop client.
+                                Wormhole enforces this route to avoid the embedded Windows host
+                                failure.
+                              </p>
+                            ) : null}
+                          </>
                         ) : null}
                         <label className="flex items-center gap-2 text-xs">
                           <Checkbox
@@ -13125,19 +13144,16 @@ function logsErrorMessage(error: unknown): string {
 }
 
 function LogLevelSetting({
-  error,
   initialValue,
   loaded,
-  onErrorChange,
   onSaved,
 }: {
-  error: string;
   initialValue: LogLevel;
   loaded: boolean;
-  onErrorChange: (error: string) => void;
   onSaved: (level: LogLevel) => void;
 }) {
   const [logLevel, setLogLevel] = useState<LogLevel>(initialValue);
+  const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
   const saveState = useLazyRef(() => createLogLevelSaveState(initialValue));
@@ -13164,7 +13180,7 @@ function LogLevelSetting({
     } catch (error) {
       saveState.current.desired = saveState.current.persisted;
       setLogLevel(saveState.current.persisted);
-      onErrorChange(logsErrorMessage(error));
+      setError(logsErrorMessage(error));
     } finally {
       busyRef.current = false;
       setBusy(false);
@@ -13175,7 +13191,7 @@ function LogLevelSetting({
     if (!loaded || !isLogLevel(next) || next === saveState.current.desired) return;
     saveState.current.desired = next;
     setLogLevel(next);
-    if (error) onErrorChange('');
+    if (error) setError('');
     void persistDesiredLogLevel();
   }
 
@@ -13443,57 +13459,7 @@ function BitwardenOperationDialog({
   );
 }
 
-type McpClient = 'claude-code' | 'claude-desktop' | 'codex';
-
 const mcpTokenPlaceholder = '<bearer-token — click Reveal or Copy config>';
-
-function buildMcpConfig(client: McpClient, endpoint: string, token: string): string {
-  if (client === 'codex') {
-    const escapeToml = (value: string) => value.replaceAll('\\', '\\\\').replaceAll('"', '\\"');
-    return (
-      '[mcp_servers.wormhole]\n' +
-      `url = "${escapeToml(endpoint)}"\n` +
-      `http_headers = { Authorization = "${escapeToml(`Bearer ${token}`)}" }\n`
-    );
-  }
-
-  if (client === 'claude-desktop') {
-    return JSON.stringify(
-      {
-        mcpServers: {
-          wormhole: {
-            command: 'cmd',
-            args: [
-              '/c',
-              'npx',
-              'mcp-remote@latest',
-              endpoint,
-              '--header',
-              'Authorization:${WORMHOLE_MCP_TOKEN}',
-            ],
-            env: { WORMHOLE_MCP_TOKEN: `Bearer ${token}` },
-          },
-        },
-      },
-      null,
-      2,
-    );
-  }
-
-  return JSON.stringify(
-    {
-      mcpServers: {
-        wormhole: {
-          type: 'http',
-          url: endpoint,
-          headers: { Authorization: `Bearer ${token}` },
-        },
-      },
-    },
-    null,
-    2,
-  );
-}
 
 function mcpClientCopyDetails(client: McpClient): {
   label: string;
@@ -13966,7 +13932,8 @@ function SettingsPage({
   const [logsOpenBusy, setLogsOpenBusy] = useState(false);
   const [retentionBusy, setRetentionBusy] = useState(false);
   const savedLogLevel = useRef<LogLevel>('info');
-  const [logsError, setLogsError] = useState('');
+  const [logsActionError, setLogsActionError] = useState('');
+  const [retentionError, setRetentionError] = useState('');
   const [backupExportOpen, setBackupExportOpen] = useState(false);
   const [backupExportPassword, setBackupExportPassword] = useState('');
   const [backupExportConfirmation, setBackupExportConfirmation] = useState('');
@@ -14121,10 +14088,10 @@ function SettingsPage({
         if (isLogLevel(info.logLevel)) savedLogLevel.current = info.logLevel;
         setLogsInfo(info);
         setRetentionDays(String(info.logRetentionDays));
-        setLogsError('');
+        setLogsActionError('');
       })
       .catch((error) => {
-        if (active) setLogsError(logsErrorMessage(error));
+        if (active) setLogsActionError(logsErrorMessage(error));
       });
     return () => {
       active = false;
@@ -14852,7 +14819,9 @@ function SettingsPage({
     try {
       const token = await window.wormhole.getMcpToken();
       if (authGateRef.current !== 'unlocked') return;
-      await copyTextToClipboard(buildMcpConfig(mcpClient, mcpEndpoint, token));
+      await copyTextToClipboard(
+        buildMcpConfig(mcpClient, mcpEndpoint, token, window.wormhole.platform),
+      );
       setMcpMessage('MCP client configuration copied with the current bearer token.');
     } catch (error) {
       setMcpError(authSettingsErrorMessage(error));
@@ -14864,11 +14833,11 @@ function SettingsPage({
   async function openCurrentLogFile() {
     if (logsOpenBusy || retentionBusy || !window.wormhole) return;
     setLogsOpenBusy(true);
-    setLogsError('');
+    setLogsActionError('');
     try {
       await window.wormhole.openCurrentLogFile();
     } catch (error) {
-      setLogsError(logsErrorMessage(error));
+      setLogsActionError(logsErrorMessage(error));
     } finally {
       setLogsOpenBusy(false);
     }
@@ -14877,11 +14846,11 @@ function SettingsPage({
   async function openLogsFolder() {
     if (logsOpenBusy || retentionBusy || !window.wormhole) return;
     setLogsOpenBusy(true);
-    setLogsError('');
+    setLogsActionError('');
     try {
       await window.wormhole.openLogsFolder();
     } catch (error) {
-      setLogsError(logsErrorMessage(error));
+      setLogsActionError(logsErrorMessage(error));
     } finally {
       setLogsOpenBusy(false);
     }
@@ -14893,12 +14862,15 @@ function SettingsPage({
     const days = Number(retentionDays);
     if (!Number.isInteger(days) || days < 1 || days > 365) {
       setRetentionDays(String(saved));
-      setLogsError('Log retention must be a whole number between 1 and 365 days.');
+      setRetentionError('Log retention must be a whole number between 1 and 365 days.');
       return;
     }
-    if (days === saved) return;
+    if (days === saved) {
+      setRetentionError('');
+      return;
+    }
     setRetentionBusy(true);
-    setLogsError('');
+    setRetentionError('');
     try {
       const result = await window.wormhole.setLogRetentionDays(days);
       setRetentionDays(String(result.logRetentionDays));
@@ -14907,7 +14879,7 @@ function SettingsPage({
       );
     } catch (error) {
       setRetentionDays(String(saved));
-      setLogsError(logsErrorMessage(error));
+      setRetentionError(logsErrorMessage(error));
     } finally {
       setRetentionBusy(false);
     }
@@ -15063,12 +15035,15 @@ function SettingsPage({
     mcpClient,
     mcpEndpoint,
     mcpTokenRevealed && mcpToken ? mcpToken : mcpTokenPlaceholder,
+    window.wormhole?.platform ?? '',
   );
   const mcpConfigDetails = mcpClientCopyDetails(mcpClient);
-  const updateAvailable = Boolean(
-    update.result?.isUpdateAvailable &&
-    update.result.latestVersion &&
-    update.result.latestVersion !== update.skippedUpdateVersion,
+  const updateAvailable = Boolean(update.result && isUpdateInstallable(update.result));
+  const updateDismissible = Boolean(
+    update.result && shouldOfferUpdate(update.result, update.skippedUpdateVersion),
+  );
+  const newerReleaseWithoutInstaller = Boolean(
+    update.result && hasNewerReleaseWithoutInstaller(update.result),
   );
   const backupExportPasswordConfirmed = backupExportPasswordsMatch(
     backupExportPassword,
@@ -15218,7 +15193,13 @@ function SettingsPage({
                   <SelectItem value="disabled">Disabled</SelectItem>
                   <SelectItem value="pin">PIN</SelectItem>
                   <SelectItem value="password">Password</SelectItem>
-                  <SelectItem value="windowsHello">Windows Hello</SelectItem>
+                  {window.wormhole?.platform === 'win32' ? (
+                    <SelectItem value="windowsHello">Windows Hello</SelectItem>
+                  ) : authMethod === 'windowsHello' ? (
+                    <SelectItem disabled value="windowsHello">
+                      Windows Hello (Windows only)
+                    </SelectItem>
+                  ) : null}
                 </SelectContent>
               </Select>
             </div>
@@ -15328,7 +15309,7 @@ function SettingsPage({
                 Turning this on installs the official Bitwarden CLI automatically.
               </p>
               <div className="grid gap-2">
-                <Label htmlFor="settings-bitwarden-path">bw.exe path</Label>
+                <Label htmlFor="settings-bitwarden-path">Bitwarden CLI path</Label>
                 <Input
                   disabled={bitwardenBusy}
                   id="settings-bitwarden-path"
@@ -15626,17 +15607,17 @@ function SettingsPage({
                 onClick={onInstallUpdate}
                 size="sm"
               >
-                Install update
+                {window.wormhole?.platform === 'linux' ? 'Download AppImage' : 'Install update'}
               </Button>
               <Button
-                disabled={!updateAvailable}
+                disabled={!update.result?.releaseUrl}
                 onClick={onOpenReleaseNotes}
                 size="sm"
                 variant="outline"
               >
                 View release notes
               </Button>
-              {updateAvailable ? (
+              {updateDismissible ? (
                 <Button disabled={update.busy} onClick={onDismissUpdate} size="sm" variant="ghost">
                   Not now
                 </Button>
@@ -15654,9 +15635,11 @@ function SettingsPage({
                 <p className="text-[11px] leading-relaxed text-muted-foreground">
                   {update.result?.checkFailed
                     ? "Couldn't reach the update server. Try again later."
-                    : update.result?.latestVersion
-                      ? "You're on the latest version."
-                      : 'Update information will appear here when a new release is available.'}
+                    : newerReleaseWithoutInstaller
+                      ? `Wormhole ${update.result?.latestVersion} is available, but no verified installer is published for this platform.`
+                      : update.result?.latestVersion
+                        ? "You're on the latest version."
+                        : 'Update information will appear here when a new release is available.'}
                 </p>
               )}
             </Card>
@@ -15671,10 +15654,7 @@ function SettingsPage({
                 id="settings-log-file"
                 readOnly
                 spellCheck={false}
-                value={
-                  logsInfo?.currentLogFilePath ??
-                  '%LOCALAPPDATA%\\Wormhole\\logs\\wormhole-YYYYMMDD.log'
-                }
+                value={logsInfo?.currentLogFilePath ?? 'Loading the current log path…'}
               />
             </div>
             <div className="flex flex-wrap gap-2">
@@ -15696,13 +15676,14 @@ function SettingsPage({
                 Open log folder
               </Button>
             </div>
+            {logsActionError ? (
+              <p className="text-[11px] text-destructive">{logsActionError}</p>
+            ) : null}
           </SettingsSection>
 
           <LogLevelSetting
-            error={logsError}
             initialValue={savedLogLevel.current}
             loaded={logsInfo !== null}
-            onErrorChange={setLogsError}
             onSaved={(level) => {
               savedLogLevel.current = level;
             }}
@@ -15732,7 +15713,9 @@ function SettingsPage({
               Logs rotate daily. Retention changes are saved now and apply after restarting
               Wormhole.
             </p>
-            {logsError ? <p className="text-[11px] text-destructive">{logsError}</p> : null}
+            {retentionError ? (
+              <p className="text-[11px] text-destructive">{retentionError}</p>
+            ) : null}
           </SettingsSection>
         </SettingsTabPanel>
 

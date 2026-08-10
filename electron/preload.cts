@@ -11,6 +11,7 @@ import type {
 type WormholeUpdateCheckResult = {
   currentVersion: string;
   latestVersion: string;
+  isNewerRelease: boolean;
   isUpdateAvailable: boolean;
   checkFailed: boolean;
   releaseTag?: string;
@@ -57,6 +58,7 @@ type WorkspaceRdpSettings = {
 };
 
 const wormholeBridge = {
+  platform: process.platform,
   loadStartup: (legacyTheme?: 'system' | 'light' | 'dark') =>
     ipcRenderer.invoke('startup:load', { legacyTheme }),
   unlockStartup: (request: { method: 'pin' | 'password'; secret: string }) =>
@@ -374,7 +376,7 @@ const wormholeBridge = {
   }) => ipcRenderer.invoke('update:download', request) as Promise<string>,
   installUpdate: (installerPath: string) =>
     ipcRenderer.invoke('update:install', { path: installerPath }) as Promise<{
-      launched: boolean;
+      appWillQuit: boolean;
     }>,
   openExternal: (url: string) => ipcRenderer.invoke('update:open-release', url) as Promise<void>,
   onUpdateResult: (listener: (result: WormholeUpdateCheckResult) => void) => {
