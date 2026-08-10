@@ -285,6 +285,131 @@ func TestBackupPlaintextRoundTripIsLegacyCompatible(t *testing.T) {
 	}
 }
 
+func TestBackupExportSnapshotsSshKeyAndPassphraseAgainstConcurrentReplacement(t *testing.T) {
+	installBackupTestSecretStore(t)
+	databasePath := filepath.Join(t.TempDir(), "source.db")
+	database := openBackupTestDatabase(t, databasePath)
+	seedBackupTestDatabase(t, database, databasePath)
+	database.Close()
+
+	passphraseRead := make(chan struct{})
+	continueExport := make(chan struct{})
+	defer func() {
+		select {
+		case <-continueExport:
+		default:
+			close(continueExport)
+		}
+	}()
+	previousUnprotect := backupUnprotectStoredSecret
+	var pauseOnce sync.Once
+	backupUnprotectStoredSecret = func(id, encoded, encoding string, legacyPaths ...string) ([]byte, error) {
+		secret, err := previousUnprotect(id, encoded, encoding, legacyPaths...)
+		if id == backupTestKeyID && err == nil {
+			pauseOnce.Do(func() {
+				close(passphraseRead)
+				<-continueExport
+			})
+		}
+		return secret, err
+	}
+	t.Cleanup(func() { backupUnprotectStoredSecret = previousUnprotect })
+
+	previousStageProtect := credentialPrivateKeyStageProtect
+	replacementStaged := make(chan struct{}, 1)
+	credentialPrivateKeyStageProtect = func(finalPath, pendingPath string, plaintext []byte) error {
+		if err := previousStageProtect(finalPath, pendingPath, plaintext); err != nil {
+			return err
+		}
+		replacementStaged <- struct{}{}
+		return nil
+	}
+	t.Cleanup(func() { credentialPrivateKeyStageProtect = previousStageProtect })
+
+	backupPath := filepath.Join(t.TempDir(), "snapshot.json")
+	exportDone := make(chan error, 1)
+	go func() {
+		_, err := exportBackup(databasePath, backupRequest{Path: backupPath})
+		exportDone <- err
+	}()
+	select {
+	case <-passphraseRead:
+	case <-time.After(5 * time.Second):
+		t.Fatal("backup did not reach the SSH key passphrase")
+	}
+
+	replacementPath := filepath.Join(t.TempDir(), "replacement.pem")
+	if err := os.WriteFile(replacementPath, testSshPrivateKey(t, "replacement-passphrase"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	updateDone := make(chan error, 1)
+	go func() {
+		_, err := updateCredential(databasePath, credentialUpdateRequest{
+			ID: backupTestKeyID,
+			credentialCreateRequest: credentialCreateRequest{
+				Name: "alice-key", Protocol: "ssh", Kind: "sshKey", Username: "alice",
+				Passphrase: "replacement-passphrase", PrivateKeyPath: replacementPath,
+			},
+		})
+		updateDone <- err
+	}()
+
+	select {
+	case <-replacementStaged:
+		close(continueExport)
+		t.Fatal("SSH key replacement reached staging during the backup snapshot")
+	case err := <-updateDone:
+		close(continueExport)
+		t.Fatalf("SSH key replacement did not wait for the backup snapshot: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(continueExport)
+	select {
+	case err := <-exportDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("backup did not finish after releasing its snapshot")
+	}
+	select {
+	case err := <-updateDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("SSH key replacement did not resume after the backup snapshot")
+	}
+
+	contents, err := os.ReadFile(backupPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document backupDocument
+	if err := json.Unmarshal(contents, &document); err != nil || document.Payload == nil {
+		t.Fatalf("backup document = %#v, %v", document, err)
+	}
+	var passphrase string
+	for _, entry := range document.Payload.Passwords {
+		if entry.CredentialID == backupTestKeyID {
+			passphrase = entry.Password
+		}
+	}
+	var privateKey []byte
+	for _, entry := range document.Payload.PrivateKeys {
+		if entry.CredentialID == backupTestKeyID {
+			privateKey, err = base64.StdEncoding.DecodeString(entry.DataB64)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	defer clearBytes(privateKey)
+	if passphrase != "key-passphrase" || !bytes.Equal(privateKey, []byte("private-key-material")) {
+		t.Fatalf("backup SSH key snapshot = passphrase:%q key:%q", passphrase, privateKey)
+	}
+}
+
 func TestBackupEncryptedRoundTripAndWrongPasswordFailBeforeWrites(t *testing.T) {
 	installBackupTestSecretStore(t)
 	sourcePath := filepath.Join(t.TempDir(), "source.db")
@@ -581,17 +706,19 @@ func TestBackupExportProtectsTheDatabaseAndSiblingFiles(t *testing.T) {
 		databasePath + "-journal",
 		databasePath + "-shm",
 		databasePath + "-wal",
+		credentialPrivateKeyLockPath(databasePath),
+		credentialPrivateKeyPath(databasePath, backupTestKeyID),
 	} {
 		if _, err := exportBackup(databasePath, backupRequest{Path: reserved}); err == nil ||
-			!strings.Contains(err.Error(), "cannot be a Wormhole database file") {
-			t.Fatalf("reserved database destination %q error = %v", reserved, err)
+			!strings.Contains(err.Error(), "cannot be Wormhole workspace storage") {
+			t.Fatalf("reserved workspace destination %q error = %v", reserved, err)
 		}
 	}
 	aliasDirectory := filepath.Join(t.TempDir(), "database-alias")
 	if err := os.Symlink(directory, aliasDirectory); err == nil {
 		aliasedJournal := filepath.Join(aliasDirectory, filepath.Base(databasePath)+"-journal")
 		if _, err := exportBackup(databasePath, backupRequest{Path: aliasedJournal}); err == nil ||
-			!strings.Contains(err.Error(), "cannot be a Wormhole database file") {
+			!strings.Contains(err.Error(), "cannot be Wormhole workspace storage") {
 			t.Fatalf("aliased database companion destination %q error = %v", aliasedJournal, err)
 		}
 	}

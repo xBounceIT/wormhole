@@ -621,7 +621,7 @@ func TestSshKeyCredentialRecoveryRecognizesPromotedReplacement(t *testing.T) {
 	}
 }
 
-func TestSshKeyCredentialDeleteWaitsForCommittedReplacement(t *testing.T) {
+func TestSshKeyCredentialOperationsRecoverCommittedReplacementBeforeProceeding(t *testing.T) {
 	installSshKeyCredentialTestStores(t)
 	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
 	keyPath := filepath.Join(t.TempDir(), "encrypted.pem")
@@ -636,10 +636,6 @@ func TestSshKeyCredentialDeleteWaitsForCommittedReplacement(t *testing.T) {
 		t.Fatal(err)
 	}
 	finalPath := credentialPrivateKeyPath(databasePath, created.ID)
-	before, err := os.ReadFile(finalPath)
-	if err != nil {
-		t.Fatal(err)
-	}
 	staged, err := stageCredentialPrivateKeyWrite(databasePath, created.ID, []byte("replacement"))
 	if err != nil {
 		t.Fatal(err)
@@ -659,31 +655,31 @@ func TestSshKeyCredentialDeleteWaitsForCommittedReplacement(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = database.Close()
+	pending, err := os.ReadFile(staged.pendingPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if _, err := updateCredential(databasePath, credentialUpdateRequest{
 		ID: created.ID,
 		credentialCreateRequest: credentialCreateRequest{
 			Name: "Concurrent replacement", Protocol: "ssh", Kind: "sshKey", Username: "operator",
 		},
-	}); err == nil || !strings.Contains(err.Error(), "still being finalized") {
-		t.Fatalf("update during replacement error = %v", err)
-	}
-	if err := deleteCredential(databasePath, credentialDeleteRequest{ID: created.ID}); err == nil ||
-		!strings.Contains(err.Error(), "still being finalized") {
-		t.Fatalf("delete during replacement error = %v", err)
+	}); err != nil {
+		t.Fatalf("update after replacement recovery: %v", err)
 	}
 	current, err := os.ReadFile(finalPath)
-	if err != nil || !bytes.Equal(current, before) {
-		t.Fatalf("concurrent delete changed protected key to %q: %v", current, err)
+	if err != nil || !bytes.Equal(current, pending) {
+		t.Fatalf("update recovered protected key %q, want %q: %v", current, pending, err)
 	}
-	if _, err := os.Stat(staged.pendingPath); err != nil {
-		t.Fatalf("concurrent delete removed replacement stage: %v", err)
-	}
-	if err := recoverCredentialPrivateKeyOperations(databasePath); err != nil {
-		t.Fatal(err)
+	if _, err := os.Stat(staged.pendingPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("recovered replacement stage survived: %v", err)
 	}
 	if err := deleteCredential(databasePath, credentialDeleteRequest{ID: created.ID}); err != nil {
-		t.Fatalf("delete after replacement recovery: %v", err)
+		t.Fatalf("delete after automatic replacement recovery: %v", err)
+	}
+	if _, err := os.Stat(finalPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("delete left recovered protected key: %v", err)
 	}
 }
 

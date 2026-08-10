@@ -34,6 +34,7 @@ const (
 	credentialPrivateKeyCreate         = "create"
 	credentialPrivateKeyReplace        = "replace"
 	credentialPrivateKeyDelete         = "delete"
+	credentialPrivateKeyLockFileName   = ".credential-private-keys.lock"
 )
 
 const credentialPrivateKeyOperationsTableSQL = `
@@ -102,6 +103,13 @@ func createCredential(databasePath string, request credentialCreateRequest) (cre
 	draft, err := normalizeCredentialDraft(request, false)
 	if err != nil {
 		return credentialRecord{}, err
+	}
+	if draft.kind == 1 {
+		release, err := acquireRecoveredCredentialPrivateKeyLock(databasePath)
+		if err != nil {
+			return credentialRecord{}, err
+		}
+		defer release()
 	}
 
 	database, err := openDatabase(databasePath, false)
@@ -218,6 +226,13 @@ func updateCredential(databasePath string, request credentialUpdateRequest) (cre
 	draft, err := normalizeCredentialDraft(request.credentialCreateRequest, true)
 	if err != nil {
 		return credentialRecord{}, err
+	}
+	if draft.kind == 1 {
+		release, err := acquireRecoveredCredentialPrivateKeyLock(databasePath)
+		if err != nil {
+			return credentialRecord{}, err
+		}
+		defer release()
 	}
 
 	database, err := openDatabase(databasePath, false)
@@ -401,6 +416,11 @@ func deleteCredential(databasePath string, request credentialDeleteRequest) erro
 	if !validCredentialID(id) {
 		return errors.New("credential id is invalid")
 	}
+	release, err := acquireRecoveredCredentialPrivateKeyLock(databasePath)
+	if err != nil {
+		return err
+	}
+	defer release()
 	database, err := openDatabase(databasePath, false)
 	if err != nil {
 		return err
@@ -850,7 +870,44 @@ func credentialPrivateKeyDigest(protected []byte) string {
 	return hex.EncodeToString(digest[:])
 }
 
+func acquireCredentialPrivateKeyLock(databasePath string) (func(), error) {
+	directory := filepath.Dir(filepath.Clean(databasePath))
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		return nil, errors.New("could not prepare SSH private key storage")
+	}
+	release, err := acquireExclusiveFileLock(credentialPrivateKeyLockPath(databasePath))
+	if err != nil {
+		return nil, errors.New("could not lock SSH private key storage")
+	}
+	return release, nil
+}
+
+func credentialPrivateKeyLockPath(databasePath string) string {
+	return filepath.Join(filepath.Dir(filepath.Clean(databasePath)), credentialPrivateKeyLockFileName)
+}
+
+func acquireRecoveredCredentialPrivateKeyLock(databasePath string) (func(), error) {
+	release, err := acquireCredentialPrivateKeyLock(databasePath)
+	if err != nil {
+		return nil, err
+	}
+	if err := recoverCredentialPrivateKeyOperationsUnlocked(databasePath); err != nil {
+		release()
+		return nil, err
+	}
+	return release, nil
+}
+
 func recoverCredentialPrivateKeyOperations(databasePath string) error {
+	release, err := acquireRecoveredCredentialPrivateKeyLock(databasePath)
+	if err != nil {
+		return err
+	}
+	release()
+	return nil
+}
+
+func recoverCredentialPrivateKeyOperationsUnlocked(databasePath string) error {
 	database, err := openDatabase(databasePath, false)
 	if err != nil {
 		return err

@@ -3510,12 +3510,17 @@ func loadSSHCredential(
 	}
 
 	if row.Kind.Valid && row.Kind.Int64 == 1 {
+		release, err := acquireRecoveredCredentialPrivateKeyLock(databasePath)
+		if err != nil {
+			return err
+		}
+		defer release()
 		stem, err := protectedCredentialFileStem(credentialID)
 		if err != nil {
 			return err
 		}
 		keyPath := filepath.Join(filepath.Dir(databasePath), "keys", stem+".dpapi")
-		key, err := unprotectSshPrivateKey(keyPath)
+		key, err := credentialPrivateKeyUnprotect(keyPath)
 		if err != nil {
 			return errors.New("could not read the SSH private key")
 		}

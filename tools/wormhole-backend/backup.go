@@ -322,40 +322,17 @@ func exportBackupContext(
 	if err := validateBackupRequest(request, true); err != nil {
 		return backupExportResult{}, err
 	}
-	if isBackupDatabaseFile(databasePath, request.Path) {
-		return backupExportResult{}, errors.New("The backup destination cannot be a Wormhole database file.")
+	if isBackupWorkspaceStoragePath(databasePath, request.Path) {
+		return backupExportResult{}, errors.New("The backup destination cannot be Wormhole workspace storage.")
 	}
 	if err := ctx.Err(); err != nil {
 		return backupExportResult{}, err
 	}
 	reportOperationProgress(progress, "reading", "Reading workspace metadata…", 10)
 
-	database, err := openDatabase(databasePath, true)
-	if err != nil {
-		return backupExportResult{}, err
-	}
 	payload := newBackupPayload()
-	if database != nil {
-		defer database.Close()
-		if payload.Nodes, err = loadBackupObjectsContext(ctx, database, "Nodes", backupNodeColumns); err != nil {
-			return backupExportResult{}, err
-		}
-		if payload.Credentials, err = loadBackupObjectsContext(ctx, database, "CredentialProfiles", backupCredentialColumns); err != nil {
-			return backupExportResult{}, err
-		}
-		if payload.Tunnels, err = loadBackupObjectsContext(ctx, database, "TunnelConfigs", backupTunnelColumns); err != nil {
-			return backupExportResult{}, err
-		}
-		if payload.BitwardenCredentialCache, err = loadBackupObjectsContext(ctx, database, "BitwardenCredentialCache", backupBitwardenColumns); err != nil {
-			return backupExportResult{}, err
-		}
-		if err := ctx.Err(); err != nil {
-			return backupExportResult{}, err
-		}
-		reportOperationProgress(progress, "secrets", "Reading protected secrets…", 35)
-		if err := exportBackupSecretsContext(ctx, database, databasePath, payload); err != nil {
-			return backupExportResult{}, err
-		}
+	if err := populateBackupPayloadContext(ctx, databasePath, payload, progress); err != nil {
+		return backupExportResult{}, err
 	}
 	if err := ctx.Err(); err != nil {
 		return backupExportResult{}, err
@@ -412,6 +389,45 @@ func exportBackupContext(
 		result.NodeCount, result.CredentialCount, result.TunnelCount, encrypted)
 	reportOperationProgress(progress, "complete", "Backup export complete.", 100)
 	return result, nil
+}
+
+func populateBackupPayloadContext(
+	ctx context.Context,
+	databasePath string,
+	payload *backupPayload,
+	progress operationProgress,
+) error {
+	release, err := acquireRecoveredCredentialPrivateKeyLock(databasePath)
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	database, err := openDatabase(databasePath, true)
+	if err != nil {
+		return err
+	}
+	if database == nil {
+		return nil
+	}
+	defer database.Close()
+	if payload.Nodes, err = loadBackupObjectsContext(ctx, database, "Nodes", backupNodeColumns); err != nil {
+		return err
+	}
+	if payload.Credentials, err = loadBackupObjectsContext(ctx, database, "CredentialProfiles", backupCredentialColumns); err != nil {
+		return err
+	}
+	if payload.Tunnels, err = loadBackupObjectsContext(ctx, database, "TunnelConfigs", backupTunnelColumns); err != nil {
+		return err
+	}
+	if payload.BitwardenCredentialCache, err = loadBackupObjectsContext(ctx, database, "BitwardenCredentialCache", backupBitwardenColumns); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	reportOperationProgress(progress, "secrets", "Reading protected secrets…", 35)
+	return exportBackupSecretsContext(ctx, database, databasePath, payload)
 }
 
 func encodeBackupDocument(document backupDocument, maximumBytes int64) ([]byte, error) {
@@ -1011,18 +1027,22 @@ func canonicalBackupPath(path string) string {
 	return filepath.Join(resolvedDirectory, filepath.Base(absolute))
 }
 
-func isBackupDatabaseFile(databasePath, targetPath string) bool {
+func isBackupWorkspaceStoragePath(databasePath, targetPath string) bool {
 	for _, reserved := range []string{
 		databasePath,
 		databasePath + "-journal",
 		databasePath + "-shm",
 		databasePath + "-wal",
+		credentialPrivateKeyLockPath(databasePath),
 	} {
 		if sameBackupFile(reserved, targetPath) {
 			return true
 		}
 	}
-	return false
+	keysDirectory := filepath.Join(filepath.Dir(databasePath), "keys")
+	relative, err := filepath.Rel(canonicalBackupPath(keysDirectory), canonicalBackupPath(targetPath))
+	return err == nil && relative != ".." &&
+		!filepath.IsAbs(relative) && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
 func validateBackupEncryption(encryption string) error {
@@ -1210,6 +1230,13 @@ func importBackupContext(
 	if nullDrops > 0 {
 		addBackupWarning(&result,
 			fmt.Sprintf("Dropped %d null entries from the backup payload (malformed or hand-edited file).", nullDrops))
+	}
+	if len(payload.PrivateKeys) > 0 {
+		release, err := acquireRecoveredCredentialPrivateKeyLock(databasePath)
+		if err != nil {
+			return result, err
+		}
+		defer release()
 	}
 
 	database, err := openDatabase(databasePath, false)
