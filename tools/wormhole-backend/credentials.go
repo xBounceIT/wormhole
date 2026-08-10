@@ -760,12 +760,34 @@ func stageCredentialPrivateKeyWrite(
 }
 
 func protectCredentialPrivateKeyStage(finalPath, pendingPath string, plaintext []byte) error {
-	protected, err := protectFileContents(finalPath, plaintext)
-	if err != nil {
-		return err
-	}
-	defer clearBytes(protected)
-	return writePrivateFileAtomic(pendingPath, protected)
+	staged := false
+	defer func() {
+		if staged {
+			return
+		}
+		if _, err := os.Lstat(finalPath); errors.Is(err, os.ErrNotExist) {
+			credentialPrivateKeyProtectionDelete(finalPath)
+		}
+	}()
+	err := writePrivateFileAtomicWithTemporaryPattern(
+		pendingPath,
+		credentialPrivateKeyStageTemporaryPattern(pendingPath),
+		func(temporary *os.File) error {
+			protected, err := protectFileContents(finalPath, plaintext)
+			if err != nil {
+				return err
+			}
+			defer clearBytes(protected)
+			_, err = temporary.Write(protected)
+			return err
+		},
+	)
+	staged = err == nil
+	return err
+}
+
+func credentialPrivateKeyStageTemporaryPattern(pendingPath string) string {
+	return "." + filepath.Base(pendingPath) + "-*.tmp"
 }
 
 func (staged *stagedCredentialPrivateKeyWrite) rollback() {
@@ -1033,17 +1055,16 @@ func recoverOrphanedCredentialPrivateKeyStages(databasePath string) error {
 	}
 	for _, entry := range entries {
 		path := filepath.Join(directory, entry.Name())
-		if strings.HasSuffix(entry.Name(), ".dpapi"+credentialPrivateKeyPendingSuffix) {
-			finalPath := strings.TrimSuffix(path, credentialPrivateKeyPendingSuffix)
-			_, finalErr := os.Lstat(finalPath)
-			if finalErr != nil && !errors.Is(finalErr, os.ErrNotExist) {
-				return finalErr
-			}
-			if err := credentialPrivateKeyPendingRemove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if finalPath, ok := credentialPrivateKeyFinalPathFromTemporaryStage(directory, entry.Name()); ok {
+			if err := removeOrphanedCredentialPrivateKeyWriteStage(path, finalPath); err != nil {
 				return err
 			}
-			if errors.Is(finalErr, os.ErrNotExist) {
-				credentialPrivateKeyProtectionDelete(finalPath)
+			continue
+		}
+		if strings.HasSuffix(entry.Name(), ".dpapi"+credentialPrivateKeyPendingSuffix) {
+			finalPath := strings.TrimSuffix(path, credentialPrivateKeyPendingSuffix)
+			if err := removeOrphanedCredentialPrivateKeyWriteStage(path, finalPath); err != nil {
+				return err
 			}
 			continue
 		}
@@ -1062,6 +1083,41 @@ func recoverOrphanedCredentialPrivateKeyStages(databasePath string) error {
 				return err
 			}
 		}
+	}
+	return nil
+}
+
+func credentialPrivateKeyFinalPathFromTemporaryStage(directory, name string) (string, bool) {
+	if !strings.HasPrefix(name, ".") || !strings.HasSuffix(name, ".tmp") {
+		return "", false
+	}
+	compactID, remainder, found := strings.Cut(
+		strings.TrimPrefix(name, "."),
+		".dpapi"+credentialPrivateKeyPendingSuffix+"-",
+	)
+	if !found || len(compactID) != 32 {
+		return "", false
+	}
+	temporaryID := strings.TrimSuffix(remainder, ".tmp")
+	if temporaryID == remainder || temporaryID == "" {
+		return "", false
+	}
+	if _, err := hex.DecodeString(compactID); err != nil {
+		return "", false
+	}
+	return filepath.Join(directory, compactID+".dpapi"), true
+}
+
+func removeOrphanedCredentialPrivateKeyWriteStage(path, finalPath string) error {
+	_, finalErr := os.Lstat(finalPath)
+	if finalErr != nil && !errors.Is(finalErr, os.ErrNotExist) {
+		return finalErr
+	}
+	if err := credentialPrivateKeyPendingRemove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if errors.Is(finalErr, os.ErrNotExist) {
+		credentialPrivateKeyProtectionDelete(finalPath)
 	}
 	return nil
 }

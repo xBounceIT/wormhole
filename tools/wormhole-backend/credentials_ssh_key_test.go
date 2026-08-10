@@ -354,6 +354,70 @@ func TestSshKeyCredentialRecoveryDiscardsUncommittedCreation(t *testing.T) {
 	}
 }
 
+func TestSshKeyCredentialRecoveryDiscardsInterruptedStageTemporaryFiles(t *testing.T) {
+	installSshKeyCredentialTestStores(t)
+	previousProtectionDelete := credentialPrivateKeyProtectionDelete
+	deletedProtectionKeys := make([]string, 0)
+	credentialPrivateKeyProtectionDelete = func(path string) {
+		deletedProtectionKeys = append(deletedProtectionKeys, path)
+	}
+	t.Cleanup(func() { credentialPrivateKeyProtectionDelete = previousProtectionDelete })
+
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	if err := ensureElectronWorkspaceSchema(databasePath); err != nil {
+		t.Fatal(err)
+	}
+	creationFinalPath := credentialPrivateKeyPath(databasePath, "11111111-1111-4111-8111-111111111111")
+	replacementFinalPath := credentialPrivateKeyPath(databasePath, "22222222-2222-4222-8222-222222222222")
+	if err := os.MkdirAll(filepath.Dir(creationFinalPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(replacementFinalPath, []byte("existing-protected-key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	temporaryPaths := make([]string, 0, 2)
+	for _, finalPath := range []string{creationFinalPath, replacementFinalPath} {
+		pendingPath := finalPath + credentialPrivateKeyPendingSuffix
+		temporary, err := os.CreateTemp(
+			filepath.Dir(finalPath),
+			credentialPrivateKeyStageTemporaryPattern(pendingPath),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		temporaryPaths = append(temporaryPaths, temporary.Name())
+		if _, err := temporary.Write([]byte("interrupted-protected-key")); err != nil {
+			_ = temporary.Close()
+			t.Fatal(err)
+		}
+		if err := temporary.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	unrelatedPath := filepath.Join(filepath.Dir(creationFinalPath), ".tunnel-unrelated.tmp")
+	if err := os.WriteFile(unrelatedPath, []byte("unrelated"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := recoverCredentialPrivateKeyOperations(databasePath); err != nil {
+		t.Fatal(err)
+	}
+	for _, temporaryPath := range temporaryPaths {
+		if _, err := os.Stat(temporaryPath); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("interrupted credential stage survived recovery: %v", err)
+		}
+	}
+	if current, err := os.ReadFile(replacementFinalPath); err != nil || string(current) != "existing-protected-key" {
+		t.Fatalf("replacement recovery changed the existing protected key: %q, %v", current, err)
+	}
+	if len(deletedProtectionKeys) != 1 || deletedProtectionKeys[0] != creationFinalPath {
+		t.Fatalf("interrupted staging keyring cleanup = %#v", deletedProtectionKeys)
+	}
+	if current, err := os.ReadFile(unrelatedPath); err != nil || string(current) != "unrelated" {
+		t.Fatalf("credential recovery changed unrelated temporary file: %q, %v", current, err)
+	}
+}
+
 func TestSshKeyCredentialRecoveryFinishesCommittedCreation(t *testing.T) {
 	installSshKeyCredentialTestStores(t)
 	databasePath := filepath.Join(t.TempDir(), "wormhole.db")

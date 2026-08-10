@@ -775,11 +775,21 @@ func legacyTunnelSecretPath(databasePath, id string) string {
 }
 
 func writePrivateFileAtomic(path string, contents []byte) error {
+	return writePrivateFileAtomicWithTemporaryPattern(path, ".tunnel-*.tmp", func(temporary *os.File) error {
+		_, err := temporary.Write(contents)
+		return err
+	})
+}
+
+func writePrivateFileAtomicWithTemporaryPattern(
+	path, pattern string,
+	writeContents func(*os.File) error,
+) error {
 	directory := filepath.Dir(path)
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return err
 	}
-	temporary, err := os.CreateTemp(directory, ".tunnel-*.tmp")
+	temporary, err := os.CreateTemp(directory, pattern)
 	if err != nil {
 		return err
 	}
@@ -794,7 +804,7 @@ func writePrivateFileAtomic(path string, contents []byte) error {
 	if err := temporary.Chmod(0o600); err != nil {
 		return err
 	}
-	if _, err := temporary.Write(contents); err != nil {
+	if err := writeContents(temporary); err != nil {
 		return err
 	}
 	if err := temporary.Sync(); err != nil {
