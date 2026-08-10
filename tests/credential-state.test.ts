@@ -59,13 +59,14 @@ test('enabling saved credentials replaces the removed connection-only none selec
   );
 });
 
-test('blank manual credential fields clear an absent password and preserve an existing one', () => {
-  assert.equal(connectionInlinePasswordAction(false, 'ssh', '', false), 'clear');
-  assert.equal(connectionInlinePasswordAction(false, 'rdp', '', undefined), 'clear');
-  assert.equal(connectionInlinePasswordAction(false, 'ssh', '', true), 'preserve');
-  assert.equal(connectionInlinePasswordAction(false, 'rdp', 'secret', false), 'set');
-  assert.equal(connectionInlinePasswordAction(true, 'ssh', 'ignored', true), 'clear');
-  assert.equal(connectionInlinePasswordAction(false, 'vnc', 'ignored', true), 'clear');
+test('manual password actions distinguish blank, preserved, replaced, and removed secrets', () => {
+  assert.equal(connectionInlinePasswordAction(false, 'ssh', '', false, false), 'clear');
+  assert.equal(connectionInlinePasswordAction(false, 'rdp', '', undefined, false), 'clear');
+  assert.equal(connectionInlinePasswordAction(false, 'ssh', '', true, false), 'preserve');
+  assert.equal(connectionInlinePasswordAction(false, 'rdp', 'secret', false, false), 'set');
+  assert.equal(connectionInlinePasswordAction(false, 'ssh', '', true, true), 'clear');
+  assert.equal(connectionInlinePasswordAction(true, 'ssh', 'ignored', true, false), 'clear');
+  assert.equal(connectionInlinePasswordAction(false, 'vnc', 'ignored', true, false), 'clear');
 });
 
 test('blank password copy only promises preservation when an inline password exists', () => {

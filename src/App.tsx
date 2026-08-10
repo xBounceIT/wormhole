@@ -1732,6 +1732,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     port: '',
     username: '',
     inlinePassword: '',
+    removeInlinePassword: false,
     protocol: 'ssh' as Protocol,
     folder: '',
     sshAutoSudo: 'inherit' as AutoSudoMode,
@@ -2696,7 +2697,11 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     setMremoteImportOpen(false);
     window.wormhole?.clearMRemoteImport();
     setSshCredentialPrompt(null);
-    setNewConnectionForm((form) => ({ ...form, inlinePassword: '' }));
+    setNewConnectionForm((form) => ({
+      ...form,
+      inlinePassword: '',
+      removeInlinePassword: false,
+    }));
     setNewConnectionOpen(false);
     setFolderDetailsOpen(false);
     setNewFolderOpen(false);
@@ -4972,6 +4977,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       port: '',
       username: '',
       inlinePassword: '',
+      removeInlinePassword: false,
       protocol: 'ssh',
       folder: '',
       sshAutoSudo: 'off',
@@ -5035,6 +5041,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       port: '',
       username: '',
       inlinePassword: '',
+      removeInlinePassword: false,
       protocol: 'ssh',
       folder: folderId ?? '',
       sshAutoSudo: 'inherit',
@@ -5251,6 +5258,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       port: node.port === undefined ? '' : String(node.port),
       username: node.username ?? '',
       inlinePassword: '',
+      removeInlinePassword: false,
       protocol: node.protocol,
       folder: findParentFolderId(tree, node.id) ?? '',
       sshAutoSudo: autoSudoModeFor(node.sshAutoSudo),
@@ -5516,6 +5524,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         newConnectionForm.protocol,
         newConnectionForm.inlinePassword,
         editingNode?.hasInlineCredential,
+        newConnectionForm.removeInlinePassword,
       );
       const nodeWrite = {
         parentId: newConnectionForm.folder,
@@ -7099,6 +7108,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                           <Label htmlFor="connection-inline-password">Password</Label>
                           <Input
                             autoComplete="new-password"
+                            disabled={newConnectionForm.removeInlinePassword}
                             id="connection-inline-password"
                             onChange={(event) =>
                               setNewConnectionForm((form) => ({
@@ -7106,12 +7116,32 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                                 inlinePassword: event.target.value,
                               }))
                             }
-                            placeholder={connectionInlinePasswordPlaceholder(
-                              editingConnectionHasInlineCredential,
-                            )}
+                            placeholder={
+                              newConnectionForm.removeInlinePassword
+                                ? 'Stored password will be removed'
+                                : connectionInlinePasswordPlaceholder(
+                                    editingConnectionHasInlineCredential,
+                                  )
+                            }
                             type="password"
                             value={newConnectionForm.inlinePassword}
                           />
+                          {editingConnectionHasInlineCredential ? (
+                            <label className="flex items-center gap-2 text-xs">
+                              <Checkbox
+                                checked={newConnectionForm.removeInlinePassword}
+                                onCheckedChange={(checked) => {
+                                  const removeInlinePassword = checked === true;
+                                  setNewConnectionForm((form) => ({
+                                    ...form,
+                                    inlinePassword: removeInlinePassword ? '' : form.inlinePassword,
+                                    removeInlinePassword,
+                                  }));
+                                }}
+                              />
+                              <span>Remove stored password</span>
+                            </label>
+                          ) : null}
                         </div>
                       </div>
                     ) : null}

@@ -226,6 +226,58 @@ FROM Nodes WHERE Id = ?;`, nodeID).Scan(
 	}
 }
 
+func TestWorkspaceNodeUpdateClearsInlinePasswordForBlankManualCredentials(t *testing.T) {
+	for _, protocol := range []string{"ssh", "rdp"} {
+		t.Run(protocol, func(t *testing.T) {
+			databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+			createWorkspaceNodeTestSchema(t, databasePath)
+			request := workspaceNodeWriteRequest{
+				Name: protocol, Kind: "connection", Protocol: protocol, Host: "target.example",
+				Username: "operator", InlinePasswordAction: "set", InlinePassword: "secret",
+			}
+			if protocol == "rdp" {
+				settings := defaultWorkspaceRdpSettings()
+				request.RDP = &settings
+			}
+
+			nodeID, err := createWorkspaceNode(databasePath, request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request.ID = nodeID
+			request.Username = ""
+			request.InlinePasswordAction = "clear"
+			request.InlinePassword = ""
+			request.CredentialMode = 1
+			if err := updateWorkspaceNode(databasePath, request); err != nil {
+				t.Fatal(err)
+			}
+
+			database, err := openDatabase(databasePath, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer database.Close()
+			var username, credentialID sql.NullString
+			var credentialMode, useInlinePassword, secretCount int
+			if err := database.QueryRow(`
+SELECT Username, CredentialId, CredentialMode, UseInlinePassword,
+       (SELECT COUNT(*) FROM CredentialSecrets WHERE lower(Id) = lower(Nodes.Id))
+FROM Nodes WHERE Id = ?;`, nodeID).Scan(
+				&username, &credentialID, &credentialMode, &useInlinePassword, &secretCount,
+			); err != nil {
+				t.Fatal(err)
+			}
+			if username.Valid || credentialID.Valid || credentialMode != 1 || useInlinePassword != 0 || secretCount != 0 {
+				t.Fatalf(
+					"cleared manual credentials = user=%#v id=%#v mode=%d inline=%d secrets=%d",
+					username, credentialID, credentialMode, useInlinePassword, secretCount,
+				)
+			}
+		})
+	}
+}
+
 func TestWorkspaceNodeCreateRejectsInvalidNetworkPorts(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
 	createWorkspaceNodeTestSchema(t, databasePath)
