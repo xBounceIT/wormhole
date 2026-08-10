@@ -167,6 +167,7 @@
     },
     "mac": {
       "category": "public.app-category.productivity",
+      "icon": "Assets/Wormhole.icns",
       "target": "dmg"
     }
   }

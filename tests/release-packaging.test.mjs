@@ -15,6 +15,27 @@ const universalBackend = await readFile(
   'utf8',
 );
 const gitignore = await readFile(new URL('../.gitignore', import.meta.url), 'utf8');
+const macIcon = await readFile(new URL('../Assets/Wormhole.icns', import.meta.url));
+
+function readIcnsChunkTypes(icon) {
+  assert.equal(icon.subarray(0, 4).toString('ascii'), 'icns');
+  assert.equal(icon.readUInt32BE(4), icon.length);
+
+  const chunkTypes = new Set();
+  let offset = 8;
+  while (offset < icon.length) {
+    assert.ok(offset + 8 <= icon.length, 'ICNS chunk header is truncated');
+    const type = icon.subarray(offset, offset + 4).toString('ascii');
+    const size = icon.readUInt32BE(offset + 4);
+    assert.ok(size >= 8, `ICNS chunk ${type} has an invalid size`);
+    assert.ok(offset + size <= icon.length, `ICNS chunk ${type} is truncated`);
+    chunkTypes.add(type);
+    offset += size;
+  }
+
+  assert.equal(offset, icon.length);
+  return chunkTypes;
+}
 
 function linuxArtifactPattern(arch, extension) {
   return packageJson.build.linux.artifactName
@@ -41,6 +62,10 @@ test('electron-builder produces portable and installable Linux packages', () => 
 test('electron-builder produces the supported macOS installer', () => {
   assert.equal(packageJson.productName, 'Wormhole');
   assert.equal(packageJson.build.mac.target, 'dmg');
+  assert.equal(packageJson.build.mac.icon, 'Assets/Wormhole.icns');
+  const iconChunkTypes = readIcnsChunkTypes(macIcon);
+  assert.ok(iconChunkTypes.has('ic09'), 'macOS icon must include a 512px representation');
+  assert.ok(iconChunkTypes.has('ic10'), 'macOS icon must include a 1024px representation');
   assert.equal(packageJson.scripts.package, 'electron-builder --publish never');
 });
 
