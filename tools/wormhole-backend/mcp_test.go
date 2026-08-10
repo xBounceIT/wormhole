@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -20,6 +21,11 @@ type callbackWriteCloser struct {
 	write func([]byte) (int, error)
 }
 
+type mcpTestSecretStore struct {
+	values        map[string]string
+	nextReference int
+}
+
 func (writer callbackWriteCloser) Write(data []byte) (int, error) {
 	if writer.write == nil {
 		return len(data), nil
@@ -28,6 +34,49 @@ func (writer callbackWriteCloser) Write(data []byte) (int, error) {
 }
 
 func (writer callbackWriteCloser) Close() error { return nil }
+
+const mcpTestPlatformEncoding = "test-platform-secret-store-v1"
+
+func installMcpTestSecretStore(t *testing.T) *mcpTestSecretStore {
+	t.Helper()
+	previousStore := credentialSecretStore
+	previousDelete := credentialSecretDelete
+	previousUnprotect := mcpUnprotectStoredSecret
+	t.Cleanup(func() {
+		credentialSecretStore = previousStore
+		credentialSecretDelete = previousDelete
+		mcpUnprotectStoredSecret = previousUnprotect
+	})
+
+	secretStore := &mcpTestSecretStore{values: make(map[string]string)}
+	credentialSecretStore = func(id, value string) (string, string, error) {
+		if id != mcpTokenCredentialID {
+			t.Fatalf("stored secret id = %q", id)
+		}
+		secretStore.nextReference++
+		reference := fmt.Sprintf("platform-reference-%d", secretStore.nextReference)
+		secretStore.values[reference] = value
+		return reference, mcpTestPlatformEncoding, nil
+	}
+	credentialSecretDelete = func(id, encoded, encoding string) error {
+		if id != mcpTokenCredentialID || encoding != mcpTestPlatformEncoding {
+			t.Fatalf("deleted secret = id:%q encoding:%q", id, encoding)
+		}
+		delete(secretStore.values, encoded)
+		return nil
+	}
+	mcpUnprotectStoredSecret = func(id, encoded, encoding string, _ ...string) ([]byte, error) {
+		if id != mcpTokenCredentialID || encoding != mcpTestPlatformEncoding {
+			return nil, errors.New("unexpected platform secret reference")
+		}
+		value, ok := secretStore.values[encoded]
+		if !ok {
+			return nil, errors.New("platform secret is missing")
+		}
+		return []byte(value), nil
+	}
+	return secretStore
+}
 
 func TestMcpAuthorizationRequiresExactBearerToken(t *testing.T) {
 	if !isMcpAuthorized("Bearer secret-token", "secret-token") {
@@ -74,7 +123,210 @@ func TestMcpGetOrCreateTokenReadsStoredToken(t *testing.T) {
 		t.Fatalf("getOrCreateToken could not read the stored token: %v", err)
 	}
 	if read != created {
-		t.Fatalf("stored token round-trip mismatch: got %q want %q", read, created)
+		t.Fatal("stored token round-trip mismatch")
+	}
+}
+
+func TestMcpTokenLifecycleUsesPlatformSecretStore(t *testing.T) {
+	secretStore := installMcpTestSecretStore(t)
+
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	first := newMcpController(&sshServer{databasePath: databasePath})
+	created, err := first.getOrCreateToken()
+	if err != nil {
+		t.Fatalf("first getOrCreateToken: %v", err)
+	}
+	if created == "" || len(secretStore.values) != 1 {
+		t.Fatalf("created token present = %t, platform entries = %d", created != "", len(secretStore.values))
+	}
+
+	second := newMcpController(&sshServer{databasePath: databasePath})
+	reread, err := second.getOrCreateToken()
+	if err != nil {
+		t.Fatalf("second getOrCreateToken: %v", err)
+	}
+	if reread != created {
+		t.Fatal("platform token round-trip mismatch")
+	}
+
+	regenerated, err := second.regenerateToken()
+	if err != nil {
+		t.Fatalf("regenerateToken: %v", err)
+	}
+	if regenerated == "" || regenerated == created || len(secretStore.values) != 1 {
+		t.Fatalf(
+			"regenerated token present = %t, changed = %t, platform entries = %d",
+			regenerated != "",
+			regenerated != created,
+			len(secretStore.values),
+		)
+	}
+
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var encoded, encoding string
+	if err := database.QueryRow(
+		"SELECT Secret, Encoding FROM CredentialSecrets WHERE lower(Id) = ?;",
+		normalizeID(mcpTokenCredentialID),
+	).Scan(&encoded, &encoding); err != nil {
+		t.Fatal(err)
+	}
+	if encoding != mcpTestPlatformEncoding || encoded == regenerated || secretStore.values[encoded] != regenerated {
+		t.Fatalf("stored platform token = encoding:%q reference:%q", encoding, encoded)
+	}
+
+	third := newMcpController(&sshServer{databasePath: databasePath})
+	final, err := third.getOrCreateToken()
+	if err != nil {
+		t.Fatalf("third getOrCreateToken: %v", err)
+	}
+	if final != regenerated {
+		t.Fatal("regenerated token round-trip mismatch")
+	}
+}
+
+func TestMcpTokenReplacementRollsBackPlatformSecretOnDatabaseFailure(t *testing.T) {
+	secretStore := installMcpTestSecretStore(t)
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	controller := newMcpController(&sshServer{databasePath: databasePath})
+	created, err := controller.getOrCreateToken()
+	if err != nil {
+		t.Fatalf("getOrCreateToken: %v", err)
+	}
+
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var originalReference, originalEncoding string
+	if err := database.QueryRow(
+		"SELECT Secret, Encoding FROM CredentialSecrets WHERE lower(Id) = ?;",
+		normalizeID(mcpTokenCredentialID),
+	).Scan(&originalReference, &originalEncoding); err != nil {
+		t.Fatal(err)
+	}
+	trigger := fmt.Sprintf(`
+CREATE TRIGGER FailMcpTokenReplacement
+BEFORE INSERT ON CredentialSecrets
+WHEN NEW.Id = '%s'
+BEGIN
+    SELECT RAISE(ABORT, 'forced MCP token write failure');
+END;`, normalizeID(mcpTokenCredentialID))
+	if _, err := database.Exec(trigger); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := controller.regenerateToken(); err == nil {
+		t.Fatal("regenerateToken succeeded despite the database failure")
+	}
+	if controller.currentToken() != created {
+		t.Fatal("failed regeneration changed the live token")
+	}
+	if len(secretStore.values) != 1 || secretStore.values[originalReference] != created {
+		t.Fatalf("failed regeneration left %d platform secrets", len(secretStore.values))
+	}
+
+	database, err = openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var storedReference, storedEncoding string
+	if err := database.QueryRow(
+		"SELECT Secret, Encoding FROM CredentialSecrets WHERE lower(Id) = ?;",
+		normalizeID(mcpTokenCredentialID),
+	).Scan(&storedReference, &storedEncoding); err != nil {
+		t.Fatal(err)
+	}
+	if storedReference != originalReference || storedEncoding != originalEncoding {
+		t.Fatalf(
+			"failed regeneration changed database row: reference:%q encoding:%q",
+			storedReference,
+			storedEncoding,
+		)
+	}
+}
+
+func TestMcpReadableLegacyTokenSurvivesMigrationFailure(t *testing.T) {
+	previousStore := credentialSecretStore
+	previousDelete := credentialSecretDelete
+	previousUnprotect := mcpUnprotectStoredSecret
+	t.Cleanup(func() {
+		credentialSecretStore = previousStore
+		credentialSecretDelete = previousDelete
+		mcpUnprotectStoredSecret = previousUnprotect
+	})
+
+	const expected = "readable-legacy-token"
+	mcpUnprotectStoredSecret = func(id, encoded, encoding string, _ ...string) ([]byte, error) {
+		if id != mcpTokenCredentialID || encoded != "legacy-payload" || encoding != electronSafeStorageSecretEncoding {
+			t.Fatalf("unexpected legacy secret read: id:%q encoded:%q encoding:%q", id, encoded, encoding)
+		}
+		return []byte(expected), nil
+	}
+	credentialSecretStore = func(id, value string) (string, string, error) {
+		if id != mcpTokenCredentialID || value != expected {
+			t.Fatalf("unexpected migration write: id:%q expected-token:%t", id, value == expected)
+		}
+		return "", "", errors.New("platform secret store unavailable")
+	}
+	credentialSecretDelete = func(string, string, string) error {
+		t.Fatal("failed platform store must not request deletion")
+		return nil
+	}
+
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureMigrationSchema(database); err != nil {
+		t.Fatal(err)
+	}
+	_, err = database.Exec(`
+INSERT INTO CredentialSecrets (Id, Secret, Encoding, UpdatedAt)
+VALUES (?, ?, ?, ?);`,
+		normalizeID(mcpTokenCredentialID),
+		"legacy-payload",
+		electronSafeStorageSecretEncoding,
+		time.Now().UTC().Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	controller := newMcpController(&sshServer{databasePath: databasePath})
+	actual, err := controller.getOrCreateToken()
+	if err != nil {
+		t.Fatalf("readable legacy token was rejected after migration failure: %v", err)
+	}
+	if actual != expected {
+		t.Fatal("readable legacy token changed after migration failure")
+	}
+
+	database, err = openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var encoded, encoding string
+	if err := database.QueryRow(
+		"SELECT Secret, Encoding FROM CredentialSecrets WHERE lower(Id) = ?;",
+		normalizeID(mcpTokenCredentialID),
+	).Scan(&encoded, &encoding); err != nil {
+		t.Fatal(err)
+	}
+	if encoded != "legacy-payload" || encoding != electronSafeStorageSecretEncoding {
+		t.Fatalf("failed migration changed legacy row: encoded:%q encoding:%q", encoded, encoding)
 	}
 }
 
@@ -820,7 +1072,13 @@ func TestMcpControllerLifecycleServesBearerProtectedLoopbackEndpoint(t *testing.
 
 	regenerated, err := controller.regenerateToken()
 	if err != nil || regenerated == "" || regenerated == token || controller.currentToken() != regenerated {
-		t.Fatalf("regenerated token = %q, %v", regenerated, err)
+		t.Fatalf(
+			"regeneration error = %v, token present = %t, changed = %t, live = %t",
+			err,
+			regenerated != "",
+			regenerated != token,
+			controller.currentToken() == regenerated,
+		)
 	}
 	if err := controller.stop(true); err != nil {
 		t.Fatal(err)
