@@ -3,6 +3,13 @@
   "version": "2.0.0",
   "private": true,
   "description": "Wormhole desktop application",
+  "author": {
+    "name": "Wormhole project",
+    "email": "35002896+xBounceIT@users.noreply.github.com"
+  },
+  "homepage": "https://github.com/xBounceIT/wormhole",
+  "license": "AGPL-3.0-only",
+  "desktopName": "com.xbounceit.wormhole.desktop",
   "type": "module",
   "main": "dist-electron/main.js",
   "scripts": {
@@ -141,10 +148,22 @@
       }
     ],
     "linux": {
+      "artifactName": "Wormhole-${version}-${os}-${arch}.${ext}",
       "category": "Utility",
       "executableName": "wormhole",
       "icon": "Assets/Wormhole.png",
-      "target": "AppImage"
+      "syncDesktopName": true,
+      "target": [
+        "AppImage",
+        "deb",
+        "rpm"
+      ]
+    },
+    "deb": {
+      "packageName": "wormhole"
+    },
+    "rpm": {
+      "packageName": "wormhole"
     },
     "mac": {
       "category": "public.app-category.productivity",
