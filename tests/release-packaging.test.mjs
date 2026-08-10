@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
+import { Arch, getArtifactArchName } from 'builder-util';
 
 const packageJson = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
 const releaseWorkflow = await readFile(
@@ -15,11 +16,36 @@ const universalBackend = await readFile(
 );
 const gitignore = await readFile(new URL('../.gitignore', import.meta.url), 'utf8');
 
-test('electron-builder produces the supported Linux and macOS installers', () => {
+function linuxArtifactPattern(arch, extension) {
+  return packageJson.build.linux.artifactName
+    .replace('${version}', '*')
+    .replace('${os}', 'linux')
+    .replace('${arch}', getArtifactArchName(arch, extension))
+    .replace('${ext}', extension);
+}
+
+test('electron-builder produces portable and installable Linux packages', () => {
   assert.equal(packageJson.build.artifactName, 'Wormhole-${version}-${os}-${arch}-setup.${ext}');
-  assert.equal(packageJson.build.linux.target, 'AppImage');
+  assert.equal(packageJson.build.linux.artifactName, 'Wormhole-${version}-${os}-${arch}.${ext}');
+  assert.deepEqual(packageJson.build.linux.target, ['AppImage', 'deb', 'rpm']);
+  assert.equal(packageJson.build.linux.icon, 'Assets/Wormhole.png');
+  assert.equal(packageJson.desktopName, 'com.xbounceit.wormhole.desktop');
+  assert.equal(packageJson.build.linux.syncDesktopName, true);
+  assert.equal(packageJson.homepage, 'https://github.com/xBounceIT/wormhole');
+  assert.equal(packageJson.license, 'AGPL-3.0-only');
+  assert.match(packageJson.author.email, /@/);
+  assert.equal(packageJson.build.deb.packageName, 'wormhole');
+  assert.equal(packageJson.build.rpm.packageName, 'wormhole');
+});
+
+test('electron-builder produces the supported macOS installer', () => {
   assert.equal(packageJson.build.mac.target, 'dmg');
   assert.equal(packageJson.scripts.package, 'electron-builder --publish never');
+});
+
+test('the desktop window uses an icon format supported by the current platform', () => {
+  assert.match(electronMain, /process\.platform === 'win32' \? 'Wormhole\.ico' : 'Wormhole\.png'/);
+  assert.match(electronMain, /icon: applicationIconPath/);
 });
 
 test('native Go binaries are shipped outside the Electron asar archive', () => {
@@ -42,10 +68,14 @@ test('native Go binaries are shipped outside the Electron asar archive', () => {
   );
 });
 
-test('release workflow builds and publishes every installer target', () => {
+test('release workflow builds and publishes every desktop package', () => {
   for (const expected of [
-    'Wormhole-*-linux-x86_64-setup.AppImage',
-    'Wormhole-*-linux-arm64-setup.AppImage',
+    linuxArtifactPattern(Arch.x64, 'AppImage'),
+    linuxArtifactPattern(Arch.x64, 'deb'),
+    linuxArtifactPattern(Arch.x64, 'rpm'),
+    linuxArtifactPattern(Arch.arm64, 'AppImage'),
+    linuxArtifactPattern(Arch.arm64, 'deb'),
+    linuxArtifactPattern(Arch.arm64, 'rpm'),
     'Wormhole-*-mac-universal-setup.dmg',
   ]) {
     assert.match(releaseWorkflow, new RegExp(expected.replaceAll('*', '\\*').replace('.', '\\.')));
@@ -54,10 +84,19 @@ test('release workflow builds and publishes every installer target', () => {
   assert.match(releaseWorkflow, /gh release edit/);
   assert.match(releaseWorkflow, /Generate installer SHA-256 sidecar/);
   assert.match(releaseWorkflow, /\$installers\.Count -ne 1/);
-  assert.match(releaseWorkflow, /\$\{\{ matrix\.artifact \}\}\.sha256/);
+  assert.match(releaseWorkflow, /\$\{\{ matrix\.updater_artifact \}\}\.sha256/);
   assert.equal((releaseWorkflow.match(/Verify tag matches package version/g) ?? []).length, 1);
   assert.match(releaseWorkflow, /build:\r?\n[\s\S]*?needs: checks/);
-  assert.match(releaseWorkflow, /installers:\r?\n[\s\S]*?needs: checks/);
+  assert.match(releaseWorkflow, /packages:\r?\n[\s\S]*?needs: checks/);
+  assert.match(releaseWorkflow, /needs: \[build, packages\]/);
+  assert.match(releaseWorkflow, /Verify Linux package outputs/);
+  assert.match(releaseWorkflow, /if \[\[ \$\{#matches\[@\]\} -ne 1 \]\]/);
+  for (const extension of ['AppImage', 'deb', 'rpm']) {
+    assert.equal(
+      (releaseWorkflow.match(new RegExp(`release/\\*\\.${extension}`, 'g')) ?? []).length,
+      2,
+    );
+  }
   assert.match(releaseWorkflow, /permissions:\r?\n\s+contents: read/);
   assert.match(releaseWorkflow, /release:\r?\n[\s\S]*?permissions:\r?\n\s+contents: write/);
   assert.match(

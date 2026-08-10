@@ -209,8 +209,8 @@ jobs:
             Wormhole-*.sha256
           if-no-files-found: error
 
-  installers:
-    name: Build ${{ matrix.platform }} installer
+  packages:
+    name: Build ${{ matrix.platform }} packages
     needs: checks
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -222,19 +222,28 @@ jobs:
             builder_platform: linux
             builder_arch: x64
             backend_arch: x64
-            artifact: release/Wormhole-*-linux-x86_64-setup.AppImage
+            updater_artifact: release/Wormhole-*-linux-x86_64.AppImage
+            artifacts: |
+              release/*.AppImage
+              release/*.deb
+              release/*.rpm
           - platform: linux-arm64
             runner: ubuntu-24.04
             builder_platform: linux
             builder_arch: arm64
             backend_arch: arm64
-            artifact: release/Wormhole-*-linux-arm64-setup.AppImage
+            updater_artifact: release/Wormhole-*-linux-arm64.AppImage
+            artifacts: |
+              release/*.AppImage
+              release/*.deb
+              release/*.rpm
           - platform: macos
             runner: macos-26
             builder_platform: mac
             builder_arch: universal
             backend_arch: universal
-            artifact: release/Wormhole-*-mac-universal-setup.dmg
+            updater_artifact: release/Wormhole-*-mac-universal-setup.dmg
+            artifacts: release/Wormhole-*-mac-universal-setup.dmg
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -267,39 +276,77 @@ jobs:
         if: matrix.backend_arch == 'universal'
         run: npm run build:backend:universal
 
-      - name: Build ${{ matrix.platform }} installer
+      - name: Build ${{ matrix.platform }} packages
         run: npm run package -- --${{ matrix.builder_platform }} --${{ matrix.builder_arch }}
+
+      - name: Verify Linux package outputs
+        if: matrix.builder_platform == 'linux'
+        shell: bash
+        env:
+          BUILDER_ARCH: ${{ matrix.builder_arch }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          case "$BUILDER_ARCH" in
+            x64)
+              expected=(
+                'release/Wormhole-*-linux-x86_64.AppImage'
+                'release/Wormhole-*-linux-amd64.deb'
+                'release/Wormhole-*-linux-x86_64.rpm'
+              )
+              ;;
+            arm64)
+              expected=(
+                'release/Wormhole-*-linux-arm64.AppImage'
+                'release/Wormhole-*-linux-arm64.deb'
+                'release/Wormhole-*-linux-aarch64.rpm'
+              )
+              ;;
+            *)
+              echo "Unsupported Linux package architecture: $BUILDER_ARCH" >&2
+              exit 1
+              ;;
+          esac
+
+          for pattern in "${expected[@]}"; do
+            matches=( $pattern )
+            if [[ ${#matches[@]} -ne 1 ]]; then
+              echo "Expected exactly one package matching $pattern, found ${#matches[@]}." >&2
+              exit 1
+            fi
+          done
 
       - name: Generate installer SHA-256 sidecar
         shell: pwsh
         run: |
-          $installers = @(Get-ChildItem "${{ matrix.artifact }}" -File)
+          $installers = @(Get-ChildItem "${{ matrix.updater_artifact }}" -File)
           if ($installers.Count -ne 1) {
-            throw "Expected exactly one ${{ matrix.platform }} installer, found $($installers.Count)."
+            throw "Expected exactly one ${{ matrix.platform }} updater installer, found $($installers.Count)."
           }
           $installers | ForEach-Object {
             $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant()
             "$hash  $($_.Name)" | Set-Content -LiteralPath "$($_.FullName).sha256" -Encoding ascii
           }
 
-      - name: Upload ${{ matrix.platform }} installer
+      - name: Upload ${{ matrix.platform }} packages
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: wormhole-${{ matrix.platform }}
           path: |
-            ${{ matrix.artifact }}
-            ${{ matrix.artifact }}.sha256
+            ${{ matrix.artifacts }}
+            ${{ matrix.updater_artifact }}.sha256
           if-no-files-found: error
           retention-days: 1
 
   release:
     name: Publish GitHub Release
-    needs: [build, installers]
+    needs: [build, packages]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
-      - name: Download installers
+      - name: Download release packages
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: dist

@@ -764,7 +764,7 @@ func prepareWorkspaceInlineSecret(tx *sql.Tx, node normalizedWorkspaceNode, upda
 	}
 	encoded, encoding, err := credentialSecretStore(node.id, node.inlinePassword)
 	if err != nil {
-		return change, errors.New("could not protect the inline password")
+		return change, fmt.Errorf("could not protect the inline password: %w", err)
 	}
 	change.newEncoded, change.newEncoding = encoded, encoding
 	if err := upsertCredentialSecret(tx, node.id, encoded, encoding); err != nil {

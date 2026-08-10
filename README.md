@@ -133,7 +133,10 @@ artifacts:
     npm run build:installer
     npm run build:installer:arm64
 
-The Electron installer is the only release workflow.
+The Electron application is the only release workflow. Linux releases publish
+a portable AppImage plus installable DEB and RPM packages for x86-64 and ARM64.
+Windows releases publish the installer and portable ZIP, while macOS releases
+publish the DMG.
 
 ## Stack
 
