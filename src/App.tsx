@@ -289,7 +289,7 @@ import {
   tunnelValueFor,
   updateTunnelEditorSetting,
   userFacingTunnelError,
-  watchguardSsoEnabledForEditor,
+  watchguardEditorSettingsFromDetails,
   watchguardUsesSso,
   type TunnelMode,
 } from './tunnel-state';
@@ -11707,17 +11707,6 @@ function tunnelEditorFields(kind: number): TunnelField[] {
     case 3:
       return [
         {
-          key: 'AuthMode',
-          label: 'Authentication mode',
-          section: 'Gateway',
-          type: 'select',
-          options: [
-            { value: 0, label: 'Automatic' },
-            { value: 1, label: 'Username and password' },
-            { value: 2, label: 'SAML' },
-          ],
-        },
-        {
           key: 'Server',
           label: 'Server',
           section: 'Gateway',
@@ -11731,17 +11720,29 @@ function tunnelEditorFields(kind: number): TunnelField[] {
           placeholder: '443',
         },
         {
-          key: 'UseSingleSignOn',
-          label: 'Use SSO',
-          section: 'Credentials',
+          key: 'TrustServerCertificate',
+          label: 'Ignore certificate errors',
+          section: 'Gateway',
           type: 'checkbox',
           fullWidth: true,
+          hint: 'Skip certificate validation for the WatchGuard portal and embedded SAML sign-in. Use only for a gateway you trust.',
         },
-        { key: 'Username', label: 'Username', section: 'Credentials' },
+        {
+          key: 'AuthMode',
+          label: 'Authentication mode',
+          section: 'Authentication',
+          type: 'select',
+          options: [
+            { value: 1, label: 'Username and password' },
+            { value: 2, label: 'SAML' },
+          ],
+          fullWidth: true,
+        },
+        { key: 'Username', label: 'Username', section: 'Authentication' },
         {
           key: 'Password',
           label: 'Password',
-          section: 'Credentials',
+          section: 'Authentication',
           type: 'password',
         },
         {
@@ -11779,12 +11780,6 @@ function tunnelEditorFields(kind: number): TunnelField[] {
           label: 'verify-x509-name subject (advanced)',
           section: 'Advanced',
           placeholder: 'leave default unless the Firebox uses a custom server cert',
-        },
-        {
-          key: 'TrustServerCertificate',
-          label: 'Trust the server certificate on the pre-auth login',
-          section: 'Advanced',
-          type: 'checkbox',
         },
       ];
     case 4:
@@ -11989,8 +11984,7 @@ function tunnelDefaultSettings(kind: number): Record<string, unknown> {
     case 3:
       return {
         Port: 443,
-        AuthMode: 0,
-        UseSingleSignOn: false,
+        AuthMode: 1,
         VerifyX509Name: '/O=WatchGuard_Technologies/OU=Fireware/CN=Fireware_SSLVPN_Server',
       };
     case 4:
@@ -12015,10 +12009,10 @@ function blankTunnelEditor(): TunnelEditorValue {
 }
 
 function tunnelEditorFromDetails(details: WormholeTunnelDetails): TunnelEditorValue {
-  const settings = { ...tunnelDefaultSettings(details.kind), ...details.settings };
-  if (details.kind === 3 && watchguardSsoEnabledForEditor(details.settings)) {
-    settings.UseSingleSignOn = true;
-  }
+  const settings =
+    details.kind === 3
+      ? watchguardEditorSettingsFromDetails(tunnelDefaultSettings(details.kind), details.settings)
+      : { ...tunnelDefaultSettings(details.kind), ...details.settings };
   return {
     id: details.id,
     name: details.name,
@@ -12051,7 +12045,7 @@ function TunnelFieldRow({
     <div
       className={cn(
         'grid gap-2',
-        (field.type === 'textarea' || field.fullWidth) && 'md:col-span-2',
+        (field.type === 'textarea' || field.fullWidth) && 'col-span-full',
       )}
     >
       <Label htmlFor={`tunnel-${field.key}`}>{field.label}</Label>
@@ -12109,10 +12103,12 @@ function TunnelSection({
   title,
   children,
   className,
+  contentClassName,
 }: {
   title?: string;
   children: ReactNode;
   className?: string;
+  contentClassName?: string;
 }) {
   return (
     <section className={cn('grid gap-3', className)}>
@@ -12121,7 +12117,7 @@ function TunnelSection({
           {title}
         </h4>
       ) : null}
-      <div className="grid gap-4 md:grid-cols-2">{children}</div>
+      <div className={cn('grid gap-4', contentClassName ?? 'md:grid-cols-2')}>{children}</div>
     </section>
   );
 }
@@ -12517,9 +12513,14 @@ function TunnelEditorDialog({
             ) : null}
             {value.kind === 3 ? (
               <>
-                <TunnelSection title="Gateway">{rows('Gateway')}</TunnelSection>
-                <TunnelSection title="Credentials">
-                  {rows('Credentials', {
+                <TunnelSection
+                  contentClassName="grid-cols-[minmax(0,1fr)_7rem] sm:grid-cols-[minmax(0,1fr)_8rem]"
+                  title="Gateway"
+                >
+                  {rows('Gateway')}
+                </TunnelSection>
+                <TunnelSection title="Authentication">
+                  {rows('Authentication', {
                     hidden: (field) =>
                       useWatchguardSso && (field.key === 'Username' || field.key === 'Password'),
                   })}

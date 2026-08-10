@@ -946,7 +946,7 @@ func TestValidateTunnelWriteRequestMatchesProviderRequirements(t *testing.T) {
 			missing:  "Username",
 		},
 		{
-			name: "WatchGuard explicit non-SSO automatic mode", kind: 3,
+			name: "WatchGuard legacy automatic mode", kind: 3,
 			settings: `{"Server":"firebox.example.test","AuthMode":0,"UseSingleSignOn":false}`,
 			missing:  "Username",
 		},
@@ -1012,14 +1012,47 @@ func TestValidateTunnelWriteRequestCanonicalizesWatchGuardSSO(t *testing.T) {
 	if err := json.Unmarshal(request.Settings, &settings); err != nil {
 		t.Fatal(err)
 	}
-	if !tunnelSettingBool(settings, "UseSingleSignOn") || tunnelSettingNumber(settings, "AuthMode") != 2 {
+	if tunnelSettingNumber(settings, "AuthMode") != 2 {
 		t.Fatalf("WatchGuard SSO mode was not canonicalized: %s", request.Settings)
+	}
+	if _, found := settings["UseSingleSignOn"]; found {
+		t.Fatalf("WatchGuard SSO retained its legacy checkbox state: %s", request.Settings)
 	}
 	if _, found := settings["Username"]; found {
 		t.Fatalf("WatchGuard SSO retained the username: %s", request.Settings)
 	}
 	if _, found := settings["Password"]; found {
 		t.Fatalf("WatchGuard SSO retained the password: %s", request.Settings)
+	}
+}
+
+func TestValidateTunnelWriteRequestCanonicalizesLegacyWatchGuardPasswordMode(t *testing.T) {
+	request := tunnelWriteRequest{
+		Name: "watchguard password",
+		Kind: 3,
+		Settings: json.RawMessage(`{
+            "Server":"firebox.example.test",
+            "AuthMode":0,
+            "UseSingleSignOn":false,
+            "Username":"alice",
+            "Password":"secret"
+        }`),
+	}
+	if err := validateTunnelWriteRequest(&request, false); err != nil {
+		t.Fatalf("legacy WatchGuard password settings were rejected: %v", err)
+	}
+	var settings map[string]json.RawMessage
+	if err := json.Unmarshal(request.Settings, &settings); err != nil {
+		t.Fatal(err)
+	}
+	if tunnelSettingNumber(settings, "AuthMode") != 1 {
+		t.Fatalf("WatchGuard password mode was not canonicalized: %s", request.Settings)
+	}
+	if _, found := settings["UseSingleSignOn"]; found {
+		t.Fatalf("WatchGuard password mode retained its legacy checkbox state: %s", request.Settings)
+	}
+	if tunnelSettingString(settings, "Username") != "alice" || tunnelSettingString(settings, "Password") != "secret" {
+		t.Fatalf("WatchGuard password mode lost its credentials: %s", request.Settings)
 	}
 }
 

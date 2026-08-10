@@ -1,18 +1,43 @@
-export type TunnelBrowserCompletion = 'query-token' | 'oauth-code' | 'cookie';
+import { createHash } from 'node:crypto';
 
-// Each provider gets the same dedicated, persistent browser profile as its WinUI/WebView2
-// counterpart. Persisting the partition keeps the IdP session between connects without mixing
-// cookies across Fortinet, WatchGuard, and Microsoft Entra. Provider-specific completion modes
-// are part of the native broker contract, so they are a stable discriminator here.
-export function tunnelAuthPartition(completion: TunnelBrowserCompletion): string {
-  switch (completion) {
+export type TunnelBrowserCompletion = 'query-token' | 'oauth-code' | 'cookie';
+export type TunnelAuthPartitionRequest =
+  | { completion: 'cookie' | 'oauth-code' }
+  | {
+      completion: 'query-token';
+      origin: string;
+      ignoreCertificateErrors: boolean;
+    };
+
+// Persisting each provider partition keeps its IdP session between connects. WatchGuard also
+// isolates the Firebox origin and certificate policy because Chromium caches certificate verify
+// results inside the network service; an explicit trust opt-in must never affect another gateway
+// or a later connection that restores normal verification.
+export function tunnelAuthPartition(request: TunnelAuthPartitionRequest): string {
+  switch (request.completion) {
     case 'cookie':
       return 'persist:wormhole-tunnel-auth-fortinet';
-    case 'query-token':
-      return 'persist:wormhole-tunnel-auth-watchguard';
     case 'oauth-code':
       return 'persist:wormhole-tunnel-auth-azure';
+    case 'query-token': {
+      const origin = new URL(request.origin).origin.toLowerCase();
+      const material = `${origin}\0cert=${request.ignoreCertificateErrors ? '1' : '0'}`;
+      const hash = createHash('sha256').update(material).digest('hex').slice(0, 16);
+      return `persist:wormhole-tunnel-auth-watchguard-${hash}`;
+    }
   }
+}
+
+function normalizeCertificateHostname(hostname: string): string {
+  const normalized = hostname.toLowerCase();
+  if (normalized.startsWith('[') && normalized.endsWith(']')) {
+    return normalized.slice(1, -1);
+  }
+  return normalized.endsWith('.') ? normalized.slice(0, -1) : normalized;
+}
+
+export function isSameCertificateHostname(candidate: string, expected: string): boolean {
+  return normalizeCertificateHostname(candidate) === normalizeCertificateHostname(expected);
 }
 
 export function isMatchingOAuthRedirect(candidate: URL, expectedRaw: string): boolean {

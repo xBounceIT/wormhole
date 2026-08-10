@@ -675,7 +675,7 @@ test('VPN diagnostics expose target probing and cancellation across the bridge',
   );
 });
 
-test('VPN editor keeps WatchGuard SSO and Stormshield OTP layout contracts explicit', () => {
+test('VPN editor keeps WatchGuard authentication and Stormshield OTP layout contracts explicit', () => {
   const fields = sourceBetween(
     appSource,
     'function tunnelEditorFields',
@@ -684,12 +684,16 @@ test('VPN editor keeps WatchGuard SSO and Stormshield OTP layout contracts expli
   const watchguard = sourceBetween(fields, 'case 3:', 'case 4:');
   const stormshield = sourceBetween(fields, 'case 4:', 'case 5:');
 
-  assert.ok(watchguard.indexOf("key: 'UseSingleSignOn'") < watchguard.indexOf("key: 'Username'"));
+  const server = watchguard.indexOf("key: 'Server'");
+  const port = watchguard.indexOf("key: 'Port'");
+  const authMode = watchguard.indexOf("key: 'AuthMode'");
+  assert.ok(server >= 0 && server < port && port < authMode);
   assert.match(
     watchguard,
-    /key: 'UseSingleSignOn'[\s\S]{0,180}label: 'Use SSO'[\s\S]{0,180}fullWidth: true/,
+    /key: 'TrustServerCertificate'[\s\S]{0,180}label: 'Ignore certificate errors'/,
   );
-  assert.doesNotMatch(watchguard, /not required for SAML/i);
+  assert.match(watchguard, /key: 'AuthMode'[\s\S]{0,240}Username and password[\s\S]{0,120}SAML/);
+  assert.doesNotMatch(watchguard, /UseSingleSignOn|Use SSO|label: 'Automatic'/);
   const watchguardRender = sourceBetween(
     appSource,
     '{value.kind === 3 ? (',
@@ -697,7 +701,15 @@ test('VPN editor keeps WatchGuard SSO and Stormshield OTP layout contracts expli
   );
   assert.match(
     watchguardRender,
-    /useWatchguardSso[\s\S]{0,160}field\.key === 'Username'[\s\S]{0,120}field\.key === 'Password'/,
+    /title="Authentication"[\s\S]{0,180}useWatchguardSso[\s\S]{0,160}field\.key === 'Username'[\s\S]{0,120}field\.key === 'Password'/,
+  );
+  assert.match(
+    watchguardRender,
+    /grid-cols-\[minmax\(0,1fr\)_7rem\][\s\S]{0,180}rows\('Gateway'\)/,
+  );
+  assert.match(
+    mainSource,
+    /setCertificateVerifyProc[\s\S]{0,180}event\.ignoreCertificateErrors[\s\S]{0,100}fireboxHost/,
   );
 
   const otp = stormshield.indexOf("key: 'UseOtp'");
@@ -706,7 +718,7 @@ test('VPN editor keeps WatchGuard SSO and Stormshield OTP layout contracts expli
   assert.ok(otp >= 0 && otp < username && username < password);
   assert.match(stormshield, /key: 'UseOtp'[\s\S]{0,180}fullWidth: true/);
   assert.doesNotMatch(stormshield, /UseSingleSignOn|Connect with single sign-on/i);
-  assert.match(appSource, /field\.fullWidth\) && 'md:col-span-2'/);
+  assert.match(appSource, /field\.fullWidth\) && 'col-span-full'/);
 });
 
 test('VPN editor keeps expanded provider fields inside its scrolling body', () => {

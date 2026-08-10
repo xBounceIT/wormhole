@@ -601,11 +601,13 @@ func validateTunnelSettings(kind int64, settings map[string]json.RawMessage) err
 			return err
 		}
 		useSSO := watchguardUsesSingleSignOn(settings)
+		delete(settings, "UseSingleSignOn")
 		if useSSO {
-			settings["UseSingleSignOn"] = json.RawMessage("true")
 			settings["AuthMode"] = json.RawMessage("2")
 			delete(settings, "Username")
 			delete(settings, "Password")
+		} else {
+			settings["AuthMode"] = json.RawMessage("1")
 		}
 		if hasTunnelDirectiveDelimiter(tunnelSettingString(settings, "Server"), false) ||
 			hasTunnelDirectiveDelimiter(tunnelSettingString(settings, "VerifyX509Name"), false) {
