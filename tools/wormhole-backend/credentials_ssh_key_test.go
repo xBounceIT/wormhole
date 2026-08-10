@@ -277,7 +277,7 @@ END;`); err != nil {
 	if err == nil {
 		t.Fatal("SSH key creation should fail when the profile insert is rejected")
 	}
-	if len(*protectedKeys) != 1 || len(*deletedSecrets) != 1 {
+	if len(*protectedKeys) != 0 || len(*deletedSecrets) != 1 {
 		t.Fatalf("failed create cleanup = keys:%d secrets:%#v", len(*protectedKeys), *deletedSecrets)
 	}
 	entries, err := os.ReadDir(filepath.Join(filepath.Dir(databasePath), "keys"))
@@ -286,6 +286,44 @@ END;`); err != nil {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("failed create left protected key files: %#v", entries)
+	}
+}
+
+func TestSshKeyCredentialCreateStagesUnderDatabaseWriteLock(t *testing.T) {
+	installSshKeyCredentialTestStores(t)
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	keyPath := filepath.Join(t.TempDir(), "id_ed25519")
+	if err := os.WriteFile(keyPath, testSshPrivateKey(t, ""), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	stageProtect := credentialPrivateKeyStageProtect
+	observedWriteLock := false
+	credentialPrivateKeyStageProtect = func(finalPath, pendingPath string, plaintext []byte) error {
+		contender, err := openDatabase(databasePath, false)
+		if err != nil {
+			return err
+		}
+		defer contender.Close()
+		if _, err := contender.Exec("PRAGMA busy_timeout = 1;"); err != nil {
+			return err
+		}
+		if _, err := contender.Exec("BEGIN IMMEDIATE;"); err == nil {
+			_, _ = contender.Exec("ROLLBACK;")
+			return errors.New("SSH private key staging started without the database write lock")
+		}
+		observedWriteLock = true
+		return stageProtect(finalPath, pendingPath, plaintext)
+	}
+
+	if _, err := createCredential(databasePath, credentialCreateRequest{
+		Name: "Locked key", Protocol: "ssh", Kind: "sshKey", Username: "operator",
+		PrivateKeyPath: keyPath,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !observedWriteLock {
+		t.Fatal("SSH private key staging did not observe the database write lock")
 	}
 }
 

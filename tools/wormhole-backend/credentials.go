@@ -143,24 +143,10 @@ func createCredential(databasePath string, request credentialCreateRequest) (cre
 		}
 	}
 	var stagedPrivateKey *stagedCredentialPrivateKeyWrite
-	if draft.kind == 1 {
-		stagedPrivateKey, err = stageCredentialPrivateKeyWrite(databasePath, id, privateKey)
-		if err != nil {
-			_ = deleteCredentialPrivateKey(databasePath, id)
-			if encoded != "" {
-				_ = credentialSecretDelete(id, encoded, encoding)
-			}
-			return credentialRecord{}, errors.New("could not protect the SSH private key")
-		}
-	}
-
 	tx, err := database.Begin()
 	if err != nil {
 		if encoded != "" {
 			_ = credentialSecretDelete(id, encoded, encoding)
-		}
-		if stagedPrivateKey != nil {
-			stagedPrivateKey.rollbackCreation()
 		}
 		return credentialRecord{}, fmt.Errorf("could not start credential save: %w", err)
 	}
@@ -187,6 +173,15 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
 		draft.kind, nullableCredentialField(draft.privateKeyFileName), draft.protocolValue, draft.provider, nullableCredentialField(draft.itemID),
 		nullableCredentialField(draft.itemName), draft.fieldPath, createdAt); err != nil {
 		return credentialRecord{}, normalizeCredentialWriteError(err)
+	}
+	// The profile insert acquires SQLite's write lock before any protected file is staged.
+	// Startup recovery uses BEGIN IMMEDIATE, so it cannot mistake this live stage for an orphan.
+	if draft.kind == 1 {
+		stagedPrivateKey, err = stageCredentialPrivateKeyWrite(databasePath, id, privateKey)
+		if err != nil {
+			_ = deleteCredentialPrivateKey(databasePath, id)
+			return credentialRecord{}, errors.New("could not protect the SSH private key")
+		}
 	}
 	if encoded != "" {
 		if err := upsertCredentialSecret(tx, id, encoded, encoding); err != nil {
