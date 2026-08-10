@@ -418,6 +418,59 @@ func TestSshKeyCredentialRecoveryDiscardsInterruptedStageTemporaryFiles(t *testi
 	}
 }
 
+func TestSshKeyCredentialCreateDoesNotCommitBeforeStageDirectorySync(t *testing.T) {
+	installSshKeyCredentialTestStores(t)
+	previousStageProtect := credentialPrivateKeyStageProtect
+	credentialPrivateKeyStageProtect = func(finalPath, pendingPath string, plaintext []byte) error {
+		return writePrivateFileAtomicWithTemporaryPattern(
+			pendingPath,
+			credentialPrivateKeyStageTemporaryPattern(pendingPath),
+			func(temporary *os.File) error {
+				_, err := temporary.Write(testProtectedKeyContents(plaintext))
+				return err
+			},
+			nil,
+		)
+	}
+	t.Cleanup(func() { credentialPrivateKeyStageProtect = previousStageProtect })
+
+	previousDirectorySync := privateFileDirectorySync
+	directorySyncs := 0
+	privateFileDirectorySync = func(string) error {
+		directorySyncs++
+		return os.ErrPermission
+	}
+	t.Cleanup(func() { privateFileDirectorySync = previousDirectorySync })
+
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	keyPath := filepath.Join(t.TempDir(), "id_ed25519")
+	if err := os.WriteFile(keyPath, testSshPrivateKey(t, ""), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := createCredential(databasePath, credentialCreateRequest{
+		Name: "SSH key", Protocol: "ssh", Kind: "sshKey", Username: "operator",
+		PrivateKeyPath: keyPath,
+	}); err == nil || !strings.Contains(err.Error(), "protect the SSH private key") {
+		t.Fatalf("stage directory sync error = %v", err)
+	}
+	if directorySyncs == 0 {
+		t.Fatal("SSH key staging did not synchronize the key directory")
+	}
+
+	database, err := openDatabase(databasePath, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var profiles int
+	if err := database.QueryRow("SELECT COUNT(*) FROM CredentialProfiles;").Scan(&profiles); err != nil {
+		t.Fatal(err)
+	}
+	if profiles != 0 {
+		t.Fatalf("profiles committed before stage directory sync = %d", profiles)
+	}
+}
+
 func TestSshKeyCredentialRecoveryFinishesCommittedCreation(t *testing.T) {
 	installSshKeyCredentialTestStores(t)
 	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
@@ -862,6 +915,49 @@ END;`); err != nil {
 	}
 }
 
+func TestSshKeyCredentialDeleteDoesNotCommitBeforeStageDirectorySync(t *testing.T) {
+	installSshKeyCredentialTestStores(t)
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	keyPath := filepath.Join(t.TempDir(), "id_ed25519")
+	if err := os.WriteFile(keyPath, testSshPrivateKey(t, ""), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	created, err := createCredential(databasePath, credentialCreateRequest{
+		Name: "SSH key", Protocol: "ssh", Kind: "sshKey", Username: "operator",
+		PrivateKeyPath: keyPath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	previousDirectorySync := privateFileDirectorySync
+	privateFileDirectorySync = func(string) error { return os.ErrPermission }
+	t.Cleanup(func() { privateFileDirectorySync = previousDirectorySync })
+	if err := deleteCredential(databasePath, credentialDeleteRequest{ID: created.ID}); err == nil {
+		t.Fatal("SSH key deletion committed before its stage directory sync")
+	}
+
+	finalPath := credentialPrivateKeyPath(databasePath, created.ID)
+	if _, err := os.Stat(finalPath); err != nil {
+		t.Fatalf("failed deletion staging did not restore the protected key: %v", err)
+	}
+	database, err := openDatabase(databasePath, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var profiles int
+	if err := database.QueryRow(
+		"SELECT COUNT(*) FROM CredentialProfiles WHERE Id = ?;",
+		created.ID,
+	).Scan(&profiles); err != nil {
+		t.Fatal(err)
+	}
+	if profiles != 1 {
+		t.Fatalf("profiles after deletion stage directory sync failure = %d", profiles)
+	}
+}
+
 func TestSshKeyCredentialDeletionStagingRejectsChangedFile(t *testing.T) {
 	installSshKeyCredentialTestStores(t)
 	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
@@ -1146,6 +1242,76 @@ WHERE p.Id = ?;`, created.ID).Scan(&storedSecret, &fileName); err != nil {
 	credentialPrivateKeyPromote = previousPromote
 	if err := recoverCredentialPrivateKeyOperations(databasePath); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestSshKeyCredentialUpdateKeepsJournalUntilPromotionDirectorySync(t *testing.T) {
+	installSshKeyCredentialTestStores(t)
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	firstPath := filepath.Join(t.TempDir(), "first.pem")
+	secondPath := filepath.Join(t.TempDir(), "second.pem")
+	if err := os.WriteFile(firstPath, testSshPrivateKey(t, ""), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(secondPath, testSshPrivateKey(t, ""), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	created, err := createCredential(databasePath, credentialCreateRequest{
+		Name: "SSH key", Protocol: "ssh", Kind: "sshKey", Username: "operator",
+		PrivateKeyPath: firstPath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	previousDirectorySync := privateFileDirectorySync
+	privateFileDirectorySync = func(string) error { return os.ErrPermission }
+	t.Cleanup(func() { privateFileDirectorySync = previousDirectorySync })
+	_, err = updateCredential(databasePath, credentialUpdateRequest{
+		ID: created.ID,
+		credentialCreateRequest: credentialCreateRequest{
+			Name: "Replacement", Protocol: "ssh", Kind: "sshKey", Username: "operator",
+			PrivateKeyPath: secondPath,
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "activate the SSH private key write") {
+		t.Fatalf("promotion directory sync error = %v", err)
+	}
+
+	database, err := openDatabase(databasePath, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var operations int
+	if err := database.QueryRow(
+		"SELECT COUNT(*) FROM CredentialPrivateKeyOperations WHERE CredentialId = ?;",
+		created.ID,
+	).Scan(&operations); err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	database.Close()
+	if operations != 1 {
+		t.Fatalf("journal rows after promotion directory sync failure = %d", operations)
+	}
+
+	privateFileDirectorySync = previousDirectorySync
+	if err := recoverCredentialPrivateKeyOperations(databasePath); err != nil {
+		t.Fatal(err)
+	}
+	database, err = openDatabase(databasePath, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.QueryRow(
+		"SELECT COUNT(*) FROM CredentialPrivateKeyOperations WHERE CredentialId = ?;",
+		created.ID,
+	).Scan(&operations); err != nil {
+		t.Fatal(err)
+	}
+	if operations != 0 {
+		t.Fatalf("journal rows after durable recovery = %d", operations)
 	}
 }
 

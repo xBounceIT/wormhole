@@ -95,7 +95,7 @@ var credentialSecretStore = storeCredentialSecret
 var credentialSecretDelete = deleteStoredCredentialSecret
 var credentialPrivateKeyUnprotect = unprotectSshPrivateKey
 var credentialPrivateKeyStageProtect = protectCredentialPrivateKeyStage
-var credentialPrivateKeyPromote = os.Rename
+var credentialPrivateKeyPromote = replaceFileWithWriteThrough
 var credentialPrivateKeyPendingRemove = os.Remove
 var credentialPrivateKeyProtectionDelete = deleteFileProtectionKey
 
@@ -525,7 +525,7 @@ type stagedCredentialPrivateKeyDeletion struct {
 	staged     bool
 }
 
-var credentialPrivateKeyStageDelete = os.Rename
+var credentialPrivateKeyStageDelete = replaceFileWithWriteThrough
 
 func stageCredentialPrivateKeyDeletion(databasePath, id string) (*stagedCredentialPrivateKeyDeletion, error) {
 	finalPath := credentialPrivateKeyPath(databasePath, id)
@@ -551,6 +551,12 @@ func stageCredentialPrivateKeyDeletion(databasePath, id string) (*stagedCredenti
 		return nil, err
 	}
 	deletion.staged = true
+	if err := privateFileDirectorySync(filepath.Dir(stagedPath)); err != nil {
+		if rollbackErr := deletion.rollback(); rollbackErr != nil {
+			return nil, fmt.Errorf("SSH private key deletion staging was not durable and could not be restored: %w", err)
+		}
+		return nil, err
+	}
 	if err := verifyCredentialPrivateKeyDigest(stagedPath, deletion.digest); err != nil {
 		if rollbackErr := deletion.rollback(); rollbackErr != nil {
 			return nil, fmt.Errorf("SSH private key deletion staging changed and could not be restored: %w", err)
@@ -572,10 +578,10 @@ func (staged *stagedCredentialPrivateKeyDeletion) rollback() error {
 	if err := verifyCredentialPrivateKeyDigest(staged.stagedPath, staged.digest); err != nil {
 		return err
 	}
-	if err := credentialPrivateKeyPromote(staged.stagedPath, staged.finalPath); err != nil {
-		return verifyCredentialPrivateKeyDigest(staged.finalPath, staged.digest)
-	}
-	return verifyCredentialPrivateKeyDigest(staged.finalPath, staged.digest)
+	// A rename can report an error after completing. Treat the verified destination as the
+	// source of truth, then make its directory entry durable before returning.
+	_ = credentialPrivateKeyPromote(staged.stagedPath, staged.finalPath)
+	return verifyDurableCredentialPrivateKey(staged.finalPath, staged.digest)
 }
 
 func recordCredentialPrivateKeyDeletion(tx *sql.Tx, staged *stagedCredentialPrivateKeyDeletion) error {
@@ -608,8 +614,7 @@ func removeCommittedCredentialPrivateKeyDeletion(staged *stagedCredentialPrivate
 			if !errors.Is(err, os.ErrNotExist) {
 				return err
 			}
-		} else if err := credentialPrivateKeyPendingRemove(staged.stagedPath); err != nil &&
-			!errors.Is(err, os.ErrNotExist) {
+		} else if err := removeCredentialPrivateKeyStageFile(staged.stagedPath); err != nil {
 			return err
 		}
 	} else if _, err := os.Lstat(staged.stagedPath); err == nil {
@@ -744,12 +749,12 @@ func stageCredentialPrivateKeyWrite(
 		return nil, err
 	}
 	if err := credentialPrivateKeyStageProtect(finalPath, pendingPath, plaintext); err != nil {
-		_ = credentialPrivateKeyPendingRemove(pendingPath)
+		_ = removeCredentialPrivateKeyStageFile(pendingPath)
 		return nil, err
 	}
 	protected, err := readBoundedRegularFile(pendingPath, maxProtectedSshKeyBytes)
 	if err != nil {
-		_ = credentialPrivateKeyPendingRemove(pendingPath)
+		_ = removeCredentialPrivateKeyStageFile(pendingPath)
 		return nil, err
 	}
 	digest := credentialPrivateKeyDigest(protected)
@@ -760,16 +765,7 @@ func stageCredentialPrivateKeyWrite(
 }
 
 func protectCredentialPrivateKeyStage(finalPath, pendingPath string, plaintext []byte) error {
-	staged := false
-	defer func() {
-		if staged {
-			return
-		}
-		if _, err := os.Lstat(finalPath); errors.Is(err, os.ErrNotExist) {
-			credentialPrivateKeyProtectionDelete(finalPath)
-		}
-	}()
-	err := writePrivateFileAtomicWithTemporaryPattern(
+	return writePrivateFileAtomicWithTemporaryPattern(
 		pendingPath,
 		credentialPrivateKeyStageTemporaryPattern(pendingPath),
 		func(temporary *os.File) error {
@@ -781,9 +777,12 @@ func protectCredentialPrivateKeyStage(finalPath, pendingPath string, plaintext [
 			_, err = temporary.Write(protected)
 			return err
 		},
+		func() {
+			if _, err := os.Lstat(finalPath); errors.Is(err, os.ErrNotExist) {
+				credentialPrivateKeyProtectionDelete(finalPath)
+			}
+		},
 	)
-	staged = err == nil
-	return err
 }
 
 func credentialPrivateKeyStageTemporaryPattern(pendingPath string) string {
@@ -791,12 +790,22 @@ func credentialPrivateKeyStageTemporaryPattern(pendingPath string) string {
 }
 
 func (staged *stagedCredentialPrivateKeyWrite) rollback() {
-	_ = credentialPrivateKeyPendingRemove(staged.pendingPath)
+	_ = removeCredentialPrivateKeyStageFile(staged.pendingPath)
 }
 
 func (staged *stagedCredentialPrivateKeyWrite) rollbackCreation() {
-	staged.rollback()
 	credentialPrivateKeyProtectionDelete(staged.finalPath)
+	staged.rollback()
+}
+
+func removeCredentialPrivateKeyStageFile(path string) error {
+	if err := credentialPrivateKeyPendingRemove(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	return privateFileDirectorySync(filepath.Dir(path))
 }
 
 func recordCredentialPrivateKeyCreation(
@@ -869,15 +878,15 @@ func promoteOrVerifyCredentialPrivateKey(staged *stagedCredentialPrivateKeyWrite
 		if digest != staged.digest {
 			return errors.New("pending SSH private key digest does not match")
 		}
-		if err := credentialPrivateKeyPromote(staged.pendingPath, staged.finalPath); err != nil {
-			return verifyCredentialPrivateKeyDigest(staged.finalPath, staged.digest)
-		}
-		return verifyCredentialPrivateKeyDigest(staged.finalPath, staged.digest)
+		// A rename can report an error after completing. Destination verification decides
+		// whether recovery may safely clear the journal.
+		_ = credentialPrivateKeyPromote(staged.pendingPath, staged.finalPath)
+		return verifyDurableCredentialPrivateKey(staged.finalPath, staged.digest)
 	}
 	if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	return verifyCredentialPrivateKeyDigest(staged.finalPath, staged.digest)
+	return verifyDurableCredentialPrivateKey(staged.finalPath, staged.digest)
 }
 
 func verifyCredentialPrivateKeyDigest(path, expected string) error {
@@ -890,6 +899,13 @@ func verifyCredentialPrivateKeyDigest(path, expected string) error {
 		return errors.New("protected SSH private key digest does not match")
 	}
 	return nil
+}
+
+func verifyDurableCredentialPrivateKey(path, expected string) error {
+	if err := verifyCredentialPrivateKeyDigest(path, expected); err != nil {
+		return err
+	}
+	return privateFileDirectorySync(filepath.Dir(path))
 }
 
 func credentialPrivateKeyDigest(protected []byte) string {
@@ -1113,13 +1129,10 @@ func removeOrphanedCredentialPrivateKeyWriteStage(path, finalPath string) error 
 	if finalErr != nil && !errors.Is(finalErr, os.ErrNotExist) {
 		return finalErr
 	}
-	if err := credentialPrivateKeyPendingRemove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
 	if errors.Is(finalErr, os.ErrNotExist) {
 		credentialPrivateKeyProtectionDelete(finalPath)
 	}
-	return nil
+	return removeCredentialPrivateKeyStageFile(path)
 }
 
 func normalizeCredentialDraft(

@@ -775,15 +775,23 @@ func legacyTunnelSecretPath(databasePath, id string) string {
 }
 
 func writePrivateFileAtomic(path string, contents []byte) error {
-	return writePrivateFileAtomicWithTemporaryPattern(path, ".tunnel-*.tmp", func(temporary *os.File) error {
-		_, err := temporary.Write(contents)
-		return err
-	})
+	return writePrivateFileAtomicWithTemporaryPattern(
+		path,
+		".tunnel-*.tmp",
+		func(temporary *os.File) error {
+			_, err := temporary.Write(contents)
+			return err
+		},
+		nil,
+	)
 }
+
+var privateFileDirectorySync = syncPrivateFileDirectory
 
 func writePrivateFileAtomicWithTemporaryPattern(
 	path, pattern string,
 	writeContents func(*os.File) error,
+	onAbort func(),
 ) error {
 	directory := filepath.Dir(path)
 	if err := os.MkdirAll(directory, 0o700); err != nil {
@@ -798,7 +806,12 @@ func writePrivateFileAtomicWithTemporaryPattern(
 	defer func() {
 		_ = temporary.Close()
 		if !committed {
-			_ = os.Remove(temporaryPath)
+			if onAbort != nil {
+				onAbort()
+			}
+			if os.Remove(temporaryPath) == nil {
+				_ = privateFileDirectorySync(directory)
+			}
 		}
 	}()
 	if err := temporary.Chmod(0o600); err != nil {
@@ -813,7 +826,10 @@ func writePrivateFileAtomicWithTemporaryPattern(
 	if err := temporary.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(temporaryPath, path); err != nil {
+	if err := replaceFileWithWriteThrough(temporaryPath, path); err != nil {
+		return err
+	}
+	if err := privateFileDirectorySync(directory); err != nil {
 		return err
 	}
 	committed = true
