@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { createRequire } from 'node:module';
+import { relative } from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { Arch, getArtifactArchName } from 'builder-util';
+
+const require = createRequire(import.meta.url);
+const { convertIcon } = require('app-builder-lib/out/util/iconConverter.js');
 
 const packageJson = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
 const releaseWorkflow = await readFile(
@@ -15,7 +21,16 @@ const universalBackend = await readFile(
   'utf8',
 );
 const gitignore = await readFile(new URL('../.gitignore', import.meta.url), 'utf8');
+const linuxIconSizes = [16, 24, 32, 48, 64, 96, 128, 256, 512, 1024];
+const projectDir = fileURLToPath(new URL('..', import.meta.url));
 const macIcon = await readFile(new URL('../Assets/Wormhole.icns', import.meta.url));
+
+function readPngDimensions(data) {
+  const pngSignature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  assert.deepEqual(data.subarray(0, pngSignature.length), pngSignature);
+  assert.equal(data.subarray(12, 16).toString('ascii'), 'IHDR');
+  return { width: data.readUInt32BE(16), height: data.readUInt32BE(20) };
+}
 
 function readIcnsChunkTypes(icon) {
   assert.equal(icon.subarray(0, 4).toString('ascii'), 'icns');
@@ -49,7 +64,8 @@ test('electron-builder produces portable and installable Linux packages', () => 
   assert.equal(packageJson.build.artifactName, 'Wormhole-${version}-${os}-${arch}-setup.${ext}');
   assert.equal(packageJson.build.linux.artifactName, 'Wormhole-${version}-${os}-${arch}.${ext}');
   assert.deepEqual(packageJson.build.linux.target, ['AppImage', 'deb', 'rpm']);
-  assert.equal(packageJson.build.linux.icon, 'Assets/Wormhole.png');
+  assert.equal(packageJson.build.linux.icon, 'Assets/LinuxIcons');
+  assert.ok(packageJson.build.files.includes('!Assets/LinuxIcons/**/*'));
   assert.equal(packageJson.desktopName, 'com.xbounceit.wormhole.desktop');
   assert.equal(packageJson.build.linux.syncDesktopName, true);
   assert.equal(packageJson.homepage, 'https://github.com/xBounceIT/wormhole');
@@ -57,6 +73,37 @@ test('electron-builder produces portable and installable Linux packages', () => 
   assert.match(packageJson.author.email, /@/);
   assert.equal(packageJson.build.deb.packageName, 'wormhole');
   assert.equal(packageJson.build.rpm.packageName, 'wormhole');
+});
+
+test('Linux packages provide freedesktop icons at standard menu sizes', async () => {
+  const canonicalIcon = await readFile(new URL('../Assets/Wormhole.png', import.meta.url));
+
+  for (const size of linuxIconSizes) {
+    const icon = await readFile(
+      new URL(`../Assets/LinuxIcons/${size}x${size}.png`, import.meta.url),
+    );
+    assert.deepEqual(readPngDimensions(icon), { width: size, height: size });
+    if (size === 1024) assert.deepEqual(icon, canonicalIcon);
+  }
+});
+
+test('electron-builder resolves every reviewed Linux icon asset', async () => {
+  const resolved = await convertIcon({
+    sources: [packageJson.build.linux.icon],
+    fallbackSources: [],
+    roots: [projectDir],
+    format: 'set',
+    outDir: fileURLToPath(new URL('../release/.icon-test', import.meta.url)),
+  });
+
+  assert.equal(resolved.isFallback, false);
+  assert.deepEqual(
+    resolved.icons.map(({ file, size }) => ({
+      file: relative(projectDir, file).replaceAll('\\', '/'),
+      size,
+    })),
+    linuxIconSizes.map((size) => ({ file: `Assets/LinuxIcons/${size}x${size}.png`, size })),
+  );
 });
 
 test('electron-builder produces the supported macOS installer', () => {
@@ -117,6 +164,12 @@ test('release workflow builds and publishes every desktop package', () => {
   assert.match(releaseWorkflow, /needs: \[build, packages\]/);
   assert.match(releaseWorkflow, /Verify Linux package outputs/);
   assert.match(releaseWorkflow, /if \[\[ \$\{#matches\[@\]\} -ne 1 \]\]/);
+  assert.match(releaseWorkflow, /usr\/share\/icons\/hicolor\/\$size\/apps\/wormhole\.png/);
+  assert.match(releaseWorkflow, /dpkg-deb --extract/);
+  assert.match(releaseWorkflow, /PNG image data/);
+  assert.match(releaseWorkflow, /cmp -s "Assets\/LinuxIcons\/\$size\.png"/);
+  assert.doesNotMatch(releaseWorkflow, /dpkg-deb --contents/);
+  assert.match(releaseWorkflow, /Icon=wormhole/);
   for (const extension of ['AppImage', 'deb', 'rpm']) {
     assert.equal(
       (releaseWorkflow.match(new RegExp(`release/\\*\\.${extension}`, 'g')) ?? []).length,
