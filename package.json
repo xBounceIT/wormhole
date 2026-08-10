@@ -1,5 +1,6 @@
 {
   "name": "wormhole-electron",
+  "productName": "Wormhole",
   "version": "2.0.1",
   "private": true,
   "description": "Wormhole desktop application",
@@ -120,7 +121,6 @@
   },
   "build": {
     "appId": "com.xbounceit.wormhole",
-    "productName": "Wormhole",
     "artifactName": "Wormhole-${version}-${os}-${arch}-setup.${ext}",
     "asar": true,
     "directories": {
@@ -168,6 +168,7 @@
     },
     "mac": {
       "category": "public.app-category.productivity",
+      "icon": "Assets/Wormhole.icns",
       "target": "dmg"
     }
   }

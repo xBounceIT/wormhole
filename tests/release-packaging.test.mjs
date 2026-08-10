@@ -23,12 +23,33 @@ const universalBackend = await readFile(
 const gitignore = await readFile(new URL('../.gitignore', import.meta.url), 'utf8');
 const linuxIconSizes = [16, 24, 32, 48, 64, 96, 128, 256, 512, 1024];
 const projectDir = fileURLToPath(new URL('..', import.meta.url));
+const macIcon = await readFile(new URL('../Assets/Wormhole.icns', import.meta.url));
 
 function readPngDimensions(data) {
   const pngSignature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
   assert.deepEqual(data.subarray(0, pngSignature.length), pngSignature);
   assert.equal(data.subarray(12, 16).toString('ascii'), 'IHDR');
   return { width: data.readUInt32BE(16), height: data.readUInt32BE(20) };
+}
+
+function readIcnsChunkTypes(icon) {
+  assert.equal(icon.subarray(0, 4).toString('ascii'), 'icns');
+  assert.equal(icon.readUInt32BE(4), icon.length);
+
+  const chunkTypes = new Set();
+  let offset = 8;
+  while (offset < icon.length) {
+    assert.ok(offset + 8 <= icon.length, 'ICNS chunk header is truncated');
+    const type = icon.subarray(offset, offset + 4).toString('ascii');
+    const size = icon.readUInt32BE(offset + 4);
+    assert.ok(size >= 8, `ICNS chunk ${type} has an invalid size`);
+    assert.ok(offset + size <= icon.length, `ICNS chunk ${type} is truncated`);
+    chunkTypes.add(type);
+    offset += size;
+  }
+
+  assert.equal(offset, icon.length);
+  return chunkTypes;
 }
 
 function linuxArtifactPattern(arch, extension) {
@@ -86,7 +107,12 @@ test('electron-builder resolves every reviewed Linux icon asset', async () => {
 });
 
 test('electron-builder produces the supported macOS installer', () => {
+  assert.equal(packageJson.productName, 'Wormhole');
   assert.equal(packageJson.build.mac.target, 'dmg');
+  assert.equal(packageJson.build.mac.icon, 'Assets/Wormhole.icns');
+  const iconChunkTypes = readIcnsChunkTypes(macIcon);
+  assert.ok(iconChunkTypes.has('ic09'), 'macOS icon must include a 512px representation');
+  assert.ok(iconChunkTypes.has('ic10'), 'macOS icon must include a 1024px representation');
   assert.equal(packageJson.scripts.package, 'electron-builder --publish never');
 });
 
