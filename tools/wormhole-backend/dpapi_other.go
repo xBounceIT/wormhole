@@ -54,17 +54,21 @@ func unprotectFileContents(path string, protected []byte) ([]byte, error) {
 }
 
 func protectFile(path string, plaintext []byte) error {
-	key, err := fileProtectionKey(path, true)
-	if err != nil {
-		return err
-	}
-	defer clearBytes(key)
-	protected, err := encryptAuthDocument(plaintext, key)
+	protected, err := protectFileContents(path, plaintext)
 	if err != nil {
 		return err
 	}
 	defer clearBytes(protected)
 	return writePrivateFileAtomic(path, protected)
+}
+
+func protectFileContents(path string, plaintext []byte) ([]byte, error) {
+	key, err := fileProtectionKey(path, true)
+	if err != nil {
+		return nil, err
+	}
+	defer clearBytes(key)
+	return encryptAuthDocument(plaintext, key)
 }
 
 func protectAuthDocument(storePath string, plaintext []byte) ([]byte, error) {

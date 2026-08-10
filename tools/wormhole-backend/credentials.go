@@ -1,8 +1,11 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -17,16 +20,24 @@ import (
 )
 
 const (
-	maxCredentialNameLength     = 256
-	maxCredentialUsernameLength = 512
-	maxCredentialDomainLength   = 512
-	maxStoredCredentialPassword = 4096
-	maxStoredCredentialBytes    = maxStoredCredentialPassword * utf8.UTFMax
-	maxBitwardenItemIDLength    = 512
-	maxBitwardenItemNameLength  = 1024
-	maxSshPrivateKeyBytes       = 1024 * 1024
-	maxProtectedSshKeyBytes     = maxSshPrivateKeyBytes + (64 * 1024)
+	maxCredentialNameLength           = 256
+	maxCredentialUsernameLength       = 512
+	maxCredentialDomainLength         = 512
+	maxStoredCredentialPassword       = 4096
+	maxStoredCredentialBytes          = maxStoredCredentialPassword * utf8.UTFMax
+	maxBitwardenItemIDLength          = 512
+	maxBitwardenItemNameLength        = 1024
+	maxSshPrivateKeyBytes             = 1024 * 1024
+	maxProtectedSshKeyBytes           = maxSshPrivateKeyBytes + (64 * 1024)
+	credentialPrivateKeyPendingSuffix = ".pending"
 )
+
+const credentialPrivateKeyOperationsTableSQL = `
+CREATE TABLE IF NOT EXISTS CredentialPrivateKeyOperations (
+    CredentialId   TEXT PRIMARY KEY NOT NULL,
+    ProtectedSha256 TEXT NOT NULL,
+    CreatedAtUtc   TEXT NOT NULL
+);`
 
 type credentialCreateRequest struct {
 	Name               string `json:"name"`
@@ -78,6 +89,9 @@ var credentialSecretStore = storeCredentialSecret
 var credentialSecretDelete = deleteStoredCredentialSecret
 var credentialPrivateKeyProtect = protectFile
 var credentialPrivateKeyUnprotect = unprotectSshPrivateKey
+var credentialPrivateKeyStageProtect = protectCredentialPrivateKeyStage
+var credentialPrivateKeyPromote = os.Rename
+var credentialPrivateKeyPendingRemove = os.Remove
 
 func createCredential(databasePath string, request credentialCreateRequest) (credentialRecord, error) {
 	draft, err := normalizeCredentialDraft(request, false)
@@ -281,12 +295,12 @@ func updateCredential(databasePath string, request credentialUpdateRequest) (cre
 		return credentialRecord{}, fmt.Errorf("could not start credential update: %w", err)
 	}
 	committed := false
-	var rollbackPrivateKey func()
+	var stagedReplacement *stagedCredentialPrivateKeyReplacement
 	defer func() {
 		if !committed {
 			_ = tx.Rollback()
-			if rollbackPrivateKey != nil {
-				rollbackPrivateKey()
+			if stagedReplacement != nil {
+				stagedReplacement.rollback()
 			}
 			if replaceSecret {
 				_ = credentialSecretDelete(id, encoded, encoding)
@@ -333,15 +347,23 @@ WHERE lower(Id) = ? AND COALESCE(Kind, 0) = 1 AND COALESCE(SecretProvider, 0) = 
 		}
 	}
 	if kind == 1 && draft.privateKeyPath != "" {
-		rollbackPrivateKey, err = replaceCredentialPrivateKey(databasePath, id, privateKey)
+		stagedReplacement, err = stageCredentialPrivateKeyReplacement(databasePath, id, privateKey)
 		if err != nil {
 			return credentialRecord{}, errors.New("could not protect the SSH private key")
+		}
+		if err := recordCredentialPrivateKeyReplacement(tx, stagedReplacement); err != nil {
+			return credentialRecord{}, err
 		}
 	}
 	if err := tx.Commit(); err != nil {
 		return credentialRecord{}, fmt.Errorf("could not update credential: %w", err)
 	}
 	committed = true
+	if stagedReplacement != nil {
+		if err := finalizeCredentialPrivateKeyReplacement(database, stagedReplacement); err != nil {
+			return credentialRecord{}, err
+		}
+	}
 	secretChanged := replaceSecret || clearSecret
 	if secretChanged && previousEncoded.Valid && previousEncoding.Valid &&
 		(previousEncoded.String != encoded || previousEncoding.String != encoding) {
@@ -582,29 +604,228 @@ func validateSshPrivateKey(contents []byte, passphrase string) error {
 	return nil
 }
 
-func replaceCredentialPrivateKey(databasePath, id string, plaintext []byte) (func(), error) {
-	path := credentialPrivateKeyPath(databasePath, id)
-	var previous []byte
-	var err error
-	hadPrevious := false
-	if previous, err = readBoundedRegularFile(path, maxProtectedSshKeyBytes); err == nil {
-		hadPrevious = true
+type stagedCredentialPrivateKeyReplacement struct {
+	id          string
+	finalPath   string
+	pendingPath string
+	digest      string
+}
+
+type pendingCredentialPrivateKeyOperation struct {
+	id     string
+	digest string
+}
+
+func stageCredentialPrivateKeyReplacement(
+	databasePath, id string,
+	plaintext []byte,
+) (*stagedCredentialPrivateKeyReplacement, error) {
+	finalPath := credentialPrivateKeyPath(databasePath, id)
+	pendingPath := finalPath + credentialPrivateKeyPendingSuffix
+	if _, err := os.Lstat(pendingPath); err == nil {
+		return nil, errors.New("an SSH private key replacement is already pending")
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return nil, errors.New("stored SSH private key is invalid")
-	}
-	if err := credentialPrivateKeyProtect(path, plaintext); err != nil {
-		clearBytes(previous)
 		return nil, err
 	}
-	return func() {
-		defer clearBytes(previous)
-		if hadPrevious {
-			_ = writePrivateFileAtomic(path, previous)
-			return
-		}
-		_ = os.Remove(path)
-		deleteFileProtectionKey(path)
+	if err := credentialPrivateKeyStageProtect(finalPath, pendingPath, plaintext); err != nil {
+		_ = credentialPrivateKeyPendingRemove(pendingPath)
+		return nil, err
+	}
+	protected, err := readBoundedRegularFile(pendingPath, maxProtectedSshKeyBytes)
+	if err != nil {
+		_ = credentialPrivateKeyPendingRemove(pendingPath)
+		return nil, err
+	}
+	digest := credentialPrivateKeyDigest(protected)
+	clearBytes(protected)
+	return &stagedCredentialPrivateKeyReplacement{
+		id: normalizeID(id), finalPath: finalPath, pendingPath: pendingPath, digest: digest,
 	}, nil
+}
+
+func protectCredentialPrivateKeyStage(finalPath, pendingPath string, plaintext []byte) error {
+	protected, err := protectFileContents(finalPath, plaintext)
+	if err != nil {
+		return err
+	}
+	defer clearBytes(protected)
+	return writePrivateFileAtomic(pendingPath, protected)
+}
+
+func (staged *stagedCredentialPrivateKeyReplacement) rollback() {
+	_ = credentialPrivateKeyPendingRemove(staged.pendingPath)
+}
+
+func recordCredentialPrivateKeyReplacement(
+	tx *sql.Tx,
+	staged *stagedCredentialPrivateKeyReplacement,
+) error {
+	_, err := tx.Exec(`
+INSERT INTO CredentialPrivateKeyOperations (CredentialId, ProtectedSha256, CreatedAtUtc)
+VALUES (?, ?, ?);`, staged.id, staged.digest, time.Now().UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return fmt.Errorf("could not journal the SSH private key replacement: %w", err)
+	}
+	return nil
+}
+
+func finalizeCredentialPrivateKeyReplacement(
+	database *sql.DB,
+	staged *stagedCredentialPrivateKeyReplacement,
+) error {
+	if err := promoteOrVerifyCredentialPrivateKey(staged); err != nil {
+		return errors.New("could not activate the SSH private key replacement")
+	}
+	if _, err := database.Exec(
+		"DELETE FROM CredentialPrivateKeyOperations WHERE lower(CredentialId) = ?;",
+		staged.id,
+	); err != nil {
+		return fmt.Errorf("could not finish the SSH private key replacement: %w", err)
+	}
+	return nil
+}
+
+func promoteOrVerifyCredentialPrivateKey(staged *stagedCredentialPrivateKeyReplacement) error {
+	protected, err := readBoundedRegularFile(staged.pendingPath, maxProtectedSshKeyBytes)
+	if err == nil {
+		digest := credentialPrivateKeyDigest(protected)
+		clearBytes(protected)
+		if digest != staged.digest {
+			return errors.New("pending SSH private key digest does not match")
+		}
+		if err := credentialPrivateKeyPromote(staged.pendingPath, staged.finalPath); err != nil {
+			return verifyCredentialPrivateKeyDigest(staged.finalPath, staged.digest)
+		}
+		return verifyCredentialPrivateKeyDigest(staged.finalPath, staged.digest)
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return verifyCredentialPrivateKeyDigest(staged.finalPath, staged.digest)
+}
+
+func verifyCredentialPrivateKeyDigest(path, expected string) error {
+	protected, err := readBoundedRegularFile(path, maxProtectedSshKeyBytes)
+	if err != nil {
+		return err
+	}
+	defer clearBytes(protected)
+	if credentialPrivateKeyDigest(protected) != expected {
+		return errors.New("protected SSH private key digest does not match")
+	}
+	return nil
+}
+
+func credentialPrivateKeyDigest(protected []byte) string {
+	digest := sha256.Sum256(protected)
+	return hex.EncodeToString(digest[:])
+}
+
+func recoverCredentialPrivateKeyOperations(databasePath string) error {
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		return err
+	}
+	defer database.Close()
+	if err := ensureCredentialWriteSchema(database); err != nil {
+		return err
+	}
+	return recoverCredentialPrivateKeyOperationsWithDatabase(database, databasePath)
+}
+
+func recoverCredentialPrivateKeyOperationsWithDatabase(database *sql.DB, databasePath string) error {
+	ctx := context.Background()
+	connection, err := database.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("could not open SSH private key recovery: %w", err)
+	}
+	defer connection.Close()
+	if _, err := connection.ExecContext(ctx, "BEGIN IMMEDIATE;"); err != nil {
+		return fmt.Errorf("could not lock SSH private key recovery: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = connection.ExecContext(ctx, "ROLLBACK;")
+		}
+	}()
+
+	rows, err := connection.QueryContext(ctx, `
+SELECT CredentialId, ProtectedSha256
+FROM CredentialPrivateKeyOperations
+ORDER BY CredentialId;`)
+	if err != nil {
+		return fmt.Errorf("could not inspect SSH private key recovery: %w", err)
+	}
+	operations := make([]pendingCredentialPrivateKeyOperation, 0)
+	for rows.Next() {
+		var operation pendingCredentialPrivateKeyOperation
+		if err := rows.Scan(&operation.id, &operation.digest); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("could not read SSH private key recovery: %w", err)
+		}
+		operation.id = normalizeID(operation.id)
+		decodedDigest, decodeErr := hex.DecodeString(operation.digest)
+		if !validCredentialID(operation.id) || decodeErr != nil || len(decodedDigest) != sha256.Size {
+			_ = rows.Close()
+			return errors.New("SSH private key recovery record is invalid")
+		}
+		operation.digest = hex.EncodeToString(decodedDigest)
+		operations = append(operations, operation)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return fmt.Errorf("could not read SSH private key recovery: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("could not close SSH private key recovery: %w", err)
+	}
+	for _, operation := range operations {
+		finalPath := credentialPrivateKeyPath(databasePath, operation.id)
+		staged := &stagedCredentialPrivateKeyReplacement{
+			id: operation.id, finalPath: finalPath,
+			pendingPath: finalPath + credentialPrivateKeyPendingSuffix, digest: operation.digest,
+		}
+		if err := promoteOrVerifyCredentialPrivateKey(staged); err != nil {
+			return errors.New("could not recover an SSH private key replacement")
+		}
+		if _, err := connection.ExecContext(
+			ctx,
+			"DELETE FROM CredentialPrivateKeyOperations WHERE lower(CredentialId) = ?;",
+			operation.id,
+		); err != nil {
+			return fmt.Errorf("could not complete SSH private key recovery: %w", err)
+		}
+	}
+	if err := removeOrphanedCredentialPrivateKeyStages(databasePath); err != nil {
+		return errors.New("could not clean interrupted SSH private key staging")
+	}
+	if _, err := connection.ExecContext(ctx, "COMMIT;"); err != nil {
+		return fmt.Errorf("could not commit SSH private key recovery: %w", err)
+	}
+	committed = true
+	return nil
+}
+
+func removeOrphanedCredentialPrivateKeyStages(databasePath string) error {
+	directory := filepath.Join(filepath.Dir(databasePath), "keys")
+	entries, err := os.ReadDir(directory)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if !strings.HasSuffix(entry.Name(), ".dpapi"+credentialPrivateKeyPendingSuffix) {
+			continue
+		}
+		if err := credentialPrivateKeyPendingRemove(filepath.Join(directory, entry.Name())); err != nil &&
+			!errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
 }
 
 func normalizeCredentialDraft(
@@ -746,6 +967,9 @@ CREATE TABLE IF NOT EXISTS CredentialSecrets (
     UpdatedAt TEXT NOT NULL
 );`); err != nil {
 		return fmt.Errorf("could not create credential storage: %w", err)
+	}
+	if _, err := database.Exec(credentialPrivateKeyOperationsTableSQL); err != nil {
+		return fmt.Errorf("could not create SSH private key recovery storage: %w", err)
 	}
 
 	columns, err := tableColumns(database, "CredentialProfiles")

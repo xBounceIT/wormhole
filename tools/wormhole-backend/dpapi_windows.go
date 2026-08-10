@@ -298,11 +298,16 @@ func unprotectFileContents(_ string, protected []byte) ([]byte, error) {
 }
 
 func protectFile(path string, plaintext []byte) error {
-	protected, err := protectDpapi(plaintext, nil)
+	protected, err := protectFileContents(path, plaintext)
 	if err != nil {
 		return err
 	}
+	defer clearBytes(protected)
 	return writePrivateFileAtomic(path, protected)
+}
+
+func protectFileContents(_ string, plaintext []byte) ([]byte, error) {
+	return protectDpapi(plaintext, nil)
 }
 
 func deleteFileProtectionKey(string) {}

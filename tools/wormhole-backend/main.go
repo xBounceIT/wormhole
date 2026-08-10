@@ -257,6 +257,10 @@ func runBackendCLI(args []string, input io.Reader, output io.Writer, errorOutput
 			writeErrorTo(errorOutput, err.Error())
 			return 1
 		}
+		if err := recoverCredentialPrivateKeyOperations(*databasePath); err != nil {
+			writeErrorTo(errorOutput, err.Error())
+			return 1
+		}
 	}
 	if *operation == "ssh" {
 		logInfo("SSH service started")

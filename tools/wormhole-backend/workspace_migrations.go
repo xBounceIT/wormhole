@@ -285,6 +285,13 @@ CREATE INDEX IF NOT EXISTS IX_BitwardenCredentialCache_Name
 				return err
 			},
 		},
+		{
+			id: "0016_credential_private_key_operations",
+			ensure: func(ctx context.Context, connection *sql.Conn) error {
+				_, err := connection.ExecContext(ctx, credentialPrivateKeyOperationsTableSQL)
+				return err
+			},
+		},
 	}
 
 	for _, migration := range migrations {

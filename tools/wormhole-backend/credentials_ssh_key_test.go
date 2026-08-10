@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/pem"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -37,11 +40,17 @@ func testSshPrivateKey(t *testing.T, passphrase string) []byte {
 	return pem.EncodeToMemory(block)
 }
 
+func testProtectedKeyContents(plaintext []byte) []byte {
+	digest := sha256.Sum256(plaintext)
+	return append([]byte("protected-key-placeholder-"), []byte(hex.EncodeToString(digest[:]))...)
+}
+
 func installSshKeyCredentialTestStores(t *testing.T) (*int, *[]string, *[][]byte, *[]string) {
 	t.Helper()
 	previousStore := credentialSecretStore
 	previousDelete := credentialSecretDelete
 	previousProtect := credentialPrivateKeyProtect
+	previousStageProtect := credentialPrivateKeyStageProtect
 	previousUnprotect := credentialPrivateKeyUnprotect
 	secretStores := 0
 	deletedSecrets := make([]string, 0)
@@ -61,7 +70,14 @@ func installSshKeyCredentialTestStores(t *testing.T) (*int, *[]string, *[][]byte
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			return err
 		}
-		return os.WriteFile(path, []byte("protected-key-placeholder"), 0o600)
+		return os.WriteFile(path, testProtectedKeyContents(plaintext), 0o600)
+	}
+	credentialPrivateKeyStageProtect = func(_ string, pendingPath string, plaintext []byte) error {
+		protectedKeys = append(protectedKeys, append([]byte(nil), plaintext...))
+		if err := os.MkdirAll(filepath.Dir(pendingPath), 0o700); err != nil {
+			return err
+		}
+		return os.WriteFile(pendingPath, testProtectedKeyContents(plaintext), 0o600)
 	}
 	credentialPrivateKeyUnprotect = func(string) ([]byte, error) {
 		return nil, os.ErrNotExist
@@ -70,6 +86,7 @@ func installSshKeyCredentialTestStores(t *testing.T) (*int, *[]string, *[][]byte
 		credentialSecretStore = previousStore
 		credentialSecretDelete = previousDelete
 		credentialPrivateKeyProtect = previousProtect
+		credentialPrivateKeyStageProtect = previousStageProtect
 		credentialPrivateKeyUnprotect = previousUnprotect
 	})
 	return &secretStores, &deletedSecrets, &protectedKeys, &storedSecrets
@@ -280,7 +297,7 @@ END;`); err != nil {
 	}
 }
 
-func TestSshKeyCredentialReplacementRollbackRestoresProtectedFile(t *testing.T) {
+func TestSshKeyCredentialReplacementRollbackLeavesProtectedFileUntouched(t *testing.T) {
 	installSshKeyCredentialTestStores(t)
 	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
 	id := "11111111-1111-4111-8111-111111111111"
@@ -292,24 +309,254 @@ func TestSshKeyCredentialReplacementRollbackRestoresProtectedFile(t *testing.T) 
 	if err := os.WriteFile(keyPath, previous, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	rollback, err := replaceCredentialPrivateKey(databasePath, id, []byte("replacement-plaintext"))
+	staged, err := stageCredentialPrivateKeyReplacement(databasePath, id, []byte("replacement-plaintext"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	replaced, err := os.ReadFile(keyPath)
+	current, err := os.ReadFile(keyPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Equal(replaced, previous) {
-		t.Fatal("replacement did not update the protected key file")
+	if !bytes.Equal(current, previous) {
+		t.Fatalf("staging changed the protected key to %q", current)
 	}
-	rollback()
-	restored, err := os.ReadFile(keyPath)
+	if _, err := os.Stat(staged.pendingPath); err != nil {
+		t.Fatalf("pending replacement was not written: %v", err)
+	}
+	staged.rollback()
+	if _, err := os.Stat(staged.pendingPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("pending replacement survived rollback: %v", err)
+	}
+	current, err = os.ReadFile(keyPath)
+	if err != nil || !bytes.Equal(current, previous) {
+		t.Fatalf("rollback changed protected key to %q: %v", current, err)
+	}
+}
+
+func TestSshKeyCredentialRecoveryDiscardsUncommittedReplacement(t *testing.T) {
+	installSshKeyCredentialTestStores(t)
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	firstPath := filepath.Join(t.TempDir(), "first.pem")
+	if err := os.WriteFile(firstPath, testSshPrivateKey(t, "first-passphrase"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	created, err := createCredential(databasePath, credentialCreateRequest{
+		Name: "SSH key", Protocol: "ssh", Kind: "sshKey", Username: "operator",
+		Passphrase: "first-passphrase", PrivateKeyPath: firstPath,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(restored, previous) {
-		t.Fatalf("rollback restored %q, want %q", restored, previous)
+	finalPath := credentialPrivateKeyPath(databasePath, created.ID)
+	before, err := os.ReadFile(finalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	staged, err := stageCredentialPrivateKeyReplacement(
+		databasePath,
+		created.ID,
+		testSshPrivateKey(t, "second-passphrase"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := recoverCredentialPrivateKeyOperations(databasePath); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(finalPath)
+	if err != nil || !bytes.Equal(after, before) {
+		t.Fatalf("uncommitted recovery changed protected key to %q: %v", after, err)
+	}
+	if _, err := os.Stat(staged.pendingPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("uncommitted stage survived recovery: %v", err)
+	}
+}
+
+func TestSshKeyCredentialRecoveryPromotesCommittedReplacement(t *testing.T) {
+	installSshKeyCredentialTestStores(t)
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	firstPath := filepath.Join(t.TempDir(), "first.pem")
+	if err := os.WriteFile(firstPath, testSshPrivateKey(t, "first-passphrase"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	created, err := createCredential(databasePath, credentialCreateRequest{
+		Name: "SSH key", Protocol: "ssh", Kind: "sshKey", Username: "operator",
+		Passphrase: "first-passphrase", PrivateKeyPath: firstPath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	finalPath := credentialPrivateKeyPath(databasePath, created.ID)
+	before, err := os.ReadFile(finalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	staged, err := stageCredentialPrivateKeyReplacement(
+		databasePath,
+		created.ID,
+		testSshPrivateKey(t, "second-passphrase"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := os.ReadFile(staged.pendingPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := database.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(
+		"UPDATE CredentialProfiles SET PrivateKeyFileName = ? WHERE Id = ?;",
+		"second.pem",
+		created.ID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := recordCredentialPrivateKeyReplacement(tx, staged); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	_ = database.Close()
+	stillOld, err := os.ReadFile(finalPath)
+	if err != nil || !bytes.Equal(stillOld, before) {
+		t.Fatalf("commit replaced protected key before recovery: %q, %v", stillOld, err)
+	}
+	if err := recoverCredentialPrivateKeyOperations(databasePath); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(finalPath)
+	if err != nil || !bytes.Equal(after, pending) {
+		t.Fatalf("committed recovery promoted %q, want %q: %v", after, pending, err)
+	}
+	if _, err := os.Stat(staged.pendingPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("committed stage survived recovery: %v", err)
+	}
+	database, err = openDatabase(databasePath, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var operations int
+	if err := database.QueryRow("SELECT COUNT(*) FROM CredentialPrivateKeyOperations;").Scan(&operations); err != nil {
+		t.Fatal(err)
+	}
+	if operations != 0 {
+		t.Fatalf("completed recovery operations = %d, want 0", operations)
+	}
+}
+
+func TestSshKeyCredentialRecoveryRecognizesPromotedReplacement(t *testing.T) {
+	installSshKeyCredentialTestStores(t)
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	if err := ensureElectronWorkspaceSchema(databasePath); err != nil {
+		t.Fatal(err)
+	}
+	id := "11111111-1111-4111-8111-111111111111"
+	staged, err := stageCredentialPrivateKeyReplacement(databasePath, id, []byte("replacement"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := database.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := recordCredentialPrivateKeyReplacement(tx, staged); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	_ = database.Close()
+	if err := credentialPrivateKeyPromote(staged.pendingPath, staged.finalPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := recoverCredentialPrivateKeyOperations(databasePath); err != nil {
+		t.Fatal(err)
+	}
+	database, err = openDatabase(databasePath, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var operations int
+	if err := database.QueryRow("SELECT COUNT(*) FROM CredentialPrivateKeyOperations;").Scan(&operations); err != nil {
+		t.Fatal(err)
+	}
+	if operations != 0 {
+		t.Fatalf("already promoted recovery operations = %d, want 0", operations)
+	}
+}
+
+func TestSshKeyCredentialRecoveryRejectsAlteredReplacement(t *testing.T) {
+	installSshKeyCredentialTestStores(t)
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	if err := ensureElectronWorkspaceSchema(databasePath); err != nil {
+		t.Fatal(err)
+	}
+	id := "11111111-1111-4111-8111-111111111111"
+	finalPath := credentialPrivateKeyPath(databasePath, id)
+	if err := os.MkdirAll(filepath.Dir(finalPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	original := []byte("original-protected-key")
+	if err := os.WriteFile(finalPath, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	staged, err := stageCredentialPrivateKeyReplacement(databasePath, id, []byte("replacement"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := database.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := recordCredentialPrivateKeyReplacement(tx, staged); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	_ = database.Close()
+	if err := os.WriteFile(staged.pendingPath, []byte("altered-protected-key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := recoverCredentialPrivateKeyOperations(databasePath); err == nil {
+		t.Fatal("altered SSH private key replacement was recovered")
+	}
+	current, err := os.ReadFile(finalPath)
+	if err != nil || !bytes.Equal(current, original) {
+		t.Fatalf("failed recovery changed protected key to %q: %v", current, err)
+	}
+	if _, err := os.Stat(staged.pendingPath); err != nil {
+		t.Fatalf("failed recovery removed pending evidence: %v", err)
+	}
+	database, err = openDatabase(databasePath, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var operations int
+	if err := database.QueryRow("SELECT COUNT(*) FROM CredentialPrivateKeyOperations;").Scan(&operations); err != nil {
+		t.Fatal(err)
+	}
+	if operations != 1 {
+		t.Fatalf("failed recovery operations = %d, want 1", operations)
 	}
 }
 
