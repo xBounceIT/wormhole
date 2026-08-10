@@ -63,7 +63,13 @@ import {
 import { KeyedTaskTracker } from './keyed-task-tracker.js';
 import { shouldDeferExtensionReload } from './extension-reload-policy.js';
 import { encodeTerminalClipboardText, isEncodedSshInput } from './terminal-clipboard.js';
-import { isLocalSftpPath, sshMaxSftpPathLength } from './sftp-contract.js';
+import {
+  isLocalSftpPath,
+  isSftpName,
+  sshMaxSftpEntryNameLength,
+  sshMaxSftpPathLength,
+  type SftpNameDestination,
+} from './sftp-contract.js';
 import { RdpBackendClient, stopChildProcess } from './rdp.js';
 import { settleTunnelCleanup, TunnelLeaseRegistry } from './tunnel-lease-registry.js';
 import { isTunnelIdentifier, parseTunnelTestRequest } from './tunnel-test-contract.js';
@@ -1023,7 +1029,6 @@ const sshMaxTerminalCells = 500 * 500;
 const sshMaxTerminalScrollbackLines = 5000;
 const sshMaxTerminalScrollbackLineLength = 2048;
 const sshMaxSftpEntries = 4096;
-const sshMaxSftpEntryNameLength = 4096;
 const sshMaxBackendErrorLength = 4096;
 const sshMaxSftpQuickPaths = 64;
 const sshMaxSftpQuickPathLabelLength = 256;
@@ -1650,21 +1655,16 @@ function isSftpTransferId(value: unknown): value is string {
   return isSftpRequestId(value);
 }
 
-function isSftpTransferItem(value: unknown): value is SshSftpTransferItem {
+function isSftpTransferItem(
+  value: unknown,
+  destination: SftpNameDestination,
+): value is SshSftpTransferItem {
   return (
     isRecord(value) &&
     typeof value.sourcePath === 'string' &&
     value.sourcePath.length > 0 &&
     Buffer.byteLength(value.sourcePath, 'utf8') <= sshMaxSftpPathLength &&
-    typeof value.name === 'string' &&
-    value.name.length > 0 &&
-    Buffer.byteLength(value.name, 'utf8') <= sshMaxSftpEntryNameLength &&
-    !value.name.includes('/') &&
-    !value.name.includes('\\') &&
-    !value.name.includes(':') &&
-    !value.name.includes('\u0000') &&
-    value.name !== '.' &&
-    value.name !== '..' &&
+    isSftpName(value.name, destination) &&
     typeof value.isDirectory === 'boolean' &&
     typeof value.size === 'number' &&
     Number.isSafeInteger(value.size) &&
@@ -1707,13 +1707,14 @@ function isSftpTransferRequest(value: unknown): value is SftpTransferRequest {
     !Array.isArray(value.items) ||
     value.items.length === 0 ||
     value.items.length > 256 ||
-    !value.items.every(isSftpTransferItem) ||
     (value.direction === 'local-to-remote'
       ? !isSftpPath(value.destinationPath)
       : !isLocalSftpPath(value.destinationPath))
   ) {
     return false;
   }
+  const destination = value.direction === 'local-to-remote' ? 'remote' : 'local';
+  if (!value.items.every((item) => isSftpTransferItem(item, destination))) return false;
   const sourceIsLocal = value.direction !== 'remote-to-local';
   return value.items.every((item) =>
     sourceIsLocal ? isLocalSftpPath(item.sourcePath) : isSftpPath(item.sourcePath),
@@ -1723,13 +1724,7 @@ function isSftpTransferRequest(value: unknown): value is SftpTransferRequest {
 function isSftpEntry(value: unknown, pane: SshSftpPane = 'remote'): value is SshSftpWireEntry {
   if (!isRecord(value)) return false;
   return (
-    typeof value.name === 'string' &&
-    value.name.length > 0 &&
-    Buffer.byteLength(value.name, 'utf8') <= sshMaxSftpEntryNameLength &&
-    !value.name.includes('/') &&
-    !value.name.includes('\\') &&
-    !value.name.includes(':') &&
-    !value.name.includes('\u0000') &&
+    isSftpName(value.name, pane) &&
     typeof value.full_path === 'string' &&
     value.full_path.length > 0 &&
     (pane === 'local' ? isLocalSftpPath(value.full_path) : isSftpPath(value.full_path)) &&

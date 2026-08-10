@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { isLocalSftpPath, sshMaxSftpPathLength } from '../electron/sftp-contract.ts';
+import {
+  isLocalSftpPath,
+  isSftpName,
+  sshMaxSftpEntryNameLength,
+  sshMaxSftpPathLength,
+} from '../electron/sftp-contract.ts';
 
 test('local SFTP paths accept native POSIX roots on Linux and macOS', () => {
   for (const platform of ['linux', 'darwin'] as const) {
@@ -38,4 +43,27 @@ test('local SFTP path limits are measured in UTF-8 bytes on every platform', () 
   assert.equal(isLocalSftpPath(maxWindowsPath, false, 'win32'), true);
   assert.equal(isLocalSftpPath(`${maxWindowsPath}a`, false, 'win32'), false);
   assert.equal(isLocalSftpPath(`/${'é'.repeat(sshMaxSftpPathLength / 2)}`, false, 'linux'), false);
+});
+
+test('local SFTP names follow the destination host filesystem', () => {
+  for (const platform of ['linux', 'darwin'] as const) {
+    assert.equal(isSftpName('report:2026.txt', 'local', platform), true);
+    assert.equal(isSftpName('report\\2026.txt', 'local', platform), true);
+  }
+  assert.equal(isSftpName('report:2026.txt', 'local', 'win32'), false);
+  assert.equal(isSftpName('report\\2026.txt', 'local', 'win32'), false);
+  assert.equal(isSftpName('nested/report.txt', 'local', 'linux'), false);
+  assert.equal(isSftpName('bad\u0000name', 'local', 'linux'), false);
+});
+
+test('remote SFTP names allow colons without treating backslashes as separators', () => {
+  assert.equal(isSftpName('report:2026.txt', 'remote', 'win32'), true);
+  assert.equal(isSftpName('report\\2026.txt', 'remote', 'linux'), false);
+  assert.equal(isSftpName('.', 'remote', 'linux'), false);
+  assert.equal(isSftpName('..', 'remote', 'linux'), false);
+  assert.equal(isSftpName('é'.repeat(sshMaxSftpEntryNameLength / 2), 'remote', 'linux'), true);
+  assert.equal(
+    isSftpName(`${'é'.repeat(sshMaxSftpEntryNameLength / 2)}a`, 'remote', 'linux'),
+    false,
+  );
 });

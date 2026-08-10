@@ -79,6 +79,7 @@ import {
   isLocalSftpPathRoot,
   isInvalidLocalSftpDropDestination,
   isSftpTransferTerminal,
+  isValidSftpNameInput,
   joinLocalSftpPath,
   shouldApplySftpClosed,
   shouldApplySftpError,
@@ -8918,18 +8919,6 @@ function parseSftpDragPayload(data: DataTransfer): SftpDragPayload | undefined {
   return items.length > 0 ? { sourcePane: 'local', items, external: true } : undefined;
 }
 
-function isValidSftpNameInput(name: string): boolean {
-  return (
-    name.length > 0 &&
-    name !== '.' &&
-    name !== '..' &&
-    !name.includes('/') &&
-    !name.includes('\\') &&
-    !name.includes(':') &&
-    !name.includes(String.fromCharCode(0))
-  );
-}
-
 // Virtualization, selection, drag/drop, and keyboard navigation share one pane coordinate system;
 // keeping them together prevents subtly different path and selection semantics.
 // react-doctor-disable-next-line react-doctor/no-giant-component
@@ -9101,7 +9090,7 @@ function SftpFilePane({
     if (renameCommitPath.current === editingPath) return;
     renameCommitPath.current = editingPath;
     const name = editingName.trim();
-    if (!isValidSftpNameInput(name)) {
+    if (!isValidSftpNameInput(name, pane, state.path)) {
       setEditingPath(undefined);
       return;
     }
@@ -9113,7 +9102,7 @@ function SftpFilePane({
 
   function submitPrompt() {
     const name = promptValue.trim();
-    if (!prompt || !isValidSftpNameInput(name)) return;
+    if (!prompt || !isValidSftpNameInput(name, pane, state.path)) return;
     onOperation(prompt === 'folder' ? 'mkdir' : 'file', joinSftpPanePath(pane, state.path, name));
     setPrompt(undefined);
     setPromptValue('');

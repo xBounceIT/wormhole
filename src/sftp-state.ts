@@ -346,6 +346,25 @@ function localSftpPathStyle(path: string): LocalSftpPathStyle | undefined {
   return /^(?:[A-Za-z]:[\\/]|\\\\)/.test(path) ? 'windows' : undefined;
 }
 
+export function isValidSftpNameInput(
+  name: string,
+  pane: 'local' | 'remote',
+  currentPath: string,
+): boolean {
+  if (
+    name.length === 0 ||
+    name === '.' ||
+    name === '..' ||
+    name.includes('/') ||
+    name.includes(String.fromCharCode(0))
+  ) {
+    return false;
+  }
+  if (pane === 'local' && localSftpPathStyle(currentPath) === 'posix') return true;
+  if (name.includes('\\')) return false;
+  return pane === 'remote' || !name.includes(':');
+}
+
 export function joinLocalSftpPath(parent: string, name: string): string {
   const style = localSftpPathStyle(parent);
   const separator =

@@ -15,6 +15,7 @@ import (
 	"os"
 	pathpkg "path"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -813,8 +814,57 @@ func TestNormalizeSftpPathRejectsUnsafeInput(t *testing.T) {
 	if _, err := normalizeSftpPath(strings.Repeat("a", sshSftpMaxPathBytes+1)); err == nil {
 		t.Fatal("overlong SFTP path was accepted")
 	}
-	if isSafeSftpName("report:2026.txt") {
-		t.Fatal("remote filename containing a colon was accepted")
+	if !isSafeSftpName("report:2026.txt") {
+		t.Fatal("remote filename containing a colon was rejected")
+	}
+	if isSafeSftpName(`report\2026.txt`) {
+		t.Fatal("remote filename containing a backslash was accepted")
+	}
+}
+
+func TestLocalSftpNamesFollowHostFilesystemRules(t *testing.T) {
+	wantPunctuation := runtime.GOOS != "windows"
+	for _, name := range []string{"report:2026.txt", `report\2026.txt`} {
+		if got := isSafeLocalSftpName(name); got != wantPunctuation {
+			t.Fatalf("isSafeLocalSftpName(%q) = %v, want %v on %s", name, got, wantPunctuation, runtime.GOOS)
+		}
+	}
+	for _, name := range []string{"", ".", "..", "nested/file", "bad\x00name"} {
+		if isSafeLocalSftpName(name) {
+			t.Fatalf("unsafe local SFTP name was accepted: %q", name)
+		}
+	}
+	if !isSafeTransferName("local-to-remote", "report:2026.txt") {
+		t.Fatal("valid remote destination name was rejected")
+	}
+	if isSafeTransferName("local-to-remote", `report\2026.txt`) {
+		t.Fatal("unsupported remote destination backslash was accepted")
+	}
+}
+
+func TestLocalSftpListingPreservesPosixPunctuation(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX filenames are not supported by the Windows test filesystem")
+	}
+	root := t.TempDir()
+	names := []string{"report:2026.txt", `report\2026.txt`}
+	for _, name := range names {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("report"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entries, _, err := readLocalDirectory(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed := make(map[string]bool, len(entries))
+	for _, entry := range entries {
+		listed[entry.Name] = true
+	}
+	for _, name := range names {
+		if !listed[name] {
+			t.Fatalf("host-valid local filename was omitted: %q", name)
+		}
 	}
 }
 
