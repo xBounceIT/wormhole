@@ -10,52 +10,64 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/zalando/go-keyring"
 )
 
-// Linux uses the freedesktop Secret Service through secret-tool. Password bytes are supplied on
-// stdin, never as an argument or in the SQLite database. Distributions without a running Secret
-// Service receive a clear save error instead of a plaintext fallback.
+// Linux uses the freedesktop Secret Service over D-Bus. Older releases invoked secret-tool, so
+// that reader remains available for existing references while new writes no longer require the
+// optional libsecret-tools package. There is deliberately no plaintext fallback when a Secret
+// Service is unavailable.
 const (
-	linuxSecretServiceEncoding = "linux-secret-service-v1"
-	linuxSecretToolTimeout     = 20 * time.Second
+	linuxLegacySecretServiceEncoding = "linux-secret-service-v1"
+	linuxSecretServiceEncoding       = "linux-secret-service-dbus-v1"
+	linuxSecretServiceName           = "Wormhole"
+	linuxSecretToolTimeout           = 20 * time.Second
 )
+
+var linuxCredentialStore = credentialSecretKeyring{
+	service:  linuxSecretServiceName,
+	encoding: linuxSecretServiceEncoding,
+	set:      keyring.Set,
+	get:      keyring.Get,
+	delete:   keyring.Delete,
+	notFound: keyring.ErrNotFound,
+}
 
 func storeCredentialSecret(id, value string) (string, string, error) {
-	reference, err := newCredentialSecretReference(id)
-	if err != nil {
-		return "", "", err
-	}
-	account, err := credentialSecretAccount(id, reference)
-	if err != nil {
-		return "", "", err
-	}
-	commandPath, err := exec.LookPath("secret-tool")
-	if err != nil {
-		return "", "", errors.New("the system secret store is unavailable")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), linuxSecretToolTimeout)
-	defer cancel()
-	command := exec.CommandContext(ctx, commandPath, "store", "--label=Wormhole credential", "service", "Wormhole", "account", account)
-	command.Stdin = strings.NewReader(value)
-	command.Stdout = io.Discard
-	command.Stderr = io.Discard
-	if err := command.Run(); err != nil {
-		return "", "", errors.New("the system secret store is unavailable")
-	}
-	return reference, linuxSecretServiceEncoding, nil
+	return linuxCredentialStore.store(id, value)
 }
 
 func unprotectPlatformCredentialSecret(id, encoded, encoding string) ([]byte, error) {
-	if strings.TrimSpace(encoding) != linuxSecretServiceEncoding {
+	switch strings.TrimSpace(encoding) {
+	case linuxSecretServiceEncoding:
+		return linuxCredentialStore.load(id, encoded)
+	case linuxLegacySecretServiceEncoding:
+		return unprotectLegacyLinuxCredentialSecret(id, encoded)
+	default:
 		return nil, errUnsupportedSecretEncoding
 	}
+}
+
+func deleteStoredCredentialSecret(id, encoded, encoding string) error {
+	switch strings.TrimSpace(encoding) {
+	case linuxSecretServiceEncoding:
+		return linuxCredentialStore.remove(id, encoded)
+	case linuxLegacySecretServiceEncoding:
+		return deleteLegacyLinuxCredentialSecret(id, encoded)
+	default:
+		return nil
+	}
+}
+
+func unprotectLegacyLinuxCredentialSecret(id, encoded string) ([]byte, error) {
 	account, err := credentialSecretAccount(id, encoded)
 	if err != nil {
 		return nil, errors.New("stored credential reference is invalid")
 	}
 	commandPath, err := exec.LookPath("secret-tool")
 	if err != nil {
-		return nil, errors.New("the system secret store is unavailable")
+		return nil, errCredentialSecretStoreUnavailable
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), linuxSecretToolTimeout)
 	defer cancel()
@@ -63,25 +75,22 @@ func unprotectPlatformCredentialSecret(id, encoded, encoding string) ([]byte, er
 	command.Stderr = io.Discard
 	stdout, err := command.StdoutPipe()
 	if err != nil || command.Start() != nil {
-		return nil, errors.New("the system secret store is unavailable")
+		return nil, errCredentialSecretStoreUnavailable
 	}
 	value, readErr := io.ReadAll(io.LimitReader(stdout, int64(maxStoredCredentialBytes+2)))
 	if readErr != nil || len(value) > maxStoredCredentialBytes+1 {
 		cancel()
 		_ = command.Wait()
-		return nil, errors.New("the system secret store is unavailable")
+		return nil, errCredentialSecretStoreUnavailable
 	}
 	waitErr := command.Wait()
 	if waitErr != nil {
-		return nil, errors.New("the system secret store is unavailable")
+		return nil, errCredentialSecretStoreUnavailable
 	}
 	return bytes.TrimSuffix(value, []byte{'\n'}), nil
 }
 
-func deleteStoredCredentialSecret(id, encoded, encoding string) error {
-	if strings.TrimSpace(encoding) != linuxSecretServiceEncoding {
-		return nil
-	}
+func deleteLegacyLinuxCredentialSecret(id, encoded string) error {
 	account, err := credentialSecretAccount(id, encoded)
 	if err != nil {
 		return err
