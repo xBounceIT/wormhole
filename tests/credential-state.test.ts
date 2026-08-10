@@ -116,11 +116,11 @@ test('SSH keys are accepted only by SSH password-capable controls', () => {
   assert.equal(credentialCanUseProtocol('unsupported', 'ssh'), false);
 });
 
-test('Auto sudo remains available for inline and inherited credentials but not a selected SSH key', () => {
+test('Auto sudo remains available for password and SSH key credentials', () => {
   assert.equal(sshAutoSudoAvailable(false, 'sshKey'), true);
   assert.equal(sshAutoSudoAvailable(true, undefined), true);
   assert.equal(sshAutoSudoAvailable(true, 'password'), true);
-  assert.equal(sshAutoSudoAvailable(true, 'sshKey'), false);
+  assert.equal(sshAutoSudoAvailable(true, 'sshKey'), true);
   assert.equal(sshAutoSudoAvailable(true, 'unsupported'), false);
 });
 

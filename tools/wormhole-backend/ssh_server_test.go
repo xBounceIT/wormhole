@@ -652,6 +652,25 @@ func TestSSHAutoSudoDriverStartsWithoutShellOutput(t *testing.T) {
 	}
 }
 
+func TestSSHAutoSudoDriverUsesNonInteractiveSudoWithoutLoginPassword(t *testing.T) {
+	input := &recordingSSHInput{}
+	native := &sshNativeSession{stdin: input}
+	driver := newSSHAutoSudoDriver(native, "")
+	if driver == nil {
+		t.Fatal("expected auto-sudo driver for an SSH key credential")
+	}
+	native.autoSudo = driver
+	defer driver.dispose()
+
+	if err := native.write([]byte("whoami\r")); err != nil {
+		t.Fatalf("buffering terminal input failed: %v", err)
+	}
+	driver.start()
+	if got := input.String(); got != "sudo -n su\rwhoami\r" {
+		t.Fatalf("passwordless auto sudo input = %q", got)
+	}
+}
+
 func TestSSHAutoSudoDriverStartIsIdempotent(t *testing.T) {
 	input := &recordingSSHInput{}
 	native := &sshNativeSession{stdin: input}

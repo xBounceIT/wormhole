@@ -1095,8 +1095,8 @@ function AutoSudoField({
   const description =
     mode === 'on'
       ? isFolder
-        ? 'SSH descendants that inherit this setting run “sudo su” on connect and send the saved password only at the sudo prompt.'
-        : 'Runs “sudo su” on connect and sends the saved password only at the sudo prompt. If sudo does not prompt, nothing is sent.'
+        ? 'SSH descendants run sudo on connect. Password credentials answer only the sudo prompt; SSH keys require passwordless sudo.'
+        : 'Runs sudo on connect. Password credentials answer only the sudo prompt; SSH keys require passwordless sudo.'
       : mode === 'off'
         ? 'Never runs sudo automatically on connect.'
         : isFolder

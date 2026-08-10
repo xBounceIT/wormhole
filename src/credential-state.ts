@@ -81,7 +81,8 @@ export function sshAutoSudoAvailable(
   return (
     !useSavedCredentials ||
     selectedCredentialKind === undefined ||
-    selectedCredentialKind === 'password'
+    selectedCredentialKind === 'password' ||
+    selectedCredentialKind === 'sshKey'
   );
 }
 
