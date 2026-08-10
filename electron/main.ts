@@ -572,7 +572,7 @@ type WorkspaceCredential = {
   isVirtualBitwarden?: boolean;
 };
 type CredentialProtocol = 'ssh' | 'rdp' | 'vnc';
-type CredentialCreateRequest = {
+type CredentialWriteRequest = {
   name: string;
   protocol: CredentialProtocol;
   username: string;
@@ -583,7 +583,11 @@ type CredentialCreateRequest = {
   bitwardenItemName?: string;
   bitwardenFieldPath?: string;
 };
-type CredentialUpdateRequest = CredentialCreateRequest & { id: string };
+type CredentialCreateRequest = Omit<
+  CredentialWriteRequest,
+  'provider' | 'bitwardenItemId' | 'bitwardenItemName' | 'bitwardenFieldPath'
+> & { provider: 'Local' };
+type CredentialUpdateRequest = CredentialWriteRequest & { id: string };
 type CredentialDeleteRequest = { id: string };
 type WorkspaceNodeRequest = { nodeId: string };
 type WorkspaceDuplicateNodeResponse = { nodeId: string; name: string };
@@ -1436,10 +1440,10 @@ function parseWorkspaceNodeRequest(value: unknown): WorkspaceNodeRequest {
   return { nodeId: value.nodeId };
 }
 
-function parseCredentialCreateRequest(
+function parseCredentialWriteRequest(
   value: unknown,
   allowMissingLocalPassword = false,
-): CredentialCreateRequest {
+): CredentialWriteRequest {
   if (!isRecord(value)) throw new Error('Credential details are invalid.');
   const name = value.name;
   const protocol = value.protocol;
@@ -1480,6 +1484,21 @@ function parseCredentialCreateRequest(
     bitwardenItemId,
     bitwardenItemName,
     bitwardenFieldPath: 'login.password',
+  };
+}
+
+function parseCredentialCreateRequest(value: unknown): CredentialCreateRequest {
+  const request = parseCredentialWriteRequest(value);
+  if (request.provider !== 'Local') {
+    throw new Error('Bitwarden credential profiles cannot be created manually.');
+  }
+  return {
+    name: request.name,
+    protocol: request.protocol,
+    username: request.username,
+    domain: request.domain,
+    password: request.password,
+    provider: 'Local',
   };
 }
 
@@ -1622,7 +1641,7 @@ function isWorkspaceNodeInlineCredentialRequest(
 }
 
 function parseCredentialUpdateRequest(value: unknown): CredentialUpdateRequest {
-  const request = parseCredentialCreateRequest(value, true);
+  const request = parseCredentialWriteRequest(value, true);
   const id = isRecord(value) ? value.id : undefined;
   if (typeof id !== 'string' || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id)) {
     throw new Error('Credential id is invalid.');
