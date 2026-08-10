@@ -138,6 +138,42 @@ a portable AppImage plus installable DEB and RPM packages for x86-64 and ARM64.
 Windows releases publish the installer and portable ZIP, while macOS releases
 publish the DMG.
 
+## macOS Gatekeeper notice
+
+The macOS release is not currently signed with an Apple Developer ID or
+notarized by Apple. As a result, Gatekeeper displays a warning that the
+developer cannot be verified when Wormhole is opened for the first time. This
+warning is expected and does not by itself mean that malware was detected; it
+means that macOS cannot verify the developer or an Apple notarization ticket.
+
+Download Wormhole only from this repository's
+[GitHub Releases](https://github.com/xBounceIT/wormhole/releases) page. Each
+DMG has an accompanying `.sha256` file that can be checked from Terminal
+before installation:
+
+    shasum -a 256 -c Wormhole-*-mac-universal-setup.dmg.sha256
+
+To open Wormhole after verifying the download:
+
+1. Drag `Wormhole.app` to the Applications folder.
+2. Try to open it once, then dismiss the Gatekeeper warning.
+3. Open **System Settings > Privacy & Security** and scroll down to
+   **Security**.
+4. Click **Open Anyway** next to Wormhole, then confirm the prompt.
+
+macOS saves this approval as an exception, so the same copy of the app can be
+opened normally afterward. Apple documents this process in
+[Open apps safely on your Mac](https://support.apple.com/102445).
+
+Advanced users can remove the quarantine attribute instead, after verifying
+the download and moving the app to Applications:
+
+    xattr -dr com.apple.quarantine /Applications/Wormhole.app
+
+This command does not sign or notarize the app; it only removes the local
+quarantine flag from that copy. End users do not need an Apple Developer
+account or any paid subscription to use Wormhole.
+
 ## Stack
 
 | Concern | Choice |
