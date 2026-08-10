@@ -50,8 +50,9 @@ const (
 )
 
 var (
-	errBackupPasswordRequired = errors.New("Backup file is encrypted; password required.")
-	errBackupBadPassword      = errors.New("Backup password is incorrect or the file is corrupt.")
+	errBackupPasswordRequired           = errors.New("Backup file is encrypted; password required.")
+	errBackupBadPassword                = errors.New("Backup password is incorrect or the file is corrupt.")
+	errBackupPrivateKeyPasswordRequired = errors.New("A backup password is required to export SSH private keys.")
 
 	// Tests replace this indirection so backup semantics can be exercised on hosts without an
 	// interactive OS keychain. Production always delegates to the platform secret implementation.
@@ -330,8 +331,9 @@ func exportBackupContext(
 	}
 	reportOperationProgress(progress, "reading", "Reading workspace metadata…", 10)
 
+	encrypted := request.Password != ""
 	payload := newBackupPayload()
-	if err := populateBackupPayloadContext(ctx, databasePath, payload, progress); err != nil {
+	if err := populateBackupPayloadContext(ctx, databasePath, payload, progress, encrypted); err != nil {
 		return backupExportResult{}, err
 	}
 	if err := ctx.Err(); err != nil {
@@ -346,7 +348,6 @@ func exportBackupContext(
 		Encryption:    backupEncryptionNone,
 		Payload:       payload,
 	}
-	encrypted := request.Password != ""
 	if encrypted {
 		plaintext, marshalErr := json.Marshal(payload)
 		if marshalErr != nil {
@@ -396,6 +397,7 @@ func populateBackupPayloadContext(
 	databasePath string,
 	payload *backupPayload,
 	progress operationProgress,
+	privateKeysEncrypted bool,
 ) error {
 	release, err := acquireRecoveredCredentialPrivateKeyLock(databasePath)
 	if err != nil {
@@ -417,6 +419,9 @@ func populateBackupPayloadContext(
 	if payload.Credentials, err = loadBackupObjectsContext(ctx, database, "CredentialProfiles", backupCredentialColumns); err != nil {
 		return err
 	}
+	if !privateKeysEncrypted && backupContainsLocalSshKeyCredential(payload.Credentials) {
+		return errBackupPrivateKeyPasswordRequired
+	}
 	if payload.Tunnels, err = loadBackupObjectsContext(ctx, database, "TunnelConfigs", backupTunnelColumns); err != nil {
 		return err
 	}
@@ -428,6 +433,24 @@ func populateBackupPayloadContext(
 	}
 	reportOperationProgress(progress, "secrets", "Reading protected secrets…", 35)
 	return exportBackupSecretsContext(ctx, database, databasePath, payload)
+}
+
+func backupContainsLocalSshKeyCredential(credentials []*backupObject) bool {
+	for _, credential := range credentials {
+		if credential == nil {
+			continue
+		}
+		if isLocalSshKeyBackupCredential(*credential) {
+			return true
+		}
+	}
+	return false
+}
+
+func isLocalSshKeyBackupCredential(credential backupObject) bool {
+	kind, _ := backupObjectInteger(credential, "kind")
+	provider, _ := backupObjectInteger(credential, "secretProvider")
+	return kind == 1 && provider == 0
 }
 
 func encodeBackupDocument(document backupDocument, maximumBytes int64) ([]byte, error) {
@@ -636,7 +659,7 @@ func exportBackupSecretsContext(ctx context.Context, database *sql.DB, databaseP
 				passwordEntries[index] = &backupPasswordEntry{CredentialID: id, Password: password}
 			}
 		}
-		if kind != 1 || provider != 0 {
+		if !isLocalSshKeyBackupCredential(*credential) {
 			return nil
 		}
 		keyPath := credentialPrivateKeyPath(databasePath, id)
