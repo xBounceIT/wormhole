@@ -3453,6 +3453,11 @@ func loadSSHCredential(
 		}
 		return errors.New("Wormhole database has no SSH credentials")
 	}
+	release, err := sshCredentialPrivateKeyLock(databasePath)
+	if err != nil {
+		return err
+	}
+	defer release()
 	columns, err := tableColumns(database, "CredentialProfiles")
 	if err != nil {
 		return err
@@ -3510,11 +3515,9 @@ func loadSSHCredential(
 	}
 
 	if row.Kind.Valid && row.Kind.Int64 == 1 {
-		release, err := acquireRecoveredCredentialPrivateKeyLock(databasePath)
-		if err != nil {
+		if err := recoverCredentialPrivateKeyOperationsUnlocked(databasePath); err != nil {
 			return err
 		}
-		defer release()
 		stem, err := protectedCredentialFileStem(credentialID)
 		if err != nil {
 			return err
@@ -3541,6 +3544,10 @@ func loadSSHCredential(
 	target.password = string(secret)
 	return nil
 }
+
+// This indirection lets concurrency tests observe lock acquisition without changing the
+// production locking behavior.
+var sshCredentialPrivateKeyLock = acquireCredentialPrivateKeyLock
 
 func applySSHCredentialOverride(
 	target *sshTarget,

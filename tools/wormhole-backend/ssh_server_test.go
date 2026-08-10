@@ -2870,6 +2870,114 @@ func TestLoadSSHCredentialSnapshotsKeyAndPassphraseAgainstConcurrentReplacement(
 	}
 }
 
+func TestLoadSSHCredentialWaitsForReplacementBeforeReadingProfile(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	oldKeyPath := filepath.Join(t.TempDir(), "old.pem")
+	if err := os.WriteFile(oldKeyPath, testSshPrivateKey(t, "old-passphrase"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	created, err := createCredential(databasePath, credentialCreateRequest{
+		Name: "Runtime key", Protocol: "ssh", Kind: "sshKey", Username: "old-user",
+		Passphrase: "old-passphrase", PrivateKeyPath: oldKeyPath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	database, err := openDatabase(databasePath, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	replacementPath := filepath.Join(t.TempDir(), "replacement.pem")
+	replacementKey := testSshPrivateKey(t, "replacement-passphrase")
+	if err := os.WriteFile(replacementPath, replacementKey, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	replacementStaged := make(chan struct{})
+	continueUpdate := make(chan struct{})
+	defer func() {
+		select {
+		case <-continueUpdate:
+		default:
+			close(continueUpdate)
+		}
+	}()
+	previousStageProtect := credentialPrivateKeyStageProtect
+	credentialPrivateKeyStageProtect = func(finalPath, pendingPath string, plaintext []byte) error {
+		if err := previousStageProtect(finalPath, pendingPath, plaintext); err != nil {
+			return err
+		}
+		close(replacementStaged)
+		<-continueUpdate
+		return nil
+	}
+	t.Cleanup(func() { credentialPrivateKeyStageProtect = previousStageProtect })
+
+	updateDone := make(chan error, 1)
+	go func() {
+		_, err := updateCredential(databasePath, credentialUpdateRequest{
+			ID: created.ID,
+			credentialCreateRequest: credentialCreateRequest{
+				Name: "Runtime key", Protocol: "ssh", Kind: "sshKey", Username: "new-user",
+				Passphrase: "replacement-passphrase", PrivateKeyPath: replacementPath,
+			},
+		})
+		updateDone <- err
+	}()
+	select {
+	case <-replacementStaged:
+	case <-time.After(5 * time.Second):
+		t.Fatal("SSH key replacement did not reach staging")
+	}
+
+	lockAttempted := make(chan struct{})
+	previousRuntimeLock := sshCredentialPrivateKeyLock
+	sshCredentialPrivateKeyLock = func(path string) (func(), error) {
+		close(lockAttempted)
+		return previousRuntimeLock(path)
+	}
+	t.Cleanup(func() { sshCredentialPrivateKeyLock = previousRuntimeLock })
+	target := sshTarget{}
+	loadDone := make(chan error, 1)
+	go func() {
+		loadDone <- loadSSHCredential(database, databasePath, created.ID, &target, "", "", false, false)
+	}()
+	select {
+	case <-lockAttempted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("runtime credential load did not attempt to acquire the snapshot lock")
+	}
+	close(continueUpdate)
+
+	select {
+	case err := <-updateDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("SSH key replacement did not finish")
+	}
+	select {
+	case err := <-loadDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("runtime credential load did not resume")
+	}
+	defer clearBytes(target.privateKey)
+	if target.username != "new-user" || target.keyPassphrase != "replacement-passphrase" ||
+		!bytes.Equal(target.privateKey, replacementKey) {
+		t.Fatalf(
+			"runtime SSH credential snapshot = user:%q passphrase:%q key-bytes:%d",
+			target.username,
+			target.keyPassphrase,
+			len(target.privateKey),
+		)
+	}
+}
+
 func TestDialNativeSSHUsesGoSSHClientForPasswordAndPTY(t *testing.T) {
 	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
