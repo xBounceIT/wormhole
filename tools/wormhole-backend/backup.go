@@ -1069,9 +1069,36 @@ func isBackupWorkspaceStoragePath(databasePath, targetPath string) bool {
 		}
 	}
 	keysDirectory := filepath.Join(filepath.Dir(databasePath), "keys")
-	relative, err := filepath.Rel(canonicalBackupPath(keysDirectory), canonicalBackupPath(targetPath))
-	return err == nil && relative != ".." &&
-		!filepath.IsAbs(relative) && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+	return backupPathWithinDirectory(
+		canonicalBackupPath(keysDirectory),
+		canonicalBackupPath(targetPath),
+	)
+}
+
+func backupPathWithinDirectory(directory, target string) bool {
+	directory = filepath.Clean(directory)
+	target = filepath.Clean(target)
+	directoryVolume := filepath.VolumeName(directory)
+	targetVolume := filepath.VolumeName(target)
+	if !equalBackupPaths(directoryVolume, targetVolume) {
+		return false
+	}
+	split := func(path string) []string {
+		return strings.FieldsFunc(path, func(character rune) bool {
+			return character < utf8.RuneSelf && os.IsPathSeparator(uint8(character))
+		})
+	}
+	directoryParts := split(strings.TrimPrefix(directory, directoryVolume))
+	targetParts := split(strings.TrimPrefix(target, targetVolume))
+	if len(targetParts) < len(directoryParts) {
+		return false
+	}
+	for index, part := range directoryParts {
+		if !equalBackupPaths(part, targetParts[index]) {
+			return false
+		}
+	}
+	return true
 }
 
 func validateBackupEncryption(encryption string) error {

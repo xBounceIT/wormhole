@@ -843,6 +843,28 @@ func TestBackupExportProtectsTheDatabaseAndSiblingFiles(t *testing.T) {
 	}
 }
 
+func TestBackupWorkspaceStoragePathUsesPlatformCaseRules(t *testing.T) {
+	directory := t.TempDir()
+	databasePath := filepath.Join(directory, "wormhole.db")
+	caseVariant := filepath.Join(directory, "KEYS", "credential.dpapi")
+	wantReserved := runtime.GOOS == "windows" || runtime.GOOS == "darwin"
+	if reserved := isBackupWorkspaceStoragePath(databasePath, caseVariant); reserved != wantReserved {
+		t.Fatalf("case-variant key path reserved = %t, want %t on %s", reserved, wantReserved, runtime.GOOS)
+	}
+	if !isBackupWorkspaceStoragePath(
+		databasePath,
+		filepath.Join(directory, "keys", "nested", "credential.dpapi"),
+	) {
+		t.Fatal("nested protected key path was not reserved")
+	}
+	if isBackupWorkspaceStoragePath(
+		databasePath,
+		filepath.Join(directory, "keys-sibling", "credential.dpapi"),
+	) {
+		t.Fatal("key-directory sibling was treated as protected storage")
+	}
+}
+
 func TestBackupExportCanonicalizesLegacySQLiteTimestamps(t *testing.T) {
 	installBackupTestSecretStore(t)
 	databasePath := filepath.Join(t.TempDir(), "source.db")
