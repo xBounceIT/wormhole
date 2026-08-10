@@ -49,8 +49,9 @@ func TestPrepareWatchguardAutomaticAuthenticatesDownloadsAndCachesProfile(t *tes
 	defer server.Close()
 	serverURL, _ := url.Parse(server.URL)
 	raw, _ := json.Marshal(map[string]any{
-		"Server": serverURL.Hostname(), "Port": mustTestPort(t, serverURL.Port()), "AuthMode": 1,
-		"Username": "alice", "Password": "secret", "TrustServerCertificate": true,
+		"Server": serverURL.Hostname(), "Port": mustTestPort(t, serverURL.Port()), "AuthMode": 0,
+		"UseSingleSignOn": false,
+		"Username":        "alice", "Password": "secret", "TrustServerCertificate": true,
 	})
 	snapshot := tunnelConfigSnapshot{
 		databasePath: filepath.Join(t.TempDir(), "wormhole.db"),
@@ -317,7 +318,7 @@ func TestPrepareWatchguardSAMLUsesBrowserResultAndDownloadsWithCookies(t *testin
 	serverURL, _ := url.Parse(server.URL)
 	raw, _ := json.Marshal(map[string]any{
 		"Server": serverURL.Hostname(), "Port": mustTestPort(t, serverURL.Port()),
-		"AuthMode": 2, "TrustServerCertificate": true,
+		"AuthMode": 0, "UseSingleSignOn": true, "TrustServerCertificate": true,
 	})
 	ctx := withTunnelPromptHandler(context.Background(), func(_ context.Context, prompt tunnelPrompt) (string, error) {
 		if !prompt.Browser || len(prompt.URLs) != 3 || !prompt.IgnoreCertificateErrors {

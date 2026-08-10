@@ -10,7 +10,9 @@ import {
   tunnelModeFor,
   tunnelTestPhaseLabel,
   tunnelValueFor,
+  updateTunnelEditorSetting,
   userFacingTunnelError,
+  watchguardSsoEnabledForEditor,
 } from '../src/tunnel-state.ts';
 
 const tunnelId = 'b2a0a6b0-69c8-4f3e-a4cb-f3395aa0a9f7';
@@ -105,6 +107,73 @@ test('VPN editor matches WinUI normalization for Fortinet and Cisco secrets', ()
   );
 });
 
+test('VPN editor removes WatchGuard credentials for SSO and obsolete Stormshield SSO state', () => {
+  assert.deepEqual(
+    normalizeTunnelEditorSettings(3, {
+      Server: 'firebox.example.com',
+      AuthMode: 0,
+      UseSingleSignOn: true,
+      Username: 'must-go',
+      Password: 'must-go',
+    }),
+    {
+      Server: 'firebox.example.com',
+      AuthMode: 2,
+      UseSingleSignOn: true,
+      VerifyX509Name: '/O=WatchGuard_Technologies/OU=Fireware/CN=Fireware_SSLVPN_Server',
+    },
+  );
+  assert.deepEqual(
+    normalizeTunnelEditorSettings(4, {
+      Server: 'sns.example.com',
+      Username: 'alice',
+      Password: 'secret\r\n',
+      UseSingleSignOn: true,
+    }),
+    {
+      Server: 'sns.example.com',
+      Username: 'alice',
+      Password: 'secret',
+      Mode: 0,
+      AppToken: 'sslclient',
+    },
+  );
+});
+
+test('WatchGuard editor keeps the SSO checkbox, authentication mode, and credentials atomic', () => {
+  const credentials = { AuthMode: 1, Username: 'alice', Password: 'secret' };
+  assert.deepEqual(updateTunnelEditorSetting(3, credentials, 'UseSingleSignOn', true), {
+    AuthMode: 2,
+    UseSingleSignOn: true,
+  });
+  assert.deepEqual(
+    updateTunnelEditorSetting(3, { AuthMode: 2, UseSingleSignOn: true }, 'UseSingleSignOn', false),
+    { AuthMode: 0, UseSingleSignOn: false },
+  );
+  assert.deepEqual(updateTunnelEditorSetting(3, credentials, 'AuthMode', 2), {
+    AuthMode: 2,
+    UseSingleSignOn: true,
+  });
+  assert.deepEqual(updateTunnelEditorSetting(4, credentials, 'UseOtp', true), {
+    ...credentials,
+    UseOtp: true,
+  });
+});
+
+test('WatchGuard editor preserves legacy automatic SSO without reclassifying manual profiles', () => {
+  assert.equal(watchguardSsoEnabledForEditor({ AuthMode: 0 }), true);
+  assert.equal(
+    watchguardSsoEnabledForEditor({ AuthMode: 0, Username: 'alice', Password: 'secret' }),
+    false,
+  );
+  assert.equal(
+    watchguardSsoEnabledForEditor({ AuthMode: 0, ProfileOvpn: 'client\nremote firebox 443' }),
+    false,
+  );
+  assert.equal(watchguardSsoEnabledForEditor({ AuthMode: 0, UseSingleSignOn: false }), false);
+  assert.equal(watchguardSsoEnabledForEditor({ AuthMode: 2 }), true);
+});
+
 test('missing tunnel fields match the WinUI required-field gates', () => {
   assert.deepEqual(
     missingTunnelFields({
@@ -135,6 +204,45 @@ test('missing tunnel fields match the WinUI required-field gates', () => {
       settings: { Host: 'vpn.example.com', Port: 443, Username: 'alice' },
     }),
     ['Password'],
+  );
+  assert.deepEqual(
+    missingTunnelFields({
+      name: 'WatchGuard SSO',
+      kind: 3,
+      settings: {
+        Server: 'firebox.example.com',
+        Port: 443,
+        AuthMode: 2,
+        UseSingleSignOn: true,
+      },
+    }),
+    [],
+  );
+  assert.deepEqual(
+    missingTunnelFields({
+      name: 'WatchGuard password',
+      kind: 3,
+      settings: {
+        Server: 'firebox.example.com',
+        Port: 443,
+        AuthMode: 0,
+        UseSingleSignOn: false,
+      },
+    }),
+    ['Username', 'Password'],
+  );
+  assert.deepEqual(
+    missingTunnelFields({
+      name: 'Stormshield',
+      kind: 4,
+      settings: {
+        Server: 'sns.example.com',
+        Port: 443,
+        Mode: 0,
+        UseSingleSignOn: true,
+      },
+    }),
+    ['Username', 'Password'],
   );
 });
 
