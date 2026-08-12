@@ -29,7 +29,7 @@ const (
 	authPbkdf2Iterations    = 600_000
 	authMaxPbkdf2Iterations = 5_000_000
 	authMaxStoreBytes       = 64 * 1024
-	authMaxSettingsBytes    = 1024 * 1024
+	authMaxSettingsBytes    = 4 * 1024 * 1024
 	authPinMinLength        = 4
 	authPinMaxLength        = 12
 	authPasswordMinLength   = 8
@@ -256,6 +256,9 @@ func updateSettingsDocumentWithOptions(
 	contents, err = json.MarshalIndent(document, "", "  ")
 	if err != nil {
 		return fmt.Errorf("cannot encode Wormhole settings: %w", err)
+	}
+	if len(contents) > authMaxSettingsBytes {
+		return errors.New("Wormhole settings file is too large")
 	}
 	temporary, err := os.CreateTemp(filepath.Dir(cleanPath), ".wormhole-settings-*.tmp")
 	if err != nil {

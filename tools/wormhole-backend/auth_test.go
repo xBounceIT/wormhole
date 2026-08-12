@@ -228,6 +228,31 @@ func TestAuthSettingsRejectOversizedFileWithoutOverwritingIt(t *testing.T) {
 	}
 }
 
+func TestSettingsUpdateRejectsOversizedOutputWithoutOverwritingIt(t *testing.T) {
+	settingsPath := filepath.Join(t.TempDir(), authSettingsFilename)
+	original := []byte(`{"Theme":"dark"}`)
+	if err := os.WriteFile(settingsPath, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oversized, err := json.Marshal(strings.Repeat("x", authMaxSettingsBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := updateSettingsDocument(settingsPath, func(document map[string]json.RawMessage) error {
+		document["oversized"] = oversized
+		return nil
+	}); err == nil {
+		t.Fatal("oversized settings output was accepted")
+	}
+	contents, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(contents, original) {
+		t.Fatal("oversized settings update changed the original settings file")
+	}
+}
+
 func TestAuthStateDefaultsWithoutFiles(t *testing.T) {
 	state, err := authState(filepath.Join(t.TempDir(), "wormhole.db"))
 	if err != nil {

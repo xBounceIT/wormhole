@@ -1,6 +1,7 @@
 import {
   lazy,
   memo,
+  startTransition,
   Suspense,
   useCallback,
   useDeferredValue,
@@ -277,6 +278,14 @@ import {
   minSidebarWidth,
   normalizeSidebarWidth,
 } from './sidebar-settings';
+import {
+  createConnectionTreeExpansionWriter,
+  indexConnectionTree,
+  reconcileExpandedFolderIds,
+  restoreExpandedFolderIds,
+  serializeConnectionTreeExpansion,
+  shouldRenderConnectionTreeChildren,
+} from './connection-tree-state';
 import {
   appendTunnelTestLog,
   isTunnelTestCancellation,
@@ -1000,13 +1009,6 @@ function filterTree(nodes: TreeNode[], query: string): TreeNode[] {
   });
 }
 
-function collectFolderIds(nodes: TreeNode[]): string[] {
-  return nodes.flatMap((node) => [
-    ...(node.kind === 'folder' ? [node.id] : []),
-    ...(node.children ? collectFolderIds(node.children) : []),
-  ]);
-}
-
 function collectFolders(nodes: TreeNode[]): TreeNode[] {
   return nodes.flatMap((node) =>
     node.kind === 'folder' ? [node, ...(node.children ? collectFolders(node.children) : [])] : [],
@@ -1655,6 +1657,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   const [theme, setTheme] = useState<Theme>(initialSettings.theme);
   const [systemTheme, setSystemTheme] = useState<ResolvedTheme>(getSystemTheme);
   const [tree, setTree] = useState<TreeNode[]>(initialWorkspace.tree);
+  const connectionTreeIndex = useMemo(() => indexConnectionTree(tree), [tree]);
   const treeRef = useRef(tree);
   useLayoutEffect(() => {
     treeRef.current = tree;
@@ -1694,8 +1697,22 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   const rdpSavedCredentialAttempts = useRef(new Set<string>());
   const [runtimeBitwardenRetries] = useState(() => new KeyedRetryQueue<string>());
   const [activePage, setActivePage] = useState<NavItem>('sessions');
-  const [expanded, setExpanded] = useState<Set<string>>(
-    () => new Set(collectFolderIds(initialWorkspace.tree)),
+  const [expanded, setExpanded] = useState<Set<string>>(() =>
+    restoreExpandedFolderIds(
+      connectionTreeIndex.folderIds,
+      initialSettings.connectionTreeExpansion,
+    ),
+  );
+  const [connectionTreeExpansionWriter] = useState(() =>
+    createConnectionTreeExpansionWriter(
+      (state) => {
+        if (!window.wormhole) throw new Error('The settings service is unavailable.');
+        return window.wormhole.setConnectionTreeExpansion(state).then(() => undefined);
+      },
+      {
+        initialState: serializeConnectionTreeExpansion(connectionTreeIndex.folderIds, expanded),
+      },
+    ),
   );
   const [selectedNodeId, setSelectedNodeId] = useState(
     () => findFirstConnection(initialWorkspace.tree)?.id ?? initialWorkspace.tree[0]?.id ?? '',
@@ -1845,9 +1862,11 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       }
     | undefined
   >(undefined);
+  const normalizedConnectionTreeSearch = searchText.trim().toLowerCase();
+  const connectionTreeSearchActive = normalizedConnectionTreeSearch.length > 0;
   const visibleTree = useMemo(
-    () => filterTree(tree, searchText.trim().toLowerCase()),
-    [searchText, tree],
+    () => filterTree(tree, normalizedConnectionTreeSearch),
+    [normalizedConnectionTreeSearch, tree],
   );
   const editingConnectionHasInlineCredential = useMemo(
     () =>
@@ -1858,6 +1877,13 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   );
 
   useEffect(() => () => sidebarWriter.cancel(), [sidebarWriter]);
+  useEffect(() => () => connectionTreeExpansionWriter.cancel(), [connectionTreeExpansionWriter]);
+  useEffect(() => {
+    connectionTreeExpansionWriter.schedule(connectionTreeIndex.folderIds, expanded);
+  }, [connectionTreeExpansionWriter, connectionTreeIndex.folderIds, expanded]);
+  useEffect(() => {
+    if (authGate === 'unlocked') void connectionTreeExpansionWriter.flush().catch(() => undefined);
+  }, [authGate, connectionTreeExpansionWriter]);
   useEffect(() => {
     const requestId = ++rdpExternalClientRequirementRequest.current;
     if (!newConnectionOpen || newConnectionForm.protocol !== 'rdp' || !window.wormhole) {
@@ -2916,6 +2942,22 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     });
   }
 
+  function toggleAllFolders(value: boolean) {
+    startTransition(() => {
+      setExpanded((current) => {
+        const alreadyApplied = value
+          ? current.size === connectionTreeIndex.folderIds.length &&
+            connectionTreeIndex.folderIds.every((id) => current.has(id))
+          : current.size === 0;
+        return alreadyApplied
+          ? current
+          : value
+            ? new Set(connectionTreeIndex.folderIds)
+            : new Set();
+      });
+    });
+  }
+
   function toggleTreeNodeSelection(id: string, checked: boolean) {
     const next = new Set(selectedTreeNodeIds);
     if (checked) next.add(id);
@@ -3921,14 +3963,14 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   });
   useEffect(() => {
     return window.wormhole?.onWindowCloseRequested(async () => {
-      await sidebarWriter.flush().catch(() => undefined);
+      await Promise.allSettled([sidebarWriter.flush(), connectionTreeExpansionWriter.flush()]);
       await Promise.allSettled(
         sessionsRef.current.map((session) => releaseSessionResourcesRef.current(session)),
       );
       setSessions([]);
       setSelectedSessionId('');
     });
-  }, [sidebarWriter]);
+  }, [connectionTreeExpansionWriter, sidebarWriter]);
 
   useEffect(() => {
     return window.wormhole?.onWindowCloseConfirmationRequested(
@@ -5034,9 +5076,8 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     setCredentials(workspace.credentials as CredentialRecord[]);
     setCredentialOptions(workspaceCredentialOptions(workspace));
     setTunnels(workspace.tunnels as TunnelRecord[]);
-    setExpanded(
-      (current) =>
-        new Set([...current].filter((id) => findTreeNode(nextTree, id)?.kind === 'folder')),
+    setExpanded((current) =>
+      reconcileExpandedFolderIds(indexConnectionTree(nextTree).folderIds, current),
     );
     setSelectedTreeNodeIds(
       (current) => new Set([...current].filter((id) => Boolean(findTreeNode(nextTree, id)))),
@@ -5052,9 +5093,8 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
 
   function applyDeletedTreeState(nextTree: TreeNode[]) {
     setTree(nextTree);
-    setExpanded(
-      (current) =>
-        new Set([...current].filter((id) => findTreeNode(nextTree, id)?.kind === 'folder')),
+    setExpanded((current) =>
+      reconcileExpandedFolderIds(indexConnectionTree(nextTree).folderIds, current),
     );
     setSelectedTreeNodeIds(
       (current) => new Set([...current].filter((id) => Boolean(findTreeNode(nextTree, id)))),
@@ -5843,13 +5883,14 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       const isFolder = node.kind === 'folder';
       const protocol = node.protocol ?? 'ssh';
       const isLastSibling = index === nodes.length - 1;
-      const isExpanded = searchText.trim() ? true : expanded.has(node.id);
+      const isExpanded = connectionTreeSearchActive || expanded.has(node.id);
       const hasChildren = Boolean(node.children?.length);
       const isSelected = node.kind === 'folder' && selectedNodeId === node.id;
-      const creationFolderId = node.kind === 'folder' ? node.id : findParentFolderId(tree, node.id);
+      const creationFolderId =
+        node.kind === 'folder' ? node.id : connectionTreeIndex.parentFolderIdByNodeId.get(node.id);
       const activeDropPlacement = dropTarget?.id === node.id ? dropTarget.placement : null;
       const isDragging = draggedNodeIdSet.has(node.id);
-      const treeDragEnabled = !searchText.trim();
+      const treeDragEnabled = !connectionTreeSearchActive;
       const treeGeometry = getTreeRowGeometry(depth);
       const branchGeometry = treeGeometry.branch;
       const dropIndicator =
@@ -5888,7 +5929,6 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           draggable={treeDragEnabled}
           onClick={() => {
             setSelectedNodeId(node.id);
-            if (isFolder) toggleFolder(node.id);
           }}
           onDragEnd={handleTreeDragEnd}
           onDragStart={(event) => handleTreeDragStart(event, node)}
@@ -5988,7 +6028,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         <Collapsible
           className="relative py-0.5"
           key={node.id}
-          onOpenChange={(value) => toggleFolder(node.id, value)}
+          onOpenChange={(value) => {
+            if (!connectionTreeSearchActive) toggleFolder(node.id, value);
+          }}
           open={isExpanded}
         >
           {treeVerticalGuide}
@@ -6010,12 +6052,12 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
               {treeConnector}
               <NodeTooltip node={node}>
                 <div>
-                  <CollapsibleTrigger asChild>{row}</CollapsibleTrigger>
+                  {hasChildren ? <CollapsibleTrigger asChild>{row}</CollapsibleTrigger> : row}
                 </div>
               </NodeTooltip>
             </div>
           </NodeContextMenu>
-          {hasChildren ? (
+          {shouldRenderConnectionTreeChildren(hasChildren, isExpanded) ? (
             <CollapsibleContent>{renderTree(node.children!, depth + 1)}</CollapsibleContent>
           ) : null}
         </Collapsible>
@@ -6422,15 +6464,12 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                       <h1 className="!text-xs font-semibold tracking-tight">Connections</h1>
                     </div>
                     <div className="flex items-center gap-0.5">
-                      <IconButton
-                        label="Expand all folders"
-                        onClick={() => setExpanded(new Set(collectFolderIds(tree)))}
-                      >
+                      <IconButton label="Expand all folders" onClick={() => toggleAllFolders(true)}>
                         <ChevronDown />
                       </IconButton>
                       <IconButton
                         label="Collapse all folders"
-                        onClick={() => setExpanded(new Set())}
+                        onClick={() => toggleAllFolders(false)}
                       >
                         <ChevronUp />
                       </IconButton>
@@ -6515,6 +6554,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                     <ContextMenuTrigger asChild>
                       <div
                         className="flex min-h-0 flex-1 flex-col"
+                        data-connection-tree=""
                         data-connection-tree-shortcut-scope=""
                       >
                         <ScrollArea className="min-h-0 flex-1 px-1">
@@ -6640,7 +6680,8 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                     setCredentialOptions(workspaceCredentialOptions(workspace));
                     setTunnels(workspace.tunnels);
                     setExpanded(
-                      (current) => new Set([...current, ...collectFolderIds(workspace.tree)]),
+                      (current) =>
+                        new Set([...current, ...indexConnectionTree(workspace.tree).folderIds]),
                     );
                     setSelectedNodeId((current) =>
                       findTreeNode(workspace.tree, current)
