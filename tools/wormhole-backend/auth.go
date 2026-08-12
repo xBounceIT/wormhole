@@ -257,7 +257,7 @@ func updateSettingsDocumentWithOptions(
 	if err != nil {
 		return fmt.Errorf("cannot encode Wormhole settings: %w", err)
 	}
-	if len(contents) > authMaxSettingsBytes {
+	if len(contents)+1 > authMaxSettingsBytes {
 		return errors.New("Wormhole settings file is too large")
 	}
 	temporary, err := os.CreateTemp(filepath.Dir(cleanPath), ".wormhole-settings-*.tmp")
