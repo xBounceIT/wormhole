@@ -601,6 +601,16 @@ test('opening update settings does not remount and orphan active settings operat
   }
 });
 
+test('header update action matches the compact app button typography', () => {
+  const updateButtonSource = sourceBetween(
+    appSource,
+    '{updateBannerVisible ? (',
+    '<ResizablePanelGroup',
+  );
+  assert.match(updateButtonSource, /className="[^"]*!text-xs[^"]*"/);
+  assert.doesNotMatch(updateButtonSource, /text-\[10px\]/);
+});
+
 test('credential mutations do not remount and orphan an active batch operation', () => {
   const credentialsMount = appSource.match(/<CredentialsPage[\s\S]*?\/>/)?.[0] ?? '';
 

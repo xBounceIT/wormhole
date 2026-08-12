@@ -6427,7 +6427,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
             <span className="select-none text-sm font-semibold tracking-tight">Wormhole</span>
             {updateBannerVisible ? (
               <Button
-                className="h-7 gap-1.5 rounded-md border-border bg-background px-2.5 text-[10px] font-semibold text-foreground hover:bg-muted hover:text-foreground"
+                className="h-7 gap-1.5 rounded-md border-border bg-background px-2.5 !text-xs font-semibold text-foreground hover:bg-muted hover:text-foreground"
                 onClick={() => {
                   setSettingsUpdatesRequest((request) => request + 1);
                   setActivePage('settings');
