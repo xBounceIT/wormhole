@@ -228,6 +228,75 @@ func TestAuthSettingsRejectOversizedFileWithoutOverwritingIt(t *testing.T) {
 	}
 }
 
+func TestSettingsUpdateRejectsOversizedOutputWithoutOverwritingIt(t *testing.T) {
+	settingsPath := filepath.Join(t.TempDir(), authSettingsFilename)
+	original := []byte(`{"Theme":"dark"}`)
+	if err := os.WriteFile(settingsPath, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oversized, err := json.Marshal(strings.Repeat("x", authMaxSettingsBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := updateSettingsDocument(settingsPath, func(document map[string]json.RawMessage) error {
+		document["oversized"] = oversized
+		return nil
+	}); err == nil {
+		t.Fatal("oversized settings output was accepted")
+	}
+	contents, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(contents, original) {
+		t.Fatal("oversized settings update changed the original settings file")
+	}
+}
+
+func TestSettingsUpdateIncludesTrailingNewlineInSizeLimit(t *testing.T) {
+	settingsPath := filepath.Join(t.TempDir(), authSettingsFilename)
+	original := []byte(`{"Theme":"dark"}`)
+	if err := os.WriteFile(settingsPath, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	emptyPadding, err := json.Marshal("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline, err := json.MarshalIndent(map[string]json.RawMessage{"padding": emptyPadding}, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	padding, err := json.Marshal(strings.Repeat("x", authMaxSettingsBytes-len(baseline)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	boundaryDocument := map[string]json.RawMessage{"padding": padding}
+	encoded, err := json.MarshalIndent(boundaryDocument, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(encoded) != authMaxSettingsBytes {
+		t.Fatalf("boundary document size = %d, want %d", len(encoded), authMaxSettingsBytes)
+	}
+
+	if err := updateSettingsDocument(settingsPath, func(document map[string]json.RawMessage) error {
+		clear(document)
+		document["padding"] = padding
+		return nil
+	}); err == nil {
+		t.Fatal("settings output with an oversized trailing newline was accepted")
+	}
+	contents, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(contents, original) {
+		t.Fatal("boundary settings update changed the original settings file")
+	}
+}
+
 func TestAuthStateDefaultsWithoutFiles(t *testing.T) {
 	state, err := authState(filepath.Join(t.TempDir(), "wormhole.db"))
 	if err != nil {

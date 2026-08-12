@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -465,6 +467,104 @@ func TestShellSettingsRejectBadLegacyValuesSafely(t *testing.T) {
 			}
 			if settings.SidebarWidth != test.want {
 				t.Fatalf("sidebar width = %d, want %d", settings.SidebarWidth, test.want)
+			}
+		})
+	}
+}
+
+func TestConnectionTreeExpansionStateDistinguishesMissingAndCollapsed(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	settings, err := readAppSettings(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.ConnectionTreeExpansion != nil {
+		t.Fatalf("missing expansion state = %#v, want nil", settings.ConnectionTreeExpansion)
+	}
+
+	if err := writeConnectionTreeExpansion(databasePath, connectionTreeExpansionState{
+		DefaultExpanded: false,
+		FolderIDs:       []string{},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	settings, err = readAppSettings(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.ConnectionTreeExpansion == nil || settings.ConnectionTreeExpansion.DefaultExpanded || len(settings.ConnectionTreeExpansion.FolderIDs) != 0 {
+		t.Fatalf("collapse-all expansion state = %#v, want explicit collapsed default", settings.ConnectionTreeExpansion)
+	}
+}
+
+func TestConnectionTreeExpansionStatePersistsUniqueFolderIDs(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	if err := writeConnectionTreeExpansion(
+		databasePath,
+		connectionTreeExpansionState{
+			DefaultExpanded: true,
+			FolderIDs:       []string{"folder-b", "folder-a", "folder-b"},
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	settings, err := readAppSettings(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"folder-b", "folder-a"}
+	if settings.ConnectionTreeExpansion == nil || !settings.ConnectionTreeExpansion.DefaultExpanded {
+		t.Fatalf("expansion state = %#v, want expanded default", settings.ConnectionTreeExpansion)
+	}
+	if len(settings.ConnectionTreeExpansion.FolderIDs) != len(want) {
+		t.Fatalf("expansion exceptions = %#v, want %#v", settings.ConnectionTreeExpansion.FolderIDs, want)
+	}
+	for index := range want {
+		if settings.ConnectionTreeExpansion.FolderIDs[index] != want[index] {
+			t.Fatalf("expansion exceptions = %#v, want %#v", settings.ConnectionTreeExpansion.FolderIDs, want)
+		}
+	}
+}
+
+func TestConnectionTreeExpansionStateSupportsMaximumCompactTree(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	folderIDs := make([]string, maxConnectionTreeExpansionFolderIDs)
+	for index := range folderIDs {
+		folderIDs[index] = fmt.Sprintf("%0128d", index)
+	}
+	if err := writeConnectionTreeExpansion(databasePath, connectionTreeExpansionState{
+		DefaultExpanded: true,
+		FolderIDs:       folderIDs,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	settings, err := readAppSettings(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.ConnectionTreeExpansion == nil {
+		t.Fatal("expansion state is missing")
+	}
+	if len(settings.ConnectionTreeExpansion.FolderIDs) != len(folderIDs) {
+		t.Fatalf("expansion exception count = %d, want %d", len(settings.ConnectionTreeExpansion.FolderIDs), len(folderIDs))
+	}
+}
+
+func TestConnectionTreeExpansionStateRejectsInvalidFolderIDs(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	for name, folderIDs := range map[string][]string{
+		"nil":        nil,
+		"empty id":   {""},
+		"long id":    {strings.Repeat("x", maxConnectionTreeExpansionFolderIDBytes+1)},
+		"whitespace": {" folder"},
+		"control":    {"folder\n"},
+		"too many":   make([]string, maxConnectionTreeExpansionFolderIDs+1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := writeConnectionTreeExpansion(databasePath, connectionTreeExpansionState{
+				FolderIDs: folderIDs,
+			}); err == nil {
+				t.Fatal("invalid expansion state was accepted")
 			}
 		})
 	}

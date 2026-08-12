@@ -32,11 +32,14 @@ type themeMigrationResult struct {
 }
 
 const (
-	confirmOnTabCloseKey = "ConfirmOnTabClose"
-	sidebarWidthKey      = "SidebarWidth"
-	defaultSidebarWidth  = 320
-	minSidebarWidth      = 180
-	maxSidebarWidth      = 600
+	confirmOnTabCloseKey                    = "ConfirmOnTabClose"
+	sidebarWidthKey                         = "SidebarWidth"
+	connectionTreeExpansionKey              = "ConnectionTreeExpansion"
+	defaultSidebarWidth                     = 320
+	minSidebarWidth                         = 180
+	maxSidebarWidth                         = 600
+	maxConnectionTreeExpansionFolderIDs     = 25_000
+	maxConnectionTreeExpansionFolderIDBytes = 128
 )
 
 // Update preferences share the same settings.json document and use the same JSON keys as the
@@ -339,12 +342,63 @@ func writeSidebarWidth(databasePath string, width int) error {
 	return writeSettingsValues(databasePath, map[string]any{sidebarWidthKey: clampSidebarWidth(width)})
 }
 
+type connectionTreeExpansionState struct {
+	DefaultExpanded bool     `json:"defaultExpanded"`
+	FolderIDs       []string `json:"folderIds"`
+}
+
+func normalizeConnectionTreeExpansion(state connectionTreeExpansionState) (connectionTreeExpansionState, bool) {
+	if state.FolderIDs == nil || len(state.FolderIDs) > maxConnectionTreeExpansionFolderIDs {
+		return connectionTreeExpansionState{}, false
+	}
+	normalized := make([]string, 0, len(state.FolderIDs))
+	seen := make(map[string]struct{}, len(state.FolderIDs))
+	for _, folderID := range state.FolderIDs {
+		if !validConnectionTreeFolderID(folderID) {
+			return connectionTreeExpansionState{}, false
+		}
+		if _, duplicate := seen[folderID]; duplicate {
+			continue
+		}
+		seen[folderID] = struct{}{}
+		normalized = append(normalized, folderID)
+	}
+	return connectionTreeExpansionState{
+		DefaultExpanded: state.DefaultExpanded,
+		FolderIDs:       normalized,
+	}, true
+}
+
+func validConnectionTreeFolderID(folderID string) bool {
+	if folderID == "" || len(folderID) > maxConnectionTreeExpansionFolderIDBytes || strings.TrimSpace(folderID) != folderID {
+		return false
+	}
+	for _, character := range folderID {
+		if character < 0x20 || character == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+func writeConnectionTreeExpansion(databasePath string, state connectionTreeExpansionState) error {
+	normalized, valid := normalizeConnectionTreeExpansion(state)
+	if !valid {
+		return errors.New("connection tree expansion setting is invalid")
+	}
+	return writeSettingsValues(
+		databasePath,
+		map[string]any{connectionTreeExpansionKey: normalized},
+	)
+}
+
 type appSettingsValues struct {
 	Theme                     applicationTheme
 	PromptBeforeTunnelConnect bool
 	AutoCopyOnSelect          bool
 	ConfirmOnTabClose         bool
 	SidebarWidth              int
+	ConnectionTreeExpansion   *connectionTreeExpansionState
 	AutoCheckForUpdates       bool
 	LastUpdateCheck           *string
 	SkippedUpdateVersion      *string
@@ -401,6 +455,14 @@ func readAppSettings(databasePath string) (appSettingsValues, error) {
 		var width int
 		if json.Unmarshal(value, &width) == nil {
 			settings.SidebarWidth = clampSidebarWidth(width)
+		}
+	}
+	if value, ok := document[connectionTreeExpansionKey]; ok {
+		var state connectionTreeExpansionState
+		if json.Unmarshal(value, &state) == nil {
+			if normalized, valid := normalizeConnectionTreeExpansion(state); valid {
+				settings.ConnectionTreeExpansion = &normalized
+			}
 		}
 	}
 	if value, ok := document[autoCheckForUpdatesKey]; ok {

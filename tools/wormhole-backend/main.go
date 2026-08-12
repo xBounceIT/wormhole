@@ -56,14 +56,15 @@ type workspaceSnapshot struct {
 }
 
 type appSettingsSnapshot struct {
-	Theme                     applicationTheme `json:"theme"`
-	PromptBeforeTunnelConnect bool             `json:"promptBeforeTunnelConnect"`
-	AutoCopyOnSelect          bool             `json:"autoCopyOnSelect"`
-	ConfirmOnTabClose         bool             `json:"confirmOnTabClose"`
-	SidebarWidth              int              `json:"sidebarWidth"`
-	AutoCheckForUpdates       bool             `json:"autoCheckForUpdates"`
-	LastUpdateCheck           *string          `json:"lastUpdateCheck"`
-	SkippedUpdateVersion      *string          `json:"skippedUpdateVersion"`
+	Theme                     applicationTheme              `json:"theme"`
+	PromptBeforeTunnelConnect bool                          `json:"promptBeforeTunnelConnect"`
+	AutoCopyOnSelect          bool                          `json:"autoCopyOnSelect"`
+	ConfirmOnTabClose         bool                          `json:"confirmOnTabClose"`
+	SidebarWidth              int                           `json:"sidebarWidth"`
+	ConnectionTreeExpansion   *connectionTreeExpansionState `json:"connectionTreeExpansion"`
+	AutoCheckForUpdates       bool                          `json:"autoCheckForUpdates"`
+	LastUpdateCheck           *string                       `json:"lastUpdateCheck"`
+	SkippedUpdateVersion      *string                       `json:"skippedUpdateVersion"`
 }
 
 // startupSnapshot deliberately returns the workspace only while app authentication is disabled.
@@ -567,6 +568,7 @@ func runBackendCLI(args []string, input io.Reader, output io.Writer, errorOutput
 				"autoCopyOnSelect":          settings.AutoCopyOnSelect,
 				"confirmOnTabClose":         settings.ConfirmOnTabClose,
 				"sidebarWidth":              settings.SidebarWidth,
+				"connectionTreeExpansion":   settings.ConnectionTreeExpansion,
 				"autoCheckForUpdates":       settings.AutoCheckForUpdates,
 				"lastUpdateCheck":           settings.LastUpdateCheck,
 				"skippedUpdateVersion":      settings.SkippedUpdateVersion,
@@ -640,6 +642,18 @@ func runBackendCLI(args []string, input io.Reader, output io.Writer, errorOutput
 			err = writeSidebarWidth(*databasePath, *request.Width)
 			if err == nil {
 				result = map[string]any{"updated": true, "sidebarWidth": clampSidebarWidth(*request.Width)}
+			}
+		}
+	case "settings-set-connection-tree-expansion":
+		var request connectionTreeExpansionState
+		err = decodeInputLimit(input, &request, authMaxSettingsBytes)
+		if err == nil && request.FolderIDs == nil {
+			err = errors.New("connection tree expansion setting is invalid")
+		}
+		if err == nil {
+			err = writeConnectionTreeExpansion(*databasePath, request)
+			if err == nil {
+				result = map[string]bool{"updated": true}
 			}
 		}
 	case "settings-set-update-preferences":
@@ -1043,6 +1057,7 @@ func loadAppSettingsSnapshot(databasePath string) (appSettingsSnapshot, error) {
 		AutoCopyOnSelect:          settings.AutoCopyOnSelect,
 		ConfirmOnTabClose:         settings.ConfirmOnTabClose,
 		SidebarWidth:              settings.SidebarWidth,
+		ConnectionTreeExpansion:   settings.ConnectionTreeExpansion,
 		AutoCheckForUpdates:       settings.AutoCheckForUpdates,
 		LastUpdateCheck:           settings.LastUpdateCheck,
 		SkippedUpdateVersion:      settings.SkippedUpdateVersion,

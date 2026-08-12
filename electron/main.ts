@@ -21,6 +21,11 @@ import { fileURLToPath } from 'node:url';
 import type { ElectronChromeExtensions } from 'electron-chrome-extensions';
 import { AuthSession } from './auth-session.js';
 import { hasValidCredentialSecretLength } from './credential-secret-length.js';
+import {
+  connectionTreeExpansionMaxRequestBytes,
+  parseConnectionTreeExpansionSetting,
+  type ConnectionTreeExpansionSetting,
+} from './connection-tree-settings.js';
 import { initializeLocalCrashDiagnostics } from './crash-diagnostics.js';
 import { isAppTheme, parseThemeStartupRequest, type AppTheme } from './theme-settings.js';
 import {
@@ -272,6 +277,7 @@ type BackendOperation =
   | 'settings-set-auto-copy-on-select'
   | 'settings-set-confirm-on-tab-close'
   | 'settings-set-sidebar-width'
+  | 'settings-set-connection-tree-expansion'
   | 'bitwarden-onboarding-read'
   | 'bitwarden-onboarding-dismiss'
   | 'mcp-status'
@@ -408,6 +414,7 @@ type AppSettings = {
   autoCopyOnSelect: boolean;
   confirmOnTabClose: boolean;
   sidebarWidth: number;
+  connectionTreeExpansion: ConnectionTreeExpansionSetting | null;
   autoCheckForUpdates: boolean;
   lastUpdateCheck: string | null;
   skippedUpdateVersion: string | null;
@@ -3642,9 +3649,11 @@ async function runBackend<T>(
     const requestLimit =
       operation === 'workspace-delete-nodes'
         ? workspaceDeleteNodesMaxRequestBytes
-        : operation.startsWith('tunnel-')
-          ? backendMaxTunnelRequestBytes
-          : backendMaxRequestBytes;
+        : operation === 'settings-set-connection-tree-expansion'
+          ? connectionTreeExpansionMaxRequestBytes
+          : operation.startsWith('tunnel-')
+            ? backendMaxTunnelRequestBytes
+            : backendMaxRequestBytes;
     if (requestPayload === undefined || Buffer.byteLength(requestPayload, 'utf8') > requestLimit) {
       throw new Error('The Wormhole request is too large.');
     }
@@ -7030,6 +7039,16 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       await requireWorkspaceAuth();
       return runBackend<{ updated: boolean; sidebarWidth: number }>('settings-set-sidebar-width', {
         width: value,
+      });
+    });
+  });
+
+  ipcMain.handle('settings:set-connection-tree-expansion', async (_event, value: unknown) => {
+    const state = parseConnectionTreeExpansionSetting(value);
+    return serializeAuthOperation(async () => {
+      await requireWorkspaceAuth();
+      return runBackend<{ updated: boolean }>('settings-set-connection-tree-expansion', {
+        ...state,
       });
     });
   });
