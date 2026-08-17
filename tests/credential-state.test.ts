@@ -116,6 +116,20 @@ test('SSH keys are accepted only by SSH password-capable controls', () => {
   assert.equal(credentialCanUseProtocol('unsupported', 'ssh'), false);
 });
 
+test('credential cards omit the redundant password badge while retaining the SSH key badge', () => {
+  const appSource = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  const credentialGrid = appSource.match(
+    /renderItem=\{\(credential\) => \([\s\S]*?resetKey=\{normalizedCredentialSearch\}/,
+  )?.[0];
+
+  assert.ok(credentialGrid);
+  assert.doesNotMatch(credentialGrid, />Password<|['"]Password['"]/);
+  assert.match(
+    credentialGrid,
+    /credential\.kind === 'sshKey'[\s\S]*?<Badge variant="outline">SSH key<\/Badge>/,
+  );
+});
+
 test('Auto sudo remains available for password and SSH key credentials', () => {
   assert.equal(sshAutoSudoAvailable(false, 'sshKey'), true);
   assert.equal(sshAutoSudoAvailable(true, undefined), true);
