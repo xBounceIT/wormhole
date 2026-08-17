@@ -152,6 +152,7 @@ const (
 )
 
 type mcpCommandPresentationFilter struct {
+	inputPayload         []byte
 	expectedEcho         []byte
 	expectedEchoFallback []int
 	presentation         []byte
@@ -167,6 +168,7 @@ type mcpCommandPresentationFilter struct {
 	retiredPending       int
 	state                mcpPresentationState
 	abandoned            bool
+	wrapperWritten       bool
 	interruptWritten     bool
 	retired              bool
 	complete             bool
@@ -190,6 +192,7 @@ func newMcpCommandPresentationFilter(
 		echo = echo[:len(echo)-1]
 	}
 	return &mcpCommandPresentationFilter{
+		inputPayload:         append([]byte(nil), payload...),
 		expectedEcho:         append([]byte(nil), echo...),
 		expectedEchoFallback: buildPrefixFallback(echo),
 		presentation:         []byte(command + "\r\n"),
@@ -749,6 +752,8 @@ func (native *sshNativeSession) runMcpCommand(
 		capture.push(data)
 		position = next
 		if capture.completed {
+			native.retireMcpCommandPresentation()
+			clearPresentation = false
 			return capture.finish(false), nil
 		}
 

@@ -1213,6 +1213,15 @@ func (native *sshNativeSession) clearMcpCommandPresentation() {
 	native.clearMcpCommandPresentationLocked()
 }
 
+func (native *sshNativeSession) retireMcpCommandPresentation() {
+	if native == nil {
+		return
+	}
+	native.terminalOutputMu.Lock()
+	defer native.terminalOutputMu.Unlock()
+	native.retireMcpCommandPresentationLocked()
+}
+
 func (native *sshNativeSession) abandonMcpCommandPresentation() {
 	if native == nil {
 		return
@@ -1225,13 +1234,19 @@ func (native *sshNativeSession) abandonMcpCommandPresentation() {
 	}
 }
 
-func (native *sshNativeSession) retireAbandonedMcpCommandPresentationOnInterrupt(data []byte) {
-	if native == nil || bytes.IndexByte(data, '\x03') < 0 {
+func (native *sshNativeSession) recordMcpCommandPresentationInputWritten(data []byte) {
+	if native == nil || len(data) == 0 {
 		return
 	}
 	native.terminalOutputMu.Lock()
 	defer native.terminalOutputMu.Unlock()
-	if native.mcpPresentation != nil {
+	if native.mcpPresentation == nil {
+		return
+	}
+	if !native.mcpPresentation.wrapperWritten && bytes.Equal(data, native.mcpPresentation.inputPayload) {
+		native.mcpPresentation.wrapperWritten = true
+	}
+	if native.mcpPresentation.wrapperWritten && bytes.IndexByte(data, '\x03') >= 0 {
 		native.mcpPresentation.interruptWritten = true
 		native.retireInterruptedMcpCommandPresentationLocked()
 	}
@@ -1241,6 +1256,13 @@ func (native *sshNativeSession) retireInterruptedMcpCommandPresentationLocked() 
 	if native.mcpPresentation == nil ||
 		!native.mcpPresentation.abandoned ||
 		!native.mcpPresentation.interruptWritten {
+		return
+	}
+	native.retireMcpCommandPresentationLocked()
+}
+
+func (native *sshNativeSession) retireMcpCommandPresentationLocked() {
+	if native.mcpPresentation == nil {
 		return
 	}
 	if len(native.mcpRetiredPresentations) >= mcpMaxRetiredPresentations {
@@ -1375,7 +1397,7 @@ func (native *sshNativeSession) writeRemoteInput(data []byte) error {
 		written = len(data)
 	}
 	if written > 0 {
-		native.retireAbandonedMcpCommandPresentationOnInterrupt(data[:written])
+		native.recordMcpCommandPresentationInputWritten(data[:written])
 	}
 	return err
 }

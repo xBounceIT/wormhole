@@ -679,8 +679,9 @@ func TestMcpPresentationRetirementDropsPartialWrapperPrefixes(t *testing.T) {
 			if visible := native.filterMcpPresentationLocked(prefix); len(visible) != 0 {
 				t.Fatalf("speculative prefix became visible before interrupt: %q", visible)
 			}
+			filter.wrapperWritten = true
 			native.abandonMcpCommandPresentation()
-			native.retireAbandonedMcpCommandPresentationOnInterrupt([]byte{'\x03'})
+			native.recordMcpCommandPresentationInputWritten([]byte{'\x03'})
 
 			visible := native.filterMcpPresentationLocked([]byte("^C\r\nroot@example:/home/user# "))
 			if string(visible) != "^C\r\nroot@example:/home/user# " {
@@ -1063,13 +1064,70 @@ func TestMcpRunCommandInterruptRetiresTimedOutPresentation(t *testing.T) {
 	}
 }
 
+func TestMcpRunCommandKeepsFilterThroughFragmentedEndLineEnding(t *testing.T) {
+	terminal, err := newSSHTerminalEmulator(80, 24)
+	if err != nil {
+		t.Fatal(err)
+	}
+	native := &sshNativeSession{
+		server:           &sshServer{output: &sshEventWriter{encoder: json.NewEncoder(io.Discard)}},
+		terminal:         terminal,
+		mcpReplay:        newMcpReplayBuffer(mcpReplayCapacity),
+		mcpCommandReplay: newMcpReplayBuffer(mcpReplayCapacity),
+		done:             make(chan struct{}),
+	}
+	defer native.close(false)
+	native.stdin = callbackWriteCloser{write: func(data []byte) (int, error) {
+		token := extractMcpPayloadToken(t, string(data))
+		payloadEcho := strings.TrimSuffix(string(data), "\r")
+		native.publishTerminalData([]byte(payloadEcho + "\r\n" +
+			"@@WHS_" + token + "@@\r\nhello\r\n" +
+			"@@WHE_" + token + "_0@@"))
+		return len(data), nil
+	}}
+
+	result, err := native.runMcpCommand(context.Background(), "echo hello", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ExitCode == nil || *result.ExitCode != 0 || result.Output != "hello" || result.TimedOut {
+		t.Fatalf("unexpected command result: %#v", result)
+	}
+	native.terminalOutputMu.Lock()
+	active := native.mcpPresentation != nil
+	retired := len(native.mcpRetiredPresentations)
+	native.terminalOutputMu.Unlock()
+	if active || retired != 1 {
+		t.Fatalf("fragmented end line ending left active=%v retired=%d", active, retired)
+	}
+	want := "echo hello\r\nhello\r\n"
+	if visible := string(native.mcpReplay.snapshotTail(4096)); visible != want {
+		t.Fatalf("visible output before fragmented line ending = %q", visible)
+	}
+
+	native.publishTerminalData([]byte("\r"))
+	if visible := string(native.mcpReplay.snapshotTail(4096)); visible != want {
+		t.Fatalf("end-marker carriage return became visible: %q", visible)
+	}
+	native.publishTerminalData([]byte("\nroot@example:/home/user# "))
+	if visible := string(native.mcpReplay.snapshotTail(4096)); visible != want+"root@example:/home/user# " {
+		t.Fatalf("fragmented end-marker line ending output = %q", visible)
+	}
+	native.terminalOutputMu.Lock()
+	retired = len(native.mcpRetiredPresentations)
+	native.terminalOutputMu.Unlock()
+	if retired != 0 {
+		t.Fatalf("completed tail left %d retired presentations", retired)
+	}
+}
+
 func TestMcpWrittenInterruptRetiresPresentationDespiteWriteError(t *testing.T) {
 	writeErr := errors.New("partial write")
 	native := &sshNativeSession{
 		stdin: callbackWriteCloser{write: func([]byte) (int, error) {
 			return 1, writeErr
 		}},
-		mcpPresentation: &mcpCommandPresentationFilter{abandoned: true},
+		mcpPresentation: &mcpCommandPresentationFilter{abandoned: true, wrapperWritten: true},
 	}
 
 	if err := native.writeRemoteInput([]byte{'\x03', 'x'}); !errors.Is(err, writeErr) {
@@ -1085,12 +1143,16 @@ func TestMcpWrittenInterruptRetiresPresentationDespiteWriteError(t *testing.T) {
 }
 
 func TestMcpWrittenInterruptBeforeTimeoutRetiresWhenAbandoned(t *testing.T) {
-	current := &mcpCommandPresentationFilter{}
+	payload := []byte("wrapper")
+	current := &mcpCommandPresentationFilter{inputPayload: payload}
 	native := &sshNativeSession{
 		stdin:           callbackWriteCloser{write: func(data []byte) (int, error) { return len(data), nil }},
 		mcpPresentation: current,
 	}
 
+	if err := native.writeRemoteInput(payload); err != nil {
+		t.Fatal(err)
+	}
 	if err := native.writeRemoteInput([]byte{'\x03'}); err != nil {
 		t.Fatal(err)
 	}
@@ -1105,6 +1167,26 @@ func TestMcpWrittenInterruptBeforeTimeoutRetiresWhenAbandoned(t *testing.T) {
 	}
 }
 
+func TestMcpWrittenInterruptBeforeWrapperIsIgnored(t *testing.T) {
+	payload := []byte("wrapper")
+	current := &mcpCommandPresentationFilter{inputPayload: payload}
+	native := &sshNativeSession{
+		stdin:           callbackWriteCloser{write: func(data []byte) (int, error) { return len(data), nil }},
+		mcpPresentation: current,
+	}
+
+	if err := native.writeRemoteInput([]byte{'\x03'}); err != nil {
+		t.Fatal(err)
+	}
+	if err := native.writeRemoteInput(payload); err != nil {
+		t.Fatal(err)
+	}
+	native.abandonMcpCommandPresentation()
+	if native.mcpPresentation != current || current.interruptWritten || len(native.mcpRetiredPresentations) != 0 {
+		t.Fatal("pre-wrapper interrupt incorrectly retired the timed-out presentation")
+	}
+}
+
 func TestMcpWrittenInterruptEvictsOldestRetiredPresentationAtLimit(t *testing.T) {
 	oldest := &mcpCommandPresentationFilter{retired: true}
 	retired := make([]*mcpCommandPresentationFilter, mcpMaxRetiredPresentations)
@@ -1112,13 +1194,13 @@ func TestMcpWrittenInterruptEvictsOldestRetiredPresentationAtLimit(t *testing.T)
 	for index := 1; index < len(retired); index++ {
 		retired[index] = &mcpCommandPresentationFilter{retired: true}
 	}
-	current := &mcpCommandPresentationFilter{abandoned: true}
+	current := &mcpCommandPresentationFilter{abandoned: true, wrapperWritten: true}
 	native := &sshNativeSession{
 		mcpPresentation:         current,
 		mcpRetiredPresentations: retired,
 	}
 
-	native.retireAbandonedMcpCommandPresentationOnInterrupt([]byte{'\x03'})
+	native.recordMcpCommandPresentationInputWritten([]byte{'\x03'})
 
 	if native.mcpPresentation != nil || len(native.mcpRetiredPresentations) != mcpMaxRetiredPresentations {
 		t.Fatalf(
