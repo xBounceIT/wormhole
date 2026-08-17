@@ -1084,6 +1084,27 @@ func TestMcpWrittenInterruptRetiresPresentationDespiteWriteError(t *testing.T) {
 	}
 }
 
+func TestMcpWrittenInterruptBeforeTimeoutRetiresWhenAbandoned(t *testing.T) {
+	current := &mcpCommandPresentationFilter{}
+	native := &sshNativeSession{
+		stdin:           callbackWriteCloser{write: func(data []byte) (int, error) { return len(data), nil }},
+		mcpPresentation: current,
+	}
+
+	if err := native.writeRemoteInput([]byte{'\x03'}); err != nil {
+		t.Fatal(err)
+	}
+	if native.mcpPresentation != current || !current.interruptWritten || len(native.mcpRetiredPresentations) != 0 {
+		t.Fatal("pre-timeout interrupt did not remain recorded on the active presentation")
+	}
+
+	native.abandonMcpCommandPresentation()
+	if native.mcpPresentation != nil || len(native.mcpRetiredPresentations) != 1 ||
+		native.mcpRetiredPresentations[0] != current || !current.retired {
+		t.Fatal("timeout did not retire the previously interrupted presentation")
+	}
+}
+
 func TestMcpWrittenInterruptEvictsOldestRetiredPresentationAtLimit(t *testing.T) {
 	oldest := &mcpCommandPresentationFilter{retired: true}
 	retired := make([]*mcpCommandPresentationFilter, mcpMaxRetiredPresentations)

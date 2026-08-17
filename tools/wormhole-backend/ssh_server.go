@@ -1221,6 +1221,7 @@ func (native *sshNativeSession) abandonMcpCommandPresentation() {
 	defer native.terminalOutputMu.Unlock()
 	if native.mcpPresentation != nil {
 		native.mcpPresentation.abandoned = true
+		native.retireInterruptedMcpCommandPresentationLocked()
 	}
 }
 
@@ -1230,23 +1231,33 @@ func (native *sshNativeSession) retireAbandonedMcpCommandPresentationOnInterrupt
 	}
 	native.terminalOutputMu.Lock()
 	defer native.terminalOutputMu.Unlock()
-	if native.mcpPresentation != nil && native.mcpPresentation.abandoned {
-		if len(native.mcpRetiredPresentations) >= mcpMaxRetiredPresentations {
-			// A retired filter buffers only suffixes that may belong to its internal wrapper.
-			// Drop the oldest filter and those private bytes rather than leaking them or
-			// permanently blocking recovery after repeated interrupted commands.
-			copy(native.mcpRetiredPresentations, native.mcpRetiredPresentations[1:])
-			native.mcpRetiredPresentations[len(native.mcpRetiredPresentations)-1] = nil
-			native.mcpRetiredPresentations = native.mcpRetiredPresentations[:len(native.mcpRetiredPresentations)-1]
-		}
-		native.mcpPresentation.retiredPending = len(native.mcpPresentation.pending)
-		native.mcpPresentation.retired = true
-		native.mcpRetiredPresentations = append(
-			native.mcpRetiredPresentations,
-			native.mcpPresentation,
-		)
-		native.mcpPresentation = nil
+	if native.mcpPresentation != nil {
+		native.mcpPresentation.interruptWritten = true
+		native.retireInterruptedMcpCommandPresentationLocked()
 	}
+}
+
+func (native *sshNativeSession) retireInterruptedMcpCommandPresentationLocked() {
+	if native.mcpPresentation == nil ||
+		!native.mcpPresentation.abandoned ||
+		!native.mcpPresentation.interruptWritten {
+		return
+	}
+	if len(native.mcpRetiredPresentations) >= mcpMaxRetiredPresentations {
+		// A retired filter buffers only suffixes that may belong to its internal wrapper.
+		// Drop the oldest filter and those private bytes rather than leaking them or
+		// permanently blocking recovery after repeated interrupted commands.
+		copy(native.mcpRetiredPresentations, native.mcpRetiredPresentations[1:])
+		native.mcpRetiredPresentations[len(native.mcpRetiredPresentations)-1] = nil
+		native.mcpRetiredPresentations = native.mcpRetiredPresentations[:len(native.mcpRetiredPresentations)-1]
+	}
+	native.mcpPresentation.retiredPending = len(native.mcpPresentation.pending)
+	native.mcpPresentation.retired = true
+	native.mcpRetiredPresentations = append(
+		native.mcpRetiredPresentations,
+		native.mcpPresentation,
+	)
+	native.mcpPresentation = nil
 }
 
 func (native *sshNativeSession) filterMcpPresentationLocked(data []byte) []byte {

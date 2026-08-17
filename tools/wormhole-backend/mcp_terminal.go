@@ -167,6 +167,7 @@ type mcpCommandPresentationFilter struct {
 	retiredPending       int
 	state                mcpPresentationState
 	abandoned            bool
+	interruptWritten     bool
 	retired              bool
 	complete             bool
 }
