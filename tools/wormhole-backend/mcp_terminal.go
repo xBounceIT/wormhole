@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -22,6 +23,8 @@ const (
 	mcpCommandCaptureBytes   = 1024 * 1024
 	mcpMarkerTailBytes       = 512
 )
+
+var errMcpCommandInProgress = errors.New("a previous MCP command is still running")
 
 type mcpSessionInfo struct {
 	ID       string `json:"id"`
@@ -144,20 +147,34 @@ const (
 )
 
 const (
-	mcpMaxSpeculativeEchoBytes = 64 * 1024
-	mcpMaxEndMarkerDigits      = 10
+	mcpMaxEndMarkerDigits            = 10
+	mcpMaxRetiredPresentations       = 8
+	mcpReadlineRedrawTokenProofBytes = 8
 )
 
 type mcpCommandPresentationFilter struct {
-	expectedEcho    []byte
-	presentation    []byte
-	startMarker     []byte
-	endMarkerPrefix []byte
-	pending         []byte
-	suppressedEcho  []byte
-	matchedEcho     int
-	state           mcpPresentationState
-	complete        bool
+	inputPayload         []byte
+	expectedEcho         []byte
+	expectedEchoFallback []int
+	presentation         []byte
+	startMarker          []byte
+	startMarkerFallback  []int
+	endMarkerPrefix      []byte
+	pending              []byte
+	suppressedEcho       []byte
+	scanPosition         int
+	echoMatched          int
+	startMarkerMatched   int
+	readlineRedrawStart  int
+	terminalColumns      int
+	retiredPending       int
+	state                mcpPresentationState
+	abandoned            bool
+	wrapperWriteStarted  bool
+	wrapperWritten       bool
+	interruptWritten     bool
+	retired              bool
+	complete             bool
 }
 
 type mcpEndMarkerSearch struct {
@@ -177,18 +194,18 @@ func newMcpCommandPresentationFilter(
 	if len(echo) > 0 && echo[len(echo)-1] == '\r' {
 		echo = echo[:len(echo)-1]
 	}
-	filter := &mcpCommandPresentationFilter{
-		expectedEcho:    append([]byte(nil), echo...),
-		presentation:    []byte(command + "\r\n"),
-		startMarker:     append([]byte(nil), startMarker...),
-		endMarkerPrefix: append([]byte(nil), endMarkerPrefix...),
-		state:           mcpPresentationMatchingEcho,
+	return &mcpCommandPresentationFilter{
+		inputPayload:         append([]byte(nil), payload...),
+		expectedEcho:         append([]byte(nil), echo...),
+		expectedEchoFallback: buildPrefixFallback(echo),
+		presentation:         []byte(command + "\r\n"),
+		startMarker:          append([]byte(nil), startMarker...),
+		startMarkerFallback:  buildPrefixFallback(startMarker),
+		endMarkerPrefix:      append([]byte(nil), endMarkerPrefix...),
+		readlineRedrawStart:  -1,
+		terminalColumns:      80,
+		state:                mcpPresentationMatchingEcho,
 	}
-	if len(filter.expectedEcho) > mcpMaxSpeculativeEchoBytes {
-		filter.state = mcpPresentationPassThrough
-		filter.complete = true
-	}
-	return filter
 }
 
 func (filter *mcpCommandPresentationFilter) filter(data []byte) []byte {
@@ -204,7 +221,7 @@ func (filter *mcpCommandPresentationFilter) filter(data []byte) []byte {
 	for {
 		switch filter.state {
 		case mcpPresentationMatchingEcho:
-			if !filter.matchEchoOrFailOpen(&output) {
+			if !filter.findEchoOrStartMarker(&output) {
 				return output
 			}
 		case mcpPresentationMatchingEchoLineEnding:
@@ -256,29 +273,132 @@ func (filter *mcpCommandPresentationFilter) drainPending() []byte {
 		return nil
 	}
 	output := make([]byte, 0, len(filter.suppressedEcho)+len(filter.pending))
-	if len(filter.suppressedEcho) > 0 {
-		output = append(output, filter.suppressedEcho...)
-		filter.suppressedEcho = nil
-	}
-	filter.drainTo(&output, len(filter.pending))
+	output = append(output, filter.suppressedEcho...)
+	output = append(output, filter.pending...)
+	filter.suppressedEcho = nil
+	filter.pending = nil
 	filter.state = mcpPresentationPassThrough
 	filter.complete = true
 	return output
 }
 
-func (filter *mcpCommandPresentationFilter) matchEchoOrFailOpen(output *[]byte) bool {
-	for filter.matchedEcho < len(filter.pending) && filter.matchedEcho < len(filter.expectedEcho) {
-		if filter.pending[filter.matchedEcho] != filter.expectedEcho[filter.matchedEcho] {
-			filter.failOpen(output)
+func (filter *mcpCommandPresentationFilter) findEchoOrStartMarker(output *[]byte) bool {
+	// A prompt emitted just before the MCP write can be read after this filter is installed.
+	// Stream both possible prefixes so a fragmented maximum-size echo remains linear.
+	for filter.scanPosition < len(filter.pending) {
+		value := filter.pending[filter.scanPosition]
+		filter.echoMatched = advancePrefixMatch(
+			filter.echoMatched,
+			value,
+			filter.expectedEcho,
+			filter.expectedEchoFallback,
+		)
+		filter.startMarkerMatched = advancePrefixMatch(
+			filter.startMarkerMatched,
+			value,
+			filter.startMarker,
+			filter.startMarkerFallback,
+		)
+		filter.scanPosition++
+		if filter.scanPosition >= 2 &&
+			filter.pending[filter.scanPosition-2] == '\r' &&
+			filter.pending[filter.scanPosition-1] == '<' {
+			filter.readlineRedrawStart = filter.scanPosition - 2
+		}
+
+		echoComplete := filter.echoMatched == len(filter.expectedEcho)
+		markerComplete := filter.startMarkerMatched == len(filter.startMarker)
+		if !echoComplete && !markerComplete {
+			continue
+		}
+		echoStart := filter.scanPosition - filter.echoMatched
+		markerStart := filter.scanPosition - filter.startMarkerMatched
+		if markerComplete && (!echoComplete || markerStart < echoStart) {
+			filter.drainBeforeWrapperMatch(output, markerStart)
+			filter.consumePending(len(filter.startMarker))
+			*output = append(*output, filter.presentation...)
+			filter.state = mcpPresentationSwallowStartLineEnding
 			return true
 		}
-		filter.matchedEcho++
+		filter.drainBeforeWrapperMatch(output, echoStart)
+		filter.state = mcpPresentationMatchingEchoLineEnding
+		return true
 	}
-	if filter.matchedEcho < len(filter.expectedEcho) {
+
+	if filter.readlineRedrawStart >= 0 &&
+		len(filter.pending)-filter.readlineRedrawStart > len(filter.expectedEcho)+len(filter.startMarker)+3 {
+		filter.readlineRedrawStart = -1
+	}
+	keep := maxInt(filter.echoMatched, filter.startMarkerMatched)
+	if filter.readlineRedrawStart >= 0 {
+		keep = len(filter.pending) - filter.readlineRedrawStart
+	} else if len(filter.pending) > 0 && filter.pending[len(filter.pending)-1] == '\r' {
+		keep = maxInt(keep, 1)
+	}
+	filter.drainTo(output, len(filter.pending)-keep)
+	if filter.readlineRedrawStart >= 0 {
+		filter.readlineRedrawStart = 0
+	}
+	filter.scanPosition = len(filter.pending)
+	return false
+}
+
+func (filter *mcpCommandPresentationFilter) drainBeforeWrapperMatch(output *[]byte, matchStart int) {
+	redrawContentStart := filter.readlineRedrawStart + 2
+	redrawContentEnd := matchStart
+	if redrawContentEnd > redrawContentStart && filter.pending[redrawContentEnd-1] == '\n' {
+		redrawContentEnd--
+		if redrawContentEnd > redrawContentStart && filter.pending[redrawContentEnd-1] == '\r' {
+			redrawContentEnd--
+		}
+	} else if redrawContentEnd > redrawContentStart && filter.pending[redrawContentEnd-1] == '\r' {
+		redrawContentEnd--
+	}
+	confirmedRedraw := filter.readlineRedrawStart >= 0 &&
+		filter.isConfirmedReadlineRedraw(filter.pending[redrawContentStart:redrawContentEnd])
+	if !confirmedRedraw {
+		filter.drainTo(output, matchStart)
+		return
+	}
+	redrawBytes := matchStart - filter.readlineRedrawStart
+	filter.drainTo(output, filter.readlineRedrawStart)
+	filter.consumePending(redrawBytes)
+	filter.readlineRedrawStart = -1
+}
+
+func (filter *mcpCommandPresentationFilter) isConfirmedReadlineRedraw(candidate []byte) bool {
+	if !bytes.HasSuffix(filter.expectedEcho, candidate) {
 		return false
 	}
-	filter.state = mcpPresentationMatchingEchoLineEnding
-	return true
+	if filter.hasReadlineRedrawTokenProof(candidate, mcpReadlineRedrawTokenProofBytes) {
+		return true
+	}
+	if filter.terminalColumns <= 0 || len(candidate)+1 != filter.terminalColumns {
+		return false
+	}
+	// Readline reserves the first cell for '<'. The payload ends in the random
+	// marker token, so every remaining cell is evidence of this wrapper echo.
+	// A one-column PTY has no evidence-bearing cells, but its exact redraw is
+	// only "\r<" and would otherwise leak the truncation indicator.
+	if len(candidate) == 0 {
+		return true
+	}
+	return filter.hasReadlineRedrawTokenProof(
+		candidate,
+		minInt(len(candidate), mcpReadlineRedrawTokenProofBytes),
+	)
+}
+
+func (filter *mcpCommandPresentationFilter) hasReadlineRedrawTokenProof(candidate []byte, proofBytes int) bool {
+	if proofBytes <= 0 || len(candidate) < proofBytes {
+		return false
+	}
+	tokenEnd := len(filter.endMarkerPrefix) - 1
+	if tokenEnd < proofBytes || filter.endMarkerPrefix[tokenEnd] != '_' {
+		return false
+	}
+	tokenProof := filter.endMarkerPrefix[tokenEnd-proofBytes : tokenEnd]
+	return bytes.HasSuffix(candidate, tokenProof)
 }
 
 func (filter *mcpCommandPresentationFilter) matchEchoLineEndingOrFailOpen(output *[]byte) bool {
@@ -309,8 +429,7 @@ func (filter *mcpCommandPresentationFilter) matchEchoLineEndingOrFailOpen(output
 
 func (filter *mcpCommandPresentationFilter) confirmEcho(echoLength int) {
 	filter.suppressedEcho = append([]byte(nil), filter.pending[:echoLength]...)
-	filter.pending = filter.pending[echoLength:]
-	filter.matchedEcho = 0
+	filter.consumePending(echoLength)
 	filter.state = mcpPresentationAwaitStartMarker
 }
 
@@ -329,7 +448,7 @@ func (filter *mcpCommandPresentationFilter) matchStartMarkerOrFailOpen(output *[
 	if len(filter.pending) < len(filter.startMarker) {
 		return false
 	}
-	filter.pending = filter.pending[len(filter.startMarker):]
+	filter.consumePending(len(filter.startMarker))
 	filter.suppressedEcho = nil
 	*output = append(*output, filter.presentation...)
 	filter.state = mcpPresentationSwallowStartLineEnding
@@ -337,12 +456,13 @@ func (filter *mcpCommandPresentationFilter) matchStartMarkerOrFailOpen(output *[
 }
 
 func (filter *mcpCommandPresentationFilter) failOpen(output *[]byte) {
-	if len(filter.suppressedEcho) > 0 {
+	if filter.retired && filter.state == mcpPresentationMatchingEchoLineEnding {
+		filter.consumePending(len(filter.expectedEcho))
+	} else if len(filter.suppressedEcho) > 0 && !filter.retired {
 		*output = append(*output, filter.suppressedEcho...)
-		filter.suppressedEcho = nil
 	}
+	filter.suppressedEcho = nil
 	filter.drainTo(output, len(filter.pending))
-	filter.matchedEcho = 0
 	filter.state = mcpPresentationPassThrough
 	filter.complete = true
 }
@@ -351,7 +471,7 @@ func (filter *mcpCommandPresentationFilter) passUntilEndMarker(output *[]byte) b
 	search := filter.findEndMarker()
 	if search.found {
 		filter.drainTo(output, search.start)
-		filter.pending = filter.pending[search.endExclusive-search.start:]
+		filter.consumePending(search.endExclusive - search.start)
 		filter.state = mcpPresentationSwallowEndLineEnding
 		return true
 	}
@@ -421,19 +541,19 @@ func (filter *mcpCommandPresentationFilter) consumeLineEndingOrWait(
 		return false
 	}
 	if filter.pending[0] == '\r' {
-		filter.pending = filter.pending[1:]
+		filter.consumePending(1)
 		if len(filter.pending) == 0 {
 			filter.state = afterCRState
 			return false
 		}
 		if filter.pending[0] == '\n' {
-			filter.pending = filter.pending[1:]
+			filter.consumePending(1)
 		}
 		filter.state = nextState
 		return true
 	}
 	if filter.pending[0] == '\n' {
-		filter.pending = filter.pending[1:]
+		filter.consumePending(1)
 	}
 	filter.state = nextState
 	return true
@@ -444,7 +564,7 @@ func (filter *mcpCommandPresentationFilter) consumeOptionalLFOrWait(nextState mc
 		return false
 	}
 	if filter.pending[0] == '\n' {
-		filter.pending = filter.pending[1:]
+		filter.consumePending(1)
 	}
 	filter.state = nextState
 	return true
@@ -461,35 +581,79 @@ func (filter *mcpCommandPresentationFilter) prefixMatchLengthAt(index int) int {
 }
 
 func (filter *mcpCommandPresentationFilter) longestPrefixSuffixLength() int {
-	maxLength := minInt(len(filter.pending), len(filter.endMarkerPrefix)-1)
+	return longestPrefixSuffixLength(filter.pending, filter.endMarkerPrefix)
+}
+
+func longestPrefixSuffixLength(data, prefix []byte) int {
+	maxLength := minInt(len(data), len(prefix)-1)
 	for length := maxLength; length > 0; length-- {
-		sourceOffset := len(filter.pending) - length
-		matches := true
-		for index := 0; index < length; index++ {
-			if filter.pending[sourceOffset+index] == filter.endMarkerPrefix[index] {
-				continue
-			}
-			matches = false
-			break
-		}
-		if matches {
+		if bytes.Equal(data[len(data)-length:], prefix[:length]) {
 			return length
 		}
 	}
 	return 0
 }
 
+func buildPrefixFallback(prefix []byte) []int {
+	if len(prefix) <= 1 {
+		return nil
+	}
+	fallback := make([]int, len(prefix))
+	for index, matched := 1, 0; index < len(prefix); index++ {
+		for matched > 0 && prefix[index] != prefix[matched] {
+			matched = fallback[matched-1]
+		}
+		if prefix[index] == prefix[matched] {
+			matched++
+		}
+		fallback[index] = matched
+	}
+	return fallback
+}
+
+func advancePrefixMatch(matched int, value byte, prefix []byte, fallback []int) int {
+	if len(prefix) == 0 {
+		return 0
+	}
+	for matched > 0 && value != prefix[matched] {
+		matched = fallback[matched-1]
+	}
+	if value == prefix[matched] {
+		matched++
+	}
+	return matched
+}
+
 func (filter *mcpCommandPresentationFilter) drainTo(output *[]byte, count int) {
 	if count <= 0 {
 		return
 	}
+	discard := minInt(count, filter.retiredPending)
+	filter.consumePending(discard)
+	count -= discard
+	if count <= 0 {
+		return
+	}
 	*output = append(*output, filter.pending[:count]...)
+	filter.consumePending(count)
+}
+
+func (filter *mcpCommandPresentationFilter) consumePending(count int) {
+	if count <= 0 {
+		return
+	}
+	filter.retiredPending = maxInt(0, filter.retiredPending-count)
 	filter.pending = filter.pending[count:]
 }
 
 func newMcpCommandCapture(command string) (mcpCommandCapture, []byte, error) {
 	if len(command) == 0 || len(command) > mcpMaxCommandBytes {
 		return mcpCommandCapture{}, nil, errors.New("MCP command is empty or too large")
+	}
+	for _, value := range []byte(command) {
+		if value < 0x20 || value == 0x7f {
+			return mcpCommandCapture{}, nil, errors.New("MCP command contains control characters")
+		}
 	}
 
 	var random [16]byte
@@ -501,9 +665,10 @@ func newMcpCommandCapture(command string) (mcpCommandCapture, []byte, error) {
 	endPrefix := []byte("@@WHE_" + token + "_")
 	escaped := strings.ReplaceAll(command, "'", "'\\''")
 	payload := fmt.Sprintf(
-		"printf '@@WHS_%%s@@\\n' %s; eval '%s'; __wh_rc=$?; printf '@@WHE_%%s_%%s@@\\n' %s \"$__wh_rc\"\r",
+		"printf '@@WHS_%%s@@\\n' %s; eval '%s'; __wh_rc=$?; printf '@@WHE_%%s_%%s@@\\n' %s \"$__wh_rc\"; : %s\r",
 		token,
 		escaped,
+		token,
 		token,
 	)
 	return mcpCommandCapture{
@@ -540,12 +705,16 @@ func (capture *mcpCommandCapture) push(data []byte) {
 }
 
 func (capture *mcpCommandCapture) finish(timedOut bool) mcpCommandResult {
-	bodyStart := 0
-	if index := indexBytes(capture.captured, capture.start); index >= 0 {
-		bodyStart = index + len(capture.start)
+	start := bytes.Index(capture.captured, capture.start)
+	if start < 0 {
+		return mcpCommandResult{
+			ExitCode:  capture.exitCode,
+			TimedOut:  timedOut,
+			Truncated: capture.truncated,
+		}
 	}
-	body := capture.captured[bodyStart:]
-	if index := indexBytes(body, capture.endPrefix); index >= 0 {
+	body := capture.captured[start+len(capture.start):]
+	if index := bytes.Index(body, capture.endPrefix); index >= 0 {
 		body = body[:index]
 	}
 	return mcpCommandResult{
@@ -557,12 +726,12 @@ func (capture *mcpCommandCapture) finish(timedOut bool) mcpCommandResult {
 }
 
 func parseMcpEndMarker(data, prefix []byte) (*int, bool) {
-	index := indexBytes(data, prefix)
+	index := bytes.Index(data, prefix)
 	if index < 0 {
 		return nil, false
 	}
 	suffix := data[index+len(prefix):]
-	end := indexBytes(suffix, []byte("@@"))
+	end := bytes.Index(suffix, []byte("@@"))
 	if end < 1 {
 		return nil, false
 	}
@@ -580,25 +749,6 @@ func parseMcpEndMarker(data, prefix []byte) (*int, bool) {
 		}
 	}
 	return &value, true
-}
-
-func indexBytes(haystack, needle []byte) int {
-	if len(needle) == 0 {
-		return 0
-	}
-	for index := 0; index+len(needle) <= len(haystack); index++ {
-		match := true
-		for offset := range needle {
-			if haystack[index+offset] != needle[offset] {
-				match = false
-				break
-			}
-		}
-		if match {
-			return index
-		}
-	}
-	return -1
 }
 
 func (native *sshNativeSession) runMcpCommand(
@@ -629,8 +779,15 @@ func (native *sshNativeSession) runMcpCommand(
 		return mcpCommandResult{}, err
 	}
 	position := native.mcpCommandReplay.position()
-	native.beginMcpCommandPresentation(command, payload, capture.start, capture.endPrefix)
-	defer native.clearMcpCommandPresentation()
+	if err := native.beginMcpCommandPresentation(command, payload, capture.start, capture.endPrefix); err != nil {
+		return mcpCommandResult{}, err
+	}
+	clearPresentation := true
+	defer func() {
+		if clearPresentation {
+			native.clearMcpCommandPresentation()
+		}
+	}()
 	if err := ctx.Err(); err != nil {
 		return mcpCommandResult{}, err
 	}
@@ -648,11 +805,15 @@ func (native *sshNativeSession) runMcpCommand(
 		capture.push(data)
 		position = next
 		if capture.completed {
+			native.retireMcpCommandPresentation()
+			clearPresentation = false
 			return capture.finish(false), nil
 		}
 
 		select {
 		case <-commandContext.Done():
+			native.abandonMcpCommandPresentation()
+			clearPresentation = false
 			if errors.Is(ctx.Err(), context.Canceled) {
 				return mcpCommandResult{}, ctx.Err()
 			}

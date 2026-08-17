@@ -530,7 +530,7 @@ func newMcpServer(controller *mcpController) *mcp.Server {
 	}
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "run_command",
-		Description: "Run a single shell command on a connected SSH session and return its captured output and exit code. This drives the user's live terminal, so it assumes a normal POSIX shell prompt is in the foreground. The first action on a session asks the user to approve AI-agent control.",
+		Description: "Run a single shell command on a connected SSH session and return its captured output and exit code. This drives the user's live terminal, so it assumes a normal POSIX shell prompt is in the foreground. A timed-out command can remain active and blocks another run_command call until it finishes; use send_text to interrupt it when needed. The first action on a session asks the user to approve AI-agent control.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input runCommandInput) (*mcp.CallToolResult, mcpCommandResult, error) {
 		native, err := controller.resolveSession(input.SessionID)
 		if err != nil {

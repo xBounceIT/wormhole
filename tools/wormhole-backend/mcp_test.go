@@ -470,6 +470,18 @@ func TestMcpCommandCaptureTimesOutWithPartialOutput(t *testing.T) {
 	}
 }
 
+func TestMcpCommandCaptureHidesPreStartWrapperOnTimeout(t *testing.T) {
+	capture, payload, err := newMcpCommandCapture("echo hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	capture.push(append([]byte("root@example:/home/user# "), payload...))
+	result := capture.finish(true)
+	if !result.TimedOut || result.Output != "" || result.ExitCode != nil {
+		t.Fatalf("unexpected pre-start timeout result: %#v", result)
+	}
+}
+
 func TestMcpPresentationFilterHidesWrapperAfterConfirmedMarkers(t *testing.T) {
 	capture, payload, err := newMcpCommandCapture("echo hello")
 	if err != nil {
@@ -494,36 +506,218 @@ func TestMcpPresentationFilterHidesWrapperAfterConfirmedMarkers(t *testing.T) {
 	}
 }
 
-func TestMcpPresentationFilterFailsOpenOnMismatch(t *testing.T) {
+func TestMcpPresentationFilterPreservesOutputBeforeEcho(t *testing.T) {
 	capture, payload, err := newMcpCommandCapture("echo hello")
 	if err != nil {
 		t.Fatal(err)
 	}
 	filter := newMcpCommandPresentationFilter("echo hello", payload, capture.start, capture.endPrefix)
-	input := []byte("regular terminal output\r\n")
-	if visible := filter.filter(input); string(visible) != string(input) {
-		t.Fatalf("presentation filter did not fail open: %q", visible)
+	prefix := []byte("root@example:/home/user# ")
+	if visible := filter.filter(prefix); string(visible) != string(prefix) {
+		t.Fatalf("pending prompt was not preserved: %q", visible)
+	}
+	if filter.complete {
+		t.Fatal("presentation filter stopped before the MCP echo arrived")
+	}
+
+	raw := append(bytes.TrimSuffix(payload, []byte("\r")), []byte("\r\n")...)
+	raw = append(raw, capture.start...)
+	raw = append(raw, []byte("\r\nhello\r\n")...)
+	raw = append(raw, capture.endPrefix...)
+	raw = append(raw, []byte("0@@\r\n")...)
+	if visible := filter.filter(raw); string(visible) != "echo hello\r\nhello\r\n" {
+		t.Fatalf("filtered command after pending prompt = %q", visible)
 	}
 	if !filter.complete {
-		t.Fatal("presentation filter remained active after a mismatch")
+		t.Fatal("presentation filter did not complete")
 	}
 }
 
-func TestMcpPresentationFilterDrainPendingFailsOpen(t *testing.T) {
+func TestMcpPresentationFilterHandlesStartMarkerWithoutTerminalEcho(t *testing.T) {
 	capture, payload, err := newMcpCommandCapture("echo hello")
 	if err != nil {
 		t.Fatal(err)
 	}
 	filter := newMcpCommandPresentationFilter("echo hello", payload, capture.start, capture.endPrefix)
-	partial := payload[:minInt(8, len(payload))]
-	if visible := filter.filter(partial); len(visible) != 0 {
-		t.Fatalf("partial echo was released too early: %q", visible)
-	}
-	if drained := filter.drainPending(); !bytes.Equal(drained, partial) {
-		t.Fatalf("pending bytes were not released on cleanup: %q", drained)
+	raw := append([]byte("root@example:/home/user# "), capture.start...)
+	raw = append(raw, []byte("\r\nhello\r\n")...)
+	raw = append(raw, capture.endPrefix...)
+	raw = append(raw, []byte("0@@\r\n")...)
+
+	visible := filter.filter(raw)
+	if string(visible) != "root@example:/home/user# echo hello\r\nhello\r\n" {
+		t.Fatalf("no-echo command output = %q", visible)
 	}
 	if !filter.complete {
-		t.Fatal("presentation filter did not complete after drain")
+		t.Fatal("presentation filter did not complete")
+	}
+}
+
+func TestMcpPresentationFilterHidesReadlineRedrawnWrapperAtEverySplit(t *testing.T) {
+	capture, payload, err := newMcpCommandCapture("echo hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	echo := bytes.TrimSuffix(payload, []byte("\r"))
+	redraw := append([]byte("\r<"), echo[len(echo)-32:]...)
+	raw := append([]byte("root@example:/home/user# "), redraw...)
+	raw = append(raw, []byte("\r\n")...)
+	raw = append(raw, capture.start...)
+	raw = append(raw, []byte("\r\nhello\r\n")...)
+	raw = append(raw, capture.endPrefix...)
+	raw = append(raw, []byte("0@@\r\n")...)
+	want := "root@example:/home/user# echo hello\r\nhello\r\n"
+
+	for split := 0; split <= len(raw); split++ {
+		filter := newMcpCommandPresentationFilter("echo hello", payload, capture.start, capture.endPrefix)
+		visible := append(filter.filter(raw[:split]), filter.filter(raw[split:])...)
+		if string(visible) != want || !filter.complete {
+			t.Fatalf("split %d readline redraw output = %q complete=%v", split, visible, filter.complete)
+		}
+	}
+}
+
+func TestMcpPresentationFilterHidesNarrowTerminalReadlineRedrawAtEverySplit(t *testing.T) {
+	capture, payload, err := newMcpCommandCapture("echo hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	echo := bytes.TrimSuffix(payload, []byte("\r"))
+	for columns := 1; columns <= 16; columns++ {
+		t.Run(fmt.Sprintf("columns-%d", columns), func(t *testing.T) {
+			redraw := append([]byte("\r<"), echo[len(echo)-(columns-1):]...)
+			raw := append([]byte("root@example:/home/user# "), redraw...)
+			raw = append(raw, []byte("\r\n")...)
+			raw = append(raw, capture.start...)
+			raw = append(raw, []byte("\r\nhello\r\n")...)
+			raw = append(raw, capture.endPrefix...)
+			raw = append(raw, []byte("0@@\r\n")...)
+			want := "root@example:/home/user# echo hello\r\nhello\r\n"
+
+			for split := 0; split <= len(raw); split++ {
+				terminal, terminalErr := newSSHTerminalEmulator(80, 24)
+				if terminalErr != nil {
+					t.Fatal(terminalErr)
+				}
+				terminal.resize(uint32(columns), 24)
+				native := &sshNativeSession{terminal: terminal}
+				if beginErr := native.beginMcpCommandPresentation("echo hello", payload, capture.start, capture.endPrefix); beginErr != nil {
+					t.Fatal(beginErr)
+				}
+				visible := append(
+					native.filterMcpPresentationLocked(raw[:split]),
+					native.filterMcpPresentationLocked(raw[split:])...,
+				)
+				if string(visible) != want {
+					t.Fatalf("split %d narrow readline redraw output = %q", split, visible)
+				}
+			}
+		})
+	}
+}
+
+func TestMcpPresentationFilterPreservesNarrowReadlineRedrawWithWrongToken(t *testing.T) {
+	capture, payload, err := newMcpCommandCapture("echo hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const columns = 12
+	echo := bytes.TrimSuffix(payload, []byte("\r"))
+	wrongToken := append([]byte(nil), echo[len(echo)-(columns-1):]...)
+	wrongToken[0] = differentHexByte(wrongToken[0])
+	prefix := append([]byte("progress\r<"), wrongToken...)
+	prefix = append(prefix, []byte("\r\nroot@example:/home/user# ")...)
+	raw := append(append([]byte{}, prefix...), capture.start...)
+	raw = append(raw, []byte("\r\nhello\r\n")...)
+	raw = append(raw, capture.endPrefix...)
+	raw = append(raw, []byte("0@@\r\n")...)
+	want := string(prefix) + "echo hello\r\nhello\r\n"
+
+	for split := 0; split <= len(raw); split++ {
+		filter := newMcpCommandPresentationFilter("echo hello", payload, capture.start, capture.endPrefix)
+		filter.terminalColumns = columns
+		visible := append(filter.filter(raw[:split]), filter.filter(raw[split:])...)
+		if string(visible) != want || !filter.complete {
+			t.Fatalf("split %d wrong-token redraw output = %q complete=%v", split, visible, filter.complete)
+		}
+	}
+}
+
+func TestMcpPresentationFilterPreservesUnrelatedReadlineSequenceAtEverySplit(t *testing.T) {
+	capture, payload, err := newMcpCommandCapture("echo hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefix := []byte("downloading\r<status\r\nroot@example:/home/user# ")
+	raw := append(append([]byte{}, prefix...), capture.start...)
+	raw = append(raw, []byte("\r\nhello\r\n")...)
+	raw = append(raw, capture.endPrefix...)
+	raw = append(raw, []byte("0@@\r\n")...)
+	want := string(prefix) + "echo hello\r\nhello\r\n"
+
+	for split := 0; split <= len(raw); split++ {
+		filter := newMcpCommandPresentationFilter("echo hello", payload, capture.start, capture.endPrefix)
+		visible := append(filter.filter(raw[:split]), filter.filter(raw[split:])...)
+		if string(visible) != want || !filter.complete {
+			t.Fatalf("split %d unrelated redraw output = %q complete=%v", split, visible, filter.complete)
+		}
+	}
+}
+
+func TestMcpPresentationFilterPreservesWrapperSuffixCollisionsAtEverySplit(t *testing.T) {
+	capture, payload, err := newMcpCommandCapture("echo hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	echo := bytes.TrimSuffix(payload, []byte("\r"))
+	wrongToken := append([]byte(nil), echo[len(echo)-8:]...)
+	wrongToken[0] = differentHexByte(wrongToken[0])
+	for name, testCase := range map[string]struct {
+		collision string
+		columns   int
+	}{
+		"one-byte":    {collision: "f", columns: 80},
+		"wrong-token": {collision: string(wrongToken), columns: 9},
+	} {
+		t.Run(name, func(t *testing.T) {
+			prefix := []byte("progress\r<" + testCase.collision + "\r\nroot@example:/home/user# ")
+			raw := append(append([]byte{}, prefix...), capture.start...)
+			raw = append(raw, []byte("\r\nhello\r\n")...)
+			raw = append(raw, capture.endPrefix...)
+			raw = append(raw, []byte("0@@\r\n")...)
+			want := string(prefix) + "echo hello\r\nhello\r\n"
+
+			for split := 0; split <= len(raw); split++ {
+				filter := newMcpCommandPresentationFilter("echo hello", payload, capture.start, capture.endPrefix)
+				filter.terminalColumns = testCase.columns
+				visible := append(filter.filter(raw[:split]), filter.filter(raw[split:])...)
+				if string(visible) != want || !filter.complete {
+					t.Fatalf("split %d suffix collision output = %q complete=%v", split, visible, filter.complete)
+				}
+			}
+		})
+	}
+}
+
+func differentHexByte(value byte) byte {
+	if value == '0' {
+		return '1'
+	}
+	return '0'
+}
+
+func TestMcpPresentationFilterBoundsUnconfirmedReadlineSequence(t *testing.T) {
+	capture, payload, err := newMcpCommandCapture("echo hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	filter := newMcpCommandPresentationFilter("echo hello", payload, capture.start, capture.endPrefix)
+	prefix := append([]byte("\r<"), bytes.Repeat([]byte("x"), len(filter.expectedEcho)+len(filter.startMarker)+3)...)
+	if visible := filter.filter(prefix); !bytes.Equal(visible, prefix) {
+		t.Fatalf("oversized unconfirmed redraw output = %q", visible)
+	}
+	if filter.readlineRedrawStart >= 0 || len(filter.pending) != 0 {
+		t.Fatalf("oversized unconfirmed redraw remained buffered: start=%d pending=%d", filter.readlineRedrawStart, len(filter.pending))
 	}
 }
 
@@ -555,6 +749,56 @@ func TestMcpPresentationFilterHandlesFragmentedLineEndingsAndMarkers(t *testing.
 	}
 }
 
+func TestMcpPresentationFilterHandlesEveryPromptAndWrapperSplit(t *testing.T) {
+	capture, payload, err := newMcpCommandCapture("echo hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := append([]byte("root@example:/home/user# "), bytes.TrimSuffix(payload, []byte("\r"))...)
+	raw = append(raw, []byte("\r\n")...)
+	raw = append(raw, capture.start...)
+	raw = append(raw, []byte("\r\nhello\r\n")...)
+	raw = append(raw, capture.endPrefix...)
+	raw = append(raw, []byte("0@@\r\nroot@example:/home/user# ")...)
+	want := "root@example:/home/user# echo hello\r\nhello\r\nroot@example:/home/user# "
+
+	for split := 0; split <= len(raw); split++ {
+		filter := newMcpCommandPresentationFilter("echo hello", payload, capture.start, capture.endPrefix)
+		visible := append(filter.filter(raw[:split]), filter.filter(raw[split:])...)
+		if string(visible) != want || !filter.complete {
+			t.Fatalf("split %d output = %q complete=%v", split, visible, filter.complete)
+		}
+	}
+}
+
+func TestMcpPresentationRetirementDropsPartialWrapperPrefixes(t *testing.T) {
+	capture, payload, err := newMcpCommandCapture("echo hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	echo := bytes.TrimSuffix(payload, []byte("\r"))
+	for name, prefix := range map[string][]byte{
+		"echo":         append([]byte(nil), echo[:len(echo)/2]...),
+		"start-marker": append(append(append([]byte(nil), echo...), []byte("\r\n")...), capture.start[:len(capture.start)/2]...),
+	} {
+		t.Run(name, func(t *testing.T) {
+			filter := newMcpCommandPresentationFilter("echo hello", payload, capture.start, capture.endPrefix)
+			native := &sshNativeSession{mcpPresentation: filter}
+			if visible := native.filterMcpPresentationLocked(prefix); len(visible) != 0 {
+				t.Fatalf("speculative prefix became visible before interrupt: %q", visible)
+			}
+			filter.wrapperWritten = true
+			native.abandonMcpCommandPresentation()
+			native.recordMcpCommandPresentationInputWritten([]byte{'\x03'}, 1)
+
+			visible := native.filterMcpPresentationLocked([]byte("^C\r\nroot@example:/home/user# "))
+			if string(visible) != "^C\r\nroot@example:/home/user# " {
+				t.Fatalf("post-interrupt output exposed the speculative prefix: %q", visible)
+			}
+		})
+	}
+}
+
 func TestMcpPresentationFilterFailsOpenAtEverySpeculativeBoundary(t *testing.T) {
 	capture, payload, err := newMcpCommandCapture("echo x")
 	if err != nil {
@@ -572,12 +816,50 @@ func TestMcpPresentationFilterFailsOpenAtEverySpeculativeBoundary(t *testing.T) 
 			}
 		})
 	}
+}
 
-	large := newMcpCommandPresentationFilter(
-		"large", bytes.Repeat([]byte{'x'}, mcpMaxSpeculativeEchoBytes+2), capture.start, capture.endPrefix,
-	)
-	if visible := large.filter([]byte("ordinary")); string(visible) != "ordinary" || !large.complete {
-		t.Fatalf("oversized echo filter = %q complete=%v", visible, large.complete)
+func TestMcpPresentationFilterHidesLargeWrapper(t *testing.T) {
+	capture, _, err := newMcpCommandCapture("echo large")
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := append(bytes.Repeat([]byte{'x'}, mcpMaxCommandBytes+1024), '\r')
+	filter := newMcpCommandPresentationFilter("echo large", payload, capture.start, capture.endPrefix)
+	raw := append(bytes.TrimSuffix(payload, []byte("\r")), []byte("\r\n")...)
+	raw = append(raw, capture.start...)
+	raw = append(raw, []byte("\r\nlarge\r\n")...)
+	raw = append(raw, capture.endPrefix...)
+	raw = append(raw, []byte("0@@\r\n")...)
+
+	var visible []byte
+	for start := 0; start < len(raw); start += sshOutputChunk {
+		end := minInt(start+sshOutputChunk, len(raw))
+		visible = append(visible, filter.filter(raw[start:end])...)
+	}
+	if string(visible) != "echo large\r\nlarge\r\n" || !filter.complete {
+		t.Fatalf("large wrapper output = %q complete=%v", visible, filter.complete)
+	}
+}
+
+func TestMcpPresentationFilterHidesMaximumWrapperByteByByte(t *testing.T) {
+	capture, _, err := newMcpCommandCapture("echo large")
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := append(bytes.Repeat([]byte{'x'}, mcpMaxCommandBytes), '\r')
+	filter := newMcpCommandPresentationFilter("echo large", payload, capture.start, capture.endPrefix)
+	raw := append(bytes.TrimSuffix(payload, []byte("\r")), []byte("\r\n")...)
+	raw = append(raw, capture.start...)
+	raw = append(raw, []byte("\r\nlarge\r\n")...)
+	raw = append(raw, capture.endPrefix...)
+	raw = append(raw, []byte("0@@\r\n")...)
+
+	var visible []byte
+	for _, value := range raw {
+		visible = append(visible, filter.filter([]byte{value})...)
+	}
+	if string(visible) != "echo large\r\nlarge\r\n" || !filter.complete {
+		t.Fatalf("byte-wise maximum wrapper output = %q complete=%v", visible, filter.complete)
 	}
 }
 
@@ -636,6 +918,14 @@ func TestMcpReplayCaptureAndAnsiHelpersCoverInvalidBoundaries(t *testing.T) {
 			t.Fatalf("invalid command length %d was accepted", len(command))
 		}
 	}
+	for _, command := range []string{"echo\x00hidden", "echo\rnext", "echo\nnext", "echo\tnext", "echo\x1b[2J", "echo\x7f"} {
+		if _, _, err := newMcpCommandCapture(command); err == nil {
+			t.Fatalf("command with control bytes was accepted: %q", command)
+		}
+	}
+	if _, _, err := newMcpCommandCapture("printf 'caffè'"); err != nil {
+		t.Fatalf("Unicode command was rejected: %v", err)
+	}
 	capture := mcpCommandCapture{
 		endPrefix: []byte("@@END_"), captured: make([]byte, mcpCommandCaptureBytes-1),
 	}
@@ -650,9 +940,6 @@ func TestMcpReplayCaptureAndAnsiHelpersCoverInvalidBoundaries(t *testing.T) {
 		if code, ok := parseMcpEndMarker([]byte(marker), []byte("@@END_")); ok || code != nil {
 			t.Fatalf("invalid marker %q parsed as %v", marker, code)
 		}
-	}
-	if indexBytes([]byte("abc"), nil) != 0 || indexBytes([]byte("abc"), []byte("z")) != -1 {
-		t.Fatal("byte search boundary result was invalid")
 	}
 	input := []byte("A\rB\r\n\x1b[31mC\x1b]title\aD\x1b]title\x1b\\E\x1bxF")
 	if output := string(stripMcpAnsi(input)); output != "AB\nCDEF" {
@@ -677,7 +964,7 @@ func TestMcpRunCommandKeepsWrapperOutOfVisibleReplay(t *testing.T) {
 	native.stdin = callbackWriteCloser{write: func(data []byte) (int, error) {
 		token := extractMcpPayloadToken(t, string(data))
 		payloadEcho := strings.TrimSuffix(string(data), "\r")
-		raw := payloadEcho + "\r\n" +
+		raw := "root@example:/home/user# " + payloadEcho + "\r\n" +
 			"@@WHS_" + token + "@@\r\n" +
 			"hello\r\n" +
 			"@@WHE_" + token + "_0@@\r\n"
@@ -699,13 +986,465 @@ func TestMcpRunCommandKeepsWrapperOutOfVisibleReplay(t *testing.T) {
 		strings.Contains(visible, "printf '@@WHS_%s@@") {
 		t.Fatalf("wrapper leaked into visible replay: %q", visible)
 	}
-	if visible != "echo hello\r\nhello\r\n" {
+	if visible != "root@example:/home/user# echo hello\r\nhello\r\n" {
 		t.Fatalf("unexpected visible replay: %q", visible)
 	}
 
 	raw := string(native.mcpCommandReplay.snapshotTail(4096))
 	if !strings.Contains(raw, "@@WHS_") || !strings.Contains(raw, "@@WHE_") {
 		t.Fatalf("raw command replay did not retain MCP markers: %q", raw)
+	}
+}
+
+func TestMcpRunCommandTimeoutKeepsWrapperOutOfVisibleReplay(t *testing.T) {
+	var output bytes.Buffer
+	terminal, err := newSSHTerminalEmulator(80, 24)
+	if err != nil {
+		t.Fatal(err)
+	}
+	native := &sshNativeSession{
+		id:               "session",
+		server:           &sshServer{output: &sshEventWriter{encoder: json.NewEncoder(&output)}},
+		terminal:         terminal,
+		mcpReplay:        newMcpReplayBuffer(mcpReplayCapacity),
+		mcpCommandReplay: newMcpReplayBuffer(mcpReplayCapacity),
+		done:             make(chan struct{}),
+	}
+	writes := 0
+	firstToken := ""
+	native.stdin = callbackWriteCloser{write: func(data []byte) (int, error) {
+		writes++
+		token := extractMcpPayloadToken(t, string(data))
+		payloadEcho := strings.TrimSuffix(string(data), "\r")
+		if writes == 1 {
+			firstToken = token
+			native.publishTerminalData([]byte("root@example:/home/user# " + payloadEcho + "\r\n" +
+				"@@WHS_" + token + "@@\r\npartial\r\n"))
+			return len(data), nil
+		}
+		native.publishTerminalData([]byte(payloadEcho + "\r\n" +
+			"@@WHS_" + token + "@@\r\nnext\r\n" +
+			"@@WHE_" + token + "_0@@\r\n"))
+		return len(data), nil
+	}}
+
+	result, err := native.runMcpCommand(context.Background(), "echo hello", time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.TimedOut || result.Output != "partial" || result.ExitCode != nil {
+		t.Fatalf("unexpected timeout result: %#v", result)
+	}
+	if _, err := native.runMcpCommand(context.Background(), "echo overlap", time.Second); !errors.Is(err, errMcpCommandInProgress) {
+		t.Fatalf("overlapping command returned %v", err)
+	}
+	if writes != 1 {
+		t.Fatalf("overlapping command wrote %d payloads", writes)
+	}
+
+	native.publishTerminalData([]byte("late\r\n@@WHE_" + firstToken + "_0@@\r\nroot@example:/home/user# "))
+	visible := string(native.mcpReplay.snapshotTail(4096))
+	if strings.Contains(visible, "@@WHS_") || strings.Contains(visible, "@@WHE_") ||
+		strings.Contains(visible, "printf '@@WHS_%s@@") {
+		t.Fatalf("late wrapper leaked into visible replay after timeout: %q", visible)
+	}
+	if visible != "root@example:/home/user# echo hello\r\npartial\r\nlate\r\nroot@example:/home/user# " {
+		t.Fatalf("unexpected timeout replay: %q", visible)
+	}
+
+	next, err := native.runMcpCommand(context.Background(), "echo next", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next.ExitCode == nil || *next.ExitCode != 0 || next.Output != "next" || next.TimedOut {
+		t.Fatalf("unexpected follow-up result: %#v", next)
+	}
+}
+
+func TestMcpRunCommandInterruptRetiresTimedOutPresentation(t *testing.T) {
+	terminal, err := newSSHTerminalEmulator(80, 24)
+	if err != nil {
+		t.Fatal(err)
+	}
+	interruptStarted := make(chan struct{})
+	releaseInterrupt := make(chan struct{})
+	native := &sshNativeSession{
+		server:           &sshServer{output: &sshEventWriter{encoder: json.NewEncoder(io.Discard)}},
+		terminal:         terminal,
+		mcpReplay:        newMcpReplayBuffer(mcpReplayCapacity),
+		mcpCommandReplay: newMcpReplayBuffer(mcpReplayCapacity),
+		inputQueue:       make(chan []byte, sshInputQueueCapacity),
+		done:             make(chan struct{}),
+	}
+	defer native.close(false)
+	defer func() {
+		select {
+		case <-releaseInterrupt:
+		default:
+			close(releaseInterrupt)
+		}
+	}()
+	wrapperWrites := 0
+	firstToken := ""
+	native.stdin = callbackWriteCloser{write: func(data []byte) (int, error) {
+		if bytes.Equal(data, []byte{'\x03'}) {
+			close(interruptStarted)
+			<-releaseInterrupt
+			native.publishTerminalData([]byte("^C\r\nroot@example:/home/user# "))
+			return len(data), nil
+		}
+		if bytes.Equal(data, []byte("still running")) {
+			return len(data), nil
+		}
+		wrapperWrites++
+		token := extractMcpPayloadToken(t, string(data))
+		payloadEcho := strings.TrimSuffix(string(data), "\r")
+		if wrapperWrites == 1 {
+			firstToken = token
+			native.publishTerminalData([]byte(payloadEcho + "\r\n" +
+				"@@WHS_" + token + "@@\r\npartial\r\n"))
+			return len(data), nil
+		}
+		native.publishTerminalData([]byte("late\r\n@@WHE_" + firstToken + "_130@@\r\n" +
+			payloadEcho + "\r\n" +
+			"@@WHS_" + token + "@@\r\nnext\r\n" +
+			"@@WHE_" + token + "_0@@\r\n"))
+		return len(data), nil
+	}}
+	native.startInputPump()
+
+	result, err := native.runMcpCommand(context.Background(), "echo hello", time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.TimedOut || result.Output != "partial" {
+		t.Fatalf("unexpected timeout result: %#v", result)
+	}
+	if err := native.write([]byte("still running")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := native.runMcpCommand(context.Background(), "echo overlap", time.Second); !errors.Is(err, errMcpCommandInProgress) {
+		t.Fatalf("non-interrupting text cleared the timed-out presentation: %v", err)
+	}
+	if err := native.write([]byte{'\x03'}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-interruptStarted:
+	case <-time.After(time.Second):
+		t.Fatal("interrupt did not reach the SSH writer")
+	}
+	if _, err := native.runMcpCommand(context.Background(), "echo overlap", time.Second); !errors.Is(err, errMcpCommandInProgress) {
+		t.Fatalf("queued interrupt cleared the timed-out presentation before it was written: %v", err)
+	}
+	close(releaseInterrupt)
+	deadline := time.Now().Add(time.Second)
+	for {
+		native.terminalOutputMu.Lock()
+		cleared := native.mcpPresentation == nil && len(native.mcpRetiredPresentations) == 1
+		native.terminalOutputMu.Unlock()
+		if cleared {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("written interrupt did not retire the timed-out presentation")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	next, err := native.runMcpCommand(context.Background(), "echo next", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next.ExitCode == nil || *next.ExitCode != 0 || next.Output != "next" || next.TimedOut {
+		t.Fatalf("unexpected follow-up result: %#v", next)
+	}
+	native.terminalOutputMu.Lock()
+	presentationCount := len(native.mcpRetiredPresentations)
+	native.terminalOutputMu.Unlock()
+	if presentationCount != 0 {
+		t.Fatalf("late marker left %d retired presentations", presentationCount)
+	}
+	visible := string(native.mcpReplay.snapshotTail(4096))
+	if strings.Contains(visible, "@@WHS_") || strings.Contains(visible, "@@WHE_") ||
+		strings.Contains(visible, "printf '@@WHS_%s@@") {
+		t.Fatalf("wrapper leaked into visible replay after interrupt: %q", visible)
+	}
+}
+
+func TestMcpClearPresentationRestoresPendingOutputBeforeWrapperWrite(t *testing.T) {
+	for name, input := range map[string][]byte{
+		"partial-line-ending": []byte("background update\r"),
+		"unrelated-redraw":    []byte("progress\r<status"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			terminal, err := newSSHTerminalEmulator(80, 24)
+			if err != nil {
+				t.Fatal(err)
+			}
+			capture, payload, err := newMcpCommandCapture("echo hello")
+			if err != nil {
+				t.Fatal(err)
+			}
+			native := &sshNativeSession{
+				server:           &sshServer{output: &sshEventWriter{encoder: json.NewEncoder(io.Discard)}},
+				terminal:         terminal,
+				mcpReplay:        newMcpReplayBuffer(mcpReplayCapacity),
+				mcpCommandReplay: newMcpReplayBuffer(mcpReplayCapacity),
+				mcpPresentation:  newMcpCommandPresentationFilter("echo hello", payload, capture.start, capture.endPrefix),
+			}
+
+			native.publishTerminalData(input)
+			native.clearMcpCommandPresentation()
+
+			if visible := native.mcpReplay.snapshotTail(len(input) + 1); !bytes.Equal(visible, input) {
+				t.Fatalf("restored output = %q, want %q", visible, input)
+			}
+			if native.mcpPresentation != nil {
+				t.Fatal("unwritten presentation remained active after cleanup")
+			}
+		})
+	}
+}
+
+func TestMcpClearPresentationDropsOutputAfterPartialWrapperWrite(t *testing.T) {
+	terminal, err := newSSHTerminalEmulator(80, 24)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capture, payload, err := newMcpCommandCapture("echo hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	presentation := newMcpCommandPresentationFilter("echo hello", payload, capture.start, capture.endPrefix)
+	native := &sshNativeSession{
+		server:           &sshServer{output: &sshEventWriter{encoder: json.NewEncoder(io.Discard)}},
+		terminal:         terminal,
+		mcpReplay:        newMcpReplayBuffer(mcpReplayCapacity),
+		mcpCommandReplay: newMcpReplayBuffer(mcpReplayCapacity),
+		mcpPresentation:  presentation,
+	}
+	writeErr := errors.New("partial wrapper write")
+	native.stdin = callbackWriteCloser{write: func(data []byte) (int, error) {
+		native.publishTerminalData(data[:1])
+		return 1, writeErr
+	}}
+
+	if err := native.writeRemoteInput(payload); !errors.Is(err, writeErr) {
+		t.Fatalf("partial wrapper write returned %v", err)
+	}
+	if !presentation.wrapperWriteStarted || presentation.wrapperWritten {
+		t.Fatal("partial wrapper write was not tracked")
+	}
+	native.clearMcpCommandPresentation()
+	if visible := native.mcpReplay.snapshotTail(len(payload)); len(visible) != 0 {
+		t.Fatalf("partial wrapper became visible during cleanup: %q", visible)
+	}
+}
+
+func TestMcpRunCommandKeepsFilterThroughFragmentedEndLineEnding(t *testing.T) {
+	terminal, err := newSSHTerminalEmulator(80, 24)
+	if err != nil {
+		t.Fatal(err)
+	}
+	native := &sshNativeSession{
+		server:           &sshServer{output: &sshEventWriter{encoder: json.NewEncoder(io.Discard)}},
+		terminal:         terminal,
+		mcpReplay:        newMcpReplayBuffer(mcpReplayCapacity),
+		mcpCommandReplay: newMcpReplayBuffer(mcpReplayCapacity),
+		done:             make(chan struct{}),
+	}
+	defer native.close(false)
+	native.stdin = callbackWriteCloser{write: func(data []byte) (int, error) {
+		token := extractMcpPayloadToken(t, string(data))
+		payloadEcho := strings.TrimSuffix(string(data), "\r")
+		native.publishTerminalData([]byte(payloadEcho + "\r\n" +
+			"@@WHS_" + token + "@@\r\nhello\r\n" +
+			"@@WHE_" + token + "_0@@"))
+		return len(data), nil
+	}}
+
+	result, err := native.runMcpCommand(context.Background(), "echo hello", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ExitCode == nil || *result.ExitCode != 0 || result.Output != "hello" || result.TimedOut {
+		t.Fatalf("unexpected command result: %#v", result)
+	}
+	native.terminalOutputMu.Lock()
+	active := native.mcpPresentation != nil
+	retired := len(native.mcpRetiredPresentations)
+	native.terminalOutputMu.Unlock()
+	if active || retired != 1 {
+		t.Fatalf("fragmented end line ending left active=%v retired=%d", active, retired)
+	}
+	want := "echo hello\r\nhello\r\n"
+	if visible := string(native.mcpReplay.snapshotTail(4096)); visible != want {
+		t.Fatalf("visible output before fragmented line ending = %q", visible)
+	}
+
+	native.publishTerminalData([]byte("\r"))
+	if visible := string(native.mcpReplay.snapshotTail(4096)); visible != want {
+		t.Fatalf("end-marker carriage return became visible: %q", visible)
+	}
+	native.publishTerminalData([]byte("\nroot@example:/home/user# "))
+	if visible := string(native.mcpReplay.snapshotTail(4096)); visible != want+"root@example:/home/user# " {
+		t.Fatalf("fragmented end-marker line ending output = %q", visible)
+	}
+	native.terminalOutputMu.Lock()
+	retired = len(native.mcpRetiredPresentations)
+	native.terminalOutputMu.Unlock()
+	if retired != 0 {
+		t.Fatalf("completed tail left %d retired presentations", retired)
+	}
+}
+
+func TestMcpWrittenInterruptRetiresPresentationDespiteWriteError(t *testing.T) {
+	writeErr := errors.New("partial write")
+	native := &sshNativeSession{
+		stdin: callbackWriteCloser{write: func([]byte) (int, error) {
+			return 1, writeErr
+		}},
+		mcpPresentation: &mcpCommandPresentationFilter{abandoned: true, wrapperWritten: true},
+	}
+
+	if err := native.writeRemoteInput([]byte{'\x03', 'x'}); !errors.Is(err, writeErr) {
+		t.Fatalf("partial write returned %v", err)
+	}
+	if native.mcpPresentation != nil || len(native.mcpRetiredPresentations) != 1 {
+		t.Fatalf(
+			"partial interrupt write left active = %t, retired = %d",
+			native.mcpPresentation != nil,
+			len(native.mcpRetiredPresentations),
+		)
+	}
+}
+
+func TestMcpWrittenInterruptBeforeTimeoutRetiresWhenAbandoned(t *testing.T) {
+	payload := []byte("wrapper")
+	current := &mcpCommandPresentationFilter{inputPayload: payload}
+	native := &sshNativeSession{
+		stdin:           callbackWriteCloser{write: func(data []byte) (int, error) { return len(data), nil }},
+		mcpPresentation: current,
+	}
+
+	if err := native.writeRemoteInput(payload); err != nil {
+		t.Fatal(err)
+	}
+	if err := native.writeRemoteInput([]byte{'\x03'}); err != nil {
+		t.Fatal(err)
+	}
+	if native.mcpPresentation != current || !current.interruptWritten || len(native.mcpRetiredPresentations) != 0 {
+		t.Fatal("pre-timeout interrupt did not remain recorded on the active presentation")
+	}
+
+	native.abandonMcpCommandPresentation()
+	if native.mcpPresentation != nil || len(native.mcpRetiredPresentations) != 1 ||
+		native.mcpRetiredPresentations[0] != current || !current.retired {
+		t.Fatal("timeout did not retire the previously interrupted presentation")
+	}
+}
+
+func TestMcpWrittenInterruptBeforeWrapperIsIgnored(t *testing.T) {
+	payload := []byte("wrapper")
+	current := &mcpCommandPresentationFilter{inputPayload: payload}
+	native := &sshNativeSession{
+		stdin:           callbackWriteCloser{write: func(data []byte) (int, error) { return len(data), nil }},
+		mcpPresentation: current,
+	}
+
+	if err := native.writeRemoteInput([]byte{'\x03'}); err != nil {
+		t.Fatal(err)
+	}
+	if err := native.writeRemoteInput(payload); err != nil {
+		t.Fatal(err)
+	}
+	native.abandonMcpCommandPresentation()
+	if native.mcpPresentation != current || current.interruptWritten || len(native.mcpRetiredPresentations) != 0 {
+		t.Fatal("pre-wrapper interrupt incorrectly retired the timed-out presentation")
+	}
+}
+
+func TestMcpCoalescedWrapperAndInterruptRetiresWhenAbandoned(t *testing.T) {
+	payload := []byte("wrapper")
+	current := &mcpCommandPresentationFilter{inputPayload: payload}
+	native := &sshNativeSession{
+		stdin:           callbackWriteCloser{write: func(data []byte) (int, error) { return len(data), nil }},
+		mcpPresentation: current,
+	}
+	coalesced := append(append([]byte("pending-prefix"), payload...), '\x03')
+
+	if err := native.writeRemoteInput(coalesced); err != nil {
+		t.Fatal(err)
+	}
+	if native.mcpPresentation != current || !current.wrapperWritten ||
+		!current.interruptWritten || len(native.mcpRetiredPresentations) != 0 {
+		t.Fatal("coalesced wrapper and interrupt were not recorded in PTY order")
+	}
+
+	native.abandonMcpCommandPresentation()
+	if native.mcpPresentation != nil || len(native.mcpRetiredPresentations) != 1 ||
+		native.mcpRetiredPresentations[0] != current || !current.retired {
+		t.Fatal("timeout did not retire the coalesced wrapper and interrupt")
+	}
+}
+
+func TestMcpCoalescedInterruptBeforeWrapperIsIgnored(t *testing.T) {
+	payload := []byte("wrapper")
+	current := &mcpCommandPresentationFilter{inputPayload: payload}
+	native := &sshNativeSession{
+		stdin:           callbackWriteCloser{write: func(data []byte) (int, error) { return len(data), nil }},
+		mcpPresentation: current,
+	}
+	coalesced := append([]byte{'\x03'}, payload...)
+
+	if err := native.writeRemoteInput(coalesced); err != nil {
+		t.Fatal(err)
+	}
+	native.abandonMcpCommandPresentation()
+	if native.mcpPresentation != current || !current.wrapperWritten ||
+		current.interruptWritten || len(native.mcpRetiredPresentations) != 0 {
+		t.Fatal("coalesced pre-wrapper interrupt incorrectly retired the timed-out presentation")
+	}
+}
+
+func TestMcpBeginCommandPresentationPreservesRetiredFiltersAtLimit(t *testing.T) {
+	capture, payload, err := newMcpCommandCapture("echo oldest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldest := newMcpCommandPresentationFilter("echo oldest", payload, capture.start, capture.endPrefix)
+	oldest.retired = true
+	oldest.wrapperWriteStarted = true
+	oldest.wrapperWritten = true
+	retired := make([]*mcpCommandPresentationFilter, mcpMaxRetiredPresentations)
+	retired[0] = oldest
+	for index := 1; index < len(retired); index++ {
+		retired[index] = &mcpCommandPresentationFilter{
+			retired: true,
+			state:   mcpPresentationPassThrough,
+		}
+	}
+	native := &sshNativeSession{
+		mcpRetiredPresentations: retired,
+	}
+
+	err = native.beginMcpCommandPresentation("echo blocked", []byte("wrapper\r"), []byte("start"), []byte("end"))
+	if !errors.Is(err, errMcpCommandInProgress) {
+		t.Fatalf("retired presentation limit returned %v", err)
+	}
+	if native.mcpPresentation != nil || len(native.mcpRetiredPresentations) != mcpMaxRetiredPresentations ||
+		native.mcpRetiredPresentations[0] != oldest {
+		t.Fatal("retired presentation limit discarded suppression state or installed a new wrapper")
+	}
+
+	raw := append(bytes.TrimSuffix(payload, []byte("\r")), []byte("\r\n")...)
+	raw = append(raw, capture.start...)
+	raw = append(raw, []byte("\r\nlate\r\n")...)
+	raw = append(raw, capture.endPrefix...)
+	raw = append(raw, []byte("0@@\r\n")...)
+	if visible := native.filterMcpPresentationLocked(raw); string(visible) != "echo oldest\r\nlate\r\n" {
+		t.Fatalf("oldest retired wrapper was not suppressed after reaching the limit: %q", visible)
 	}
 }
 

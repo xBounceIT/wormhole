@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/base64"
@@ -252,16 +253,16 @@ type sshNativeSession struct {
 	sftpGeneration uint64
 	sftpListSeq    uint64
 
-	inputQueue        chan []byte
-	done              chan struct{}
-	outputWG          sync.WaitGroup
-	lifecycleMu       sync.Mutex
-	terminalOutputMu  sync.Mutex
-	mcpPresentationMu sync.Mutex
-	mcpPresentation   *mcpCommandPresentationFilter
-	started           bool
-	closed            bool
-	closeOnce         sync.Once
+	inputQueue              chan []byte
+	done                    chan struct{}
+	outputWG                sync.WaitGroup
+	lifecycleMu             sync.Mutex
+	terminalOutputMu        sync.Mutex
+	mcpPresentation         *mcpCommandPresentationFilter
+	mcpRetiredPresentations []*mcpCommandPresentationFilter
+	started                 bool
+	closed                  bool
+	closeOnce               sync.Once
 }
 
 type sshServer struct {
@@ -1187,18 +1188,26 @@ func (native *sshNativeSession) beginMcpCommandPresentation(
 	payload []byte,
 	startMarker []byte,
 	endMarkerPrefix []byte,
-) {
+) error {
 	if native == nil {
-		return
+		return errSSHSessionClosed
 	}
 	native.terminalOutputMu.Lock()
 	defer native.terminalOutputMu.Unlock()
 	if native.isClosed() {
-		return
+		return errSSHSessionClosed
 	}
-	native.mcpPresentationMu.Lock()
-	defer native.mcpPresentationMu.Unlock()
+	if native.mcpPresentation != nil {
+		return errMcpCommandInProgress
+	}
+	if len(native.mcpRetiredPresentations) >= mcpMaxRetiredPresentations {
+		return errMcpCommandInProgress
+	}
 	native.mcpPresentation = newMcpCommandPresentationFilter(command, payload, startMarker, endMarkerPrefix)
+	if native.terminal != nil && native.terminal.columns > 0 {
+		native.mcpPresentation.terminalColumns = native.terminal.columns
+	}
+	return nil
 }
 
 func (native *sshNativeSession) clearMcpCommandPresentation() {
@@ -1207,44 +1216,128 @@ func (native *sshNativeSession) clearMcpCommandPresentation() {
 	}
 	native.terminalOutputMu.Lock()
 	defer native.terminalOutputMu.Unlock()
-	if native.isClosed() {
-		native.clearMcpCommandPresentationLocked()
+	if native.mcpPresentation != nil && !native.mcpPresentation.wrapperWriteStarted {
+		pending := native.mcpPresentation.drainPending()
+		native.mcpPresentation = nil
+		if len(pending) > 0 && native.server != nil && native.terminal != nil {
+			native.publishVisibleTerminalDataLocked(pending)
+		}
 		return
 	}
-	pending := native.drainAndClearMcpCommandPresentationLocked()
-	if len(pending) > 0 && native.server != nil && native.terminal != nil {
-		native.publishVisibleTerminalDataLocked(pending)
+	native.clearMcpCommandPresentationLocked()
+}
+
+func (native *sshNativeSession) retireMcpCommandPresentation() {
+	if native == nil {
+		return
+	}
+	native.terminalOutputMu.Lock()
+	defer native.terminalOutputMu.Unlock()
+	native.retireMcpCommandPresentationLocked()
+}
+
+func (native *sshNativeSession) abandonMcpCommandPresentation() {
+	if native == nil {
+		return
+	}
+	native.terminalOutputMu.Lock()
+	defer native.terminalOutputMu.Unlock()
+	if native.mcpPresentation != nil {
+		native.mcpPresentation.abandoned = true
+		native.retireInterruptedMcpCommandPresentationLocked()
 	}
 }
 
-func (native *sshNativeSession) filterMcpPresentationLocked(data []byte) []byte {
-	native.mcpPresentationMu.Lock()
-	defer native.mcpPresentationMu.Unlock()
-	if native.mcpPresentation == nil {
-		return data
+func (native *sshNativeSession) recordMcpCommandPresentationInputWritten(data []byte, written int) {
+	if native == nil || written <= 0 || len(data) == 0 {
+		return
 	}
-	visible := native.mcpPresentation.filter(data)
+	written = minInt(written, len(data))
+	native.terminalOutputMu.Lock()
+	defer native.terminalOutputMu.Unlock()
+	if native.mcpPresentation == nil {
+		return
+	}
+	interruptStart := 0
+	if !native.mcpPresentation.wrapperWritten {
+		wrapperStart := bytes.Index(data, native.mcpPresentation.inputPayload)
+		if wrapperStart < 0 || written <= wrapperStart {
+			return
+		}
+		native.mcpPresentation.wrapperWriteStarted = true
+		wrapperEnd := wrapperStart + len(native.mcpPresentation.inputPayload)
+		if written < wrapperEnd {
+			return
+		}
+		native.mcpPresentation.wrapperWritten = true
+		interruptStart = wrapperEnd
+	}
+	if bytes.IndexByte(data[interruptStart:written], '\x03') >= 0 {
+		native.mcpPresentation.interruptWritten = true
+		native.retireInterruptedMcpCommandPresentationLocked()
+	}
+}
+
+func (native *sshNativeSession) retireInterruptedMcpCommandPresentationLocked() {
+	if native.mcpPresentation == nil ||
+		!native.mcpPresentation.abandoned ||
+		!native.mcpPresentation.interruptWritten {
+		return
+	}
+	native.retireMcpCommandPresentationLocked()
+}
+
+func (native *sshNativeSession) retireMcpCommandPresentationLocked() {
+	if native.mcpPresentation == nil {
+		return
+	}
+	if len(native.mcpRetiredPresentations) >= mcpMaxRetiredPresentations {
+		// beginMcpCommandPresentation prevents this state in normal operation. Preserve every
+		// existing token and leave the current filter active if the invariant is ever violated.
+		return
+	}
+	native.mcpPresentation.retiredPending = len(native.mcpPresentation.pending)
+	native.mcpPresentation.retired = true
+	native.mcpRetiredPresentations = append(
+		native.mcpRetiredPresentations,
+		native.mcpPresentation,
+	)
+	native.mcpPresentation = nil
+}
+
+func (native *sshNativeSession) filterMcpPresentationLocked(data []byte) []byte {
+	visible := data
+	if len(native.mcpRetiredPresentations) > 0 {
+		remaining := native.mcpRetiredPresentations[:0]
+		for _, presentation := range native.mcpRetiredPresentations {
+			visible = presentation.filter(visible)
+			if !presentation.complete {
+				remaining = append(remaining, presentation)
+			}
+		}
+		for index := len(remaining); index < len(native.mcpRetiredPresentations); index++ {
+			native.mcpRetiredPresentations[index] = nil
+		}
+		native.mcpRetiredPresentations = remaining
+	}
+	if native.mcpPresentation == nil {
+		return visible
+	}
+	visible = native.mcpPresentation.filter(visible)
 	if native.mcpPresentation.complete {
 		native.mcpPresentation = nil
 	}
 	return visible
 }
 
-func (native *sshNativeSession) drainAndClearMcpCommandPresentationLocked() []byte {
-	native.mcpPresentationMu.Lock()
-	defer native.mcpPresentationMu.Unlock()
-	if native.mcpPresentation == nil {
-		return nil
-	}
-	pending := native.mcpPresentation.drainPending()
+func (native *sshNativeSession) clearMcpCommandPresentationLocked() {
 	native.mcpPresentation = nil
-	return pending
 }
 
-func (native *sshNativeSession) clearMcpCommandPresentationLocked() {
-	native.mcpPresentationMu.Lock()
-	defer native.mcpPresentationMu.Unlock()
-	native.mcpPresentation = nil
+func (native *sshNativeSession) clearAllMcpCommandPresentationsLocked() {
+	native.clearMcpCommandPresentationLocked()
+	clear(native.mcpRetiredPresentations)
+	native.mcpRetiredPresentations = nil
 }
 
 func (native *sshNativeSession) publishTerminalFrame(frame *sshTerminalFrame) {
@@ -1303,8 +1396,7 @@ func (native *sshNativeSession) writeRaw(data []byte) error {
 		return errSSHSessionClosed
 	}
 	if native.inputQueue == nil || native.done == nil {
-		_, err := native.stdin.Write(data)
-		return err
+		return native.writeRemoteInput(data)
 	}
 	copyOfData := append([]byte(nil), data...)
 	select {
@@ -1322,6 +1414,17 @@ func (native *sshNativeSession) writeRaw(data []byte) error {
 	}
 }
 
+func (native *sshNativeSession) writeRemoteInput(data []byte) error {
+	written, err := native.stdin.Write(data)
+	if written > len(data) {
+		written = len(data)
+	}
+	if written > 0 {
+		native.recordMcpCommandPresentationInputWritten(data, written)
+	}
+	return err
+}
+
 func (native *sshNativeSession) resize(columns, rows uint32) error {
 	columns, rows = normalizeTerminalSize(columns, rows)
 	native.terminalOutputMu.Lock()
@@ -1331,6 +1434,9 @@ func (native *sshNativeSession) resize(columns, rows uint32) error {
 	}
 	if err := native.session.WindowChange(int(rows), int(columns)); err != nil {
 		return err
+	}
+	if native.mcpPresentation != nil && !native.mcpPresentation.wrapperWriteStarted {
+		native.mcpPresentation.terminalColumns = int(columns)
 	}
 	if native.terminal != nil {
 		frame := native.terminal.resize(columns, rows)
@@ -1344,11 +1450,7 @@ func (native *sshNativeSession) resize(columns, rows uint32) error {
 func (native *sshNativeSession) close(notify bool) {
 	native.closeOnce.Do(func() {
 		native.terminalOutputMu.Lock()
-		if pending := native.drainAndClearMcpCommandPresentationLocked(); len(pending) > 0 &&
-			native.server != nil &&
-			native.terminal != nil {
-			native.publishVisibleTerminalDataLocked(pending)
-		}
+		native.clearAllMcpCommandPresentationsLocked()
 		native.lifecycleMu.Lock()
 		native.closed = true
 		native.lifecycleMu.Unlock()
@@ -1412,7 +1514,7 @@ func (native *sshNativeSession) startInputPump() {
 				if native.isClosed() {
 					return
 				}
-				if _, err := native.stdin.Write(data); err != nil {
+				if err := native.writeRemoteInput(data); err != nil {
 					native.close(native.server != nil)
 					return
 				}
