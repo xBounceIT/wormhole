@@ -598,6 +598,34 @@ func TestMcpPresentationFilterPreservesUnrelatedReadlineSequenceAtEverySplit(t *
 	}
 }
 
+func TestMcpPresentationFilterPreservesWrapperSuffixCollisionsAtEverySplit(t *testing.T) {
+	capture, payload, err := newMcpCommandCapture("echo hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, collision := range map[string]string{
+		"one-byte":    "\"",
+		"static-tail": "12345678" + mcpReadlineWrapperStaticSuffix,
+	} {
+		t.Run(name, func(t *testing.T) {
+			prefix := []byte("progress\r<" + collision + "\r\nroot@example:/home/user# ")
+			raw := append(append([]byte{}, prefix...), capture.start...)
+			raw = append(raw, []byte("\r\nhello\r\n")...)
+			raw = append(raw, capture.endPrefix...)
+			raw = append(raw, []byte("0@@\r\n")...)
+			want := string(prefix) + "echo hello\r\nhello\r\n"
+
+			for split := 0; split <= len(raw); split++ {
+				filter := newMcpCommandPresentationFilter("echo hello", payload, capture.start, capture.endPrefix)
+				visible := append(filter.filter(raw[:split]), filter.filter(raw[split:])...)
+				if string(visible) != want || !filter.complete {
+					t.Fatalf("split %d suffix collision output = %q complete=%v", split, visible, filter.complete)
+				}
+			}
+		})
+	}
+}
+
 func TestMcpPresentationFilterBoundsUnconfirmedReadlineSequence(t *testing.T) {
 	capture, payload, err := newMcpCommandCapture("echo hello")
 	if err != nil {

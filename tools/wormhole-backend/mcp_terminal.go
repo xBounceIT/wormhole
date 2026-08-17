@@ -147,8 +147,10 @@ const (
 )
 
 const (
-	mcpMaxEndMarkerDigits      = 10
-	mcpMaxRetiredPresentations = 8
+	mcpMaxEndMarkerDigits            = 10
+	mcpMaxRetiredPresentations       = 8
+	mcpReadlineRedrawTokenProofBytes = 8
+	mcpReadlineWrapperStaticSuffix   = " \"$__wh_rc\""
 )
 
 type mcpCommandPresentationFilter struct {
@@ -337,8 +339,7 @@ func (filter *mcpCommandPresentationFilter) drainBeforeWrapperMatch(output *[]by
 		redrawContentEnd--
 	}
 	confirmedRedraw := filter.readlineRedrawStart >= 0 &&
-		redrawContentStart < redrawContentEnd &&
-		bytes.HasSuffix(filter.expectedEcho, filter.pending[redrawContentStart:redrawContentEnd])
+		filter.isConfirmedReadlineRedraw(filter.pending[redrawContentStart:redrawContentEnd])
 	if !confirmedRedraw {
 		filter.drainTo(output, matchStart)
 		return
@@ -347,6 +348,21 @@ func (filter *mcpCommandPresentationFilter) drainBeforeWrapperMatch(output *[]by
 	filter.drainTo(output, filter.readlineRedrawStart)
 	filter.consumePending(redrawBytes)
 	filter.readlineRedrawStart = -1
+}
+
+func (filter *mcpCommandPresentationFilter) isConfirmedReadlineRedraw(candidate []byte) bool {
+	staticSuffix := []byte(mcpReadlineWrapperStaticSuffix)
+	if len(candidate) < len(staticSuffix)+mcpReadlineRedrawTokenProofBytes ||
+		!bytes.HasSuffix(candidate, staticSuffix) ||
+		!bytes.HasSuffix(filter.expectedEcho, candidate) {
+		return false
+	}
+	tokenEnd := len(filter.endMarkerPrefix) - 1
+	if tokenEnd < mcpReadlineRedrawTokenProofBytes || filter.endMarkerPrefix[tokenEnd] != '_' {
+		return false
+	}
+	tokenProof := filter.endMarkerPrefix[tokenEnd-mcpReadlineRedrawTokenProofBytes : tokenEnd]
+	return bytes.HasSuffix(candidate[:len(candidate)-len(staticSuffix)], tokenProof)
 }
 
 func (filter *mcpCommandPresentationFilter) matchEchoLineEndingOrFailOpen(output *[]byte) bool {
