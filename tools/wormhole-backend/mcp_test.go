@@ -576,6 +576,42 @@ func TestMcpPresentationFilterHidesReadlineRedrawnWrapperAtEverySplit(t *testing
 	}
 }
 
+func TestMcpPresentationFilterPreservesUnrelatedReadlineSequenceAtEverySplit(t *testing.T) {
+	capture, payload, err := newMcpCommandCapture("echo hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefix := []byte("downloading\r<status\r\nroot@example:/home/user# ")
+	raw := append(append([]byte{}, prefix...), capture.start...)
+	raw = append(raw, []byte("\r\nhello\r\n")...)
+	raw = append(raw, capture.endPrefix...)
+	raw = append(raw, []byte("0@@\r\n")...)
+	want := string(prefix) + "echo hello\r\nhello\r\n"
+
+	for split := 0; split <= len(raw); split++ {
+		filter := newMcpCommandPresentationFilter("echo hello", payload, capture.start, capture.endPrefix)
+		visible := append(filter.filter(raw[:split]), filter.filter(raw[split:])...)
+		if string(visible) != want || !filter.complete {
+			t.Fatalf("split %d unrelated redraw output = %q complete=%v", split, visible, filter.complete)
+		}
+	}
+}
+
+func TestMcpPresentationFilterBoundsUnconfirmedReadlineSequence(t *testing.T) {
+	capture, payload, err := newMcpCommandCapture("echo hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	filter := newMcpCommandPresentationFilter("echo hello", payload, capture.start, capture.endPrefix)
+	prefix := append([]byte("\r<"), bytes.Repeat([]byte("x"), len(filter.expectedEcho)+len(filter.startMarker)+3)...)
+	if visible := filter.filter(prefix); !bytes.Equal(visible, prefix) {
+		t.Fatalf("oversized unconfirmed redraw output = %q", visible)
+	}
+	if filter.readlineRedrawStart >= 0 || len(filter.pending) != 0 {
+		t.Fatalf("oversized unconfirmed redraw remained buffered: start=%d pending=%d", filter.readlineRedrawStart, len(filter.pending))
+	}
+}
+
 func TestMcpPresentationFilterHandlesFragmentedLineEndingsAndMarkers(t *testing.T) {
 	capture, payload, err := newMcpCommandCapture("printf result")
 	if err != nil {
