@@ -577,6 +577,42 @@ func TestMcpPresentationFilterHidesReadlineRedrawnWrapperAtEverySplit(t *testing
 	}
 }
 
+func TestMcpPresentationFilterHidesNarrowTerminalReadlineRedrawAtEverySplit(t *testing.T) {
+	capture, payload, err := newMcpCommandCapture("echo hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	echo := bytes.TrimSuffix(payload, []byte("\r"))
+	const columns = 16
+	redraw := append([]byte("\r<"), echo[len(echo)-(columns-1):]...)
+	raw := append([]byte("root@example:/home/user# "), redraw...)
+	raw = append(raw, []byte("\r\n")...)
+	raw = append(raw, capture.start...)
+	raw = append(raw, []byte("\r\nhello\r\n")...)
+	raw = append(raw, capture.endPrefix...)
+	raw = append(raw, []byte("0@@\r\n")...)
+	want := "root@example:/home/user# echo hello\r\nhello\r\n"
+
+	for split := 0; split <= len(raw); split++ {
+		terminal, terminalErr := newSSHTerminalEmulator(80, 24)
+		if terminalErr != nil {
+			t.Fatal(terminalErr)
+		}
+		terminal.resize(columns, 24)
+		native := &sshNativeSession{terminal: terminal}
+		if beginErr := native.beginMcpCommandPresentation("echo hello", payload, capture.start, capture.endPrefix); beginErr != nil {
+			t.Fatal(beginErr)
+		}
+		visible := append(
+			native.filterMcpPresentationLocked(raw[:split]),
+			native.filterMcpPresentationLocked(raw[split:])...,
+		)
+		if string(visible) != want {
+			t.Fatalf("split %d narrow readline redraw output = %q", split, visible)
+		}
+	}
+}
+
 func TestMcpPresentationFilterPreservesUnrelatedReadlineSequenceAtEverySplit(t *testing.T) {
 	capture, payload, err := newMcpCommandCapture("echo hello")
 	if err != nil {
@@ -603,12 +639,16 @@ func TestMcpPresentationFilterPreservesWrapperSuffixCollisionsAtEverySplit(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	for name, collision := range map[string]string{
-		"one-byte":    "\"",
-		"static-tail": "12345678" + mcpReadlineWrapperStaticSuffix,
+	for name, testCase := range map[string]struct {
+		collision string
+		columns   int
+	}{
+		"one-byte":           {collision: "\"", columns: 80},
+		"static-tail":        {collision: "zzzzzzzz" + mcpReadlineWrapperStaticSuffix, columns: 80},
+		"narrow-static-tail": {collision: "zzzzzzzz" + mcpReadlineWrapperStaticSuffix, columns: 20},
 	} {
 		t.Run(name, func(t *testing.T) {
-			prefix := []byte("progress\r<" + collision + "\r\nroot@example:/home/user# ")
+			prefix := []byte("progress\r<" + testCase.collision + "\r\nroot@example:/home/user# ")
 			raw := append(append([]byte{}, prefix...), capture.start...)
 			raw = append(raw, []byte("\r\nhello\r\n")...)
 			raw = append(raw, capture.endPrefix...)
@@ -617,6 +657,7 @@ func TestMcpPresentationFilterPreservesWrapperSuffixCollisionsAtEverySplit(t *te
 
 			for split := 0; split <= len(raw); split++ {
 				filter := newMcpCommandPresentationFilter("echo hello", payload, capture.start, capture.endPrefix)
+				filter.terminalColumns = testCase.columns
 				visible := append(filter.filter(raw[:split]), filter.filter(raw[split:])...)
 				if string(visible) != want || !filter.complete {
 					t.Fatalf("split %d suffix collision output = %q complete=%v", split, visible, filter.complete)

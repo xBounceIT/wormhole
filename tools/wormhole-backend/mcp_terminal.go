@@ -150,6 +150,7 @@ const (
 	mcpMaxEndMarkerDigits            = 10
 	mcpMaxRetiredPresentations       = 8
 	mcpReadlineRedrawTokenProofBytes = 8
+	mcpReadlineNarrowTokenProofBytes = 2
 	mcpReadlineWrapperStaticSuffix   = " \"$__wh_rc\""
 )
 
@@ -167,6 +168,7 @@ type mcpCommandPresentationFilter struct {
 	echoMatched          int
 	startMarkerMatched   int
 	readlineRedrawStart  int
+	terminalColumns      int
 	retiredPending       int
 	state                mcpPresentationState
 	abandoned            bool
@@ -203,6 +205,7 @@ func newMcpCommandPresentationFilter(
 		startMarkerFallback:  buildPrefixFallback(startMarker),
 		endMarkerPrefix:      append([]byte(nil), endMarkerPrefix...),
 		readlineRedrawStart:  -1,
+		terminalColumns:      80,
 		state:                mcpPresentationMatchingEcho,
 	}
 }
@@ -366,17 +369,28 @@ func (filter *mcpCommandPresentationFilter) drainBeforeWrapperMatch(output *[]by
 }
 
 func (filter *mcpCommandPresentationFilter) isConfirmedReadlineRedraw(candidate []byte) bool {
+	if !bytes.HasSuffix(filter.expectedEcho, candidate) {
+		return false
+	}
+	if filter.hasReadlineRedrawTokenProof(candidate, mcpReadlineRedrawTokenProofBytes) {
+		return true
+	}
+	return filter.terminalColumns > 0 &&
+		len(candidate)+1 == filter.terminalColumns &&
+		filter.hasReadlineRedrawTokenProof(candidate, mcpReadlineNarrowTokenProofBytes)
+}
+
+func (filter *mcpCommandPresentationFilter) hasReadlineRedrawTokenProof(candidate []byte, proofBytes int) bool {
 	staticSuffix := []byte(mcpReadlineWrapperStaticSuffix)
-	if len(candidate) < len(staticSuffix)+mcpReadlineRedrawTokenProofBytes ||
-		!bytes.HasSuffix(candidate, staticSuffix) ||
-		!bytes.HasSuffix(filter.expectedEcho, candidate) {
+	if proofBytes <= 0 || len(candidate) < len(staticSuffix)+proofBytes ||
+		!bytes.HasSuffix(candidate, staticSuffix) {
 		return false
 	}
 	tokenEnd := len(filter.endMarkerPrefix) - 1
-	if tokenEnd < mcpReadlineRedrawTokenProofBytes || filter.endMarkerPrefix[tokenEnd] != '_' {
+	if tokenEnd < proofBytes || filter.endMarkerPrefix[tokenEnd] != '_' {
 		return false
 	}
-	tokenProof := filter.endMarkerPrefix[tokenEnd-mcpReadlineRedrawTokenProofBytes : tokenEnd]
+	tokenProof := filter.endMarkerPrefix[tokenEnd-proofBytes : tokenEnd]
 	return bytes.HasSuffix(candidate[:len(candidate)-len(staticSuffix)], tokenProof)
 }
 

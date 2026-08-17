@@ -1204,6 +1204,9 @@ func (native *sshNativeSession) beginMcpCommandPresentation(
 		return errMcpCommandInProgress
 	}
 	native.mcpPresentation = newMcpCommandPresentationFilter(command, payload, startMarker, endMarkerPrefix)
+	if native.terminal != nil && native.terminal.columns > 0 {
+		native.mcpPresentation.terminalColumns = native.terminal.columns
+	}
 	return nil
 }
 
@@ -1431,6 +1434,9 @@ func (native *sshNativeSession) resize(columns, rows uint32) error {
 	}
 	if err := native.session.WindowChange(int(rows), int(columns)); err != nil {
 		return err
+	}
+	if native.mcpPresentation != nil && !native.mcpPresentation.wrapperWriteStarted {
+		native.mcpPresentation.terminalColumns = int(columns)
 	}
 	if native.terminal != nil {
 		frame := native.terminal.resize(columns, rows)
