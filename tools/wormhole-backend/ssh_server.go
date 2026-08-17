@@ -1232,7 +1232,12 @@ func (native *sshNativeSession) retireAbandonedMcpCommandPresentationOnInterrupt
 	defer native.terminalOutputMu.Unlock()
 	if native.mcpPresentation != nil && native.mcpPresentation.abandoned {
 		if len(native.mcpRetiredPresentations) >= mcpMaxRetiredPresentations {
-			return
+			// A retired filter buffers only suffixes that may belong to its internal wrapper.
+			// Drop the oldest filter and those private bytes rather than leaking them or
+			// permanently blocking recovery after repeated interrupted commands.
+			copy(native.mcpRetiredPresentations, native.mcpRetiredPresentations[1:])
+			native.mcpRetiredPresentations[len(native.mcpRetiredPresentations)-1] = nil
+			native.mcpRetiredPresentations = native.mcpRetiredPresentations[:len(native.mcpRetiredPresentations)-1]
 		}
 		native.mcpPresentation.retired = true
 		native.mcpRetiredPresentations = append(

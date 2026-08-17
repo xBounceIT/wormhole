@@ -975,6 +975,35 @@ func TestMcpWrittenInterruptRetiresPresentationDespiteWriteError(t *testing.T) {
 	}
 }
 
+func TestMcpWrittenInterruptEvictsOldestRetiredPresentationAtLimit(t *testing.T) {
+	oldest := &mcpCommandPresentationFilter{retired: true}
+	retired := make([]*mcpCommandPresentationFilter, mcpMaxRetiredPresentations)
+	retired[0] = oldest
+	for index := 1; index < len(retired); index++ {
+		retired[index] = &mcpCommandPresentationFilter{retired: true}
+	}
+	current := &mcpCommandPresentationFilter{abandoned: true}
+	native := &sshNativeSession{
+		mcpPresentation:         current,
+		mcpRetiredPresentations: retired,
+	}
+
+	native.retireAbandonedMcpCommandPresentationOnInterrupt([]byte{'\x03'})
+
+	if native.mcpPresentation != nil || len(native.mcpRetiredPresentations) != mcpMaxRetiredPresentations {
+		t.Fatalf(
+			"capped retirement left active = %t, retired = %d",
+			native.mcpPresentation != nil,
+			len(native.mcpRetiredPresentations),
+		)
+	}
+	if native.mcpRetiredPresentations[0] == oldest ||
+		native.mcpRetiredPresentations[len(native.mcpRetiredPresentations)-1] != current ||
+		!current.retired {
+		t.Fatal("capped retirement did not evict the oldest filter and retain the current one")
+	}
+}
+
 func TestMcpRunCommandReportsTruncatedWhenRawReplayDropsBytes(t *testing.T) {
 	var output bytes.Buffer
 	terminal, err := newSSHTerminalEmulator(80, 24)
