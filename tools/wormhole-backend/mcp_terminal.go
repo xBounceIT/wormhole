@@ -150,8 +150,6 @@ const (
 	mcpMaxEndMarkerDigits            = 10
 	mcpMaxRetiredPresentations       = 8
 	mcpReadlineRedrawTokenProofBytes = 8
-	mcpReadlineNarrowTokenProofBytes = 2
-	mcpReadlineWrapperStaticSuffix   = " \"$__wh_rc\""
 )
 
 type mcpCommandPresentationFilter struct {
@@ -375,15 +373,24 @@ func (filter *mcpCommandPresentationFilter) isConfirmedReadlineRedraw(candidate 
 	if filter.hasReadlineRedrawTokenProof(candidate, mcpReadlineRedrawTokenProofBytes) {
 		return true
 	}
-	return filter.terminalColumns > 0 &&
-		len(candidate)+1 == filter.terminalColumns &&
-		filter.hasReadlineRedrawTokenProof(candidate, mcpReadlineNarrowTokenProofBytes)
+	if filter.terminalColumns <= 0 || len(candidate)+1 != filter.terminalColumns {
+		return false
+	}
+	// Readline reserves the first cell for '<'. The payload ends in the random
+	// marker token, so every remaining cell is evidence of this wrapper echo.
+	// A one-column PTY has no evidence-bearing cells, but its exact redraw is
+	// only "\r<" and would otherwise leak the truncation indicator.
+	if len(candidate) == 0 {
+		return true
+	}
+	return filter.hasReadlineRedrawTokenProof(
+		candidate,
+		minInt(len(candidate), mcpReadlineRedrawTokenProofBytes),
+	)
 }
 
 func (filter *mcpCommandPresentationFilter) hasReadlineRedrawTokenProof(candidate []byte, proofBytes int) bool {
-	staticSuffix := []byte(mcpReadlineWrapperStaticSuffix)
-	if proofBytes <= 0 || len(candidate) < len(staticSuffix)+proofBytes ||
-		!bytes.HasSuffix(candidate, staticSuffix) {
+	if proofBytes <= 0 || len(candidate) < proofBytes {
 		return false
 	}
 	tokenEnd := len(filter.endMarkerPrefix) - 1
@@ -391,7 +398,7 @@ func (filter *mcpCommandPresentationFilter) hasReadlineRedrawTokenProof(candidat
 		return false
 	}
 	tokenProof := filter.endMarkerPrefix[tokenEnd-proofBytes : tokenEnd]
-	return bytes.HasSuffix(candidate[:len(candidate)-len(staticSuffix)], tokenProof)
+	return bytes.HasSuffix(candidate, tokenProof)
 }
 
 func (filter *mcpCommandPresentationFilter) matchEchoLineEndingOrFailOpen(output *[]byte) bool {
@@ -658,9 +665,10 @@ func newMcpCommandCapture(command string) (mcpCommandCapture, []byte, error) {
 	endPrefix := []byte("@@WHE_" + token + "_")
 	escaped := strings.ReplaceAll(command, "'", "'\\''")
 	payload := fmt.Sprintf(
-		"printf '@@WHS_%%s@@\\n' %s; eval '%s'; __wh_rc=$?; printf '@@WHE_%%s_%%s@@\\n' %s \"$__wh_rc\"\r",
+		"printf '@@WHS_%%s@@\\n' %s; eval '%s'; __wh_rc=$?; printf '@@WHE_%%s_%%s@@\\n' %s \"$__wh_rc\"; : %s\r",
 		token,
 		escaped,
+		token,
 		token,
 	)
 	return mcpCommandCapture{

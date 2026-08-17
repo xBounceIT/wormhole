@@ -583,32 +583,62 @@ func TestMcpPresentationFilterHidesNarrowTerminalReadlineRedrawAtEverySplit(t *t
 		t.Fatal(err)
 	}
 	echo := bytes.TrimSuffix(payload, []byte("\r"))
-	const columns = 16
-	redraw := append([]byte("\r<"), echo[len(echo)-(columns-1):]...)
-	raw := append([]byte("root@example:/home/user# "), redraw...)
-	raw = append(raw, []byte("\r\n")...)
-	raw = append(raw, capture.start...)
+	for columns := 1; columns <= 16; columns++ {
+		t.Run(fmt.Sprintf("columns-%d", columns), func(t *testing.T) {
+			redraw := append([]byte("\r<"), echo[len(echo)-(columns-1):]...)
+			raw := append([]byte("root@example:/home/user# "), redraw...)
+			raw = append(raw, []byte("\r\n")...)
+			raw = append(raw, capture.start...)
+			raw = append(raw, []byte("\r\nhello\r\n")...)
+			raw = append(raw, capture.endPrefix...)
+			raw = append(raw, []byte("0@@\r\n")...)
+			want := "root@example:/home/user# echo hello\r\nhello\r\n"
+
+			for split := 0; split <= len(raw); split++ {
+				terminal, terminalErr := newSSHTerminalEmulator(80, 24)
+				if terminalErr != nil {
+					t.Fatal(terminalErr)
+				}
+				terminal.resize(uint32(columns), 24)
+				native := &sshNativeSession{terminal: terminal}
+				if beginErr := native.beginMcpCommandPresentation("echo hello", payload, capture.start, capture.endPrefix); beginErr != nil {
+					t.Fatal(beginErr)
+				}
+				visible := append(
+					native.filterMcpPresentationLocked(raw[:split]),
+					native.filterMcpPresentationLocked(raw[split:])...,
+				)
+				if string(visible) != want {
+					t.Fatalf("split %d narrow readline redraw output = %q", split, visible)
+				}
+			}
+		})
+	}
+}
+
+func TestMcpPresentationFilterPreservesNarrowReadlineRedrawWithWrongToken(t *testing.T) {
+	capture, payload, err := newMcpCommandCapture("echo hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const columns = 12
+	echo := bytes.TrimSuffix(payload, []byte("\r"))
+	wrongToken := append([]byte(nil), echo[len(echo)-(columns-1):]...)
+	wrongToken[0] = differentHexByte(wrongToken[0])
+	prefix := append([]byte("progress\r<"), wrongToken...)
+	prefix = append(prefix, []byte("\r\nroot@example:/home/user# ")...)
+	raw := append(append([]byte{}, prefix...), capture.start...)
 	raw = append(raw, []byte("\r\nhello\r\n")...)
 	raw = append(raw, capture.endPrefix...)
 	raw = append(raw, []byte("0@@\r\n")...)
-	want := "root@example:/home/user# echo hello\r\nhello\r\n"
+	want := string(prefix) + "echo hello\r\nhello\r\n"
 
 	for split := 0; split <= len(raw); split++ {
-		terminal, terminalErr := newSSHTerminalEmulator(80, 24)
-		if terminalErr != nil {
-			t.Fatal(terminalErr)
-		}
-		terminal.resize(columns, 24)
-		native := &sshNativeSession{terminal: terminal}
-		if beginErr := native.beginMcpCommandPresentation("echo hello", payload, capture.start, capture.endPrefix); beginErr != nil {
-			t.Fatal(beginErr)
-		}
-		visible := append(
-			native.filterMcpPresentationLocked(raw[:split]),
-			native.filterMcpPresentationLocked(raw[split:])...,
-		)
-		if string(visible) != want {
-			t.Fatalf("split %d narrow readline redraw output = %q", split, visible)
+		filter := newMcpCommandPresentationFilter("echo hello", payload, capture.start, capture.endPrefix)
+		filter.terminalColumns = columns
+		visible := append(filter.filter(raw[:split]), filter.filter(raw[split:])...)
+		if string(visible) != want || !filter.complete {
+			t.Fatalf("split %d wrong-token redraw output = %q complete=%v", split, visible, filter.complete)
 		}
 	}
 }
@@ -639,13 +669,15 @@ func TestMcpPresentationFilterPreservesWrapperSuffixCollisionsAtEverySplit(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
+	echo := bytes.TrimSuffix(payload, []byte("\r"))
+	wrongToken := append([]byte(nil), echo[len(echo)-8:]...)
+	wrongToken[0] = differentHexByte(wrongToken[0])
 	for name, testCase := range map[string]struct {
 		collision string
 		columns   int
 	}{
-		"one-byte":           {collision: "\"", columns: 80},
-		"static-tail":        {collision: "zzzzzzzz" + mcpReadlineWrapperStaticSuffix, columns: 80},
-		"narrow-static-tail": {collision: "zzzzzzzz" + mcpReadlineWrapperStaticSuffix, columns: 20},
+		"one-byte":    {collision: "f", columns: 80},
+		"wrong-token": {collision: string(wrongToken), columns: 9},
 	} {
 		t.Run(name, func(t *testing.T) {
 			prefix := []byte("progress\r<" + testCase.collision + "\r\nroot@example:/home/user# ")
@@ -665,6 +697,13 @@ func TestMcpPresentationFilterPreservesWrapperSuffixCollisionsAtEverySplit(t *te
 			}
 		})
 	}
+}
+
+func differentHexByte(value byte) byte {
+	if value == '0' {
+		return '1'
+	}
+	return '0'
 }
 
 func TestMcpPresentationFilterBoundsUnconfirmedReadlineSequence(t *testing.T) {
