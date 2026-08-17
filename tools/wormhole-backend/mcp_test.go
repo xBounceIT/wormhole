@@ -561,6 +561,7 @@ func TestMcpPresentationFilterHidesReadlineRedrawnWrapperAtEverySplit(t *testing
 	echo := bytes.TrimSuffix(payload, []byte("\r"))
 	redraw := append([]byte("\r<"), echo[len(echo)-32:]...)
 	raw := append([]byte("root@example:/home/user# "), redraw...)
+	raw = append(raw, []byte("\r\n")...)
 	raw = append(raw, capture.start...)
 	raw = append(raw, []byte("\r\nhello\r\n")...)
 	raw = append(raw, capture.endPrefix...)

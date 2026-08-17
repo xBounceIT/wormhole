@@ -304,7 +304,7 @@ func (filter *mcpCommandPresentationFilter) findEchoOrStartMarker(output *[]byte
 	}
 
 	if filter.readlineRedrawStart >= 0 &&
-		len(filter.pending)-filter.readlineRedrawStart > len(filter.expectedEcho)+len(filter.startMarker)+2 {
+		len(filter.pending)-filter.readlineRedrawStart > len(filter.expectedEcho)+len(filter.startMarker)+3 {
 		filter.readlineRedrawStart = -1
 	}
 	keep := maxInt(filter.echoMatched, filter.startMarkerMatched)
@@ -323,9 +323,18 @@ func (filter *mcpCommandPresentationFilter) findEchoOrStartMarker(output *[]byte
 
 func (filter *mcpCommandPresentationFilter) drainBeforeWrapperMatch(output *[]byte, matchStart int) {
 	redrawContentStart := filter.readlineRedrawStart + 2
+	redrawContentEnd := matchStart
+	if redrawContentEnd > redrawContentStart && filter.pending[redrawContentEnd-1] == '\n' {
+		redrawContentEnd--
+		if redrawContentEnd > redrawContentStart && filter.pending[redrawContentEnd-1] == '\r' {
+			redrawContentEnd--
+		}
+	} else if redrawContentEnd > redrawContentStart && filter.pending[redrawContentEnd-1] == '\r' {
+		redrawContentEnd--
+	}
 	confirmedRedraw := filter.readlineRedrawStart >= 0 &&
-		redrawContentStart < matchStart &&
-		bytes.HasSuffix(filter.expectedEcho, filter.pending[redrawContentStart:matchStart])
+		redrawContentStart < redrawContentEnd &&
+		bytes.HasSuffix(filter.expectedEcho, filter.pending[redrawContentStart:redrawContentEnd])
 	if !confirmedRedraw {
 		filter.drainTo(output, matchStart)
 		return
