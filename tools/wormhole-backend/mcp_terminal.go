@@ -156,9 +156,14 @@ type mcpCommandPresentationFilter struct {
 	expectedEchoFallback []int
 	presentation         []byte
 	startMarker          []byte
+	startMarkerFallback  []int
 	endMarkerPrefix      []byte
 	pending              []byte
 	suppressedEcho       []byte
+	scanPosition         int
+	echoMatched          int
+	startMarkerMatched   int
+	retiredPending       int
 	state                mcpPresentationState
 	abandoned            bool
 	retired              bool
@@ -187,6 +192,7 @@ func newMcpCommandPresentationFilter(
 		expectedEchoFallback: buildPrefixFallback(echo),
 		presentation:         []byte(command + "\r\n"),
 		startMarker:          append([]byte(nil), startMarker...),
+		startMarkerFallback:  buildPrefixFallback(startMarker),
 		endMarkerPrefix:      append([]byte(nil), endMarkerPrefix...),
 		state:                mcpPresentationMatchingEcho,
 	}
@@ -254,31 +260,45 @@ func (filter *mcpCommandPresentationFilter) filter(data []byte) []byte {
 
 func (filter *mcpCommandPresentationFilter) findEchoOrStartMarker(output *[]byte) bool {
 	// A prompt emitted just before the MCP write can be read after this filter is installed.
-	// Preserve that unrelated prefix while retaining only bytes that could begin the hidden echo.
-	echoIndex := bytes.Index(filter.pending, filter.expectedEcho)
-	markerIndex := bytes.Index(filter.pending, filter.startMarker)
-	if markerIndex >= 0 && (echoIndex < 0 || markerIndex < echoIndex) {
-		filter.drainTo(output, markerIndex)
-		filter.pending = filter.pending[len(filter.startMarker):]
-		*output = append(*output, filter.presentation...)
-		filter.state = mcpPresentationSwallowStartLineEnding
-		return true
-	}
-	if echoIndex >= 0 {
-		filter.drainTo(output, echoIndex)
+	// Stream both possible prefixes so a fragmented maximum-size echo remains linear.
+	for filter.scanPosition < len(filter.pending) {
+		value := filter.pending[filter.scanPosition]
+		filter.echoMatched = advancePrefixMatch(
+			filter.echoMatched,
+			value,
+			filter.expectedEcho,
+			filter.expectedEchoFallback,
+		)
+		filter.startMarkerMatched = advancePrefixMatch(
+			filter.startMarkerMatched,
+			value,
+			filter.startMarker,
+			filter.startMarkerFallback,
+		)
+		filter.scanPosition++
+
+		echoComplete := filter.echoMatched == len(filter.expectedEcho)
+		markerComplete := filter.startMarkerMatched == len(filter.startMarker)
+		if !echoComplete && !markerComplete {
+			continue
+		}
+		echoStart := filter.scanPosition - filter.echoMatched
+		markerStart := filter.scanPosition - filter.startMarkerMatched
+		if markerComplete && (!echoComplete || markerStart < echoStart) {
+			filter.drainTo(output, markerStart)
+			filter.consumePending(len(filter.startMarker))
+			*output = append(*output, filter.presentation...)
+			filter.state = mcpPresentationSwallowStartLineEnding
+			return true
+		}
+		filter.drainTo(output, echoStart)
 		filter.state = mcpPresentationMatchingEchoLineEnding
 		return true
 	}
 
-	keep := maxInt(
-		longestPrefixSuffixLengthWithFallback(
-			filter.pending,
-			filter.expectedEcho,
-			filter.expectedEchoFallback,
-		),
-		longestPrefixSuffixLength(filter.pending, filter.startMarker),
-	)
+	keep := maxInt(filter.echoMatched, filter.startMarkerMatched)
 	filter.drainTo(output, len(filter.pending)-keep)
+	filter.scanPosition = len(filter.pending)
 	return false
 }
 
@@ -310,7 +330,7 @@ func (filter *mcpCommandPresentationFilter) matchEchoLineEndingOrFailOpen(output
 
 func (filter *mcpCommandPresentationFilter) confirmEcho(echoLength int) {
 	filter.suppressedEcho = append([]byte(nil), filter.pending[:echoLength]...)
-	filter.pending = filter.pending[echoLength:]
+	filter.consumePending(echoLength)
 	filter.state = mcpPresentationAwaitStartMarker
 }
 
@@ -329,7 +349,7 @@ func (filter *mcpCommandPresentationFilter) matchStartMarkerOrFailOpen(output *[
 	if len(filter.pending) < len(filter.startMarker) {
 		return false
 	}
-	filter.pending = filter.pending[len(filter.startMarker):]
+	filter.consumePending(len(filter.startMarker))
 	filter.suppressedEcho = nil
 	*output = append(*output, filter.presentation...)
 	filter.state = mcpPresentationSwallowStartLineEnding
@@ -338,7 +358,7 @@ func (filter *mcpCommandPresentationFilter) matchStartMarkerOrFailOpen(output *[
 
 func (filter *mcpCommandPresentationFilter) failOpen(output *[]byte) {
 	if filter.retired && filter.state == mcpPresentationMatchingEchoLineEnding {
-		filter.pending = filter.pending[len(filter.expectedEcho):]
+		filter.consumePending(len(filter.expectedEcho))
 	} else if len(filter.suppressedEcho) > 0 && !filter.retired {
 		*output = append(*output, filter.suppressedEcho...)
 	}
@@ -352,7 +372,7 @@ func (filter *mcpCommandPresentationFilter) passUntilEndMarker(output *[]byte) b
 	search := filter.findEndMarker()
 	if search.found {
 		filter.drainTo(output, search.start)
-		filter.pending = filter.pending[search.endExclusive-search.start:]
+		filter.consumePending(search.endExclusive - search.start)
 		filter.state = mcpPresentationSwallowEndLineEnding
 		return true
 	}
@@ -422,19 +442,19 @@ func (filter *mcpCommandPresentationFilter) consumeLineEndingOrWait(
 		return false
 	}
 	if filter.pending[0] == '\r' {
-		filter.pending = filter.pending[1:]
+		filter.consumePending(1)
 		if len(filter.pending) == 0 {
 			filter.state = afterCRState
 			return false
 		}
 		if filter.pending[0] == '\n' {
-			filter.pending = filter.pending[1:]
+			filter.consumePending(1)
 		}
 		filter.state = nextState
 		return true
 	}
 	if filter.pending[0] == '\n' {
-		filter.pending = filter.pending[1:]
+		filter.consumePending(1)
 	}
 	filter.state = nextState
 	return true
@@ -445,7 +465,7 @@ func (filter *mcpCommandPresentationFilter) consumeOptionalLFOrWait(nextState mc
 		return false
 	}
 	if filter.pending[0] == '\n' {
-		filter.pending = filter.pending[1:]
+		filter.consumePending(1)
 	}
 	filter.state = nextState
 	return true
@@ -475,25 +495,6 @@ func longestPrefixSuffixLength(data, prefix []byte) int {
 	return 0
 }
 
-func longestPrefixSuffixLengthWithFallback(data, prefix []byte, fallback []int) int {
-	if len(data) == 0 || len(prefix) <= 1 || len(fallback) != len(prefix) {
-		return 0
-	}
-	matched := 0
-	for _, value := range data {
-		for matched > 0 && value != prefix[matched] {
-			matched = fallback[matched-1]
-		}
-		if value == prefix[matched] {
-			matched++
-		}
-		if matched == len(prefix) {
-			matched = fallback[matched-1]
-		}
-	}
-	return matched
-}
-
 func buildPrefixFallback(prefix []byte) []int {
 	if len(prefix) <= 1 {
 		return nil
@@ -511,11 +512,38 @@ func buildPrefixFallback(prefix []byte) []int {
 	return fallback
 }
 
+func advancePrefixMatch(matched int, value byte, prefix []byte, fallback []int) int {
+	if len(prefix) == 0 {
+		return 0
+	}
+	for matched > 0 && value != prefix[matched] {
+		matched = fallback[matched-1]
+	}
+	if value == prefix[matched] {
+		matched++
+	}
+	return matched
+}
+
 func (filter *mcpCommandPresentationFilter) drainTo(output *[]byte, count int) {
 	if count <= 0 {
 		return
 	}
+	discard := minInt(count, filter.retiredPending)
+	filter.consumePending(discard)
+	count -= discard
+	if count <= 0 {
+		return
+	}
 	*output = append(*output, filter.pending[:count]...)
+	filter.consumePending(count)
+}
+
+func (filter *mcpCommandPresentationFilter) consumePending(count int) {
+	if count <= 0 {
+		return
+	}
+	filter.retiredPending = maxInt(0, filter.retiredPending-count)
 	filter.pending = filter.pending[count:]
 }
 

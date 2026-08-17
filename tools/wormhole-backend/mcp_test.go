@@ -603,6 +603,33 @@ func TestMcpPresentationFilterHandlesEveryPromptAndWrapperSplit(t *testing.T) {
 	}
 }
 
+func TestMcpPresentationRetirementDropsPartialWrapperPrefixes(t *testing.T) {
+	capture, payload, err := newMcpCommandCapture("echo hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	echo := bytes.TrimSuffix(payload, []byte("\r"))
+	for name, prefix := range map[string][]byte{
+		"echo":         append([]byte(nil), echo[:len(echo)/2]...),
+		"start-marker": append(append(append([]byte(nil), echo...), []byte("\r\n")...), capture.start[:len(capture.start)/2]...),
+	} {
+		t.Run(name, func(t *testing.T) {
+			filter := newMcpCommandPresentationFilter("echo hello", payload, capture.start, capture.endPrefix)
+			native := &sshNativeSession{mcpPresentation: filter}
+			if visible := native.filterMcpPresentationLocked(prefix); len(visible) != 0 {
+				t.Fatalf("speculative prefix became visible before interrupt: %q", visible)
+			}
+			native.abandonMcpCommandPresentation()
+			native.retireAbandonedMcpCommandPresentationOnInterrupt([]byte{'\x03'})
+
+			visible := native.filterMcpPresentationLocked([]byte("^C\r\nroot@example:/home/user# "))
+			if string(visible) != "^C\r\nroot@example:/home/user# " {
+				t.Fatalf("post-interrupt output exposed the speculative prefix: %q", visible)
+			}
+		})
+	}
+}
+
 func TestMcpPresentationFilterFailsOpenAtEverySpeculativeBoundary(t *testing.T) {
 	capture, payload, err := newMcpCommandCapture("echo x")
 	if err != nil {
@@ -642,6 +669,28 @@ func TestMcpPresentationFilterHidesLargeWrapper(t *testing.T) {
 	}
 	if string(visible) != "echo large\r\nlarge\r\n" || !filter.complete {
 		t.Fatalf("large wrapper output = %q complete=%v", visible, filter.complete)
+	}
+}
+
+func TestMcpPresentationFilterHidesMaximumWrapperByteByByte(t *testing.T) {
+	capture, _, err := newMcpCommandCapture("echo large")
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := append(bytes.Repeat([]byte{'x'}, mcpMaxCommandBytes), '\r')
+	filter := newMcpCommandPresentationFilter("echo large", payload, capture.start, capture.endPrefix)
+	raw := append(bytes.TrimSuffix(payload, []byte("\r")), []byte("\r\n")...)
+	raw = append(raw, capture.start...)
+	raw = append(raw, []byte("\r\nlarge\r\n")...)
+	raw = append(raw, capture.endPrefix...)
+	raw = append(raw, []byte("0@@\r\n")...)
+
+	var visible []byte
+	for _, value := range raw {
+		visible = append(visible, filter.filter([]byte{value})...)
+	}
+	if string(visible) != "echo large\r\nlarge\r\n" || !filter.complete {
+		t.Fatalf("byte-wise maximum wrapper output = %q complete=%v", visible, filter.complete)
 	}
 }
 

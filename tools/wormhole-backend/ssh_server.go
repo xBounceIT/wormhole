@@ -1239,6 +1239,7 @@ func (native *sshNativeSession) retireAbandonedMcpCommandPresentationOnInterrupt
 			native.mcpRetiredPresentations[len(native.mcpRetiredPresentations)-1] = nil
 			native.mcpRetiredPresentations = native.mcpRetiredPresentations[:len(native.mcpRetiredPresentations)-1]
 		}
+		native.mcpPresentation.retiredPending = len(native.mcpPresentation.pending)
 		native.mcpPresentation.retired = true
 		native.mcpRetiredPresentations = append(
 			native.mcpRetiredPresentations,
