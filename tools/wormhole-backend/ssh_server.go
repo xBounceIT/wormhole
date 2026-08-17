@@ -1211,6 +1211,28 @@ func (native *sshNativeSession) clearMcpCommandPresentation() {
 	native.clearMcpCommandPresentationLocked()
 }
 
+func (native *sshNativeSession) abandonMcpCommandPresentation() {
+	if native == nil {
+		return
+	}
+	native.terminalOutputMu.Lock()
+	defer native.terminalOutputMu.Unlock()
+	if native.mcpPresentation != nil {
+		native.mcpPresentation.abandoned = true
+	}
+}
+
+func (native *sshNativeSession) clearAbandonedMcpCommandPresentation() {
+	if native == nil {
+		return
+	}
+	native.terminalOutputMu.Lock()
+	defer native.terminalOutputMu.Unlock()
+	if native.mcpPresentation != nil && native.mcpPresentation.abandoned {
+		native.clearMcpCommandPresentationLocked()
+	}
+}
+
 func (native *sshNativeSession) filterMcpPresentationLocked(data []byte) []byte {
 	if native.mcpPresentation == nil {
 		return data

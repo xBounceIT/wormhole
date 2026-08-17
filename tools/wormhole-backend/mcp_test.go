@@ -843,6 +843,72 @@ func TestMcpRunCommandTimeoutKeepsWrapperOutOfVisibleReplay(t *testing.T) {
 	}
 }
 
+func TestMcpRunCommandInterruptClearsTimedOutPresentation(t *testing.T) {
+	terminal, err := newSSHTerminalEmulator(80, 24)
+	if err != nil {
+		t.Fatal(err)
+	}
+	native := &sshNativeSession{
+		server:           &sshServer{output: &sshEventWriter{encoder: json.NewEncoder(io.Discard)}},
+		terminal:         terminal,
+		mcpReplay:        newMcpReplayBuffer(mcpReplayCapacity),
+		mcpCommandReplay: newMcpReplayBuffer(mcpReplayCapacity),
+		done:             make(chan struct{}),
+	}
+	wrapperWrites := 0
+	native.stdin = callbackWriteCloser{write: func(data []byte) (int, error) {
+		if bytes.Equal(data, []byte{'\x03'}) {
+			native.publishTerminalData([]byte("^C\r\nroot@example:/home/user# "))
+			return len(data), nil
+		}
+		if bytes.Equal(data, []byte("still running")) {
+			return len(data), nil
+		}
+		wrapperWrites++
+		token := extractMcpPayloadToken(t, string(data))
+		payloadEcho := strings.TrimSuffix(string(data), "\r")
+		if wrapperWrites == 1 {
+			native.publishTerminalData([]byte(payloadEcho + "\r\n" +
+				"@@WHS_" + token + "@@\r\npartial\r\n"))
+			return len(data), nil
+		}
+		native.publishTerminalData([]byte(payloadEcho + "\r\n" +
+			"@@WHS_" + token + "@@\r\nnext\r\n" +
+			"@@WHE_" + token + "_0@@\r\n"))
+		return len(data), nil
+	}}
+
+	result, err := native.runMcpCommand(context.Background(), "echo hello", time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.TimedOut || result.Output != "partial" {
+		t.Fatalf("unexpected timeout result: %#v", result)
+	}
+	if err := native.writeMcpText([]byte("still running")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := native.runMcpCommand(context.Background(), "echo overlap", time.Second); !errors.Is(err, errMcpCommandInProgress) {
+		t.Fatalf("non-interrupting text cleared the timed-out presentation: %v", err)
+	}
+	if err := native.writeMcpText([]byte{'\x03'}); err != nil {
+		t.Fatal(err)
+	}
+
+	next, err := native.runMcpCommand(context.Background(), "echo next", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next.ExitCode == nil || *next.ExitCode != 0 || next.Output != "next" || next.TimedOut {
+		t.Fatalf("unexpected follow-up result: %#v", next)
+	}
+	visible := string(native.mcpReplay.snapshotTail(4096))
+	if strings.Contains(visible, "@@WHS_") || strings.Contains(visible, "@@WHE_") ||
+		strings.Contains(visible, "printf '@@WHS_%s@@") {
+		t.Fatalf("wrapper leaked into visible replay after interrupt: %q", visible)
+	}
+}
+
 func TestMcpRunCommandReportsTruncatedWhenRawReplayDropsBytes(t *testing.T) {
 	var output bytes.Buffer
 	terminal, err := newSSHTerminalEmulator(80, 24)

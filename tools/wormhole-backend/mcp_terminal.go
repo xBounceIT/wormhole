@@ -157,6 +157,7 @@ type mcpCommandPresentationFilter struct {
 	pending              []byte
 	suppressedEcho       []byte
 	state                mcpPresentationState
+	abandoned            bool
 	complete             bool
 }
 
@@ -675,6 +676,7 @@ func (native *sshNativeSession) runMcpCommand(
 
 		select {
 		case <-commandContext.Done():
+			native.abandonMcpCommandPresentation()
 			clearPresentation = false
 			if errors.Is(ctx.Err(), context.Canceled) {
 				return mcpCommandResult{}, ctx.Err()
@@ -685,6 +687,16 @@ func (native *sshNativeSession) runMcpCommand(
 		case <-notify:
 		}
 	}
+}
+
+func (native *sshNativeSession) writeMcpText(data []byte) error {
+	if err := native.write(data); err != nil {
+		return err
+	}
+	if bytes.IndexByte(data, '\x03') >= 0 {
+		native.clearAbandonedMcpCommandPresentation()
+	}
+	return nil
 }
 
 func (native *sshNativeSession) acquireMcpCommand(ctx context.Context) error {
