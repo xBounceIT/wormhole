@@ -23,6 +23,8 @@ import {
   formatBitwardenVaultStatus,
 } from '../src/bitwarden-cli-view.ts';
 
+const appSource = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+
 test('connection credential choices expose inheritance and saved credentials only', () => {
   assert.deepEqual(
     buildConnectionCredentialSelectionOptions(
@@ -77,6 +79,47 @@ test('blank password copy only promises preservation when an inline password exi
   assert.equal(connectionInlinePasswordPlaceholder(undefined), '(optional)');
 });
 
+test('connection password clear action is a button in the aligned field header', () => {
+  const usernameInput = appSource.indexOf('id="connection-username"');
+  const start = appSource.lastIndexOf('<div className="grid gap-4 sm:grid-cols-2">', usernameInput);
+  const end = appSource.indexOf('{canConfigureConnectionSshAutoSudo ?', start);
+  const manualCredentialFields = appSource.slice(start, end);
+  const usernameHeaderStart = manualCredentialFields.indexOf(
+    '<div className="flex h-6 items-center">',
+  );
+  const usernameHeaderEnd = manualCredentialFields.indexOf('</div>', usernameHeaderStart);
+  const usernameHeader = manualCredentialFields.slice(usernameHeaderStart, usernameHeaderEnd + 6);
+  const passwordHeaderStart = manualCredentialFields.indexOf(
+    '<div className="flex h-6 items-center justify-between gap-2">',
+  );
+  const passwordHeaderEnd = manualCredentialFields.indexOf('</div>', passwordHeaderStart);
+  const passwordHeader = manualCredentialFields.slice(passwordHeaderStart, passwordHeaderEnd + 6);
+
+  assert.ok(
+    usernameInput >= 0 &&
+      start >= 0 &&
+      end > start &&
+      usernameHeaderStart >= 0 &&
+      usernameHeaderEnd > usernameHeaderStart &&
+      passwordHeaderStart >= 0 &&
+      passwordHeaderEnd > passwordHeaderStart,
+  );
+  assert.match(
+    usernameHeader,
+    /<div className="flex h-6 items-center">\s*<Label htmlFor="connection-username">Username<\/Label>/,
+  );
+  assert.match(
+    passwordHeader,
+    /<div className="flex h-6 items-center justify-between gap-2">[\s\S]*?<Label htmlFor="connection-inline-password">Password<\/Label>[\s\S]*?<Button[\s\S]*?aria-pressed=\{newConnectionForm\.removeInlinePassword\}[\s\S]*?type="button"[\s\S]*?>\s*Clear password\s*<\/Button>/,
+  );
+  assert.match(
+    passwordHeader,
+    /inlinePassword: '',[\s\S]*?removeInlinePassword: !form\.removeInlinePassword/,
+  );
+  assert.doesNotMatch(usernameHeader, /<Input|<Button|<Checkbox/);
+  assert.doesNotMatch(passwordHeader, /<Input|<Checkbox|Remove stored password/);
+});
+
 test('credential merge matches SQLite BINARY ordering for Unicode names', () => {
   const merged = mergeCredential(
     [
@@ -117,7 +160,6 @@ test('SSH keys are accepted only by SSH password-capable controls', () => {
 });
 
 test('credential cards omit the redundant password badge while retaining the SSH key badge', () => {
-  const appSource = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
   const credentialGrid = appSource.match(
     /renderItem=\{\(credential\) => \([\s\S]*?resetKey=\{normalizedCredentialSearch\}/,
   )?.[0];
@@ -154,7 +196,6 @@ test('hidden Auto sudo ignores stale quick-connect state and preserves only a lo
 });
 
 test('SSH key credential import keeps key paths and material behind the native boundary', () => {
-  const appSource = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
   const preloadSource = readFileSync(new URL('../electron/preload.cts', import.meta.url), 'utf8');
   const mainSource = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
   const backendSource = readFileSync(
