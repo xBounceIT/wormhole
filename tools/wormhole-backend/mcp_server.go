@@ -565,7 +565,7 @@ func newMcpServer(controller *mcpController) *mcp.Server {
 		if err := controller.ensureApproval(ctx, native, "send_text"); err != nil {
 			return nil, "", err
 		}
-		if err := native.writeMcpText([]byte(input.Text)); err != nil {
+		if err := native.write([]byte(input.Text)); err != nil {
 			return nil, "", err
 		}
 		return nil, "ok", nil

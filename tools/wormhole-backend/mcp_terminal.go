@@ -146,7 +146,10 @@ const (
 	mcpPresentationPassThrough
 )
 
-const mcpMaxEndMarkerDigits = 10
+const (
+	mcpMaxEndMarkerDigits      = 10
+	mcpMaxRetiredPresentations = 8
+)
 
 type mcpCommandPresentationFilter struct {
 	expectedEcho         []byte
@@ -158,6 +161,7 @@ type mcpCommandPresentationFilter struct {
 	suppressedEcho       []byte
 	state                mcpPresentationState
 	abandoned            bool
+	retired              bool
 	complete             bool
 }
 
@@ -333,10 +337,12 @@ func (filter *mcpCommandPresentationFilter) matchStartMarkerOrFailOpen(output *[
 }
 
 func (filter *mcpCommandPresentationFilter) failOpen(output *[]byte) {
-	if len(filter.suppressedEcho) > 0 {
+	if filter.retired && filter.state == mcpPresentationMatchingEchoLineEnding {
+		filter.pending = filter.pending[len(filter.expectedEcho):]
+	} else if len(filter.suppressedEcho) > 0 && !filter.retired {
 		*output = append(*output, filter.suppressedEcho...)
-		filter.suppressedEcho = nil
 	}
+	filter.suppressedEcho = nil
 	filter.drainTo(output, len(filter.pending))
 	filter.state = mcpPresentationPassThrough
 	filter.complete = true
@@ -687,16 +693,6 @@ func (native *sshNativeSession) runMcpCommand(
 		case <-notify:
 		}
 	}
-}
-
-func (native *sshNativeSession) writeMcpText(data []byte) error {
-	if err := native.write(data); err != nil {
-		return err
-	}
-	if bytes.IndexByte(data, '\x03') >= 0 {
-		native.clearAbandonedMcpCommandPresentation()
-	}
-	return nil
 }
 
 func (native *sshNativeSession) acquireMcpCommand(ctx context.Context) error {

@@ -843,21 +843,35 @@ func TestMcpRunCommandTimeoutKeepsWrapperOutOfVisibleReplay(t *testing.T) {
 	}
 }
 
-func TestMcpRunCommandInterruptClearsTimedOutPresentation(t *testing.T) {
+func TestMcpRunCommandInterruptRetiresTimedOutPresentation(t *testing.T) {
 	terminal, err := newSSHTerminalEmulator(80, 24)
 	if err != nil {
 		t.Fatal(err)
 	}
+	interruptStarted := make(chan struct{})
+	releaseInterrupt := make(chan struct{})
 	native := &sshNativeSession{
 		server:           &sshServer{output: &sshEventWriter{encoder: json.NewEncoder(io.Discard)}},
 		terminal:         terminal,
 		mcpReplay:        newMcpReplayBuffer(mcpReplayCapacity),
 		mcpCommandReplay: newMcpReplayBuffer(mcpReplayCapacity),
+		inputQueue:       make(chan []byte, sshInputQueueCapacity),
 		done:             make(chan struct{}),
 	}
+	defer native.close(false)
+	defer func() {
+		select {
+		case <-releaseInterrupt:
+		default:
+			close(releaseInterrupt)
+		}
+	}()
 	wrapperWrites := 0
+	firstToken := ""
 	native.stdin = callbackWriteCloser{write: func(data []byte) (int, error) {
 		if bytes.Equal(data, []byte{'\x03'}) {
+			close(interruptStarted)
+			<-releaseInterrupt
 			native.publishTerminalData([]byte("^C\r\nroot@example:/home/user# "))
 			return len(data), nil
 		}
@@ -868,15 +882,18 @@ func TestMcpRunCommandInterruptClearsTimedOutPresentation(t *testing.T) {
 		token := extractMcpPayloadToken(t, string(data))
 		payloadEcho := strings.TrimSuffix(string(data), "\r")
 		if wrapperWrites == 1 {
+			firstToken = token
 			native.publishTerminalData([]byte(payloadEcho + "\r\n" +
 				"@@WHS_" + token + "@@\r\npartial\r\n"))
 			return len(data), nil
 		}
-		native.publishTerminalData([]byte(payloadEcho + "\r\n" +
+		native.publishTerminalData([]byte("late\r\n@@WHE_" + firstToken + "_130@@\r\n" +
+			payloadEcho + "\r\n" +
 			"@@WHS_" + token + "@@\r\nnext\r\n" +
 			"@@WHE_" + token + "_0@@\r\n"))
 		return len(data), nil
 	}}
+	native.startInputPump()
 
 	result, err := native.runMcpCommand(context.Background(), "echo hello", time.Millisecond)
 	if err != nil {
@@ -885,14 +902,36 @@ func TestMcpRunCommandInterruptClearsTimedOutPresentation(t *testing.T) {
 	if !result.TimedOut || result.Output != "partial" {
 		t.Fatalf("unexpected timeout result: %#v", result)
 	}
-	if err := native.writeMcpText([]byte("still running")); err != nil {
+	if err := native.write([]byte("still running")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := native.runMcpCommand(context.Background(), "echo overlap", time.Second); !errors.Is(err, errMcpCommandInProgress) {
 		t.Fatalf("non-interrupting text cleared the timed-out presentation: %v", err)
 	}
-	if err := native.writeMcpText([]byte{'\x03'}); err != nil {
+	if err := native.write([]byte{'\x03'}); err != nil {
 		t.Fatal(err)
+	}
+	select {
+	case <-interruptStarted:
+	case <-time.After(time.Second):
+		t.Fatal("interrupt did not reach the SSH writer")
+	}
+	if _, err := native.runMcpCommand(context.Background(), "echo overlap", time.Second); !errors.Is(err, errMcpCommandInProgress) {
+		t.Fatalf("queued interrupt cleared the timed-out presentation before it was written: %v", err)
+	}
+	close(releaseInterrupt)
+	deadline := time.Now().Add(time.Second)
+	for {
+		native.terminalOutputMu.Lock()
+		cleared := native.mcpPresentation == nil && len(native.mcpRetiredPresentations) == 1
+		native.terminalOutputMu.Unlock()
+		if cleared {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("written interrupt did not retire the timed-out presentation")
+		}
+		time.Sleep(time.Millisecond)
 	}
 
 	next, err := native.runMcpCommand(context.Background(), "echo next", time.Second)
@@ -902,10 +941,37 @@ func TestMcpRunCommandInterruptClearsTimedOutPresentation(t *testing.T) {
 	if next.ExitCode == nil || *next.ExitCode != 0 || next.Output != "next" || next.TimedOut {
 		t.Fatalf("unexpected follow-up result: %#v", next)
 	}
+	native.terminalOutputMu.Lock()
+	presentationCount := len(native.mcpRetiredPresentations)
+	native.terminalOutputMu.Unlock()
+	if presentationCount != 0 {
+		t.Fatalf("late marker left %d retired presentations", presentationCount)
+	}
 	visible := string(native.mcpReplay.snapshotTail(4096))
 	if strings.Contains(visible, "@@WHS_") || strings.Contains(visible, "@@WHE_") ||
 		strings.Contains(visible, "printf '@@WHS_%s@@") {
 		t.Fatalf("wrapper leaked into visible replay after interrupt: %q", visible)
+	}
+}
+
+func TestMcpWrittenInterruptRetiresPresentationDespiteWriteError(t *testing.T) {
+	writeErr := errors.New("partial write")
+	native := &sshNativeSession{
+		stdin: callbackWriteCloser{write: func([]byte) (int, error) {
+			return 1, writeErr
+		}},
+		mcpPresentation: &mcpCommandPresentationFilter{abandoned: true},
+	}
+
+	if err := native.writeRemoteInput([]byte{'\x03', 'x'}); !errors.Is(err, writeErr) {
+		t.Fatalf("partial write returned %v", err)
+	}
+	if native.mcpPresentation != nil || len(native.mcpRetiredPresentations) != 1 {
+		t.Fatalf(
+			"partial interrupt write left active = %t, retired = %d",
+			native.mcpPresentation != nil,
+			len(native.mcpRetiredPresentations),
+		)
 	}
 }
 
