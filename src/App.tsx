@@ -11395,7 +11395,7 @@ function CredentialsPage({
                         label={`Delete ${credential.name}`}
                         onClick={() => setPendingDeletion([credential.id])}
                       >
-                        <X />
+                        <Trash2 />
                       </IconButton>
                     </div>
                   </CardFooter>
@@ -13321,7 +13321,7 @@ function TunnelsPage({
                     label={`Delete ${tunnel.name}`}
                     onClick={() => void deleteTunnel(tunnel)}
                   >
-                    <X />
+                    <Trash2 />
                   </IconButton>
                 </CardFooter>
               </Card>

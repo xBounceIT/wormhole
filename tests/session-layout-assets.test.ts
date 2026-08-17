@@ -734,6 +734,7 @@ test('VPN cards show searchable endpoint metadata instead of a managed-tunnel pl
   assert.match(tunnelsPage, /tunnel\.endpoint \?\? ''/);
   assert.match(tunnelsPage, /tunnel\.endpoint \|\| 'Endpoint unavailable'/);
   assert.match(tunnelsPage, /title=\{tunnel\.endpoint \|\| undefined\}/);
+  assert.match(tunnelsPage, /label=\{`Delete \$\{tunnel\.name\}`\}[\s\S]{0,160}<Trash2 \/>/);
   assert.doesNotMatch(tunnelsPage, /Managed VPN tunnel/i);
 });
 

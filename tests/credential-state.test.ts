@@ -170,6 +170,7 @@ test('credential cards omit the redundant password badge while retaining the SSH
     credentialGrid,
     /credential\.kind === 'sshKey'[\s\S]*?<Badge variant="outline">SSH key<\/Badge>/,
   );
+  assert.match(credentialGrid, /label=\{`Delete \$\{credential\.name\}`\}[\s\S]{0,160}<Trash2 \/>/);
 });
 
 test('Auto sudo remains available for password and SSH key credentials', () => {
