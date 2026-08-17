@@ -163,6 +163,7 @@ type mcpCommandPresentationFilter struct {
 	scanPosition         int
 	echoMatched          int
 	startMarkerMatched   int
+	readlineRedrawStart  int
 	retiredPending       int
 	state                mcpPresentationState
 	abandoned            bool
@@ -194,6 +195,7 @@ func newMcpCommandPresentationFilter(
 		startMarker:          append([]byte(nil), startMarker...),
 		startMarkerFallback:  buildPrefixFallback(startMarker),
 		endMarkerPrefix:      append([]byte(nil), endMarkerPrefix...),
+		readlineRedrawStart:  -1,
 		state:                mcpPresentationMatchingEcho,
 	}
 }
@@ -276,6 +278,12 @@ func (filter *mcpCommandPresentationFilter) findEchoOrStartMarker(output *[]byte
 			filter.startMarkerFallback,
 		)
 		filter.scanPosition++
+		if filter.readlineRedrawStart < 0 &&
+			filter.scanPosition >= 2 &&
+			filter.pending[filter.scanPosition-2] == '\r' &&
+			filter.pending[filter.scanPosition-1] == '<' {
+			filter.readlineRedrawStart = filter.scanPosition - 2
+		}
 
 		echoComplete := filter.echoMatched == len(filter.expectedEcho)
 		markerComplete := filter.startMarkerMatched == len(filter.startMarker)
@@ -285,21 +293,40 @@ func (filter *mcpCommandPresentationFilter) findEchoOrStartMarker(output *[]byte
 		echoStart := filter.scanPosition - filter.echoMatched
 		markerStart := filter.scanPosition - filter.startMarkerMatched
 		if markerComplete && (!echoComplete || markerStart < echoStart) {
-			filter.drainTo(output, markerStart)
+			filter.drainBeforeWrapperMatch(output, markerStart)
 			filter.consumePending(len(filter.startMarker))
 			*output = append(*output, filter.presentation...)
 			filter.state = mcpPresentationSwallowStartLineEnding
 			return true
 		}
-		filter.drainTo(output, echoStart)
+		filter.drainBeforeWrapperMatch(output, echoStart)
 		filter.state = mcpPresentationMatchingEchoLineEnding
 		return true
 	}
 
 	keep := maxInt(filter.echoMatched, filter.startMarkerMatched)
+	if filter.readlineRedrawStart >= 0 {
+		keep = len(filter.pending) - filter.readlineRedrawStart
+	} else if len(filter.pending) > 0 && filter.pending[len(filter.pending)-1] == '\r' {
+		keep = maxInt(keep, 1)
+	}
 	filter.drainTo(output, len(filter.pending)-keep)
+	if filter.readlineRedrawStart >= 0 {
+		filter.readlineRedrawStart = 0
+	}
 	filter.scanPosition = len(filter.pending)
 	return false
+}
+
+func (filter *mcpCommandPresentationFilter) drainBeforeWrapperMatch(output *[]byte, matchStart int) {
+	if filter.readlineRedrawStart < 0 || filter.readlineRedrawStart > matchStart {
+		filter.drainTo(output, matchStart)
+		return
+	}
+	redrawBytes := matchStart - filter.readlineRedrawStart
+	filter.drainTo(output, filter.readlineRedrawStart)
+	filter.consumePending(redrawBytes)
+	filter.readlineRedrawStart = -1
 }
 
 func (filter *mcpCommandPresentationFilter) matchEchoLineEndingOrFailOpen(output *[]byte) bool {

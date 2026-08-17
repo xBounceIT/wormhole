@@ -553,6 +553,29 @@ func TestMcpPresentationFilterHandlesStartMarkerWithoutTerminalEcho(t *testing.T
 	}
 }
 
+func TestMcpPresentationFilterHidesReadlineRedrawnWrapperAtEverySplit(t *testing.T) {
+	capture, payload, err := newMcpCommandCapture("echo hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	echo := bytes.TrimSuffix(payload, []byte("\r"))
+	redraw := append([]byte("\r<"), echo[len(echo)-32:]...)
+	raw := append([]byte("root@example:/home/user# "), redraw...)
+	raw = append(raw, capture.start...)
+	raw = append(raw, []byte("\r\nhello\r\n")...)
+	raw = append(raw, capture.endPrefix...)
+	raw = append(raw, []byte("0@@\r\n")...)
+	want := "root@example:/home/user# echo hello\r\nhello\r\n"
+
+	for split := 0; split <= len(raw); split++ {
+		filter := newMcpCommandPresentationFilter("echo hello", payload, capture.start, capture.endPrefix)
+		visible := append(filter.filter(raw[:split]), filter.filter(raw[split:])...)
+		if string(visible) != want || !filter.complete {
+			t.Fatalf("split %d readline redraw output = %q complete=%v", split, visible, filter.complete)
+		}
+	}
+}
+
 func TestMcpPresentationFilterHandlesFragmentedLineEndingsAndMarkers(t *testing.T) {
 	capture, payload, err := newMcpCommandCapture("printf result")
 	if err != nil {
