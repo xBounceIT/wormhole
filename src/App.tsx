@@ -11350,9 +11350,9 @@ function CredentialsPage({
                       {credential.domain ? (
                         <Badge variant="outline">Domain · {credential.domain}</Badge>
                       ) : null}
-                      <Badge variant="outline">
-                        {credential.kind === 'sshKey' ? 'SSH key' : 'Password'}
-                      </Badge>
+                      {credential.kind === 'sshKey' ? (
+                        <Badge variant="outline">SSH key</Badge>
+                      ) : null}
                       <CredentialProviderIcon
                         kind={credential.kind}
                         provider={credential.provider}
