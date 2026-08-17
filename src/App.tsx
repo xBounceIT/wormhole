@@ -7187,7 +7187,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                       newConnectionForm.protocol === 'rdp') ? (
                       <div className="grid gap-4 sm:grid-cols-2">
                         <div className="grid gap-2">
-                          <Label htmlFor="connection-username">Username</Label>
+                          <div className="flex h-6 items-center">
+                            <Label htmlFor="connection-username">Username</Label>
+                          </div>
                           <Input
                             id="connection-username"
                             onChange={(event) =>
@@ -7201,7 +7203,26 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                           />
                         </div>
                         <div className="grid gap-2">
-                          <Label htmlFor="connection-inline-password">Password</Label>
+                          <div className="flex h-6 items-center justify-between gap-2">
+                            <Label htmlFor="connection-inline-password">Password</Label>
+                            {editingConnectionHasInlineCredential ? (
+                              <Button
+                                aria-pressed={newConnectionForm.removeInlinePassword}
+                                onClick={() =>
+                                  setNewConnectionForm((form) => ({
+                                    ...form,
+                                    inlinePassword: '',
+                                    removeInlinePassword: !form.removeInlinePassword,
+                                  }))
+                                }
+                                size="xs"
+                                type="button"
+                                variant="destructive"
+                              >
+                                Clear password
+                              </Button>
+                            ) : null}
+                          </div>
                           <Input
                             autoComplete="new-password"
                             disabled={newConnectionForm.removeInlinePassword}
@@ -7222,22 +7243,6 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                             type="password"
                             value={newConnectionForm.inlinePassword}
                           />
-                          {editingConnectionHasInlineCredential ? (
-                            <label className="flex items-center gap-2 text-xs">
-                              <Checkbox
-                                checked={newConnectionForm.removeInlinePassword}
-                                onCheckedChange={(checked) => {
-                                  const removeInlinePassword = checked === true;
-                                  setNewConnectionForm((form) => ({
-                                    ...form,
-                                    inlinePassword: removeInlinePassword ? '' : form.inlinePassword,
-                                    removeInlinePassword,
-                                  }));
-                                }}
-                              />
-                              <span>Remove stored password</span>
-                            </label>
-                          ) : null}
                         </div>
                       </div>
                     ) : null}
