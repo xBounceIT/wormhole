@@ -79,7 +79,12 @@ import {
 } from './sftp-contract.js';
 import { RdpBackendClient, stopChildProcess } from './rdp.js';
 import { settleTunnelCleanup, TunnelLeaseRegistry } from './tunnel-lease-registry.js';
-import { isTunnelIdentifier, parseTunnelTestRequest } from './tunnel-test-contract.js';
+import {
+  isTunnelIdentifier,
+  parseTunnelDetailsResponse,
+  parseTunnelSummaryList,
+  parseTunnelTestRequest,
+} from './tunnel-test-contract.js';
 import {
   isSameCertificateHostname,
   isMatchingOAuthRedirect,
@@ -251,6 +256,7 @@ type BackendOperation =
   | 'workspace-node-create'
   | 'workspace-node-update'
   | 'tunnel-create'
+  | 'tunnel-list'
   | 'tunnel-read'
   | 'tunnel-update'
   | 'tunnel-delete'
@@ -790,12 +796,6 @@ type ActiveNativeOperation = {
   kind: NativeOperationKind;
   backend: NativeBackendProcess;
   sender: Electron.WebContents;
-};
-type TunnelDetailsResponse = {
-  id: string;
-  name: string;
-  kind: number;
-  settings: Record<string, unknown>;
 };
 type AuthStateResponse = {
   mode: string;
@@ -7459,15 +7459,21 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     const request = parseTunnelWriteRequest(value, false);
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
-      return runBackend<TunnelDetailsResponse>('tunnel-create', request);
+      return parseTunnelDetailsResponse(await runBackend<unknown>('tunnel-create', request));
     });
+  });
+
+  ipcMain.handle('tunnel:list', async () => {
+    return runAuthorizedOperation(async () =>
+      parseTunnelSummaryList(await runBackend<unknown>('tunnel-list')),
+    );
   });
 
   ipcMain.handle('tunnel:read', async (_event, value: unknown) => {
     const request = parseTunnelIDRequest(value);
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
-      return runBackend<TunnelDetailsResponse>('tunnel-read', request);
+      return parseTunnelDetailsResponse(await runBackend<unknown>('tunnel-read', request));
     });
   });
 
@@ -7475,7 +7481,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     const request = parseTunnelWriteRequest(value, true);
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
-      return runBackend<TunnelDetailsResponse>('tunnel-update', request);
+      return parseTunnelDetailsResponse(await runBackend<unknown>('tunnel-update', request));
     });
   });
 

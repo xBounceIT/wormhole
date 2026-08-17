@@ -260,6 +260,7 @@ const wormholeBridge = {
   ) => ipcRenderer.invoke('workspace:update-node-tunnel', request),
   createTunnel: (request: { name: string; kind: number; settings: Record<string, unknown> }) =>
     ipcRenderer.invoke('tunnel:create', request),
+  listTunnels: () => ipcRenderer.invoke('tunnel:list'),
   readTunnel: (id: string) => ipcRenderer.invoke('tunnel:read', { id }),
   updateTunnel: (request: {
     id: string;

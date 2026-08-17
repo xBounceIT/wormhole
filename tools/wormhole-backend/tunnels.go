@@ -9,8 +9,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -40,7 +42,90 @@ type tunnelDetails struct {
 	ID       string          `json:"id"`
 	Name     string          `json:"name"`
 	Kind     int64           `json:"kind"`
+	Endpoint string          `json:"endpoint,omitempty"`
 	Settings json.RawMessage `json:"settings"`
+}
+
+func tunnelEndpointSummary(kind int64, raw json.RawMessage) string {
+	var settings map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &settings); err != nil || settings == nil {
+		return ""
+	}
+	defer clearTunnelSettingsMap(settings)
+
+	hostPort := func(host string, port int64) string {
+		if port == 0 {
+			port = 443
+		}
+		return formatTunnelEndpoint(host, fmt.Sprint(port))
+	}
+	profileEndpoint := func() string {
+		remotes := extractOpenVPNTransportRemotes(tunnelSettingString(settings, "ProfileOvpn"))
+		if len(remotes) == 0 {
+			return ""
+		}
+		return formatTunnelEndpoint(remotes[0].Host, remotes[0].Port)
+	}
+
+	switch kind {
+	case 0:
+		return normalizeTunnelEndpoint(tunnelSettingString(settings, "PeerEndpoint"))
+	case 1:
+		return profileEndpoint()
+	case 2, 6:
+		return hostPort(tunnelSettingString(settings, "Host"), tunnelSettingNumber(settings, "Port"))
+	case 3:
+		return hostPort(tunnelSettingString(settings, "Server"), tunnelSettingNumber(settings, "Port"))
+	case 4:
+		if tunnelSettingNumber(settings, "Mode") == 1 {
+			return profileEndpoint()
+		}
+		return hostPort(tunnelSettingString(settings, "Server"), tunnelSettingNumber(settings, "Port"))
+	case 5:
+		servers := stringListSetting(settings, "Servers")
+		if len(servers) == 0 {
+			return ""
+		}
+		return formatTunnelEndpoint(servers[0], "443")
+	default:
+		return ""
+	}
+}
+
+func normalizeTunnelEndpoint(value string) string {
+	value = strings.TrimSpace(value)
+	host, port, err := net.SplitHostPort(value)
+	if err != nil {
+		return ""
+	}
+	return formatTunnelEndpoint(host, port)
+}
+
+func formatTunnelEndpoint(host, port string) string {
+	host = strings.TrimSpace(host)
+	port = strings.TrimSpace(port)
+	if host == "" || port == "" {
+		return ""
+	}
+	portNumber, err := strconv.Atoi(port)
+	if err != nil || portNumber < 1 || portNumber > 65535 {
+		return ""
+	}
+	if _, err := buildWebURL("https", host, portNumber); err != nil {
+		return ""
+	}
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+	}
+	return sanitizeTunnelEndpoint(net.JoinHostPort(host, strconv.Itoa(portNumber)))
+}
+
+func sanitizeTunnelEndpoint(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 512 || strings.IndexFunc(value, unicode.IsControl) >= 0 {
+		return ""
+	}
+	return value
 }
 
 const tunnelSecretPrefix = "tunnel:"
@@ -185,7 +270,10 @@ func writeTunnel(databasePath string, request tunnelWriteRequest, create bool) (
 	if !create && cacheIdentityChanged {
 		clearTunnelProviderCaches(databasePath, request.ID, previousKind, request.Kind)
 	}
-	return tunnelDetails{ID: request.ID, Name: request.Name, Kind: request.Kind, Settings: request.Settings}, nil
+	return tunnelDetails{
+		ID: request.ID, Name: request.Name, Kind: request.Kind,
+		Endpoint: tunnelEndpointSummary(request.Kind, request.Settings), Settings: request.Settings,
+	}, nil
 }
 
 func readTunnel(databasePath string, request tunnelReadRequest) (tunnelDetails, error) {
@@ -221,6 +309,7 @@ func readTunnelUnlocked(databasePath string, request tunnelReadRequest) (tunnelD
 		return tunnelDetails{}, err
 	}
 	result.Settings = settings
+	result.Endpoint = tunnelEndpointSummary(result.Kind, result.Settings)
 	return result, nil
 }
 

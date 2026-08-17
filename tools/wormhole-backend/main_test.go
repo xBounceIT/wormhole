@@ -217,6 +217,7 @@ func TestRunBackendCLIExecutesSafeOneShotOperations(t *testing.T) {
 	}{
 		{name: "startup", operation: "startup", input: ""},
 		{name: "workspace", operation: "workspace"},
+		{name: "tunnel list", operation: "tunnel-list"},
 		{name: "auth status", operation: "auth-status"},
 		{name: "settings read", operation: "settings-read"},
 		{name: "settings migrate", operation: "settings-migrate"},
