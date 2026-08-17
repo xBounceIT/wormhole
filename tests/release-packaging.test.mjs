@@ -5,11 +5,15 @@ import { relative } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { Arch, getArtifactArchName } from 'builder-util';
+import { prerelease, satisfies, valid } from 'semver';
 
 const require = createRequire(import.meta.url);
 const { convertIcon } = require('app-builder-lib/out/util/iconConverter.js');
 
 const packageJson = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
+const packageLock = JSON.parse(
+  await readFile(new URL('../package-lock.json', import.meta.url), 'utf8'),
+);
 const releaseWorkflow = await readFile(
   new URL('../.github/workflows/release.yml', import.meta.url),
   'utf8',
@@ -59,6 +63,35 @@ function linuxArtifactPattern(arch, extension) {
     .replace('${arch}', getArtifactArchName(arch, extension))
     .replace('${ext}', extension);
 }
+
+function isNanoIdVersionPatched(version) {
+  return (
+    valid(version) !== null &&
+    prerelease(version) === null &&
+    !satisfies(version, '<3.3.18 || >=4.0.0 <5.1.6')
+  );
+}
+
+test('dependency lock excludes the Nano ID zero-size generator vulnerability', () => {
+  assert.equal(isNanoIdVersionPatched('3.3.17'), false);
+  assert.equal(isNanoIdVersionPatched('3.3.18'), true);
+  assert.equal(isNanoIdVersionPatched('4.0.0'), false);
+  assert.equal(isNanoIdVersionPatched('5.1.5'), false);
+  assert.equal(isNanoIdVersionPatched('5.1.6'), true);
+  assert.equal(isNanoIdVersionPatched('5.1.6-beta.1'), false);
+  assert.equal(isNanoIdVersionPatched('invalid'), false);
+
+  const nanoIdPackages = Object.entries(packageLock.packages)
+    .filter(
+      ([location]) =>
+        location === 'node_modules/nanoid' || location.endsWith('/node_modules/nanoid'),
+    )
+    .map(([, metadata]) => metadata);
+
+  for (const { version } of nanoIdPackages) {
+    assert.ok(isNanoIdVersionPatched(version), `nanoid ${version} is vulnerable`);
+  }
+});
 
 test('electron-builder produces portable and installable Linux packages', () => {
   assert.equal(packageJson.build.artifactName, 'Wormhole-${version}-${os}-${arch}-setup.${ext}');
