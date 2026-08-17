@@ -1187,6 +1187,49 @@ func TestMcpWrittenInterruptBeforeWrapperIsIgnored(t *testing.T) {
 	}
 }
 
+func TestMcpCoalescedWrapperAndInterruptRetiresWhenAbandoned(t *testing.T) {
+	payload := []byte("wrapper")
+	current := &mcpCommandPresentationFilter{inputPayload: payload}
+	native := &sshNativeSession{
+		stdin:           callbackWriteCloser{write: func(data []byte) (int, error) { return len(data), nil }},
+		mcpPresentation: current,
+	}
+	coalesced := append(append([]byte("pending-prefix"), payload...), '\x03')
+
+	if err := native.writeRemoteInput(coalesced); err != nil {
+		t.Fatal(err)
+	}
+	if native.mcpPresentation != current || !current.wrapperWritten ||
+		!current.interruptWritten || len(native.mcpRetiredPresentations) != 0 {
+		t.Fatal("coalesced wrapper and interrupt were not recorded in PTY order")
+	}
+
+	native.abandonMcpCommandPresentation()
+	if native.mcpPresentation != nil || len(native.mcpRetiredPresentations) != 1 ||
+		native.mcpRetiredPresentations[0] != current || !current.retired {
+		t.Fatal("timeout did not retire the coalesced wrapper and interrupt")
+	}
+}
+
+func TestMcpCoalescedInterruptBeforeWrapperIsIgnored(t *testing.T) {
+	payload := []byte("wrapper")
+	current := &mcpCommandPresentationFilter{inputPayload: payload}
+	native := &sshNativeSession{
+		stdin:           callbackWriteCloser{write: func(data []byte) (int, error) { return len(data), nil }},
+		mcpPresentation: current,
+	}
+	coalesced := append([]byte{'\x03'}, payload...)
+
+	if err := native.writeRemoteInput(coalesced); err != nil {
+		t.Fatal(err)
+	}
+	native.abandonMcpCommandPresentation()
+	if native.mcpPresentation != current || !current.wrapperWritten ||
+		current.interruptWritten || len(native.mcpRetiredPresentations) != 0 {
+		t.Fatal("coalesced pre-wrapper interrupt incorrectly retired the timed-out presentation")
+	}
+}
+
 func TestMcpWrittenInterruptEvictsOldestRetiredPresentationAtLimit(t *testing.T) {
 	oldest := &mcpCommandPresentationFilter{retired: true}
 	retired := make([]*mcpCommandPresentationFilter, mcpMaxRetiredPresentations)

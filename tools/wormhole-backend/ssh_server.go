@@ -1243,10 +1243,16 @@ func (native *sshNativeSession) recordMcpCommandPresentationInputWritten(data []
 	if native.mcpPresentation == nil {
 		return
 	}
-	if !native.mcpPresentation.wrapperWritten && bytes.Equal(data, native.mcpPresentation.inputPayload) {
+	interruptStart := 0
+	if !native.mcpPresentation.wrapperWritten {
+		wrapperStart := bytes.Index(data, native.mcpPresentation.inputPayload)
+		if wrapperStart < 0 {
+			return
+		}
 		native.mcpPresentation.wrapperWritten = true
+		interruptStart = wrapperStart + len(native.mcpPresentation.inputPayload)
 	}
-	if native.mcpPresentation.wrapperWritten && bytes.IndexByte(data, '\x03') >= 0 {
+	if bytes.IndexByte(data[interruptStart:], '\x03') >= 0 {
 		native.mcpPresentation.interruptWritten = true
 		native.retireInterruptedMcpCommandPresentationLocked()
 	}
