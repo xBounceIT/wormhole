@@ -159,12 +159,14 @@ interface WormholeWorkspaceTunnel {
   id: string;
   name: string;
   kind: string;
+  endpoint?: string;
 }
 
 interface WormholeTunnelDetails {
   id: string;
   name: string;
   kind: number;
+  endpoint?: string;
   settings: Record<string, unknown>;
 }
 
@@ -913,6 +915,7 @@ interface Window {
       kind: number;
       settings: Record<string, unknown>;
     }): Promise<WormholeTunnelDetails>;
+    listTunnels(): Promise<WormholeWorkspaceTunnel[]>;
     readTunnel(id: string): Promise<WormholeTunnelDetails>;
     updateTunnel(request: {
       id: string;

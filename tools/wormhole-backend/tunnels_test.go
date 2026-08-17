@@ -160,6 +160,138 @@ func TestTunnelSidecarCommandCoversEveryPortableProvider(t *testing.T) {
 	}
 }
 
+func TestTunnelEndpointSummaryProjectsGenericProviderEndpoints(t *testing.T) {
+	tests := []struct {
+		name     string
+		kind     int64
+		settings string
+		want     string
+	}{
+		{
+			name: "WireGuard", kind: 0,
+			settings: `{"PeerEndpoint":"wg.example.test:51820","InterfacePrivateKey":"must-not-leak"}`,
+			want:     "wg.example.test:51820",
+		},
+		{
+			name: "WireGuard IPv6", kind: 0,
+			settings: `{"PeerEndpoint":"[2001:db8::20]:51820"}`,
+			want:     "[2001:db8::20]:51820",
+		},
+		{
+			name: "OpenVPN", kind: 1,
+			settings: `{"ProfileOvpn":"client\n<ca>\nremote ignored.example 1\n</ca>\nremote ovpn.example.test\n","Password":"must-not-leak"}`,
+			want:     "ovpn.example.test:1194",
+		},
+		{
+			name: "Fortinet IPv6", kind: 2,
+			settings: `{"Host":"2001:db8::10","Port":10443,"Password":"must-not-leak"}`,
+			want:     "[2001:db8::10]:10443",
+		},
+		{
+			name: "WatchGuard default port", kind: 3,
+			settings: `{"Server":"firebox.example.test"}`,
+			want:     "firebox.example.test:443",
+		},
+		{
+			name: "Stormshield imported profile", kind: 4,
+			settings: `{"Mode":1,"Server":"stale.example.test","ProfileOvpn":"remote sns.example.test 8443 tcp\n"}`,
+			want:     "sns.example.test:8443",
+		},
+		{
+			name: "Azure first gateway", kind: 5,
+			settings: `{"Servers":"primary.vpn.azure.test, backup.vpn.azure.test","ServerSecretHex":"must-not-leak"}`,
+			want:     "primary.vpn.azure.test:443",
+		},
+		{
+			name: "Cisco default port", kind: 6,
+			settings: `{"Host":"anyconnect.example.test","Password":"must-not-leak"}`,
+			want:     "anyconnect.example.test:443",
+		},
+		{name: "WireGuard credential-shaped endpoint", kind: 0, settings: `{"PeerEndpoint":"secret@wg.example.test:51820"}`, want: ""},
+		{name: "Host credential-shaped endpoint", kind: 2, settings: `{"Host":"secret@vpn.example.test","Port":443}`, want: ""},
+		{name: "Profile credential-shaped endpoint", kind: 1, settings: `{"ProfileOvpn":"remote secret@vpn.example.test 443\n"}`, want: ""},
+		{name: "Profile port out of range", kind: 1, settings: `{"ProfileOvpn":"remote vpn.example.test 70000\n"}`, want: ""},
+		{name: "Profile non-numeric port", kind: 1, settings: `{"ProfileOvpn":"remote vpn.example.test https\n"}`, want: ""},
+		{name: "Host control character", kind: 2, settings: `{"Host":"vpn.example.test\\nsecret","Port":443}`, want: ""},
+		{name: "Endpoint too long", kind: 0, settings: `{"PeerEndpoint":"` + strings.Repeat("a", 513) + `:443"}`, want: ""},
+		{name: "Malformed settings", kind: 1, settings: `{`, want: ""},
+		{name: "Unknown provider", kind: 99, settings: `{}`, want: ""},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := tunnelEndpointSummary(test.kind, json.RawMessage(test.settings)); got != test.want {
+				t.Fatalf("endpoint = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestTunnelSummaryProjectionIncludesEndpointWithoutSecrets(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	created, err := createTunnel(databasePath, tunnelWriteRequest{
+		Name: "safe summary",
+		Kind: 0,
+		Settings: json.RawMessage(`{
+            "InterfacePrivateKey":"must-not-leak",
+            "InterfaceAddress":"10.0.0.2/32",
+            "PeerPublicKey":"public",
+            "PeerEndpoint":"wg.example.test:51820"
+        }`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Endpoint != "wg.example.test:51820" {
+		t.Fatalf("created endpoint = %q", created.Endpoint)
+	}
+
+	read, err := readTunnel(databasePath, tunnelReadRequest{ID: created.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if read.Endpoint != created.Endpoint {
+		t.Fatalf("read endpoint = %q, want %q", read.Endpoint, created.Endpoint)
+	}
+
+	workspace, err := loadWorkspace(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(workspace.Tunnels) != 1 || workspace.Tunnels[0].Endpoint != "" {
+		t.Fatalf("workspace tunnels = %#v", workspace.Tunnels)
+	}
+	summaries, err := loadTunnelSummaries(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(summaries) != 1 || summaries[0].Endpoint != created.Endpoint {
+		t.Fatalf("tunnel summaries = %#v", summaries)
+	}
+	encoded, err := json.Marshal(summaries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, []byte("must-not-leak")) || bytes.Contains(encoded, []byte("InterfacePrivateKey")) {
+		t.Fatalf("tunnel summary projection exposed settings: %s", encoded)
+	}
+
+	if err := os.Remove(legacyTunnelSecretPath(databasePath, created.ID)); err != nil {
+		t.Fatal(err)
+	}
+	workspace, err = loadWorkspace(databasePath)
+	if err != nil || len(workspace.Tunnels) != 1 {
+		t.Fatalf("missing settings affected the workspace: %#v, %v", workspace.Tunnels, err)
+	}
+	summaries, err = loadTunnelSummaries(databasePath)
+	if err != nil {
+		t.Fatalf("missing settings made the tunnel list unusable: %v", err)
+	}
+	if len(summaries) != 1 || summaries[0].Endpoint != "" {
+		t.Fatalf("summary with missing settings = %#v", summaries)
+	}
+}
+
 func TestStormshieldSidecarBindsPhysicalTransportAndValidatesProfile(t *testing.T) {
 	original := physicalTransportAdapterIDsForTunnel
 	t.Cleanup(func() { physicalTransportAdapterIDsForTunnel = original })

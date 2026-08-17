@@ -4,6 +4,8 @@ import test from 'node:test';
 import {
   isTunnelIdentifier,
   isTunnelTestHost,
+  parseTunnelDetailsResponse,
+  parseTunnelSummaryList,
   parseTunnelTestRequest,
 } from '../electron/tunnel-test-contract.ts';
 
@@ -60,5 +62,60 @@ test('tunnel test IPC host validation preserves DNS and IPv4/IPv6 targets', () =
     'bad/path',
   ]) {
     assert.equal(isTunnelTestHost(host), false, host);
+  }
+});
+
+test('tunnel response contracts preserve bounded generic endpoint metadata', () => {
+  const details = {
+    id: tunnelID,
+    name: 'Corporate VPN',
+    kind: 2,
+    endpoint: '[2001:db8::1]:443',
+    settings: { Host: '2001:db8::1', Password: 'secret' },
+  };
+  assert.deepEqual(parseTunnelDetailsResponse(details), details);
+  assert.deepEqual(
+    parseTunnelSummaryList([
+      { id: tunnelID, name: 'Corporate VPN', kind: 'Fortinet', endpoint: 'vpn.example.test:443' },
+      { id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', name: 'Unavailable', kind: 'OpenVPN' },
+    ]),
+    [
+      { id: tunnelID, name: 'Corporate VPN', kind: 'Fortinet', endpoint: 'vpn.example.test:443' },
+      {
+        id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        name: 'Unavailable',
+        kind: 'OpenVPN',
+        endpoint: undefined,
+      },
+    ],
+  );
+});
+
+test('tunnel response contracts reject malformed or unbounded backend output', () => {
+  const validDetails = {
+    id: tunnelID,
+    name: 'Corporate VPN',
+    kind: 2,
+    settings: {},
+  };
+  for (const details of [
+    null,
+    { ...validDetails, id: 'invalid' },
+    { ...validDetails, name: '' },
+    { ...validDetails, kind: 7 },
+    { ...validDetails, settings: [] },
+    { ...validDetails, endpoint: '' },
+    { ...validDetails, endpoint: 'vpn.example.test:443\nsecret' },
+    { ...validDetails, endpoint: `vpn.${'a'.repeat(513)}:443` },
+  ]) {
+    assert.throws(() => parseTunnelDetailsResponse(details), /invalid/i);
+  }
+  for (const summaries of [
+    {},
+    [{ id: tunnelID, name: 'VPN', kind: 2 }],
+    [{ id: tunnelID, name: 'VPN', kind: 'x'.repeat(65) }],
+    [{ id: tunnelID, name: 'VPN', kind: 'OpenVPN', endpoint: 'bad\u0080endpoint' }],
+  ]) {
+    assert.throws(() => parseTunnelSummaryList(summaries), /invalid/i);
   }
 });

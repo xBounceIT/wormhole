@@ -177,9 +177,10 @@ type credentialMetadataQueryer interface {
 }
 
 type tunnelRecord struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-	Kind string `json:"kind"`
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Kind     string `json:"kind"`
+	Endpoint string `json:"endpoint,omitempty"`
 }
 
 type nodeRow struct {
@@ -315,6 +316,8 @@ func runBackendCLI(args []string, input io.Reader, output io.Writer, errorOutput
 				logInfo("workspace loaded: %d roots, %d credentials, %d tunnels", len(workspace.Tree), len(workspace.Credentials), len(workspace.Tunnels))
 			}
 		}
+	case "tunnel-list":
+		result, err = loadTunnelSummaries(*databasePath)
 	case "workspace-duplicate-node":
 		var request workspaceNodeRequest
 		err = decodeInput(&request)
@@ -2285,26 +2288,69 @@ func loadCredentialsForProtocolFromDatabase(
 	return profiles, nil
 }
 
-func loadTunnels(database *sql.DB) ([]tunnelRecord, error) {
+func loadTunnelRows(database *sql.DB) ([]tunnelRow, error) {
 	exists, err := tableExists(database, "TunnelConfigs")
 	if err != nil || !exists {
-		return []tunnelRecord{}, err
+		return []tunnelRow{}, err
 	}
 	rows, err := database.Query("SELECT Id, Name, Kind FROM TunnelConfigs ORDER BY Name, Id;")
 	if err != nil {
 		return nil, fmt.Errorf("cannot read VPN tunnels: %w", err)
 	}
 	defer rows.Close()
-	tunnels := make([]tunnelRecord, 0)
+	result := make([]tunnelRow, 0)
 	for rows.Next() {
 		var row tunnelRow
 		if err := rows.Scan(&row.ID, &row.Name, &row.Kind); err != nil {
 			return nil, fmt.Errorf("cannot read a VPN tunnel: %w", err)
 		}
-		tunnels = append(tunnels, tunnelRecord{ID: row.ID, Name: row.Name, Kind: tunnelName(row.Kind)})
+		result = append(result, row)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("cannot enumerate VPN tunnels: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("cannot close the VPN tunnel reader: %w", err)
+	}
+	return result, nil
+}
+
+func loadTunnels(database *sql.DB) ([]tunnelRecord, error) {
+	rows, err := loadTunnelRows(database)
+	if err != nil {
+		return nil, err
+	}
+	tunnels := make([]tunnelRecord, 0, len(rows))
+	for _, row := range rows {
+		tunnels = append(tunnels, tunnelRecord{ID: row.ID, Name: row.Name, Kind: tunnelName(row.Kind)})
+	}
+	return tunnels, nil
+}
+
+func loadTunnelSummaries(databasePath string) ([]tunnelRecord, error) {
+	database, err := openDatabase(databasePath, true)
+	if err != nil || database == nil {
+		return []tunnelRecord{}, err
+	}
+	defer database.Close()
+	rows, err := loadTunnelRows(database)
+	if err != nil {
+		return nil, err
+	}
+
+	tunnels := make([]tunnelRecord, 0, len(rows))
+	for _, row := range rows {
+		endpoint := ""
+		settings, settingsErr := readTunnelSettings(database, databasePath, row.ID)
+		if settingsErr == nil {
+			endpoint = tunnelEndpointSummary(row.Kind, settings)
+		}
+		clearBytes(settings)
+		// Missing or damaged protected settings must not make the tunnel list unusable.
+		// The editor will still surface the authoritative read error when this tunnel is opened.
+		tunnels = append(tunnels, tunnelRecord{
+			ID: row.ID, Name: row.Name, Kind: tunnelName(row.Kind), Endpoint: endpoint,
+		})
 	}
 	return tunnels, nil
 }

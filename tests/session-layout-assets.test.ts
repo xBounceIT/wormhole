@@ -718,6 +718,25 @@ test('VPN diagnostics expose target probing and cancellation across the bridge',
   );
 });
 
+test('VPN cards show searchable endpoint metadata instead of a managed-tunnel placeholder', () => {
+  const tunnelsPage = sourceBetween(appSource, 'function TunnelsPage', 'function SettingsSection');
+
+  assert.match(preloadSource, /listTunnels: \(\) => ipcRenderer\.invoke\('tunnel:list'\)/);
+  assert.match(mainSource, /parseTunnelSummaryList\(await runBackend<unknown>\('tunnel-list'\)\)/);
+  assert.match(
+    mainSource,
+    /parseTunnelDetailsResponse\(await runBackend<unknown>\('tunnel-create'/,
+  );
+  assert.match(tunnelsPage, /\.listTunnels\(\)/);
+  assert.match(tunnelsPage, /attempt === summaryLoadAttemptRef\.current/);
+  assert.match(tunnelsPage, /\+\+summaryLoadAttemptRef\.current/);
+  assert.match(appSource, /current\.filter\(\(item\) => item\.id !== tunnel\.id\)/);
+  assert.match(tunnelsPage, /tunnel\.endpoint \?\? ''/);
+  assert.match(tunnelsPage, /tunnel\.endpoint \|\| 'Endpoint unavailable'/);
+  assert.match(tunnelsPage, /title=\{tunnel\.endpoint \|\| undefined\}/);
+  assert.doesNotMatch(tunnelsPage, /Managed VPN tunnel/i);
+});
+
 test('VPN editor keeps WatchGuard authentication and Stormshield OTP layout contracts explicit', () => {
   const fields = sourceBetween(
     appSource,

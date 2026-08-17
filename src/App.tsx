@@ -877,6 +877,7 @@ type TunnelRecord = {
   id: string;
   name: string;
   kind: string;
+  endpoint?: string;
 };
 
 function newSessionToken(): string {
@@ -6727,10 +6728,11 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                 />
               ) : activePage === 'tunnels' ? (
                 <TunnelsPage
+                  onTunnelsLoaded={setTunnels}
                   onTunnelCreated={(tunnel) =>
                     setTunnels((current) =>
-                      [...current, tunnel].sort((left, right) =>
-                        left.name.localeCompare(right.name),
+                      [...current.filter((item) => item.id !== tunnel.id), tunnel].sort(
+                        (left, right) => left.name.localeCompare(right.name),
                       ),
                     )
                   }
@@ -12678,6 +12680,7 @@ function TunnelEditorDialog({
         id: saved.id,
         name: saved.name,
         kind: tunnelKindLabel(saved.kind),
+        endpoint: saved.endpoint,
       });
       onOpenChange(false);
     } catch (saveError) {
@@ -12980,11 +12983,13 @@ function TunnelEditorDialog({
 // react-doctor-disable-next-line react-doctor/no-giant-component, react-doctor/prefer-useReducer
 function TunnelsPage({
   tunnels,
+  onTunnelsLoaded,
   onTunnelCreated,
   onTunnelUpdated,
   onTunnelDeleted,
 }: {
   tunnels: TunnelRecord[];
+  onTunnelsLoaded: (tunnels: TunnelRecord[]) => void;
   onTunnelCreated: (tunnel: TunnelRecord) => void;
   onTunnelUpdated: (tunnel: TunnelRecord) => void;
   onTunnelDeleted: (id: string) => void;
@@ -13006,6 +13011,7 @@ function TunnelsPage({
   const [testTargetPort, setTestTargetPort] = useState('');
   const [testInputError, setTestInputError] = useState('');
   const testAttemptRef = useRef(0);
+  const summaryLoadAttemptRef = useRef(0);
   const deferredSearchText = useDeferredValue(searchText);
   const normalizedTunnelSearch = normalizeListSearch(deferredSearchText);
   const tunnelSearchActive = normalizedTunnelSearch.length > 0;
@@ -13014,7 +13020,7 @@ function TunnelsPage({
       tunnelSearchActive
         ? tunnels.map((tunnel) => ({
             item: tunnel,
-            text: `${tunnel.name}\u0000${tunnel.kind}`.toLowerCase(),
+            text: `${tunnel.name}\u0000${tunnel.kind}\u0000${tunnel.endpoint ?? ''}`.toLowerCase(),
           }))
         : [],
     [tunnelSearchActive, tunnels],
@@ -13023,6 +13029,33 @@ function TunnelsPage({
     () => filterListSearchIndex(tunnels, tunnelSearchIndex, normalizedTunnelSearch),
     [normalizedTunnelSearch, tunnelSearchIndex, tunnels],
   );
+
+  useEffect(() => {
+    let active = true;
+    const attempt = ++summaryLoadAttemptRef.current;
+    const api = window.wormhole;
+    if (!api) {
+      setActionError('The VPN service is unavailable.');
+      return () => {
+        active = false;
+      };
+    }
+    api
+      .listTunnels()
+      .then((loaded) => {
+        if (active && attempt === summaryLoadAttemptRef.current) onTunnelsLoaded(loaded);
+      })
+      .catch((loadError: unknown) => {
+        if (active && attempt === summaryLoadAttemptRef.current) {
+          setActionError(
+            loadError instanceof Error ? loadError.message : 'Could not load VPN tunnels.',
+          );
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [onTunnelsLoaded]);
 
   useEffect(() => {
     return window.wormhole?.onTunnelTestProgress((event) => {
@@ -13076,6 +13109,7 @@ function TunnelsPage({
         setActionError(result.error ?? 'Could not delete VPN tunnel.');
         return;
       }
+      ++summaryLoadAttemptRef.current;
       onTunnelDeleted(tunnel.id);
     } catch (error) {
       setActionError(error instanceof Error ? error.message : 'Could not delete VPN tunnel.');
@@ -13203,6 +13237,12 @@ function TunnelsPage({
     setTestInputError('');
   }
 
+  function tunnelSaved(tunnel: TunnelRecord) {
+    ++summaryLoadAttemptRef.current;
+    if (editorValue.id) onTunnelUpdated(tunnel);
+    else onTunnelCreated(tunnel);
+  }
+
   return (
     <section className="flex h-full min-h-0 flex-col overflow-hidden px-6 py-4">
       <h2 className="shrink-0 text-xl font-semibold tracking-tight">VPN tunnels</h2>
@@ -13260,7 +13300,9 @@ function TunnelsPage({
                   </CardAction>
                   <CardDescription className="flex min-w-0 items-center gap-1.5 text-[11px]">
                     <Network className="size-3 shrink-0" />
-                    <span className="truncate">Managed VPN tunnel</span>
+                    <span className="truncate" title={tunnel.endpoint || undefined}>
+                      {tunnel.endpoint || 'Endpoint unavailable'}
+                    </span>
                   </CardDescription>
                 </CardHeader>
                 <CardFooter className="mt-auto justify-end gap-0.5">
@@ -13289,7 +13331,7 @@ function TunnelsPage({
           initial={editorValue}
           key={editorValue.id ?? `new:${editorValue.kind}`}
           onOpenChange={setTunnelEditorOpen}
-          onSaved={(tunnel) => (editorValue.id ? onTunnelUpdated(tunnel) : onTunnelCreated(tunnel))}
+          onSaved={tunnelSaved}
           open
         />
       ) : null}
