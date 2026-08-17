@@ -1200,6 +1200,9 @@ func (native *sshNativeSession) beginMcpCommandPresentation(
 	if native.mcpPresentation != nil {
 		return errMcpCommandInProgress
 	}
+	if len(native.mcpRetiredPresentations) >= mcpMaxRetiredPresentations {
+		return errMcpCommandInProgress
+	}
 	native.mcpPresentation = newMcpCommandPresentationFilter(command, payload, startMarker, endMarkerPrefix)
 	return nil
 }
@@ -1210,6 +1213,14 @@ func (native *sshNativeSession) clearMcpCommandPresentation() {
 	}
 	native.terminalOutputMu.Lock()
 	defer native.terminalOutputMu.Unlock()
+	if native.mcpPresentation != nil && !native.mcpPresentation.wrapperWriteStarted {
+		pending := native.mcpPresentation.drainPending()
+		native.mcpPresentation = nil
+		if len(pending) > 0 && native.server != nil && native.terminal != nil {
+			native.publishVisibleTerminalDataLocked(pending)
+		}
+		return
+	}
 	native.clearMcpCommandPresentationLocked()
 }
 
@@ -1234,10 +1245,11 @@ func (native *sshNativeSession) abandonMcpCommandPresentation() {
 	}
 }
 
-func (native *sshNativeSession) recordMcpCommandPresentationInputWritten(data []byte) {
-	if native == nil || len(data) == 0 {
+func (native *sshNativeSession) recordMcpCommandPresentationInputWritten(data []byte, written int) {
+	if native == nil || written <= 0 || len(data) == 0 {
 		return
 	}
+	written = minInt(written, len(data))
 	native.terminalOutputMu.Lock()
 	defer native.terminalOutputMu.Unlock()
 	if native.mcpPresentation == nil {
@@ -1246,13 +1258,18 @@ func (native *sshNativeSession) recordMcpCommandPresentationInputWritten(data []
 	interruptStart := 0
 	if !native.mcpPresentation.wrapperWritten {
 		wrapperStart := bytes.Index(data, native.mcpPresentation.inputPayload)
-		if wrapperStart < 0 {
+		if wrapperStart < 0 || written <= wrapperStart {
+			return
+		}
+		native.mcpPresentation.wrapperWriteStarted = true
+		wrapperEnd := wrapperStart + len(native.mcpPresentation.inputPayload)
+		if written < wrapperEnd {
 			return
 		}
 		native.mcpPresentation.wrapperWritten = true
-		interruptStart = wrapperStart + len(native.mcpPresentation.inputPayload)
+		interruptStart = wrapperEnd
 	}
-	if bytes.IndexByte(data[interruptStart:], '\x03') >= 0 {
+	if bytes.IndexByte(data[interruptStart:written], '\x03') >= 0 {
 		native.mcpPresentation.interruptWritten = true
 		native.retireInterruptedMcpCommandPresentationLocked()
 	}
@@ -1272,12 +1289,9 @@ func (native *sshNativeSession) retireMcpCommandPresentationLocked() {
 		return
 	}
 	if len(native.mcpRetiredPresentations) >= mcpMaxRetiredPresentations {
-		// A retired filter buffers only suffixes that may belong to its internal wrapper.
-		// Drop the oldest filter and those private bytes rather than leaking them or
-		// permanently blocking recovery after repeated interrupted commands.
-		copy(native.mcpRetiredPresentations, native.mcpRetiredPresentations[1:])
-		native.mcpRetiredPresentations[len(native.mcpRetiredPresentations)-1] = nil
-		native.mcpRetiredPresentations = native.mcpRetiredPresentations[:len(native.mcpRetiredPresentations)-1]
+		// beginMcpCommandPresentation prevents this state in normal operation. Preserve every
+		// existing token and leave the current filter active if the invariant is ever violated.
+		return
 	}
 	native.mcpPresentation.retiredPending = len(native.mcpPresentation.pending)
 	native.mcpPresentation.retired = true
@@ -1403,7 +1417,7 @@ func (native *sshNativeSession) writeRemoteInput(data []byte) error {
 		written = len(data)
 	}
 	if written > 0 {
-		native.recordMcpCommandPresentationInputWritten(data[:written])
+		native.recordMcpCommandPresentationInputWritten(data, written)
 	}
 	return err
 }

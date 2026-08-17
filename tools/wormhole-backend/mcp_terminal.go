@@ -170,6 +170,7 @@ type mcpCommandPresentationFilter struct {
 	retiredPending       int
 	state                mcpPresentationState
 	abandoned            bool
+	wrapperWriteStarted  bool
 	wrapperWritten       bool
 	interruptWritten     bool
 	retired              bool
@@ -264,6 +265,20 @@ func (filter *mcpCommandPresentationFilter) filter(data []byte) []byte {
 			return output
 		}
 	}
+}
+
+func (filter *mcpCommandPresentationFilter) drainPending() []byte {
+	if filter == nil {
+		return nil
+	}
+	output := make([]byte, 0, len(filter.suppressedEcho)+len(filter.pending))
+	output = append(output, filter.suppressedEcho...)
+	output = append(output, filter.pending...)
+	filter.suppressedEcho = nil
+	filter.pending = nil
+	filter.state = mcpPresentationPassThrough
+	filter.complete = true
+	return output
 }
 
 func (filter *mcpCommandPresentationFilter) findEchoOrStartMarker(output *[]byte) bool {

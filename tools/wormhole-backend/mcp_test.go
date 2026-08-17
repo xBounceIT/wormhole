@@ -709,7 +709,7 @@ func TestMcpPresentationRetirementDropsPartialWrapperPrefixes(t *testing.T) {
 			}
 			filter.wrapperWritten = true
 			native.abandonMcpCommandPresentation()
-			native.recordMcpCommandPresentationInputWritten([]byte{'\x03'})
+			native.recordMcpCommandPresentationInputWritten([]byte{'\x03'}, 1)
 
 			visible := native.filterMcpPresentationLocked([]byte("^C\r\nroot@example:/home/user# "))
 			if string(visible) != "^C\r\nroot@example:/home/user# " {
@@ -1092,6 +1092,76 @@ func TestMcpRunCommandInterruptRetiresTimedOutPresentation(t *testing.T) {
 	}
 }
 
+func TestMcpClearPresentationRestoresPendingOutputBeforeWrapperWrite(t *testing.T) {
+	for name, input := range map[string][]byte{
+		"partial-line-ending": []byte("background update\r"),
+		"unrelated-redraw":    []byte("progress\r<status"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			terminal, err := newSSHTerminalEmulator(80, 24)
+			if err != nil {
+				t.Fatal(err)
+			}
+			capture, payload, err := newMcpCommandCapture("echo hello")
+			if err != nil {
+				t.Fatal(err)
+			}
+			native := &sshNativeSession{
+				server:           &sshServer{output: &sshEventWriter{encoder: json.NewEncoder(io.Discard)}},
+				terminal:         terminal,
+				mcpReplay:        newMcpReplayBuffer(mcpReplayCapacity),
+				mcpCommandReplay: newMcpReplayBuffer(mcpReplayCapacity),
+				mcpPresentation:  newMcpCommandPresentationFilter("echo hello", payload, capture.start, capture.endPrefix),
+			}
+
+			native.publishTerminalData(input)
+			native.clearMcpCommandPresentation()
+
+			if visible := native.mcpReplay.snapshotTail(len(input) + 1); !bytes.Equal(visible, input) {
+				t.Fatalf("restored output = %q, want %q", visible, input)
+			}
+			if native.mcpPresentation != nil {
+				t.Fatal("unwritten presentation remained active after cleanup")
+			}
+		})
+	}
+}
+
+func TestMcpClearPresentationDropsOutputAfterPartialWrapperWrite(t *testing.T) {
+	terminal, err := newSSHTerminalEmulator(80, 24)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capture, payload, err := newMcpCommandCapture("echo hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	presentation := newMcpCommandPresentationFilter("echo hello", payload, capture.start, capture.endPrefix)
+	native := &sshNativeSession{
+		server:           &sshServer{output: &sshEventWriter{encoder: json.NewEncoder(io.Discard)}},
+		terminal:         terminal,
+		mcpReplay:        newMcpReplayBuffer(mcpReplayCapacity),
+		mcpCommandReplay: newMcpReplayBuffer(mcpReplayCapacity),
+		mcpPresentation:  presentation,
+	}
+	writeErr := errors.New("partial wrapper write")
+	native.stdin = callbackWriteCloser{write: func(data []byte) (int, error) {
+		native.publishTerminalData(data[:1])
+		return 1, writeErr
+	}}
+
+	if err := native.writeRemoteInput(payload); !errors.Is(err, writeErr) {
+		t.Fatalf("partial wrapper write returned %v", err)
+	}
+	if !presentation.wrapperWriteStarted || presentation.wrapperWritten {
+		t.Fatal("partial wrapper write was not tracked")
+	}
+	native.clearMcpCommandPresentation()
+	if visible := native.mcpReplay.snapshotTail(len(payload)); len(visible) != 0 {
+		t.Fatalf("partial wrapper became visible during cleanup: %q", visible)
+	}
+}
+
 func TestMcpRunCommandKeepsFilterThroughFragmentedEndLineEnding(t *testing.T) {
 	terminal, err := newSSHTerminalEmulator(80, 24)
 	if err != nil {
@@ -1258,32 +1328,43 @@ func TestMcpCoalescedInterruptBeforeWrapperIsIgnored(t *testing.T) {
 	}
 }
 
-func TestMcpWrittenInterruptEvictsOldestRetiredPresentationAtLimit(t *testing.T) {
-	oldest := &mcpCommandPresentationFilter{retired: true}
+func TestMcpBeginCommandPresentationPreservesRetiredFiltersAtLimit(t *testing.T) {
+	capture, payload, err := newMcpCommandCapture("echo oldest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldest := newMcpCommandPresentationFilter("echo oldest", payload, capture.start, capture.endPrefix)
+	oldest.retired = true
+	oldest.wrapperWriteStarted = true
+	oldest.wrapperWritten = true
 	retired := make([]*mcpCommandPresentationFilter, mcpMaxRetiredPresentations)
 	retired[0] = oldest
 	for index := 1; index < len(retired); index++ {
-		retired[index] = &mcpCommandPresentationFilter{retired: true}
+		retired[index] = &mcpCommandPresentationFilter{
+			retired: true,
+			state:   mcpPresentationPassThrough,
+		}
 	}
-	current := &mcpCommandPresentationFilter{abandoned: true, wrapperWritten: true}
 	native := &sshNativeSession{
-		mcpPresentation:         current,
 		mcpRetiredPresentations: retired,
 	}
 
-	native.recordMcpCommandPresentationInputWritten([]byte{'\x03'})
-
-	if native.mcpPresentation != nil || len(native.mcpRetiredPresentations) != mcpMaxRetiredPresentations {
-		t.Fatalf(
-			"capped retirement left active = %t, retired = %d",
-			native.mcpPresentation != nil,
-			len(native.mcpRetiredPresentations),
-		)
+	err = native.beginMcpCommandPresentation("echo blocked", []byte("wrapper\r"), []byte("start"), []byte("end"))
+	if !errors.Is(err, errMcpCommandInProgress) {
+		t.Fatalf("retired presentation limit returned %v", err)
 	}
-	if native.mcpRetiredPresentations[0] == oldest ||
-		native.mcpRetiredPresentations[len(native.mcpRetiredPresentations)-1] != current ||
-		!current.retired {
-		t.Fatal("capped retirement did not evict the oldest filter and retain the current one")
+	if native.mcpPresentation != nil || len(native.mcpRetiredPresentations) != mcpMaxRetiredPresentations ||
+		native.mcpRetiredPresentations[0] != oldest {
+		t.Fatal("retired presentation limit discarded suppression state or installed a new wrapper")
+	}
+
+	raw := append(bytes.TrimSuffix(payload, []byte("\r")), []byte("\r\n")...)
+	raw = append(raw, capture.start...)
+	raw = append(raw, []byte("\r\nlate\r\n")...)
+	raw = append(raw, capture.endPrefix...)
+	raw = append(raw, []byte("0@@\r\n")...)
+	if visible := native.filterMcpPresentationLocked(raw); string(visible) != "echo oldest\r\nlate\r\n" {
+		t.Fatalf("oldest retired wrapper was not suppressed after reaching the limit: %q", visible)
 	}
 }
 
