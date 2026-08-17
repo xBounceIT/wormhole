@@ -5885,7 +5885,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       const isLastSibling = index === nodes.length - 1;
       const isExpanded = connectionTreeSearchActive || expanded.has(node.id);
       const hasChildren = Boolean(node.children?.length);
+      const isTreeNodeSelected = selectedTreeNodeIds.has(node.id);
       const isSelected = node.kind === 'folder' && selectedNodeId === node.id;
+      const showsMoveCursor = isFolder || isTreeNodeSelected;
       const creationFolderId =
         node.kind === 'folder' ? node.id : connectionTreeIndex.parentFolderIdByNodeId.get(node.id);
       const activeDropPlacement = dropTarget?.id === node.id ? dropTarget.placement : null;
@@ -5907,7 +5909,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         ) : null;
       const treeCheckbox = (
         <TreeSelectionCheckbox
-          checked={selectedTreeNodeIds.has(node.id)}
+          checked={isTreeNodeSelected}
           label={`Select ${node.name}`}
           onCheckedChange={(checked) => toggleTreeNodeSelection(node.id, checked)}
         />
@@ -5917,7 +5919,8 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           aria-current={isSelected ? 'true' : undefined}
           aria-keyshortcuts={isFolder ? 'F2 Delete' : 'F2 Delete Enter'}
           className={[
-            'relative z-10 h-8 w-full cursor-grab justify-start gap-1.5 rounded-md px-2 text-left !text-xs font-medium text-sidebar-foreground/80 transition-[background-color,box-shadow,opacity] duration-150 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground aria-expanded:bg-transparent aria-expanded:text-sidebar-foreground/80 active:cursor-grabbing',
+            'relative z-10 h-8 w-full justify-start gap-1.5 rounded-md px-2 text-left !text-xs font-medium text-sidebar-foreground/80 transition-[background-color,box-shadow,opacity] duration-150 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground aria-expanded:bg-transparent aria-expanded:text-sidebar-foreground/80',
+            showsMoveCursor ? 'cursor-grab active:cursor-grabbing' : 'cursor-default',
             isSelected
               ? 'bg-sidebar-accent text-sidebar-accent-foreground aria-expanded:bg-sidebar-accent aria-expanded:text-sidebar-accent-foreground'
               : '',
