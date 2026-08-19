@@ -6868,10 +6868,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                 >
                   Cancel
                 </Button>
-                <Button type="submit">
-                  <Power data-icon="inline-start" />
-                  Connect
-                </Button>
+                <Button type="submit">Connect</Button>
               </DialogFooter>
             </form>
           </DialogContent>
@@ -7941,13 +7938,12 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                   Cancel
                 </Button>
                 <Button disabled={editorBusy} type="submit">
-                  {connectionEditorMode === 'quick' ? (
-                    <Power data-icon="inline-start" />
-                  ) : editingConnectionId ? (
-                    <Check data-icon="inline-start" />
-                  ) : (
-                    <Plus data-icon="inline-start" />
-                  )}
+                  {connectionEditorMode !== 'quick' &&
+                    (editingConnectionId ? (
+                      <Check data-icon="inline-start" />
+                    ) : (
+                      <Plus data-icon="inline-start" />
+                    ))}
                   {connectionEditorMode === 'quick'
                     ? 'Connect'
                     : editorBusy
@@ -8190,7 +8186,6 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                   }
                   type="submit"
                 >
-                  <Power data-icon="inline-start" />
                   {sshCredentialPromptBusy ? 'Connecting…' : 'Connect'}
                 </Button>
               </DialogFooter>
@@ -8312,7 +8307,6 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                   }
                   type="submit"
                 >
-                  <Power data-icon="inline-start" />
                   {rdpCredentialPromptBusy ? 'Connecting…' : 'Connect'}
                 </Button>
               </DialogFooter>

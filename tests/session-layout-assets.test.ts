@@ -541,6 +541,15 @@ test('Quick Connect keeps its session name optional in the mounted form', () => 
   assert.match(appSource, /connectionEditorMode === 'quick'[\s\S]{0,160}Defaults to target/);
 });
 
+test('Connect actions use text without a power icon', () => {
+  const connectButtonSources = [...appSource.matchAll(/<Button\b[\s\S]*?<\/Button>/g)]
+    .map((match) => match[0])
+    .filter((source) => /\bConnect(?:ing)?\b/i.test(source));
+
+  assert.ok(connectButtonSources.length > 0);
+  for (const source of connectButtonSources) assert.doesNotMatch(source, /<Power\b/);
+});
+
 test('new folders expose every inheritable default before creation', () => {
   assert.match(appSource, /id="new-folder-credential"/);
   assert.match(appSource, /id="new-folder-auto-sudo"/);
