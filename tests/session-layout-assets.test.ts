@@ -541,6 +541,27 @@ test('Quick Connect keeps its session name optional in the mounted form', () => 
   assert.match(appSource, /connectionEditorMode === 'quick'[\s\S]{0,160}Defaults to target/);
 });
 
+test('serial connections omit the VPN route from the mounted connection editor', () => {
+  const editorSource = sourceBetween(
+    appSource,
+    'open={newConnectionOpen}',
+    'open={folderDetailsOpen}',
+  );
+  const tunnelFieldIndex = editorSource.indexOf('id="connection-tunnel-route"');
+  assert.ok(tunnelFieldIndex >= 0, 'missing connection VPN route field');
+  const tunnelFieldSource = editorSource.slice(
+    Math.max(0, tunnelFieldIndex - 300),
+    tunnelFieldIndex + 500,
+  );
+
+  assert.match(
+    tunnelFieldSource,
+    /connectionProtocolSupportsTunnel\(newConnectionForm\.protocol\) \? \([\s\S]*<TunnelRouteField/,
+  );
+  assert.doesNotMatch(tunnelFieldSource, /disabled=/);
+  assert.equal(editorSource.match(/id="connection-tunnel-route"/g)?.length, 1);
+});
+
 test('new folders expose every inheritable default before creation', () => {
   assert.match(appSource, /id="new-folder-credential"/);
   assert.match(appSource, /id="new-folder-auto-sudo"/);
