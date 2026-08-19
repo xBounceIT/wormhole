@@ -11849,7 +11849,7 @@ type TunnelField = {
   key: string;
   label: string;
   section?: string;
-  type?: 'password' | 'textarea' | 'number' | 'checkbox' | 'select';
+  type?: 'password' | 'textarea' | 'number' | 'checkbox' | 'switch' | 'select';
   options?: { value: number; label: string }[];
   placeholder?: string;
   hint?: string;
@@ -12080,7 +12080,7 @@ function tunnelEditorFields(kind: number): TunnelField[] {
           key: 'TrustServerCertificate',
           label: 'Ignore certificate errors',
           section: 'Gateway',
-          type: 'checkbox',
+          type: 'switch',
           fullWidth: true,
           hint: 'Skip certificate validation for the WatchGuard portal and embedded SAML sign-in. Use only for a gateway you trust.',
         },
@@ -12137,6 +12137,7 @@ function tunnelEditorFields(kind: number): TunnelField[] {
           label: 'verify-x509-name subject (advanced)',
           section: 'Advanced',
           placeholder: 'leave default unless the Firebox uses a custom server cert',
+          fullWidth: true,
         },
       ];
     case 4:
@@ -12405,8 +12406,20 @@ function TunnelFieldRow({
         (field.type === 'textarea' || field.fullWidth) && 'col-span-full',
       )}
     >
-      <Label htmlFor={`tunnel-${field.key}`}>{field.label}</Label>
-      {field.type === 'checkbox' ? (
+      {field.type === 'switch' ? (
+        <div className="flex min-h-8 items-center justify-between gap-4">
+          <Label htmlFor={`tunnel-${field.key}`}>{field.label}</Label>
+          <Switch
+            checked={value[field.key] === true}
+            disabled={disabled}
+            id={`tunnel-${field.key}`}
+            onCheckedChange={(checked) => onChange(field.key, checked)}
+          />
+        </div>
+      ) : (
+        <Label htmlFor={`tunnel-${field.key}`}>{field.label}</Label>
+      )}
+      {field.type === 'switch' ? null : field.type === 'checkbox' ? (
         <Checkbox
           checked={value[field.key] === true}
           disabled={disabled}
