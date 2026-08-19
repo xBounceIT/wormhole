@@ -541,6 +541,27 @@ test('Quick Connect keeps its session name optional in the mounted form', () => 
   assert.match(appSource, /connectionEditorMode === 'quick'[\s\S]{0,160}Defaults to target/);
 });
 
+test('serial connections omit the VPN route from the mounted connection editor', () => {
+  const editorSource = sourceBetween(
+    appSource,
+    'open={newConnectionOpen}',
+    'open={folderDetailsOpen}',
+  );
+  const tunnelFieldIndex = editorSource.indexOf('id="connection-tunnel-route"');
+  assert.ok(tunnelFieldIndex >= 0, 'missing connection VPN route field');
+  const tunnelFieldSource = editorSource.slice(
+    Math.max(0, tunnelFieldIndex - 300),
+    tunnelFieldIndex + 500,
+  );
+
+  assert.match(
+    tunnelFieldSource,
+    /connectionProtocolSupportsTunnel\(newConnectionForm\.protocol\) \? \([\s\S]*<TunnelRouteField/,
+  );
+  assert.doesNotMatch(tunnelFieldSource, /disabled=/);
+  assert.equal(editorSource.match(/id="connection-tunnel-route"/g)?.length, 1);
+});
+
 test('new folders expose every inheritable default before creation', () => {
   assert.match(appSource, /id="new-folder-credential"/);
   assert.match(appSource, /id="new-folder-auto-sudo"/);
@@ -805,6 +826,33 @@ test('OpenVPN profile import shares the field label row without rendering a dupl
   assert.match(fieldRow, /flex flex-wrap items-center justify-between gap-2/);
   assert.match(fieldRow, /<Label htmlFor=\{`tunnel-\$\{field\.key\}`\}>\{field\.label\}<\/Label>/);
   assert.match(fieldRow, /\{labelAction\}/);
+});
+
+test('Fortinet SSO and certificate choices render as switches on dedicated rows', () => {
+  const fields = sourceBetween(
+    appSource,
+    'function tunnelEditorFields',
+    'function tunnelDefaultSettings',
+  );
+  const fortinet = sourceBetween(fields, 'case 2:', 'case 3:');
+  const watchguard = sourceBetween(fields, 'case 3:', 'case 4:');
+  const stormshield = sourceBetween(fields, 'case 4:', 'case 5:');
+  const cisco = sourceBetween(fields, 'case 6:', 'default:');
+  const fieldRow = sourceBetween(appSource, 'function TunnelFieldRow', 'function TunnelSection');
+
+  assert.match(fortinet, /key: 'UseSingleSignOn'[\s\S]{0,180}type: 'switch'/);
+  assert.match(fortinet, /key: 'UseExternalBrowser'[\s\S]{0,180}type: 'switch'/);
+  assert.match(fortinet, /key: 'TrustServerCertificate'[\s\S]{0,180}type: 'switch'/);
+  assert.match(fortinet, /key: 'TotpSecret'[\s\S]{0,240}fullWidth: true/);
+  assert.match(fortinet, /key: 'TrustServerCertificate'[\s\S]{0,240}fullWidth: true/);
+  assert.match(fortinet, /key: 'ServerCertSha256Pin'[\s\S]{0,240}fullWidth: true/);
+  assert.match(fieldRow, /field\.type === 'switch'[\s\S]{0,500}<Switch/);
+  assert.match(fieldRow, /<Switch[\s\S]{0,160}aria-label=\{field\.label\}/);
+  assert.match(fieldRow, /field\.type === 'checkbox'[\s\S]{0,180}<Checkbox/);
+  assert.match(watchguard, /key: 'TrustServerCertificate'[\s\S]{0,180}type: 'checkbox'/);
+  assert.match(stormshield, /key: 'UseOtp'[\s\S]{0,180}type: 'checkbox'/);
+  assert.match(stormshield, /key: 'TrustServerCertificate'[\s\S]{0,180}type: 'checkbox'/);
+  assert.match(cisco, /key: 'TrustServerCertificate'[\s\S]{0,180}type: 'checkbox'/);
 });
 
 test('VPN editor keeps expanded provider fields inside its scrolling body', () => {
