@@ -28,11 +28,14 @@ import {
   connectionInlinePasswordAction,
   connectionInlinePasswordPlaceholder,
   connectionUsesSavedCredentials,
+  buildCredentialListProjection,
+  credentialSelectionAfterSelectAll,
   credentialCanUseProtocol,
   effectiveSshAutoSudoMode,
   mergeCredential,
   sshAutoSudoAvailable,
   type CredentialKind,
+  type CredentialSourceFilter,
 } from './credential-state';
 import {
   createLogLevelSaveState,
@@ -139,6 +142,7 @@ import {
   Globe,
   Info,
   KeyRound,
+  ListFilter,
   LoaderCircle,
   Maximize2,
   Monitor,
@@ -192,6 +196,8 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
@@ -688,6 +694,14 @@ type CredentialOptionGroups = Record<CredentialProtocol, CredentialRecord[]>;
 const manualCredentialSelectionValue = '__manual__';
 const bitwardenCredentialCreationError =
   'Bitwarden credential profiles cannot be created manually.';
+const credentialSourceFilterOptions: ReadonlyArray<{
+  value: CredentialSourceFilter;
+  label: string;
+}> = [
+  { value: 'all', label: 'All sources' },
+  { value: 'Local', label: 'Local' },
+  { value: 'Bitwarden', label: 'Bitwarden' },
+];
 
 function workspaceCredentialOptions(workspace: WormholeWorkspaceSnapshot): CredentialOptionGroups {
   return {
@@ -10854,6 +10868,8 @@ function CredentialsPage({
   // react-doctor-disable-next-line react-doctor/prefer-useReducer
 }) {
   const [searchText, setSearchText] = useState('');
+  const [credentialSourceFilter, setCredentialSourceFilter] =
+    useState<CredentialSourceFilter>('all');
   const [selectedCredentials, setSelectedCredentials] = useState<Set<string>>(() => new Set());
   const [editorOpen, setEditorOpen] = useState(false);
   const [editingCredential, setEditingCredential] = useState<CredentialRecord | null>(null);
@@ -10901,32 +10917,20 @@ function CredentialsPage({
     searchText,
     deferredSearchText,
   );
-  const credentialSearchActive = normalizedCredentialSearch.length > 0;
-  const credentialSearchIndex = useMemo(
+  const credentialListProjection = useMemo(
     () =>
-      credentialSearchActive
-        ? credentials.map((credential) => ({
-            item: credential,
-            text: [
-              credential.name,
-              credential.username,
-              credential.domain,
-              credential.provider,
-              credential.kind === 'sshKey' ? 'SSH key' : 'Password',
-              credential.privateKeyFileName,
-            ]
-              .filter(Boolean)
-              .join('\u0000')
-              .toLowerCase(),
-          }))
-        : [],
-    [credentialSearchActive, credentials],
+      buildCredentialListProjection(
+        credentials,
+        credentialSourceFilter,
+        normalizedCredentialSearch,
+      ),
+    [credentialSourceFilter, credentials, normalizedCredentialSearch],
   );
+  const filteredCredentials = credentialListProjection.credentials;
 
-  const filteredCredentials = useMemo(
-    () => filterListSearchIndex(credentials, credentialSearchIndex, normalizedCredentialSearch),
-    [credentialSearchIndex, credentials, normalizedCredentialSearch],
-  );
+  const credentialSourceFilterLabel =
+    credentialSourceFilterOptions.find((option) => option.value === credentialSourceFilter)
+      ?.label ?? 'All sources';
 
   const credentialById = useMemo(
     () => new Map(credentials.map((credential) => [credential.id, credential])),
@@ -10937,9 +10941,6 @@ function CredentialsPage({
     [credentialById, selectedCredentials],
   );
 
-  const allVisibleSelected =
-    filteredCredentials.length > 0 &&
-    filteredCredentials.every((credential) => validSelectedCredentials.has(credential.id));
   const deletableSelectedCredentials = [...validSelectedCredentials].filter(
     (id) => credentialById.get(id)?.canDelete,
   );
@@ -11261,14 +11262,40 @@ function CredentialsPage({
             placeholder="Search credentials"
             value={searchText}
           />
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                aria-label={`Filter credentials by source: ${credentialSourceFilterLabel}`}
+                className="!text-xs"
+                size="default"
+                variant={credentialSourceFilter === 'all' ? 'outline' : 'secondary'}
+              >
+                <ListFilter data-icon="inline-start" />
+                {credentialSourceFilterLabel}
+                <ChevronDown data-icon="inline-end" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuRadioGroup
+                onValueChange={(value) =>
+                  setCredentialSourceFilter(value as CredentialSourceFilter)
+                }
+                value={credentialSourceFilter}
+              >
+                {credentialSourceFilterOptions.map((option) => (
+                  <DropdownMenuRadioItem key={option.value} value={option.value}>
+                    {option.label}
+                  </DropdownMenuRadioItem>
+                ))}
+              </DropdownMenuRadioGroup>
+            </DropdownMenuContent>
+          </DropdownMenu>
           <Button
             className="!text-xs"
             disabled={credentialSearchResultsPending}
             onClick={() =>
-              setSelectedCredentials(
-                allVisibleSelected
-                  ? new Set()
-                  : new Set(filteredCredentials.map((credential) => credential.id)),
+              setSelectedCredentials((current) =>
+                credentialSelectionAfterSelectAll(filteredCredentials, current),
               )
             }
             size="default"
@@ -11320,14 +11347,14 @@ function CredentialsPage({
               <div className="max-w-[420px] space-y-3">
                 <KeyRound className="mx-auto size-12 text-muted-foreground/50" />
                 <h3 className="text-sm font-semibold">
-                  {credentials.length === 0
+                  {credentialListProjection.emptyState === 'empty'
                     ? 'No credentials yet'
-                    : 'No credentials match your search'}
+                    : 'No credentials match your filters'}
                 </h3>
                 <p className="text-xs leading-relaxed text-muted-foreground">
-                  {credentials.length === 0
+                  {credentialListProjection.emptyState === 'empty'
                     ? 'Add a password or SSH key credential to reuse across your connections.'
-                    : 'Try a different name, username, domain, or provider.'}
+                    : 'Try a different search or credential source.'}
                 </p>
               </div>
             </div>
@@ -11401,7 +11428,7 @@ function CredentialsPage({
                   </CardFooter>
                 </Card>
               )}
-              resetKey={normalizedCredentialSearch}
+              resetKey={credentialListProjection.resetKey}
               rowHeight={176}
             />
           )}

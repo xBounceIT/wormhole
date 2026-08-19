@@ -14,7 +14,79 @@ type CredentialSelectionOption = {
 
 export type CredentialKind = 'password' | 'sshKey' | 'unsupported';
 export type CredentialProtocol = 'ssh' | 'rdp' | 'vnc';
+export type CredentialSourceFilter = 'all' | 'Local' | 'Bitwarden';
 export type SshAutoSudoMode = 'inherit' | 'on' | 'off';
+
+type CredentialListItem = {
+  id: string;
+  name: string;
+  username: string;
+  domain?: string;
+  provider: string;
+  kind: CredentialKind;
+  privateKeyFileName?: string;
+};
+
+type CredentialListProjection<T> = {
+  credentials: ReadonlyArray<T>;
+  emptyState: 'empty' | 'noMatches' | null;
+  resetKey: string;
+};
+
+function credentialListSearchText(credential: CredentialListItem): string {
+  return [
+    credential.name,
+    credential.username,
+    credential.domain,
+    credential.provider,
+    credential.kind === 'sshKey' ? 'SSH key' : 'Password',
+    credential.privateKeyFileName,
+  ]
+    .filter(Boolean)
+    .join('\u0000')
+    .toLowerCase();
+}
+
+export function filterCredentialsBySource<T extends { provider: string }>(
+  credentials: ReadonlyArray<T>,
+  source: CredentialSourceFilter,
+): ReadonlyArray<T> {
+  return source === 'all'
+    ? credentials
+    : credentials.filter((credential) => credential.provider === source);
+}
+
+export function buildCredentialListProjection<T extends CredentialListItem>(
+  credentials: ReadonlyArray<T>,
+  source: CredentialSourceFilter,
+  normalizedSearch: string,
+): CredentialListProjection<T> {
+  const sourceCredentials = filterCredentialsBySource(credentials, source);
+  const visibleCredentials = normalizedSearch
+    ? sourceCredentials.filter(
+        (credential) => credentialListSearchText(credential).includes(normalizedSearch), // react-doctor-disable-line react-doctor/js-set-map-lookups -- String lookup, not an array scan.
+      )
+    : sourceCredentials;
+
+  return {
+    credentials: visibleCredentials,
+    emptyState:
+      visibleCredentials.length > 0 ? null : credentials.length === 0 ? 'empty' : 'noMatches',
+    resetKey: `${source}\u0000${normalizedSearch}`,
+  };
+}
+
+export function credentialSelectionAfterSelectAll<T extends { id: string }>(
+  visibleCredentials: ReadonlyArray<T>,
+  selectedCredentials: ReadonlySet<string>,
+): Set<string> {
+  const allVisibleSelected =
+    visibleCredentials.length > 0 &&
+    visibleCredentials.every((credential) => selectedCredentials.has(credential.id));
+  return allVisibleSelected
+    ? new Set()
+    : new Set(visibleCredentials.map((credential) => credential.id));
+}
 
 export function buildConnectionCredentialSelectionOptions(
   credentials: SavedCredential[],
