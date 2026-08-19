@@ -240,6 +240,7 @@ import {
   resolveVisibleConnectionTreeSelection,
 } from './tree-shortcuts';
 import {
+  connectionProtocolSupportsTunnel,
   quickConnectStartsImmediately,
   quickConnectTunnelId,
   type QuickConnectProtocol,
@@ -5600,8 +5601,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         newConnectionForm.sshAutoSudo,
         editingNode ? autoSudoModeFor(editingNode.sshAutoSudo) : 'inherit',
       );
-      const connectionTunnel =
-        newConnectionForm.protocol === 'serial' ? 'off' : newConnectionForm.tunnel;
+      const connectionTunnel = connectionProtocolSupportsTunnel(newConnectionForm.protocol)
+        ? newConnectionForm.tunnel
+        : 'off';
       const connectionCredential: CredentialSelection =
         newConnectionForm.protocol === 'ssh' ||
         newConnectionForm.protocol === 'rdp' ||
@@ -7277,16 +7279,15 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                       />
                     ) : null}
 
-                    <TunnelRouteField
-                      disabled={newConnectionForm.protocol === 'serial'}
-                      id="connection-tunnel-route"
-                      mode={
-                        newConnectionForm.protocol === 'serial' ? 'off' : newConnectionForm.tunnel
-                      }
-                      onChange={(tunnel) => setNewConnectionForm((form) => ({ ...form, tunnel }))}
-                      scope={connectionEditorMode === 'quick' ? 'quick' : 'connection'}
-                      tunnels={tunnels}
-                    />
+                    {connectionProtocolSupportsTunnel(newConnectionForm.protocol) ? (
+                      <TunnelRouteField
+                        id="connection-tunnel-route"
+                        mode={newConnectionForm.tunnel}
+                        onChange={(tunnel) => setNewConnectionForm((form) => ({ ...form, tunnel }))}
+                        scope={connectionEditorMode === 'quick' ? 'quick' : 'connection'}
+                        tunnels={tunnels}
+                      />
+                    ) : null}
 
                     {newConnectionForm.protocol === 'https' ? (
                       <label className="flex items-center gap-2 text-xs">
@@ -11893,14 +11894,12 @@ function TunnelRouteField({
   onChange,
   scope,
   tunnels,
-  disabled = false,
 }: {
   id: string;
   mode: TunnelMode;
   onChange: (mode: TunnelMode) => void;
   scope: 'connection' | 'folder' | 'quick';
   tunnels: TunnelRecord[];
-  disabled?: boolean;
 }) {
   const isFolder = scope === 'folder';
   const isQuick = scope === 'quick';
@@ -11936,7 +11935,6 @@ function TunnelRouteField({
       <Label htmlFor={id}>{isFolder ? 'VPN route default' : 'VPN route'}</Label>
       <SearchableCombobox
         className="sm:max-w-[280px]"
-        disabled={disabled}
         emptyMessage="No VPN routes found."
         id={id}
         onValueChange={(value) => onChange(value as TunnelMode)}
