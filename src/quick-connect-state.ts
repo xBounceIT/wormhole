@@ -1,6 +1,6 @@
 export type QuickConnectProtocol = 'ssh' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial';
 
-export function quickConnectSupportsTunnel(protocol: QuickConnectProtocol): boolean {
+export function connectionProtocolSupportsTunnel(protocol: QuickConnectProtocol): boolean {
   return (
     protocol === 'ssh' ||
     protocol === 'rdp' ||
@@ -14,7 +14,7 @@ export function quickConnectTunnelId(
   protocol: QuickConnectProtocol,
   tunnelMode: string | undefined,
 ): string | undefined {
-  if (!quickConnectSupportsTunnel(protocol) || !tunnelMode || tunnelMode === 'off')
+  if (!connectionProtocolSupportsTunnel(protocol) || !tunnelMode || tunnelMode === 'off')
     return undefined;
   return tunnelMode;
 }
