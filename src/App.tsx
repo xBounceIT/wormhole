@@ -12419,11 +12419,13 @@ function TunnelFieldRow({
   field,
   value,
   disabled,
+  labelAction,
   onChange,
 }: {
   field: TunnelField;
   value: Record<string, unknown>;
   disabled?: boolean;
+  labelAction?: ReactNode;
   onChange: (key: string, next: unknown) => void;
 }) {
   return (
@@ -12443,6 +12445,11 @@ function TunnelFieldRow({
             id={`tunnel-${field.key}`}
             onCheckedChange={(checked) => onChange(field.key, checked)}
           />
+        </div>
+      ) : labelAction ? (
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <Label htmlFor={`tunnel-${field.key}`}>{field.label}</Label>
+          {labelAction}
         </div>
       ) : (
         <Label htmlFor={`tunnel-${field.key}`}>{field.label}</Label>
@@ -12582,6 +12589,7 @@ function TunnelEditorDialog({
     options?: {
       disabled?: (field: TunnelField) => boolean;
       hidden?: (field: TunnelField) => boolean;
+      labelAction?: (field: TunnelField) => ReactNode;
     },
   ) =>
     fields.flatMap((field) =>
@@ -12591,6 +12599,7 @@ function TunnelEditorDialog({
               disabled={options?.disabled?.(field)}
               field={field}
               key={field.key}
+              labelAction={options?.labelAction?.(field)}
               onChange={setSetting}
               value={value.settings}
             />,
@@ -12860,20 +12869,20 @@ function TunnelEditorDialog({
             {value.kind === 1 ? (
               <>
                 <div className="grid gap-3">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <Label htmlFor="tunnel-ProfileOvpn">OpenVPN profile (.ovpn contents)</Label>
-                    <Button
-                      disabled={busy}
-                      onClick={() => void importOvpnProfile()}
-                      size="sm"
-                      type="button"
-                      variant="outline"
-                    >
-                      <Upload data-icon="inline-start" />
-                      Import from file…
-                    </Button>
-                  </div>
-                  {rows('Profile')}
+                  {rows('Profile', {
+                    labelAction: () => (
+                      <Button
+                        disabled={busy}
+                        onClick={() => void importOvpnProfile()}
+                        size="sm"
+                        type="button"
+                        variant="outline"
+                      >
+                        <Upload data-icon="inline-start" />
+                        Import from file…
+                      </Button>
+                    ),
+                  })}
                 </div>
                 <TunnelSection title="Authentication (optional)">
                   {rows('Authentication')}

@@ -805,6 +805,29 @@ test('VPN editor keeps WatchGuard authentication and Stormshield OTP layout cont
   assert.match(appSource, /field\.fullWidth\) && 'col-span-full'/);
 });
 
+test('OpenVPN profile import shares the field label row without rendering a duplicate label', () => {
+  const fields = sourceBetween(
+    appSource,
+    'function tunnelEditorFields',
+    'function tunnelDefaultSettings',
+  );
+  const openVpnFields = sourceBetween(fields, 'case 1:', 'case 2:');
+  const fieldRow = sourceBetween(appSource, 'function TunnelFieldRow', 'function TunnelSection');
+  const openVpnRender = sourceBetween(appSource, '{value.kind === 1 ? (', '{value.kind === 2 ? (');
+
+  assert.equal(openVpnFields.match(/label: 'OpenVPN profile \(\.ovpn contents\)'/g)?.length, 1);
+  assert.match(openVpnRender, /rows\('Profile', \{[\s\S]{0,120}labelAction:/);
+  assert.match(openVpnRender, /disabled=\{busy\}/);
+  assert.match(openVpnRender, /onClick=\{\(\) => void importOvpnProfile\(\)\}/);
+  assert.match(openVpnRender, /type="button"/);
+  assert.match(openVpnRender, /Import from file…/);
+  assert.doesNotMatch(openVpnRender, /<Label[^>]*>OpenVPN profile/);
+  assert.match(fieldRow, /labelAction \? \(/);
+  assert.match(fieldRow, /flex flex-wrap items-center justify-between gap-2/);
+  assert.match(fieldRow, /<Label htmlFor=\{`tunnel-\$\{field\.key\}`\}>\{field\.label\}<\/Label>/);
+  assert.match(fieldRow, /\{labelAction\}/);
+});
+
 test('Fortinet SSO and certificate choices render as switches on dedicated rows', () => {
   const fields = sourceBetween(
     appSource,
