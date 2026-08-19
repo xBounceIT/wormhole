@@ -784,6 +784,33 @@ test('VPN editor keeps WatchGuard authentication and Stormshield OTP layout cont
   assert.match(appSource, /field\.fullWidth\) && 'col-span-full'/);
 });
 
+test('Fortinet SSO and certificate choices render as switches on dedicated rows', () => {
+  const fields = sourceBetween(
+    appSource,
+    'function tunnelEditorFields',
+    'function tunnelDefaultSettings',
+  );
+  const fortinet = sourceBetween(fields, 'case 2:', 'case 3:');
+  const watchguard = sourceBetween(fields, 'case 3:', 'case 4:');
+  const stormshield = sourceBetween(fields, 'case 4:', 'case 5:');
+  const cisco = sourceBetween(fields, 'case 6:', 'default:');
+  const fieldRow = sourceBetween(appSource, 'function TunnelFieldRow', 'function TunnelSection');
+
+  assert.match(fortinet, /key: 'UseSingleSignOn'[\s\S]{0,180}type: 'switch'/);
+  assert.match(fortinet, /key: 'UseExternalBrowser'[\s\S]{0,180}type: 'switch'/);
+  assert.match(fortinet, /key: 'TrustServerCertificate'[\s\S]{0,180}type: 'switch'/);
+  assert.match(fortinet, /key: 'TotpSecret'[\s\S]{0,240}fullWidth: true/);
+  assert.match(fortinet, /key: 'TrustServerCertificate'[\s\S]{0,240}fullWidth: true/);
+  assert.match(fortinet, /key: 'ServerCertSha256Pin'[\s\S]{0,240}fullWidth: true/);
+  assert.match(fieldRow, /field\.type === 'switch'[\s\S]{0,500}<Switch/);
+  assert.match(fieldRow, /<Switch[\s\S]{0,160}aria-label=\{field\.label\}/);
+  assert.match(fieldRow, /field\.type === 'checkbox'[\s\S]{0,180}<Checkbox/);
+  assert.match(watchguard, /key: 'TrustServerCertificate'[\s\S]{0,180}type: 'checkbox'/);
+  assert.match(stormshield, /key: 'UseOtp'[\s\S]{0,180}type: 'checkbox'/);
+  assert.match(stormshield, /key: 'TrustServerCertificate'[\s\S]{0,180}type: 'checkbox'/);
+  assert.match(cisco, /key: 'TrustServerCertificate'[\s\S]{0,180}type: 'checkbox'/);
+});
+
 test('VPN editor keeps expanded provider fields inside its scrolling body', () => {
   const editor = sourceBetween(
     appSource,

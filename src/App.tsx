@@ -11849,7 +11849,7 @@ type TunnelField = {
   key: string;
   label: string;
   section?: string;
-  type?: 'password' | 'textarea' | 'number' | 'checkbox' | 'select';
+  type?: 'password' | 'textarea' | 'number' | 'checkbox' | 'switch' | 'select';
   options?: { value: number; label: string }[];
   placeholder?: string;
   hint?: string;
@@ -12027,13 +12027,13 @@ function tunnelEditorFields(kind: number): TunnelField[] {
           key: 'UseSingleSignOn',
           label: 'Enable single sign-on (SSO) for the VPN tunnel',
           section: 'Single sign-on',
-          type: 'checkbox',
+          type: 'switch',
         },
         {
           key: 'UseExternalBrowser',
           label: 'Use external browser for SAML authentication',
           section: 'Single sign-on',
-          type: 'checkbox',
+          type: 'switch',
         },
         {
           key: 'SamlRedirectPort',
@@ -12048,17 +12048,20 @@ function tunnelEditorFields(kind: number): TunnelField[] {
           section: 'Advanced',
           type: 'password',
           hint: 'used by username/password authentication',
+          fullWidth: true,
         },
         {
           key: 'TrustServerCertificate',
           label: 'Trust server certificate (skip verification)',
           section: 'Advanced',
-          type: 'checkbox',
+          type: 'switch',
+          fullWidth: true,
         },
         {
           key: 'ServerCertSha256Pin',
           label: 'Server certificate SHA-256 pin (hex, optional)',
           section: 'Advanced',
+          fullWidth: true,
         },
       ];
     case 3:
@@ -12405,8 +12408,21 @@ function TunnelFieldRow({
         (field.type === 'textarea' || field.fullWidth) && 'col-span-full',
       )}
     >
-      <Label htmlFor={`tunnel-${field.key}`}>{field.label}</Label>
-      {field.type === 'checkbox' ? (
+      {field.type === 'switch' ? (
+        <div className="flex min-h-8 items-center justify-between gap-4">
+          <Label htmlFor={`tunnel-${field.key}`}>{field.label}</Label>
+          <Switch
+            aria-label={field.label}
+            checked={value[field.key] === true}
+            disabled={disabled}
+            id={`tunnel-${field.key}`}
+            onCheckedChange={(checked) => onChange(field.key, checked)}
+          />
+        </div>
+      ) : (
+        <Label htmlFor={`tunnel-${field.key}`}>{field.label}</Label>
+      )}
+      {field.type === 'switch' ? null : field.type === 'checkbox' ? (
         <Checkbox
           checked={value[field.key] === true}
           disabled={disabled}
