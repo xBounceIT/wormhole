@@ -28,9 +28,10 @@ import {
   connectionInlinePasswordAction,
   connectionInlinePasswordPlaceholder,
   connectionUsesSavedCredentials,
+  buildCredentialListProjection,
+  credentialSelectionAfterSelectAll,
   credentialCanUseProtocol,
   effectiveSshAutoSudoMode,
-  filterCredentialsBySource,
   mergeCredential,
   sshAutoSudoAvailable,
   type CredentialKind,
@@ -10916,41 +10917,16 @@ function CredentialsPage({
     searchText,
     deferredSearchText,
   );
-  const credentialSearchActive = normalizedCredentialSearch.length > 0;
-  const sourceFilteredCredentials = useMemo(
-    () => filterCredentialsBySource(credentials, credentialSourceFilter),
-    [credentialSourceFilter, credentials],
-  );
-  const credentialSearchIndex = useMemo(
+  const credentialListProjection = useMemo(
     () =>
-      credentialSearchActive
-        ? sourceFilteredCredentials.map((credential) => ({
-            item: credential,
-            text: [
-              credential.name,
-              credential.username,
-              credential.domain,
-              credential.provider,
-              credential.kind === 'sshKey' ? 'SSH key' : 'Password',
-              credential.privateKeyFileName,
-            ]
-              .filter(Boolean)
-              .join('\u0000')
-              .toLowerCase(),
-          }))
-        : [],
-    [credentialSearchActive, sourceFilteredCredentials],
-  );
-
-  const filteredCredentials = useMemo(
-    () =>
-      filterListSearchIndex(
-        sourceFilteredCredentials,
-        credentialSearchIndex,
+      buildCredentialListProjection(
+        credentials,
+        credentialSourceFilter,
         normalizedCredentialSearch,
       ),
-    [credentialSearchIndex, normalizedCredentialSearch, sourceFilteredCredentials],
+    [credentialSourceFilter, credentials, normalizedCredentialSearch],
   );
+  const filteredCredentials = credentialListProjection.credentials;
 
   const credentialSourceFilterLabel =
     credentialSourceFilterOptions.find((option) => option.value === credentialSourceFilter)
@@ -10965,9 +10941,6 @@ function CredentialsPage({
     [credentialById, selectedCredentials],
   );
 
-  const allVisibleSelected =
-    filteredCredentials.length > 0 &&
-    filteredCredentials.every((credential) => validSelectedCredentials.has(credential.id));
   const deletableSelectedCredentials = [...validSelectedCredentials].filter(
     (id) => credentialById.get(id)?.canDelete,
   );
@@ -11321,10 +11294,8 @@ function CredentialsPage({
             className="!text-xs"
             disabled={credentialSearchResultsPending}
             onClick={() =>
-              setSelectedCredentials(
-                allVisibleSelected
-                  ? new Set()
-                  : new Set(filteredCredentials.map((credential) => credential.id)),
+              setSelectedCredentials((current) =>
+                credentialSelectionAfterSelectAll(filteredCredentials, current),
               )
             }
             size="default"
@@ -11376,12 +11347,12 @@ function CredentialsPage({
               <div className="max-w-[420px] space-y-3">
                 <KeyRound className="mx-auto size-12 text-muted-foreground/50" />
                 <h3 className="text-sm font-semibold">
-                  {credentials.length === 0
+                  {credentialListProjection.emptyState === 'empty'
                     ? 'No credentials yet'
                     : 'No credentials match your filters'}
                 </h3>
                 <p className="text-xs leading-relaxed text-muted-foreground">
-                  {credentials.length === 0
+                  {credentialListProjection.emptyState === 'empty'
                     ? 'Add a password or SSH key credential to reuse across your connections.'
                     : 'Try a different search or credential source.'}
                 </p>
@@ -11457,7 +11428,7 @@ function CredentialsPage({
                   </CardFooter>
                 </Card>
               )}
-              resetKey={`${credentialSourceFilter}\u0000${normalizedCredentialSearch}`}
+              resetKey={credentialListProjection.resetKey}
               rowHeight={176}
             />
           )}

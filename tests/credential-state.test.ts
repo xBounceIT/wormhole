@@ -3,11 +3,13 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import {
+  buildCredentialListProjection,
   buildConnectionCredentialSelectionOptions,
   connectionCredentialSelectionAfterSavedToggle,
   connectionInlinePasswordAction,
   connectionInlinePasswordPlaceholder,
   connectionUsesSavedCredentials,
+  credentialSelectionAfterSelectAll,
   credentialCanUseProtocol,
   effectiveSshAutoSudoMode,
   filterCredentialsBySource,
@@ -151,12 +153,32 @@ test('credential merge replaces an existing id without duplicating it', () => {
   ]);
 });
 
-test('credential source filter separates local and Bitwarden credentials', () => {
+test('credential source projection combines provider, search, and empty state', () => {
   const credentials = [
-    { id: 'local-password', provider: 'Local' },
-    { id: 'vault-password', provider: 'Bitwarden' },
-    { id: 'local-key', provider: 'Local' },
-  ];
+    {
+      id: 'local-password',
+      name: 'Production SSH',
+      username: 'alice',
+      provider: 'Local',
+      kind: 'password',
+    },
+    {
+      id: 'vault-password',
+      name: 'Production RDP',
+      username: 'bob',
+      domain: 'CORP',
+      provider: 'Bitwarden',
+      kind: 'password',
+    },
+    {
+      id: 'local-key',
+      name: 'Jump host',
+      username: 'carol',
+      provider: 'Local',
+      kind: 'sshKey',
+      privateKeyFileName: 'id_ed25519',
+    },
+  ] as const;
 
   assert.equal(filterCredentialsBySource(credentials, 'all'), credentials);
   assert.deepEqual(
@@ -171,17 +193,50 @@ test('credential source filter separates local and Bitwarden credentials', () =>
     filterCredentialsBySource(credentials, 'Bitwarden').map((credential) => credential.id),
     ['vault-password'],
   );
+
+  const localSearch = buildCredentialListProjection(credentials, 'Local', 'jump');
+  assert.deepEqual(
+    localSearch.credentials.map((credential) => credential.id),
+    ['local-key'],
+  );
+  assert.equal(localSearch.emptyState, null);
+  assert.equal(localSearch.resetKey, 'Local\u0000jump');
+
+  const bitwardenSearch = buildCredentialListProjection(credentials, 'Bitwarden', 'alice');
+  assert.deepEqual(bitwardenSearch.credentials, []);
+  assert.equal(bitwardenSearch.emptyState, 'noMatches');
+  assert.equal(bitwardenSearch.resetKey, 'Bitwarden\u0000alice');
+
+  const empty = buildCredentialListProjection([], 'all', '');
+  assert.deepEqual(empty.credentials, []);
+  assert.equal(empty.emptyState, 'empty');
 });
 
-test('credentials page exposes a source filter that also resets the virtual grid', () => {
-  assert.match(appSource, /aria-label=\{`Filter credentials by source:/);
-  assert.match(appSource, /\{ value: 'Local', label: 'Local' \}/);
-  assert.match(appSource, /\{ value: 'Bitwarden', label: 'Bitwarden' \}/);
-  assert.match(appSource, /filterCredentialsBySource\(credentials, credentialSourceFilter\)/);
-  assert.match(
-    appSource,
-    /resetKey=\{`\$\{credentialSourceFilter\}\\u0000\$\{normalizedCredentialSearch\}`\}/,
+test('credential bulk selection follows the source-filtered projection', () => {
+  const credentials = [
+    { id: 'local-password', provider: 'Local' },
+    { id: 'vault-password', provider: 'Bitwarden' },
+    { id: 'local-key', provider: 'Local' },
+  ];
+  const localCredentials = filterCredentialsBySource(credentials, 'Local');
+
+  const selected = credentialSelectionAfterSelectAll(localCredentials, new Set(['vault-password']));
+  assert.deepEqual([...selected], ['local-password', 'local-key']);
+  assert.deepEqual([...credentialSelectionAfterSelectAll(localCredentials, selected)], []);
+  assert.deepEqual([...credentialSelectionAfterSelectAll([], new Set(['vault-password']))], []);
+});
+
+test('credentials page wires the source menu to the tested list projection', () => {
+  const credentialsPage = appSource.slice(
+    appSource.indexOf('function CredentialsPage('),
+    appSource.indexOf('function TunnelsPage('),
   );
+
+  assert.match(credentialsPage, /aria-label=\{`Filter credentials by source:/);
+  assert.match(credentialsPage, /<DropdownMenuRadioGroup[\s\S]*?setCredentialSourceFilter/);
+  assert.match(credentialsPage, /buildCredentialListProjection\(/);
+  assert.match(credentialsPage, /credentialSelectionAfterSelectAll\(/);
+  assert.match(credentialsPage, /resetKey=\{credentialListProjection\.resetKey\}/);
 });
 
 test('SSH keys are accepted only by SSH password-capable controls', () => {
