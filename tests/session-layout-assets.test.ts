@@ -774,9 +774,10 @@ test('VPN editor keeps WatchGuard authentication and Stormshield OTP layout cont
   assert.ok(server >= 0 && server < port && port < authMode);
   assert.match(
     watchguard,
-    /key: 'TrustServerCertificate'[\s\S]{0,180}label: 'Ignore certificate errors'/,
+    /key: 'TrustServerCertificate'[\s\S]{0,180}label: 'Ignore certificate errors'[\s\S]{0,100}type: 'switch'/,
   );
   assert.match(watchguard, /key: 'AuthMode'[\s\S]{0,240}Username and password[\s\S]{0,120}SAML/);
+  assert.match(watchguard, /key: 'VerifyX509Name'[\s\S]{0,240}fullWidth: true/);
   assert.doesNotMatch(watchguard, /UseSingleSignOn|Use SSO|label: 'Automatic'/);
   const watchguardRender = sourceBetween(
     appSource,
@@ -795,6 +796,12 @@ test('VPN editor keeps WatchGuard authentication and Stormshield OTP layout cont
     mainSource,
     /setCertificateVerifyProc[\s\S]{0,180}event\.ignoreCertificateErrors[\s\S]{0,100}fireboxHost/,
   );
+  const fieldRow = sourceBetween(appSource, 'function TunnelFieldRow', 'function TunnelSection');
+  assert.match(
+    fieldRow,
+    /field\.type === 'switch'[\s\S]{0,160}justify-between[\s\S]{0,160}<Label[\s\S]{0,120}<Switch/,
+  );
+  assert.match(fieldRow, /field\.type === 'checkbox'[\s\S]{0,120}<Checkbox/);
 
   const otp = stormshield.indexOf("key: 'UseOtp'");
   const username = stormshield.indexOf("key: 'Username'");
@@ -849,7 +856,7 @@ test('Fortinet SSO and certificate choices render as switches on dedicated rows'
   assert.match(fieldRow, /field\.type === 'switch'[\s\S]{0,500}<Switch/);
   assert.match(fieldRow, /<Switch[\s\S]{0,160}aria-label=\{field\.label\}/);
   assert.match(fieldRow, /field\.type === 'checkbox'[\s\S]{0,180}<Checkbox/);
-  assert.match(watchguard, /key: 'TrustServerCertificate'[\s\S]{0,180}type: 'checkbox'/);
+  assert.match(watchguard, /key: 'TrustServerCertificate'[\s\S]{0,180}type: 'switch'/);
   assert.match(stormshield, /key: 'UseOtp'[\s\S]{0,180}type: 'checkbox'/);
   assert.match(stormshield, /key: 'TrustServerCertificate'[\s\S]{0,180}type: 'checkbox'/);
   assert.match(cisco, /key: 'TrustServerCertificate'[\s\S]{0,180}type: 'checkbox'/);

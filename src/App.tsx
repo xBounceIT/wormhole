@@ -12108,7 +12108,7 @@ function tunnelEditorFields(kind: number): TunnelField[] {
           key: 'TrustServerCertificate',
           label: 'Ignore certificate errors',
           section: 'Gateway',
-          type: 'checkbox',
+          type: 'switch',
           fullWidth: true,
           hint: 'Skip certificate validation for the WatchGuard portal and embedded SAML sign-in. Use only for a gateway you trust.',
         },
@@ -12165,6 +12165,7 @@ function tunnelEditorFields(kind: number): TunnelField[] {
           label: 'verify-x509-name subject (advanced)',
           section: 'Advanced',
           placeholder: 'leave default unless the Firebox uses a custom server cert',
+          fullWidth: true,
         },
       ];
     case 4:
