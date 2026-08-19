@@ -14,7 +14,17 @@ type CredentialSelectionOption = {
 
 export type CredentialKind = 'password' | 'sshKey' | 'unsupported';
 export type CredentialProtocol = 'ssh' | 'rdp' | 'vnc';
+export type CredentialSourceFilter = 'all' | 'Local' | 'Bitwarden';
 export type SshAutoSudoMode = 'inherit' | 'on' | 'off';
+
+export function filterCredentialsBySource<T extends { provider: string }>(
+  credentials: ReadonlyArray<T>,
+  source: CredentialSourceFilter,
+): ReadonlyArray<T> {
+  return source === 'all'
+    ? credentials
+    : credentials.filter((credential) => credential.provider === source);
+}
 
 export function buildConnectionCredentialSelectionOptions(
   credentials: SavedCredential[],

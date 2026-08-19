@@ -10,6 +10,7 @@ import {
   connectionUsesSavedCredentials,
   credentialCanUseProtocol,
   effectiveSshAutoSudoMode,
+  filterCredentialsBySource,
   mergeCredential,
   sshAutoSudoAvailable,
 } from '../src/credential-state.ts';
@@ -150,6 +151,39 @@ test('credential merge replaces an existing id without duplicating it', () => {
   ]);
 });
 
+test('credential source filter separates local and Bitwarden credentials', () => {
+  const credentials = [
+    { id: 'local-password', provider: 'Local' },
+    { id: 'vault-password', provider: 'Bitwarden' },
+    { id: 'local-key', provider: 'Local' },
+  ];
+
+  assert.equal(filterCredentialsBySource(credentials, 'all'), credentials);
+  assert.deepEqual(
+    filterCredentialsBySource(credentials, 'all').map((credential) => credential.id),
+    ['local-password', 'vault-password', 'local-key'],
+  );
+  assert.deepEqual(
+    filterCredentialsBySource(credentials, 'Local').map((credential) => credential.id),
+    ['local-password', 'local-key'],
+  );
+  assert.deepEqual(
+    filterCredentialsBySource(credentials, 'Bitwarden').map((credential) => credential.id),
+    ['vault-password'],
+  );
+});
+
+test('credentials page exposes a source filter that also resets the virtual grid', () => {
+  assert.match(appSource, /aria-label=\{`Filter credentials by source:/);
+  assert.match(appSource, /\{ value: 'Local', label: 'Local' \}/);
+  assert.match(appSource, /\{ value: 'Bitwarden', label: 'Bitwarden' \}/);
+  assert.match(appSource, /filterCredentialsBySource\(credentials, credentialSourceFilter\)/);
+  assert.match(
+    appSource,
+    /resetKey=\{`\$\{credentialSourceFilter\}\\u0000\$\{normalizedCredentialSearch\}`\}/,
+  );
+});
+
 test('SSH keys are accepted only by SSH password-capable controls', () => {
   assert.equal(credentialCanUseProtocol('sshKey', 'ssh'), true);
   assert.equal(credentialCanUseProtocol('sshKey', 'rdp'), false);
@@ -161,7 +195,7 @@ test('SSH keys are accepted only by SSH password-capable controls', () => {
 
 test('credential cards omit the redundant password badge while retaining the SSH key badge', () => {
   const credentialGrid = appSource.match(
-    /renderItem=\{\(credential\) => \([\s\S]*?resetKey=\{normalizedCredentialSearch\}/,
+    /renderItem=\{\(credential\) => \([\s\S]*?resetKey=\{/,
   )?.[0];
 
   assert.ok(credentialGrid);
