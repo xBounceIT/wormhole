@@ -195,21 +195,28 @@ func buildTLSConfig(cfg config, mode tlsCompatibilityMode) (*tls.Config, error) 
 		if len(want) != sha256.Size {
 			return nil, fmt.Errorf("server_cert_sha256_pin must be a SHA-256 hash (%d bytes); got %d bytes", sha256.Size, len(want))
 		}
-		t.InsecureSkipVerify = true
-		t.VerifyConnection = func(cs tls.ConnectionState) error {
-			if len(cs.PeerCertificates) == 0 {
-				return errors.New("no peer certificates")
-			}
-			got := sha256.Sum256(cs.PeerCertificates[0].Raw)
-			// bytes.Equal is fine here (no constant-time requirement): both sides are
-			// already-public certificate digests, not secrets.
-			if !bytes.Equal(got[:], want) {
-				return fmt.Errorf("server cert SHA-256 %x does not match configured pin", got)
-			}
-			return nil
-		}
+		configurePinnedCertificateVerification(t, want)
 	}
 	return t, nil
+}
+
+func configurePinnedCertificateVerification(config *tls.Config, want []byte) {
+	// Go must skip its default CA/hostname check so a private or self-signed gateway can be
+	// authenticated exclusively by the configured SHA-256 pin. VerifyConnection then performs
+	// the mandatory replacement check for every handshake and fails closed on a missing/mismatch.
+	config.InsecureSkipVerify = true
+	config.VerifyConnection = func(state tls.ConnectionState) error {
+		if len(state.PeerCertificates) == 0 {
+			return errors.New("no peer certificates")
+		}
+		got := sha256.Sum256(state.PeerCertificates[0].Raw)
+		// bytes.Equal is fine here (no constant-time requirement): both sides are
+		// already-public certificate digests, not secrets.
+		if !bytes.Equal(got[:], want) {
+			return fmt.Errorf("server cert SHA-256 %x does not match configured pin", got)
+		}
+		return nil
+	}
 }
 
 func isTLSHandshakeFailure(err error) bool {
@@ -358,8 +365,8 @@ func readCstpConnectResponse(br *bufio.Reader) (*session, error) {
 		return nil, errors.New("gateway did not assign an IPv4 address (no X-CSTP-Address header)")
 	}
 	if mtus := headers["x-cstp-mtu"]; len(mtus) > 0 {
-		if m, err := strconv.Atoi(strings.TrimSpace(mtus[0])); err == nil && m > 0 {
-			sess.MTU = m
+		if m, err := strconv.ParseUint(strings.TrimSpace(mtus[0]), 10, 16); err == nil && m > 0 {
+			sess.MTU = int(m)
 		}
 	}
 	if dpd := headers["x-cstp-dpd"]; len(dpd) > 0 {

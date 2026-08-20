@@ -221,19 +221,26 @@ func buildTLSConfig(cfg config) (*tls.Config, error) {
 			return nil, fmt.Errorf("server_cert_sha256_pin must be a SHA-256 hash (%d bytes); got %d bytes",
 				sha256.Size, len(want))
 		}
-		t.InsecureSkipVerify = true
-		t.VerifyConnection = func(cs tls.ConnectionState) error {
-			if len(cs.PeerCertificates) == 0 {
-				return errors.New("no peer certificates")
-			}
-			got := sha256.Sum256(cs.PeerCertificates[0].Raw)
-			if !bytesEqual(got[:], want) {
-				return fmt.Errorf("server cert SHA-256 %x does not match configured pin", got)
-			}
-			return nil
-		}
+		configurePinnedCertificateVerification(t, want)
 	}
 	return t, nil
+}
+
+func configurePinnedCertificateVerification(config *tls.Config, want []byte) {
+	// Go must skip its default CA/hostname check so a private or self-signed gateway can be
+	// authenticated exclusively by the configured SHA-256 pin. VerifyConnection then performs
+	// the mandatory replacement check for every handshake and fails closed on a missing/mismatch.
+	config.InsecureSkipVerify = true
+	config.VerifyConnection = func(state tls.ConnectionState) error {
+		if len(state.PeerCertificates) == 0 {
+			return errors.New("no peer certificates")
+		}
+		got := sha256.Sum256(state.PeerCertificates[0].Raw)
+		if !bytesEqual(got[:], want) {
+			return fmt.Errorf("server cert SHA-256 %x does not match configured pin", got)
+		}
+		return nil
+	}
 }
 
 func bytesEqual(a, b []byte) bool {
