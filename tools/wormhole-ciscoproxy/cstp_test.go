@@ -439,6 +439,20 @@ func TestReadCstpConnectResponse_DefaultsMTUWhenHeaderMissing(t *testing.T) {
 	}
 }
 
+func TestReadCstpConnectResponse_DefaultsMTUWhenHeaderExceedsUint16(t *testing.T) {
+	raw := "HTTP/1.1 200 CONNECTED\r\n" +
+		"X-CSTP-Address: 10.20.30.40\r\n" +
+		"X-CSTP-MTU: 65536\r\n" +
+		"\r\n"
+	sess, err := readCstpConnectResponse(bufio.NewReader(strings.NewReader(raw)))
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if sess.MTU != defaultCSTPMTU {
+		t.Fatalf("mtu: got %d want safe default %d", sess.MTU, defaultCSTPMTU)
+	}
+}
+
 func TestReadCstpConnectResponse_RejectsNon200(t *testing.T) {
 	raw := "HTTP/1.1 403 Forbidden\r\n\r\n"
 	br := bufio.NewReader(strings.NewReader(raw))

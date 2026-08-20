@@ -120,9 +120,12 @@ func (d netstackDialer) DialContext(ctx context.Context, network, address string
 	if err != nil {
 		return nil, fmt.Errorf("split host:port: %w", err)
 	}
-	p, err := strconv.Atoi(port)
+	p, err := strconv.ParseUint(port, 10, 16)
 	if err != nil {
 		return nil, fmt.Errorf("port %q: %w", port, err)
+	}
+	if p == 0 {
+		return nil, fmt.Errorf("port %q is outside the valid range 1-65535", port)
 	}
 
 	ip, err := d.resolveHostV4(ctx, host)

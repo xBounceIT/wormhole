@@ -54,6 +54,8 @@ func TestNetstackDialerValidatesRequests(t *testing.T) {
 		{network: "udp", address: "host:53", want: "unsupported network"},
 		{network: "tcp", address: "missing-port", want: "split host:port"},
 		{network: "tcp4", address: "host:not-a-port", want: "port"},
+		{network: "tcp4", address: "host:0", want: "port"},
+		{network: "tcp4", address: "host:65536", want: "port"},
 		{network: "tcp", address: "[2001:db8::1]:443", want: "only IPv4"},
 		{network: "tcp", address: "internal.example:443", want: "refusing to use host OS resolver"},
 	} {

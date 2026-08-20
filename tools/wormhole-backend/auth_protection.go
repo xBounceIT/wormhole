@@ -37,8 +37,7 @@ func encryptAuthDocument(plaintext, key []byte) ([]byte, error) {
 	}
 	defer clearBytes(nonce)
 
-	protected := make([]byte, 0, len(authProtectionEnvelope)+len(nonce)+len(plaintext)+gcm.Overhead())
-	protected = append(protected, authProtectionEnvelope...)
+	protected := append([]byte(nil), authProtectionEnvelope...)
 	protected = append(protected, nonce...)
 	return gcm.Seal(protected, nonce, plaintext, authProtectionEnvelope), nil
 }

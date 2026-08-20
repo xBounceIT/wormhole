@@ -83,6 +83,7 @@ import {
   type SessionPaneRect,
   type SessionSplitDivider,
 } from './session-layout';
+import { newSessionToken } from './session-token';
 import {
   filterListSearchIndex,
   listSearchResultsArePending,
@@ -894,12 +895,6 @@ type TunnelRecord = {
   kind: string;
   endpoint?: string;
 };
-
-function newSessionToken(): string {
-  return typeof crypto.randomUUID === 'function'
-    ? crypto.randomUUID()
-    : `ssh-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-}
 
 function measuredRdpSurfaceBounds(sessionId: string): WormholeRdpSurfaceRect | undefined {
   const surface = [...document.querySelectorAll<HTMLElement>('[data-rdp-session-id]')].find(

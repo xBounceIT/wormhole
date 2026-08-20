@@ -787,7 +787,7 @@ func rewriteStormshieldConnectionBlock(lines []string, desired, desiredProto str
 		}
 	}
 	sawRemote, keptRemote, unqualified, sawProto := false, false, false, false
-	output := make([]string, 0, len(lines)+1)
+	output := make([]string, 0, len(lines))
 	for _, line := range lines {
 		directive, argument := vpnDirective(strings.TrimSpace(line))
 		if strings.EqualFold(directive, "proto") {
