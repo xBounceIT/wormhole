@@ -189,7 +189,12 @@ app.whenReady().then(async () => {
     const needsVirtualDisplay = process.platform === 'linux' && !environment.DISPLAY;
     const executable = needsVirtualDisplay ? 'xvfb-run' : electronExecutable;
     const arguments_ = needsVirtualDisplay
-      ? ['--auto-servernum', electronExecutable, harnessPath]
+      ? [
+          '--auto-servernum',
+          electronExecutable,
+          '--no-sandbox', // Safe for this local data-URL test; npm's binary has no SUID helper.
+          harnessPath,
+        ]
       : [harnessPath];
 
     await execFileAsync(executable, arguments_, {
