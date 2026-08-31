@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { execFile } from 'node:child_process';
+import { createRequire } from 'node:module';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
+import { promisify } from 'node:util';
 import {
   encodeTerminalClipboardText,
   isEncodedSshInput,
@@ -15,6 +20,9 @@ import {
 import { terminalVisibleScrollback } from '../src/terminal-frame.ts';
 
 const appSource = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+const require = createRequire(import.meta.url);
+const electronExecutable = require('electron') as string;
+const execFileAsync = promisify(execFile);
 
 const shortcut = (
   key: string,
@@ -140,4 +148,50 @@ test('styled runs remain inline and preserve spaces when Chromium copies a termi
     2,
   );
   assert.doesNotMatch(terminalGridSource, /className=(?:"|{`)[^"`]*block flex-none/);
+});
+
+test('Chromium keeps styled runs on one clipboard line and separates real terminal rows', async () => {
+  const temporaryDirectory = mkdtempSync(join(tmpdir(), 'wormhole-terminal-clipboard-'));
+  const harnessPath = join(temporaryDirectory, 'selection.cjs');
+  const { ELECTRON_RUN_AS_NODE: _electronRunAsNode, ...environment } = process.env;
+  try {
+    writeFileSync(
+      harnessPath,
+      String.raw`
+const assert = require('node:assert/strict');
+const { app, BrowserWindow } = require('electron');
+
+const html = encodeURIComponent('<style>.row{display:block;white-space:pre}.run{display:inline-block;overflow:hidden;vertical-align:top}</style><div id="terminal"><div class="row"><span class="run" style="color:white">docker stack deploy -c </span><span class="run" style="color:red">portainer-agent-stack.yml </span><span class="run" style="color:red">portainer</span></div><div class="row"><span class="run">printf done</span></div></div>');
+
+app.whenReady().then(async () => {
+  const window = new BrowserWindow({ show: false });
+  try {
+    await window.loadURL('data:text/html;charset=utf-8,' + html);
+    const selectedText = await window.webContents.executeJavaScript(
+      "const range=document.createRange();range.selectNodeContents(document.getElementById('terminal'));const selection=window.getSelection();selection.removeAllRanges();selection.addRange(range);selection.toString()",
+    );
+    assert.equal(
+      selectedText,
+      'docker stack deploy -c portainer-agent-stack.yml portainer\nprintf done',
+    );
+  } finally {
+    window.destroy();
+  }
+  app.quit();
+}).catch((error) => {
+  console.error(error);
+  app.exit(1);
+});
+`,
+      'utf8',
+    );
+
+    await execFileAsync(electronExecutable, [harnessPath], {
+      env: environment,
+      timeout: 30_000,
+      windowsHide: true,
+    });
+  } finally {
+    rmSync(temporaryDirectory, { force: true, recursive: true });
+  }
 });
