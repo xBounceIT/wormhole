@@ -11,6 +11,7 @@ import {
   shouldAutoCopyTerminalSelection,
   shouldUseTerminalClipboardShortcut,
 } from '../src/terminal-clipboard.ts';
+import { terminalVisibleScrollback } from '../src/terminal-frame.ts';
 
 const shortcut = (
   key: string,
@@ -105,5 +106,21 @@ test('clipboard writes fail when neither implementation is available', async () 
   await assert.rejects(
     writeClipboardText('selected text', undefined, () => false),
     /unavailable/i,
+  );
+});
+
+test('normal terminal frames expose their retained scrollback', () => {
+  const scrollback = [{ text: 'previous output' }];
+
+  assert.equal(terminalVisibleScrollback({ alternateScreen: false, scrollback }), scrollback);
+});
+
+test('alternate-screen applications hide retained scrollback', () => {
+  assert.equal(
+    terminalVisibleScrollback({
+      alternateScreen: true,
+      scrollback: [{ text: 'previous output' }],
+    }),
+    undefined,
   );
 });

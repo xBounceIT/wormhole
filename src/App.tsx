@@ -63,6 +63,7 @@ import {
   shouldAutoCopyTerminalSelection,
   shouldUseTerminalClipboardShortcut,
 } from './terminal-clipboard';
+import { terminalVisibleScrollback } from './terminal-frame';
 import { failedSshReconnectState, reconnectingSshState } from './ssh-reconnect-state';
 import {
   canSplitSession,
@@ -8593,7 +8594,7 @@ const TerminalTextGrid = memo(function TerminalTextGrid({
         fontVariantLigatures: 'none',
       }}
     >
-      <TerminalScrollback lines={frame.scrollback} />
+      <TerminalScrollback lines={terminalVisibleScrollback(frame)} />
       {Array.from({ length: frame.rows }, (_, row) => (
         <div className="flex h-[18px] min-w-max whitespace-pre" key={row}>
           {terminalTextRuns(frame, row).map((run, index) => (

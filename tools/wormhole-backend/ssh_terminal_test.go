@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -325,8 +326,12 @@ func TestSSHTerminalEmulatorDoesNotMixAlternateScreenIntoScrollback(t *testing.T
 		t.Fatal("test setup did not create scrollback")
 	}
 
-	if _, _, err := emulator.write([]byte("\x1b[?1049h")); err != nil {
+	frame, changed, err := emulator.write([]byte("\x1b[?1049h"))
+	if err != nil {
 		t.Fatal(err)
+	}
+	if !changed || frame == nil || !frame.AlternateScreen || !frame.ViewportReset {
+		t.Fatalf("entering alternate screen was not published: frame=%#v changed=%v", frame, changed)
 	}
 	if _, _, err := emulator.write([]byte("alt-one\r\nalt-two\r\nalt-three\r\nalt-four\r\n")); err != nil {
 		t.Fatal(err)
@@ -334,29 +339,99 @@ func TestSSHTerminalEmulatorDoesNotMixAlternateScreenIntoScrollback(t *testing.T
 	if len(emulator.scrollback) != initialScrollback {
 		t.Fatalf("alternate-screen output polluted scrollback: got %d want %d", len(emulator.scrollback), initialScrollback)
 	}
-	if _, _, err := emulator.write([]byte("\x1b[?1049l")); err != nil {
+	frame, changed, err = emulator.write([]byte("\x1b[?1049l"))
+	if err != nil {
 		t.Fatal(err)
+	}
+	if !changed || frame == nil || frame.AlternateScreen || !frame.ViewportReset {
+		t.Fatalf("leaving alternate screen was not published: frame=%#v changed=%v", frame, changed)
 	}
 	if len(emulator.scrollback) != initialScrollback {
 		t.Fatalf("leaving alternate screen changed scrollback: got %d want %d", len(emulator.scrollback), initialScrollback)
 	}
-	if _, _, err := emulator.write([]byte("\x1b[?1049halt-one\r\nhalt-two\r\nhalt-three\r\nhalt-four\r\n\x1b[?1049l")); err != nil {
+	frame, changed, err = emulator.write([]byte("\x1b[?1049halt-one\r\nhalt-two\r\nhalt-three\r\nhalt-four\r\n\x1b[?1049l"))
+	if err != nil {
 		t.Fatal(err)
+	}
+	if !changed || frame == nil || frame.AlternateScreen || !frame.ViewportReset {
+		t.Fatalf("combined alternate-screen transitions were not published in their final state: frame=%#v changed=%v", frame, changed)
 	}
 	if len(emulator.scrollback) != initialScrollback {
 		t.Fatalf("combined alternate-screen output polluted scrollback: got %d want %d", len(emulator.scrollback), initialScrollback)
 	}
 }
 
+func TestSSHTerminalFrameWireAlwaysIncludesAlternateScreen(t *testing.T) {
+	emulator, err := newSSHTerminalEmulator(12, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assertAlternateScreen := func(frame *sshTerminalFrame, expected bool) {
+		t.Helper()
+		payload, err := json.Marshal(frame)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var wire struct {
+			AlternateScreen *bool `json:"alternate_screen"`
+		}
+		if err := json.Unmarshal(payload, &wire); err != nil {
+			t.Fatal(err)
+		}
+		if wire.AlternateScreen == nil || *wire.AlternateScreen != expected {
+			t.Fatalf("alternate_screen wire value = %v, want %t; payload=%s", wire.AlternateScreen, expected, payload)
+		}
+	}
+
+	assertAlternateScreen(emulator.initialFrame(), false)
+	frame, changed, err := emulator.write([]byte("\x1b[?1049h"))
+	if err != nil || !changed || frame == nil {
+		t.Fatalf("entering alternate screen was not published: frame=%#v changed=%v err=%v", frame, changed, err)
+	}
+	assertAlternateScreen(frame, true)
+}
+
+func TestSSHTerminalEmulatorIgnoresRedundantAlternateScreenExit(t *testing.T) {
+	for name, chunks := range map[string][][]byte{
+		"47":           {[]byte("\x1b[?47ltext")},
+		"1047":         {[]byte("\x1b[?1047ltext")},
+		"1049":         {[]byte("\x1b[?1049ltext")},
+		"1049 chunked": {[]byte("\x1b[?1049"), []byte("ltext")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			emulator, err := newSSHTerminalEmulator(12, 3)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = emulator.initialFrame()
+			for _, chunk := range chunks {
+				if _, _, err := emulator.write(chunk); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			frame := emulator.snapshot()
+			if frame.AlternateScreen {
+				t.Fatalf("redundant alternate-screen exit activated the alternate screen: %#v", frame)
+			}
+			if text := frame.Cells[0].Character + frame.Cells[1].Character + frame.Cells[2].Character + frame.Cells[3].Character; text != "text" {
+				t.Fatalf("output following redundant alternate-screen exit = %q, want text", text)
+			}
+		})
+	}
+}
+
 func TestSSHTerminalEmulatorAlternateScreenDetectionHandlesChunksWithoutRepeating(t *testing.T) {
 	emulator := &sshTerminalEmulator{}
-	if emulator.sawAlternateScreenTransition([]byte("\x1b[?1049")) {
+	if transitions := emulator.alternateScreenTransitions([]byte("\x1b[?1049")); len(transitions) != 0 {
 		t.Fatal("partial alternate-screen transition was reported too early")
 	}
-	if !emulator.sawAlternateScreenTransition([]byte("h")) {
+	transitions := emulator.alternateScreenTransitions([]byte("h"))
+	if len(transitions) != 1 || transitions[0].end != 1 || !transitions[0].active {
 		t.Fatal("split alternate-screen transition was not recognized")
 	}
-	if emulator.sawAlternateScreenTransition([]byte("later output")) {
+	if transitions := emulator.alternateScreenTransitions([]byte("later output")); len(transitions) != 0 {
 		t.Fatal("alternate-screen transition repeated on later output")
 	}
 }

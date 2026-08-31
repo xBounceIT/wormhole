@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -55,6 +56,7 @@ type sshTerminalFrame struct {
 	CursorY           int                         `json:"cursor_y"`
 	CursorVisible     bool                        `json:"cursor_visible"`
 	ApplicationCursor bool                        `json:"application_cursor"`
+	AlternateScreen   bool                        `json:"alternate_screen"`
 	Title             string                      `json:"title,omitempty"`
 	Sequence          uint64                      `json:"sequence"`
 }
@@ -80,13 +82,22 @@ var sshViewportClearSequences = [][]byte{
 	[]byte("\x1b[3J"),
 }
 
-var sshAlternateScreenSequences = [][]byte{
-	[]byte("\x1b[?47h"),
-	[]byte("\x1b[?47l"),
-	[]byte("\x1b[?1047h"),
-	[]byte("\x1b[?1047l"),
-	[]byte("\x1b[?1049h"),
-	[]byte("\x1b[?1049l"),
+type sshTerminalAlternateScreenTransition struct {
+	end      int
+	active   bool
+	sequence []byte
+}
+
+var sshAlternateScreenSequences = []struct {
+	sequence []byte
+	active   bool
+}{
+	{[]byte("\x1b[?47h"), true},
+	{[]byte("\x1b[?47l"), false},
+	{[]byte("\x1b[?1047h"), true},
+	{[]byte("\x1b[?1047l"), false},
+	{[]byte("\x1b[?1049h"), true},
+	{[]byte("\x1b[?1049l"), false},
 }
 
 var sshScrollbackEraseSequence = []byte("\x1b[3J")
@@ -117,6 +128,7 @@ type sshTerminalEmulator struct {
 	previousCursorY       int
 	previousCursorVisible bool
 	previousAppCursor     bool
+	previousAltScreen     bool
 	previousTitle         string
 	sequence              uint64
 }
@@ -191,18 +203,20 @@ func (terminal *sshTerminalEmulator) write(data []byte) (*sshTerminalFrame, bool
 		return nil, false, nil
 	}
 
-	if _, err := terminal.vt.Write(terminal.pending[:complete]); err != nil {
+	completeData := terminal.pending[:complete]
+	alternateScreenTransitions := terminal.alternateScreenTransitions(completeData)
+	if err := terminal.writeVT(completeData, alternateScreenTransitions); err != nil {
 		return nil, false, err
 	}
-	controlEffects := terminal.sawTerminalControlEffects(terminal.pending[:complete])
+	controlEffects := terminal.sawTerminalControlEffects(completeData)
 	terminalReset := controlEffects.scrollbackReset
-	viewportReset := controlEffects.viewportReset
-	terminalAltTransition := terminal.sawAlternateScreenTransition(terminal.pending[:complete])
+	terminalAltTransition := len(alternateScreenTransitions) > 0
+	viewportReset := controlEffects.viewportReset || terminalAltTransition
 	var historyRows []sshTerminalScrollbackLine
 	if terminal.historyVT != nil {
 		var err error
 		historyRows, err = terminal.writeHistory(
-			terminal.pending[:complete],
+			completeData,
 			terminalReset || terminalAltTransition,
 		)
 		if err != nil {
@@ -249,6 +263,32 @@ func (terminal *sshTerminalEmulator) write(data []byte) (*sshTerminalFrame, bool
 	return frame, changed || scrollbackChanged, nil
 }
 
+func (terminal *sshTerminalEmulator) writeVT(
+	data []byte,
+	transitions []sshTerminalAlternateScreenTransition,
+) error {
+	offset := 0
+	for _, transition := range transitions {
+		if _, err := terminal.vt.Write(data[offset:transition.end]); err != nil {
+			return err
+		}
+		offset = transition.end
+
+		terminal.state.Lock()
+		active := terminal.state.Mode(vt10x.ModeAltScreen)
+		terminal.state.Unlock()
+		if active != transition.active {
+			if _, err := terminal.vt.Write(transition.sequence); err != nil {
+				return err
+			}
+		}
+	}
+	if _, err := terminal.vt.Write(data[offset:]); err != nil {
+		return err
+	}
+	return nil
+}
+
 func completeUTF8Prefix(data []byte) int {
 	for index := 0; index < len(data); {
 		_, size := utf8.DecodeRune(data[index:])
@@ -284,6 +324,7 @@ func (terminal *sshTerminalEmulator) snapshotLocked(forceFull bool) (*sshTermina
 	cursorX, cursorY := terminal.state.Cursor()
 	cursorVisible := terminal.state.CursorVisible()
 	applicationCursor := terminal.state.Mode(vt10x.ModeAppCursor)
+	alternateScreen := terminal.state.Mode(vt10x.ModeAltScreen)
 	title := terminal.state.Title()
 	full := forceFull || len(terminal.previousCells) != len(cells)
 	changes := make([]sshTerminalCellChange, 0)
@@ -306,12 +347,14 @@ func (terminal *sshTerminalEmulator) snapshotLocked(forceFull bool) (*sshTermina
 		cursorY != terminal.previousCursorY ||
 		cursorVisible != terminal.previousCursorVisible ||
 		applicationCursor != terminal.previousAppCursor ||
+		alternateScreen != terminal.previousAltScreen ||
 		title != terminal.previousTitle
 	terminal.previousCells = cells
 	terminal.previousCursorX = cursorX
 	terminal.previousCursorY = cursorY
 	terminal.previousCursorVisible = cursorVisible
 	terminal.previousAppCursor = applicationCursor
+	terminal.previousAltScreen = alternateScreen
 	terminal.previousTitle = title
 	if !changed {
 		return nil, false
@@ -326,6 +369,7 @@ func (terminal *sshTerminalEmulator) snapshotLocked(forceFull bool) (*sshTermina
 		CursorY:           cursorY,
 		CursorVisible:     cursorVisible,
 		ApplicationCursor: applicationCursor,
+		AlternateScreen:   alternateScreen,
 		Title:             title,
 		Sequence:          terminal.sequence,
 	}
@@ -816,16 +860,45 @@ func terminalControlSequenceSeen(tail, data, sequence []byte) bool {
 	return false
 }
 
-func (terminal *sshTerminalEmulator) sawAlternateScreenTransition(data []byte) bool {
-	seen := false
-	for _, sequence := range sshAlternateScreenSequences {
-		if terminalControlSequenceSeen(terminal.controlTail, data, sequence) {
-			seen = true
-			break
+func (terminal *sshTerminalEmulator) alternateScreenTransitions(data []byte) []sshTerminalAlternateScreenTransition {
+	var transitions []sshTerminalAlternateScreenTransition
+	for _, candidate := range sshAlternateScreenSequences {
+		for prefixLength := 1; prefixLength < len(candidate.sequence); prefixLength++ {
+			if len(terminal.controlTail) < prefixLength || len(data) < len(candidate.sequence)-prefixLength {
+				continue
+			}
+			if bytes.Equal(terminal.controlTail[len(terminal.controlTail)-prefixLength:], candidate.sequence[:prefixLength]) &&
+				bytes.Equal(data[:len(candidate.sequence)-prefixLength], candidate.sequence[prefixLength:]) {
+				transitions = append(transitions, sshTerminalAlternateScreenTransition{
+					end:      len(candidate.sequence) - prefixLength,
+					active:   candidate.active,
+					sequence: candidate.sequence,
+				})
+				break
+			}
+		}
+
+		searchFrom := 0
+		for searchFrom < len(data) {
+			index := bytes.Index(data[searchFrom:], candidate.sequence)
+			if index < 0 {
+				break
+			}
+			start := searchFrom + index
+			end := start + len(candidate.sequence)
+			transitions = append(transitions, sshTerminalAlternateScreenTransition{
+				end:      end,
+				active:   candidate.active,
+				sequence: candidate.sequence,
+			})
+			searchFrom = start + 1
 		}
 	}
+	sort.Slice(transitions, func(left, right int) bool {
+		return transitions[left].end < transitions[right].end
+	})
 	terminal.controlTail = terminalTail(terminal.controlTail, data, 16)
-	return seen
+	return transitions
 }
 
 func terminalTail(previous, data []byte, limit int) []byte {
