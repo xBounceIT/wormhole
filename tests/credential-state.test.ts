@@ -337,7 +337,7 @@ test('SSH key credential import keeps key paths and material behind the native b
   assert.match(preloadSource, /credential:discard-ssh-private-key/);
   assert.doesNotMatch(preloadSource, /privateKeyPath/);
 
-  assert.match(mainSource, /dialog\.showOpenDialog\(owner, options\)/);
+  assert.match(mainSource, /showCoordinatedOpenDialog\(owner, options\)/);
   assert.match(mainSource, /sshPrivateKeySelections\.get\(event\.sender\)/);
   assert.match(mainSource, /privateKeyPath: selection\.path/);
   assert.match(mainSource, /sshPrivateKeySelections\.delete\(event\.sender\)/);

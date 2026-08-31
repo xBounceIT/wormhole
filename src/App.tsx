@@ -1705,6 +1705,11 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     setTunnelPromptValue('');
   }, [activeTunnelPromptId]);
   const authPromptResolver = useRef<((succeeded: boolean) => void) | null>(null);
+  const settleAuthConfirmation = useCallback((succeeded: boolean) => {
+    authPromptResolver.current?.(succeeded);
+    authPromptResolver.current = null;
+    setAuthPrompt(null);
+  }, []);
   const idleCheckInFlight = useRef(false);
   const lastActivityAt = useLazyRef(Date.now);
   const quickConnectSubmitInFlight = useRef(false);
@@ -2184,9 +2189,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       return;
     }
 
-    authPromptResolver.current?.(succeeded);
-    authPromptResolver.current = null;
-    setAuthPrompt(null);
+    settleAuthConfirmation(succeeded);
   }
 
   async function resolveMcpApproval(approved: boolean) {
@@ -2656,11 +2659,18 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       );
     });
 
-    const unsubscribeMcp = window.wormhole?.onMcpApproval((approval) => {
+    const unsubscribeMcp = window.wormhole?.onMcpApproval((event) => {
+      if (event.type === 'mcp.approval-cancelled') {
+        setMcpApprovals((current) =>
+          current.filter((approval) => approval.requestId !== event.requestId),
+        );
+        return;
+      }
+      settleAuthConfirmation(false);
       setMcpApprovals((current) =>
-        current.some((pending) => pending.requestId === approval.requestId)
+        current.some((pending) => pending.requestId === event.requestId)
           ? current
-          : [...current, approval],
+          : [...current, event],
       );
     });
     const unsubscribeBackend = window.wormhole?.onBackendEvent((event) => {
@@ -2730,7 +2740,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       unsubscribeMcp?.();
       unsubscribeBackend?.();
     };
-  }, []);
+  }, [settleAuthConfirmation]);
 
   useEffect(() => {
     const timeoutMinutes = authState?.idleTimeoutMinutes;
@@ -6424,7 +6434,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         }}
         open={mcpApprovals.length > 0}
       >
-        <DialogContent className="border-border/70 bg-card text-card-foreground sm:max-w-md">
+        <DialogContent
+          className="z-[60] border-border/70 bg-card text-card-foreground sm:max-w-md"
+          overlayClassName="z-[60]"
+        >
           <DialogHeader>
             <DialogTitle>Allow AI agent control?</DialogTitle>
             <DialogDescription>
@@ -6699,6 +6712,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                   }
                   isAuthorized={authGate === 'unlocked'}
                   isWebSurfaceVisible={
+                    mcpApprovals.length === 0 &&
                     !newConnectionOpen &&
                     !folderDetailsOpen &&
                     !newFolderOpen &&

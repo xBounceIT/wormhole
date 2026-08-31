@@ -583,6 +583,13 @@ interface WormholeMcpApproval {
   tool: string;
 }
 
+interface WormholeMcpApprovalCancelled {
+  type: 'mcp.approval-cancelled';
+  requestId: string;
+}
+
+type WormholeMcpApprovalEvent = WormholeMcpApproval | WormholeMcpApprovalCancelled;
+
 interface WormholeUpdateCheckResult {
   currentVersion: string;
   latestVersion: string;
@@ -1150,7 +1157,7 @@ interface Window {
     getMcpToken(): Promise<string>;
     regenerateMcpToken(): Promise<string>;
     respondMcpApproval(requestId: string, approved: boolean): Promise<void>;
-    onMcpApproval(listener: (event: WormholeMcpApproval) => void): () => void;
+    onMcpApproval(listener: (event: WormholeMcpApprovalEvent) => void): () => void;
     sendVncCommand(command: WormholeVncCommand): Promise<WormholeBackendResponse>;
     onBackendEvent(listener: (event: WormholeBackendEvent) => void): () => void;
     startRdpSession(request: {

@@ -9,6 +9,13 @@ import {
   readDarwinHardwareModel,
   shouldDisableHardwareAcceleration,
 } from '../electron/gpu-compatibility.ts';
+import {
+  bringMcpApprovalWindowToFront,
+  McpApprovalWindowCoordinator,
+  selectMcpApprovalWindow,
+  type McpApprovalBlockingWindow,
+  type McpApprovalWindow,
+} from '../electron/mcp-approval-window.ts';
 import { stopChildProcess } from '../electron/rdp.ts';
 import { drainSshBackendSessionIds } from '../electron/ssh-backend-lifecycle.ts';
 import { TunnelLeaseRegistry } from '../electron/tunnel-lease-registry.ts';
@@ -227,6 +234,408 @@ test('cross-platform backend features are not gated by Windows-only IPC handlers
     assert.ok(handlers.includes(call), `missing cross-platform handler call: ${call}`);
   }
   assert.match(preloadSource, /platform: process\.platform/);
+});
+
+test('MCP approval restores and foregrounds the Wormhole window before notifying the renderer', () => {
+  function createWindow(state: { destroyed?: boolean; minimized?: boolean; visible?: boolean }) {
+    const calls: string[] = [];
+    const window: McpApprovalWindow = {
+      isDestroyed: () => state.destroyed ?? false,
+      isMinimized: () => state.minimized ?? false,
+      isVisible: () => state.visible ?? true,
+      restore: () => calls.push('restore'),
+      show: () => calls.push('show'),
+      moveTop: () => calls.push('moveTop'),
+      focus: () => calls.push('focus'),
+    };
+    return { calls, window };
+  }
+
+  const minimized = createWindow({ minimized: true, visible: false });
+  bringMcpApprovalWindowToFront(minimized.window);
+  assert.deepEqual(minimized.calls, ['restore', 'show', 'moveTop', 'focus']);
+
+  const visible = createWindow({ visible: true });
+  bringMcpApprovalWindowToFront(visible.window);
+  assert.deepEqual(visible.calls, ['moveTop', 'focus']);
+
+  const destroyed = createWindow({ destroyed: true, minimized: true, visible: false });
+  bringMcpApprovalWindowToFront(destroyed.window);
+  assert.deepEqual(destroyed.calls, []);
+
+  const unstable = createWindow({ visible: true });
+  unstable.window.moveTop = () => {
+    unstable.calls.push('moveTop');
+    throw new Error('unsupported z-order operation');
+  };
+  assert.doesNotThrow(() => bringMcpApprovalWindowToFront(unstable.window));
+  assert.deepEqual(unstable.calls, ['moveTop', 'focus']);
+
+  const invalid = createWindow({});
+  invalid.window.isDestroyed = () => {
+    throw new Error('window state unavailable');
+  };
+  assert.doesNotThrow(() => bringMcpApprovalWindowToFront(invalid.window));
+  assert.deepEqual(invalid.calls, []);
+
+  const auxiliary = createWindow({ visible: true });
+  const firstMain = createWindow({ visible: true });
+  const focusedMain = createWindow({ visible: true });
+  const mainWindows = new Set([firstMain.window, focusedMain.window]);
+  assert.equal(
+    selectMcpApprovalWindow(
+      [auxiliary.window, firstMain.window, focusedMain.window],
+      auxiliary.window,
+      (window) => mainWindows.has(window),
+    ),
+    firstMain.window,
+  );
+  assert.equal(
+    selectMcpApprovalWindow(
+      [auxiliary.window, firstMain.window, focusedMain.window],
+      null,
+      (window) => mainWindows.has(window),
+    ),
+    firstMain.window,
+  );
+  assert.equal(
+    selectMcpApprovalWindow(
+      [auxiliary.window, firstMain.window, focusedMain.window],
+      focusedMain.window,
+      (window) => mainWindows.has(window),
+    ),
+    focusedMain.window,
+  );
+  let recoveredMain: McpApprovalWindow | undefined;
+  assert.doesNotThrow(() => {
+    recoveredMain = selectMcpApprovalWindow(
+      [invalid.window, firstMain.window],
+      invalid.window,
+      (window) => window === invalid.window || window === firstMain.window,
+    );
+  });
+  assert.equal(recoveredMain, firstMain.window);
+
+  const destroyedMain = createWindow({ destroyed: true });
+  assert.equal(
+    selectMcpApprovalWindow(
+      [auxiliary.window, destroyedMain.window],
+      destroyedMain.window,
+      (window) => window === destroyedMain.window,
+    ),
+    undefined,
+  );
+
+  const mainSource = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
+  const approvalHandler = mainSource.slice(
+    mainSource.indexOf("if (mcpMessage?.type === 'mcp.approval')"),
+    mainSource.indexOf('const event = parseSshBackendEvent'),
+  );
+  const approvalCancellationHandler = mainSource.slice(
+    mainSource.indexOf("if (mcpMessage?.type === 'mcp.approval-cancelled')"),
+    mainSource.indexOf("if (mcpMessage?.type === 'mcp.approval')"),
+  );
+  const foreground = approvalHandler.indexOf('bringMcpApprovalWindowToFront(approvalWindow)');
+  const closeBitwardenWindows = approvalHandler.indexOf(
+    'webSurfaces.closeBitwardenFloatingWindows()',
+  );
+  const notification = approvalHandler.indexOf("window.webContents.send('mcp:approval'");
+  assert.match(approvalHandler, /selectMcpApprovalWindow\(/);
+  assert.match(approvalHandler, /mcpApprovalWindowCoordinator\.beginApproval\(/);
+  assert.match(approvalHandler, /presentationReady\.then\(\(\) => \{/);
+  assert.match(approvalHandler, /presentApprovalWhenNativeDialogsClose\(/);
+  assert.match(approvalHandler, /windowCloseCoordinators\.has\(window\)/);
+  assert.ok(closeBitwardenWindows >= 0 && closeBitwardenWindows < foreground);
+  assert.ok(foreground >= 0 && foreground < notification);
+  assert.match(approvalCancellationHandler, /finishApproval\(mcpMessage\.requestId\)/);
+  assert.match(
+    approvalCancellationHandler,
+    /broadcastMcpApprovalCancellation\(mcpMessage\.requestId\)/,
+  );
+
+  const approvalCancellationBroadcast = mainSource.slice(
+    mainSource.indexOf('private broadcastMcpApprovalCancellation'),
+    mainSource.indexOf('private failOpenWaiters'),
+  );
+  assert.match(approvalCancellationBroadcast, /windowCloseCoordinators\.has\(window\)/);
+  assert.match(approvalCancellationBroadcast, /window\.webContents\.send\('mcp:approval', event\)/);
+
+  const windowsHelloHandler = mainSource.slice(
+    mainSource.indexOf("ipcMain.handle('auth:hello-verify'"),
+    mainSource.indexOf("ipcMain.handle('auth:system-idle'"),
+  );
+  assert.match(windowsHelloHandler, /runPreemptibleOperation\(async \(signal\) =>/);
+  assert.match(windowsHelloHandler, /'auth-hello-verify',[\s\S]*backendTimeoutMs,[\s\S]*signal/);
+  assert.match(windowsHelloHandler, /if \(signal\.aborted\)/);
+
+  const backendRunner = mainSource.slice(
+    mainSource.indexOf('async function runBackend'),
+    mainSource.indexOf('// ---- update checks / downloads ----'),
+  );
+  const abortHandler = backendRunner.slice(
+    backendRunner.indexOf('const abort = () =>'),
+    backendRunner.indexOf("signal?.addEventListener('abort'"),
+  );
+  const closeHandler = backendRunner.slice(
+    backendRunner.indexOf("child.on('close'"),
+    backendRunner.indexOf('if (requestPayload === undefined)'),
+  );
+  assert.match(abortHandler, /abortRequested = true;[\s\S]*child\.kill\(\)/);
+  assert.doesNotMatch(abortHandler, /finishReject/);
+  assert.match(closeHandler, /if \(abortRequested\) \{[\s\S]*finishReject\(cancellationError\)/);
+
+  const nativeDialogHelpersStart = mainSource.indexOf('function runCoordinatedFileDialog');
+  const nativeDialogHelpersEnd = mainSource.indexOf('function enqueueTunnelBrowserAuth');
+  const nativeDialogHelpers = mainSource.slice(nativeDialogHelpersStart, nativeDialogHelpersEnd);
+  const mainWithoutNativeDialogHelpers =
+    mainSource.slice(0, nativeDialogHelpersStart) + mainSource.slice(nativeDialogHelpersEnd);
+  assert.equal(nativeDialogHelpers.match(/runNativeDialog\(/g)?.length, 2);
+  assert.equal(
+    nativeDialogHelpers.match(/mcpApprovalWindowCoordinator\.hasPendingApprovals/g)?.length,
+    1,
+  );
+  assert.doesNotMatch(
+    mainWithoutNativeDialogHelpers,
+    /dialog\.show(?:OpenDialog|SaveDialog|MessageBox)/,
+  );
+
+  const webSurfaceManager = mainSource.slice(
+    mainSource.indexOf('class WebSurfaceManager'),
+    mainSource.indexOf('const webSurfaces = new WebSurfaceManager()'),
+  );
+  const closeBitwardenWindowsFlow = webSurfaceManager.slice(
+    webSurfaceManager.indexOf('closeBitwardenFloatingWindows(): void'),
+    webSurfaceManager.indexOf('closeForWindow(owner: BrowserWindow)'),
+  );
+  const openExtensionWindowFlow = webSurfaceManager.slice(
+    webSurfaceManager.indexOf('private async openExtensionWindow'),
+    webSurfaceManager.indexOf('private async loadBitwardenExtension'),
+  );
+  const openBitwardenPopupFlow = webSurfaceManager.slice(
+    webSurfaceManager.indexOf('private async openBitwardenPopupCore'),
+    webSurfaceManager.indexOf('async closeBitwardenPopup'),
+  );
+  assert.match(closeBitwardenWindowsFlow, /closeBitwardenPopup\(sessionId\)/);
+  assert.match(closeBitwardenWindowsFlow, /bitwardenAuxiliaryWindows\.values\(\)/);
+  assert.match(closeBitwardenWindowsFlow, /auxiliary\.window\.destroy\(\)/);
+  assert.equal(
+    openExtensionWindowFlow.match(/mcpApprovalWindowCoordinator\.hasPendingApprovals/g)?.length,
+    2,
+  );
+  const auxiliaryLoad = openExtensionWindowFlow.indexOf('await withBitwardenBrowserTimeout');
+  const approvalGuardAfterLoad = openExtensionWindowFlow.lastIndexOf(
+    'mcpApprovalWindowCoordinator.hasPendingApprovals',
+  );
+  const auxiliaryShow = openExtensionWindowFlow.indexOf('extensionWindow.show');
+  assert.ok(auxiliaryLoad < approvalGuardAfterLoad && approvalGuardAfterLoad < auxiliaryShow);
+  const popupLoad = openBitwardenPopupFlow.indexOf('await withBitwardenBrowserTimeout');
+  const popupApprovalGuard = openBitwardenPopupFlow.indexOf(
+    'mcpApprovalWindowCoordinator.hasPendingApprovals',
+  );
+  const popupShow = openBitwardenPopupFlow.indexOf('popup.setVisible(true)');
+  assert.ok(popupLoad < popupApprovalGuard && popupApprovalGuard < popupShow);
+
+  const tunnelAuth = mainSource.slice(
+    mainSource.indexOf('async function runTunnelBrowserAuth'),
+    mainSource.indexOf('class NativeBackendProcess'),
+  );
+  const approvalResponse = mainSource.slice(
+    mainSource.indexOf("ipcMain.handle('mcp:approval'"),
+    mainSource.indexOf("ipcMain.handle('workspace:update-node-web-settings'"),
+  );
+  const lockPreparation = mainSource.slice(
+    mainSource.indexOf('prepareForLock(): void'),
+    mainSource.indexOf('async close(sessionId:', mainSource.indexOf('prepareForLock(): void')),
+  );
+  const backendDisposal = mainSource.slice(
+    mainSource.indexOf('async dispose(): Promise<void>'),
+    mainSource.indexOf(
+      'private ensureStarted()',
+      mainSource.indexOf('async dispose(): Promise<void>'),
+    ),
+  );
+  const backendExit = mainSource.slice(
+    mainSource.indexOf("child.on('exit'"),
+    mainSource.indexOf('private write(command:', mainSource.indexOf("child.on('exit'")),
+  );
+  assert.doesNotMatch(tunnelAuth, /\bmodal\s*:/);
+  assert.match(tunnelAuth, /presentTunnelAuthWindow\(authWindow\)/);
+  assert.match(tunnelAuth, /forgetTunnelAuthWindow\(authWindow\)/);
+  assert.match(approvalResponse, /finishApproval\(approval\.requestId\)/);
+  assert.match(lockPreparation, /mcpApprovalWindowCoordinator\.reset\(\)/);
+  assert.match(backendDisposal, /mcpApprovalWindowCoordinator\.reset\(\)/);
+  assert.match(backendExit, /for \(const requestId of mcpApprovalWindowCoordinator\.reset\(\)\)/);
+  assert.match(backendExit, /this\.broadcastMcpApprovalCancellation\(requestId\)/);
+
+  const bitwardenPopupOpen = mainSource.slice(
+    mainSource.indexOf("ipcMain.handle('web:bitwarden-popup-open'"),
+    mainSource.indexOf("ipcMain.handle('web:bitwarden-popup-close'"),
+  );
+  assert.match(
+    bitwardenPopupOpen,
+    /runAuthorizedOperation\(async \(\) => \{\s*if \(mcpApprovalWindowCoordinator\.hasPendingApprovals\)/,
+  );
+});
+
+test('MCP approval temporarily preempts tunnel browser authentication windows', () => {
+  function createWindow() {
+    const calls: string[] = [];
+    let destroyed = false;
+    const window: McpApprovalBlockingWindow = {
+      isDestroyed: () => destroyed,
+      isMinimized: () => false,
+      isVisible: () => true,
+      restore: () => calls.push('restore'),
+      show: () => calls.push('show'),
+      hide: () => calls.push('hide'),
+      moveTop: () => calls.push('moveTop'),
+      focus: () => calls.push('focus'),
+      destroy: () => {
+        calls.push('destroy');
+        destroyed = true;
+      },
+    };
+    return { calls, window };
+  }
+
+  const coordinator = new McpApprovalWindowCoordinator<McpApprovalBlockingWindow>();
+  const activeAuth = createWindow();
+  const queuedAuth = createWindow();
+
+  coordinator.presentTunnelAuthWindow(activeAuth.window);
+  assert.deepEqual(activeAuth.calls, ['show']);
+
+  coordinator.beginApproval('approval-1');
+  coordinator.beginApproval('approval-2');
+  assert.equal(coordinator.hasPendingApprovals, true);
+  assert.deepEqual(activeAuth.calls, ['show', 'hide', 'hide']);
+
+  coordinator.presentTunnelAuthWindow(queuedAuth.window);
+  assert.deepEqual(queuedAuth.calls, []);
+
+  coordinator.finishApproval('approval-1');
+  assert.deepEqual(activeAuth.calls, ['show', 'hide', 'hide']);
+  assert.deepEqual(queuedAuth.calls, []);
+
+  coordinator.finishApproval('approval-2');
+  assert.equal(coordinator.hasPendingApprovals, false);
+  assert.deepEqual(activeAuth.calls, ['show', 'hide', 'hide', 'show', 'focus']);
+  assert.deepEqual(queuedAuth.calls, ['show', 'focus']);
+
+  coordinator.forgetTunnelAuthWindow(queuedAuth.window);
+  coordinator.beginApproval('approval-3');
+  assert.deepEqual(queuedAuth.calls, ['show', 'focus']);
+
+  assert.deepEqual(coordinator.reset(), ['approval-3']);
+  assert.equal(coordinator.hasPendingApprovals, false);
+  assert.deepEqual(activeAuth.calls, ['show', 'hide', 'hide', 'show', 'focus', 'hide', 'destroy']);
+
+  const futureAuth = createWindow();
+  coordinator.presentTunnelAuthWindow(futureAuth.window);
+  assert.deepEqual(futureAuth.calls, ['show']);
+});
+
+test('MCP approval waits for native dialogs and drops cancelled deferred presentations', async () => {
+  const coordinator = new McpApprovalWindowCoordinator<McpApprovalBlockingWindow>();
+  let closeFirstDialog!: () => void;
+  const firstDialog = coordinator.runNativeDialog(
+    () =>
+      new Promise<void>((resolve) => {
+        closeFirstDialog = resolve;
+      }),
+  );
+  let cancelledPresentationCount = 0;
+  coordinator.beginApproval('cancelled');
+  coordinator.presentApprovalWhenNativeDialogsClose('cancelled', () => {
+    cancelledPresentationCount++;
+  });
+  coordinator.finishApproval('cancelled');
+  closeFirstDialog();
+  await firstDialog;
+  assert.equal(cancelledPresentationCount, 0);
+
+  let closeSecondDialog!: () => void;
+  const secondDialog = coordinator.runNativeDialog(
+    () =>
+      new Promise<void>((resolve) => {
+        closeSecondDialog = resolve;
+      }),
+  );
+  let presentationCount = 0;
+  coordinator.beginApproval('pending');
+  coordinator.presentApprovalWhenNativeDialogsClose('pending', () => {
+    presentationCount++;
+  });
+  assert.equal(presentationCount, 0);
+  closeSecondDialog();
+  await secondDialog;
+  assert.equal(presentationCount, 1);
+  coordinator.finishApproval('pending');
+
+  coordinator.beginApproval('immediate');
+  coordinator.presentApprovalWhenNativeDialogsClose('immediate', () => {
+    presentationCount++;
+  });
+  coordinator.presentApprovalWhenNativeDialogsClose('unknown', () => {
+    presentationCount++;
+  });
+  assert.equal(presentationCount, 2);
+  coordinator.finishApproval('immediate');
+});
+
+test('MCP approval cancels preemptible native authentication before presentation', async () => {
+  const coordinator = new McpApprovalWindowCoordinator<McpApprovalBlockingWindow>();
+  let verificationSignal!: AbortSignal;
+  let finishVerification!: (value: string) => void;
+  const verification = coordinator.runPreemptibleOperation(
+    (signal) =>
+      new Promise<string>((resolve) => {
+        verificationSignal = signal;
+        finishVerification = resolve;
+      }),
+  );
+
+  let presentationReady = false;
+  const ready = coordinator.beginApproval('windows-hello').then(() => {
+    presentationReady = true;
+  });
+  assert.equal(verificationSignal.aborted, true);
+  await Promise.resolve();
+  assert.equal(presentationReady, false);
+
+  finishVerification('cancelled');
+  assert.equal(await verification, 'cancelled');
+  await ready;
+  assert.equal(presentationReady, true);
+
+  let lateOperationWasAborted = false;
+  await coordinator.runPreemptibleOperation(async (signal) => {
+    lateOperationWasAborted = signal.aborted;
+  });
+  assert.equal(lateOperationWasAborted, true);
+  coordinator.finishApproval('windows-hello');
+});
+
+test('MCP approval stays above renderer dialogs and hides native session surfaces', () => {
+  const appSource = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  const dialogSource = readFileSync(
+    new URL('../src/components/ui/dialog.tsx', import.meta.url),
+    'utf8',
+  );
+  const approvalDialog = appSource.slice(
+    appSource.indexOf('open={mcpApprovals.length > 0}'),
+    appSource.indexOf('<div', appSource.indexOf('open={mcpApprovals.length > 0}')),
+  );
+  const nativeSurfaceVisibility = appSource.slice(
+    appSource.indexOf('isWebSurfaceVisible={'),
+    appSource.indexOf('selectedSession={selectedSession}'),
+  );
+
+  assert.match(dialogSource, /overlayClassName\?: string/);
+  assert.match(dialogSource, /<DialogOverlay className=\{overlayClassName\} \/>/);
+  assert.match(approvalDialog, /className="z-\[60\]/);
+  assert.match(approvalDialog, /overlayClassName="z-\[60\]"/);
+  assert.match(nativeSurfaceVisibility, /mcpApprovals\.length === 0/);
 });
 
 test('MCP client configuration uses the host platform command contract', () => {

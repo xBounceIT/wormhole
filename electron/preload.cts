@@ -721,16 +721,20 @@ const wormholeBridge = {
   respondMcpApproval: (requestId: string, approved: boolean) =>
     ipcRenderer.invoke('mcp:approval', { requestId, approved }),
   onMcpApproval: (
-    listener: (event: {
-      type: 'mcp.approval';
-      requestId: string;
-      sessionId: string;
-      host: string;
-      port: number;
-      username: string;
-      title: string;
-      tool: string;
-    }) => void,
+    listener: (
+      event:
+        | {
+            type: 'mcp.approval';
+            requestId: string;
+            sessionId: string;
+            host: string;
+            port: number;
+            username: string;
+            title: string;
+            tool: string;
+          }
+        | { type: 'mcp.approval-cancelled'; requestId: string },
+    ) => void,
   ) => {
     const handler = (_event: Electron.IpcRendererEvent, value: unknown) => {
       listener(value as Parameters<typeof listener>[0]);
