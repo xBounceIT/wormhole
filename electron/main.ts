@@ -78,6 +78,7 @@ import {
   type SftpNameDestination,
 } from './sftp-contract.js';
 import { RdpBackendClient, stopChildProcess } from './rdp.js';
+import { drainSshBackendSessionIds } from './ssh-backend-lifecycle.js';
 import { settleTunnelCleanup, TunnelLeaseRegistry } from './tunnel-lease-registry.js';
 import {
   isTunnelIdentifier,
@@ -5788,6 +5789,9 @@ class NativeSshBackend {
   private lineReader: Interface | undefined;
   private controlSequence = 0;
   private readonly activeSessions = new Set<string>();
+  // Go remains the lifecycle source of truth. Electron retains only the IDs Go explicitly marks
+  // so an unexpected child exit can deliver the terminal closed event to the renderer.
+  private readonly retainedMismatchSessions = new Set<string>();
   private readonly tunnelLeases = new TunnelLeaseRegistry();
   private readonly connectionAttempts = new WebSessionAttemptTracker();
   private readonly pendingConnections = new Map<string, number>();
@@ -6228,6 +6232,7 @@ class NativeSshBackend {
     this.openWaiters.clear();
     this.failControlWaiters(new Error('SSH service stopped.'));
     this.activeSessions.clear();
+    this.retainedMismatchSessions.clear();
     const tunnelReleases = this.tunnelLeases.releaseAll(releaseNativeTunnelLease);
     this.lineReader?.close();
     this.lineReader = undefined;
@@ -6244,6 +6249,7 @@ class NativeSshBackend {
 
   backendStopped(): void {
     this.tunnelLeases.clear();
+    this.retainedMismatchSessions.clear();
   }
 
   private ensureStarted(): void {
@@ -6291,8 +6297,10 @@ class NativeSshBackend {
       if (this.child !== child) return;
       this.child = undefined;
       if (this.lineReader === lineReader) this.lineReader = undefined;
-      const closedSessions = [...this.activeSessions];
-      this.activeSessions.clear();
+      const closedSessions = drainSshBackendSessionIds(
+        this.activeSessions,
+        this.retainedMismatchSessions,
+      );
       for (const sessionId of closedSessions) {
         this.broadcast({ type: 'closed', sessionId });
       }
@@ -6360,6 +6368,7 @@ class NativeSshBackend {
 
     if (event.type === 'connected') {
       this.activeSessions.add(event.sessionId);
+      this.retainedMismatchSessions.delete(event.sessionId);
       const waiter = this.openWaiters.get(event.sessionId);
       if (waiter) {
         this.pendingConnections.delete(event.sessionId);
@@ -6384,7 +6393,10 @@ class NativeSshBackend {
           ),
         );
       }
-      if (!event.retainTunnelLease) {
+      if (event.retainTunnelLease) {
+        this.retainedMismatchSessions.add(event.sessionId);
+      } else {
+        this.retainedMismatchSessions.delete(event.sessionId);
         void this.releaseTunnel(event.sessionId).catch(() => undefined);
       }
     } else if (event.type === 'closed' || event.type === 'reconnect-failed') {
@@ -6395,6 +6407,7 @@ class NativeSshBackend {
         waiter.reject(new Error('SSH connection closed while connecting.'));
       }
       this.activeSessions.delete(event.sessionId);
+      this.retainedMismatchSessions.delete(event.sessionId);
       void this.releaseTunnel(event.sessionId).catch(() => undefined);
     }
 

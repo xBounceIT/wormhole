@@ -2246,6 +2246,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
 
   useEffect(() => {
     const unsubscribe = window.wormhole?.onSshEvent((event) => {
+      if (event.type === 'closed') {
+        sshHostKeyTrustInFlight.current.delete(event.sessionId);
+      }
       if (event.type === 'sftp.transfer') {
         const terminalBatch =
           event.transferState === 'batch-failed' ||
@@ -5062,6 +5065,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         received: mismatch.received,
       });
     } catch (error: unknown) {
+      if (!sshHostKeyTrustInFlight.current.has(session.backendSessionId)) return;
       setSessions((current) =>
         current.map((candidate) =>
           candidate.id === sessionId && candidate.backendSessionId === session.backendSessionId

@@ -10,6 +10,7 @@ import {
   shouldDisableHardwareAcceleration,
 } from '../electron/gpu-compatibility.ts';
 import { stopChildProcess } from '../electron/rdp.ts';
+import { drainSshBackendSessionIds } from '../electron/ssh-backend-lifecycle.ts';
 import { TunnelLeaseRegistry } from '../electron/tunnel-lease-registry.ts';
 import {
   isSafeUpdateInstallerPath,
@@ -381,6 +382,19 @@ test('SSH reconnect lifecycle is validated before renderer delivery and retains 
     appSource,
     /event\.type === 'reconnect-failed'[\s\S]*failedSshReconnectState\(event\)/,
   );
+});
+
+test('SSH backend exit closes active and retained mismatch sessions exactly once', () => {
+  const active = new Set(['connected-session', 'shared-session']);
+  const retained = new Set(['mismatch-session', 'shared-session']);
+
+  assert.deepEqual(drainSshBackendSessionIds(active, retained), [
+    'connected-session',
+    'shared-session',
+    'mismatch-session',
+  ]);
+  assert.equal(active.size, 0);
+  assert.equal(retained.size, 0);
 });
 
 test('dialog close animations retain the last open visuals instead of rendering cleared state', () => {
