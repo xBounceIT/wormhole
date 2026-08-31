@@ -332,13 +332,41 @@ test('MCP approval restores and foregrounds the Wormhole window before notifying
     mainSource.indexOf('const event = parseSshBackendEvent'),
   );
   const foreground = approvalHandler.indexOf('bringMcpApprovalWindowToFront(approvalWindow)');
-  const closeBitwardenPopup = approvalHandler.indexOf('webSurfaces.closeBitwardenPopups()');
+  const closeBitwardenWindows = approvalHandler.indexOf(
+    'webSurfaces.closeBitwardenFloatingWindows()',
+  );
   const notification = approvalHandler.indexOf("window.webContents.send('mcp:approval'");
   assert.match(approvalHandler, /selectMcpApprovalWindow\(/);
   assert.match(approvalHandler, /mcpApprovalWindowCoordinator\.beginApproval\(/);
   assert.match(approvalHandler, /windowCloseCoordinators\.has\(window\)/);
-  assert.ok(closeBitwardenPopup >= 0 && closeBitwardenPopup < foreground);
+  assert.ok(closeBitwardenWindows >= 0 && closeBitwardenWindows < foreground);
   assert.ok(foreground >= 0 && foreground < notification);
+
+  const webSurfaceManager = mainSource.slice(
+    mainSource.indexOf('class WebSurfaceManager'),
+    mainSource.indexOf('const webSurfaces = new WebSurfaceManager()'),
+  );
+  const closeBitwardenWindowsFlow = webSurfaceManager.slice(
+    webSurfaceManager.indexOf('closeBitwardenFloatingWindows(): void'),
+    webSurfaceManager.indexOf('closeForWindow(owner: BrowserWindow)'),
+  );
+  const openExtensionWindowFlow = webSurfaceManager.slice(
+    webSurfaceManager.indexOf('private async openExtensionWindow'),
+    webSurfaceManager.indexOf('private async loadBitwardenExtension'),
+  );
+  assert.match(closeBitwardenWindowsFlow, /closeBitwardenPopup\(sessionId\)/);
+  assert.match(closeBitwardenWindowsFlow, /bitwardenAuxiliaryWindows\.values\(\)/);
+  assert.match(closeBitwardenWindowsFlow, /auxiliary\.window\.destroy\(\)/);
+  assert.equal(
+    openExtensionWindowFlow.match(/mcpApprovalWindowCoordinator\.hasPendingApprovals/g)?.length,
+    2,
+  );
+  const auxiliaryLoad = openExtensionWindowFlow.indexOf('await withBitwardenBrowserTimeout');
+  const approvalGuardAfterLoad = openExtensionWindowFlow.lastIndexOf(
+    'mcpApprovalWindowCoordinator.hasPendingApprovals',
+  );
+  const auxiliaryShow = openExtensionWindowFlow.indexOf('extensionWindow.show');
+  assert.ok(auxiliaryLoad < approvalGuardAfterLoad && approvalGuardAfterLoad < auxiliaryShow);
 
   const tunnelAuth = mainSource.slice(
     mainSource.indexOf('async function runTunnelBrowserAuth'),

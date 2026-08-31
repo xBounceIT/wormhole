@@ -5025,6 +5025,9 @@ class WebSurfaceManager {
     api: ElectronChromeExtensions,
     details: ExtensionWindowCreateDetails,
   ): Promise<BrowserWindow> {
+    if (mcpApprovalWindowCoordinator.hasPendingApprovals) {
+      throw new Error('Bitwarden cannot open a browser window while an MCP approval is pending.');
+    }
     if (!authSession.isAccessAllowed || isQuitting) {
       throw new Error('Authentication is required before Bitwarden can open a browser window.');
     }
@@ -5120,8 +5123,14 @@ class WebSurfaceManager {
         bitwardenBrowserNavigationTimeoutMs,
         'Bitwarden auxiliary window navigation timed out.',
       );
-      if (!authSession.isAccessAllowed || record.disposed || record.owner.isDestroyed()) {
-        throw new Error('Bitwarden auxiliary window was cancelled while Wormhole locked.');
+      if (
+        mcpApprovalWindowCoordinator.hasPendingApprovals ||
+        extensionWindow.isDestroyed() ||
+        !authSession.isAccessAllowed ||
+        record.disposed ||
+        record.owner.isDestroyed()
+      ) {
+        throw new Error('Bitwarden auxiliary window was cancelled before it could be shown.');
       }
       if (details.focused === false) extensionWindow.showInactive();
       else extensionWindow.show();
@@ -5454,15 +5463,15 @@ class WebSurfaceManager {
     for (const record of this.surfaces.values()) {
       if (!record.disposed) record.view.setVisible(false);
     }
-    this.closeBitwardenPopups();
-    for (const auxiliary of [...this.bitwardenAuxiliaryWindows.values()]) {
-      if (!auxiliary.window.isDestroyed()) auxiliary.window.destroy();
-    }
+    this.closeBitwardenFloatingWindows();
   }
 
-  closeBitwardenPopups(): void {
+  closeBitwardenFloatingWindows(): void {
     for (const sessionId of [...this.bitwardenPopups.keys()]) {
       void this.closeBitwardenPopup(sessionId);
+    }
+    for (const auxiliary of [...this.bitwardenAuxiliaryWindows.values()]) {
+      if (!auxiliary.window.isDestroyed()) auxiliary.window.destroy();
     }
   }
 
@@ -6379,7 +6388,7 @@ class NativeSshBackend {
       if (!authSession.isAccessAllowed) return;
       const windows = BrowserWindow.getAllWindows();
       mcpApprovalWindowCoordinator.beginApproval(mcpMessage.requestId);
-      webSurfaces.closeBitwardenPopups();
+      webSurfaces.closeBitwardenFloatingWindows();
       const approvalWindow = selectMcpApprovalWindow(
         windows,
         BrowserWindow.getFocusedWindow(),
