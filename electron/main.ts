@@ -3745,6 +3745,8 @@ async function runBackend<T>(
     let stdoutBytes = 0;
     let stderr = '';
     let settled = false;
+    let abortRequested = false;
+    const cancellationError = new Error('Operation cancelled.');
     const effectiveTimeoutMs =
       timeoutMs === backendTimeoutMs && operation.startsWith('backup-')
         ? backupTimeoutMs
@@ -3754,8 +3756,9 @@ async function runBackend<T>(
       finishReject(new Error('Wormhole did not respond in time.'));
     }, effectiveTimeoutMs);
     const abort = () => {
+      if (settled) return;
+      abortRequested = true;
       child.kill();
-      finishReject(new Error('Operation cancelled.'));
     };
     signal?.addEventListener('abort', abort, { once: true });
 
@@ -3781,10 +3784,18 @@ async function runBackend<T>(
       stderr += chunk;
       if (stderr.length > backendMaxBuffer) stderr = stderr.slice(-backendMaxBuffer);
     });
-    child.on('error', (error) => finishReject(error));
-    child.stdin?.on('error', (error) => finishReject(error));
+    child.on('error', (error) => {
+      if (!abortRequested) finishReject(error);
+    });
+    child.stdin?.on('error', (error) => {
+      if (!abortRequested) finishReject(error);
+    });
     child.on('close', (code) => {
       if (settled) return;
+      if (abortRequested) {
+        finishReject(cancellationError);
+        return;
+      }
       settled = true;
       clearTimeout(timeout);
       signal?.removeEventListener('abort', abort);
@@ -6449,25 +6460,27 @@ class NativeSshBackend {
     }
     if (mcpMessage?.type === 'mcp.approval') {
       if (!authSession.isAccessAllowed) return;
-      mcpApprovalWindowCoordinator.beginApproval(mcpMessage.requestId);
+      const presentationReady = mcpApprovalWindowCoordinator.beginApproval(mcpMessage.requestId);
       webSurfaces.closeBitwardenFloatingWindows();
-      mcpApprovalWindowCoordinator.presentApprovalWhenNativeDialogsClose(
-        mcpMessage.requestId,
-        () => {
-          const windows = BrowserWindow.getAllWindows();
-          const approvalWindow = selectMcpApprovalWindow(
-            windows,
-            BrowserWindow.getFocusedWindow(),
-            (window) => windowCloseCoordinators.has(window),
-          );
-          if (approvalWindow) bringMcpApprovalWindowToFront(approvalWindow);
-          for (const window of windows) {
-            if (!window.isDestroyed() && windowCloseCoordinators.has(window)) {
-              window.webContents.send('mcp:approval', mcpMessage);
+      void presentationReady.then(() => {
+        mcpApprovalWindowCoordinator.presentApprovalWhenNativeDialogsClose(
+          mcpMessage.requestId,
+          () => {
+            const windows = BrowserWindow.getAllWindows();
+            const approvalWindow = selectMcpApprovalWindow(
+              windows,
+              BrowserWindow.getFocusedWindow(),
+              (window) => windowCloseCoordinators.has(window),
+            );
+            if (approvalWindow) bringMcpApprovalWindowToFront(approvalWindow);
+            for (const window of windows) {
+              if (!window.isDestroyed() && windowCloseCoordinators.has(window)) {
+                window.webContents.send('mcp:approval', mcpMessage);
+              }
             }
-          }
-        },
-      );
+          },
+        );
+      });
       return;
     }
     const event = parseSshBackendEvent(line);
@@ -8024,11 +8037,23 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       }
       if (!ownerWindow.isVisible()) ownerWindow.show();
       ownerWindow.focus();
-      const result = await runBackend<{ succeeded: boolean }>('auth-hello-verify', {
-        ownerWindow: nativeWindowHandle(ownerWindow),
+      return mcpApprovalWindowCoordinator.runPreemptibleOperation(async (signal) => {
+        try {
+          const result = await runBackend<{ succeeded: boolean }>(
+            'auth-hello-verify',
+            { ownerWindow: nativeWindowHandle(ownerWindow) },
+            backendTimeoutMs,
+            signal,
+          );
+          if (result.succeeded) authSession.markUnlocked();
+          return result;
+        } catch (error) {
+          if (signal.aborted) {
+            return { succeeded: false, message: 'Windows Hello was canceled.' };
+          }
+          throw error;
+        }
       });
-      if (result.succeeded) authSession.markUnlocked();
-      return result;
     });
   });
 

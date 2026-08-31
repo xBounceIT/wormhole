@@ -13,6 +13,11 @@ export type McpApprovalBlockingWindow = McpApprovalWindow & {
   hide(): void;
 };
 
+type PreemptibleOperation = {
+  controller: AbortController;
+  settled: Promise<void>;
+};
+
 function isUsableWindow(window: McpApprovalWindow): boolean {
   try {
     return !window.isDestroyed();
@@ -56,6 +61,7 @@ export class McpApprovalWindowCoordinator<TWindow extends McpApprovalBlockingWin
   private readonly pendingApprovalIds = new Set<string>();
   private readonly deferredPresentations = new Map<string, () => void>();
   private readonly tunnelAuthWindows = new Set<TWindow>();
+  private readonly preemptibleOperations = new Set<PreemptibleOperation>();
   private activeNativeDialogs = 0;
 
   get hasPendingApprovals(): boolean {
@@ -72,10 +78,32 @@ export class McpApprovalWindowCoordinator<TWindow extends McpApprovalBlockingWin
     this.tunnelAuthWindows.delete(window);
   }
 
-  beginApproval(approvalId: string): void {
+  beginApproval(approvalId: string): Promise<void> {
     this.pendingApprovalIds.add(approvalId);
     for (const window of this.tunnelAuthWindows) {
       if (isUsableWindow(window)) attemptWindowAction(() => window.hide());
+    }
+    return this.cancelPreemptibleOperations();
+  }
+
+  async runPreemptibleOperation<TResult>(
+    operation: (signal: AbortSignal) => Promise<TResult>,
+  ): Promise<TResult> {
+    const controller = new AbortController();
+    let markSettled!: () => void;
+    const activeOperation: PreemptibleOperation = {
+      controller,
+      settled: new Promise<void>((resolve) => {
+        markSettled = resolve;
+      }),
+    };
+    this.preemptibleOperations.add(activeOperation);
+    if (this.pendingApprovalIds.size > 0) controller.abort();
+    try {
+      return await operation(controller.signal);
+    } finally {
+      this.preemptibleOperations.delete(activeOperation);
+      markSettled();
     }
   }
 
@@ -112,12 +140,19 @@ export class McpApprovalWindowCoordinator<TWindow extends McpApprovalBlockingWin
   }
 
   reset(): void {
+    void this.cancelPreemptibleOperations();
     this.pendingApprovalIds.clear();
     this.deferredPresentations.clear();
     for (const window of this.tunnelAuthWindows) {
       if (isUsableWindow(window)) attemptWindowAction(() => window.destroy());
     }
     this.tunnelAuthWindows.clear();
+  }
+
+  private async cancelPreemptibleOperations(): Promise<void> {
+    const operations = [...this.preemptibleOperations];
+    for (const operation of operations) operation.controller.abort();
+    await Promise.all(operations.map((operation) => operation.settled));
   }
 
   private presentDeferredApprovals(): void {

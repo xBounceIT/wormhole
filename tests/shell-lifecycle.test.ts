@@ -342,12 +342,37 @@ test('MCP approval restores and foregrounds the Wormhole window before notifying
   const notification = approvalHandler.indexOf("window.webContents.send('mcp:approval'");
   assert.match(approvalHandler, /selectMcpApprovalWindow\(/);
   assert.match(approvalHandler, /mcpApprovalWindowCoordinator\.beginApproval\(/);
+  assert.match(approvalHandler, /presentationReady\.then\(\(\) => \{/);
   assert.match(approvalHandler, /presentApprovalWhenNativeDialogsClose\(/);
   assert.match(approvalHandler, /windowCloseCoordinators\.has\(window\)/);
   assert.ok(closeBitwardenWindows >= 0 && closeBitwardenWindows < foreground);
   assert.ok(foreground >= 0 && foreground < notification);
   assert.match(approvalCancellationHandler, /finishApproval\(mcpMessage\.requestId\)/);
   assert.match(approvalCancellationHandler, /window\.webContents\.send\('mcp:approval'/);
+
+  const windowsHelloHandler = mainSource.slice(
+    mainSource.indexOf("ipcMain.handle('auth:hello-verify'"),
+    mainSource.indexOf("ipcMain.handle('auth:system-idle'"),
+  );
+  assert.match(windowsHelloHandler, /runPreemptibleOperation\(async \(signal\) =>/);
+  assert.match(windowsHelloHandler, /'auth-hello-verify',[\s\S]*backendTimeoutMs,[\s\S]*signal/);
+  assert.match(windowsHelloHandler, /if \(signal\.aborted\)/);
+
+  const backendRunner = mainSource.slice(
+    mainSource.indexOf('async function runBackend'),
+    mainSource.indexOf('// ---- update checks / downloads ----'),
+  );
+  const abortHandler = backendRunner.slice(
+    backendRunner.indexOf('const abort = () =>'),
+    backendRunner.indexOf("signal?.addEventListener('abort'"),
+  );
+  const closeHandler = backendRunner.slice(
+    backendRunner.indexOf("child.on('close'"),
+    backendRunner.indexOf('if (requestPayload === undefined)'),
+  );
+  assert.match(abortHandler, /abortRequested = true;[\s\S]*child\.kill\(\)/);
+  assert.doesNotMatch(abortHandler, /finishReject/);
+  assert.match(closeHandler, /if \(abortRequested\) \{[\s\S]*finishReject\(cancellationError\)/);
 
   const nativeDialogHelpersStart = mainSource.indexOf('function runCoordinatedFileDialog');
   const nativeDialogHelpersEnd = mainSource.indexOf('function enqueueTunnelBrowserAuth');
@@ -540,6 +565,39 @@ test('MCP approval waits for native dialogs and drops cancelled deferred present
   });
   assert.equal(presentationCount, 2);
   coordinator.finishApproval('immediate');
+});
+
+test('MCP approval cancels preemptible native authentication before presentation', async () => {
+  const coordinator = new McpApprovalWindowCoordinator<McpApprovalBlockingWindow>();
+  let verificationSignal!: AbortSignal;
+  let finishVerification!: (value: string) => void;
+  const verification = coordinator.runPreemptibleOperation(
+    (signal) =>
+      new Promise<string>((resolve) => {
+        verificationSignal = signal;
+        finishVerification = resolve;
+      }),
+  );
+
+  let presentationReady = false;
+  const ready = coordinator.beginApproval('windows-hello').then(() => {
+    presentationReady = true;
+  });
+  assert.equal(verificationSignal.aborted, true);
+  await Promise.resolve();
+  assert.equal(presentationReady, false);
+
+  finishVerification('cancelled');
+  assert.equal(await verification, 'cancelled');
+  await ready;
+  assert.equal(presentationReady, true);
+
+  let lateOperationWasAborted = false;
+  await coordinator.runPreemptibleOperation(async (signal) => {
+    lateOperationWasAborted = signal.aborted;
+  });
+  assert.equal(lateOperationWasAborted, true);
+  coordinator.finishApproval('windows-hello');
 });
 
 test('MCP approval stays above renderer dialogs and hides native session surfaces', () => {
