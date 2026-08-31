@@ -623,6 +623,51 @@ func TestSerialNativeSessionLifecyclePublishesFrames(t *testing.T) {
 	}
 }
 
+func TestSerialNativeSessionRecoversTerminalEmulatorPanicWithoutClosingConnection(t *testing.T) {
+	var output synchronizedBuffer
+	server := &serialServer{
+		output:   &serialEventWriter{encoder: json.NewEncoder(&output)},
+		sessions: make(map[string]*serialNativeSession),
+		pending:  make(map[string]context.CancelFunc),
+	}
+	native := newSerialNativeSession(&testSerialPort{}, serialTarget{}, 8, 2)
+	brokenTerminal := &sshTerminalEmulator{columns: 8, rows: 2}
+	native.id = "session"
+	native.server = server
+	native.terminal = brokenTerminal
+	server.sessions[native.id] = native
+
+	native.publishTerminalData([]byte("serial ready"))
+	native.publishTerminalData([]byte("next frame"))
+
+	if native.isClosed() {
+		t.Fatal("terminal emulator panic closed the serial connection")
+	}
+	if server.sessions[native.id] != native {
+		t.Fatal("terminal emulator panic removed the active serial session")
+	}
+	if native.terminal == brokenTerminal || native.terminal.vt == nil {
+		t.Fatal("terminal emulator panic did not install a healthy replacement")
+	}
+	if !native.terminalRecoveryLogged {
+		t.Fatal("terminal emulator recovery was not recorded")
+	}
+	decoder := json.NewDecoder(&output)
+	for index := 0; index < 2; index++ {
+		var event serialWireEvent
+		if err := decoder.Decode(&event); err != nil {
+			t.Fatal(err)
+		}
+		if event.Type != "screen" || event.Frame == nil {
+			t.Fatalf("terminal recovery event %d = %#v", index, event)
+		}
+	}
+	var extra serialWireEvent
+	if err := decoder.Decode(&extra); err != io.EOF {
+		t.Fatalf("unexpected event after terminal recovery: event=%#v err=%v", extra, err)
+	}
+}
+
 type testSerialPort struct {
 	mu     sync.Mutex
 	writes [][]byte
