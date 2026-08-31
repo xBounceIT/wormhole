@@ -332,10 +332,12 @@ test('MCP approval restores and foregrounds the Wormhole window before notifying
     mainSource.indexOf('const event = parseSshBackendEvent'),
   );
   const foreground = approvalHandler.indexOf('bringMcpApprovalWindowToFront(approvalWindow)');
+  const closeBitwardenPopup = approvalHandler.indexOf('webSurfaces.closeBitwardenPopups()');
   const notification = approvalHandler.indexOf("window.webContents.send('mcp:approval'");
   assert.match(approvalHandler, /selectMcpApprovalWindow\(/);
   assert.match(approvalHandler, /mcpApprovalWindowCoordinator\.beginApproval\(/);
   assert.match(approvalHandler, /windowCloseCoordinators\.has\(window\)/);
+  assert.ok(closeBitwardenPopup >= 0 && closeBitwardenPopup < foreground);
   assert.ok(foreground >= 0 && foreground < notification);
 
   const tunnelAuth = mainSource.slice(
@@ -363,6 +365,12 @@ test('MCP approval restores and foregrounds the Wormhole window before notifying
   assert.match(approvalResponse, /finishApproval\(approval\.requestId\)/);
   assert.match(lockPreparation, /mcpApprovalWindowCoordinator\.reset\(\)/);
   assert.match(backendDisposal, /mcpApprovalWindowCoordinator\.reset\(\)/);
+
+  const bitwardenPopupOpen = mainSource.slice(
+    mainSource.indexOf("ipcMain.handle('web:bitwarden-popup-open'"),
+    mainSource.indexOf("ipcMain.handle('web:bitwarden-popup-close'"),
+  );
+  assert.match(bitwardenPopupOpen, /mcpApprovalWindowCoordinator\.hasPendingApprovals/);
 });
 
 test('MCP approval temporarily preempts tunnel browser authentication windows', () => {
@@ -395,6 +403,7 @@ test('MCP approval temporarily preempts tunnel browser authentication windows', 
 
   coordinator.beginApproval('approval-1');
   coordinator.beginApproval('approval-2');
+  assert.equal(coordinator.hasPendingApprovals, true);
   assert.deepEqual(activeAuth.calls, ['show', 'hide', 'hide']);
 
   coordinator.presentTunnelAuthWindow(queuedAuth.window);
@@ -405,6 +414,7 @@ test('MCP approval temporarily preempts tunnel browser authentication windows', 
   assert.deepEqual(queuedAuth.calls, []);
 
   coordinator.finishApproval('approval-2');
+  assert.equal(coordinator.hasPendingApprovals, false);
   assert.deepEqual(activeAuth.calls, ['show', 'hide', 'hide', 'show', 'focus']);
   assert.deepEqual(queuedAuth.calls, ['show', 'focus']);
 
@@ -413,6 +423,7 @@ test('MCP approval temporarily preempts tunnel browser authentication windows', 
   assert.deepEqual(queuedAuth.calls, ['show', 'focus']);
 
   coordinator.reset();
+  assert.equal(coordinator.hasPendingApprovals, false);
   assert.deepEqual(activeAuth.calls, ['show', 'hide', 'hide', 'show', 'focus', 'hide', 'destroy']);
 
   const futureAuth = createWindow();

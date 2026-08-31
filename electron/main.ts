@@ -5454,12 +5454,15 @@ class WebSurfaceManager {
     for (const record of this.surfaces.values()) {
       if (!record.disposed) record.view.setVisible(false);
     }
-    // The Bitwarden popup can hold a logged-in vault; it must never stay visible after a lock.
-    for (const sessionId of [...this.bitwardenPopups.keys()]) {
-      void this.closeBitwardenPopup(sessionId);
-    }
+    this.closeBitwardenPopups();
     for (const auxiliary of [...this.bitwardenAuxiliaryWindows.values()]) {
       if (!auxiliary.window.isDestroyed()) auxiliary.window.destroy();
+    }
+  }
+
+  closeBitwardenPopups(): void {
+    for (const sessionId of [...this.bitwardenPopups.keys()]) {
+      void this.closeBitwardenPopup(sessionId);
     }
   }
 
@@ -6376,6 +6379,7 @@ class NativeSshBackend {
       if (!authSession.isAccessAllowed) return;
       const windows = BrowserWindow.getAllWindows();
       mcpApprovalWindowCoordinator.beginApproval(mcpMessage.requestId);
+      webSurfaces.closeBitwardenPopups();
       const approvalWindow = selectMcpApprovalWindow(
         windows,
         BrowserWindow.getFocusedWindow(),
@@ -7533,6 +7537,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     if (!isBitwardenPopupOpenRequest(request)) {
       throw new Error('Bitwarden popup request is invalid.');
     }
+    if (mcpApprovalWindowCoordinator.hasPendingApprovals) return { open: false };
     return runAuthorizedOperation(() => webSurfaces.openBitwardenPopup(request));
   });
 

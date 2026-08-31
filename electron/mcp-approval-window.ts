@@ -56,6 +56,10 @@ export class McpApprovalWindowCoordinator<TWindow extends McpApprovalBlockingWin
   private readonly pendingApprovalIds = new Set<string>();
   private readonly tunnelAuthWindows = new Set<TWindow>();
 
+  get hasPendingApprovals(): boolean {
+    return this.pendingApprovalIds.size > 0;
+  }
+
   presentTunnelAuthWindow(window: TWindow): void {
     if (!isUsableWindow(window)) return;
     this.tunnelAuthWindows.add(window);
