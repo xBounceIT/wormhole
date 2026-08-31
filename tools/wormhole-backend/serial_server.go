@@ -749,11 +749,12 @@ type serialNativeSession struct {
 	started     bool
 	readDone    chan struct{}
 
-	terminalOutputMu sync.Mutex
-	writeMu          sync.Mutex
-	readGateMu       sync.Mutex
-	readGate         chan struct{}
-	readingPaused    bool
+	terminalOutputMu       sync.Mutex
+	terminalRecoveryLogged bool
+	writeMu                sync.Mutex
+	readGateMu             sync.Mutex
+	readGate               chan struct{}
+	readingPaused          bool
 
 	flowMu       sync.Mutex
 	remotePaused bool
@@ -1003,12 +1004,15 @@ func (native *serialNativeSession) publishTerminalData(data []byte) {
 	if native.isClosed() {
 		return
 	}
-	frame, changed, err := native.terminal.write(data)
+	frame, changed, recovered, err := writeTerminalResilient(&native.terminal, data)
 	if err != nil {
 		if native.server != nil {
 			native.server.writeError(native.id, "serial terminal emulation failed")
 		}
 		return
+	}
+	if recovered {
+		logTerminalRecoveryOnce(&native.terminalRecoveryLogged, "Serial")
 	}
 	if changed {
 		native.publishTerminalFrameLocked(frame)

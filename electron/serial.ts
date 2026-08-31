@@ -40,6 +40,7 @@ export type SerialTerminalFrame = {
   cursorY: number;
   cursorVisible: boolean;
   applicationCursor: boolean;
+  alternateScreen: boolean;
   title?: string;
   sequence: number;
 };
@@ -177,6 +178,7 @@ function parseTerminalFrame(value: unknown): SerialTerminalFrame | undefined {
     !isSettingsValue(value.cursor_y, 0, value.rows - 1) ||
     typeof value.cursor_visible !== 'boolean' ||
     typeof value.application_cursor !== 'boolean' ||
+    typeof value.alternate_screen !== 'boolean' ||
     !isSettingsValue(value.sequence, 1, Number.MAX_SAFE_INTEGER)
   ) {
     return undefined;
@@ -241,6 +243,7 @@ function parseTerminalFrame(value: unknown): SerialTerminalFrame | undefined {
     cursorY: value.cursor_y,
     cursorVisible: value.cursor_visible,
     applicationCursor: value.application_cursor,
+    alternateScreen: value.alternate_screen,
     title: typeof value.title === 'string' ? value.title.slice(0, 2048) : undefined,
     sequence: value.sequence,
   };

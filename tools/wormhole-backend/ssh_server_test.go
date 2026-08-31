@@ -2950,6 +2950,47 @@ func TestSSHNativeSessionDropsFramesAfterClose(t *testing.T) {
 	}
 }
 
+func TestSSHNativeSessionRecoversTerminalEmulatorPanicWithoutClosingConnection(t *testing.T) {
+	var output synchronizedBuffer
+	server := &sshServer{
+		output:   &sshEventWriter{encoder: json.NewEncoder(&output)},
+		sessions: make(map[string]*sshNativeSession),
+		pending:  make(map[string]context.CancelFunc),
+	}
+	brokenTerminal := &sshTerminalEmulator{columns: 8, rows: 2}
+	native := &sshNativeSession{
+		id:        "session",
+		server:    server,
+		terminal:  brokenTerminal,
+		mcpReplay: newMcpReplayBuffer(mcpReplayCapacity),
+		done:      make(chan struct{}),
+	}
+	server.sessions[native.id] = native
+
+	// A nil vt parser forces the same panic boundary used for malformed remote terminal output.
+	native.publishVisibleTerminalDataLocked([]byte("/ # "))
+	native.publishVisibleTerminalDataLocked([]byte("next prompt"))
+
+	if native.isClosed() {
+		t.Fatal("terminal emulator panic closed the SSH transport")
+	}
+	if server.sessions[native.id] != native {
+		t.Fatal("terminal emulator panic removed the active SSH session")
+	}
+	if native.terminal == brokenTerminal || native.terminal.vt == nil {
+		t.Fatal("terminal emulator panic did not install a healthy replacement")
+	}
+	if !native.terminalRecoveryLogged {
+		t.Fatal("terminal emulator recovery was not recorded")
+	}
+	events := decodeSSHEvents(t, output.Bytes())
+	if len(events) != 2 || events[0].Type != "screen" || events[0].Frame == nil ||
+		!events[0].Frame.Full || events[0].Frame.Columns != 8 || events[0].Frame.Rows != 2 ||
+		events[1].Type != "screen" || events[1].Frame == nil {
+		t.Fatalf("terminal recovery events = %#v", events)
+	}
+}
+
 func TestDialNativeSSHHonorsContextCancellationDuringHandshake(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

@@ -263,6 +263,7 @@ type sshNativeSession struct {
 	terminalOutputMu        sync.Mutex
 	mcpPresentation         *mcpCommandPresentationFilter
 	mcpRetiredPresentations []*mcpCommandPresentationFilter
+	terminalRecoveryLogged  bool
 	started                 bool
 	closed                  bool
 	closeOnce               sync.Once
@@ -1321,10 +1322,16 @@ func (native *sshNativeSession) publishTerminalData(data []byte) {
 
 func (native *sshNativeSession) publishVisibleTerminalDataLocked(data []byte) {
 	native.mcpReplay.append(data)
-	frame, changed, err := native.terminal.write(data)
+	frame, changed, recovered, err := writeTerminalResilient(&native.terminal, data)
 	if err != nil {
-		native.server.writeError(native.id, fmt.Sprintf("SSH terminal emulation failed: %v", err))
+		native.server.writeError(native.id, "SSH terminal emulation failed")
 		return
+	}
+	if recovered {
+		// Terminal output is untrusted input. A malformed control sequence must not be able to
+		// unwind the output goroutine and terminate the shared SSH backend process. Drop only the
+		// offending chunk, reset presentation state, and keep the transport and input stream alive.
+		logTerminalRecoveryOnce(&native.terminalRecoveryLogged, "SSH")
 	}
 	if changed {
 		native.publishTerminalFrameLocked(frame)

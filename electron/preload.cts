@@ -585,6 +585,7 @@ const wormholeBridge = {
         cursorY: number;
         cursorVisible: boolean;
         applicationCursor: boolean;
+        alternateScreen: boolean;
         title?: string;
         sequence: number;
       };
@@ -651,6 +652,7 @@ const wormholeBridge = {
         cursorY: number;
         cursorVisible: boolean;
         applicationCursor: boolean;
+        alternateScreen: boolean;
         title?: string;
         sequence: number;
       };

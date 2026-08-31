@@ -871,6 +871,7 @@ type SshTerminalFrame = {
   cursorY: number;
   cursorVisible: boolean;
   applicationCursor: boolean;
+  alternateScreen: boolean;
   title?: string;
   sequence: number;
 };
@@ -1987,6 +1988,7 @@ function parseSshTerminalFrame(value: unknown): SshTerminalFrame | undefined {
     value.cursor_y >= value.rows ||
     typeof value.cursor_visible !== 'boolean' ||
     typeof value.application_cursor !== 'boolean' ||
+    typeof value.alternate_screen !== 'boolean' ||
     typeof value.sequence !== 'number' ||
     !Number.isSafeInteger(value.sequence) ||
     value.sequence < 1
@@ -2053,6 +2055,7 @@ function parseSshTerminalFrame(value: unknown): SshTerminalFrame | undefined {
     cursorY: value.cursor_y,
     cursorVisible: value.cursor_visible,
     applicationCursor: value.application_cursor,
+    alternateScreen: value.alternate_screen,
     title: typeof value.title === 'string' ? value.title.slice(0, 2048) : undefined,
     sequence: value.sequence,
   };

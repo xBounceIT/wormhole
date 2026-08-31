@@ -312,6 +312,7 @@ interface WormholeSshTerminalFrame {
   cursorY: number;
   cursorVisible: boolean;
   applicationCursor: boolean;
+  alternateScreen: boolean;
   title?: string;
   sequence: number;
 }
