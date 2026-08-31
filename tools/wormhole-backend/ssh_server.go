@@ -613,18 +613,20 @@ func (server *sshServer) connectSSH(ctx context.Context, state *sshReconnectStat
 			if !errors.As(err, &mismatch) || strings.TrimSpace(command.NodeID) == "" {
 				mismatch = nil
 			}
-			pending := server.finishInitialFailure(state, mismatch)
-			if pending && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-				logError("SSH session failed to connect: %v", safeSSHError(err))
-				event := sshWireEvent{
+			var event *sshWireEvent
+			if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+				failure := sshWireEvent{
 					Type: "error", SessionID: command.SessionID, Error: safeSSHError(err),
 				}
 				if mismatch != nil {
-					event.HostKeyExpected = mismatch.expected
-					event.HostKeyReceived = mismatch.received
-					event.RetainTunnelLease = true
+					failure.HostKeyExpected = mismatch.expected
+					failure.HostKeyReceived = mismatch.received
+					failure.RetainTunnelLease = true
 				}
-				server.output.write(event)
+				event = &failure
+			}
+			if server.finishInitialFailure(state, mismatch, event) && event != nil {
+				logError("SSH session failed to connect: %v", safeSSHError(err))
 			}
 		} else {
 			server.reconnectAttemptFailed(state, err)
@@ -679,13 +681,13 @@ func (server *sshServer) trustHostKey(command sshWireCommand) {
 	normalizedReceived, receivedErr := normalizeSSHFingerprint(command.HostKeyReceived)
 	if nodeID == "" || len(nodeID) > 128 || normalizeID(nodeID) != normalizeID(stateCommand.NodeID) ||
 		expectedErr != nil || receivedErr != nil || normalizedExpected != expected || normalizedReceived != received {
-		server.mu.Unlock()
-		server.writeHostKeyMismatchError(
+		server.writeHostKeyMismatchErrorLocked(
 			command.SessionID,
 			"SSH host-key trust request does not match the pending connection",
 			expected,
 			received,
 		)
+		server.mu.Unlock()
 		return
 	}
 
@@ -707,14 +709,7 @@ func (server *sshServer) trustHostKeyAndReconnect(
 		trustFingerprint = trustSSHFingerprint
 	}
 	if err := trustFingerprint(server.databasePath, request); err != nil {
-		if server.finishPendingState(state, false) {
-			server.writeHostKeyMismatchError(
-				state.commandSnapshot().SessionID,
-				safeSSHError(err),
-				request.Expected,
-				request.Received,
-			)
-		}
+		server.finishHostKeyTrustFailure(state, safeSSHError(err), request.Expected, request.Received)
 		return
 	}
 	server.connectSSH(ctx, state, true)
@@ -983,6 +978,7 @@ func (server *sshServer) finishPendingState(state *sshReconnectState, abandon bo
 func (server *sshServer) finishInitialFailure(
 	state *sshReconnectState,
 	mismatch *sshHostKeyMismatchError,
+	event *sshWireEvent,
 ) bool {
 	server.mu.Lock()
 	defer server.mu.Unlock()
@@ -999,7 +995,28 @@ func (server *sshServer) finishInitialFailure(
 		delete(server.lifecycles, sessionID)
 		state.clearSecrets()
 	}
+	if pending && event != nil {
+		server.output.write(*event)
+	}
 	return pending
+}
+
+func (server *sshServer) finishHostKeyTrustFailure(
+	state *sshReconnectState,
+	message string,
+	expected string,
+	received string,
+) bool {
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	sessionID := state.commandSnapshot().SessionID
+	_, pending := server.pending[sessionID]
+	if !pending || server.lifecycles[sessionID] != state {
+		return false
+	}
+	delete(server.pending, sessionID)
+	server.writeHostKeyMismatchErrorLocked(sessionID, message, expected, received)
+	return true
 }
 
 func (server *sshServer) promote(
@@ -1176,7 +1193,8 @@ func (server *sshServer) writeError(sessionID, message string) {
 	server.output.write(sshWireEvent{Type: "error", SessionID: sessionID, Error: message})
 }
 
-func (server *sshServer) writeHostKeyMismatchError(
+// writeHostKeyMismatchErrorLocked requires server.mu so cleanup cannot overtake a lease-retaining event.
+func (server *sshServer) writeHostKeyMismatchErrorLocked(
 	sessionID string,
 	message string,
 	expected string,

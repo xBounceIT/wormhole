@@ -1150,6 +1150,25 @@ func newSSHTestServer(output io.Writer) *sshServer {
 	}
 }
 
+type blockingFirstSSHEventWrite struct {
+	output  synchronizedBuffer
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (writer *blockingFirstSSHEventWrite) Write(value []byte) (int, error) {
+	block := false
+	writer.once.Do(func() {
+		block = true
+		close(writer.started)
+	})
+	if block {
+		<-writer.release
+	}
+	return writer.output.Write(value)
+}
+
 func TestSSHServerRetainsInitialHostKeyMismatchLifecycle(t *testing.T) {
 	var output synchronizedBuffer
 	server := newSSHTestServer(&output)
@@ -1355,6 +1374,67 @@ func TestSSHHostKeyTrustFailureKeepsTheValidatedMismatchRetryable(t *testing.T) 
 		t.Fatalf("trust failure event = %#v", failed)
 	}
 	server.close("session")
+}
+
+func TestSSHHostKeyMismatchEventIsSerializedBeforeConcurrentAppLockCleanup(t *testing.T) {
+	writer := &blockingFirstSSHEventWrite{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	server := newSSHTestServer(writer)
+	state := &sshReconnectState{command: sshWireCommand{
+		SessionID: "session", NodeID: "node", SocksEndpoint: "127.0.0.1:49152",
+		PasswordOverride: "secret",
+	}}
+	server.lifecycles["session"] = state
+	server.pending["session"] = func() {}
+	event := sshWireEvent{
+		Type: "error", SessionID: "session", Error: "SSH host key mismatch",
+		HostKeyExpected: testSSHExpectedFingerprint, HostKeyReceived: testSSHReceivedFingerprint,
+		RetainTunnelLease: true,
+	}
+	finished := make(chan bool, 1)
+	go func() {
+		finished <- server.finishInitialFailure(state, &sshHostKeyMismatchError{
+			expected: testSSHExpectedFingerprint,
+			received: testSSHReceivedFingerprint,
+		}, &event)
+	}()
+	<-writer.started
+	publishedOutsideLifecycleLock := false
+	if server.mu.TryLock() {
+		server.mu.Unlock()
+		publishedOutsideLifecycleLock = true
+	}
+
+	lockFinished := make(chan struct{})
+	go func() {
+		server.handle(sshWireCommand{Type: "app-lock-all"})
+		close(lockFinished)
+	}()
+	close(writer.release)
+	if !<-finished {
+		t.Fatal("initial mismatch lifecycle was not pending")
+	}
+	<-lockFinished
+	if publishedOutsideLifecycleLock {
+		t.Fatal("initial mismatch event was published outside the lifecycle lock")
+	}
+
+	decoder := json.NewDecoder(bytes.NewReader(writer.output.Bytes()))
+	var mismatch, closed sshWireEvent
+	if err := decoder.Decode(&mismatch); err != nil {
+		t.Fatal(err)
+	}
+	if err := decoder.Decode(&closed); err != nil {
+		t.Fatal(err)
+	}
+	if mismatch.Type != "error" || !mismatch.RetainTunnelLease || closed.Type != "closed" {
+		t.Fatalf("concurrent lock event order = mismatch %#v, closed %#v", mismatch, closed)
+	}
+	if state.commandSnapshot().PasswordOverride != "" {
+		t.Fatal("application lock retained mismatch credentials")
+	}
 }
 
 func TestSSHRetainedHostKeyMismatchIsClearedByLifecycleCleanup(t *testing.T) {
