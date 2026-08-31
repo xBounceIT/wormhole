@@ -922,3 +922,66 @@ test('failed initial web navigation diagnoses SOCKS targets and releases its VPN
   assert.match(mainSource, /tunnelLeases\.isActive\(sessionId, leaseId\)/);
   assert.match(mainSource, /Could not release the failed web session VPN tunnel/);
 });
+
+test('SSH host-key trust reconnects through the retained VPN route', () => {
+  const startSource = sourceBetween(
+    appSource,
+    'function startSshSession',
+    'function submitSshKeyPassphrase',
+  );
+  assert.match(startSource, /if \(isSshHostKeyMismatchError\(message\)\) return/);
+
+  const trustSource = sourceBetween(
+    appSource,
+    'async function trustSshHostKey',
+    'function openQuickConnect',
+  );
+  assert.match(trustSource, /sessionId: current\.backendSessionId/);
+  assert.match(trustSource, /reuseTunnel: true/);
+  assert.match(trustSource, /sshHostKeyTrustInFlight\.current\.has/);
+  assert.match(trustSource, /sshHostKeyTrustInFlight\.current\.add/);
+  assert.match(trustSource, /sshHostKeyTrustInFlight\.current\.delete/);
+  assert.doesNotMatch(trustSource, /reconnectSession\(/);
+
+  const sshEvents = sourceBetween(mainSource, 'private handleLine', 'private broadcast');
+  assert.match(sshEvents, /if \(!isSshHostKeyMismatch\([\s\S]*?\)\) \{[\s\S]*?releaseTunnel/);
+  const sshError = sourceBetween(
+    sshEvents,
+    "} else if (event.type === 'error') {",
+    "} else if (event.type === 'closed' || event.type === 'reconnect-failed') {",
+  );
+  assert.match(sshError, /this\.pendingConnections\.delete\(event\.sessionId\)/);
+  assert.match(mainSource, /hostKeyExpected: hasHostKeyMismatch \? hostKeyExpected : undefined/);
+  assert.match(mainSource, /hostKeyReceived: hasHostKeyMismatch \? hostKeyReceived : undefined/);
+
+  const sshLock = sourceBetween(mainSource, 'prepareForLock(): void', 'async close(sessionId');
+  assert.match(sshLock, /this\.tunnelRoutes\.sessionIds\(\)/);
+  assert.match(sshLock, /!this\.activeSessions\.has\(sessionId\)/);
+  assert.match(sshLock, /this\.close\(sessionId\)\.catch/);
+
+  const sshOpen = sourceBetween(mainSource, 'private async openCurrent', 'sendInput(sessionId');
+  assert.match(sshOpen, /this\.tunnelRoutes\.retained\(request\.sessionId, request\.nodeId\)/);
+  assert.match(
+    sshOpen,
+    /if \(!retainedRoute\) \{\s*await this\.releaseTunnel\(request\.sessionId\);\s*\}/,
+  );
+  assert.match(
+    sshOpen,
+    /const tunnelRequested = !retainedRoute && Boolean\(request\.nodeId \|\| request\.tunnelConfigId\)/,
+  );
+  assert.match(
+    mainSource,
+    /this\.pendingConnections\.get\(request\.sessionId\) === generation[\s\S]*?this\.pendingConnections\.delete\(request\.sessionId\)/,
+  );
+
+  const openValidation = sourceBetween(
+    mainSource,
+    'function isSshOpenRequest',
+    'function isWorkspaceNodeSshSettingsRequest',
+  );
+  assert.match(
+    openValidation,
+    /value\.nodeId !== undefined[\s\S]*?typeof value\.reuseTunnel === 'boolean'/,
+  );
+  assert.match(openValidation, /value\.reuseTunnel === undefined/);
+});

@@ -1060,6 +1060,7 @@ interface Window {
       manualCredentials?: boolean;
       keyPassphrase?: string;
       manualKeyPassphrase?: boolean;
+      reuseTunnel?: boolean;
     }): Promise<WormholeSshConnected>;
     trustSshHostKey(request: {
       nodeId: string;

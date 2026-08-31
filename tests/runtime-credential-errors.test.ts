@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   isBitwardenUnlockError,
+  isSshHostKeyMismatchError,
   requiresRdpCredentialPrompt,
   requiresSshCredentialPrompt,
   requiresSshKeyPassphrasePrompt,
@@ -89,4 +90,19 @@ test('transport and saved-credential rejection errors do not open a fallback pro
     ),
     false,
   );
+});
+
+test('structured SSH host-key mismatch errors stay owned by the backend event path', () => {
+  assert.equal(
+    isSshHostKeyMismatchError('SSH host key mismatch (expected SHA256:old, received SHA256:new)'),
+    true,
+  );
+  assert.equal(
+    isSshHostKeyMismatchError(
+      "Error invoking remote method 'ssh:open': Error: SSH host key mismatch (expected SHA256:old, received SHA256:new)",
+    ),
+    true,
+  );
+  assert.equal(isSshHostKeyMismatchError('SSH authentication failed'), false);
+  assert.equal(isSshHostKeyMismatchError('Host key mismatch'), false);
 });

@@ -464,6 +464,7 @@ const wormholeBridge = {
     manualCredentials?: boolean;
     keyPassphrase?: string;
     manualKeyPassphrase?: boolean;
+    reuseTunnel?: boolean;
     username?: string;
     password?: string;
   }) => ipcRenderer.invoke('ssh:open', request),

@@ -79,6 +79,7 @@ import {
 } from './sftp-contract.js';
 import { RdpBackendClient, stopChildProcess } from './rdp.js';
 import { settleTunnelCleanup, TunnelLeaseRegistry } from './tunnel-lease-registry.js';
+import { isSshHostKeyMismatch, SshTunnelRouteRegistry } from './ssh-tunnel-route.js';
 import {
   isTunnelIdentifier,
   parseTunnelDetailsResponse,
@@ -1037,6 +1038,7 @@ type SshOpenRequest = {
   manualCredentials?: boolean;
   keyPassphrase?: string;
   manualKeyPassphrase?: boolean;
+  reuseTunnel?: boolean;
 };
 
 type SshHostKeyTrustRequest = {
@@ -1414,6 +1416,7 @@ function isSshOpenRequest(value: unknown): value is SshOpenRequest {
       value.autoSudo === undefined &&
       (value.credentialId === undefined || isTunnelID(value.credentialId)) &&
       (value.manualCredentials === undefined || typeof value.manualCredentials === 'boolean') &&
+      (value.reuseTunnel === undefined || typeof value.reuseTunnel === 'boolean') &&
       (value.manualCredentials !== true || value.credentialId === undefined) &&
       hasValidSshKeyPassphraseOverride(value) &&
       !(value.manualCredentials === true && value.manualKeyPassphrase === true) &&
@@ -1452,6 +1455,7 @@ function isSshOpenRequest(value: unknown): value is SshOpenRequest {
         value.port <= 65535)) &&
     (value.tunnelConfigId === undefined || isTunnelID(value.tunnelConfigId)) &&
     (value.autoSudo === undefined || typeof value.autoSudo === 'boolean') &&
+    value.reuseTunnel === undefined &&
     hasValidSshKeyPassphraseOverride(value) &&
     (value.manualKeyPassphrase !== true || credentialId !== undefined) &&
     value.manualCredentials !== true
@@ -2347,12 +2351,13 @@ function parseSshBackendEvent(line: string): SshBackendEvent | undefined {
     const hostKeyReceived = isSshFingerprint(value.host_key_received)
       ? value.host_key_received
       : undefined;
+    const hasHostKeyMismatch = isSshHostKeyMismatch(hostKeyExpected, hostKeyReceived);
     return {
       type: 'error',
       sessionId: value.session_id,
       error: value.error,
-      hostKeyExpected,
-      hostKeyReceived,
+      hostKeyExpected: hasHostKeyMismatch ? hostKeyExpected : undefined,
+      hostKeyReceived: hasHostKeyMismatch ? hostKeyReceived : undefined,
     };
   }
   return undefined;
@@ -5779,8 +5784,9 @@ class NativeSshBackend {
   private controlSequence = 0;
   private readonly activeSessions = new Set<string>();
   private readonly tunnelLeases = new TunnelLeaseRegistry();
+  private readonly tunnelRoutes = new SshTunnelRouteRegistry();
   private readonly connectionAttempts = new WebSessionAttemptTracker();
-  private readonly pendingConnections = new Set<string>();
+  private readonly pendingConnections = new Map<string, number>();
   private readonly openWaiters = new Map<
     string,
     {
@@ -5808,11 +5814,13 @@ class NativeSshBackend {
       throw new Error('SSH session id is already in use.');
     }
     const generation = this.connectionAttempts.begin(request.sessionId);
-    this.pendingConnections.add(request.sessionId);
+    this.pendingConnections.set(request.sessionId, generation);
     try {
       return await this.openCurrent(request, authorizationEpoch, generation);
     } finally {
-      this.pendingConnections.delete(request.sessionId);
+      if (this.pendingConnections.get(request.sessionId) === generation) {
+        this.pendingConnections.delete(request.sessionId);
+      }
     }
   }
 
@@ -5842,12 +5850,22 @@ class NativeSshBackend {
       throw new Error('SSH connection closed before opening its VPN tunnel.');
     }
     requireAuthorizationEpoch(authorizationEpoch);
-    await this.releaseTunnel(request.sessionId);
+    const retainedRoute =
+      request.reuseTunnel && request.nodeId
+        ? this.tunnelRoutes.retained(request.sessionId, request.nodeId)
+        : undefined;
+    if (request.reuseTunnel && !retainedRoute) {
+      await this.releaseTunnel(request.sessionId);
+      throw new Error('The SSH VPN tunnel is no longer available for reconnect.');
+    }
+    if (!retainedRoute) {
+      await this.releaseTunnel(request.sessionId);
+    }
     if (!this.connectionAttempts.isCurrent(request.sessionId, generation)) {
       throw new Error('SSH connection closed before opening its VPN tunnel.');
     }
-    let socksEndpoint = '';
-    const tunnelRequested = Boolean(request.nodeId || request.tunnelConfigId);
+    let socksEndpoint = retainedRoute?.socksEndpoint ?? '';
+    const tunnelRequested = !retainedRoute && Boolean(request.nodeId || request.tunnelConfigId);
     let leaseId: string | undefined;
     if (tunnelRequested) {
       leaseId = randomUUID();
@@ -5875,6 +5893,9 @@ class NativeSshBackend {
           throw new Error('The VPN tunnel returned no SOCKS endpoint.');
         }
       }
+    }
+    if (!retainedRoute && request.nodeId) {
+      this.tunnelRoutes.remember(request.sessionId, request.nodeId, socksEndpoint);
     }
     try {
       if (!this.connectionAttempts.isCurrent(request.sessionId, generation)) {
@@ -6063,9 +6084,17 @@ class NativeSshBackend {
     }
 
     // A connection can load its saved password and construct the Go-side Auto Sudo driver before
-    // its connected event reaches this process. Lock/reload must cancel those handshakes too.
-    for (const sessionId of [...this.openWaiters.keys()]) {
-      this.close(sessionId);
+    // its connected event reaches this process. A host-key mismatch can also leave an established
+    // VPN route waiting for trust without an open waiter. Lock/reload must cancel both states while
+    // preserving active sessions, whose Go-side app-lock command owns their lifecycle.
+    const inactiveSessionIds = new Set([
+      ...this.openWaiters.keys(),
+      ...this.tunnelRoutes.sessionIds().filter((sessionId) => !this.activeSessions.has(sessionId)),
+    ]);
+    for (const sessionId of inactiveSessionIds) {
+      void this.close(sessionId).catch((error) => {
+        console.warn('[Wormhole] Could not release an inactive SSH VPN tunnel.', error);
+      });
     }
   }
 
@@ -6089,10 +6118,15 @@ class NativeSshBackend {
   }
 
   cancelPendingConnections(): void {
-    for (const sessionId of [...this.pendingConnections]) void this.close(sessionId);
+    for (const sessionId of this.pendingConnections.keys()) {
+      void this.close(sessionId).catch((error) => {
+        console.warn('[Wormhole] Could not release a pending SSH VPN tunnel.', error);
+      });
+    }
   }
 
   private async releaseTunnel(sessionId: string): Promise<void> {
+    this.tunnelRoutes.forget(sessionId);
     await this.tunnelLeases.release(sessionId, releaseNativeTunnelLease);
   }
 
@@ -6183,7 +6217,9 @@ class NativeSshBackend {
   }
 
   async dispose(): Promise<void> {
-    for (const sessionId of [...this.pendingConnections]) this.connectionAttempts.cancel(sessionId);
+    for (const sessionId of this.pendingConnections.keys()) {
+      this.connectionAttempts.cancel(sessionId);
+    }
     for (const waiter of this.openWaiters.values()) {
       clearTimeout(waiter.timeout);
       waiter.reject(new Error('SSH service stopped.'));
@@ -6192,6 +6228,7 @@ class NativeSshBackend {
     this.failControlWaiters(new Error('SSH service stopped.'));
     this.activeSessions.clear();
     const tunnelReleases = this.tunnelLeases.releaseAll(releaseNativeTunnelLease);
+    this.tunnelRoutes.clear();
     this.lineReader?.close();
     this.lineReader = undefined;
     const child = this.child;
@@ -6207,6 +6244,7 @@ class NativeSshBackend {
 
   backendStopped(): void {
     this.tunnelLeases.clear();
+    this.tunnelRoutes.clear();
   }
 
   private ensureStarted(): void {
@@ -6262,6 +6300,7 @@ class NativeSshBackend {
       const failure = new Error('SSH service stopped.');
       this.failOpenWaiters(failure);
       this.failControlWaiters(failure);
+      this.tunnelRoutes.clear();
       void this.tunnelLeases.releaseAll(releaseNativeTunnelLease);
     });
   }
@@ -6325,6 +6364,7 @@ class NativeSshBackend {
       this.activeSessions.add(event.sessionId);
       const waiter = this.openWaiters.get(event.sessionId);
       if (waiter) {
+        this.pendingConnections.delete(event.sessionId);
         this.openWaiters.delete(event.sessionId);
         clearTimeout(waiter.timeout);
         waiter.resolve(event);
@@ -6332,6 +6372,7 @@ class NativeSshBackend {
     } else if (event.type === 'error') {
       const waiter = this.openWaiters.get(event.sessionId);
       if (waiter) {
+        this.pendingConnections.delete(event.sessionId);
         this.openWaiters.delete(event.sessionId);
         clearTimeout(waiter.timeout);
         const message = event.error || 'SSH connection failed.';
@@ -6345,7 +6386,9 @@ class NativeSshBackend {
           ),
         );
       }
-      void this.releaseTunnel(event.sessionId).catch(() => undefined);
+      if (!isSshHostKeyMismatch(event.hostKeyExpected, event.hostKeyReceived)) {
+        void this.releaseTunnel(event.sessionId).catch(() => undefined);
+      }
     } else if (event.type === 'closed' || event.type === 'reconnect-failed') {
       this.activeSessions.delete(event.sessionId);
       void this.releaseTunnel(event.sessionId).catch(() => undefined);

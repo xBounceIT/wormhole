@@ -11,6 +11,7 @@ import {
 } from '../electron/gpu-compatibility.ts';
 import { stopChildProcess } from '../electron/rdp.ts';
 import { TunnelLeaseRegistry } from '../electron/tunnel-lease-registry.ts';
+import { isSshHostKeyMismatch, SshTunnelRouteRegistry } from '../electron/ssh-tunnel-route.ts';
 import {
   isSafeUpdateInstallerPath,
   updateInstallAction,
@@ -945,6 +946,38 @@ test('tunnel lease release is idempotent, cancels ownership immediately, and ret
   await leases.release('rdp-old-lifecycle', async () => undefined);
   assert.equal(leases.has('rdp-old-lifecycle'), false);
   assert.equal(leases.isActive('rdp-new-lifecycle', 'lease-new'), true);
+});
+
+test('SSH host-key trust retains only the matching saved connection route', () => {
+  const routes = new SshTunnelRouteRegistry();
+  routes.remember('ssh-session', 'saved-node', '127.0.0.1:49152');
+
+  assert.deepEqual(routes.retained('ssh-session', 'saved-node'), {
+    nodeId: 'saved-node',
+    socksEndpoint: '127.0.0.1:49152',
+  });
+  assert.equal(routes.retained('ssh-session', 'different-node'), undefined);
+  assert.equal(routes.retained('different-session', 'saved-node'), undefined);
+
+  routes.remember('second-session', 'second-node', '127.0.0.1:49153');
+  assert.deepEqual(routes.sessionIds().sort(), ['second-session', 'ssh-session']);
+  routes.clear();
+  assert.equal(routes.retained('second-session', 'second-node'), undefined);
+
+  routes.remember('ssh-session', 'saved-node', '127.0.0.1:49152');
+  routes.forget('ssh-session');
+  assert.equal(routes.retained('ssh-session', 'saved-node'), undefined);
+});
+
+test('SSH host-key trust can retain a completed direct-route decision', () => {
+  const routes = new SshTunnelRouteRegistry();
+  routes.remember('ssh-session', 'saved-node', '');
+
+  assert.equal(routes.retained('ssh-session', 'saved-node')?.socksEndpoint, '');
+  assert.equal(isSshHostKeyMismatch('SHA256:old', 'SHA256:new'), true);
+  assert.equal(isSshHostKeyMismatch('SHA256:old', undefined), false);
+  assert.equal(isSshHostKeyMismatch(undefined, 'SHA256:new'), false);
+  assert.equal(isSshHostKeyMismatch('SHA256:same', 'SHA256:same'), false);
 });
 
 test('VNC disconnect remains available as cleanup across an authentication lock', () => {

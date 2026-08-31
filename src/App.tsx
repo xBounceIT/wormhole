@@ -249,6 +249,7 @@ import {
 import { KeyedRetryQueue } from './keyed-retry-queue';
 import {
   isBitwardenUnlockError,
+  isSshHostKeyMismatchError,
   requiresRdpCredentialPrompt,
   requiresSshKeyPassphrasePrompt,
   sshCredentialPromptTarget,
@@ -672,6 +673,7 @@ type SshStartRequest = {
   manualCredentials?: boolean;
   keyPassphrase?: string;
   manualKeyPassphrase?: boolean;
+  reuseTunnel?: boolean;
   frontendSessionId?: string;
 };
 
@@ -1703,6 +1705,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   const lastActivityAt = useLazyRef(Date.now);
   const quickConnectSubmitInFlight = useRef(false);
   const sshCredentialSubmitInFlight = useRef(false);
+  const sshHostKeyTrustInFlight = useRef(new Set<string>());
   const webSessionAttempts = useLazyRef(() => new WebSessionAttemptTracker());
   const webSessionOpenInFlight = useRef(new Map<string, number>());
   const rdpSavedCredentialAttempts = useRef(new Set<string>());
@@ -3086,6 +3089,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       })
       .catch((error: unknown) => {
         const message = error instanceof Error ? error.message : String(error);
+        // The structured backend event owns host-key mismatch state. Ignoring the parallel IPC
+        // rejection prevents an older open promise from overwriting a trust retry using this ID.
+        if (isSshHostKeyMismatchError(message)) return;
         if (requiresSshKeyPassphrasePrompt(message) && !request.manualKeyPassphrase) {
           clearSecretInput(sshKeyPassphraseInput.current);
           setSshKeyPassphrasePrompt(request);
@@ -5032,7 +5038,22 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     mismatch: NonNullable<Session['hostKeyMismatch']>,
   ) {
     const session = sessions.find((candidate) => candidate.id === sessionId);
-    if (!session?.nodeId) return;
+    if (!session?.nodeId || !session.backendSessionId) return;
+    if (sshHostKeyTrustInFlight.current.has(session.backendSessionId)) return;
+    sshHostKeyTrustInFlight.current.add(session.backendSessionId);
+    setSessions((current) =>
+      current.map((candidate) =>
+        candidate.id === sessionId && candidate.backendSessionId === session.backendSessionId
+          ? {
+              ...candidate,
+              status: 'connecting',
+              error: undefined,
+              hostKeyMismatch: undefined,
+              tunnelProgress: null,
+            }
+          : candidate,
+      ),
+    );
     try {
       if (!window.wormhole) throw new Error('The SSH service is unavailable.');
       await window.wormhole.trustSshHostKey({
@@ -5040,19 +5061,32 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         expected: mismatch.expected,
         received: mismatch.received,
       });
-      reconnectSession(sessionId);
+      const current = sessionsRef.current.find(
+        (candidate) =>
+          candidate.id === sessionId && candidate.backendSessionId === session.backendSessionId,
+      );
+      if (!current?.nodeId || current.nodeId !== session.nodeId || !current.backendSessionId)
+        return;
+      startSshSession({
+        sessionId: current.backendSessionId,
+        nodeId: current.nodeId,
+        reuseTunnel: true,
+      });
     } catch (error: unknown) {
       setSessions((current) =>
         current.map((candidate) =>
-          candidate.id === sessionId
+          candidate.id === sessionId && candidate.backendSessionId === session.backendSessionId
             ? {
                 ...candidate,
+                status: 'failed',
                 error: error instanceof Error ? error.message : String(error),
                 hostKeyMismatch: mismatch,
               }
             : candidate,
         ),
       );
+    } finally {
+      sshHostKeyTrustInFlight.current.delete(session.backendSessionId);
     }
   }
 
