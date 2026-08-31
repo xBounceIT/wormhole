@@ -4719,7 +4719,10 @@ class WebSurfaceManager {
       if (this.bitwardenPopups.get(sessionId) !== popup || record.disposed) {
         return { open: false };
       }
-      if (!isAuthorizationEpochCurrent(authorizationEpoch)) {
+      if (
+        mcpApprovalWindowCoordinator.hasPendingApprovals ||
+        !isAuthorizationEpochCurrent(authorizationEpoch)
+      ) {
         await this.closeBitwardenPopup(sessionId);
         return { open: false };
       }
@@ -7546,8 +7549,10 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     if (!isBitwardenPopupOpenRequest(request)) {
       throw new Error('Bitwarden popup request is invalid.');
     }
-    if (mcpApprovalWindowCoordinator.hasPendingApprovals) return { open: false };
-    return runAuthorizedOperation(() => webSurfaces.openBitwardenPopup(request));
+    return runAuthorizedOperation(async () => {
+      if (mcpApprovalWindowCoordinator.hasPendingApprovals) return { open: false };
+      return webSurfaces.openBitwardenPopup(request);
+    });
   });
 
   ipcMain.handle('web:bitwarden-popup-close', async (_event, sessionId: unknown) => {

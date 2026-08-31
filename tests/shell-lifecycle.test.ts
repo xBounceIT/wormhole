@@ -354,6 +354,10 @@ test('MCP approval restores and foregrounds the Wormhole window before notifying
     webSurfaceManager.indexOf('private async openExtensionWindow'),
     webSurfaceManager.indexOf('private async loadBitwardenExtension'),
   );
+  const openBitwardenPopupFlow = webSurfaceManager.slice(
+    webSurfaceManager.indexOf('private async openBitwardenPopupCore'),
+    webSurfaceManager.indexOf('async closeBitwardenPopup'),
+  );
   assert.match(closeBitwardenWindowsFlow, /closeBitwardenPopup\(sessionId\)/);
   assert.match(closeBitwardenWindowsFlow, /bitwardenAuxiliaryWindows\.values\(\)/);
   assert.match(closeBitwardenWindowsFlow, /auxiliary\.window\.destroy\(\)/);
@@ -367,6 +371,12 @@ test('MCP approval restores and foregrounds the Wormhole window before notifying
   );
   const auxiliaryShow = openExtensionWindowFlow.indexOf('extensionWindow.show');
   assert.ok(auxiliaryLoad < approvalGuardAfterLoad && approvalGuardAfterLoad < auxiliaryShow);
+  const popupLoad = openBitwardenPopupFlow.indexOf('await withBitwardenBrowserTimeout');
+  const popupApprovalGuard = openBitwardenPopupFlow.indexOf(
+    'mcpApprovalWindowCoordinator.hasPendingApprovals',
+  );
+  const popupShow = openBitwardenPopupFlow.indexOf('popup.setVisible(true)');
+  assert.ok(popupLoad < popupApprovalGuard && popupApprovalGuard < popupShow);
 
   const tunnelAuth = mainSource.slice(
     mainSource.indexOf('async function runTunnelBrowserAuth'),
@@ -398,7 +408,10 @@ test('MCP approval restores and foregrounds the Wormhole window before notifying
     mainSource.indexOf("ipcMain.handle('web:bitwarden-popup-open'"),
     mainSource.indexOf("ipcMain.handle('web:bitwarden-popup-close'"),
   );
-  assert.match(bitwardenPopupOpen, /mcpApprovalWindowCoordinator\.hasPendingApprovals/);
+  assert.match(
+    bitwardenPopupOpen,
+    /runAuthorizedOperation\(async \(\) => \{\s*if \(mcpApprovalWindowCoordinator\.hasPendingApprovals\)/,
+  );
 });
 
 test('MCP approval temporarily preempts tunnel browser authentication windows', () => {
