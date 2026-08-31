@@ -474,6 +474,7 @@ func (controller *mcpController) resolveApproval(requestID string, approved bool
 }
 
 func (controller *mcpController) releasePending(waiter *mcpApprovalWaiter) {
+	cancelled := false
 	controller.approvalMu.Lock()
 	if current := controller.pending[waiter.requestID]; current == waiter {
 		waiter.waiters--
@@ -481,22 +482,31 @@ func (controller *mcpController) releasePending(waiter *mcpApprovalWaiter) {
 			delete(controller.pending, waiter.requestID)
 			delete(controller.pendingByTarget, waiter.sessionID)
 			waiter.approved = false
-			close(waiter.done)
+			cancelled = true
 		}
 	}
 	controller.approvalMu.Unlock()
+	if cancelled {
+		controller.emitApprovalCancelled(waiter)
+		close(waiter.done)
+	}
 }
 
 func (controller *mcpController) cancelPending(reason string) {
+	var cancelledWaiters []*mcpApprovalWaiter
 	controller.approvalMu.Lock()
 	for requestID, waiter := range controller.pending {
 		delete(controller.pending, requestID)
 		delete(controller.pendingByTarget, waiter.sessionID)
 		waiter.approved = false
 		waiter.err = errors.New(reason)
-		close(waiter.done)
+		cancelledWaiters = append(cancelledWaiters, waiter)
 	}
 	controller.approvalMu.Unlock()
+	for _, waiter := range cancelledWaiters {
+		controller.emitApprovalCancelled(waiter)
+		close(waiter.done)
+	}
 }
 
 func (controller *mcpController) forgetSession(sessionID string) {
@@ -508,9 +518,23 @@ func (controller *mcpController) forgetSession(sessionID string) {
 		delete(controller.pendingByTarget, sessionID)
 		waiter.approved = false
 		waiter.err = errSSHSessionClosed
-		close(waiter.done)
 	}
 	controller.approvalMu.Unlock()
+	if waiter != nil {
+		controller.emitApprovalCancelled(waiter)
+		close(waiter.done)
+	}
+}
+
+func (controller *mcpController) emitApprovalCancelled(waiter *mcpApprovalWaiter) {
+	if waiter == nil || controller.server == nil || controller.server.output == nil {
+		return
+	}
+	controller.server.output.write(sshWireEvent{
+		Type:      "mcp.approval-cancelled",
+		RequestID: waiter.requestID,
+		SessionID: waiter.sessionID,
+	})
 }
 
 func newMcpServer(controller *mcpController) *mcp.Server {

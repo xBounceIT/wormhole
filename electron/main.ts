@@ -1095,6 +1095,11 @@ type McpApprovalEvent = {
   tool: string;
 };
 
+type McpApprovalCancelledEvent = {
+  type: 'mcp.approval-cancelled';
+  requestId: string;
+};
+
 const sshMaxSessionIdLength = 128;
 const sshMaxTerminalCells = 500 * 500;
 const sshMaxTerminalScrollbackLines = 5000;
@@ -2377,7 +2382,13 @@ function parseSshBackendEvent(line: string): SshBackendEvent | undefined {
   return undefined;
 }
 
-function parseMcpBackendMessage(line: string): McpControlResponse | McpApprovalEvent | undefined {
+function isMcpRequestId(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= 128;
+}
+
+function parseMcpBackendMessage(
+  line: string,
+): McpControlResponse | McpApprovalEvent | McpApprovalCancelledEvent | undefined {
   let value: unknown;
   try {
     value = JSON.parse(line);
@@ -2386,7 +2397,7 @@ function parseMcpBackendMessage(line: string): McpControlResponse | McpApprovalE
   }
   if (!isRecord(value) || typeof value.type !== 'string') return undefined;
 
-  if (value.type === 'mcp.response' && typeof value.request_id === 'string') {
+  if (value.type === 'mcp.response' && isMcpRequestId(value.request_id)) {
     const response: McpControlResponse = {
       type: 'mcp.response',
       requestId: value.request_id,
@@ -2417,9 +2428,13 @@ function parseMcpBackendMessage(line: string): McpControlResponse | McpApprovalE
     return response;
   }
 
+  if (value.type === 'mcp.approval-cancelled' && isMcpRequestId(value.request_id)) {
+    return { type: 'mcp.approval-cancelled', requestId: value.request_id };
+  }
+
   if (
     value.type === 'mcp.approval' &&
-    typeof value.request_id === 'string' &&
+    isMcpRequestId(value.request_id) &&
     isSshSessionId(value.session_id) &&
     typeof value.host === 'string' &&
     value.host.length <= 1024 &&
@@ -2532,6 +2547,41 @@ function parseTunnelBrowserEvent(value: object): TunnelBrowserEvent | undefined 
 
 let tunnelBrowserAuthQueue: Promise<void> = Promise.resolve();
 const mcpApprovalWindowCoordinator = new McpApprovalWindowCoordinator<BrowserWindow>();
+
+function runCoordinatedFileDialog<TResult>(
+  cancelledResult: TResult,
+  open: () => Promise<TResult>,
+): Promise<TResult> {
+  if (mcpApprovalWindowCoordinator.hasPendingApprovals) {
+    return Promise.resolve(cancelledResult);
+  }
+  return mcpApprovalWindowCoordinator.runNativeDialog(open);
+}
+
+function showCoordinatedOpenDialog(
+  owner: BrowserWindow | null | undefined,
+  options: Electron.OpenDialogOptions,
+): Promise<Electron.OpenDialogReturnValue> {
+  return runCoordinatedFileDialog({ canceled: true, filePaths: [] }, () =>
+    owner ? dialog.showOpenDialog(owner, options) : dialog.showOpenDialog(options),
+  );
+}
+
+function showCoordinatedSaveDialog(
+  owner: BrowserWindow | null | undefined,
+  options: Electron.SaveDialogOptions,
+): Promise<Electron.SaveDialogReturnValue> {
+  return runCoordinatedFileDialog({ canceled: true, filePath: '' }, () =>
+    owner ? dialog.showSaveDialog(owner, options) : dialog.showSaveDialog(options),
+  );
+}
+
+function showCoordinatedMessageBox(
+  owner: BrowserWindow,
+  options: Electron.MessageBoxOptions,
+): Promise<Electron.MessageBoxReturnValue> {
+  return mcpApprovalWindowCoordinator.runNativeDialog(() => dialog.showMessageBox(owner, options));
+}
 
 function enqueueTunnelBrowserAuth(backend: NativeBackendProcess, event: TunnelBrowserEvent): void {
   tunnelBrowserAuthQueue = tunnelBrowserAuthQueue
@@ -3267,7 +3317,8 @@ function showBitwardenOnboardingNoticeIfNeeded(): Promise<void> {
 
     const owner = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
     if (!owner || owner.isDestroyed()) return;
-    await dialog.showMessageBox(owner, {
+    if (mcpApprovalWindowCoordinator.hasPendingApprovals) return;
+    await showCoordinatedMessageBox(owner, {
       type: 'info',
       title: notice.title,
       message: notice.title,
@@ -6387,22 +6438,36 @@ class NativeSshBackend {
       waiter.resolve(mcpMessage);
       return;
     }
-    if (mcpMessage?.type === 'mcp.approval') {
-      if (!authSession.isAccessAllowed) return;
-      const windows = BrowserWindow.getAllWindows();
-      mcpApprovalWindowCoordinator.beginApproval(mcpMessage.requestId);
-      webSurfaces.closeBitwardenFloatingWindows();
-      const approvalWindow = selectMcpApprovalWindow(
-        windows,
-        BrowserWindow.getFocusedWindow(),
-        (window) => windowCloseCoordinators.has(window),
-      );
-      if (approvalWindow) bringMcpApprovalWindowToFront(approvalWindow);
-      for (const window of windows) {
+    if (mcpMessage?.type === 'mcp.approval-cancelled') {
+      mcpApprovalWindowCoordinator.finishApproval(mcpMessage.requestId);
+      for (const window of BrowserWindow.getAllWindows()) {
         if (!window.isDestroyed() && windowCloseCoordinators.has(window)) {
           window.webContents.send('mcp:approval', mcpMessage);
         }
       }
+      return;
+    }
+    if (mcpMessage?.type === 'mcp.approval') {
+      if (!authSession.isAccessAllowed) return;
+      mcpApprovalWindowCoordinator.beginApproval(mcpMessage.requestId);
+      webSurfaces.closeBitwardenFloatingWindows();
+      mcpApprovalWindowCoordinator.presentApprovalWhenNativeDialogsClose(
+        mcpMessage.requestId,
+        () => {
+          const windows = BrowserWindow.getAllWindows();
+          const approvalWindow = selectMcpApprovalWindow(
+            windows,
+            BrowserWindow.getFocusedWindow(),
+            (window) => windowCloseCoordinators.has(window),
+          );
+          if (approvalWindow) bringMcpApprovalWindowToFront(approvalWindow);
+          for (const window of windows) {
+            if (!window.isDestroyed() && windowCloseCoordinators.has(window)) {
+              window.webContents.send('mcp:approval', mcpMessage);
+            }
+          }
+        },
+      );
       return;
     }
     const event = parseSshBackendEvent(line);
@@ -6766,9 +6831,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
         { name: 'All files', extensions: ['*'] },
       ],
     };
-    const selection = owner
-      ? await dialog.showOpenDialog(owner, options)
-      : await dialog.showOpenDialog(options);
+    const selection = await showCoordinatedOpenDialog(owner, options);
     if (selection.canceled || selection.filePaths.length !== 1) return null;
     const selectedPath = selection.filePaths[0];
     return serializeAuthOperation(async () => {
@@ -6876,9 +6939,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
         { name: 'All files', extensions: ['*'] },
       ],
     };
-    const selection = owner
-      ? await dialog.showSaveDialog(owner, options)
-      : await dialog.showSaveDialog(options);
+    const selection = await showCoordinatedSaveDialog(owner, options);
     if (selection.canceled || !selection.filePath) return null;
     const backendResult = await runOwnedNativeOperation(
       event.sender,
@@ -6908,9 +6969,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
         { name: 'All files', extensions: ['*'] },
       ],
     };
-    const selection = owner
-      ? await dialog.showOpenDialog(owner, options)
-      : await dialog.showOpenDialog(options);
+    const selection = await showCoordinatedOpenDialog(owner, options);
     if (selection.canceled || selection.filePaths.length !== 1) return null;
     const selectedPath = selection.filePaths[0];
     return serializeAuthOperation(async () => {
@@ -7001,9 +7060,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
           { name: 'All files', extensions: ['*'] },
         ],
       };
-      const selection = owner
-        ? await dialog.showOpenDialog(owner, options)
-        : await dialog.showOpenDialog(options);
+      const selection = await showCoordinatedOpenDialog(owner, options);
       if (selection.canceled || selection.filePaths.length !== 1) return null;
       requireAuthorizationEpoch(authorizationEpoch);
       const selectedPath = selection.filePaths[0];
@@ -7323,9 +7380,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       properties: ['openFile'],
       filters: [{ name: 'Bitwarden extension ZIP', extensions: ['zip'] }],
     };
-    const selection = owner
-      ? await dialog.showOpenDialog(owner, options)
-      : await dialog.showOpenDialog(options);
+    const selection = await showCoordinatedOpenDialog(owner, options);
     if (selection.canceled || selection.filePaths.length !== 1) return null;
     return runAuthorizedBitwardenExtensionOperation((authorizationEpoch) =>
       webSurfaces.runBitwardenExtensionMutation(() => {
@@ -7348,9 +7403,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       title: 'Import unpacked Bitwarden browser extension folder',
       properties: ['openDirectory'],
     };
-    const selection = owner
-      ? await dialog.showOpenDialog(owner, options)
-      : await dialog.showOpenDialog(options);
+    const selection = await showCoordinatedOpenDialog(owner, options);
     if (selection.canceled || selection.filePaths.length !== 1) return null;
     return runAuthorizedBitwardenExtensionOperation((authorizationEpoch) =>
       webSurfaces.runBitwardenExtensionMutation(() => {
@@ -7706,9 +7759,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
           { name: 'All files', extensions: ['*'] },
         ],
       };
-      const selection = owner
-        ? await dialog.showOpenDialog(owner, options)
-        : await dialog.showOpenDialog(options);
+      const selection = await showCoordinatedOpenDialog(owner, options);
       if (selection.canceled || selection.filePaths.length !== 1) return null;
       const imported = await runBackend<{
         server: string;
@@ -7744,9 +7795,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
           { name: 'All files', extensions: ['*'] },
         ],
       };
-      const selection = owner
-        ? await dialog.showOpenDialog(owner, options)
-        : await dialog.showOpenDialog(options);
+      const selection = await showCoordinatedOpenDialog(owner, options);
       if (selection.canceled || selection.filePaths.length !== 1) return null;
       const imported = await runBackend<{
         name?: string;
@@ -7774,9 +7823,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
           { name: 'All files', extensions: ['*'] },
         ],
       };
-      const selection = owner
-        ? await dialog.showOpenDialog(owner, options)
-        : await dialog.showOpenDialog(options);
+      const selection = await showCoordinatedOpenDialog(owner, options);
       if (selection.canceled || selection.filePaths.length !== 1) return null;
       const imported = await runBackend<{ contents: string }>('ovpn-file-import', {
         path: selection.filePaths[0],
@@ -7800,9 +7847,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
         properties: ['openFile'],
         filters: [{ name: 'AnyConnect XML profile', extensions: ['xml'] }],
       };
-      const selection = owner
-        ? await dialog.showOpenDialog(owner, options)
-        : await dialog.showOpenDialog(options);
+      const selection = await showCoordinatedOpenDialog(owner, options);
       if (selection.canceled || selection.filePaths.length !== 1) return null;
       const imported = await runBackend<{
         host: string;

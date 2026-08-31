@@ -99,9 +99,14 @@ test('MCP approval settles an active authentication confirmation before opening'
     'const unsubscribeBackend',
   );
   const settlePrompt = mcpSubscription.indexOf('settleAuthConfirmation(false)');
-  const enqueueApproval = mcpSubscription.indexOf('setMcpApprovals');
+  const enqueueApproval = mcpSubscription.indexOf('setMcpApprovals', settlePrompt);
 
   assert.ok(settlePrompt >= 0 && settlePrompt < enqueueApproval);
+  assert.match(
+    mcpSubscription,
+    /event\.type === 'mcp\.approval-cancelled'[\s\S]*?filter\(\(approval\) => approval\.requestId !== event\.requestId\)/,
+  );
+  assert.match(preloadSource, /type: 'mcp\.approval-cancelled'; requestId: string/);
   assert.match(
     appSource,
     /const settleAuthConfirmation = useCallback[\s\S]*?setAuthPrompt\(null\)/,

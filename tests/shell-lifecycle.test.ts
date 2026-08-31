@@ -331,6 +331,10 @@ test('MCP approval restores and foregrounds the Wormhole window before notifying
     mainSource.indexOf("if (mcpMessage?.type === 'mcp.approval')"),
     mainSource.indexOf('const event = parseSshBackendEvent'),
   );
+  const approvalCancellationHandler = mainSource.slice(
+    mainSource.indexOf("if (mcpMessage?.type === 'mcp.approval-cancelled')"),
+    mainSource.indexOf("if (mcpMessage?.type === 'mcp.approval')"),
+  );
   const foreground = approvalHandler.indexOf('bringMcpApprovalWindowToFront(approvalWindow)');
   const closeBitwardenWindows = approvalHandler.indexOf(
     'webSurfaces.closeBitwardenFloatingWindows()',
@@ -338,9 +342,27 @@ test('MCP approval restores and foregrounds the Wormhole window before notifying
   const notification = approvalHandler.indexOf("window.webContents.send('mcp:approval'");
   assert.match(approvalHandler, /selectMcpApprovalWindow\(/);
   assert.match(approvalHandler, /mcpApprovalWindowCoordinator\.beginApproval\(/);
+  assert.match(approvalHandler, /presentApprovalWhenNativeDialogsClose\(/);
   assert.match(approvalHandler, /windowCloseCoordinators\.has\(window\)/);
   assert.ok(closeBitwardenWindows >= 0 && closeBitwardenWindows < foreground);
   assert.ok(foreground >= 0 && foreground < notification);
+  assert.match(approvalCancellationHandler, /finishApproval\(mcpMessage\.requestId\)/);
+  assert.match(approvalCancellationHandler, /window\.webContents\.send\('mcp:approval'/);
+
+  const nativeDialogHelpersStart = mainSource.indexOf('function runCoordinatedFileDialog');
+  const nativeDialogHelpersEnd = mainSource.indexOf('function enqueueTunnelBrowserAuth');
+  const nativeDialogHelpers = mainSource.slice(nativeDialogHelpersStart, nativeDialogHelpersEnd);
+  const mainWithoutNativeDialogHelpers =
+    mainSource.slice(0, nativeDialogHelpersStart) + mainSource.slice(nativeDialogHelpersEnd);
+  assert.equal(nativeDialogHelpers.match(/runNativeDialog\(/g)?.length, 2);
+  assert.equal(
+    nativeDialogHelpers.match(/mcpApprovalWindowCoordinator\.hasPendingApprovals/g)?.length,
+    1,
+  );
+  assert.doesNotMatch(
+    mainWithoutNativeDialogHelpers,
+    /dialog\.show(?:OpenDialog|SaveDialog|MessageBox)/,
+  );
 
   const webSurfaceManager = mainSource.slice(
     mainSource.indexOf('class WebSurfaceManager'),
@@ -470,6 +492,54 @@ test('MCP approval temporarily preempts tunnel browser authentication windows', 
   const futureAuth = createWindow();
   coordinator.presentTunnelAuthWindow(futureAuth.window);
   assert.deepEqual(futureAuth.calls, ['show']);
+});
+
+test('MCP approval waits for native dialogs and drops cancelled deferred presentations', async () => {
+  const coordinator = new McpApprovalWindowCoordinator<McpApprovalBlockingWindow>();
+  let closeFirstDialog!: () => void;
+  const firstDialog = coordinator.runNativeDialog(
+    () =>
+      new Promise<void>((resolve) => {
+        closeFirstDialog = resolve;
+      }),
+  );
+  let cancelledPresentationCount = 0;
+  coordinator.beginApproval('cancelled');
+  coordinator.presentApprovalWhenNativeDialogsClose('cancelled', () => {
+    cancelledPresentationCount++;
+  });
+  coordinator.finishApproval('cancelled');
+  closeFirstDialog();
+  await firstDialog;
+  assert.equal(cancelledPresentationCount, 0);
+
+  let closeSecondDialog!: () => void;
+  const secondDialog = coordinator.runNativeDialog(
+    () =>
+      new Promise<void>((resolve) => {
+        closeSecondDialog = resolve;
+      }),
+  );
+  let presentationCount = 0;
+  coordinator.beginApproval('pending');
+  coordinator.presentApprovalWhenNativeDialogsClose('pending', () => {
+    presentationCount++;
+  });
+  assert.equal(presentationCount, 0);
+  closeSecondDialog();
+  await secondDialog;
+  assert.equal(presentationCount, 1);
+  coordinator.finishApproval('pending');
+
+  coordinator.beginApproval('immediate');
+  coordinator.presentApprovalWhenNativeDialogsClose('immediate', () => {
+    presentationCount++;
+  });
+  coordinator.presentApprovalWhenNativeDialogsClose('unknown', () => {
+    presentationCount++;
+  });
+  assert.equal(presentationCount, 2);
+  coordinator.finishApproval('immediate');
 });
 
 test('MCP approval stays above renderer dialogs and hides native session surfaces', () => {

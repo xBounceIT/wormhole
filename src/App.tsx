@@ -2659,12 +2659,18 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       );
     });
 
-    const unsubscribeMcp = window.wormhole?.onMcpApproval((approval) => {
+    const unsubscribeMcp = window.wormhole?.onMcpApproval((event) => {
+      if (event.type === 'mcp.approval-cancelled') {
+        setMcpApprovals((current) =>
+          current.filter((approval) => approval.requestId !== event.requestId),
+        );
+        return;
+      }
       settleAuthConfirmation(false);
       setMcpApprovals((current) =>
-        current.some((pending) => pending.requestId === approval.requestId)
+        current.some((pending) => pending.requestId === event.requestId)
           ? current
-          : [...current, approval],
+          : [...current, event],
       );
     });
     const unsubscribeBackend = window.wormhole?.onBackendEvent((event) => {

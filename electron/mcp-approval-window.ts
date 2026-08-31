@@ -54,7 +54,9 @@ export function bringMcpApprovalWindowToFront(window: McpApprovalWindow): void {
 
 export class McpApprovalWindowCoordinator<TWindow extends McpApprovalBlockingWindow> {
   private readonly pendingApprovalIds = new Set<string>();
+  private readonly deferredPresentations = new Map<string, () => void>();
   private readonly tunnelAuthWindows = new Set<TWindow>();
+  private activeNativeDialogs = 0;
 
   get hasPendingApprovals(): boolean {
     return this.pendingApprovalIds.size > 0;
@@ -77,7 +79,27 @@ export class McpApprovalWindowCoordinator<TWindow extends McpApprovalBlockingWin
     }
   }
 
+  presentApprovalWhenNativeDialogsClose(approvalId: string, present: () => void): void {
+    if (!this.pendingApprovalIds.has(approvalId)) return;
+    if (this.activeNativeDialogs > 0) {
+      this.deferredPresentations.set(approvalId, present);
+      return;
+    }
+    attemptWindowAction(present);
+  }
+
+  async runNativeDialog<TResult>(open: () => Promise<TResult>): Promise<TResult> {
+    this.activeNativeDialogs++;
+    try {
+      return await open();
+    } finally {
+      this.activeNativeDialogs--;
+      if (this.activeNativeDialogs === 0) this.presentDeferredApprovals();
+    }
+  }
+
   finishApproval(approvalId: string): void {
+    this.deferredPresentations.delete(approvalId);
     if (!this.pendingApprovalIds.delete(approvalId) || this.pendingApprovalIds.size > 0) return;
     for (const window of this.tunnelAuthWindows) {
       if (!isUsableWindow(window)) {
@@ -91,9 +113,16 @@ export class McpApprovalWindowCoordinator<TWindow extends McpApprovalBlockingWin
 
   reset(): void {
     this.pendingApprovalIds.clear();
+    this.deferredPresentations.clear();
     for (const window of this.tunnelAuthWindows) {
       if (isUsableWindow(window)) attemptWindowAction(() => window.destroy());
     }
     this.tunnelAuthWindows.clear();
+  }
+
+  private presentDeferredApprovals(): void {
+    const presentations = [...this.deferredPresentations.values()];
+    this.deferredPresentations.clear();
+    for (const present of presentations) attemptWindowAction(present);
   }
 }
