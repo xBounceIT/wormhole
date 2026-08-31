@@ -21,7 +21,11 @@ import { fileURLToPath } from 'node:url';
 import type { ElectronChromeExtensions } from 'electron-chrome-extensions';
 import { AuthSession } from './auth-session.js';
 import { hasValidCredentialSecretLength } from './credential-secret-length.js';
-import { bringMcpApprovalWindowToFront, selectMcpApprovalWindow } from './mcp-approval-window.js';
+import {
+  bringMcpApprovalWindowToFront,
+  McpApprovalWindowCoordinator,
+  selectMcpApprovalWindow,
+} from './mcp-approval-window.js';
 import {
   connectionTreeExpansionMaxRequestBytes,
   parseConnectionTreeExpansionSetting,
@@ -2527,6 +2531,7 @@ function parseTunnelBrowserEvent(value: object): TunnelBrowserEvent | undefined 
 }
 
 let tunnelBrowserAuthQueue: Promise<void> = Promise.resolve();
+const mcpApprovalWindowCoordinator = new McpApprovalWindowCoordinator<BrowserWindow>();
 
 function enqueueTunnelBrowserAuth(backend: NativeBackendProcess, event: TunnelBrowserEvent): void {
   tunnelBrowserAuthQueue = tunnelBrowserAuthQueue
@@ -2583,7 +2588,6 @@ async function runTunnelBrowserAuth(
     minHeight: 480,
     title: event.title,
     parent: parent && !parent.isDestroyed() ? parent : undefined,
-    modal: Boolean(parent && !parent.isDestroyed()),
     show: false,
     autoHideMenuBar: true,
     webPreferences: {
@@ -2727,8 +2731,14 @@ async function runTunnelBrowserAuth(
       void complete(true);
     }
   });
-  authWindow.once('closed', () => void complete(true));
-  authWindow.once('ready-to-show', () => authWindow.show());
+  authWindow.once('closed', () => {
+    mcpApprovalWindowCoordinator.forgetTunnelAuthWindow(authWindow);
+    void complete(true);
+  });
+  // Keep this child non-modal so an MCP approval can safely preempt it on every supported desktop.
+  authWindow.once('ready-to-show', () =>
+    mcpApprovalWindowCoordinator.presentTunnelAuthWindow(authWindow),
+  );
   const cookieTimer =
     event.completion === 'cookie' ? setInterval(() => void inspectCookie(), 250) : undefined;
   authWindow.once('closed', () => {
@@ -6363,6 +6373,7 @@ class NativeSshBackend {
     if (mcpMessage?.type === 'mcp.approval') {
       if (!authSession.isAccessAllowed) return;
       const windows = BrowserWindow.getAllWindows();
+      mcpApprovalWindowCoordinator.beginApproval(mcpMessage.requestId);
       const approvalWindow = selectMcpApprovalWindow(
         windows,
         BrowserWindow.getFocusedWindow(),
@@ -6370,7 +6381,9 @@ class NativeSshBackend {
       );
       if (approvalWindow) bringMcpApprovalWindowToFront(approvalWindow);
       for (const window of windows) {
-        if (!window.isDestroyed()) window.webContents.send('mcp:approval', mcpMessage);
+        if (!window.isDestroyed() && windowCloseCoordinators.has(window)) {
+          window.webContents.send('mcp:approval', mcpMessage);
+        }
       }
       return;
     }
@@ -7997,8 +8010,12 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
   ipcMain.handle('mcp:approval', async (_event, value: unknown) => {
     const approval = parseMcpApproval(value);
     return serializeAuthOperation(async () => {
-      await requireWorkspaceAuth();
-      await sshBackend.respondMcpApproval(approval.requestId, approval.approved);
+      try {
+        await requireWorkspaceAuth();
+        await sshBackend.respondMcpApproval(approval.requestId, approval.approved);
+      } finally {
+        mcpApprovalWindowCoordinator.finishApproval(approval.requestId);
+      }
     });
   });
 

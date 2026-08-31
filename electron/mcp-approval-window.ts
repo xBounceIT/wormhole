@@ -8,6 +8,10 @@ export type McpApprovalWindow = {
   focus(): void;
 };
 
+export type McpApprovalBlockingWindow = McpApprovalWindow & {
+  hide(): void;
+};
+
 function isUsableWindow(window: McpApprovalWindow): boolean {
   try {
     return !window.isDestroyed();
@@ -45,4 +49,38 @@ export function bringMcpApprovalWindowToFront(window: McpApprovalWindow): void {
   });
   attemptWindowAction(() => window.moveTop());
   attemptWindowAction(() => window.focus());
+}
+
+export class McpApprovalWindowCoordinator<TWindow extends McpApprovalBlockingWindow> {
+  private readonly pendingApprovalIds = new Set<string>();
+  private readonly tunnelAuthWindows = new Set<TWindow>();
+
+  presentTunnelAuthWindow(window: TWindow): void {
+    if (!isUsableWindow(window)) return;
+    this.tunnelAuthWindows.add(window);
+    if (this.pendingApprovalIds.size === 0) attemptWindowAction(() => window.show());
+  }
+
+  forgetTunnelAuthWindow(window: TWindow): void {
+    this.tunnelAuthWindows.delete(window);
+  }
+
+  beginApproval(approvalId: string): void {
+    this.pendingApprovalIds.add(approvalId);
+    for (const window of this.tunnelAuthWindows) {
+      if (isUsableWindow(window)) attemptWindowAction(() => window.hide());
+    }
+  }
+
+  finishApproval(approvalId: string): void {
+    if (!this.pendingApprovalIds.delete(approvalId) || this.pendingApprovalIds.size > 0) return;
+    for (const window of this.tunnelAuthWindows) {
+      if (!isUsableWindow(window)) {
+        this.tunnelAuthWindows.delete(window);
+        continue;
+      }
+      attemptWindowAction(() => window.show());
+      attemptWindowAction(() => window.focus());
+    }
+  }
 }

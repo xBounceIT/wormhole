@@ -11,7 +11,9 @@ import {
 } from '../electron/gpu-compatibility.ts';
 import {
   bringMcpApprovalWindowToFront,
+  McpApprovalWindowCoordinator,
   selectMcpApprovalWindow,
+  type McpApprovalBlockingWindow,
   type McpApprovalWindow,
 } from '../electron/mcp-approval-window.ts';
 import { stopChildProcess } from '../electron/rdp.ts';
@@ -332,8 +334,65 @@ test('MCP approval restores and foregrounds the Wormhole window before notifying
   const foreground = approvalHandler.indexOf('bringMcpApprovalWindowToFront(approvalWindow)');
   const notification = approvalHandler.indexOf("window.webContents.send('mcp:approval'");
   assert.match(approvalHandler, /selectMcpApprovalWindow\(/);
+  assert.match(approvalHandler, /mcpApprovalWindowCoordinator\.beginApproval\(/);
   assert.match(approvalHandler, /windowCloseCoordinators\.has\(window\)/);
   assert.ok(foreground >= 0 && foreground < notification);
+
+  const tunnelAuth = mainSource.slice(
+    mainSource.indexOf('async function runTunnelBrowserAuth'),
+    mainSource.indexOf('class NativeBackendProcess'),
+  );
+  const approvalResponse = mainSource.slice(
+    mainSource.indexOf("ipcMain.handle('mcp:approval'"),
+    mainSource.indexOf("ipcMain.handle('workspace:update-node-web-settings'"),
+  );
+  assert.doesNotMatch(tunnelAuth, /\bmodal\s*:/);
+  assert.match(tunnelAuth, /presentTunnelAuthWindow\(authWindow\)/);
+  assert.match(tunnelAuth, /forgetTunnelAuthWindow\(authWindow\)/);
+  assert.match(approvalResponse, /finishApproval\(approval\.requestId\)/);
+});
+
+test('MCP approval temporarily preempts tunnel browser authentication windows', () => {
+  function createWindow() {
+    const calls: string[] = [];
+    const window: McpApprovalBlockingWindow = {
+      isDestroyed: () => false,
+      isMinimized: () => false,
+      isVisible: () => true,
+      restore: () => calls.push('restore'),
+      show: () => calls.push('show'),
+      hide: () => calls.push('hide'),
+      moveTop: () => calls.push('moveTop'),
+      focus: () => calls.push('focus'),
+    };
+    return { calls, window };
+  }
+
+  const coordinator = new McpApprovalWindowCoordinator<McpApprovalBlockingWindow>();
+  const activeAuth = createWindow();
+  const queuedAuth = createWindow();
+
+  coordinator.presentTunnelAuthWindow(activeAuth.window);
+  assert.deepEqual(activeAuth.calls, ['show']);
+
+  coordinator.beginApproval('approval-1');
+  coordinator.beginApproval('approval-2');
+  assert.deepEqual(activeAuth.calls, ['show', 'hide', 'hide']);
+
+  coordinator.presentTunnelAuthWindow(queuedAuth.window);
+  assert.deepEqual(queuedAuth.calls, []);
+
+  coordinator.finishApproval('approval-1');
+  assert.deepEqual(activeAuth.calls, ['show', 'hide', 'hide']);
+  assert.deepEqual(queuedAuth.calls, []);
+
+  coordinator.finishApproval('approval-2');
+  assert.deepEqual(activeAuth.calls, ['show', 'hide', 'hide', 'show', 'focus']);
+  assert.deepEqual(queuedAuth.calls, ['show', 'focus']);
+
+  coordinator.forgetTunnelAuthWindow(queuedAuth.window);
+  coordinator.beginApproval('approval-3');
+  assert.deepEqual(queuedAuth.calls, ['show', 'focus']);
 });
 
 test('MCP approval stays above renderer dialogs and hides native session surfaces', () => {
