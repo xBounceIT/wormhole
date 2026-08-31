@@ -186,7 +186,13 @@ app.whenReady().then(async () => {
       'utf8',
     );
 
-    await execFileAsync(electronExecutable, [harnessPath], {
+    const needsVirtualDisplay = process.platform === 'linux' && !environment.DISPLAY;
+    const executable = needsVirtualDisplay ? 'xvfb-run' : electronExecutable;
+    const arguments_ = needsVirtualDisplay
+      ? ['--auto-servernum', electronExecutable, harnessPath]
+      : [harnessPath];
+
+    await execFileAsync(executable, arguments_, {
       env: environment,
       timeout: 30_000,
       windowsHide: true,
