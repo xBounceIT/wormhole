@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import {
   encodeTerminalClipboardText,
@@ -12,6 +13,8 @@ import {
   shouldUseTerminalClipboardShortcut,
 } from '../src/terminal-clipboard.ts';
 import { terminalVisibleScrollback } from '../src/terminal-frame.ts';
+
+const appSource = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
 
 const shortcut = (
   key: string,
@@ -123,4 +126,18 @@ test('alternate-screen applications hide retained scrollback', () => {
     }),
     undefined,
   );
+});
+
+test('styled runs remain inline and preserve spaces when Chromium copies a terminal row', () => {
+  const terminalGridSource = appSource.slice(
+    appSource.indexOf('const TerminalScrollback'),
+    appSource.indexOf('function terminalCsiWithModifier'),
+  );
+
+  assert.equal(terminalGridSource.match(/inline-block overflow-hidden align-top/g)?.length, 2);
+  assert.equal(
+    terminalGridSource.match(/className="h-\[18px\] min-w-max whitespace-pre"/g)?.length,
+    2,
+  );
+  assert.doesNotMatch(terminalGridSource, /className=(?:"|{`)[^"`]*block flex-none/);
 });
