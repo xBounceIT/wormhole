@@ -10,6 +10,7 @@ import {
   shouldDisableHardwareAcceleration,
 } from '../electron/gpu-compatibility.ts';
 import { stopChildProcess } from '../electron/rdp.ts';
+import { drainSshBackendSessionIds } from '../electron/ssh-backend-lifecycle.ts';
 import { TunnelLeaseRegistry } from '../electron/tunnel-lease-registry.ts';
 import {
   isSafeUpdateInstallerPath,
@@ -42,7 +43,11 @@ import {
   minSidebarWidth,
   normalizeSidebarWidth,
 } from '../src/sidebar-settings.ts';
-import { failedSshReconnectState, reconnectingSshState } from '../src/ssh-reconnect-state.ts';
+import {
+  failedSshReconnectState,
+  reconnectingSshState,
+  settlesSshHostKeyTrustAttempt,
+} from '../src/ssh-reconnect-state.ts';
 import {
   hasNewerReleaseWithoutInstaller,
   isUpdateInstallable,
@@ -356,6 +361,15 @@ test('SSH automatic reconnect keeps the tab alive and reports terminal exhaustio
   );
 });
 
+test('SSH backend results take precedence over a concurrent host-key trust rejection', () => {
+  assert.equal(settlesSshHostKeyTrustAttempt('connected'), true);
+  assert.equal(settlesSshHostKeyTrustAttempt('error'), true);
+  assert.equal(settlesSshHostKeyTrustAttempt('closed'), true);
+  assert.equal(settlesSshHostKeyTrustAttempt('reconnect-failed'), true);
+  assert.equal(settlesSshHostKeyTrustAttempt('reconnecting'), false);
+  assert.equal(settlesSshHostKeyTrustAttempt('screen'), false);
+});
+
 test('SSH reconnect lifecycle is validated before renderer delivery and retains its VPN lease', () => {
   const mainSource = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
   const appSource = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
@@ -371,7 +385,7 @@ test('SSH reconnect lifecycle is validated before renderer delivery and retains 
   );
   assert.match(handler, /event\.type === 'closed' \|\| event\.type === 'reconnect-failed'/);
   assert.doesNotMatch(handler, /event\.type === 'reconnecting'/);
-  assert.match(mainSource, /prepareForLock\(\): void[\s\S]*type: 'app-lock'/);
+  assert.match(mainSource, /prepareForLock\(\): void[\s\S]*type: 'app-lock-all'/);
   assert.match(
     mainSource.slice(mainSource.indexOf("ipcMain.handle('auth:lock'")),
     /sshBackend\.prepareForLock\(\)/,
@@ -381,6 +395,19 @@ test('SSH reconnect lifecycle is validated before renderer delivery and retains 
     appSource,
     /event\.type === 'reconnect-failed'[\s\S]*failedSshReconnectState\(event\)/,
   );
+});
+
+test('SSH backend exit closes active and retained mismatch sessions exactly once', () => {
+  const active = new Set(['connected-session', 'shared-session']);
+  const retained = new Set(['mismatch-session', 'shared-session']);
+
+  assert.deepEqual(drainSshBackendSessionIds(active, retained), [
+    'connected-session',
+    'shared-session',
+    'mismatch-session',
+  ]);
+  assert.equal(active.size, 0);
+  assert.equal(retained.size, 0);
 });
 
 test('dialog close animations retain the last open visuals instead of rendering cleared state', () => {

@@ -65,6 +65,23 @@ type sshHostKeyMismatchError struct {
 	received string
 }
 
+type terminalSSHHostKeyTrustError struct {
+	message string
+}
+
+func (err *terminalSSHHostKeyTrustError) Error() string {
+	return err.message
+}
+
+func newTerminalSSHHostKeyTrustError(message string) error {
+	return &terminalSSHHostKeyTrustError{message: message}
+}
+
+func isTerminalSSHHostKeyTrustError(err error) bool {
+	var terminal *terminalSSHHostKeyTrustError
+	return errors.As(err, &terminal)
+}
+
 func (err *sshHostKeyMismatchError) Error() string {
 	return fmt.Sprintf(
 		"SSH host key mismatch (expected %s, received %s)",
@@ -84,6 +101,8 @@ type sshWireCommand struct {
 	Password                      string                `json:"password"`
 	TunnelConfigID                string                `json:"tunnel_config_id"`
 	SocksEndpoint                 string                `json:"socks_endpoint"`
+	HostKeyExpected               string                `json:"host_key_expected"`
+	HostKeyReceived               string                `json:"host_key_received"`
 	UsernameOverride              string                `json:"username_override,omitempty"`
 	UsernameOverrideAuthoritative bool                  `json:"username_override_authoritative,omitempty"`
 	PasswordOverride              string                `json:"password_override,omitempty"`
@@ -127,6 +146,7 @@ type sshWireEvent struct {
 	Token               string             `json:"token,omitempty"`
 	HostKeyExpected     string             `json:"host_key_expected,omitempty"`
 	HostKeyReceived     string             `json:"host_key_received,omitempty"`
+	RetainTunnelLease   bool               `json:"retain_tunnel_lease,omitempty"`
 	Path                string             `json:"path,omitempty"`
 	Entries             []sshSftpEntry     `json:"entries"`
 	QuickPaths          []sshSftpQuickPath `json:"quick_paths,omitempty"`
@@ -277,6 +297,7 @@ type sshServer struct {
 	pending                map[string]context.CancelFunc
 	lifecycles             map[string]*sshReconnectState
 	openSSH                func(context.Context, *sshReconnectState) (*sshNativeSession, sshTarget, error)
+	trustFingerprint       func(string, sshHostKeyTrustRequest) error
 	reconnectDelayOverride *time.Duration
 
 	transferMu sync.Mutex
@@ -292,6 +313,8 @@ type sshReconnectState struct {
 	attempts          int
 	connectedAt       time.Time
 	reconnectDisabled bool
+	hostKeyExpected   string
+	hostKeyReceived   string
 }
 
 func (state *sshReconnectState) commandSnapshot() sshWireCommand {
@@ -428,6 +451,10 @@ func (server *sshServer) handle(command sshWireCommand) {
 		server.handleMcp(command)
 		return
 	}
+	if command.Type == "app-lock-all" {
+		server.prepareAllSessionsForLock()
+		return
+	}
 	command.SessionID = strings.TrimSpace(command.SessionID)
 	if command.SessionID == "" || len(command.SessionID) > 128 {
 		server.writeError(command.SessionID, "SSH session id is invalid")
@@ -461,12 +488,26 @@ func (server *sshServer) handle(command sshWireCommand) {
 		server.sftpClose(command)
 	case "auto-sudo-cancel":
 		server.cancelAutoSudo(command)
+	case "host-key-trust":
+		server.trustHostKey(command)
 	case "app-lock":
 		server.prepareSessionForLock(command.SessionID)
 	case "close":
 		server.close(command.SessionID)
 	default:
 		server.writeError(command.SessionID, "unsupported SSH command")
+	}
+}
+
+func (server *sshServer) prepareAllSessionsForLock() {
+	server.mu.Lock()
+	sessionIDs := make([]string, 0, len(server.lifecycles))
+	for sessionID := range server.lifecycles {
+		sessionIDs = append(sessionIDs, sessionID)
+	}
+	server.mu.Unlock()
+	for _, sessionID := range sessionIDs {
+		server.prepareSessionForLock(sessionID)
 	}
 }
 
@@ -586,18 +627,24 @@ func (server *sshServer) connectSSH(ctx context.Context, state *sshReconnectStat
 	native, target, err := server.openNativeSSH(openContext, state)
 	if err != nil {
 		if initial {
-			pending := server.finishPendingState(state, true)
-			if pending && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-				logError("SSH session failed to connect: %v", safeSSHError(err))
-				event := sshWireEvent{
+			var mismatch *sshHostKeyMismatchError
+			if !errors.As(err, &mismatch) || strings.TrimSpace(command.NodeID) == "" {
+				mismatch = nil
+			}
+			var event *sshWireEvent
+			if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+				failure := sshWireEvent{
 					Type: "error", SessionID: command.SessionID, Error: safeSSHError(err),
 				}
-				var mismatch *sshHostKeyMismatchError
-				if errors.As(err, &mismatch) {
-					event.HostKeyExpected = mismatch.expected
-					event.HostKeyReceived = mismatch.received
+				if mismatch != nil {
+					failure.HostKeyExpected = mismatch.expected
+					failure.HostKeyReceived = mismatch.received
+					failure.RetainTunnelLease = true
 				}
-				server.output.write(event)
+				event = &failure
+			}
+			if server.finishInitialFailure(state, mismatch, event) && event != nil {
+				logError("SSH session failed to connect: %v", safeSSHError(err))
 			}
 		} else {
 			server.reconnectAttemptFailed(state, err)
@@ -625,6 +672,70 @@ func (server *sshServer) connectSSH(ctx context.Context, state *sshReconnectStat
 	logInfo("SSH session connected: %s@%s:%d", target.username, target.host, target.port)
 	native.publishTerminalFrame(native.terminal.initialFrame())
 	native.start()
+}
+
+func (server *sshServer) trustHostKey(command sshWireCommand) {
+	server.mu.Lock()
+	state := server.lifecycles[command.SessionID]
+	if state == nil {
+		server.mu.Unlock()
+		server.writeError(command.SessionID, "SSH host-key trust request is no longer active")
+		return
+	}
+	if server.sessions[command.SessionID] != nil || server.pending[command.SessionID] != nil {
+		server.mu.Unlock()
+		return
+	}
+	expected := state.hostKeyExpected
+	received := state.hostKeyReceived
+	stateCommand := state.commandSnapshot()
+	if expected == "" || received == "" {
+		server.mu.Unlock()
+		server.writeError(command.SessionID, "SSH session is not waiting for host-key trust")
+		return
+	}
+	nodeID := strings.TrimSpace(command.NodeID)
+	normalizedExpected, expectedErr := normalizeSSHFingerprint(command.HostKeyExpected)
+	normalizedReceived, receivedErr := normalizeSSHFingerprint(command.HostKeyReceived)
+	if nodeID == "" || len(nodeID) > 128 || normalizeID(nodeID) != normalizeID(stateCommand.NodeID) ||
+		expectedErr != nil || receivedErr != nil || normalizedExpected != expected || normalizedReceived != received {
+		server.writeHostKeyMismatchErrorLocked(
+			command.SessionID,
+			"SSH host-key trust request does not match the pending connection",
+			expected,
+			received,
+		)
+		server.mu.Unlock()
+		return
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	server.pending[command.SessionID] = cancel
+	server.mu.Unlock()
+
+	request := sshHostKeyTrustRequest{NodeID: nodeID, Expected: expected, Received: received}
+	go server.trustHostKeyAndReconnect(ctx, state, request)
+}
+
+func (server *sshServer) trustHostKeyAndReconnect(
+	ctx context.Context,
+	state *sshReconnectState,
+	request sshHostKeyTrustRequest,
+) {
+	trustFingerprint := server.trustFingerprint
+	if trustFingerprint == nil {
+		trustFingerprint = trustSSHFingerprint
+	}
+	if err := trustFingerprint(server.databasePath, request); err != nil {
+		message := safeSSHError(err)
+		if isTerminalSSHHostKeyTrustError(err) {
+			server.finishTerminalHostKeyTrustFailure(state, message)
+		} else {
+			server.finishHostKeyTrustFailure(state, message, request.Expected, request.Received)
+		}
+		return
+	}
+	server.connectSSH(ctx, state, true)
 }
 
 func (server *sshServer) openNativeSSH(
@@ -887,6 +998,60 @@ func (server *sshServer) finishPendingState(state *sshReconnectState, abandon bo
 	return pending
 }
 
+func (server *sshServer) finishInitialFailure(
+	state *sshReconnectState,
+	mismatch *sshHostKeyMismatchError,
+	event *sshWireEvent,
+) bool {
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	sessionID := state.commandSnapshot().SessionID
+	_, pending := server.pending[sessionID]
+	if server.lifecycles[sessionID] != state {
+		return false
+	}
+	delete(server.pending, sessionID)
+	if mismatch != nil {
+		state.hostKeyExpected = mismatch.expected
+		state.hostKeyReceived = mismatch.received
+	} else {
+		delete(server.lifecycles, sessionID)
+		state.clearSecrets()
+	}
+	if pending && event != nil {
+		server.output.write(*event)
+	}
+	return pending
+}
+
+func (server *sshServer) finishHostKeyTrustFailure(
+	state *sshReconnectState,
+	message string,
+	expected string,
+	received string,
+) bool {
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	sessionID := state.commandSnapshot().SessionID
+	_, pending := server.pending[sessionID]
+	if !pending || server.lifecycles[sessionID] != state {
+		return false
+	}
+	delete(server.pending, sessionID)
+	server.writeHostKeyMismatchErrorLocked(sessionID, message, expected, received)
+	return true
+}
+
+func (server *sshServer) finishTerminalHostKeyTrustFailure(
+	state *sshReconnectState,
+	message string,
+) bool {
+	sessionID := state.commandSnapshot().SessionID
+	return server.finishInitialFailure(state, nil, &sshWireEvent{
+		Type: "error", SessionID: sessionID, Error: message,
+	})
+}
+
 func (server *sshServer) promote(
 	sessionID string,
 	native *sshNativeSession,
@@ -900,6 +1065,8 @@ func (server *sshServer) promote(
 	delete(server.pending, sessionID)
 	server.sessions[sessionID] = native
 	state.connectedAt = time.Now()
+	state.hostKeyExpected = ""
+	state.hostKeyReceived = ""
 	return true
 }
 
@@ -1057,6 +1224,19 @@ func (server *sshServer) cancelAllTransfers() {
 
 func (server *sshServer) writeError(sessionID, message string) {
 	server.output.write(sshWireEvent{Type: "error", SessionID: sessionID, Error: message})
+}
+
+// writeHostKeyMismatchErrorLocked requires server.mu so cleanup cannot overtake a lease-retaining event.
+func (server *sshServer) writeHostKeyMismatchErrorLocked(
+	sessionID string,
+	message string,
+	expected string,
+	received string,
+) {
+	server.output.write(sshWireEvent{
+		Type: "error", SessionID: sessionID, Error: message,
+		HostKeyExpected: expected, HostKeyReceived: received, RetainTunnelLease: true,
+	})
 }
 
 func (server *sshServer) writeSftpError(sessionID, message string, path ...string) {
@@ -3810,18 +3990,20 @@ func persistSSHFingerprint(databasePath, nodeID, fingerprint string) error {
 func trustSSHFingerprint(databasePath string, request sshHostKeyTrustRequest) error {
 	nodeID := strings.TrimSpace(request.NodeID)
 	if nodeID == "" || len(nodeID) > 128 {
-		return errors.New("SSH connection id is invalid")
+		return newTerminalSSHHostKeyTrustError("SSH connection id is invalid")
 	}
 	expected, err := normalizeSSHFingerprint(request.Expected)
 	if err != nil {
-		return fmt.Errorf("expected SSH fingerprint is invalid: %w", err)
+		return newTerminalSSHHostKeyTrustError("expected SSH fingerprint is invalid: " + err.Error())
 	}
 	received, err := normalizeSSHFingerprint(request.Received)
 	if err != nil {
-		return fmt.Errorf("received SSH fingerprint is invalid: %w", err)
+		return newTerminalSSHHostKeyTrustError("received SSH fingerprint is invalid: " + err.Error())
 	}
 	if expected == received {
-		return errors.New("the new SSH fingerprint must differ from the saved fingerprint")
+		return newTerminalSSHHostKeyTrustError(
+			"the new SSH fingerprint must differ from the saved fingerprint",
+		)
 	}
 
 	database, err := openDatabase(databasePath, false)
@@ -3834,14 +4016,16 @@ func trustSSHFingerprint(databasePath string, request sshHostKeyTrustRequest) er
 		return err
 	}
 	if _, ok := columns["SshKnownHostFingerprint"]; !ok {
-		return errors.New("SSH fingerprint column is missing")
+		return newTerminalSSHHostKeyTrustError("SSH fingerprint column is missing")
 	}
 	effectiveFingerprint, err := loadEffectiveSSHFingerprint(database, nodeID, columns)
 	if err != nil {
 		return err
 	}
 	if effectiveFingerprint != expected {
-		return errors.New("SSH host fingerprint changed; reload the connection before trusting it")
+		return newTerminalSSHHostKeyTrustError(
+			"SSH host fingerprint changed; reload the connection before trusting it",
+		)
 	}
 	result, err := database.Exec(
 		"UPDATE Nodes SET SshKnownHostFingerprint = ?, UpdatedAt = ? WHERE lower(Id) = ? AND (COALESCE(TRIM(SshKnownHostFingerprint), '') = '' OR TRIM(SshKnownHostFingerprint) = ?);",
@@ -3867,13 +4051,15 @@ func trustSSHFingerprint(databasePath string, request sshHostKeyTrustRequest) er
 		normalizeID(nodeID),
 	).Scan(&current)
 	if errors.Is(err, sql.ErrNoRows) {
-		return errors.New("SSH connection was not found")
+		return newTerminalSSHHostKeyTrustError("SSH connection was not found")
 	}
 	if err != nil {
 		return err
 	}
 	if strings.TrimSpace(nullableString(current)) != expected {
-		return errors.New("SSH host fingerprint changed; reload the connection before trusting it")
+		return newTerminalSSHHostKeyTrustError(
+			"SSH host fingerprint changed; reload the connection before trusting it",
+		)
 	}
 	return errors.New("SSH host fingerprint could not be updated")
 }
@@ -3891,7 +4077,7 @@ func loadEffectiveSSHFingerprint(
 	seen := make(map[string]struct{})
 	for currentID != "" {
 		if _, duplicate := seen[currentID]; duplicate {
-			return "", errors.New("SSH connection tree contains a cycle")
+			return "", newTerminalSSHHostKeyTrustError("SSH connection tree contains a cycle")
 		}
 		seen[currentID] = struct{}{}
 
@@ -3901,7 +4087,7 @@ func loadEffectiveSSHFingerprint(
 			currentID,
 		).Scan(&parentID, &fingerprint)
 		if errors.Is(err, sql.ErrNoRows) {
-			return "", errors.New("SSH connection was not found")
+			return "", newTerminalSSHHostKeyTrustError("SSH connection was not found")
 		}
 		if err != nil {
 			return "", err

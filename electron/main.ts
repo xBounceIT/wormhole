@@ -78,6 +78,7 @@ import {
   type SftpNameDestination,
 } from './sftp-contract.js';
 import { RdpBackendClient, stopChildProcess } from './rdp.js';
+import { drainSshBackendSessionIds } from './ssh-backend-lifecycle.js';
 import { settleTunnelCleanup, TunnelLeaseRegistry } from './tunnel-lease-registry.js';
 import {
   isTunnelIdentifier,
@@ -950,6 +951,7 @@ type SshBackendEvent =
       error: string;
       hostKeyExpected?: string;
       hostKeyReceived?: string;
+      retainTunnelLease: boolean;
     }
   | {
       type: 'sftp.opening' | 'sftp.closed';
@@ -1041,6 +1043,7 @@ type SshOpenRequest = {
 };
 
 type SshHostKeyTrustRequest = {
+  sessionId: string;
   nodeId: string;
   expected: string;
   received: string;
@@ -1891,9 +1894,14 @@ function isSshFingerprint(value: unknown): value is string {
   return typeof value === 'string' && /^SHA256:[A-Za-z0-9+/]{43}$/.test(value);
 }
 
+function isSshHostKeyMismatch(expected: string | undefined, received: string | undefined): boolean {
+  return Boolean(expected && received && expected !== received);
+}
+
 function isSshHostKeyTrustRequest(value: unknown): value is SshHostKeyTrustRequest {
   return (
     isRecord(value) &&
+    isSshSessionId(value.sessionId) &&
     isSshSessionId(value.nodeId) &&
     isSshFingerprint(value.expected) &&
     isSshFingerprint(value.received) &&
@@ -2350,12 +2358,15 @@ function parseSshBackendEvent(line: string): SshBackendEvent | undefined {
     const hostKeyReceived = isSshFingerprint(value.host_key_received)
       ? value.host_key_received
       : undefined;
+    const hasHostKeyMismatch = isSshHostKeyMismatch(hostKeyExpected, hostKeyReceived);
+    const retainTunnelLease = value.retain_tunnel_lease === true && hasHostKeyMismatch;
     return {
       type: 'error',
       sessionId: value.session_id,
       error: value.error,
-      hostKeyExpected,
-      hostKeyReceived,
+      hostKeyExpected: hasHostKeyMismatch ? hostKeyExpected : undefined,
+      hostKeyReceived: hasHostKeyMismatch ? hostKeyReceived : undefined,
+      retainTunnelLease,
     };
   }
   return undefined;
@@ -5781,9 +5792,12 @@ class NativeSshBackend {
   private lineReader: Interface | undefined;
   private controlSequence = 0;
   private readonly activeSessions = new Set<string>();
+  // Go remains the lifecycle source of truth. Electron retains only the IDs Go explicitly marks
+  // so an unexpected child exit can deliver the terminal closed event to the renderer.
+  private readonly retainedMismatchSessions = new Set<string>();
   private readonly tunnelLeases = new TunnelLeaseRegistry();
   private readonly connectionAttempts = new WebSessionAttemptTracker();
-  private readonly pendingConnections = new Set<string>();
+  private readonly pendingConnections = new Map<string, number>();
   private readonly openWaiters = new Map<
     string,
     {
@@ -5811,11 +5825,13 @@ class NativeSshBackend {
       throw new Error('SSH session id is already in use.');
     }
     const generation = this.connectionAttempts.begin(request.sessionId);
-    this.pendingConnections.add(request.sessionId);
+    this.pendingConnections.set(request.sessionId, generation);
     try {
       return await this.openCurrent(request, authorizationEpoch, generation);
     } finally {
-      this.pendingConnections.delete(request.sessionId);
+      if (this.pendingConnections.get(request.sessionId) === generation) {
+        this.pendingConnections.delete(request.sessionId);
+      }
     }
   }
 
@@ -5890,63 +5906,91 @@ class NativeSshBackend {
       throw error;
     }
 
-    return await new Promise<SshConnectedResponse>((resolve, reject) => {
+    return await this.waitForConnection(request.sessionId, bitwardenCredential.bitwarden, () => {
+      this.write({
+        type: 'open',
+        session_id: request.sessionId,
+        node_id: request.nodeId,
+        credential_id:
+          request.credentialId && !bitwardenCredential.bitwarden ? request.credentialId : undefined,
+        auto_sudo: request.autoSudo,
+        host: request.host,
+        port: request.port,
+        username: request.nodeId ? undefined : request.username,
+        password: request.nodeId ? undefined : request.password,
+        tunnel_config_id: request.tunnelConfigId,
+        socks_endpoint: socksEndpoint,
+        tunnel_enabled: request.nodeId && !socksEndpoint ? false : undefined,
+        username_override: request.manualCredentials
+          ? request.username?.trim()
+          : bitwardenCredential.bitwarden
+            ? bitwardenCredential.username
+            : undefined,
+        username_override_authoritative:
+          request.manualCredentials === true || request.credentialId !== undefined,
+        password_override: request.manualCredentials
+          ? request.password
+          : bitwardenCredential.bitwarden
+            ? bitwardenCredential.password
+            : undefined,
+        credential_override: request.manualCredentials === true || bitwardenCredential.bitwarden,
+        key_passphrase_override: request.manualKeyPassphrase ? request.keyPassphrase : undefined,
+        columns: request.columns,
+        rows: request.rows,
+      });
+    });
+  }
+
+  async trustHostKey(request: SshHostKeyTrustRequest): Promise<SshConnectedResponse> {
+    if (
+      this.pendingConnections.has(request.sessionId) ||
+      this.openWaiters.has(request.sessionId) ||
+      this.activeSessions.has(request.sessionId)
+    ) {
+      throw new Error('SSH session is not waiting for host-key trust.');
+    }
+    this.ensureStarted();
+    return this.waitForConnection(request.sessionId, false, () => {
+      this.write({
+        type: 'host-key-trust',
+        session_id: request.sessionId,
+        node_id: request.nodeId,
+        host_key_expected: request.expected,
+        host_key_received: request.received,
+      });
+    });
+  }
+
+  private waitForConnection(
+    sessionId: string,
+    usedBitwarden: boolean,
+    start: () => void,
+  ): Promise<SshConnectedResponse> {
+    return new Promise<SshConnectedResponse>((resolve, reject) => {
       const timeout = setTimeout(() => {
-        const waiter = this.openWaiters.get(request.sessionId);
+        const waiter = this.openWaiters.get(sessionId);
         if (!waiter || waiter.timeout !== timeout) return;
-        this.openWaiters.delete(request.sessionId);
-        void this.releaseTunnel(request.sessionId).catch(() => undefined);
+        this.openWaiters.delete(sessionId);
+        void this.releaseTunnel(sessionId).catch(() => undefined);
         reject(new Error('SSH connection timed out.'));
         try {
-          this.write({ type: 'close', session_id: request.sessionId });
+          this.write({ type: 'close', session_id: sessionId });
         } catch {
           // The backend may already have stopped; the timeout has released the renderer.
         }
       }, nativeConnectionTimeoutMs);
-      this.openWaiters.set(request.sessionId, {
+      this.openWaiters.set(sessionId, {
         resolve,
         reject,
         timeout,
-        usedBitwarden: bitwardenCredential.bitwarden,
+        usedBitwarden,
       });
       try {
-        this.write({
-          type: 'open',
-          session_id: request.sessionId,
-          node_id: request.nodeId,
-          credential_id:
-            request.credentialId && !bitwardenCredential.bitwarden
-              ? request.credentialId
-              : undefined,
-          auto_sudo: request.autoSudo,
-          host: request.host,
-          port: request.port,
-          username: request.nodeId ? undefined : request.username,
-          password: request.nodeId ? undefined : request.password,
-          tunnel_config_id: request.tunnelConfigId,
-          socks_endpoint: socksEndpoint,
-          tunnel_enabled: request.nodeId && !socksEndpoint ? false : undefined,
-          username_override: request.manualCredentials
-            ? request.username?.trim()
-            : bitwardenCredential.bitwarden
-              ? bitwardenCredential.username
-              : undefined,
-          username_override_authoritative:
-            request.manualCredentials === true || request.credentialId !== undefined,
-          password_override: request.manualCredentials
-            ? request.password
-            : bitwardenCredential.bitwarden
-              ? bitwardenCredential.password
-              : undefined,
-          credential_override: request.manualCredentials === true || bitwardenCredential.bitwarden,
-          key_passphrase_override: request.manualKeyPassphrase ? request.keyPassphrase : undefined,
-          columns: request.columns,
-          rows: request.rows,
-        });
+        start();
       } catch (error) {
-        this.openWaiters.delete(request.sessionId);
+        this.openWaiters.delete(sessionId);
         clearTimeout(timeout);
-        void this.releaseTunnel(request.sessionId).catch(() => undefined);
+        void this.releaseTunnel(sessionId).catch(() => undefined);
         reject(error instanceof Error ? error : new Error(String(error)));
       }
     });
@@ -6056,19 +6100,10 @@ class NativeSshBackend {
   }
 
   prepareForLock(): void {
-    for (const sessionId of this.activeSessions) {
-      try {
-        this.write({ type: 'app-lock', session_id: sessionId });
-      } catch {
-        // A broken pipe during lock/reload is already a terminal cleanup state.
-        continue;
-      }
-    }
-
-    // A connection can load its saved password and construct the Go-side Auto Sudo driver before
-    // its connected event reaches this process. Lock/reload must cancel those handshakes too.
-    for (const sessionId of [...this.openWaiters.keys()]) {
-      this.close(sessionId);
+    try {
+      this.write({ type: 'app-lock-all' });
+    } catch {
+      // A broken pipe during lock/reload is already a terminal cleanup state.
     }
   }
 
@@ -6092,7 +6127,11 @@ class NativeSshBackend {
   }
 
   cancelPendingConnections(): void {
-    for (const sessionId of [...this.pendingConnections]) void this.close(sessionId);
+    for (const sessionId of this.pendingConnections.keys()) {
+      void this.close(sessionId).catch((error) => {
+        console.warn('[Wormhole] Could not release a pending SSH VPN tunnel.', error);
+      });
+    }
   }
 
   private async releaseTunnel(sessionId: string): Promise<void> {
@@ -6186,7 +6225,9 @@ class NativeSshBackend {
   }
 
   async dispose(): Promise<void> {
-    for (const sessionId of [...this.pendingConnections]) this.connectionAttempts.cancel(sessionId);
+    for (const sessionId of this.pendingConnections.keys()) {
+      this.connectionAttempts.cancel(sessionId);
+    }
     for (const waiter of this.openWaiters.values()) {
       clearTimeout(waiter.timeout);
       waiter.reject(new Error('SSH service stopped.'));
@@ -6194,6 +6235,7 @@ class NativeSshBackend {
     this.openWaiters.clear();
     this.failControlWaiters(new Error('SSH service stopped.'));
     this.activeSessions.clear();
+    this.retainedMismatchSessions.clear();
     const tunnelReleases = this.tunnelLeases.releaseAll(releaseNativeTunnelLease);
     this.lineReader?.close();
     this.lineReader = undefined;
@@ -6210,6 +6252,7 @@ class NativeSshBackend {
 
   backendStopped(): void {
     this.tunnelLeases.clear();
+    this.retainedMismatchSessions.clear();
   }
 
   private ensureStarted(): void {
@@ -6257,8 +6300,10 @@ class NativeSshBackend {
       if (this.child !== child) return;
       this.child = undefined;
       if (this.lineReader === lineReader) this.lineReader = undefined;
-      const closedSessions = [...this.activeSessions];
-      this.activeSessions.clear();
+      const closedSessions = drainSshBackendSessionIds(
+        this.activeSessions,
+        this.retainedMismatchSessions,
+      );
       for (const sessionId of closedSessions) {
         this.broadcast({ type: 'closed', sessionId });
       }
@@ -6326,8 +6371,10 @@ class NativeSshBackend {
 
     if (event.type === 'connected') {
       this.activeSessions.add(event.sessionId);
+      this.retainedMismatchSessions.delete(event.sessionId);
       const waiter = this.openWaiters.get(event.sessionId);
       if (waiter) {
+        this.pendingConnections.delete(event.sessionId);
         this.openWaiters.delete(event.sessionId);
         clearTimeout(waiter.timeout);
         waiter.resolve(event);
@@ -6335,6 +6382,7 @@ class NativeSshBackend {
     } else if (event.type === 'error') {
       const waiter = this.openWaiters.get(event.sessionId);
       if (waiter) {
+        this.pendingConnections.delete(event.sessionId);
         this.openWaiters.delete(event.sessionId);
         clearTimeout(waiter.timeout);
         const message = event.error || 'SSH connection failed.';
@@ -6348,9 +6396,21 @@ class NativeSshBackend {
           ),
         );
       }
-      void this.releaseTunnel(event.sessionId).catch(() => undefined);
+      if (event.retainTunnelLease) {
+        this.retainedMismatchSessions.add(event.sessionId);
+      } else {
+        this.retainedMismatchSessions.delete(event.sessionId);
+        void this.releaseTunnel(event.sessionId).catch(() => undefined);
+      }
     } else if (event.type === 'closed' || event.type === 'reconnect-failed') {
+      const waiter = this.openWaiters.get(event.sessionId);
+      if (waiter) {
+        this.openWaiters.delete(event.sessionId);
+        clearTimeout(waiter.timeout);
+        waiter.reject(new Error('SSH connection closed while connecting.'));
+      }
       this.activeSessions.delete(event.sessionId);
+      this.retainedMismatchSessions.delete(event.sessionId);
       void this.releaseTunnel(event.sessionId).catch(() => undefined);
     }
 
@@ -8008,13 +8068,17 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     );
   });
   ipcMain.handle('ssh:trust-host-key', async (_event, request: unknown) => {
+    requireNativeResourcesRunning();
     if (!isSshHostKeyTrustRequest(request)) {
       throw new Error('SSH host-key trust request is invalid.');
     }
-    return serializeAuthOperation(async () => {
-      await requireWorkspaceAuth();
-      return runBackend('ssh-trust-host-key', request);
-    });
+    return runAuthorizedOperation(
+      () => {
+        requireNativeResourcesRunning();
+        return sshBackend.trustHostKey(request);
+      },
+      () => sshBackend.close(request.sessionId),
+    );
   });
   ipcMain.handle('ssh:input', async (_event, sessionId: unknown, data: unknown) => {
     if (!isSshSessionId(sessionId) || !isSshInput(data)) {

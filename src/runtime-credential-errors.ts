@@ -29,6 +29,13 @@ export function requiresSshKeyPassphrasePrompt(message: string): boolean {
   return message.toLowerCase().includes('ssh private key passphrase is required');
 }
 
+export function isSshHostKeyMismatchError(message: string): boolean {
+  const value = message
+    .trimStart()
+    .replace(/^Error invoking remote method '[^']+':\s*(?:Error:\s*)?/i, '');
+  return value.toLowerCase().startsWith('ssh host key mismatch');
+}
+
 export function requiresRdpCredentialPrompt(message: string): boolean {
   const value = message.toLowerCase();
   if (

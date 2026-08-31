@@ -1063,10 +1063,11 @@ interface Window {
       manualKeyPassphrase?: boolean;
     }): Promise<WormholeSshConnected>;
     trustSshHostKey(request: {
+      sessionId: string;
       nodeId: string;
       expected: string;
       received: string;
-    }): Promise<{ updated: boolean }>;
+    }): Promise<WormholeSshConnected>;
     sendSshInput(sessionId: string, data: string): Promise<void>;
     pasteClipboardToSsh(sessionId: string): Promise<{ pasted: boolean }>;
     resizeSshSession(sessionId: string, columns: number, rows: number): Promise<void>;

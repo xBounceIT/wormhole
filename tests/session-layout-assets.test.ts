@@ -922,3 +922,52 @@ test('failed initial web navigation diagnoses SOCKS targets and releases its VPN
   assert.match(mainSource, /tunnelLeases\.isActive\(sessionId, leaseId\)/);
   assert.match(mainSource, /Could not release the failed web session VPN tunnel/);
 });
+
+test('SSH host-key trust delegates the retained lifecycle retry to Go', () => {
+  const startSource = sourceBetween(
+    appSource,
+    'function startSshSession',
+    'function submitSshKeyPassphrase',
+  );
+  assert.match(startSource, /if \(isSshHostKeyMismatchError\(message\)\) return/);
+
+  const trustSource = sourceBetween(
+    appSource,
+    'async function trustSshHostKey',
+    'function openQuickConnect',
+  );
+  assert.match(trustSource, /sessionId: session\.backendSessionId/);
+  assert.match(trustSource, /sshHostKeyTrustInFlight\.current\.has/);
+  assert.match(trustSource, /sshHostKeyTrustInFlight\.current\.add/);
+  assert.match(trustSource, /sshHostKeyTrustInFlight\.current\.delete/);
+  assert.match(
+    trustSource,
+    /if \(!sshHostKeyTrustInFlight\.current\.has\(session\.backendSessionId\)\) return/,
+  );
+  assert.match(appSource, /settlesSshHostKeyTrustAttempt\(event\.type\)/);
+  assert.doesNotMatch(trustSource, /startSshSession\(|reconnectSession\(/);
+
+  const sshEvents = sourceBetween(mainSource, 'private handleLine', 'private broadcast');
+  assert.match(
+    sshEvents,
+    /if \(event\.retainTunnelLease\) \{[\s\S]*?\} else \{[\s\S]*?releaseTunnel/,
+  );
+  assert.match(mainSource, /hostKeyExpected: hasHostKeyMismatch \? hostKeyExpected : undefined/);
+  assert.match(mainSource, /hostKeyReceived: hasHostKeyMismatch \? hostKeyReceived : undefined/);
+  assert.match(mainSource, /value\.retain_tunnel_lease === true && hasHostKeyMismatch/);
+  assert.match(sshEvents, /this\.retainedMismatchSessions\.add\(event\.sessionId\)/);
+  assert.match(sshEvents, /this\.retainedMismatchSessions\.delete\(event\.sessionId\)/);
+  assert.match(mainSource, /drainSshBackendSessionIds\([\s\S]*?this\.retainedMismatchSessions/);
+
+  const sshLock = sourceBetween(mainSource, 'prepareForLock(): void', 'async close(sessionId');
+  assert.match(sshLock, /this\.write\(\{ type: 'app-lock-all' \}\)/);
+
+  const sshTrust = sourceBetween(mainSource, 'async trustHostKey', 'private waitForConnection');
+  assert.match(sshTrust, /type: 'host-key-trust'/);
+  assert.match(sshTrust, /host_key_expected: request\.expected/);
+  assert.match(sshTrust, /host_key_received: request\.received/);
+  assert.match(
+    mainSource,
+    /this\.pendingConnections\.get\(request\.sessionId\) === generation[\s\S]*?this\.pendingConnections\.delete\(request\.sessionId\)/,
+  );
+});

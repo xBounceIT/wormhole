@@ -1108,29 +1108,430 @@ func TestSSHServerOpensFakeNativeSessionAndDispatchesConnectedCommands(t *testin
 	}
 }
 
-func TestSSHServerReportsInitialHostKeyMismatch(t *testing.T) {
-	var output synchronizedBuffer
-	server := &sshServer{
-		output:     &sshEventWriter{encoder: json.NewEncoder(&output)},
+const (
+	testSSHExpectedFingerprint = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	testSSHReceivedFingerprint = "SHA256:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+)
+
+func waitForSSHTestCondition(t *testing.T, description string, condition func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for !condition() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", description)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func newSSHTestNativeSession(t *testing.T) *sshNativeSession {
+	t.Helper()
+	terminal, err := newSSHTerminalEmulator(80, 24)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &sshNativeSession{
+		terminal:         terminal,
+		mcpReplay:        newMcpReplayBuffer(mcpReplayCapacity),
+		mcpCommandReplay: newMcpReplayBuffer(mcpReplayCapacity),
+		inputQueue:       make(chan []byte, sshInputQueueCapacity),
+		done:             make(chan struct{}),
+		started:          true,
+	}
+}
+
+func newSSHTestServer(output io.Writer) *sshServer {
+	return &sshServer{
+		output:     &sshEventWriter{encoder: json.NewEncoder(output)},
 		sessions:   make(map[string]*sshNativeSession),
 		pending:    make(map[string]context.CancelFunc),
 		lifecycles: make(map[string]*sshReconnectState),
 		transfers:  make(map[string]*sshSftpTransfer),
 	}
-	server.openSSH = func(context.Context, *sshReconnectState) (*sshNativeSession, sshTarget, error) {
-		return nil, sshTarget{}, &sshHostKeyMismatchError{expected: "old", received: "new"}
+}
+
+type blockingFirstSSHEventWrite struct {
+	output  synchronizedBuffer
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (writer *blockingFirstSSHEventWrite) Write(value []byte) (int, error) {
+	block := false
+	writer.once.Do(func() {
+		block = true
+		close(writer.started)
+	})
+	if block {
+		<-writer.release
 	}
-	server.open(sshWireCommand{Type: "open", SessionID: "session", Host: "127.0.0.1", Port: 22, Username: "alice", Password: "secret"})
-	deadline := time.Now().Add(time.Second)
-	for !strings.Contains(output.String(), `"type":"error"`) && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
+	return writer.output.Write(value)
+}
+
+func TestSSHServerRetainsInitialHostKeyMismatchLifecycle(t *testing.T) {
+	var output synchronizedBuffer
+	server := newSSHTestServer(&output)
+	server.openSSH = func(context.Context, *sshReconnectState) (*sshNativeSession, sshTarget, error) {
+		return nil, sshTarget{}, &sshHostKeyMismatchError{
+			expected: testSSHExpectedFingerprint,
+			received: testSSHReceivedFingerprint,
+		}
+	}
+	server.open(sshWireCommand{
+		Type: "open", SessionID: "session", NodeID: "node", SocksEndpoint: "127.0.0.1:49152",
+		PasswordOverride: "secret", Columns: 80, Rows: 24,
+	})
+	waitForSSHTestCondition(t, "host-key mismatch event", func() bool {
+		return strings.Contains(output.String(), `"type":"error"`)
+	})
+	var event sshWireEvent
+	if err := json.NewDecoder(bytes.NewReader(output.Bytes())).Decode(&event); err != nil {
+		t.Fatal(err)
+	}
+	if event.HostKeyExpected != testSSHExpectedFingerprint ||
+		event.HostKeyReceived != testSSHReceivedFingerprint ||
+		!event.RetainTunnelLease {
+		t.Fatalf("mismatch event = %#v", event)
+	}
+	server.mu.Lock()
+	state := server.lifecycles["session"]
+	_, pending := server.pending["session"]
+	server.mu.Unlock()
+	if state == nil || pending {
+		t.Fatalf("mismatch lifecycle state = %#v, pending = %t", state, pending)
+	}
+	command := state.commandSnapshot()
+	if command.SocksEndpoint != "127.0.0.1:49152" || command.PasswordOverride != "secret" {
+		t.Fatalf("retained connection command = %#v", command)
+	}
+	server.close("session")
+}
+
+func TestSSHServerDoesNotRetainAnUntrustableDirectHostKeyMismatch(t *testing.T) {
+	var output synchronizedBuffer
+	server := newSSHTestServer(&output)
+	var state *sshReconnectState
+	server.openSSH = func(_ context.Context, candidate *sshReconnectState) (*sshNativeSession, sshTarget, error) {
+		state = candidate
+		return nil, sshTarget{}, &sshHostKeyMismatchError{
+			expected: testSSHExpectedFingerprint,
+			received: testSSHReceivedFingerprint,
+		}
+	}
+	server.open(sshWireCommand{
+		Type: "open", SessionID: "session", Host: "ssh.example.test", Port: 22,
+		Username: "alice", Password: "secret",
+	})
+	waitForSSHTestCondition(t, "direct host-key mismatch", func() bool {
+		return strings.Contains(output.String(), `"type":"error"`)
+	})
+	server.mu.Lock()
+	_, retained := server.lifecycles["session"]
+	server.mu.Unlock()
+	if retained || state == nil || state.commandSnapshot().Password != "" {
+		t.Fatal("direct host-key mismatch retained an unusable lifecycle or password")
 	}
 	var event sshWireEvent
 	if err := json.NewDecoder(bytes.NewReader(output.Bytes())).Decode(&event); err != nil {
 		t.Fatal(err)
 	}
-	if event.HostKeyExpected != "old" || event.HostKeyReceived != "new" {
-		t.Fatalf("mismatch event = %#v", event)
+	if event.HostKeyExpected != "" || event.HostKeyReceived != "" || event.RetainTunnelLease {
+		t.Fatalf("direct mismatch was exposed as trustable: %#v", event)
+	}
+}
+
+func TestSSHHostKeyTrustRetriesTheRetainedRouteOnce(t *testing.T) {
+	var output synchronizedBuffer
+	server := newSSHTestServer(&output)
+	native := newSSHTestNativeSession(t)
+	var callsMu sync.Mutex
+	var opened []sshWireCommand
+	server.openSSH = func(_ context.Context, state *sshReconnectState) (*sshNativeSession, sshTarget, error) {
+		callsMu.Lock()
+		opened = append(opened, state.commandSnapshot())
+		call := len(opened)
+		callsMu.Unlock()
+		if call == 1 {
+			return nil, sshTarget{}, &sshHostKeyMismatchError{
+				expected: testSSHExpectedFingerprint,
+				received: testSSHReceivedFingerprint,
+			}
+		}
+		return native, sshTarget{
+			host: "ssh.example.test", port: 22, username: "alice", title: "Test",
+			knownHostFingerprint: testSSHReceivedFingerprint,
+		}, nil
+	}
+	trustStarted := make(chan struct{})
+	finishTrust := make(chan struct{})
+	trustCalls := 0
+	var trustRequest sshHostKeyTrustRequest
+	server.trustFingerprint = func(_ string, request sshHostKeyTrustRequest) error {
+		callsMu.Lock()
+		trustCalls++
+		trustRequest = request
+		callsMu.Unlock()
+		close(trustStarted)
+		<-finishTrust
+		return nil
+	}
+	server.open(sshWireCommand{
+		Type: "open", SessionID: "session", NodeID: "node", SocksEndpoint: "127.0.0.1:49152",
+		PasswordOverride: "secret", Columns: 80, Rows: 24,
+	})
+	waitForSSHTestCondition(t, "retained host-key mismatch", func() bool {
+		server.mu.Lock()
+		defer server.mu.Unlock()
+		return server.lifecycles["session"] != nil && server.pending["session"] == nil
+	})
+	trust := sshWireCommand{
+		Type: "host-key-trust", SessionID: "session", NodeID: "node",
+		HostKeyExpected: testSSHExpectedFingerprint, HostKeyReceived: testSSHReceivedFingerprint,
+	}
+	server.handle(trust)
+	<-trustStarted
+	server.handle(trust)
+	close(finishTrust)
+	waitForSSHTestCondition(t, "trusted SSH reconnect", func() bool {
+		server.mu.Lock()
+		defer server.mu.Unlock()
+		return server.sessions["session"] == native
+	})
+	callsMu.Lock()
+	openedSnapshot := append([]sshWireCommand(nil), opened...)
+	trustCallsSnapshot := trustCalls
+	trustRequestSnapshot := trustRequest
+	callsMu.Unlock()
+	if trustCallsSnapshot != 1 || len(openedSnapshot) != 2 {
+		t.Fatalf("trust calls = %d, SSH opens = %d", trustCallsSnapshot, len(openedSnapshot))
+	}
+	if trustRequestSnapshot.NodeID != "node" ||
+		trustRequestSnapshot.Expected != testSSHExpectedFingerprint ||
+		trustRequestSnapshot.Received != testSSHReceivedFingerprint {
+		t.Fatalf("trust request = %#v", trustRequestSnapshot)
+	}
+	if openedSnapshot[0].SocksEndpoint != "127.0.0.1:49152" ||
+		openedSnapshot[1].SocksEndpoint != openedSnapshot[0].SocksEndpoint {
+		t.Fatalf("SSH retry changed its VPN route: %#v", openedSnapshot)
+	}
+	server.mu.Lock()
+	state := server.lifecycles["session"]
+	server.mu.Unlock()
+	if state == nil || state.hostKeyExpected != "" || state.hostKeyReceived != "" {
+		t.Fatalf("connected lifecycle retained mismatch state: %#v", state)
+	}
+	server.close("session")
+}
+
+func TestSSHHostKeyTrustFailureKeepsTheValidatedMismatchRetryable(t *testing.T) {
+	var output synchronizedBuffer
+	server := newSSHTestServer(&output)
+	server.openSSH = func(context.Context, *sshReconnectState) (*sshNativeSession, sshTarget, error) {
+		return nil, sshTarget{}, &sshHostKeyMismatchError{
+			expected: testSSHExpectedFingerprint,
+			received: testSSHReceivedFingerprint,
+		}
+	}
+	server.trustFingerprint = func(string, sshHostKeyTrustRequest) error {
+		return errors.New("fingerprint update failed")
+	}
+	server.open(sshWireCommand{
+		Type: "open", SessionID: "session", NodeID: "node", SocksEndpoint: "127.0.0.1:49152",
+		PasswordOverride: "secret",
+	})
+	waitForSSHTestCondition(t, "retained host-key mismatch", func() bool {
+		server.mu.Lock()
+		defer server.mu.Unlock()
+		return server.lifecycles["session"] != nil && server.pending["session"] == nil
+	})
+	server.handle(sshWireCommand{
+		Type: "host-key-trust", SessionID: "session", NodeID: "node",
+		HostKeyExpected: testSSHExpectedFingerprint, HostKeyReceived: testSSHReceivedFingerprint,
+	})
+	waitForSSHTestCondition(t, "retryable trust failure", func() bool {
+		return strings.Count(output.String(), `"type":"error"`) == 2
+	})
+	server.mu.Lock()
+	state := server.lifecycles["session"]
+	_, pending := server.pending["session"]
+	server.mu.Unlock()
+	if state == nil || pending || state.commandSnapshot().SocksEndpoint != "127.0.0.1:49152" {
+		t.Fatalf("trust failure discarded the retained route: state=%#v pending=%t", state, pending)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(output.Bytes()))
+	var initial, failed sshWireEvent
+	if err := decoder.Decode(&initial); err != nil {
+		t.Fatal(err)
+	}
+	if err := decoder.Decode(&failed); err != nil {
+		t.Fatal(err)
+	}
+	if failed.Error != "fingerprint update failed" ||
+		failed.HostKeyExpected != testSSHExpectedFingerprint ||
+		failed.HostKeyReceived != testSSHReceivedFingerprint ||
+		!failed.RetainTunnelLease {
+		t.Fatalf("trust failure event = %#v", failed)
+	}
+	server.close("session")
+}
+
+func TestSSHHostKeyTrustPermanentFailureReleasesTheRetainedRoute(t *testing.T) {
+	var output synchronizedBuffer
+	server := newSSHTestServer(&output)
+	server.openSSH = func(context.Context, *sshReconnectState) (*sshNativeSession, sshTarget, error) {
+		return nil, sshTarget{}, &sshHostKeyMismatchError{
+			expected: testSSHExpectedFingerprint,
+			received: testSSHReceivedFingerprint,
+		}
+	}
+	server.trustFingerprint = func(string, sshHostKeyTrustRequest) error {
+		return newTerminalSSHHostKeyTrustError("SSH connection was not found")
+	}
+	server.open(sshWireCommand{
+		Type: "open", SessionID: "session", NodeID: "node", SocksEndpoint: "127.0.0.1:49152",
+		PasswordOverride: "secret",
+	})
+	waitForSSHTestCondition(t, "retained host-key mismatch", func() bool {
+		server.mu.Lock()
+		defer server.mu.Unlock()
+		return server.lifecycles["session"] != nil && server.pending["session"] == nil
+	})
+	server.mu.Lock()
+	retainedState := server.lifecycles["session"]
+	server.mu.Unlock()
+	server.handle(sshWireCommand{
+		Type: "host-key-trust", SessionID: "session", NodeID: "node",
+		HostKeyExpected: testSSHExpectedFingerprint, HostKeyReceived: testSSHReceivedFingerprint,
+	})
+	waitForSSHTestCondition(t, "terminal trust failure", func() bool {
+		return strings.Count(output.String(), `"type":"error"`) == 2
+	})
+	server.mu.Lock()
+	state := server.lifecycles["session"]
+	_, pending := server.pending["session"]
+	server.mu.Unlock()
+	if state != nil || pending || retainedState == nil || retainedState.commandSnapshot().PasswordOverride != "" {
+		t.Fatalf(
+			"terminal trust failure retained lifecycle state=%#v pending=%t passwordCleared=%t",
+			state,
+			pending,
+			retainedState != nil && retainedState.commandSnapshot().PasswordOverride == "",
+		)
+	}
+
+	decoder := json.NewDecoder(bytes.NewReader(output.Bytes()))
+	var initial, failed sshWireEvent
+	if err := decoder.Decode(&initial); err != nil {
+		t.Fatal(err)
+	}
+	if err := decoder.Decode(&failed); err != nil {
+		t.Fatal(err)
+	}
+	if failed.Error != "SSH connection was not found" ||
+		failed.HostKeyExpected != "" || failed.HostKeyReceived != "" || failed.RetainTunnelLease {
+		t.Fatalf("terminal trust failure event = %#v", failed)
+	}
+}
+
+func TestSSHHostKeyMismatchEventIsSerializedBeforeConcurrentAppLockCleanup(t *testing.T) {
+	writer := &blockingFirstSSHEventWrite{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	server := newSSHTestServer(writer)
+	state := &sshReconnectState{command: sshWireCommand{
+		SessionID: "session", NodeID: "node", SocksEndpoint: "127.0.0.1:49152",
+		PasswordOverride: "secret",
+	}}
+	server.lifecycles["session"] = state
+	server.pending["session"] = func() {}
+	event := sshWireEvent{
+		Type: "error", SessionID: "session", Error: "SSH host key mismatch",
+		HostKeyExpected: testSSHExpectedFingerprint, HostKeyReceived: testSSHReceivedFingerprint,
+		RetainTunnelLease: true,
+	}
+	finished := make(chan bool, 1)
+	go func() {
+		finished <- server.finishInitialFailure(state, &sshHostKeyMismatchError{
+			expected: testSSHExpectedFingerprint,
+			received: testSSHReceivedFingerprint,
+		}, &event)
+	}()
+	<-writer.started
+	publishedOutsideLifecycleLock := false
+	if server.mu.TryLock() {
+		server.mu.Unlock()
+		publishedOutsideLifecycleLock = true
+	}
+
+	lockFinished := make(chan struct{})
+	go func() {
+		server.handle(sshWireCommand{Type: "app-lock-all"})
+		close(lockFinished)
+	}()
+	close(writer.release)
+	if !<-finished {
+		t.Fatal("initial mismatch lifecycle was not pending")
+	}
+	<-lockFinished
+	if publishedOutsideLifecycleLock {
+		t.Fatal("initial mismatch event was published outside the lifecycle lock")
+	}
+
+	decoder := json.NewDecoder(bytes.NewReader(writer.output.Bytes()))
+	var mismatch, closed sshWireEvent
+	if err := decoder.Decode(&mismatch); err != nil {
+		t.Fatal(err)
+	}
+	if err := decoder.Decode(&closed); err != nil {
+		t.Fatal(err)
+	}
+	if mismatch.Type != "error" || !mismatch.RetainTunnelLease || closed.Type != "closed" {
+		t.Fatalf("concurrent lock event order = mismatch %#v, closed %#v", mismatch, closed)
+	}
+	if state.commandSnapshot().PasswordOverride != "" {
+		t.Fatal("application lock retained mismatch credentials")
+	}
+}
+
+func TestSSHRetainedHostKeyMismatchIsClearedByLifecycleCleanup(t *testing.T) {
+	for name, cleanup := range map[string]func(*sshServer){
+		"close": func(server *sshServer) { server.close("session") },
+		"app-lock-all": func(server *sshServer) {
+			server.handle(sshWireCommand{Type: "app-lock-all"})
+		},
+		"shutdown": func(server *sshServer) { server.shutdown() },
+	} {
+		t.Run(name, func(t *testing.T) {
+			var output synchronizedBuffer
+			server := newSSHTestServer(&output)
+			server.openSSH = func(context.Context, *sshReconnectState) (*sshNativeSession, sshTarget, error) {
+				return nil, sshTarget{}, &sshHostKeyMismatchError{
+					expected: testSSHExpectedFingerprint,
+					received: testSSHReceivedFingerprint,
+				}
+			}
+			server.open(sshWireCommand{
+				Type: "open", SessionID: "session", NodeID: "node", SocksEndpoint: "127.0.0.1:49152",
+				PasswordOverride: "secret",
+			})
+			var state *sshReconnectState
+			waitForSSHTestCondition(t, "retained mismatch lifecycle", func() bool {
+				server.mu.Lock()
+				defer server.mu.Unlock()
+				state = server.lifecycles["session"]
+				return state != nil && server.pending["session"] == nil
+			})
+			cleanup(server)
+			server.mu.Lock()
+			_, retained := server.lifecycles["session"]
+			_, pending := server.pending["session"]
+			server.mu.Unlock()
+			if retained || pending || state.commandSnapshot().PasswordOverride != "" {
+				t.Fatalf("%s retained SSH mismatch credentials or lifecycle", name)
+			}
+		})
 	}
 }
 
@@ -2292,8 +2693,38 @@ VALUES ('node', 'SHA256:KfNRucV0MaZ9lkCIfmHHZgcCsxJrf3frwycqo2/cw9k', 'now');
 		Expected: "SHA256:rjnaNoqbDUI5dQiifXn9cdTeEZ0dRAD/TTLe6sBbOiw",
 		Received: "SHA256:KfNRucV0MaZ9lkCIfmHHZgcCsxJrf3frwycqo2/cw9k",
 	})
-	if err == nil || !strings.Contains(err.Error(), "fingerprint changed") {
+	if err == nil || !isTerminalSSHHostKeyTrustError(err) ||
+		!strings.Contains(err.Error(), "fingerprint changed") {
 		t.Fatalf("expected stale-pin rejection, got %v", err)
+	}
+}
+
+func TestTrustSSHFingerprintTreatsDeletedNodeAsTerminal(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = database.Exec(`
+CREATE TABLE Nodes (
+    Id TEXT PRIMARY KEY NOT NULL,
+    SshKnownHostFingerprint TEXT NULL,
+    UpdatedAt TEXT NOT NULL
+);
+`)
+	database.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = trustSSHFingerprint(databasePath, sshHostKeyTrustRequest{
+		NodeID:   "deleted-node",
+		Expected: testSSHExpectedFingerprint,
+		Received: testSSHReceivedFingerprint,
+	})
+	if err == nil || !isTerminalSSHHostKeyTrustError(err) ||
+		!strings.Contains(err.Error(), "not found") {
+		t.Fatalf("expected deleted-node terminal rejection, got %v", err)
 	}
 }
 

@@ -10,6 +10,15 @@ export type SshReconnectFailedEvent = {
   error: string;
 };
 
+export function settlesSshHostKeyTrustAttempt(eventType: string): boolean {
+  return (
+    eventType === 'connected' ||
+    eventType === 'error' ||
+    eventType === 'closed' ||
+    eventType === 'reconnect-failed'
+  );
+}
+
 export function reconnectingSshState(event: SshReconnectingEvent) {
   const delay = `${event.delaySeconds} second${event.delaySeconds === 1 ? '' : 's'}`;
   return {
