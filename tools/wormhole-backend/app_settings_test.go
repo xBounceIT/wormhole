@@ -450,12 +450,16 @@ func TestShellSettingsDefaultPersistAndClamp(t *testing.T) {
 }
 
 func TestShellSettingsRejectBadLegacyValuesSafely(t *testing.T) {
+	if minSidebarWidth != 256 {
+		t.Fatalf("minimum sidebar width = %d, want 256 to keep header actions visible", minSidebarWidth)
+	}
 	for name, test := range map[string]struct {
 		value any
 		want  int
 	}{
 		"invalid-type": {value: "wide", want: defaultSidebarWidth},
 		"below-min":    {value: -42, want: minSidebarWidth},
+		"old-minimum":  {value: 180, want: minSidebarWidth},
 		"above-max":    {value: 100000, want: maxSidebarWidth},
 	} {
 		t.Run(name, func(t *testing.T) {

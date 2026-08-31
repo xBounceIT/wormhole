@@ -1,5 +1,6 @@
 export const defaultSidebarWidth = 320;
-export const minSidebarWidth = 180;
+// Keeps the Connections title and its five header actions visible at the resize limit.
+export const minSidebarWidth = 256;
 export const maxSidebarWidth = 600;
 export const sidebarSaveDelayMs = 250;
 

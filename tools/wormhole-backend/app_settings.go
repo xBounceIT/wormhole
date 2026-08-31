@@ -36,7 +36,8 @@ const (
 	sidebarWidthKey                         = "SidebarWidth"
 	connectionTreeExpansionKey              = "ConnectionTreeExpansion"
 	defaultSidebarWidth                     = 320
-	minSidebarWidth                         = 180
+	// Keep this aligned with src/sidebar-settings.ts so persisted widths cannot hide header actions.
+	minSidebarWidth                         = 256
 	maxSidebarWidth                         = 600
 	maxConnectionTreeExpansionFolderIDs     = 25_000
 	maxConnectionTreeExpansionFolderIDBytes = 128
