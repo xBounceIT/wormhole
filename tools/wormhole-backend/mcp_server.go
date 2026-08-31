@@ -419,8 +419,6 @@ func (controller *mcpController) ensureApproval(
 	}
 	controller.pending[requestID] = waiter
 	controller.pendingByTarget[sessionID] = waiter
-	controller.approvalMu.Unlock()
-
 	controller.server.output.write(sshWireEvent{
 		Type:      "mcp.approval",
 		RequestID: requestID,
@@ -431,6 +429,7 @@ func (controller *mcpController) ensureApproval(
 		Title:     native.mcpSession.Title,
 		Tool:      tool,
 	})
+	controller.approvalMu.Unlock()
 
 	select {
 	case <-waiter.done:

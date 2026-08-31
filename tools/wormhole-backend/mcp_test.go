@@ -1579,7 +1579,7 @@ func waitForMcpApprovalWaiterCount(t *testing.T, controller *mcpController, expe
 	}
 }
 
-func requireMcpApprovalCancellationEvent(
+func requireMcpApprovalCancellationSequence(
 	t *testing.T,
 	output *bytes.Buffer,
 	requestID string,
@@ -1587,7 +1587,7 @@ func requireMcpApprovalCancellationEvent(
 ) {
 	t.Helper()
 	decoder := json.NewDecoder(bytes.NewReader(output.Bytes()))
-	cancellations := make([]sshWireEvent, 0, 1)
+	events := make([]sshWireEvent, 0, 2)
 	for {
 		var event sshWireEvent
 		if err := decoder.Decode(&event); err != nil {
@@ -1596,14 +1596,15 @@ func requireMcpApprovalCancellationEvent(
 			}
 			t.Fatal(err)
 		}
-		if event.Type == "mcp.approval-cancelled" {
-			cancellations = append(cancellations, event)
-		}
+		events = append(events, event)
 	}
-	if len(cancellations) != 1 {
-		t.Fatalf("approval cancellation event count = %d, want 1", len(cancellations))
+	if len(events) != 2 {
+		t.Fatalf("approval event count = %d, want 2", len(events))
 	}
-	if event := cancellations[0]; event.RequestID != requestID || event.SessionID != sessionID {
+	if event := events[0]; event.Type != "mcp.approval" || event.RequestID != requestID || event.SessionID != sessionID {
+		t.Fatalf("initial approval event = %#v", event)
+	}
+	if event := events[1]; event.Type != "mcp.approval-cancelled" || event.RequestID != requestID || event.SessionID != sessionID {
 		t.Fatalf("approval cancellation event = %#v", event)
 	}
 }
@@ -1659,7 +1660,7 @@ func TestMcpApprovalCancellationReportsLockReason(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("approval waiter did not complete after lock")
 	}
-	requireMcpApprovalCancellationEvent(t, &output, requestID, native.id)
+	requireMcpApprovalCancellationSequence(t, &output, requestID, native.id)
 }
 
 func TestMcpApprovalCancellationReportsSessionClosed(t *testing.T) {
@@ -1683,7 +1684,7 @@ func TestMcpApprovalCancellationReportsSessionClosed(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("approval waiter did not complete after session close")
 	}
-	requireMcpApprovalCancellationEvent(t, &output, requestID, native.id)
+	requireMcpApprovalCancellationSequence(t, &output, requestID, native.id)
 }
 
 func TestMcpCancelledConcurrentApprovalWaiterIsReleased(t *testing.T) {
@@ -1718,7 +1719,7 @@ func TestMcpCancelledConcurrentApprovalWaiterIsReleased(t *testing.T) {
 	if pendingCount != 0 || targetCount != 0 {
 		t.Fatalf("cancelled waiters left stale approval state: pending=%d targets=%d", pendingCount, targetCount)
 	}
-	requireMcpApprovalCancellationEvent(t, &output, requestID, native.id)
+	requireMcpApprovalCancellationSequence(t, &output, requestID, native.id)
 }
 
 func TestMcpCommandValidation(t *testing.T) {
