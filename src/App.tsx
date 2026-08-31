@@ -64,7 +64,11 @@ import {
   shouldUseTerminalClipboardShortcut,
 } from './terminal-clipboard';
 import { terminalVisibleScrollback } from './terminal-frame';
-import { failedSshReconnectState, reconnectingSshState } from './ssh-reconnect-state';
+import {
+  failedSshReconnectState,
+  reconnectingSshState,
+  settlesSshHostKeyTrustAttempt,
+} from './ssh-reconnect-state';
 import {
   canSplitSession,
   createSessionLayout,
@@ -2247,7 +2251,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
 
   useEffect(() => {
     const unsubscribe = window.wormhole?.onSshEvent((event) => {
-      if (event.type === 'closed') {
+      if (settlesSshHostKeyTrustAttempt(event.type)) {
         sshHostKeyTrustInFlight.current.delete(event.sessionId);
       }
       if (event.type === 'sftp.transfer') {

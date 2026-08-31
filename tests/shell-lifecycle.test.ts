@@ -43,7 +43,11 @@ import {
   minSidebarWidth,
   normalizeSidebarWidth,
 } from '../src/sidebar-settings.ts';
-import { failedSshReconnectState, reconnectingSshState } from '../src/ssh-reconnect-state.ts';
+import {
+  failedSshReconnectState,
+  reconnectingSshState,
+  settlesSshHostKeyTrustAttempt,
+} from '../src/ssh-reconnect-state.ts';
 import {
   hasNewerReleaseWithoutInstaller,
   isUpdateInstallable,
@@ -355,6 +359,15 @@ test('SSH automatic reconnect keeps the tab alive and reports terminal exhaustio
       error: 'Automatic reconnect failed after 3 attempts. network unavailable',
     },
   );
+});
+
+test('SSH backend results take precedence over a concurrent host-key trust rejection', () => {
+  assert.equal(settlesSshHostKeyTrustAttempt('connected'), true);
+  assert.equal(settlesSshHostKeyTrustAttempt('error'), true);
+  assert.equal(settlesSshHostKeyTrustAttempt('closed'), true);
+  assert.equal(settlesSshHostKeyTrustAttempt('reconnect-failed'), true);
+  assert.equal(settlesSshHostKeyTrustAttempt('reconnecting'), false);
+  assert.equal(settlesSshHostKeyTrustAttempt('screen'), false);
 });
 
 test('SSH reconnect lifecycle is validated before renderer delivery and retains its VPN lease', () => {

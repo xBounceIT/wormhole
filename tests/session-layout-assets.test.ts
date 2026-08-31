@@ -944,6 +944,7 @@ test('SSH host-key trust delegates the retained lifecycle retry to Go', () => {
     trustSource,
     /if \(!sshHostKeyTrustInFlight\.current\.has\(session\.backendSessionId\)\) return/,
   );
+  assert.match(appSource, /settlesSshHostKeyTrustAttempt\(event\.type\)/);
   assert.doesNotMatch(trustSource, /startSshSession\(|reconnectSession\(/);
 
   const sshEvents = sourceBetween(mainSource, 'private handleLine', 'private broadcast');
