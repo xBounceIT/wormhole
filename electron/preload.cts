@@ -464,12 +464,15 @@ const wormholeBridge = {
     manualCredentials?: boolean;
     keyPassphrase?: string;
     manualKeyPassphrase?: boolean;
-    reuseTunnel?: boolean;
     username?: string;
     password?: string;
   }) => ipcRenderer.invoke('ssh:open', request),
-  trustSshHostKey: (request: { nodeId: string; expected: string; received: string }) =>
-    ipcRenderer.invoke('ssh:trust-host-key', request),
+  trustSshHostKey: (request: {
+    sessionId: string;
+    nodeId: string;
+    expected: string;
+    received: string;
+  }) => ipcRenderer.invoke('ssh:trust-host-key', request),
   sendSshInput: (sessionId: string, data: string) =>
     ipcRenderer.invoke('ssh:input', sessionId, data),
   pasteClipboardToSsh: (sessionId: string) => ipcRenderer.invoke('ssh:paste-clipboard', sessionId),

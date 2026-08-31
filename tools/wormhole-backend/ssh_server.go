@@ -84,6 +84,8 @@ type sshWireCommand struct {
 	Password                      string                `json:"password"`
 	TunnelConfigID                string                `json:"tunnel_config_id"`
 	SocksEndpoint                 string                `json:"socks_endpoint"`
+	HostKeyExpected               string                `json:"host_key_expected"`
+	HostKeyReceived               string                `json:"host_key_received"`
 	UsernameOverride              string                `json:"username_override,omitempty"`
 	UsernameOverrideAuthoritative bool                  `json:"username_override_authoritative,omitempty"`
 	PasswordOverride              string                `json:"password_override,omitempty"`
@@ -127,6 +129,7 @@ type sshWireEvent struct {
 	Token               string             `json:"token,omitempty"`
 	HostKeyExpected     string             `json:"host_key_expected,omitempty"`
 	HostKeyReceived     string             `json:"host_key_received,omitempty"`
+	RetainTunnelLease   bool               `json:"retain_tunnel_lease,omitempty"`
 	Path                string             `json:"path,omitempty"`
 	Entries             []sshSftpEntry     `json:"entries"`
 	QuickPaths          []sshSftpQuickPath `json:"quick_paths,omitempty"`
@@ -276,6 +279,7 @@ type sshServer struct {
 	pending                map[string]context.CancelFunc
 	lifecycles             map[string]*sshReconnectState
 	openSSH                func(context.Context, *sshReconnectState) (*sshNativeSession, sshTarget, error)
+	trustFingerprint       func(string, sshHostKeyTrustRequest) error
 	reconnectDelayOverride *time.Duration
 
 	transferMu sync.Mutex
@@ -291,6 +295,8 @@ type sshReconnectState struct {
 	attempts          int
 	connectedAt       time.Time
 	reconnectDisabled bool
+	hostKeyExpected   string
+	hostKeyReceived   string
 }
 
 func (state *sshReconnectState) commandSnapshot() sshWireCommand {
@@ -427,6 +433,10 @@ func (server *sshServer) handle(command sshWireCommand) {
 		server.handleMcp(command)
 		return
 	}
+	if command.Type == "app-lock-all" {
+		server.prepareAllSessionsForLock()
+		return
+	}
 	command.SessionID = strings.TrimSpace(command.SessionID)
 	if command.SessionID == "" || len(command.SessionID) > 128 {
 		server.writeError(command.SessionID, "SSH session id is invalid")
@@ -460,12 +470,26 @@ func (server *sshServer) handle(command sshWireCommand) {
 		server.sftpClose(command)
 	case "auto-sudo-cancel":
 		server.cancelAutoSudo(command)
+	case "host-key-trust":
+		server.trustHostKey(command)
 	case "app-lock":
 		server.prepareSessionForLock(command.SessionID)
 	case "close":
 		server.close(command.SessionID)
 	default:
 		server.writeError(command.SessionID, "unsupported SSH command")
+	}
+}
+
+func (server *sshServer) prepareAllSessionsForLock() {
+	server.mu.Lock()
+	sessionIDs := make([]string, 0, len(server.lifecycles))
+	for sessionID := range server.lifecycles {
+		sessionIDs = append(sessionIDs, sessionID)
+	}
+	server.mu.Unlock()
+	for _, sessionID := range sessionIDs {
+		server.prepareSessionForLock(sessionID)
 	}
 }
 
@@ -585,16 +609,20 @@ func (server *sshServer) connectSSH(ctx context.Context, state *sshReconnectStat
 	native, target, err := server.openNativeSSH(openContext, state)
 	if err != nil {
 		if initial {
-			pending := server.finishPendingState(state, true)
+			var mismatch *sshHostKeyMismatchError
+			if !errors.As(err, &mismatch) || strings.TrimSpace(command.NodeID) == "" {
+				mismatch = nil
+			}
+			pending := server.finishInitialFailure(state, mismatch)
 			if pending && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 				logError("SSH session failed to connect: %v", safeSSHError(err))
 				event := sshWireEvent{
 					Type: "error", SessionID: command.SessionID, Error: safeSSHError(err),
 				}
-				var mismatch *sshHostKeyMismatchError
-				if errors.As(err, &mismatch) {
+				if mismatch != nil {
 					event.HostKeyExpected = mismatch.expected
 					event.HostKeyReceived = mismatch.received
+					event.RetainTunnelLease = true
 				}
 				server.output.write(event)
 			}
@@ -624,6 +652,72 @@ func (server *sshServer) connectSSH(ctx context.Context, state *sshReconnectStat
 	logInfo("SSH session connected: %s@%s:%d", target.username, target.host, target.port)
 	native.publishTerminalFrame(native.terminal.initialFrame())
 	native.start()
+}
+
+func (server *sshServer) trustHostKey(command sshWireCommand) {
+	server.mu.Lock()
+	state := server.lifecycles[command.SessionID]
+	if state == nil {
+		server.mu.Unlock()
+		server.writeError(command.SessionID, "SSH host-key trust request is no longer active")
+		return
+	}
+	if server.sessions[command.SessionID] != nil || server.pending[command.SessionID] != nil {
+		server.mu.Unlock()
+		return
+	}
+	expected := state.hostKeyExpected
+	received := state.hostKeyReceived
+	stateCommand := state.commandSnapshot()
+	if expected == "" || received == "" {
+		server.mu.Unlock()
+		server.writeError(command.SessionID, "SSH session is not waiting for host-key trust")
+		return
+	}
+	nodeID := strings.TrimSpace(command.NodeID)
+	normalizedExpected, expectedErr := normalizeSSHFingerprint(command.HostKeyExpected)
+	normalizedReceived, receivedErr := normalizeSSHFingerprint(command.HostKeyReceived)
+	if nodeID == "" || len(nodeID) > 128 || normalizeID(nodeID) != normalizeID(stateCommand.NodeID) ||
+		expectedErr != nil || receivedErr != nil || normalizedExpected != expected || normalizedReceived != received {
+		server.mu.Unlock()
+		server.writeHostKeyMismatchError(
+			command.SessionID,
+			"SSH host-key trust request does not match the pending connection",
+			expected,
+			received,
+		)
+		return
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	server.pending[command.SessionID] = cancel
+	server.mu.Unlock()
+
+	request := sshHostKeyTrustRequest{NodeID: nodeID, Expected: expected, Received: received}
+	go server.trustHostKeyAndReconnect(ctx, state, request)
+}
+
+func (server *sshServer) trustHostKeyAndReconnect(
+	ctx context.Context,
+	state *sshReconnectState,
+	request sshHostKeyTrustRequest,
+) {
+	trustFingerprint := server.trustFingerprint
+	if trustFingerprint == nil {
+		trustFingerprint = trustSSHFingerprint
+	}
+	if err := trustFingerprint(server.databasePath, request); err != nil {
+		if server.finishPendingState(state, false) {
+			server.writeHostKeyMismatchError(
+				state.commandSnapshot().SessionID,
+				safeSSHError(err),
+				request.Expected,
+				request.Received,
+			)
+		}
+		return
+	}
+	server.connectSSH(ctx, state, true)
 }
 
 func (server *sshServer) openNativeSSH(
@@ -886,6 +980,28 @@ func (server *sshServer) finishPendingState(state *sshReconnectState, abandon bo
 	return pending
 }
 
+func (server *sshServer) finishInitialFailure(
+	state *sshReconnectState,
+	mismatch *sshHostKeyMismatchError,
+) bool {
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	sessionID := state.commandSnapshot().SessionID
+	_, pending := server.pending[sessionID]
+	if server.lifecycles[sessionID] != state {
+		return false
+	}
+	delete(server.pending, sessionID)
+	if mismatch != nil {
+		state.hostKeyExpected = mismatch.expected
+		state.hostKeyReceived = mismatch.received
+	} else {
+		delete(server.lifecycles, sessionID)
+		state.clearSecrets()
+	}
+	return pending
+}
+
 func (server *sshServer) promote(
 	sessionID string,
 	native *sshNativeSession,
@@ -899,6 +1015,8 @@ func (server *sshServer) promote(
 	delete(server.pending, sessionID)
 	server.sessions[sessionID] = native
 	state.connectedAt = time.Now()
+	state.hostKeyExpected = ""
+	state.hostKeyReceived = ""
 	return true
 }
 
@@ -1056,6 +1174,18 @@ func (server *sshServer) cancelAllTransfers() {
 
 func (server *sshServer) writeError(sessionID, message string) {
 	server.output.write(sshWireEvent{Type: "error", SessionID: sessionID, Error: message})
+}
+
+func (server *sshServer) writeHostKeyMismatchError(
+	sessionID string,
+	message string,
+	expected string,
+	received string,
+) {
+	server.output.write(sshWireEvent{
+		Type: "error", SessionID: sessionID, Error: message,
+		HostKeyExpected: expected, HostKeyReceived: received, RetainTunnelLease: true,
+	})
 }
 
 func (server *sshServer) writeSftpError(sessionID, message string, path ...string) {

@@ -673,7 +673,6 @@ type SshStartRequest = {
   manualCredentials?: boolean;
   keyPassphrase?: string;
   manualKeyPassphrase?: boolean;
-  reuseTunnel?: boolean;
   frontendSessionId?: string;
 };
 
@@ -5057,20 +5056,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     try {
       if (!window.wormhole) throw new Error('The SSH service is unavailable.');
       await window.wormhole.trustSshHostKey({
+        sessionId: session.backendSessionId,
         nodeId: session.nodeId,
         expected: mismatch.expected,
         received: mismatch.received,
-      });
-      const current = sessionsRef.current.find(
-        (candidate) =>
-          candidate.id === sessionId && candidate.backendSessionId === session.backendSessionId,
-      );
-      if (!current?.nodeId || current.nodeId !== session.nodeId || !current.backendSessionId)
-        return;
-      startSshSession({
-        sessionId: current.backendSessionId,
-        nodeId: current.nodeId,
-        reuseTunnel: true,
       });
     } catch (error: unknown) {
       setSessions((current) =>
