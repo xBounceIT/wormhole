@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"strings"
 	"unicode/utf8"
@@ -14,6 +15,8 @@ const (
 	sshTerminalMaxScrollbackLines = 5000
 	sshTerminalHistoryRebaseLines = sshTerminalMaxScrollbackLines + 512
 )
+
+var errTerminalEmulatorPanic = errors.New("terminal emulator rejected remote output")
 
 // sshTerminalCell is the renderer-neutral representation of one terminal cell.
 // The ANSI parser and all cursor/screen state live in Go; the renderer only paints
@@ -274,6 +277,51 @@ func (terminal *sshTerminalEmulator) write(data []byte) (*sshTerminalFrame, bool
 		frame.Scrollback = scrollback
 	}
 	return frame, changed || scrollbackChanged, nil
+}
+
+func writeTerminalSafely(
+	terminal *sshTerminalEmulator,
+	data []byte,
+) (frame *sshTerminalFrame, changed bool, err error) {
+	defer func() {
+		if recover() == nil {
+			return
+		}
+		frame = nil
+		changed = false
+		err = errTerminalEmulatorPanic
+	}()
+	return terminal.write(data)
+}
+
+func writeTerminalResilient(
+	terminal **sshTerminalEmulator,
+	data []byte,
+) (frame *sshTerminalFrame, changed bool, recovered bool, err error) {
+	current := *terminal
+	frame, changed, err = writeTerminalSafely(current, data)
+	if err == nil {
+		return frame, changed, false, nil
+	}
+
+	var columns, rows uint32
+	if current != nil {
+		columns, rows = uint32(current.columns), uint32(current.rows)
+	}
+	replacement, resetErr := newSSHTerminalEmulator(columns, rows)
+	if resetErr != nil {
+		return nil, false, false, resetErr
+	}
+	*terminal = replacement
+	return replacement.initialFrame(), true, true, nil
+}
+
+func logTerminalRecoveryOnce(logged *bool, protocol string) {
+	if *logged {
+		return
+	}
+	*logged = true
+	logWarn("%s terminal emulator reset after invalid remote output", protocol)
 }
 
 func (terminal *sshTerminalEmulator) writeVT(
