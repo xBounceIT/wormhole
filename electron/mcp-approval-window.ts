@@ -9,6 +9,7 @@ export type McpApprovalWindow = {
 };
 
 export type McpApprovalBlockingWindow = McpApprovalWindow & {
+  destroy(): void;
   hide(): void;
 };
 
@@ -82,5 +83,13 @@ export class McpApprovalWindowCoordinator<TWindow extends McpApprovalBlockingWin
       attemptWindowAction(() => window.show());
       attemptWindowAction(() => window.focus());
     }
+  }
+
+  reset(): void {
+    this.pendingApprovalIds.clear();
+    for (const window of this.tunnelAuthWindows) {
+      if (isUsableWindow(window)) attemptWindowAction(() => window.destroy());
+    }
+    this.tunnelAuthWindows.clear();
   }
 }

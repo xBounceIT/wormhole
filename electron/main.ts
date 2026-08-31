@@ -6111,6 +6111,7 @@ class NativeSshBackend {
   }
 
   prepareForLock(): void {
+    mcpApprovalWindowCoordinator.reset();
     try {
       this.write({ type: 'app-lock-all' });
     } catch {
@@ -6236,6 +6237,7 @@ class NativeSshBackend {
   }
 
   async dispose(): Promise<void> {
+    mcpApprovalWindowCoordinator.reset();
     for (const sessionId of this.pendingConnections.keys()) {
       this.connectionAttempts.cancel(sessionId);
     }
