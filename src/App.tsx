@@ -1705,6 +1705,11 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     setTunnelPromptValue('');
   }, [activeTunnelPromptId]);
   const authPromptResolver = useRef<((succeeded: boolean) => void) | null>(null);
+  const settleAuthConfirmation = useCallback((succeeded: boolean) => {
+    authPromptResolver.current?.(succeeded);
+    authPromptResolver.current = null;
+    setAuthPrompt(null);
+  }, []);
   const idleCheckInFlight = useRef(false);
   const lastActivityAt = useLazyRef(Date.now);
   const quickConnectSubmitInFlight = useRef(false);
@@ -2184,9 +2189,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       return;
     }
 
-    authPromptResolver.current?.(succeeded);
-    authPromptResolver.current = null;
-    setAuthPrompt(null);
+    settleAuthConfirmation(succeeded);
   }
 
   async function resolveMcpApproval(approved: boolean) {
@@ -2657,6 +2660,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     });
 
     const unsubscribeMcp = window.wormhole?.onMcpApproval((approval) => {
+      settleAuthConfirmation(false);
       setMcpApprovals((current) =>
         current.some((pending) => pending.requestId === approval.requestId)
           ? current
@@ -2730,7 +2734,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       unsubscribeMcp?.();
       unsubscribeBackend?.();
     };
-  }, []);
+  }, [settleAuthConfirmation]);
 
   useEffect(() => {
     const timeoutMinutes = authState?.idleTimeoutMinutes;

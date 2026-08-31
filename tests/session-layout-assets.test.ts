@@ -92,6 +92,23 @@ test('authentication prompt keeps the active Windows Hello request through Stric
   assert.doesNotMatch(promptSource, /let cancelled = false/);
 });
 
+test('MCP approval settles an active authentication confirmation before opening', () => {
+  const mcpSubscription = sourceBetween(
+    appSource,
+    'const unsubscribeMcp',
+    'const unsubscribeBackend',
+  );
+  const settlePrompt = mcpSubscription.indexOf('settleAuthConfirmation(false)');
+  const enqueueApproval = mcpSubscription.indexOf('setMcpApprovals');
+
+  assert.ok(settlePrompt >= 0 && settlePrompt < enqueueApproval);
+  assert.match(
+    appSource,
+    /const settleAuthConfirmation = useCallback[\s\S]*?setAuthPrompt\(null\)/,
+  );
+  assert.match(appSource, /settleAuthConfirmation\(succeeded\)/);
+});
+
 test('first-open RDP startup reads the committed session snapshot', () => {
   const requestSource = appSource.slice(
     appSource.indexOf('async function requestRdpCredentials'),
