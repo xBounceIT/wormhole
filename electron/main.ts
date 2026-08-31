@@ -21,6 +21,7 @@ import { fileURLToPath } from 'node:url';
 import type { ElectronChromeExtensions } from 'electron-chrome-extensions';
 import { AuthSession } from './auth-session.js';
 import { hasValidCredentialSecretLength } from './credential-secret-length.js';
+import { bringMcpApprovalWindowToFront, selectMcpApprovalWindow } from './mcp-approval-window.js';
 import {
   connectionTreeExpansionMaxRequestBytes,
   parseConnectionTreeExpansionSetting,
@@ -6361,7 +6362,14 @@ class NativeSshBackend {
     }
     if (mcpMessage?.type === 'mcp.approval') {
       if (!authSession.isAccessAllowed) return;
-      for (const window of BrowserWindow.getAllWindows()) {
+      const windows = BrowserWindow.getAllWindows();
+      const approvalWindow = selectMcpApprovalWindow(
+        windows,
+        BrowserWindow.getFocusedWindow(),
+        (window) => windowCloseCoordinators.has(window),
+      );
+      if (approvalWindow) bringMcpApprovalWindowToFront(approvalWindow);
+      for (const window of windows) {
         if (!window.isDestroyed()) window.webContents.send('mcp:approval', mcpMessage);
       }
       return;

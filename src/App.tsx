@@ -6424,7 +6424,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         }}
         open={mcpApprovals.length > 0}
       >
-        <DialogContent className="border-border/70 bg-card text-card-foreground sm:max-w-md">
+        <DialogContent
+          className="z-[60] border-border/70 bg-card text-card-foreground sm:max-w-md"
+          overlayClassName="z-[60]"
+        >
           <DialogHeader>
             <DialogTitle>Allow AI agent control?</DialogTitle>
             <DialogDescription>
@@ -6699,6 +6702,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                   }
                   isAuthorized={authGate === 'unlocked'}
                   isWebSurfaceVisible={
+                    mcpApprovals.length === 0 &&
                     !newConnectionOpen &&
                     !folderDetailsOpen &&
                     !newFolderOpen &&

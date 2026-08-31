@@ -9,6 +9,11 @@ import {
   readDarwinHardwareModel,
   shouldDisableHardwareAcceleration,
 } from '../electron/gpu-compatibility.ts';
+import {
+  bringMcpApprovalWindowToFront,
+  selectMcpApprovalWindow,
+  type McpApprovalWindow,
+} from '../electron/mcp-approval-window.ts';
 import { stopChildProcess } from '../electron/rdp.ts';
 import { drainSshBackendSessionIds } from '../electron/ssh-backend-lifecycle.ts';
 import { TunnelLeaseRegistry } from '../electron/tunnel-lease-registry.ts';
@@ -227,6 +232,130 @@ test('cross-platform backend features are not gated by Windows-only IPC handlers
     assert.ok(handlers.includes(call), `missing cross-platform handler call: ${call}`);
   }
   assert.match(preloadSource, /platform: process\.platform/);
+});
+
+test('MCP approval restores and foregrounds the Wormhole window before notifying the renderer', () => {
+  function createWindow(state: { destroyed?: boolean; minimized?: boolean; visible?: boolean }) {
+    const calls: string[] = [];
+    const window: McpApprovalWindow = {
+      isDestroyed: () => state.destroyed ?? false,
+      isMinimized: () => state.minimized ?? false,
+      isVisible: () => state.visible ?? true,
+      restore: () => calls.push('restore'),
+      show: () => calls.push('show'),
+      moveTop: () => calls.push('moveTop'),
+      focus: () => calls.push('focus'),
+    };
+    return { calls, window };
+  }
+
+  const minimized = createWindow({ minimized: true, visible: false });
+  bringMcpApprovalWindowToFront(minimized.window);
+  assert.deepEqual(minimized.calls, ['restore', 'show', 'moveTop', 'focus']);
+
+  const visible = createWindow({ visible: true });
+  bringMcpApprovalWindowToFront(visible.window);
+  assert.deepEqual(visible.calls, ['moveTop', 'focus']);
+
+  const destroyed = createWindow({ destroyed: true, minimized: true, visible: false });
+  bringMcpApprovalWindowToFront(destroyed.window);
+  assert.deepEqual(destroyed.calls, []);
+
+  const unstable = createWindow({ visible: true });
+  unstable.window.moveTop = () => {
+    unstable.calls.push('moveTop');
+    throw new Error('unsupported z-order operation');
+  };
+  assert.doesNotThrow(() => bringMcpApprovalWindowToFront(unstable.window));
+  assert.deepEqual(unstable.calls, ['moveTop', 'focus']);
+
+  const invalid = createWindow({});
+  invalid.window.isDestroyed = () => {
+    throw new Error('window state unavailable');
+  };
+  assert.doesNotThrow(() => bringMcpApprovalWindowToFront(invalid.window));
+  assert.deepEqual(invalid.calls, []);
+
+  const auxiliary = createWindow({ visible: true });
+  const firstMain = createWindow({ visible: true });
+  const focusedMain = createWindow({ visible: true });
+  const mainWindows = new Set([firstMain.window, focusedMain.window]);
+  assert.equal(
+    selectMcpApprovalWindow(
+      [auxiliary.window, firstMain.window, focusedMain.window],
+      auxiliary.window,
+      (window) => mainWindows.has(window),
+    ),
+    firstMain.window,
+  );
+  assert.equal(
+    selectMcpApprovalWindow(
+      [auxiliary.window, firstMain.window, focusedMain.window],
+      null,
+      (window) => mainWindows.has(window),
+    ),
+    firstMain.window,
+  );
+  assert.equal(
+    selectMcpApprovalWindow(
+      [auxiliary.window, firstMain.window, focusedMain.window],
+      focusedMain.window,
+      (window) => mainWindows.has(window),
+    ),
+    focusedMain.window,
+  );
+  let recoveredMain: McpApprovalWindow | undefined;
+  assert.doesNotThrow(() => {
+    recoveredMain = selectMcpApprovalWindow(
+      [invalid.window, firstMain.window],
+      invalid.window,
+      (window) => window === invalid.window || window === firstMain.window,
+    );
+  });
+  assert.equal(recoveredMain, firstMain.window);
+
+  const destroyedMain = createWindow({ destroyed: true });
+  assert.equal(
+    selectMcpApprovalWindow(
+      [auxiliary.window, destroyedMain.window],
+      destroyedMain.window,
+      (window) => window === destroyedMain.window,
+    ),
+    undefined,
+  );
+
+  const mainSource = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
+  const approvalHandler = mainSource.slice(
+    mainSource.indexOf("if (mcpMessage?.type === 'mcp.approval')"),
+    mainSource.indexOf('const event = parseSshBackendEvent'),
+  );
+  const foreground = approvalHandler.indexOf('bringMcpApprovalWindowToFront(approvalWindow)');
+  const notification = approvalHandler.indexOf("window.webContents.send('mcp:approval'");
+  assert.match(approvalHandler, /selectMcpApprovalWindow\(/);
+  assert.match(approvalHandler, /windowCloseCoordinators\.has\(window\)/);
+  assert.ok(foreground >= 0 && foreground < notification);
+});
+
+test('MCP approval stays above renderer dialogs and hides native session surfaces', () => {
+  const appSource = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  const dialogSource = readFileSync(
+    new URL('../src/components/ui/dialog.tsx', import.meta.url),
+    'utf8',
+  );
+  const approvalDialog = appSource.slice(
+    appSource.indexOf('open={mcpApprovals.length > 0}'),
+    appSource.indexOf('<div', appSource.indexOf('open={mcpApprovals.length > 0}')),
+  );
+  const nativeSurfaceVisibility = appSource.slice(
+    appSource.indexOf('isWebSurfaceVisible={'),
+    appSource.indexOf('selectedSession={selectedSession}'),
+  );
+
+  assert.match(dialogSource, /overlayClassName\?: string/);
+  assert.match(dialogSource, /<DialogOverlay className=\{overlayClassName\} \/>/);
+  assert.match(approvalDialog, /className="z-\[60\]/);
+  assert.match(approvalDialog, /overlayClassName="z-\[60\]"/);
+  assert.match(nativeSurfaceVisibility, /mcpApprovals\.length === 0/);
 });
 
 test('MCP client configuration uses the host platform command contract', () => {
