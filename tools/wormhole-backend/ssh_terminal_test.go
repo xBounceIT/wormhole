@@ -392,12 +392,66 @@ func TestSSHTerminalFrameWireAlwaysIncludesAlternateScreen(t *testing.T) {
 	assertAlternateScreen(frame, true)
 }
 
+func TestSSHTerminalEmulatorHandlesCombinedAlternateScreenModeLists(t *testing.T) {
+	for name, test := range map[string]struct {
+		enter [][]byte
+		exit  [][]byte
+	}{
+		"alternate mode first": {
+			enter: [][]byte{[]byte("\x1b[?1049;25h")},
+			exit:  [][]byte{[]byte("\x1b[?1049;25l")},
+		},
+		"alternate mode last": {
+			enter: [][]byte{[]byte("\x1b[?25;1049h")},
+			exit:  [][]byte{[]byte("\x1b[?25;1049l")},
+		},
+		"chunked parameters": {
+			enter: [][]byte{[]byte("\x1b[?1049;"), []byte("25h")},
+			exit:  [][]byte{[]byte("\x1b[?25;10"), []byte("49l")},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			emulator, err := newSSHTerminalEmulator(12, 3)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = emulator.initialFrame()
+
+			writeChunks := func(chunks [][]byte) *sshTerminalFrame {
+				t.Helper()
+				var result *sshTerminalFrame
+				for _, chunk := range chunks {
+					frame, _, err := emulator.write(chunk)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if frame != nil {
+						result = frame
+					}
+				}
+				return result
+			}
+
+			frame := writeChunks(test.enter)
+			if frame == nil || !frame.AlternateScreen || !frame.ViewportReset {
+				t.Fatalf("combined mode entry was not published: %#v", frame)
+			}
+			frame = writeChunks(test.exit)
+			if frame == nil || frame.AlternateScreen || !frame.ViewportReset {
+				t.Fatalf("combined mode exit was not published: %#v", frame)
+			}
+		})
+	}
+}
+
 func TestSSHTerminalEmulatorIgnoresRedundantAlternateScreenExit(t *testing.T) {
 	for name, chunks := range map[string][][]byte{
-		"47":           {[]byte("\x1b[?47ltext")},
-		"1047":         {[]byte("\x1b[?1047ltext")},
-		"1049":         {[]byte("\x1b[?1049ltext")},
-		"1049 chunked": {[]byte("\x1b[?1049"), []byte("ltext")},
+		"47":                    {[]byte("\x1b[?47ltext")},
+		"1047":                  {[]byte("\x1b[?1047ltext")},
+		"1049":                  {[]byte("\x1b[?1049ltext")},
+		"1049 chunked":          {[]byte("\x1b[?1049"), []byte("ltext")},
+		"1049 combined":         {[]byte("\x1b[?1049;25ltext")},
+		"1049 combined chunked": {[]byte("\x1b[?1049;"), []byte("25ltext")},
 	} {
 		t.Run(name, func(t *testing.T) {
 			emulator, err := newSSHTerminalEmulator(12, 3)

@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"fmt"
-	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -88,16 +87,30 @@ type sshTerminalAlternateScreenTransition struct {
 	sequence []byte
 }
 
-var sshAlternateScreenSequences = []struct {
-	sequence []byte
-	active   bool
+type sshTerminalAlternateScreenEscapeMode uint8
+
+const (
+	sshTerminalAlternateScreenEscapeNone sshTerminalAlternateScreenEscapeMode = iota
+	sshTerminalAlternateScreenEscapeAfterEsc
+	sshTerminalAlternateScreenEscapeCSI
+	sshTerminalAlternateScreenEscapeParameters
+)
+
+type sshTerminalAlternateScreenParser struct {
+	escapeMode         sshTerminalAlternateScreenEscapeMode
+	parameter          int
+	parameterSeen      bool
+	alternateParameter int
+}
+
+var sshAlternateScreenModes = []struct {
+	parameter int
+	enter     []byte
+	exit      []byte
 }{
-	{[]byte("\x1b[?47h"), true},
-	{[]byte("\x1b[?47l"), false},
-	{[]byte("\x1b[?1047h"), true},
-	{[]byte("\x1b[?1047l"), false},
-	{[]byte("\x1b[?1049h"), true},
-	{[]byte("\x1b[?1049l"), false},
+	{47, []byte("\x1b[?47h"), []byte("\x1b[?47l")},
+	{1047, []byte("\x1b[?1047h"), []byte("\x1b[?1047l")},
+	{1049, []byte("\x1b[?1049h"), []byte("\x1b[?1049l")},
 }
 
 var sshScrollbackEraseSequence = []byte("\x1b[3J")
@@ -116,12 +129,12 @@ type sshTerminalEmulator struct {
 	historyAltScreen  bool
 	scrollback        []sshTerminalScrollbackLine
 	resetEscape       bool
-	controlTail       []byte
 	clearTail         []byte
 	historyEscapeMode sshTerminalHistoryEscapeMode
 	historyStringEsc  bool
 	historyCapture    []sshTerminalCell
 	historyCaptureOK  bool
+	alternateParser   sshTerminalAlternateScreenParser
 
 	previousCells         []sshTerminalCell
 	previousCursorX       int
@@ -862,43 +875,101 @@ func terminalControlSequenceSeen(tail, data, sequence []byte) bool {
 
 func (terminal *sshTerminalEmulator) alternateScreenTransitions(data []byte) []sshTerminalAlternateScreenTransition {
 	var transitions []sshTerminalAlternateScreenTransition
-	for _, candidate := range sshAlternateScreenSequences {
-		for prefixLength := 1; prefixLength < len(candidate.sequence); prefixLength++ {
-			if len(terminal.controlTail) < prefixLength || len(data) < len(candidate.sequence)-prefixLength {
-				continue
+	parser := &terminal.alternateParser
+	for index, value := range data {
+		switch parser.escapeMode {
+		case sshTerminalAlternateScreenEscapeNone:
+			if value == 0x1b {
+				parser.escapeMode = sshTerminalAlternateScreenEscapeAfterEsc
+				parser.resetParameters()
 			}
-			if bytes.Equal(terminal.controlTail[len(terminal.controlTail)-prefixLength:], candidate.sequence[:prefixLength]) &&
-				bytes.Equal(data[:len(candidate.sequence)-prefixLength], candidate.sequence[prefixLength:]) {
-				transitions = append(transitions, sshTerminalAlternateScreenTransition{
-					end:      len(candidate.sequence) - prefixLength,
-					active:   candidate.active,
-					sequence: candidate.sequence,
-				})
-				break
+		case sshTerminalAlternateScreenEscapeAfterEsc:
+			switch value {
+			case '[':
+				parser.escapeMode = sshTerminalAlternateScreenEscapeCSI
+			case 0x1b:
+				parser.resetParameters()
+			default:
+				parser.escapeMode = sshTerminalAlternateScreenEscapeNone
 			}
-		}
-
-		searchFrom := 0
-		for searchFrom < len(data) {
-			index := bytes.Index(data[searchFrom:], candidate.sequence)
-			if index < 0 {
-				break
+		case sshTerminalAlternateScreenEscapeCSI:
+			switch value {
+			case '?':
+				parser.escapeMode = sshTerminalAlternateScreenEscapeParameters
+				parser.resetParameters()
+			case 0x1b:
+				parser.escapeMode = sshTerminalAlternateScreenEscapeAfterEsc
+				parser.resetParameters()
+			default:
+				parser.escapeMode = sshTerminalAlternateScreenEscapeNone
 			}
-			start := searchFrom + index
-			end := start + len(candidate.sequence)
-			transitions = append(transitions, sshTerminalAlternateScreenTransition{
-				end:      end,
-				active:   candidate.active,
-				sequence: candidate.sequence,
-			})
-			searchFrom = start + 1
+		case sshTerminalAlternateScreenEscapeParameters:
+			switch {
+			case value >= '0' && value <= '9':
+				parser.appendParameterDigit(value)
+			case value == ';':
+				parser.finishParameter()
+			case value == 'h' || value == 'l':
+				parser.finishParameter()
+				active := value == 'h'
+				if sequence := sshAlternateScreenSequence(parser.alternateParameter, active); sequence != nil {
+					transitions = append(transitions, sshTerminalAlternateScreenTransition{
+						end:      index + 1,
+						active:   active,
+						sequence: sequence,
+					})
+				}
+				parser.escapeMode = sshTerminalAlternateScreenEscapeNone
+				parser.resetParameters()
+			case value == 0x1b:
+				parser.escapeMode = sshTerminalAlternateScreenEscapeAfterEsc
+				parser.resetParameters()
+			default:
+				parser.escapeMode = sshTerminalAlternateScreenEscapeNone
+				parser.resetParameters()
+			}
 		}
 	}
-	sort.Slice(transitions, func(left, right int) bool {
-		return transitions[left].end < transitions[right].end
-	})
-	terminal.controlTail = terminalTail(terminal.controlTail, data, 16)
 	return transitions
+}
+
+func (parser *sshTerminalAlternateScreenParser) resetParameters() {
+	parser.parameter = 0
+	parser.parameterSeen = false
+	parser.alternateParameter = 0
+}
+
+func (parser *sshTerminalAlternateScreenParser) appendParameterDigit(value byte) {
+	digit := int(value - '0')
+	if parser.parameter > (1049-digit)/10 {
+		parser.parameter = 1050
+	} else {
+		parser.parameter = parser.parameter*10 + digit
+	}
+	parser.parameterSeen = true
+}
+
+func (parser *sshTerminalAlternateScreenParser) finishParameter() {
+	if parser.parameterSeen && parser.alternateParameter == 0 {
+		if sshAlternateScreenSequence(parser.parameter, true) != nil {
+			parser.alternateParameter = parser.parameter
+		}
+	}
+	parser.parameter = 0
+	parser.parameterSeen = false
+}
+
+func sshAlternateScreenSequence(parameter int, active bool) []byte {
+	for _, mode := range sshAlternateScreenModes {
+		if mode.parameter != parameter {
+			continue
+		}
+		if active {
+			return mode.enter
+		}
+		return mode.exit
+	}
+	return nil
 }
 
 func terminalTail(previous, data []byte, limit int) []byte {
