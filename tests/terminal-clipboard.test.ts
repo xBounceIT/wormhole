@@ -1,5 +1,11 @@
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { createRequire } from 'node:module';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
+import { promisify } from 'node:util';
 import {
   encodeTerminalClipboardText,
   isEncodedSshInput,
@@ -12,6 +18,11 @@ import {
   shouldUseTerminalClipboardShortcut,
 } from '../src/terminal-clipboard.ts';
 import { terminalVisibleScrollback } from '../src/terminal-frame.ts';
+
+const appSource = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+const require = createRequire(import.meta.url);
+const electronExecutable = require('electron') as string;
+const execFileAsync = promisify(execFile);
 
 const shortcut = (
   key: string,
@@ -123,4 +134,75 @@ test('alternate-screen applications hide retained scrollback', () => {
     }),
     undefined,
   );
+});
+
+test('styled runs remain inline and preserve spaces when Chromium copies a terminal row', () => {
+  const terminalGridSource = appSource.slice(
+    appSource.indexOf('const TerminalScrollback'),
+    appSource.indexOf('function terminalCsiWithModifier'),
+  );
+
+  assert.equal(terminalGridSource.match(/inline-block overflow-hidden align-top/g)?.length, 2);
+  assert.equal(
+    terminalGridSource.match(/className="h-\[18px\] min-w-max whitespace-pre"/g)?.length,
+    2,
+  );
+  assert.doesNotMatch(terminalGridSource, /className=(?:"|{`)[^"`]*block flex-none/);
+});
+
+test('Chromium keeps styled runs on one clipboard line and separates real terminal rows', async () => {
+  const temporaryDirectory = mkdtempSync(join(tmpdir(), 'wormhole-terminal-clipboard-'));
+  const harnessPath = join(temporaryDirectory, 'selection.cjs');
+  const { ELECTRON_RUN_AS_NODE: _electronRunAsNode, ...environment } = process.env;
+  try {
+    writeFileSync(
+      harnessPath,
+      String.raw`
+const assert = require('node:assert/strict');
+const { app, BrowserWindow } = require('electron');
+
+const html = encodeURIComponent('<style>.row{display:block;white-space:pre}.run{display:inline-block;overflow:hidden;vertical-align:top}</style><div id="terminal"><div class="row"><span class="run" style="color:white">docker stack deploy -c </span><span class="run" style="color:red">portainer-agent-stack.yml </span><span class="run" style="color:red">portainer</span></div><div class="row"><span class="run">printf done</span></div></div>');
+
+app.whenReady().then(async () => {
+  const window = new BrowserWindow({ show: false });
+  try {
+    await window.loadURL('data:text/html;charset=utf-8,' + html);
+    const selectedText = await window.webContents.executeJavaScript(
+      "const range=document.createRange();range.selectNodeContents(document.getElementById('terminal'));const selection=window.getSelection();selection.removeAllRanges();selection.addRange(range);selection.toString()",
+    );
+    assert.equal(
+      selectedText,
+      'docker stack deploy -c portainer-agent-stack.yml portainer\nprintf done',
+    );
+  } finally {
+    window.destroy();
+  }
+  app.quit();
+}).catch((error) => {
+  console.error(error);
+  app.exit(1);
+});
+`,
+      'utf8',
+    );
+
+    const needsVirtualDisplay = process.platform === 'linux' && !environment.DISPLAY;
+    const executable = needsVirtualDisplay ? 'xvfb-run' : electronExecutable;
+    const arguments_ = needsVirtualDisplay
+      ? [
+          '--auto-servernum',
+          electronExecutable,
+          '--no-sandbox', // Safe for this local data-URL test; npm's binary has no SUID helper.
+          harnessPath,
+        ]
+      : [harnessPath];
+
+    await execFileAsync(executable, arguments_, {
+      env: environment,
+      timeout: 30_000,
+      windowsHide: true,
+    });
+  } finally {
+    rmSync(temporaryDirectory, { force: true, recursive: true });
+  }
 });

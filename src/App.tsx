@@ -8547,10 +8547,10 @@ const TerminalScrollback = memo(function TerminalScrollback({
                 },
               ];
           return (
-            <div className="flex h-[18px] min-w-max whitespace-pre" key={start + index}>
+            <div className="h-[18px] min-w-max whitespace-pre" key={start + index}>
               {runs.map((run, runIndex) => (
                 <span
-                  className="block flex-none overflow-hidden"
+                  className="inline-block overflow-hidden align-top"
                   key={`${start + index}-${runIndex}`}
                   style={{
                     backgroundColor: terminalColor(run.background, '#090909'),
@@ -8596,10 +8596,10 @@ const TerminalTextGrid = memo(function TerminalTextGrid({
     >
       <TerminalScrollback lines={terminalVisibleScrollback(frame)} />
       {Array.from({ length: frame.rows }, (_, row) => (
-        <div className="flex h-[18px] min-w-max whitespace-pre" key={row}>
+        <div className="h-[18px] min-w-max whitespace-pre" key={row}>
           {terminalTextRuns(frame, row).map((run, index) => (
             <span
-              className={`block flex-none overflow-hidden ${run.cursor ? 'terminal-cursor' : ''}`}
+              className={`inline-block overflow-hidden align-top ${run.cursor ? 'terminal-cursor' : ''}`}
               key={`${row}-${index}`}
               style={{
                 backgroundColor: run.background,
