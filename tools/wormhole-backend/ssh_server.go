@@ -65,6 +65,23 @@ type sshHostKeyMismatchError struct {
 	received string
 }
 
+type terminalSSHHostKeyTrustError struct {
+	message string
+}
+
+func (err *terminalSSHHostKeyTrustError) Error() string {
+	return err.message
+}
+
+func newTerminalSSHHostKeyTrustError(message string) error {
+	return &terminalSSHHostKeyTrustError{message: message}
+}
+
+func isTerminalSSHHostKeyTrustError(err error) bool {
+	var terminal *terminalSSHHostKeyTrustError
+	return errors.As(err, &terminal)
+}
+
 func (err *sshHostKeyMismatchError) Error() string {
 	return fmt.Sprintf(
 		"SSH host key mismatch (expected %s, received %s)",
@@ -710,7 +727,12 @@ func (server *sshServer) trustHostKeyAndReconnect(
 		trustFingerprint = trustSSHFingerprint
 	}
 	if err := trustFingerprint(server.databasePath, request); err != nil {
-		server.finishHostKeyTrustFailure(state, safeSSHError(err), request.Expected, request.Received)
+		message := safeSSHError(err)
+		if isTerminalSSHHostKeyTrustError(err) {
+			server.finishTerminalHostKeyTrustFailure(state, message)
+		} else {
+			server.finishHostKeyTrustFailure(state, message, request.Expected, request.Received)
+		}
 		return
 	}
 	server.connectSSH(ctx, state, true)
@@ -1018,6 +1040,16 @@ func (server *sshServer) finishHostKeyTrustFailure(
 	delete(server.pending, sessionID)
 	server.writeHostKeyMismatchErrorLocked(sessionID, message, expected, received)
 	return true
+}
+
+func (server *sshServer) finishTerminalHostKeyTrustFailure(
+	state *sshReconnectState,
+	message string,
+) bool {
+	sessionID := state.commandSnapshot().SessionID
+	return server.finishInitialFailure(state, nil, &sshWireEvent{
+		Type: "error", SessionID: sessionID, Error: message,
+	})
 }
 
 func (server *sshServer) promote(
@@ -3958,18 +3990,20 @@ func persistSSHFingerprint(databasePath, nodeID, fingerprint string) error {
 func trustSSHFingerprint(databasePath string, request sshHostKeyTrustRequest) error {
 	nodeID := strings.TrimSpace(request.NodeID)
 	if nodeID == "" || len(nodeID) > 128 {
-		return errors.New("SSH connection id is invalid")
+		return newTerminalSSHHostKeyTrustError("SSH connection id is invalid")
 	}
 	expected, err := normalizeSSHFingerprint(request.Expected)
 	if err != nil {
-		return fmt.Errorf("expected SSH fingerprint is invalid: %w", err)
+		return newTerminalSSHHostKeyTrustError("expected SSH fingerprint is invalid: " + err.Error())
 	}
 	received, err := normalizeSSHFingerprint(request.Received)
 	if err != nil {
-		return fmt.Errorf("received SSH fingerprint is invalid: %w", err)
+		return newTerminalSSHHostKeyTrustError("received SSH fingerprint is invalid: " + err.Error())
 	}
 	if expected == received {
-		return errors.New("the new SSH fingerprint must differ from the saved fingerprint")
+		return newTerminalSSHHostKeyTrustError(
+			"the new SSH fingerprint must differ from the saved fingerprint",
+		)
 	}
 
 	database, err := openDatabase(databasePath, false)
@@ -3982,14 +4016,16 @@ func trustSSHFingerprint(databasePath string, request sshHostKeyTrustRequest) er
 		return err
 	}
 	if _, ok := columns["SshKnownHostFingerprint"]; !ok {
-		return errors.New("SSH fingerprint column is missing")
+		return newTerminalSSHHostKeyTrustError("SSH fingerprint column is missing")
 	}
 	effectiveFingerprint, err := loadEffectiveSSHFingerprint(database, nodeID, columns)
 	if err != nil {
 		return err
 	}
 	if effectiveFingerprint != expected {
-		return errors.New("SSH host fingerprint changed; reload the connection before trusting it")
+		return newTerminalSSHHostKeyTrustError(
+			"SSH host fingerprint changed; reload the connection before trusting it",
+		)
 	}
 	result, err := database.Exec(
 		"UPDATE Nodes SET SshKnownHostFingerprint = ?, UpdatedAt = ? WHERE lower(Id) = ? AND (COALESCE(TRIM(SshKnownHostFingerprint), '') = '' OR TRIM(SshKnownHostFingerprint) = ?);",
@@ -4015,13 +4051,15 @@ func trustSSHFingerprint(databasePath string, request sshHostKeyTrustRequest) er
 		normalizeID(nodeID),
 	).Scan(&current)
 	if errors.Is(err, sql.ErrNoRows) {
-		return errors.New("SSH connection was not found")
+		return newTerminalSSHHostKeyTrustError("SSH connection was not found")
 	}
 	if err != nil {
 		return err
 	}
 	if strings.TrimSpace(nullableString(current)) != expected {
-		return errors.New("SSH host fingerprint changed; reload the connection before trusting it")
+		return newTerminalSSHHostKeyTrustError(
+			"SSH host fingerprint changed; reload the connection before trusting it",
+		)
 	}
 	return errors.New("SSH host fingerprint could not be updated")
 }
@@ -4039,7 +4077,7 @@ func loadEffectiveSSHFingerprint(
 	seen := make(map[string]struct{})
 	for currentID != "" {
 		if _, duplicate := seen[currentID]; duplicate {
-			return "", errors.New("SSH connection tree contains a cycle")
+			return "", newTerminalSSHHostKeyTrustError("SSH connection tree contains a cycle")
 		}
 		seen[currentID] = struct{}{}
 
@@ -4049,7 +4087,7 @@ func loadEffectiveSSHFingerprint(
 			currentID,
 		).Scan(&parentID, &fingerprint)
 		if errors.Is(err, sql.ErrNoRows) {
-			return "", errors.New("SSH connection was not found")
+			return "", newTerminalSSHHostKeyTrustError("SSH connection was not found")
 		}
 		if err != nil {
 			return "", err

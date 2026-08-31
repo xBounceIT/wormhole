@@ -1376,6 +1376,64 @@ func TestSSHHostKeyTrustFailureKeepsTheValidatedMismatchRetryable(t *testing.T) 
 	server.close("session")
 }
 
+func TestSSHHostKeyTrustPermanentFailureReleasesTheRetainedRoute(t *testing.T) {
+	var output synchronizedBuffer
+	server := newSSHTestServer(&output)
+	server.openSSH = func(context.Context, *sshReconnectState) (*sshNativeSession, sshTarget, error) {
+		return nil, sshTarget{}, &sshHostKeyMismatchError{
+			expected: testSSHExpectedFingerprint,
+			received: testSSHReceivedFingerprint,
+		}
+	}
+	server.trustFingerprint = func(string, sshHostKeyTrustRequest) error {
+		return newTerminalSSHHostKeyTrustError("SSH connection was not found")
+	}
+	server.open(sshWireCommand{
+		Type: "open", SessionID: "session", NodeID: "node", SocksEndpoint: "127.0.0.1:49152",
+		PasswordOverride: "secret",
+	})
+	waitForSSHTestCondition(t, "retained host-key mismatch", func() bool {
+		server.mu.Lock()
+		defer server.mu.Unlock()
+		return server.lifecycles["session"] != nil && server.pending["session"] == nil
+	})
+	server.mu.Lock()
+	retainedState := server.lifecycles["session"]
+	server.mu.Unlock()
+	server.handle(sshWireCommand{
+		Type: "host-key-trust", SessionID: "session", NodeID: "node",
+		HostKeyExpected: testSSHExpectedFingerprint, HostKeyReceived: testSSHReceivedFingerprint,
+	})
+	waitForSSHTestCondition(t, "terminal trust failure", func() bool {
+		return strings.Count(output.String(), `"type":"error"`) == 2
+	})
+	server.mu.Lock()
+	state := server.lifecycles["session"]
+	_, pending := server.pending["session"]
+	server.mu.Unlock()
+	if state != nil || pending || retainedState == nil || retainedState.commandSnapshot().PasswordOverride != "" {
+		t.Fatalf(
+			"terminal trust failure retained lifecycle state=%#v pending=%t passwordCleared=%t",
+			state,
+			pending,
+			retainedState != nil && retainedState.commandSnapshot().PasswordOverride == "",
+		)
+	}
+
+	decoder := json.NewDecoder(bytes.NewReader(output.Bytes()))
+	var initial, failed sshWireEvent
+	if err := decoder.Decode(&initial); err != nil {
+		t.Fatal(err)
+	}
+	if err := decoder.Decode(&failed); err != nil {
+		t.Fatal(err)
+	}
+	if failed.Error != "SSH connection was not found" ||
+		failed.HostKeyExpected != "" || failed.HostKeyReceived != "" || failed.RetainTunnelLease {
+		t.Fatalf("terminal trust failure event = %#v", failed)
+	}
+}
+
 func TestSSHHostKeyMismatchEventIsSerializedBeforeConcurrentAppLockCleanup(t *testing.T) {
 	writer := &blockingFirstSSHEventWrite{
 		started: make(chan struct{}),
@@ -2635,8 +2693,38 @@ VALUES ('node', 'SHA256:KfNRucV0MaZ9lkCIfmHHZgcCsxJrf3frwycqo2/cw9k', 'now');
 		Expected: "SHA256:rjnaNoqbDUI5dQiifXn9cdTeEZ0dRAD/TTLe6sBbOiw",
 		Received: "SHA256:KfNRucV0MaZ9lkCIfmHHZgcCsxJrf3frwycqo2/cw9k",
 	})
-	if err == nil || !strings.Contains(err.Error(), "fingerprint changed") {
+	if err == nil || !isTerminalSSHHostKeyTrustError(err) ||
+		!strings.Contains(err.Error(), "fingerprint changed") {
 		t.Fatalf("expected stale-pin rejection, got %v", err)
+	}
+}
+
+func TestTrustSSHFingerprintTreatsDeletedNodeAsTerminal(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = database.Exec(`
+CREATE TABLE Nodes (
+    Id TEXT PRIMARY KEY NOT NULL,
+    SshKnownHostFingerprint TEXT NULL,
+    UpdatedAt TEXT NOT NULL
+);
+`)
+	database.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = trustSSHFingerprint(databasePath, sshHostKeyTrustRequest{
+		NodeID:   "deleted-node",
+		Expected: testSSHExpectedFingerprint,
+		Received: testSSHReceivedFingerprint,
+	})
+	if err == nil || !isTerminalSSHHostKeyTrustError(err) ||
+		!strings.Contains(err.Error(), "not found") {
+		t.Fatalf("expected deleted-node terminal rejection, got %v", err)
 	}
 }
 
