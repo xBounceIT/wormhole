@@ -348,7 +348,17 @@ test('MCP approval restores and foregrounds the Wormhole window before notifying
   assert.ok(closeBitwardenWindows >= 0 && closeBitwardenWindows < foreground);
   assert.ok(foreground >= 0 && foreground < notification);
   assert.match(approvalCancellationHandler, /finishApproval\(mcpMessage\.requestId\)/);
-  assert.match(approvalCancellationHandler, /window\.webContents\.send\('mcp:approval'/);
+  assert.match(
+    approvalCancellationHandler,
+    /broadcastMcpApprovalCancellation\(mcpMessage\.requestId\)/,
+  );
+
+  const approvalCancellationBroadcast = mainSource.slice(
+    mainSource.indexOf('private broadcastMcpApprovalCancellation'),
+    mainSource.indexOf('private failOpenWaiters'),
+  );
+  assert.match(approvalCancellationBroadcast, /windowCloseCoordinators\.has\(window\)/);
+  assert.match(approvalCancellationBroadcast, /window\.webContents\.send\('mcp:approval', event\)/);
 
   const windowsHelloHandler = mainSource.slice(
     mainSource.indexOf("ipcMain.handle('auth:hello-verify'"),
@@ -444,12 +454,18 @@ test('MCP approval restores and foregrounds the Wormhole window before notifying
       mainSource.indexOf('async dispose(): Promise<void>'),
     ),
   );
+  const backendExit = mainSource.slice(
+    mainSource.indexOf("child.on('exit'"),
+    mainSource.indexOf('private write(command:', mainSource.indexOf("child.on('exit'")),
+  );
   assert.doesNotMatch(tunnelAuth, /\bmodal\s*:/);
   assert.match(tunnelAuth, /presentTunnelAuthWindow\(authWindow\)/);
   assert.match(tunnelAuth, /forgetTunnelAuthWindow\(authWindow\)/);
   assert.match(approvalResponse, /finishApproval\(approval\.requestId\)/);
   assert.match(lockPreparation, /mcpApprovalWindowCoordinator\.reset\(\)/);
   assert.match(backendDisposal, /mcpApprovalWindowCoordinator\.reset\(\)/);
+  assert.match(backendExit, /for \(const requestId of mcpApprovalWindowCoordinator\.reset\(\)\)/);
+  assert.match(backendExit, /this\.broadcastMcpApprovalCancellation\(requestId\)/);
 
   const bitwardenPopupOpen = mainSource.slice(
     mainSource.indexOf("ipcMain.handle('web:bitwarden-popup-open'"),
@@ -510,7 +526,7 @@ test('MCP approval temporarily preempts tunnel browser authentication windows', 
   coordinator.beginApproval('approval-3');
   assert.deepEqual(queuedAuth.calls, ['show', 'focus']);
 
-  coordinator.reset();
+  assert.deepEqual(coordinator.reset(), ['approval-3']);
   assert.equal(coordinator.hasPendingApprovals, false);
   assert.deepEqual(activeAuth.calls, ['show', 'hide', 'hide', 'show', 'focus', 'hide', 'destroy']);
 

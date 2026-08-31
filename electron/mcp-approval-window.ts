@@ -139,7 +139,8 @@ export class McpApprovalWindowCoordinator<TWindow extends McpApprovalBlockingWin
     }
   }
 
-  reset(): void {
+  reset(): string[] {
+    const cancelledApprovalIds = [...this.pendingApprovalIds];
     void this.cancelPreemptibleOperations();
     this.pendingApprovalIds.clear();
     this.deferredPresentations.clear();
@@ -147,6 +148,7 @@ export class McpApprovalWindowCoordinator<TWindow extends McpApprovalBlockingWin
       if (isUsableWindow(window)) attemptWindowAction(() => window.destroy());
     }
     this.tunnelAuthWindows.clear();
+    return cancelledApprovalIds;
   }
 
   private async cancelPreemptibleOperations(): Promise<void> {

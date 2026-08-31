@@ -6400,6 +6400,9 @@ class NativeSshBackend {
       const failure = new Error('SSH service stopped.');
       this.failOpenWaiters(failure);
       this.failControlWaiters(failure);
+      for (const requestId of mcpApprovalWindowCoordinator.reset()) {
+        this.broadcastMcpApprovalCancellation(requestId);
+      }
       void this.tunnelLeases.releaseAll(releaseNativeTunnelLease);
     });
   }
@@ -6451,11 +6454,7 @@ class NativeSshBackend {
     }
     if (mcpMessage?.type === 'mcp.approval-cancelled') {
       mcpApprovalWindowCoordinator.finishApproval(mcpMessage.requestId);
-      for (const window of BrowserWindow.getAllWindows()) {
-        if (!window.isDestroyed() && windowCloseCoordinators.has(window)) {
-          window.webContents.send('mcp:approval', mcpMessage);
-        }
-      }
+      this.broadcastMcpApprovalCancellation(mcpMessage.requestId);
       return;
     }
     if (mcpMessage?.type === 'mcp.approval') {
@@ -6545,6 +6544,15 @@ class NativeSshBackend {
     }
     for (const window of BrowserWindow.getAllWindows()) {
       if (!window.isDestroyed()) window.webContents.send('ssh:event', event);
+    }
+  }
+
+  private broadcastMcpApprovalCancellation(requestId: string): void {
+    const event: McpApprovalCancelledEvent = { type: 'mcp.approval-cancelled', requestId };
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (!window.isDestroyed() && windowCloseCoordinators.has(window)) {
+        window.webContents.send('mcp:approval', event);
+      }
     }
   }
 
