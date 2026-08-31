@@ -697,8 +697,10 @@ test('window teardown flushes browser state before sessions and still releases s
 });
 
 test('sidebar values clamp and resize writes debounce', async () => {
+  assert.equal(minSidebarWidth, 256);
   assert.equal(normalizeSidebarWidth(undefined), defaultSidebarWidth);
   assert.equal(normalizeSidebarWidth(-1), minSidebarWidth);
+  assert.equal(normalizeSidebarWidth(180), minSidebarWidth);
   assert.equal(normalizeSidebarWidth(9999), maxSidebarWidth);
   const callbacks: Array<() => void> = [];
   const writes: number[] = [];
