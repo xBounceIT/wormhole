@@ -24,6 +24,7 @@ import wormholeIcon from '../Assets/Wormhole.png';
 import bitwardenIcon from '../Assets/Bitwarden/bitwarden-icon.png';
 import {
   buildConnectionCredentialSelectionOptions,
+  connectionEditorCredentialSelectionIsComplete,
   connectionCredentialSelectionAfterSavedToggle,
   connectionInlinePasswordAction,
   connectionInlinePasswordPlaceholder,
@@ -32,6 +33,7 @@ import {
   credentialSelectionAfterSelectAll,
   credentialCanUseProtocol,
   effectiveSshAutoSudoMode,
+  isCredentialProtocol,
   mergeCredential,
   sshAutoSudoAvailable,
   type CredentialKind,
@@ -193,6 +195,7 @@ import {
   ContextMenuItem,
   ContextMenuSeparator,
   ContextMenuTrigger,
+  useContextMenuOverlayOpen,
 } from '@/components/ui/context-menu';
 import {
   Dialog,
@@ -712,6 +715,8 @@ type CredentialOptionGroups = Record<CredentialProtocol, CredentialRecord[]>;
 const manualCredentialSelectionValue = '__manual__';
 const bitwardenCredentialCreationError =
   'Bitwarden credential profiles cannot be created manually.';
+const connectionCredentialSelectionError =
+  'Select a saved credential before saving the connection.';
 const credentialSourceFilterOptions: ReadonlyArray<{
   value: CredentialSourceFilter;
   label: string;
@@ -733,10 +738,6 @@ function workspaceCredentialOptions(workspace: WormholeWorkspaceSnapshot): Crede
       credentialCanUseProtocol(credential.kind, 'vnc'),
     ),
   };
-}
-
-function isCredentialProtocol(protocol: Protocol): protocol is CredentialProtocol {
-  return protocol === 'ssh' || protocol === 'rdp' || protocol === 'vnc';
 }
 
 function mergeCredentialOption(
@@ -1692,6 +1693,7 @@ function backupOperationErrorMessage(error: unknown): string {
 function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAppProps) {
   const [theme, setTheme] = useState<Theme>(initialSettings.theme);
   const [systemTheme, setSystemTheme] = useState<ResolvedTheme>(getSystemTheme);
+  const contextMenuOverlayOpen = useContextMenuOverlayOpen();
   const [tree, setTree] = useState<TreeNode[]>(initialWorkspace.tree);
   const connectionTreeIndex = useMemo(() => indexConnectionTree(tree), [tree]);
   const treeRef = useRef(tree);
@@ -1985,12 +1987,22 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     ],
     [folders],
   );
+  const connectionCredentialProtocol = isCredentialProtocol(newConnectionForm.protocol)
+    ? newConnectionForm.protocol
+    : undefined;
+  const connectionProtocolSupportsSavedCredentials = connectionCredentialProtocol !== undefined;
   const connectionCredentialSelectionOptions = useMemo<SearchableComboboxOption[]>(() => {
-    const options = isCredentialProtocol(newConnectionForm.protocol)
-      ? credentialOptions[newConnectionForm.protocol]
+    const options = connectionCredentialProtocol
+      ? credentialOptions[connectionCredentialProtocol]
       : [];
     return buildConnectionCredentialSelectionOptions(options, connectionEditorMode === 'saved');
-  }, [connectionEditorMode, credentialOptions, newConnectionForm.protocol]);
+  }, [connectionEditorMode, connectionCredentialProtocol, credentialOptions]);
+  const connectionEditorCredentialSelectionComplete = connectionEditorCredentialSelectionIsComplete(
+    connectionEditorMode,
+    connectionProtocolSupportsSavedCredentials,
+    newConnectionForm.useSavedCredentials,
+    newConnectionForm.credential,
+  );
   const selectedConnectionCredential = useMemo(() => {
     const selection = newConnectionForm.credential;
     if (selection === 'inherit' || selection === 'none') return undefined;
@@ -5633,6 +5645,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   async function submitNewConnection(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (editorBusy) return;
+    if (!connectionEditorCredentialSelectionComplete) {
+      setEditorError(connectionCredentialSelectionError);
+      return;
+    }
     const name = newConnectionForm.name.trim();
     const host = newConnectionForm.host.trim();
     const portText = newConnectionForm.port.trim();
@@ -6732,6 +6748,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                   isAuthorized={authGate === 'unlocked'}
                   isWebSurfaceVisible={
                     mcpApprovals.length === 0 &&
+                    !contextMenuOverlayOpen &&
                     !newConnectionOpen &&
                     !folderDetailsOpen &&
                     !newFolderOpen &&
@@ -7252,6 +7269,11 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                               searchPlaceholder="Search credentials…"
                               value={newConnectionForm.credential}
                             />
+                            {!connectionEditorCredentialSelectionComplete ? (
+                              <p className="text-[11px] text-destructive" role="alert">
+                                {connectionCredentialSelectionError}
+                              </p>
+                            ) : null}
                           </div>
                         ) : null}
                       </div>
@@ -8012,7 +8034,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                 >
                   Cancel
                 </Button>
-                <Button disabled={editorBusy} type="submit">
+                <Button
+                  disabled={editorBusy || !connectionEditorCredentialSelectionComplete}
+                  type="submit"
+                >
                   {connectionEditorMode !== 'quick' &&
                     (editingConnectionId ? (
                       <Check data-icon="inline-start" />

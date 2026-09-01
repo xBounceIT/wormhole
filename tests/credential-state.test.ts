@@ -5,6 +5,7 @@ import test from 'node:test';
 import {
   buildCredentialListProjection,
   buildConnectionCredentialSelectionOptions,
+  connectionEditorCredentialSelectionIsComplete,
   connectionCredentialSelectionAfterSavedToggle,
   connectionInlinePasswordAction,
   connectionInlinePasswordPlaceholder,
@@ -13,6 +14,7 @@ import {
   credentialCanUseProtocol,
   effectiveSshAutoSudoMode,
   filterCredentialsBySource,
+  isCredentialProtocol,
   mergeCredential,
   sshAutoSudoAvailable,
 } from '../src/credential-state.ts';
@@ -48,6 +50,14 @@ test('connection credential choices expose inheritance and saved credentials onl
   );
 });
 
+test('credential protocol detection shares the saved-credential allowlist', () => {
+  assert.equal(isCredentialProtocol('ssh'), true);
+  assert.equal(isCredentialProtocol('rdp'), true);
+  assert.equal(isCredentialProtocol('vnc'), true);
+  assert.equal(isCredentialProtocol('https'), false);
+  assert.equal(isCredentialProtocol(''), false);
+});
+
 test('connections without a saved or inline credential reopen with saved credentials disabled', () => {
   assert.equal(connectionUsesSavedCredentials(1, false), false);
   assert.equal(connectionUsesSavedCredentials(1, true), false);
@@ -63,6 +73,54 @@ test('enabling saved credentials replaces the removed connection-only none selec
   assert.equal(
     connectionCredentialSelectionAfterSavedToggle(true, 'saved', 'credential-1'),
     'credential-1',
+  );
+});
+
+test('saved connection forms require a selection without duplicating Go reference validation', () => {
+  assert.equal(connectionEditorCredentialSelectionIsComplete('saved', true, true, 'inherit'), true);
+  assert.equal(
+    connectionEditorCredentialSelectionIsComplete('saved', true, true, ' credential-1 '),
+    true,
+  );
+  assert.equal(connectionEditorCredentialSelectionIsComplete('saved', true, true, 'none'), false);
+  assert.equal(
+    connectionEditorCredentialSelectionIsComplete('saved', true, true, 'deleted-credential'),
+    true,
+  );
+  assert.equal(connectionEditorCredentialSelectionIsComplete('saved', true, true, ''), false);
+  assert.equal(connectionEditorCredentialSelectionIsComplete('saved', true, false, 'none'), true);
+  assert.equal(connectionEditorCredentialSelectionIsComplete('saved', false, true, 'none'), true);
+  assert.equal(connectionEditorCredentialSelectionIsComplete('quick', true, true, 'none'), true);
+});
+
+test('saved connection form blocks missing credential selections before workspace writes', () => {
+  const submitStart = appSource.indexOf('async function submitNewConnection');
+  const submitEnd = appSource.indexOf('async function submitFolderDetails', submitStart);
+  const submitSource = appSource.slice(submitStart, submitEnd);
+  const credentialFieldStart = appSource.indexOf('id="connection-credential"');
+  const credentialFieldEnd = appSource.indexOf(
+    '{!newConnectionForm.useSavedCredentials &&',
+    credentialFieldStart,
+  );
+  const credentialFieldSource = appSource.slice(credentialFieldStart, credentialFieldEnd);
+
+  assert.ok(
+    submitStart >= 0 &&
+      submitEnd > submitStart &&
+      credentialFieldStart >= 0 &&
+      credentialFieldEnd > credentialFieldStart,
+  );
+  assert.match(
+    submitSource,
+    /if \(!connectionEditorCredentialSelectionComplete\)[\s\S]*?return;[\s\S]*?updateWorkspaceNode/,
+  );
+  assert.match(
+    appSource,
+    /disabled=\{editorBusy \|\| !connectionEditorCredentialSelectionComplete\}/,
+  );
+  assert.match(
+    credentialFieldSource,
+    /!connectionEditorCredentialSelectionComplete[\s\S]*?connectionCredentialSelectionError/,
   );
 });
 

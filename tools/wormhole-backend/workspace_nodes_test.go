@@ -512,6 +512,19 @@ func TestWorkspaceNodeUpdateIsAtomicWhenCredentialProtocolDoesNotMatch(t *testin
 	}
 }
 
+func TestWorkspaceNodeWriteRejectsMissingCredential(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	createWorkspaceNodeTestSchema(t, databasePath)
+
+	_, err := createWorkspaceNode(databasePath, workspaceNodeWriteRequest{
+		Name: "Missing credential", Kind: "connection", Protocol: "ssh", Host: "host.example",
+		CredentialMode: 2, CredentialID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+	})
+	if err == nil || err.Error() != "selected credential was not found" {
+		t.Fatalf("missing credential error = %v", err)
+	}
+}
+
 func TestWorkspaceNodeWriteRejectsCredentialKindsUnsupportedByConnectionProtocol(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
 	createWorkspaceNodeTestSchema(t, databasePath)
