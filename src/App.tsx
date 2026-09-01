@@ -193,6 +193,7 @@ import {
   ContextMenuItem,
   ContextMenuSeparator,
   ContextMenuTrigger,
+  useContextMenuOverlayOpen,
 } from '@/components/ui/context-menu';
 import {
   Dialog,
@@ -1690,6 +1691,7 @@ function backupOperationErrorMessage(error: unknown): string {
 function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAppProps) {
   const [theme, setTheme] = useState<Theme>(initialSettings.theme);
   const [systemTheme, setSystemTheme] = useState<ResolvedTheme>(getSystemTheme);
+  const contextMenuOverlayOpen = useContextMenuOverlayOpen();
   const [tree, setTree] = useState<TreeNode[]>(initialWorkspace.tree);
   const connectionTreeIndex = useMemo(() => indexConnectionTree(tree), [tree]);
   const treeRef = useRef(tree);
@@ -6730,6 +6732,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                   isAuthorized={authGate === 'unlocked'}
                   isWebSurfaceVisible={
                     mcpApprovals.length === 0 &&
+                    !contextMenuOverlayOpen &&
                     !newConnectionOpen &&
                     !folderDetailsOpen &&
                     !newFolderOpen &&

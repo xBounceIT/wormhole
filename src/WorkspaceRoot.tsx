@@ -1,6 +1,7 @@
 import { StrictMode, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import App from './App';
+import { ContextMenuOverlayProvider } from './components/ui/context-menu';
 
 type WorkspaceAppProps = {
   initialAuthState: WormholeAuthState;
@@ -19,7 +20,9 @@ export function mountWorkspaceApp(container: HTMLElement, props: WorkspaceAppPro
   const workspaceRoot = createRoot(container);
   workspaceRoot.render(
     <StrictMode>
-      <WorkspaceApp {...props} />
+      <ContextMenuOverlayProvider>
+        <WorkspaceApp {...props} />
+      </ContextMenuOverlayProvider>
     </StrictMode>,
   );
 }
