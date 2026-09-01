@@ -245,27 +245,39 @@ func TestTunnelSummaryProjectionIncludesEndpointWithoutSecrets(t *testing.T) {
 	if created.Endpoint != "wg.example.test:51820" {
 		t.Fatalf("created endpoint = %q", created.Endpoint)
 	}
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(
+		"UPDATE TunnelConfigs SET Id = ? WHERE Id = ?;",
+		strings.ToUpper(created.ID), created.ID,
+	); err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	database.Close()
 
 	read, err := readTunnel(databasePath, tunnelReadRequest{ID: created.ID})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if read.Endpoint != created.Endpoint {
-		t.Fatalf("read endpoint = %q, want %q", read.Endpoint, created.Endpoint)
+	if read.ID != created.ID || read.Endpoint != created.Endpoint {
+		t.Fatalf("read tunnel = %#v, want canonical id %q and endpoint %q", read, created.ID, created.Endpoint)
 	}
 
 	workspace, err := loadWorkspace(databasePath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(workspace.Tunnels) != 1 || workspace.Tunnels[0].Endpoint != "" {
+	if len(workspace.Tunnels) != 1 || workspace.Tunnels[0].ID != created.ID || workspace.Tunnels[0].Endpoint != "" {
 		t.Fatalf("workspace tunnels = %#v", workspace.Tunnels)
 	}
 	summaries, err := loadTunnelSummaries(databasePath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(summaries) != 1 || summaries[0].Endpoint != created.Endpoint {
+	if len(summaries) != 1 || summaries[0].ID != created.ID || summaries[0].Endpoint != created.Endpoint {
 		t.Fatalf("tunnel summaries = %#v", summaries)
 	}
 	encoded, err := json.Marshal(summaries)

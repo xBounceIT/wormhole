@@ -304,6 +304,7 @@ func readTunnelUnlocked(databasePath string, request tunnelReadRequest) (tunnelD
 		}
 		return tunnelDetails{}, fmt.Errorf("could not read VPN tunnel: %w", err)
 	}
+	result.ID = id
 	settings, err := readTunnelSettings(database, databasePath, result.ID)
 	if err != nil {
 		return tunnelDetails{}, err
