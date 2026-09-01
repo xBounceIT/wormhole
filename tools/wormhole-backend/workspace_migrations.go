@@ -66,6 +66,7 @@ CREATE TABLE IF NOT EXISTS Nodes (
     Protocol                 INTEGER NULL,
     Host                     TEXT NULL,
     Port                     INTEGER NULL,
+    HttpPath                 TEXT NULL,
     Username                 TEXT NULL,
     CredentialId             TEXT NULL,
     RdpDomain                TEXT NULL,
@@ -297,6 +298,14 @@ CREATE INDEX IF NOT EXISTS IX_BitwardenCredentialCache_Name
 			ensure: func(ctx context.Context, connection *sql.Conn) error {
 				_, err := connection.ExecContext(ctx, credentialSecretOperationsTableSQL)
 				return err
+			},
+		},
+		{
+			id: "0018_http_path",
+			ensure: func(ctx context.Context, connection *sql.Conn) error {
+				return ensureWorkspaceColumns(ctx, connection, "Nodes", []workspaceColumn{
+					{"HttpPath", "TEXT NULL"},
+				})
 			},
 		},
 	}

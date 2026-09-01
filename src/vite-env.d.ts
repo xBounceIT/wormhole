@@ -125,6 +125,7 @@ interface WormholeWorkspaceNode {
   hasInlineCredential?: boolean;
   rdp?: WormholeWorkspaceRdpSettings;
   httpIgnoreCertErrors?: boolean;
+  httpPath?: string;
   serialBaudRate?: number;
   serialDataBits?: number;
   serialStopBits?: number;

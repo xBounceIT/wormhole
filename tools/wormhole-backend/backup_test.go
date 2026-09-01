@@ -278,6 +278,47 @@ func TestBackupPlaintextRoundTripIsLegacyCompatible(t *testing.T) {
 	}
 }
 
+func TestBackupRoundTripPreservesWebContextPath(t *testing.T) {
+	installBackupTestSecretStore(t)
+	sourcePath := filepath.Join(t.TempDir(), "source.db")
+	source := openBackupTestDatabase(t, sourcePath)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	webNode := backupTestObject(map[string]any{
+		"id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "name": "Admin", "kind": 1,
+		"sortOrder": 0, "protocol": 4, "host": "appliance.example.test", "port": 8443,
+		"httpPath": "/admin/dashboard?tab=network#routes", "createdAt": now, "updatedAt": now,
+	})
+	if err := insertBackupObject(source, "Nodes", backupNodeColumns, webNode); err != nil {
+		source.Close()
+		t.Fatal(err)
+	}
+	source.Close()
+
+	backupPath := filepath.Join(t.TempDir(), "web-context.json")
+	if _, err := exportBackup(sourcePath, backupRequest{Path: backupPath}); err != nil {
+		t.Fatal(err)
+	}
+	contents, err := os.ReadFile(backupPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(contents, []byte(`"httpPath": "/admin/dashboard?tab=network#routes"`)) {
+		t.Fatalf("web context path was not exported:\n%s", contents)
+	}
+
+	destinationPath := filepath.Join(t.TempDir(), "destination.db")
+	if _, err := importBackup(destinationPath, backupRequest{Path: backupPath}); err != nil {
+		t.Fatal(err)
+	}
+	target, err := resolveWebTarget(destinationPath, webTargetRequest{NodeID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.URL != "https://appliance.example.test:8443/admin/dashboard?tab=network#routes" {
+		t.Fatalf("restored web target = %q", target.URL)
+	}
+}
+
 func TestBackupRequiresEncryptionBeforeReadingSshPrivateKeys(t *testing.T) {
 	installBackupTestSecretStore(t)
 	databasePath := filepath.Join(t.TempDir(), "source.db")

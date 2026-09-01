@@ -106,6 +106,7 @@ type treeNode struct {
 	SerialParity         *int                  `json:"serialParity,omitempty"`
 	SerialFlowControl    *int                  `json:"serialFlowControl,omitempty"`
 	HTTPIgnoreCertErrors *bool                 `json:"httpIgnoreCertErrors,omitempty"`
+	HTTPPath             string                `json:"httpPath,omitempty"`
 	Children             []*treeNode           `json:"children,omitempty"`
 	SshAutoSudo          *bool                 `json:"sshAutoSudo,omitempty"`
 	TunnelEnabled        *bool                 `json:"tunnelEnabled,omitempty"`
@@ -196,6 +197,7 @@ type nodeRow struct {
 	UseInlinePassword    sql.NullInt64
 	SshAutoSudo          sql.NullInt64
 	HTTPIgnoreCertErrors sql.NullInt64
+	HTTPPath             sql.NullString
 	TunnelEnabled        sql.NullInt64
 	TunnelConfigID       sql.NullString
 	CredentialMode       sql.NullInt64
@@ -1467,6 +1469,10 @@ func loadTree(database *sql.DB) ([]*treeNode, error) {
 	if _, ok := columns["HttpIgnoreCertErrors"]; ok {
 		httpIgnoreCertErrorsExpression = "HttpIgnoreCertErrors"
 	}
+	httpPathExpression := "NULL"
+	if _, ok := columns["HttpPath"]; ok {
+		httpPathExpression = "HttpPath"
+	}
 	tunnelEnabledExpression := "NULL"
 	if _, ok := columns["TunnelEnabled"]; ok {
 		tunnelEnabledExpression = "TunnelEnabled"
@@ -1492,7 +1498,7 @@ func loadTree(database *sql.DB) ([]*treeNode, error) {
 		inlinePasswordExpression = "UseInlinePassword"
 	}
 	rows, err := database.Query(`
-SELECT Id, ParentId, Name, Kind, SortOrder, Protocol, Host, ` + portExpression + ` AS Port, ` + usernameExpression + ` AS Username, ` + inlinePasswordExpression + ` AS UseInlinePassword, ` + sshAutoSudoExpression + ` AS SshAutoSudo, ` + httpIgnoreCertErrorsExpression + ` AS HttpIgnoreCertErrors, ` + tunnelEnabledExpression + ` AS TunnelEnabled, ` + tunnelConfigIDExpression + ` AS TunnelConfigId, ` + credentialModeExpression + ` AS CredentialMode, ` + credentialIDExpression + ` AS CredentialId
+SELECT Id, ParentId, Name, Kind, SortOrder, Protocol, Host, ` + portExpression + ` AS Port, ` + usernameExpression + ` AS Username, ` + inlinePasswordExpression + ` AS UseInlinePassword, ` + sshAutoSudoExpression + ` AS SshAutoSudo, ` + httpIgnoreCertErrorsExpression + ` AS HttpIgnoreCertErrors, ` + httpPathExpression + ` AS HttpPath, ` + tunnelEnabledExpression + ` AS TunnelEnabled, ` + tunnelConfigIDExpression + ` AS TunnelConfigId, ` + credentialModeExpression + ` AS CredentialMode, ` + credentialIDExpression + ` AS CredentialId
 FROM Nodes
 ORDER BY SortOrder, Name, Id;`)
 	if err != nil {
@@ -1507,7 +1513,7 @@ ORDER BY SortOrder, Name, Id;`)
 	protocolByID := map[string]sql.NullInt64{}
 	for rows.Next() {
 		var row nodeRow
-		if err := rows.Scan(&row.ID, &row.ParentID, &row.Name, &row.Kind, &row.SortOrder, &row.Protocol, &row.Host, &row.Port, &row.Username, &row.UseInlinePassword, &row.SshAutoSudo, &row.HTTPIgnoreCertErrors, &row.TunnelEnabled, &row.TunnelConfigID, &row.CredentialMode, &row.CredentialID); err != nil {
+		if err := rows.Scan(&row.ID, &row.ParentID, &row.Name, &row.Kind, &row.SortOrder, &row.Protocol, &row.Host, &row.Port, &row.Username, &row.UseInlinePassword, &row.SshAutoSudo, &row.HTTPIgnoreCertErrors, &row.HTTPPath, &row.TunnelEnabled, &row.TunnelConfigID, &row.CredentialMode, &row.CredentialID); err != nil {
 			return nil, fmt.Errorf("cannot read a connection: %w", err)
 		}
 		node := &treeNode{ID: strings.TrimSpace(row.ID), Name: row.Name, Persisted: true}
@@ -1518,6 +1524,9 @@ ORDER BY SortOrder, Name, Id;`)
 		if row.HTTPIgnoreCertErrors.Valid {
 			value := row.HTTPIgnoreCertErrors.Int64 != 0
 			node.HTTPIgnoreCertErrors = &value
+		}
+		if row.HTTPPath.Valid {
+			node.HTTPPath = row.HTTPPath.String
 		}
 		if row.TunnelEnabled.Valid {
 			value := row.TunnelEnabled.Int64 != 0

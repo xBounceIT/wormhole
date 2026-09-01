@@ -27,7 +27,7 @@ func TestEnsureElectronWorkspaceSchemaCreatesWinUICompatibleFreshDatabase(t *tes
 		}
 	}
 	for table, names := range map[string][]string{
-		"Nodes":                          {"CredentialMode", "SshAutoSudo", "HttpIgnoreCertErrors", "SerialFlowControl", "RdpGatewayCredentialId"},
+		"Nodes":                          {"CredentialMode", "SshAutoSudo", "HttpIgnoreCertErrors", "HttpPath", "SerialFlowControl", "RdpGatewayCredentialId"},
 		"CredentialProfiles":             {"Protocol", "SecretProvider", "BitwardenItemId", "BitwardenFieldPath"},
 		"CredentialPrivateKeyOperations": {"CredentialId", "OperationKind", "ProtectedSha256", "CreatedAtUtc"},
 		"CredentialSecretOperations":     {"SecretReference", "CredentialId", "Encoding", "CreatedAtUtc"},
@@ -46,7 +46,7 @@ func TestEnsureElectronWorkspaceSchemaCreatesWinUICompatibleFreshDatabase(t *tes
 	if err := database.QueryRow("SELECT COUNT(*) FROM __migration_history;").Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != 19 {
+	if count != 20 {
 		t.Fatalf("migration history count = %d", count)
 	}
 	if err := ensureElectronWorkspaceSchema(databasePath); err != nil {

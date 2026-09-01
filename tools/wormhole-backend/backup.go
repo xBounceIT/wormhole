@@ -224,6 +224,7 @@ var backupNodeColumns = []backupColumn{
 	{DB: "Protocol", JSON: "protocol", Kind: backupInteger, SQLType: "INTEGER NULL"},
 	{DB: "Host", JSON: "host", Kind: backupString, SQLType: "TEXT NULL"},
 	{DB: "Port", JSON: "port", Kind: backupInteger, SQLType: "INTEGER NULL"},
+	{DB: "HttpPath", JSON: "httpPath", Kind: backupString, SQLType: "TEXT NULL"},
 	{DB: "Username", JSON: "username", Kind: backupString, SQLType: "TEXT NULL"},
 	{DB: "CredentialId", JSON: "credentialId", Kind: backupString, SQLType: "TEXT NULL"},
 	{DB: "CredentialMode", JSON: "credentialMode", Kind: backupInteger, SQLType: "INTEGER NULL"},

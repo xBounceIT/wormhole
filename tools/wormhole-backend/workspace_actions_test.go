@@ -25,6 +25,8 @@ CREATE TABLE Nodes (
     SortOrder INTEGER NOT NULL DEFAULT 0,
     Protocol INTEGER NULL,
     Host TEXT NULL,
+    Port INTEGER NULL,
+    HttpPath TEXT NULL,
     CredentialId TEXT NULL,
     CredentialMode INTEGER NULL,
     UseInlinePassword INTEGER NULL,
@@ -35,13 +37,13 @@ CREATE TABLE Nodes (
     UpdatedAt TEXT NOT NULL
 );
 INSERT INTO Nodes
-    (Id, ParentId, Name, Kind, SortOrder, Protocol, Host, CredentialId, CredentialMode,
+    (Id, ParentId, Name, Kind, SortOrder, Protocol, Host, Port, HttpPath, CredentialId, CredentialMode,
      UseInlinePassword, SshKnownHostFingerprint, TunnelEnabled, TunnelConfigId, CreatedAt, UpdatedAt)
 VALUES
-    ('folder', NULL, 'Servers', 0, 0, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'old', 'old'),
-    ('source', 'folder', 'Production', 1, 2, 0, 'prod.example.test',
+    ('folder', NULL, 'Servers', 0, 0, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'old', 'old'),
+    ('source', 'folder', 'Production', 1, 2, 4, 'prod.example.test', 8443, '/admin?view=status#health',
      'credential-id', 2, 1, 'SHA256:old', 1, 'tunnel-id', 'old', 'old'),
-    ('sibling', 'folder', 'Existing', 1, 8, 0, 'existing.example.test',
+    ('sibling', 'folder', 'Existing', 1, 8, 0, 'existing.example.test', NULL, NULL,
      NULL, NULL, 0, NULL, NULL, NULL, 'old', 'old');`)
 	if err != nil {
 		database.Close()
@@ -62,13 +64,13 @@ VALUES
 		t.Fatal(err)
 	}
 	defer database.Close()
-	var parentID, name, credentialID, fingerprint, tunnelID sql.NullString
-	var kind, sortOrder, inlinePassword, tunnelEnabled int64
+	var parentID, name, httpPath, credentialID, fingerprint, tunnelID sql.NullString
+	var kind, sortOrder, port, inlinePassword, tunnelEnabled int64
 	err = database.QueryRow(`
-SELECT ParentId, Name, Kind, SortOrder, CredentialId, CredentialMode, UseInlinePassword,
+SELECT ParentId, Name, Kind, SortOrder, Port, HttpPath, CredentialId, CredentialMode, UseInlinePassword,
        SshKnownHostFingerprint, TunnelEnabled, TunnelConfigId
 FROM Nodes WHERE Id = ?;`, result.NodeID).Scan(
-		&parentID, &name, &kind, &sortOrder, &credentialID, new(sql.NullInt64), &inlinePassword,
+		&parentID, &name, &kind, &sortOrder, &port, &httpPath, &credentialID, new(sql.NullInt64), &inlinePassword,
 		&fingerprint, &tunnelEnabled, &tunnelID,
 	)
 	if err != nil {
@@ -79,6 +81,9 @@ FROM Nodes WHERE Id = ?;`, result.NodeID).Scan(
 	}
 	if sortOrder != 9 {
 		t.Fatalf("duplicate sort order = %d, want 9", sortOrder)
+	}
+	if port != 8443 || httpPath.String != "/admin?view=status#health" {
+		t.Fatalf("duplicate lost web target context: port=%d path=%q", port, httpPath.String)
 	}
 	if credentialID.String != "credential-id" || inlinePassword != 0 {
 		t.Fatalf("duplicate credential binding changed: credential=%q inline=%d", credentialID.String, inlinePassword)
