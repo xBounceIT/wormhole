@@ -108,6 +108,7 @@ import {
 } from './serial.js';
 import { WebSessionAttemptTracker } from './web-session-attempt.js';
 import { getInSessionNavigationUrl } from './web-new-window-navigation.js';
+import { webTargetURLMatchesEndpoint } from './web-target-validation.js';
 import { isSafeUpdateInstallerPath, updateInstallAction } from './update-installer.js';
 import { parseWorkspaceRdpSettings, type WorkspaceRdpSettings } from './workspace-rdp-contract.js';
 import type {
@@ -4114,12 +4115,7 @@ function validateWebTarget(value: WebTargetResponse): WebTargetResponse {
     throw new Error('Wormhole returned an invalid web address.');
   }
   const targetUrl = new URL(value.url);
-  if (
-    targetUrl.protocol !== `${value.protocol}:` ||
-    targetUrl.hostname !== value.host ||
-    targetUrl.username ||
-    targetUrl.password
-  ) {
+  if (!webTargetURLMatchesEndpoint(targetUrl, value)) {
     throw new Error('Wormhole returned an invalid web address.');
   }
   return value;

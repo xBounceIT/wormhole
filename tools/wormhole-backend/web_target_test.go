@@ -11,15 +11,15 @@ import (
 
 func TestResolveWebTargetResolvesInheritedHTTPSettings(t *testing.T) {
 	databasePath := createWebTargetDatabase(t, `
-INSERT INTO Nodes (Id, ParentId, Name, Kind, Protocol, Host, Port, TunnelEnabled, HttpIgnoreCertErrors) VALUES
-    ('folder', NULL, 'Appliances', 0, 4, 'firewall.example.test', 8443, 0, 1),
-    ('web', 'folder', 'Firewall', 1, NULL, NULL, NULL, NULL, 0);`)
+INSERT INTO Nodes (Id, ParentId, Name, Kind, Protocol, Host, Port, HttpPath, TunnelEnabled, HttpIgnoreCertErrors) VALUES
+    ('folder', NULL, 'Appliances', 0, 4, 'firewall.example.test', 8443, '/admin?view=network#routes', 0, 1),
+    ('web', 'folder', 'Firewall', 1, NULL, NULL, NULL, NULL, NULL, 0);`)
 
 	target, err := resolveWebTarget(databasePath, webTargetRequest{NodeID: "web"})
 	if err != nil {
 		t.Fatalf("resolve web target: %v", err)
 	}
-	if target.URL != "https://firewall.example.test:8443/" {
+	if target.URL != "https://firewall.example.test:8443/admin" {
 		t.Fatalf("unexpected URL: %q", target.URL)
 	}
 	if target.Protocol != "https" || target.Host != "firewall.example.test" || target.Port != 8443 {
@@ -118,6 +118,18 @@ func TestBuildWebURLValidatesProtocolPortAndIPv6Brackets(t *testing.T) {
 	}
 }
 
+func TestBuildWebURLPreservesNormalizedContextPath(t *testing.T) {
+	value, err := buildWebURLWithPath("https", "example.test", 8443, "/admin dashboard?q=a%2Fb#routes here")
+	if err != nil || value != "https://example.test:8443/admin%20dashboard?q=a%2Fb#routes%20here" {
+		t.Fatalf("context URL = %q, %v", value, err)
+	}
+	for _, path := range []string{"//other.example/path", "/admin\\settings", "/admin\x01settings"} {
+		if _, err := buildWebURLWithPath("https", "example.test", 443, path); err == nil {
+			t.Fatalf("accepted invalid web context path %q", path)
+		}
+	}
+}
+
 func TestParseWebAddressCoversLegacyAddressForms(t *testing.T) {
 	for _, test := range []struct {
 		name string
@@ -154,6 +166,30 @@ func TestParseWebAddressCoversLegacyAddressForms(t *testing.T) {
 	}
 }
 
+func TestParseWebAddressTargetPreservesContextPath(t *testing.T) {
+	host, port, httpPath, err := parseWebAddressTarget("https://example.test:8443/admin dashboard?q=a%2Fb#routes here")
+	if err != nil || host != "example.test" || port != 8443 || httpPath != "/admin%20dashboard?q=a%2Fb#routes%20here" {
+		t.Fatalf("parsed web target = %q, %d, %q, %v", host, port, httpPath, err)
+	}
+}
+
+func TestNormalizePersistedWebPathExcludesQueryAndFragment(t *testing.T) {
+	for _, test := range []struct {
+		raw  string
+		want string
+	}{
+		{raw: "/admin dashboard?access_token=secret#callback", want: "/admin%20dashboard"},
+		{raw: "?access_token=secret", want: ""},
+		{raw: "#callback", want: ""},
+		{raw: "/admin%2Fdashboard", want: "/admin%2Fdashboard"},
+	} {
+		got, err := normalizePersistedWebPath(test.raw)
+		if err != nil || got != test.want {
+			t.Fatalf("normalizePersistedWebPath(%q) = %q, %v; want %q", test.raw, got, err, test.want)
+		}
+	}
+}
+
 func TestResolvedProtocolForWebNodeHandlesInheritanceAndCycles(t *testing.T) {
 	const expectedProtocol = int64(4)
 	folder := &webNode{ID: "folder", Protocol: sql.NullInt64{Int64: expectedProtocol, Valid: true}}
@@ -185,7 +221,7 @@ func TestResolveWebTargetParsesQuickConnectAddressInGo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve direct web target: %v", err)
 	}
-	if target.URL != "http://[fd00::1]:8443/" || target.Protocol != "http" || target.Port != 8443 {
+	if target.URL != "http://[fd00::1]:8443/admin?from=bookmark" || target.Protocol != "http" || target.Port != 8443 {
 		t.Fatalf("unexpected direct target: %#v", target)
 	}
 	if target.IgnoreCertErrors {
@@ -307,6 +343,7 @@ CREATE TABLE Nodes (
     Protocol INTEGER NULL,
     Host TEXT NULL,
     Port INTEGER NULL,
+    HttpPath TEXT NULL,
     TunnelEnabled INTEGER NULL,
     TunnelConfigId TEXT NULL,
     HttpIgnoreCertErrors INTEGER NULL,

@@ -307,6 +307,7 @@ import {
   serializeConnectionTreeExpansion,
   shouldRenderConnectionTreeChildren,
 } from './connection-tree-state';
+import { connectionAddressForProtocolChange, savedConnectionAddressForEditor } from './web-address';
 import {
   appendTunnelTestLog,
   isTunnelTestCancellation,
@@ -467,6 +468,7 @@ type TreeNode = {
   serialParity?: number;
   serialFlowControl?: number;
   httpIgnoreCertErrors?: boolean;
+  httpPath?: string;
   sshAutoSudo?: boolean | null;
   tunnelEnabled?: boolean | null;
   tunnelConfigId?: string;
@@ -3826,7 +3828,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       id: sessionId,
       title: node.name,
       protocol: node.protocol,
-      host: node.host ?? '',
+      host: savedConnectionAddressForEditor(node.protocol, node.host ?? '', node.httpPath),
       nodeId: node.id,
       port: node.port,
       canTransfer: node.protocol === 'ssh',
@@ -5413,7 +5415,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     setEditorError('');
     setNewConnectionForm({
       name: node.name,
-      host: node.host ?? '',
+      host: savedConnectionAddressForEditor(node.protocol, node.host ?? '', node.httpPath),
       port: node.port === undefined ? '' : String(node.port),
       username: node.username ?? '',
       inlinePassword: '',
@@ -7132,6 +7134,11 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                             setNewConnectionForm((form) => ({
                               ...form,
                               protocol,
+                              host: connectionAddressForProtocolChange(
+                                form.protocol,
+                                protocol,
+                                form.host,
+                              ),
                               port: protocol === form.protocol ? form.port : '',
                               credential:
                                 protocol === form.protocol

@@ -278,6 +278,67 @@ func TestBackupPlaintextRoundTripIsLegacyCompatible(t *testing.T) {
 	}
 }
 
+func TestBackupRoundTripPreservesOnlyNonSecretWebContextPath(t *testing.T) {
+	installBackupTestSecretStore(t)
+	sourcePath := filepath.Join(t.TempDir(), "source.db")
+	source := openBackupTestDatabase(t, sourcePath)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	webNode := backupTestObject(map[string]any{
+		"id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "name": "Admin", "kind": 1,
+		"sortOrder": 0, "protocol": 4, "host": "appliance.example.test", "port": 8443,
+		"httpPath": "/admin/dashboard?access_token=secret#callback", "createdAt": now, "updatedAt": now,
+	})
+	if err := insertBackupObject(source, "Nodes", backupNodeColumns, webNode); err != nil {
+		source.Close()
+		t.Fatal(err)
+	}
+	source.Close()
+
+	backupPath := filepath.Join(t.TempDir(), "web-context.json")
+	if _, err := exportBackup(sourcePath, backupRequest{Path: backupPath}); err != nil {
+		t.Fatal(err)
+	}
+	contents, err := os.ReadFile(backupPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(contents, []byte(`"httpPath": "/admin/dashboard"`)) {
+		t.Fatalf("web context path was not exported:\n%s", contents)
+	}
+	if bytes.Contains(contents, []byte("access_token")) || bytes.Contains(contents, []byte("callback")) {
+		t.Fatalf("secret-bearing URL components were exported:\n%s", contents)
+	}
+	unsafeContents := bytes.Replace(
+		contents,
+		[]byte(`"httpPath": "/admin/dashboard"`),
+		[]byte(`"httpPath": "/admin/dashboard?access_token=imported-secret#callback"`),
+		1,
+	)
+	if bytes.Equal(unsafeContents, contents) {
+		t.Fatal("could not prepare unsafe backup fixture")
+	}
+	if err := os.WriteFile(backupPath, unsafeContents, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	destinationPath := filepath.Join(t.TempDir(), "destination.db")
+	result, err := importBackup(destinationPath, backupRequest{Path: backupPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	warnings := strings.Join(result.Warnings, "\n")
+	if !strings.Contains(warnings, "unsafe web context data") || strings.Contains(warnings, "imported-secret") {
+		t.Fatalf("unsafe backup warning = %q", warnings)
+	}
+	target, err := resolveWebTarget(destinationPath, webTargetRequest{NodeID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.URL != "https://appliance.example.test:8443/admin/dashboard" {
+		t.Fatalf("restored web target = %q", target.URL)
+	}
+}
+
 func TestBackupRequiresEncryptionBeforeReadingSshPrivateKeys(t *testing.T) {
 	installBackupTestSecretStore(t)
 	databasePath := filepath.Join(t.TempDir(), "source.db")

@@ -54,6 +54,7 @@ type normalizedWorkspaceNode struct {
 	inlinePassword       string
 	sshAutoSudo          any
 	httpIgnoreCertErrors any
+	httpPath             any
 	tunnelEnabled        any
 	tunnelConfigID       any
 	credentialMode       int
@@ -112,7 +113,7 @@ func createWorkspaceNode(databasePath string, request workspaceNodeWriteRequest)
 	insertArgs := []any{
 		node.id, nullableWorkspaceNodeString(node.parentID), node.name, node.kind, sortOrder,
 		nullableWorkspaceNodeInt(node.protocol), nullableWorkspaceNodeSQLString(node.host), nullableWorkspaceNodeInt(node.port),
-		node.username, node.credentialID, node.credentialMode, node.useInlinePassword, node.sshAutoSudo, node.httpIgnoreCertErrors,
+		node.username, node.credentialID, node.credentialMode, node.useInlinePassword, node.sshAutoSudo, node.httpIgnoreCertErrors, node.httpPath,
 		node.tunnelEnabled, node.tunnelConfigID,
 		node.serialBaudRate, node.serialDataBits, node.serialStopBits, node.serialParity, node.serialFlowControl,
 	}
@@ -121,7 +122,7 @@ func createWorkspaceNode(databasePath string, request workspaceNodeWriteRequest)
 	_, err = tx.Exec(`
 INSERT INTO Nodes (
     Id, ParentId, Name, Kind, SortOrder, Protocol, Host, Port,
-    Username, CredentialId, CredentialMode, UseInlinePassword, SshAutoSudo, HttpIgnoreCertErrors,
+    Username, CredentialId, CredentialMode, UseInlinePassword, SshAutoSudo, HttpIgnoreCertErrors, HttpPath,
     TunnelEnabled, TunnelConfigId,
     SerialBaudRate, SerialDataBits, SerialStopBits, SerialParity, SerialFlowControl,
     RdpDomain, RdpScreenSize, RdpFullScreen, RdpColorDepth, RdpUseAllMonitors,
@@ -132,7 +133,7 @@ INSERT INTO Nodes (
     RdpBitmapCaching, RdpAutoReconnect, RdpServerAuthentication, RdpGatewayUsageMethod,
     RdpGatewayHostname, RdpGatewayCredentialId, RdpGatewayBypassLocal,
     RdpGatewayUseSameCreds, RdpUseExternalClient, CreatedAt, UpdatedAt)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`, insertArgs...)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`, insertArgs...)
 	if err != nil {
 		return "", fmt.Errorf("could not create workspace node: %w", err)
 	}
@@ -196,7 +197,7 @@ WHERE lower(Id) = ? AND Kind = ?;`,
 				nullableWorkspaceNodeString(node.parentID), node.name,
 				nullableWorkspaceNodeInt(node.protocol), nullableWorkspaceNodeSQLString(node.host), nullableWorkspaceNodeInt(node.port),
 				node.username, node.credentialID, node.credentialMode, node.useInlinePassword,
-				node.sshAutoSudo, node.httpIgnoreCertErrors, node.tunnelEnabled, node.tunnelConfigID,
+				node.sshAutoSudo, node.httpIgnoreCertErrors, node.httpPath, node.tunnelEnabled, node.tunnelConfigID,
 				node.serialBaudRate, node.serialDataBits, node.serialStopBits, node.serialParity, node.serialFlowControl,
 			}
 			updateArgs = append(updateArgs, workspaceRdpDatabaseValues(node.rdp)...)
@@ -205,7 +206,7 @@ WHERE lower(Id) = ? AND Kind = ?;`,
 UPDATE Nodes SET
     ParentId = ?, Name = ?, Protocol = ?, Host = ?, Port = ?,
     Username = ?, CredentialId = ?, CredentialMode = ?, UseInlinePassword = ?,
-    SshAutoSudo = ?, HttpIgnoreCertErrors = ?,
+    SshAutoSudo = ?, HttpIgnoreCertErrors = ?, HttpPath = ?,
     TunnelEnabled = ?, TunnelConfigId = ?,
     SerialBaudRate = ?, SerialDataBits = ?, SerialStopBits = ?, SerialParity = ?, SerialFlowControl = ?,
     RdpDomain = ?, RdpScreenSize = ?, RdpFullScreen = ?, RdpColorDepth = ?, RdpUseAllMonitors = ?,
@@ -225,14 +226,14 @@ WHERE lower(Id) = ? AND Kind = ?;`, updateArgs...)
 UPDATE Nodes SET
     ParentId = ?, Name = ?, Protocol = ?, Host = ?, Port = ?, Username = ?,
     CredentialId = ?, CredentialMode = ?, UseInlinePassword = ?, SshAutoSudo = ?,
-    HttpIgnoreCertErrors = ?, TunnelEnabled = ?, TunnelConfigId = ?,
+    HttpIgnoreCertErrors = ?, HttpPath = ?, TunnelEnabled = ?, TunnelConfigId = ?,
     SerialBaudRate = ?, SerialDataBits = ?, SerialStopBits = ?, SerialParity = ?, SerialFlowControl = ?,
     UpdatedAt = ?
 WHERE lower(Id) = ? AND Kind = ?;`,
 				nullableWorkspaceNodeString(node.parentID), node.name,
 				nullableWorkspaceNodeInt(node.protocol), nullableWorkspaceNodeSQLString(node.host), nullableWorkspaceNodeInt(node.port),
 				node.username, node.credentialID, node.credentialMode, node.useInlinePassword,
-				node.sshAutoSudo, node.httpIgnoreCertErrors, node.tunnelEnabled, node.tunnelConfigID,
+				node.sshAutoSudo, node.httpIgnoreCertErrors, node.httpPath, node.tunnelEnabled, node.tunnelConfigID,
 				node.serialBaudRate, node.serialDataBits, node.serialStopBits, node.serialParity, node.serialFlowControl,
 				time.Now().UTC().Format(time.RFC3339Nano), node.id, node.kind,
 			)
@@ -337,14 +338,33 @@ func normalizeWorkspaceNodeWrite(
 		}
 		switch protocol {
 		case 3, 4:
-			parsedHost, parsedPort, err := parseWebAddress(host)
+			parsedHost, parsedPort, parsedPath, err := parseWebAddressTarget(host)
+			if err != nil {
+				return normalizedWorkspaceNode{}, err
+			}
+			persistedPath, err := normalizePersistedWebPath(parsedPath)
 			if err != nil {
 				return normalizedWorkspaceNode{}, err
 			}
 			host = parsedHost
+			node.httpPath = nullableWorkspaceNodeString(persistedPath)
 			port := request.Port
 			if port == 0 {
 				port = parsedPort
+			}
+			validationPort := port
+			if validationPort == 0 {
+				validationPort = 80
+				if protocol == 4 {
+					validationPort = 443
+				}
+			}
+			scheme := "http"
+			if protocol == 4 {
+				scheme = "https"
+			}
+			if _, err := buildWebURLWithPath(scheme, host, validationPort, persistedPath); err != nil {
+				return normalizedWorkspaceNode{}, err
 			}
 			if port != 0 {
 				node.port = sql.NullInt64{Int64: int64(port), Valid: true}
@@ -453,7 +473,7 @@ func requireWorkspaceNodeWriteSchema(database *sql.DB) error {
 	}
 	for _, required := range []string{
 		"Id", "ParentId", "Name", "Kind", "SortOrder", "Protocol", "Host", "Port",
-		"Username", "CredentialId", "CredentialMode", "UseInlinePassword", "SshAutoSudo", "HttpIgnoreCertErrors",
+		"Username", "CredentialId", "CredentialMode", "UseInlinePassword", "SshAutoSudo", "HttpIgnoreCertErrors", "HttpPath",
 		"TunnelEnabled", "TunnelConfigId", "SerialBaudRate", "SerialDataBits", "SerialStopBits",
 		"SerialParity", "SerialFlowControl", "RdpDomain", "RdpScreenSize", "RdpFullScreen",
 		"RdpColorDepth", "RdpUseAllMonitors", "RdpAudioMode", "RdpAudioCaptureMode",

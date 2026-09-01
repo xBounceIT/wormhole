@@ -31,6 +31,7 @@ CREATE TABLE Nodes (
 	UseInlinePassword INTEGER NULL,
     SshAutoSudo INTEGER NULL,
     HttpIgnoreCertErrors INTEGER NULL,
+    HttpPath TEXT NULL,
     TunnelEnabled INTEGER NULL,
     TunnelConfigId TEXT NULL,
     SerialBaudRate INTEGER NULL,
@@ -236,6 +237,100 @@ func TestWorkspaceNodeCreatePersistsCustomPortsForNetworkProtocols(t *testing.T)
 				t.Fatalf("stored custom port %d, want %d", port, test.port)
 			}
 		})
+	}
+}
+
+func TestWorkspaceNodeCreateAndUpdatePersistsWebContextPath(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	createWorkspaceNodeTestSchema(t, databasePath)
+
+	nodeID, err := createWorkspaceNode(databasePath, workspaceNodeWriteRequest{
+		Name: "Admin", Kind: "connection", Protocol: "https",
+		Host: "https://target.example:8443/admin/dashboard?tab=network#routes", CredentialMode: 0,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertStoredWebTarget := func(wantHost string, wantPort int, wantPath, wantURL string) {
+		t.Helper()
+		database, err := openDatabase(databasePath, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer database.Close()
+		var host, httpPath string
+		var port int
+		if err := database.QueryRow("SELECT Host, Port, HttpPath FROM Nodes WHERE Id = ?;", nodeID).Scan(&host, &port, &httpPath); err != nil {
+			t.Fatal(err)
+		}
+		if host != wantHost || port != wantPort || httpPath != wantPath {
+			t.Fatalf("stored web target = %q, %d, %q", host, port, httpPath)
+		}
+		tree, err := loadTree(database)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(tree) != 1 || tree[0].HTTPPath != wantPath {
+			t.Fatalf("workspace snapshot lost the web context path: %#v", tree)
+		}
+		target, err := resolveWebTarget(databasePath, webTargetRequest{NodeID: nodeID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if target.URL != wantURL {
+			t.Fatalf("resolved web URL = %q, want %q", target.URL, wantURL)
+		}
+	}
+
+	assertStoredWebTarget(
+		"target.example",
+		8443,
+		"/admin/dashboard",
+		"https://target.example:8443/admin/dashboard",
+	)
+	if err := updateWorkspaceNode(databasePath, workspaceNodeWriteRequest{
+		ID: nodeID, Name: "Admin", Kind: "connection", Protocol: "https",
+		Host: "target.example/operations", Port: 9443, CredentialMode: 0,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	assertStoredWebTarget(
+		"target.example",
+		9443,
+		"/operations",
+		"https://target.example:9443/operations",
+	)
+}
+
+func TestLoadTreeExposesOnlyNonSecretWebContextPath(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	createWorkspaceNodeTestSchema(t, databasePath)
+	nodeID, err := createWorkspaceNode(databasePath, workspaceNodeWriteRequest{
+		Name: "Admin", Kind: "connection", Protocol: "https",
+		Host: "target.example/admin", CredentialMode: 0,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(
+		"UPDATE Nodes SET HttpPath = ? WHERE Id = ?;",
+		"/admin?access_token=secret#callback",
+		nodeID,
+	); err != nil {
+		_ = database.Close()
+		t.Fatal(err)
+	}
+	tree, err := loadTree(database)
+	_ = database.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tree) != 1 || tree[0].HTTPPath != "/admin" {
+		t.Fatalf("workspace snapshot exposed unsafe web context: %#v", tree)
 	}
 }
 

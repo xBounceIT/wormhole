@@ -224,6 +224,7 @@ var backupNodeColumns = []backupColumn{
 	{DB: "Protocol", JSON: "protocol", Kind: backupInteger, SQLType: "INTEGER NULL"},
 	{DB: "Host", JSON: "host", Kind: backupString, SQLType: "TEXT NULL"},
 	{DB: "Port", JSON: "port", Kind: backupInteger, SQLType: "INTEGER NULL"},
+	{DB: "HttpPath", JSON: "httpPath", Kind: backupString, SQLType: "TEXT NULL"},
 	{DB: "Username", JSON: "username", Kind: backupString, SQLType: "TEXT NULL"},
 	{DB: "CredentialId", JSON: "credentialId", Kind: backupString, SQLType: "TEXT NULL"},
 	{DB: "CredentialMode", JSON: "credentialMode", Kind: backupInteger, SQLType: "INTEGER NULL"},
@@ -434,6 +435,7 @@ func populateBackupPayloadContext(
 	if payload.Nodes, err = loadBackupObjectsContext(ctx, database, "Nodes", backupNodeColumns); err != nil {
 		return err
 	}
+	sanitizeBackupNodeWebPaths(payload.Nodes)
 	if payload.Credentials, err = loadBackupObjectsContext(ctx, database, "CredentialProfiles", backupCredentialColumns); err != nil {
 		return err
 	}
@@ -1406,6 +1408,35 @@ func normalizeBackupPayloadLists(payload *backupPayload) {
 	}
 }
 
+func sanitizeBackupNodeWebPaths(nodes []*backupObject) {
+	for _, node := range nodes {
+		if node != nil {
+			sanitizeBackupNodeWebPath(*node)
+		}
+	}
+}
+
+func sanitizeBackupNodeWebPath(object backupObject) bool {
+	rawPath := backupObjectOptionalString(object, "httpPath")
+	if rawPath == nil {
+		return false
+	}
+	httpPath, err := normalizePersistedWebPath(*rawPath)
+	if err != nil {
+		setBackupObjectValue(object, "httpPath", nil)
+		return true
+	}
+	if httpPath == *rawPath {
+		return false
+	}
+	if httpPath == "" {
+		setBackupObjectValue(object, "httpPath", nil)
+	} else {
+		setBackupObjectValue(object, "httpPath", httpPath)
+	}
+	return true
+}
+
 func filterBackupNulls(payload *backupPayload) int {
 	dropped := 0
 	payload.Nodes, dropped = filterBackupPointers(payload.Nodes, dropped)
@@ -1847,6 +1878,10 @@ func topologicallyOrderBackupNodesContext(
 
 func scrubBackupNodeReferences(object backupObject, state *backupImportState, result *backupImportResult) {
 	name := backupObjectString(object, "name")
+	if sanitizeBackupNodeWebPath(object) {
+		addBackupWarning(result,
+			fmt.Sprintf("Node '%s' contained unsafe web context data; query, fragment, or invalid path removed.", name))
+	}
 	if protocol, present := backupObjectInteger(object, "protocol"); present &&
 		protocol != 0 && protocol != 1 && protocol != 3 && protocol != 4 && protocol != 5 && protocol != 6 {
 		addBackupWarning(result,

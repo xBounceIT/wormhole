@@ -42,6 +42,7 @@ type webNode struct {
 	Protocol             sql.NullInt64
 	Host                 sql.NullString
 	Port                 sql.NullInt64
+	HTTPPath             sql.NullString
 	TunnelEnabled        sql.NullInt64
 	TunnelConfigID       sql.NullString
 	HTTPIgnoreCertErrors sql.NullInt64
@@ -85,7 +86,7 @@ func resolveDirectWebTarget(request webTargetRequest) (webTargetResponse, error)
 	if request.TunnelConfigID != "" && tunnelID == "" {
 		return webTargetResponse{}, errors.New("web connection has an invalid VPN tunnel")
 	}
-	host, port, err := parseWebAddress(request.Address)
+	host, port, httpPath, err := parseWebAddressTarget(request.Address)
 	if err != nil {
 		return webTargetResponse{}, err
 	}
@@ -102,7 +103,7 @@ func resolveDirectWebTarget(request webTargetRequest) (webTargetResponse, error)
 	if port == 0 {
 		port = defaultPort
 	}
-	uri, err := buildWebURL(request.Protocol, host, port)
+	uri, err := buildWebURLWithPath(request.Protocol, host, port, httpPath)
 	if err != nil {
 		return webTargetResponse{}, err
 	}
@@ -137,6 +138,7 @@ func loadWebNodes(database *sql.DB) (map[string]*webNode, error) {
 	}
 	rows, err := database.Query(`SELECT Id, ParentId, Name, Kind, Protocol, Host, ` +
 		columnOrNull("Port") + ` AS Port, ` +
+		columnOrNull("HttpPath") + ` AS HttpPath, ` +
 		columnOrNull("TunnelEnabled") + ` AS TunnelEnabled, ` +
 		columnOrNull("TunnelConfigId") + ` AS TunnelConfigId, ` +
 		columnOrNull("HttpIgnoreCertErrors") + ` AS HttpIgnoreCertErrors FROM Nodes;`)
@@ -156,6 +158,7 @@ func loadWebNodes(database *sql.DB) (map[string]*webNode, error) {
 			&node.Protocol,
 			&node.Host,
 			&node.Port,
+			&node.HTTPPath,
 			&node.TunnelEnabled,
 			&node.TunnelConfigID,
 			&node.HTTPIgnoreCertErrors,
@@ -179,6 +182,7 @@ func resolveWebTargetFromNodes(leaf *webNode, nodes map[string]*webNode) (webTar
 	var host sql.NullString
 	var port sql.NullInt64
 	var portOwner *webNode
+	var httpPath sql.NullString
 	var tunnelEnabled sql.NullInt64
 	var tunnelConfigID sql.NullString
 
@@ -199,6 +203,9 @@ func resolveWebTargetFromNodes(leaf *webNode, nodes map[string]*webNode) (webTar
 		if !port.Valid && current.Port.Valid {
 			port = current.Port
 			portOwner = current
+		}
+		if !httpPath.Valid && current.HTTPPath.Valid {
+			httpPath = current.HTTPPath
 		}
 		if !tunnelEnabled.Valid && current.TunnelEnabled.Valid {
 			tunnelEnabled = current.TunnelEnabled
@@ -256,7 +263,11 @@ func resolveWebTargetFromNodes(leaf *webNode, nodes map[string]*webNode) (webTar
 		resolvedPort = int(port.Int64)
 	}
 	resolvedHost := strings.TrimSpace(host.String)
-	uri, err := buildWebURL(scheme, resolvedHost, resolvedPort)
+	resolvedPath, err := normalizePersistedWebPath(nullableString(httpPath))
+	if err != nil {
+		return webTargetResponse{}, err
+	}
+	uri, err := buildWebURLWithPath(scheme, resolvedHost, resolvedPort, resolvedPath)
 	if err != nil {
 		return webTargetResponse{}, err
 	}
@@ -292,6 +303,10 @@ func resolvedProtocolForWebNode(node *webNode, nodes map[string]*webNode) (sql.N
 }
 
 func buildWebURL(scheme, host string, port int) (string, error) {
+	return buildWebURLWithPath(scheme, host, port, "")
+}
+
+func buildWebURLWithPath(scheme, host string, port int, httpPath string) (string, error) {
 	if scheme != "http" && scheme != "https" {
 		return "", errors.New("web connection has an invalid protocol")
 	}
@@ -321,13 +336,35 @@ func buildWebURL(scheme, host string, port int) (string, error) {
 		Host:   net.JoinHostPort(host, strconv.Itoa(port)),
 		Path:   "/",
 	}
+	if httpPath != "" {
+		normalizedPath, err := normalizeWebPath(httpPath)
+		if err != nil {
+			return "", err
+		}
+		parsedPath, err := url.Parse(normalizedPath)
+		if err != nil {
+			return "", errors.New("web connection has an invalid path")
+		}
+		uri.Path = parsedPath.Path
+		uri.RawPath = parsedPath.RawPath
+		uri.RawQuery = parsedPath.RawQuery
+		uri.ForceQuery = parsedPath.ForceQuery
+		uri.Fragment = parsedPath.Fragment
+		uri.RawFragment = parsedPath.RawFragment
+	}
 	return uri.String(), nil
 }
 
-// parseWebAddress is intentionally compatible with the legacy single address field: users can
-// enter host, host:port, an IPv6 literal, or paste an HTTP(S) URL. The selected protocol wins and
-// only the target host + port are retained; paths, queries, and fragments have no persisted column.
+// parseWebAddress remains available to callers that only need the network endpoint.
 func parseWebAddress(raw string) (string, int, error) {
+	host, port, _, err := parseWebAddressTarget(raw)
+	return host, port, err
+}
+
+// parseWebAddressTarget is intentionally compatible with the legacy single address field: users
+// can enter host, host:port, an IPv6 literal, or paste an HTTP(S) URL. The selected protocol wins,
+// while the URL path, query, and fragment remain part of the logical browser target.
+func parseWebAddressTarget(raw string) (string, int, string, error) {
 	address := strings.TrimSpace(raw)
 	lowerAddress := strings.ToLower(address)
 	if strings.HasPrefix(lowerAddress, "https://") {
@@ -335,50 +372,105 @@ func parseWebAddress(raw string) (string, int, error) {
 	} else if strings.HasPrefix(lowerAddress, "http://") {
 		address = address[len("http://"):]
 	}
+	httpPath := ""
 	if cut := strings.IndexAny(address, "/?#"); cut >= 0 {
+		var err error
+		httpPath, err = normalizeWebPath(address[cut:])
+		if err != nil {
+			return "", 0, "", err
+		}
 		address = address[:cut]
 	}
 	address = strings.TrimSpace(address)
 	if address == "" {
-		return "", 0, errors.New("web connection has no host")
+		return "", 0, "", errors.New("web connection has no host")
 	}
 
 	if strings.HasPrefix(address, "[") {
 		closing := strings.Index(address, "]")
 		if closing <= 1 {
-			return "", 0, errors.New("web connection has an invalid host")
+			return "", 0, "", errors.New("web connection has an invalid host")
 		}
 		host := address[1:closing]
 		if net.ParseIP(host) == nil || !strings.Contains(host, ":") {
-			return "", 0, errors.New("web connection has an invalid host")
+			return "", 0, "", errors.New("web connection has an invalid host")
 		}
 		remainder := address[closing+1:]
 		if remainder == "" {
-			return host, 0, nil
+			return host, 0, httpPath, nil
 		}
 		if !strings.HasPrefix(remainder, ":") {
-			return "", 0, errors.New("web connection has an invalid host")
+			return "", 0, "", errors.New("web connection has an invalid host")
 		}
 		port, err := parseWebPort(remainder[1:])
-		return host, port, err
+		return host, port, httpPath, err
 	}
 
 	switch strings.Count(address, ":") {
 	case 0:
-		return address, 0, nil
+		return address, 0, httpPath, nil
 	case 1:
 		host, rawPort, _ := strings.Cut(address, ":")
 		if host == "" {
-			return "", 0, errors.New("web connection has no host")
+			return "", 0, "", errors.New("web connection has no host")
 		}
 		port, err := parseWebPort(rawPort)
-		return host, port, err
+		return host, port, httpPath, err
 	default:
 		if net.ParseIP(address) == nil {
-			return "", 0, errors.New("web connection host must be an IPv6 literal when it contains multiple colons")
+			return "", 0, "", errors.New("web connection host must be an IPv6 literal when it contains multiple colons")
 		}
-		return address, 0, nil
+		return address, 0, httpPath, nil
 	}
+}
+
+func normalizeWebPath(raw string) (string, error) {
+	parsed, err := parseWebPath(raw)
+	if err != nil {
+		return "", err
+	}
+	normalized := parsed.EscapedPath()
+	if normalized == "" && (parsed.ForceQuery || parsed.RawQuery != "" || parsed.Fragment != "") {
+		normalized = "/"
+	}
+	if parsed.ForceQuery || parsed.RawQuery != "" {
+		normalized += "?" + parsed.RawQuery
+	}
+	if parsed.Fragment != "" {
+		normalized += "#" + parsed.EscapedFragment()
+	}
+	if len(normalized) > 4096 {
+		return "", errors.New("web connection has an invalid path")
+	}
+	return normalized, nil
+}
+
+// normalizePersistedWebPath deliberately excludes query and fragment data because those URL
+// components commonly carry access tokens. Saved connections retain only their non-secret
+// application context; Quick Connect can still use normalizeWebPath for an ephemeral full target.
+func normalizePersistedWebPath(raw string) (string, error) {
+	parsed, err := parseWebPath(raw)
+	if err != nil {
+		return "", err
+	}
+	return parsed.EscapedPath(), nil
+}
+
+func parseWebPath(raw string) (*url.URL, error) {
+	if raw == "" {
+		return &url.URL{}, nil
+	}
+	if len(raw) > 4096 || strings.Contains(raw, "\\") || strings.IndexFunc(raw, unicode.IsControl) >= 0 {
+		return nil, errors.New("web connection has an invalid path")
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.IsAbs() || parsed.Host != "" || parsed.User != nil || parsed.Opaque != "" {
+		return nil, errors.New("web connection has an invalid path")
+	}
+	if parsed.Path != "" && !strings.HasPrefix(parsed.Path, "/") {
+		return nil, errors.New("web connection has an invalid path")
+	}
+	return parsed, nil
 }
 
 func parseWebPort(raw string) (int, error) {

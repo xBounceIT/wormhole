@@ -66,6 +66,7 @@ CREATE TABLE IF NOT EXISTS Nodes (
     Protocol                 INTEGER NULL,
     Host                     TEXT NULL,
     Port                     INTEGER NULL,
+    HttpPath                 TEXT NULL,
     Username                 TEXT NULL,
     CredentialId             TEXT NULL,
     RdpDomain                TEXT NULL,
@@ -296,6 +297,34 @@ CREATE INDEX IF NOT EXISTS IX_BitwardenCredentialCache_Name
 			id: "0017_credential_secret_operations",
 			ensure: func(ctx context.Context, connection *sql.Conn) error {
 				_, err := connection.ExecContext(ctx, credentialSecretOperationsTableSQL)
+				return err
+			},
+		},
+		{
+			id: "0018_http_path",
+			ensure: func(ctx context.Context, connection *sql.Conn) error {
+				return ensureWorkspaceColumns(ctx, connection, "Nodes", []workspaceColumn{
+					{"HttpPath", "TEXT NULL"},
+				})
+			},
+		},
+		{
+			id: "0019_http_path_context_only",
+			ensure: func(ctx context.Context, connection *sql.Conn) error {
+				_, err := connection.ExecContext(ctx, `
+UPDATE Nodes
+SET HttpPath = NULLIF(substr(
+    HttpPath,
+    1,
+    CASE
+        WHEN instr(HttpPath, '?') > 0 AND instr(HttpPath, '#') > 0
+            THEN min(instr(HttpPath, '?'), instr(HttpPath, '#')) - 1
+        WHEN instr(HttpPath, '?') > 0 THEN instr(HttpPath, '?') - 1
+        ELSE instr(HttpPath, '#') - 1
+    END
+), '')
+WHERE HttpPath IS NOT NULL
+  AND (instr(HttpPath, '?') > 0 OR instr(HttpPath, '#') > 0);`)
 				return err
 			},
 		},
