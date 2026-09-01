@@ -17,6 +17,10 @@ export type CredentialProtocol = 'ssh' | 'rdp' | 'vnc';
 export type CredentialSourceFilter = 'all' | 'Local' | 'Bitwarden';
 export type SshAutoSudoMode = 'inherit' | 'on' | 'off';
 
+export function isCredentialProtocol(protocol: string): protocol is CredentialProtocol {
+  return protocol === 'ssh' || protocol === 'rdp' || protocol === 'vnc';
+}
+
 type CredentialListItem = {
   id: string;
   name: string;
@@ -32,6 +36,10 @@ type CredentialListProjection<T> = {
   emptyState: 'empty' | 'noMatches' | null;
   resetKey: string;
 };
+
+function normalizeCredentialSelectionID(value: string): string {
+  return value.trim().toLowerCase();
+}
 
 function credentialListSearchText(credential: CredentialListItem): string {
   return [
@@ -95,7 +103,7 @@ export function buildConnectionCredentialSelectionOptions(
   return [
     ...(includeInheritance ? [{ value: 'inherit', label: 'Inherit from folder' }] : []),
     ...credentials.map((credential) => ({
-      value: credential.id,
+      value: normalizeCredentialSelectionID(credential.id),
       label: `${credential.name} · ${credential.provider}`,
     })),
   ];
@@ -117,6 +125,23 @@ export function connectionCredentialSelectionAfterSavedToggle(
     return 'inherit';
   }
   return currentSelection;
+}
+
+export function connectionEditorCredentialSelectionIsValid(
+  editorMode: 'saved' | 'quick',
+  protocol: string,
+  useSavedCredentials: boolean,
+  selection: string,
+  availableCredentials: ReadonlyArray<{ id: string }>,
+): boolean {
+  if (editorMode === 'quick') return true;
+  if (!isCredentialProtocol(protocol) || !useSavedCredentials) return true;
+  if (selection === 'inherit') return true;
+  const normalizedSelection = normalizeCredentialSelectionID(selection);
+  if (!normalizedSelection || normalizedSelection === 'none') return false;
+  return availableCredentials.some(
+    (credential) => normalizeCredentialSelectionID(credential.id) === normalizedSelection,
+  );
 }
 
 export function connectionInlinePasswordAction(

@@ -5,6 +5,7 @@ import test from 'node:test';
 import {
   buildCredentialListProjection,
   buildConnectionCredentialSelectionOptions,
+  connectionEditorCredentialSelectionIsValid,
   connectionCredentialSelectionAfterSavedToggle,
   connectionInlinePasswordAction,
   connectionInlinePasswordPlaceholder,
@@ -13,6 +14,7 @@ import {
   credentialCanUseProtocol,
   effectiveSshAutoSudoMode,
   filterCredentialsBySource,
+  isCredentialProtocol,
   mergeCredential,
   sshAutoSudoAvailable,
 } from '../src/credential-state.ts';
@@ -41,11 +43,19 @@ test('connection credential choices expose inheritance and saved credentials onl
   );
   assert.deepEqual(
     buildConnectionCredentialSelectionOptions(
-      [{ id: 'credential-1', name: 'Server account', provider: 'Bitwarden' }],
+      [{ id: 'CREDENTIAL-1', name: 'Server account', provider: 'Bitwarden' }],
       false,
     ),
     [{ value: 'credential-1', label: 'Server account · Bitwarden' }],
   );
+});
+
+test('credential protocol detection shares the saved-credential allowlist', () => {
+  assert.equal(isCredentialProtocol('ssh'), true);
+  assert.equal(isCredentialProtocol('rdp'), true);
+  assert.equal(isCredentialProtocol('vnc'), true);
+  assert.equal(isCredentialProtocol('https'), false);
+  assert.equal(isCredentialProtocol(''), false);
 });
 
 test('connections without a saved or inline credential reopen with saved credentials disabled', () => {
@@ -63,6 +73,86 @@ test('enabling saved credentials replaces the removed connection-only none selec
   assert.equal(
     connectionCredentialSelectionAfterSavedToggle(true, 'saved', 'credential-1'),
     'credential-1',
+  );
+});
+
+test('saved connections require inheritance or a currently available credential', () => {
+  const availableCredentials = [{ id: 'CREDENTIAL-1' }];
+
+  assert.equal(
+    connectionEditorCredentialSelectionIsValid(
+      'saved',
+      'ssh',
+      true,
+      'inherit',
+      availableCredentials,
+    ),
+    true,
+  );
+  assert.equal(
+    connectionEditorCredentialSelectionIsValid(
+      'saved',
+      'rdp',
+      true,
+      ' credential-1 ',
+      availableCredentials,
+    ),
+    true,
+  );
+  assert.equal(
+    connectionEditorCredentialSelectionIsValid('saved', 'vnc', true, 'none', availableCredentials),
+    false,
+  );
+  assert.equal(
+    connectionEditorCredentialSelectionIsValid(
+      'saved',
+      'ssh',
+      true,
+      'deleted-credential',
+      availableCredentials,
+    ),
+    false,
+  );
+  assert.equal(
+    connectionEditorCredentialSelectionIsValid('saved', 'ssh', true, '', availableCredentials),
+    false,
+  );
+  assert.equal(
+    connectionEditorCredentialSelectionIsValid('saved', 'ssh', false, 'none', availableCredentials),
+    true,
+  );
+  assert.equal(
+    connectionEditorCredentialSelectionIsValid('saved', 'https', true, 'none', []),
+    true,
+  );
+  assert.equal(connectionEditorCredentialSelectionIsValid('quick', 'ssh', true, 'none', []), true);
+});
+
+test('saved connection form blocks missing credential selections before workspace writes', () => {
+  const submitStart = appSource.indexOf('async function submitNewConnection');
+  const submitEnd = appSource.indexOf('async function submitFolderDetails', submitStart);
+  const submitSource = appSource.slice(submitStart, submitEnd);
+  const credentialFieldStart = appSource.indexOf('id="connection-credential"');
+  const credentialFieldEnd = appSource.indexOf(
+    '{!newConnectionForm.useSavedCredentials &&',
+    credentialFieldStart,
+  );
+  const credentialFieldSource = appSource.slice(credentialFieldStart, credentialFieldEnd);
+
+  assert.ok(
+    submitStart >= 0 &&
+      submitEnd > submitStart &&
+      credentialFieldStart >= 0 &&
+      credentialFieldEnd > credentialFieldStart,
+  );
+  assert.match(
+    submitSource,
+    /if \(!connectionEditorCredentialSelectionValid\)[\s\S]*?return;[\s\S]*?updateWorkspaceNode/,
+  );
+  assert.match(appSource, /disabled=\{editorBusy \|\| !connectionEditorCredentialSelectionValid\}/);
+  assert.match(
+    credentialFieldSource,
+    /!connectionEditorCredentialSelectionValid[\s\S]*?connectionCredentialSelectionError/,
   );
 });
 
