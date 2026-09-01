@@ -17,6 +17,10 @@ export type CredentialProtocol = 'ssh' | 'rdp' | 'vnc';
 export type CredentialSourceFilter = 'all' | 'Local' | 'Bitwarden';
 export type SshAutoSudoMode = 'inherit' | 'on' | 'off';
 
+export function isCredentialProtocol(protocol: string): protocol is CredentialProtocol {
+  return protocol === 'ssh' || protocol === 'rdp' || protocol === 'vnc';
+}
+
 type CredentialListItem = {
   id: string;
   name: string;
@@ -117,6 +121,18 @@ export function connectionCredentialSelectionAfterSavedToggle(
     return 'inherit';
   }
   return currentSelection;
+}
+
+export function connectionEditorCredentialSelectionIsComplete(
+  editorMode: 'saved' | 'quick',
+  supportsSavedCredentials: boolean,
+  useSavedCredentials: boolean,
+  selection: string,
+): boolean {
+  if (editorMode === 'quick') return true;
+  if (!supportsSavedCredentials || !useSavedCredentials) return true;
+  const normalizedSelection = selection.trim().toLowerCase();
+  return normalizedSelection !== '' && normalizedSelection !== 'none';
 }
 
 export function connectionInlinePasswordAction(
