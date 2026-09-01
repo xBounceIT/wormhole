@@ -17,7 +17,11 @@ import {
   shouldAutoCopyTerminalSelection,
   shouldUseTerminalClipboardShortcut,
 } from '../src/terminal-clipboard.ts';
-import { terminalVisibleScrollback } from '../src/terminal-frame.ts';
+import {
+  nextTerminalViewportResetSequence,
+  terminalScrollEventKeepsBottomPin,
+  terminalVisibleScrollback,
+} from '../src/terminal-frame.ts';
 
 const appSource = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
 const require = createRequire(import.meta.url);
@@ -133,6 +137,82 @@ test('alternate-screen applications hide retained scrollback', () => {
       scrollback: [{ text: 'previous output' }],
     }),
     undefined,
+  );
+});
+
+test('terminal viewport reset survives later frames that React can batch into one render', () => {
+  assert.equal(
+    nextTerminalViewportResetSequence(undefined, {
+      sequence: 11,
+      viewportReset: false,
+    }),
+    undefined,
+  );
+  const resetSequence = nextTerminalViewportResetSequence(undefined, {
+    sequence: 12,
+    viewportReset: true,
+  });
+
+  assert.equal(
+    nextTerminalViewportResetSequence(resetSequence, {
+      sequence: 13,
+      viewportReset: false,
+    }),
+    12,
+  );
+  assert.equal(
+    nextTerminalViewportResetSequence(resetSequence, {
+      sequence: 14,
+      viewportReset: true,
+    }),
+    14,
+  );
+});
+
+test('terminal output stays pinned after content grows ahead of an automatic scroll event', () => {
+  assert.equal(terminalScrollEventKeepsBottomPin(360, false, 360), true);
+  assert.equal(terminalScrollEventKeepsBottomPin(360.5, false, 360), true);
+});
+
+test('terminal scroll events still release the bottom pin after manual scrolling', () => {
+  assert.equal(terminalScrollEventKeepsBottomPin(180, false, 360), false);
+  assert.equal(terminalScrollEventKeepsBottomPin(180, false, undefined), false);
+  assert.equal(terminalScrollEventKeepsBottomPin(360, true, undefined), true);
+});
+
+test('live terminal wires automatic scroll tracking into frame and user scroll handling', () => {
+  const frameApplicationSource = appSource.slice(
+    appSource.indexOf('function applySshTerminalFrame'),
+    appSource.indexOf('const navItems'),
+  );
+  const terminalSurfaceSource = appSource.slice(
+    appSource.indexOf('function SshTerminalSurface'),
+    appSource.indexOf("type SftpPaneKind = 'local' | 'remote'"),
+  );
+
+  assert.match(
+    frameApplicationSource,
+    /viewportResetSequence: nextTerminalViewportResetSequence\(\s*previous\?\.viewportResetSequence,\s*incoming,/,
+  );
+  assert.match(
+    terminalSurfaceSource,
+    /useLayoutEffect\(\(\) => \{[\s\S]*stickToBottomRef\.current = true;[\s\S]*automaticScrollTopRef\.current = undefined;[\s\S]*handledViewportResetSequenceRef\.current = undefined;[\s\S]*session\.backendSessionId, session\.status/,
+  );
+  assert.match(
+    terminalSurfaceSource,
+    /viewportResetSequence !== handledViewportResetSequenceRef\.current[\s\S]*stickToBottomRef\.current = true;[\s\S]*handledViewportResetSequenceRef\.current = viewportResetSequence;/,
+  );
+  assert.match(
+    terminalSurfaceSource,
+    /const bottom = Math\.max\(0, surface\.scrollHeight - surface\.clientHeight\);\s*automaticScrollTopRef\.current = bottom;\s*surface\.scrollTop = bottom;/,
+  );
+  assert.match(
+    terminalSurfaceSource,
+    /onScroll=\{\(event\) => \{[\s\S]*terminalScrollEventKeepsBottomPin\([\s\S]*automaticScrollTopRef\.current,[\s\S]*automaticScrollTopRef\.current = undefined;/,
+  );
+  assert.match(
+    terminalSurfaceSource,
+    /automaticScrollTopRef\.current = undefined;\s*surface\.scrollLeft = nextScrollLeft;\s*surface\.scrollTop = nextScrollTop;/,
   );
 });
 
