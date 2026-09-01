@@ -243,6 +243,14 @@ func duplicateWorkspaceNode(databasePath string, request workspaceNodeRequest) (
 		// have the source's password; it can still inherit a parent credential or be edited.
 		row[index] = int64(0)
 	}
+	if index, ok := indexes["httppath"]; ok {
+		httpPath, err := normalizePersistedWebPath(workspaceNodeValueString(row[index]))
+		if err != nil || httpPath == "" {
+			row[index] = nil
+		} else {
+			row[index] = httpPath
+		}
+	}
 
 	tx, err := database.Begin()
 	if err != nil {

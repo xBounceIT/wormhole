@@ -1526,7 +1526,9 @@ ORDER BY SortOrder, Name, Id;`)
 			node.HTTPIgnoreCertErrors = &value
 		}
 		if row.HTTPPath.Valid {
-			node.HTTPPath = row.HTTPPath.String
+			if httpPath, err := normalizePersistedWebPath(row.HTTPPath.String); err == nil {
+				node.HTTPPath = httpPath
+			}
 		}
 		if row.TunnelEnabled.Valid {
 			value := row.TunnelEnabled.Int64 != 0

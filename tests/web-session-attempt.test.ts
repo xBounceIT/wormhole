@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { savedConnectionAddressForEditor } from '../src/web-address.ts';
+import {
+  connectionAddressForProtocolChange,
+  savedConnectionAddressForEditor,
+} from '../src/web-address.ts';
 import { WebSessionAttemptTracker } from '../electron/web-session-attempt.ts';
 import { webTargetURLMatchesEndpoint } from '../electron/web-target-validation.ts';
 
@@ -60,6 +63,29 @@ test('saved web addresses restore their context path in the shared connection ed
   );
   assert.equal(
     savedConnectionAddressForEditor('ssh', 'server.example.test', '/must-not-leak'),
+    'server.example.test',
+  );
+});
+
+test('switching away from a web protocol keeps only the network endpoint', () => {
+  assert.equal(
+    connectionAddressForProtocolChange(
+      'https',
+      'ssh',
+      'https://appliance.example.test:8443/admin?token=secret#callback',
+    ),
+    'appliance.example.test',
+  );
+  assert.equal(
+    connectionAddressForProtocolChange('http', 'rdp', '[fd00::1]:8080/admin'),
+    'fd00::1',
+  );
+  assert.equal(
+    connectionAddressForProtocolChange('https', 'http', 'appliance.example.test/admin'),
+    'appliance.example.test/admin',
+  );
+  assert.equal(
+    connectionAddressForProtocolChange('ssh', 'vnc', 'server.example.test'),
     'server.example.test',
   );
 });

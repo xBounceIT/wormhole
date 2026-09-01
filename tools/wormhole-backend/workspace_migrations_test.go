@@ -46,11 +46,46 @@ func TestEnsureElectronWorkspaceSchemaCreatesWinUICompatibleFreshDatabase(t *tes
 	if err := database.QueryRow("SELECT COUNT(*) FROM __migration_history;").Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != 20 {
+	if count != 21 {
 		t.Fatalf("migration history count = %d", count)
 	}
 	if err := ensureElectronWorkspaceSchema(databasePath); err != nil {
 		t.Fatalf("second migration pass: %v", err)
+	}
+}
+
+func TestEnsureElectronWorkspaceSchemaRemovesSecretBearingHTTPPathComponents(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	if err := ensureElectronWorkspaceSchema(databasePath); err != nil {
+		t.Fatal(err)
+	}
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`
+DELETE FROM __migration_history WHERE Id = '0019_http_path_context_only';
+INSERT INTO Nodes (Id, Name, Kind, SortOrder, Protocol, Host, HttpPath, CreatedAt, UpdatedAt)
+VALUES ('web', 'Web', 1, 0, 4, 'example.test', '/admin?access_token=secret#callback', 'now', 'now');`); err != nil {
+		_ = database.Close()
+		t.Fatal(err)
+	}
+	_ = database.Close()
+
+	if err := ensureElectronWorkspaceSchema(databasePath); err != nil {
+		t.Fatal(err)
+	}
+	database, err = openDatabase(databasePath, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var httpPath sql.NullString
+	if err := database.QueryRow("SELECT HttpPath FROM Nodes WHERE Id = 'web';").Scan(&httpPath); err != nil {
+		t.Fatal(err)
+	}
+	if !httpPath.Valid || httpPath.String != "/admin" {
+		t.Fatalf("sanitized HttpPath = %#v", httpPath)
 	}
 }
 

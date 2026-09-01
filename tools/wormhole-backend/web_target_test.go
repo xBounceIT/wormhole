@@ -19,7 +19,7 @@ INSERT INTO Nodes (Id, ParentId, Name, Kind, Protocol, Host, Port, HttpPath, Tun
 	if err != nil {
 		t.Fatalf("resolve web target: %v", err)
 	}
-	if target.URL != "https://firewall.example.test:8443/admin?view=network#routes" {
+	if target.URL != "https://firewall.example.test:8443/admin" {
 		t.Fatalf("unexpected URL: %q", target.URL)
 	}
 	if target.Protocol != "https" || target.Host != "firewall.example.test" || target.Port != 8443 {
@@ -170,6 +170,23 @@ func TestParseWebAddressTargetPreservesContextPath(t *testing.T) {
 	host, port, httpPath, err := parseWebAddressTarget("https://example.test:8443/admin dashboard?q=a%2Fb#routes here")
 	if err != nil || host != "example.test" || port != 8443 || httpPath != "/admin%20dashboard?q=a%2Fb#routes%20here" {
 		t.Fatalf("parsed web target = %q, %d, %q, %v", host, port, httpPath, err)
+	}
+}
+
+func TestNormalizePersistedWebPathExcludesQueryAndFragment(t *testing.T) {
+	for _, test := range []struct {
+		raw  string
+		want string
+	}{
+		{raw: "/admin dashboard?access_token=secret#callback", want: "/admin%20dashboard"},
+		{raw: "?access_token=secret", want: ""},
+		{raw: "#callback", want: ""},
+		{raw: "/admin%2Fdashboard", want: "/admin%2Fdashboard"},
+	} {
+		got, err := normalizePersistedWebPath(test.raw)
+		if err != nil || got != test.want {
+			t.Fatalf("normalizePersistedWebPath(%q) = %q, %v; want %q", test.raw, got, err, test.want)
+		}
 	}
 }
 

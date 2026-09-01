@@ -342,8 +342,12 @@ func normalizeWorkspaceNodeWrite(
 			if err != nil {
 				return normalizedWorkspaceNode{}, err
 			}
+			persistedPath, err := normalizePersistedWebPath(parsedPath)
+			if err != nil {
+				return normalizedWorkspaceNode{}, err
+			}
 			host = parsedHost
-			node.httpPath = nullableWorkspaceNodeString(parsedPath)
+			node.httpPath = nullableWorkspaceNodeString(persistedPath)
 			port := request.Port
 			if port == 0 {
 				port = parsedPort
@@ -359,7 +363,7 @@ func normalizeWorkspaceNodeWrite(
 			if protocol == 4 {
 				scheme = "https"
 			}
-			if _, err := buildWebURLWithPath(scheme, host, validationPort, parsedPath); err != nil {
+			if _, err := buildWebURLWithPath(scheme, host, validationPort, persistedPath); err != nil {
 				return normalizedWorkspaceNode{}, err
 			}
 			if port != 0 {

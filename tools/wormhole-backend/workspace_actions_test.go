@@ -82,7 +82,7 @@ FROM Nodes WHERE Id = ?;`, result.NodeID).Scan(
 	if sortOrder != 9 {
 		t.Fatalf("duplicate sort order = %d, want 9", sortOrder)
 	}
-	if port != 8443 || httpPath.String != "/admin?view=status#health" {
+	if port != 8443 || httpPath.String != "/admin" {
 		t.Fatalf("duplicate lost web target context: port=%d path=%q", port, httpPath.String)
 	}
 	if credentialID.String != "credential-id" || inlinePassword != 0 {

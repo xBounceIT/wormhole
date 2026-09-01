@@ -307,7 +307,7 @@ import {
   serializeConnectionTreeExpansion,
   shouldRenderConnectionTreeChildren,
 } from './connection-tree-state';
-import { savedConnectionAddressForEditor } from './web-address';
+import { connectionAddressForProtocolChange, savedConnectionAddressForEditor } from './web-address';
 import {
   appendTunnelTestLog,
   isTunnelTestCancellation,
@@ -7134,6 +7134,11 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                             setNewConnectionForm((form) => ({
                               ...form,
                               protocol,
+                              host: connectionAddressForProtocolChange(
+                                form.protocol,
+                                protocol,
+                                form.host,
+                              ),
                               port: protocol === form.protocol ? form.port : '',
                               credential:
                                 protocol === form.protocol

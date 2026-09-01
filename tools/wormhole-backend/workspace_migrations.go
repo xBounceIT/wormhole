@@ -308,6 +308,26 @@ CREATE INDEX IF NOT EXISTS IX_BitwardenCredentialCache_Name
 				})
 			},
 		},
+		{
+			id: "0019_http_path_context_only",
+			ensure: func(ctx context.Context, connection *sql.Conn) error {
+				_, err := connection.ExecContext(ctx, `
+UPDATE Nodes
+SET HttpPath = NULLIF(substr(
+    HttpPath,
+    1,
+    CASE
+        WHEN instr(HttpPath, '?') > 0 AND instr(HttpPath, '#') > 0
+            THEN min(instr(HttpPath, '?'), instr(HttpPath, '#')) - 1
+        WHEN instr(HttpPath, '?') > 0 THEN instr(HttpPath, '?') - 1
+        ELSE instr(HttpPath, '#') - 1
+    END
+), '')
+WHERE HttpPath IS NOT NULL
+  AND (instr(HttpPath, '?') > 0 OR instr(HttpPath, '#') > 0);`)
+				return err
+			},
+		},
 	}
 
 	for _, migration := range migrations {

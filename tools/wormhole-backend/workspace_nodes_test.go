@@ -285,8 +285,8 @@ func TestWorkspaceNodeCreateAndUpdatePersistsWebContextPath(t *testing.T) {
 	assertStoredWebTarget(
 		"target.example",
 		8443,
-		"/admin/dashboard?tab=network#routes",
-		"https://target.example:8443/admin/dashboard?tab=network#routes",
+		"/admin/dashboard",
+		"https://target.example:8443/admin/dashboard",
 	)
 	if err := updateWorkspaceNode(databasePath, workspaceNodeWriteRequest{
 		ID: nodeID, Name: "Admin", Kind: "connection", Protocol: "https",
@@ -300,6 +300,38 @@ func TestWorkspaceNodeCreateAndUpdatePersistsWebContextPath(t *testing.T) {
 		"/operations",
 		"https://target.example:9443/operations",
 	)
+}
+
+func TestLoadTreeExposesOnlyNonSecretWebContextPath(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	createWorkspaceNodeTestSchema(t, databasePath)
+	nodeID, err := createWorkspaceNode(databasePath, workspaceNodeWriteRequest{
+		Name: "Admin", Kind: "connection", Protocol: "https",
+		Host: "target.example/admin", CredentialMode: 0,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(
+		"UPDATE Nodes SET HttpPath = ? WHERE Id = ?;",
+		"/admin?access_token=secret#callback",
+		nodeID,
+	); err != nil {
+		_ = database.Close()
+		t.Fatal(err)
+	}
+	tree, err := loadTree(database)
+	_ = database.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tree) != 1 || tree[0].HTTPPath != "/admin" {
+		t.Fatalf("workspace snapshot exposed unsafe web context: %#v", tree)
+	}
 }
 
 func TestWorkspaceNodeCreateAllowsBlankManualCredentials(t *testing.T) {

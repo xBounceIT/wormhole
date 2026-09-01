@@ -263,7 +263,11 @@ func resolveWebTargetFromNodes(leaf *webNode, nodes map[string]*webNode) (webTar
 		resolvedPort = int(port.Int64)
 	}
 	resolvedHost := strings.TrimSpace(host.String)
-	uri, err := buildWebURLWithPath(scheme, resolvedHost, resolvedPort, nullableString(httpPath))
+	resolvedPath, err := normalizePersistedWebPath(nullableString(httpPath))
+	if err != nil {
+		return webTargetResponse{}, err
+	}
+	uri, err := buildWebURLWithPath(scheme, resolvedHost, resolvedPort, resolvedPath)
 	if err != nil {
 		return webTargetResponse{}, err
 	}
@@ -421,18 +425,9 @@ func parseWebAddressTarget(raw string) (string, int, string, error) {
 }
 
 func normalizeWebPath(raw string) (string, error) {
-	if raw == "" {
-		return "", nil
-	}
-	if len(raw) > 4096 || strings.Contains(raw, "\\") || strings.IndexFunc(raw, unicode.IsControl) >= 0 {
-		return "", errors.New("web connection has an invalid path")
-	}
-	parsed, err := url.Parse(raw)
-	if err != nil || parsed.IsAbs() || parsed.Host != "" || parsed.User != nil || parsed.Opaque != "" {
-		return "", errors.New("web connection has an invalid path")
-	}
-	if parsed.Path != "" && !strings.HasPrefix(parsed.Path, "/") {
-		return "", errors.New("web connection has an invalid path")
+	parsed, err := parseWebPath(raw)
+	if err != nil {
+		return "", err
 	}
 	normalized := parsed.EscapedPath()
 	if normalized == "" && (parsed.ForceQuery || parsed.RawQuery != "" || parsed.Fragment != "") {
@@ -448,6 +443,34 @@ func normalizeWebPath(raw string) (string, error) {
 		return "", errors.New("web connection has an invalid path")
 	}
 	return normalized, nil
+}
+
+// normalizePersistedWebPath deliberately excludes query and fragment data because those URL
+// components commonly carry access tokens. Saved connections retain only their non-secret
+// application context; Quick Connect can still use normalizeWebPath for an ephemeral full target.
+func normalizePersistedWebPath(raw string) (string, error) {
+	parsed, err := parseWebPath(raw)
+	if err != nil {
+		return "", err
+	}
+	return parsed.EscapedPath(), nil
+}
+
+func parseWebPath(raw string) (*url.URL, error) {
+	if raw == "" {
+		return &url.URL{}, nil
+	}
+	if len(raw) > 4096 || strings.Contains(raw, "\\") || strings.IndexFunc(raw, unicode.IsControl) >= 0 {
+		return nil, errors.New("web connection has an invalid path")
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.IsAbs() || parsed.Host != "" || parsed.User != nil || parsed.Opaque != "" {
+		return nil, errors.New("web connection has an invalid path")
+	}
+	if parsed.Path != "" && !strings.HasPrefix(parsed.Path, "/") {
+		return nil, errors.New("web connection has an invalid path")
+	}
+	return parsed, nil
 }
 
 func parseWebPort(raw string) (int, error) {
