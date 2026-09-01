@@ -9,6 +9,14 @@ const vncSource = readFileSync(
 );
 const mainSource = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
 const preloadSource = readFileSync(new URL('../electron/preload.cts', import.meta.url), 'utf8');
+const workspaceRootSource = readFileSync(
+  new URL('../src/WorkspaceRoot.tsx', import.meta.url),
+  'utf8',
+);
+const contextMenuSource = readFileSync(
+  new URL('../src/components/ui/context-menu.tsx', import.meta.url),
+  'utf8',
+);
 const rdpHostSource = readFileSync(
   new URL('../tools/wormhole-rdp-host/Program.cs', import.meta.url),
   'utf8',
@@ -471,6 +479,18 @@ test('native web and RDP overlays are hidden while a layout drag is active', () 
   assert.match(appSource, /<WebSurface[\s\S]*isActive=\{nativeSurfaceActive\}/);
   assert.match(appSource, /<RdpSurface[\s\S]*isActive=\{nativeSurfaceActive\}/);
   assert.match(appSource, /session\.sftp && isActive/);
+});
+
+test('renderer context menus hide native session surfaces while their portal is open', () => {
+  assert.match(workspaceRootSource, /<ContextMenuOverlayProvider>/);
+  assert.match(contextMenuSource, /setOpenOverlayIds/);
+  assert.match(contextMenuSource, /report\(overlayId, open\)/);
+  assert.match(contextMenuSource, /if \(openRef\.current\) report\(overlayId, false\)/);
+  assert.match(appSource, /const contextMenuOverlayOpen = useContextMenuOverlayOpen\(\)/);
+  assert.match(
+    appSource,
+    /isWebSurfaceVisible=\{[\s\S]*?mcpApprovals\.length === 0 &&[\s\S]*?!contextMenuOverlayOpen/,
+  );
 });
 
 test('active session close uses the themed confirmation dialog', () => {
