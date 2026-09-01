@@ -1,11 +1,66 @@
 import * as React from 'react';
 import { ContextMenu as ContextMenuPrimitive } from 'radix-ui';
 
+import { hasOpenOverlay, updateOpenOverlayIds } from '@/native-surface-overlay-state';
 import { cn } from '@/lib/utils';
 import { ChevronRightIcon, CheckIcon } from 'lucide-react';
 
-function ContextMenu({ ...props }: React.ComponentProps<typeof ContextMenuPrimitive.Root>) {
-  return <ContextMenuPrimitive.Root data-slot="context-menu" {...props} />;
+type ContextMenuOverlayContextValue = {
+  open: boolean;
+  report: (overlayId: string, open: boolean) => void;
+};
+
+const ContextMenuOverlayContext = React.createContext<ContextMenuOverlayContextValue>({
+  open: false,
+  report: () => undefined,
+});
+
+function ContextMenuOverlayProvider({ children }: { children: React.ReactNode }) {
+  const [openOverlayIds, setOpenOverlayIds] = React.useState<Set<string>>(() => new Set());
+  const report = React.useCallback((overlayId: string, open: boolean) => {
+    setOpenOverlayIds((current) => updateOpenOverlayIds(current, overlayId, open));
+  }, []);
+  const value = React.useMemo(
+    () => ({ open: hasOpenOverlay(openOverlayIds), report }),
+    [openOverlayIds, report],
+  );
+  return (
+    <ContextMenuOverlayContext.Provider value={value}>
+      {children}
+    </ContextMenuOverlayContext.Provider>
+  );
+}
+
+function useContextMenuOverlayOpen(): boolean {
+  return React.useContext(ContextMenuOverlayContext).open;
+}
+
+function ContextMenu({
+  onOpenChange,
+  ...props
+}: React.ComponentProps<typeof ContextMenuPrimitive.Root>) {
+  const overlayId = React.useId();
+  const { report } = React.useContext(ContextMenuOverlayContext);
+  const openRef = React.useRef(false);
+
+  React.useEffect(
+    () => () => {
+      if (openRef.current) report(overlayId, false);
+    },
+    [overlayId, report],
+  );
+
+  return (
+    <ContextMenuPrimitive.Root
+      data-slot="context-menu"
+      onOpenChange={(open) => {
+        openRef.current = open;
+        report(overlayId, open);
+        onOpenChange?.(open);
+      }}
+      {...props}
+    />
+  );
 }
 
 function ContextMenuTrigger({
@@ -228,6 +283,8 @@ function ContextMenuShortcut({ className, ...props }: React.ComponentProps<'span
 
 export {
   ContextMenu,
+  ContextMenuOverlayProvider,
+  useContextMenuOverlayOpen,
   ContextMenuTrigger,
   ContextMenuContent,
   ContextMenuItem,
