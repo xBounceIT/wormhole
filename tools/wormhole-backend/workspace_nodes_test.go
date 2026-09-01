@@ -81,10 +81,67 @@ CREATE TABLE CredentialProfiles (
 );
 	CREATE TABLE CredentialSecrets (Id TEXT PRIMARY KEY, Secret TEXT NOT NULL, Encoding TEXT NOT NULL, UpdatedAt TEXT);
 CREATE TABLE TunnelConfigs (
-    Id TEXT PRIMARY KEY NOT NULL
+    Id TEXT PRIMARY KEY NOT NULL,
+    Name TEXT NOT NULL DEFAULT '',
+    Kind INTEGER NOT NULL DEFAULT 0
 );`)
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestWorkspaceNodeUpdateReloadsLegacyTunnelRoute(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	createWorkspaceNodeTestSchema(t, databasePath)
+	const storedTunnelID = "B2A0A6B0-69C8-4F3E-A4CB-F3395AA0A9F7"
+	const canonicalTunnelID = "b2a0a6b0-69c8-4f3e-a4cb-f3395aa0a9f7"
+
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(
+		"INSERT INTO TunnelConfigs (Id, Name, Kind) VALUES (?, 'Legacy VPN', 0);",
+		storedTunnelID,
+	); err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	database.Close()
+
+	nodeID, err := createWorkspaceNode(databasePath, workspaceNodeWriteRequest{
+		Name: "SSH", Kind: "connection", Protocol: "ssh", Host: "target.example",
+		CredentialMode: 0,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tunnelEnabled := true
+	if err := updateWorkspaceNode(databasePath, workspaceNodeWriteRequest{
+		ID: nodeID, Name: "SSH", Kind: "connection", Protocol: "ssh", Host: "target.example",
+		CredentialMode: 0, TunnelEnabled: &tunnelEnabled, TunnelConfigID: storedTunnelID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	database, err = openDatabase(databasePath, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	tree, err := loadTree(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tunnels, err := loadTunnels(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tree) != 1 || tree[0].TunnelConfigID != canonicalTunnelID {
+		t.Fatalf("reloaded route = %#v, want %q", tree, canonicalTunnelID)
+	}
+	if len(tunnels) != 1 || tunnels[0].ID != tree[0].TunnelConfigID {
+		t.Fatalf("reloaded tunnels = %#v, want route id %q", tunnels, tree[0].TunnelConfigID)
 	}
 }
 
