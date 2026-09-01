@@ -2304,6 +2304,13 @@ func loadTunnelRows(database *sql.DB) ([]tunnelRow, error) {
 		if err := rows.Scan(&row.ID, &row.Name, &row.Kind); err != nil {
 			return nil, fmt.Errorf("cannot read a VPN tunnel: %w", err)
 		}
+		// Older .NET-backed databases may store GUIDs with uppercase hex digits. Node
+		// routes are normalized when the workspace tree is loaded, so expose tunnel
+		// identifiers in the same canonical form or the renderer cannot match a saved
+		// route to its combobox option after an edit.
+		if normalizedID := normalizeTunnelID(row.ID); normalizedID != "" {
+			row.ID = normalizedID
+		}
 		result = append(result, row)
 	}
 	if err := rows.Err(); err != nil {
