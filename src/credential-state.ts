@@ -37,10 +37,6 @@ type CredentialListProjection<T> = {
   resetKey: string;
 };
 
-function normalizeCredentialSelectionID(value: string): string {
-  return value.trim().toLowerCase();
-}
-
 function credentialListSearchText(credential: CredentialListItem): string {
   return [
     credential.name,
@@ -103,7 +99,7 @@ export function buildConnectionCredentialSelectionOptions(
   return [
     ...(includeInheritance ? [{ value: 'inherit', label: 'Inherit from folder' }] : []),
     ...credentials.map((credential) => ({
-      value: normalizeCredentialSelectionID(credential.id),
+      value: credential.id,
       label: `${credential.name} · ${credential.provider}`,
     })),
   ];
@@ -127,21 +123,16 @@ export function connectionCredentialSelectionAfterSavedToggle(
   return currentSelection;
 }
 
-export function connectionEditorCredentialSelectionIsValid(
+export function connectionEditorCredentialSelectionIsComplete(
   editorMode: 'saved' | 'quick',
-  protocol: string,
+  supportsSavedCredentials: boolean,
   useSavedCredentials: boolean,
   selection: string,
-  availableCredentials: ReadonlyArray<{ id: string }>,
 ): boolean {
   if (editorMode === 'quick') return true;
-  if (!isCredentialProtocol(protocol) || !useSavedCredentials) return true;
-  if (selection === 'inherit') return true;
-  const normalizedSelection = normalizeCredentialSelectionID(selection);
-  if (!normalizedSelection || normalizedSelection === 'none') return false;
-  return availableCredentials.some(
-    (credential) => normalizeCredentialSelectionID(credential.id) === normalizedSelection,
-  );
+  if (!supportsSavedCredentials || !useSavedCredentials) return true;
+  const normalizedSelection = selection.trim().toLowerCase();
+  return normalizedSelection !== '' && normalizedSelection !== 'none';
 }
 
 export function connectionInlinePasswordAction(

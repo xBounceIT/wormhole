@@ -24,7 +24,7 @@ import wormholeIcon from '../Assets/Wormhole.png';
 import bitwardenIcon from '../Assets/Bitwarden/bitwarden-icon.png';
 import {
   buildConnectionCredentialSelectionOptions,
-  connectionEditorCredentialSelectionIsValid,
+  connectionEditorCredentialSelectionIsComplete,
   connectionCredentialSelectionAfterSavedToggle,
   connectionInlinePasswordAction,
   connectionInlinePasswordPlaceholder,
@@ -1983,20 +1983,21 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     ],
     [folders],
   );
+  const connectionCredentialProtocol = isCredentialProtocol(newConnectionForm.protocol)
+    ? newConnectionForm.protocol
+    : undefined;
+  const connectionProtocolSupportsSavedCredentials = connectionCredentialProtocol !== undefined;
   const connectionCredentialSelectionOptions = useMemo<SearchableComboboxOption[]>(() => {
-    const options = isCredentialProtocol(newConnectionForm.protocol)
-      ? credentialOptions[newConnectionForm.protocol]
+    const options = connectionCredentialProtocol
+      ? credentialOptions[connectionCredentialProtocol]
       : [];
     return buildConnectionCredentialSelectionOptions(options, connectionEditorMode === 'saved');
-  }, [connectionEditorMode, credentialOptions, newConnectionForm.protocol]);
-  const connectionEditorCredentialSelectionValid = connectionEditorCredentialSelectionIsValid(
+  }, [connectionEditorMode, connectionCredentialProtocol, credentialOptions]);
+  const connectionEditorCredentialSelectionComplete = connectionEditorCredentialSelectionIsComplete(
     connectionEditorMode,
-    newConnectionForm.protocol,
+    connectionProtocolSupportsSavedCredentials,
     newConnectionForm.useSavedCredentials,
     newConnectionForm.credential,
-    isCredentialProtocol(newConnectionForm.protocol)
-      ? credentialOptions[newConnectionForm.protocol]
-      : [],
   );
   const selectedConnectionCredential = useMemo(() => {
     const selection = newConnectionForm.credential;
@@ -5640,7 +5641,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   async function submitNewConnection(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (editorBusy) return;
-    if (!connectionEditorCredentialSelectionValid) {
+    if (!connectionEditorCredentialSelectionComplete) {
       setEditorError(connectionCredentialSelectionError);
       return;
     }
@@ -7263,7 +7264,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                               searchPlaceholder="Search credentials…"
                               value={newConnectionForm.credential}
                             />
-                            {!connectionEditorCredentialSelectionValid ? (
+                            {!connectionEditorCredentialSelectionComplete ? (
                               <p className="text-[11px] text-destructive" role="alert">
                                 {connectionCredentialSelectionError}
                               </p>
@@ -8029,7 +8030,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                   Cancel
                 </Button>
                 <Button
-                  disabled={editorBusy || !connectionEditorCredentialSelectionValid}
+                  disabled={editorBusy || !connectionEditorCredentialSelectionComplete}
                   type="submit"
                 >
                   {connectionEditorMode !== 'quick' &&

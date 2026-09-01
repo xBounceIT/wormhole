@@ -5,7 +5,7 @@ import test from 'node:test';
 import {
   buildCredentialListProjection,
   buildConnectionCredentialSelectionOptions,
-  connectionEditorCredentialSelectionIsValid,
+  connectionEditorCredentialSelectionIsComplete,
   connectionCredentialSelectionAfterSavedToggle,
   connectionInlinePasswordAction,
   connectionInlinePasswordPlaceholder,
@@ -43,7 +43,7 @@ test('connection credential choices expose inheritance and saved credentials onl
   );
   assert.deepEqual(
     buildConnectionCredentialSelectionOptions(
-      [{ id: 'CREDENTIAL-1', name: 'Server account', provider: 'Bitwarden' }],
+      [{ id: 'credential-1', name: 'Server account', provider: 'Bitwarden' }],
       false,
     ),
     [{ value: 'credential-1', label: 'Server account · Bitwarden' }],
@@ -76,56 +76,21 @@ test('enabling saved credentials replaces the removed connection-only none selec
   );
 });
 
-test('saved connections require inheritance or a currently available credential', () => {
-  const availableCredentials = [{ id: 'CREDENTIAL-1' }];
-
+test('saved connection forms require a selection without duplicating Go reference validation', () => {
+  assert.equal(connectionEditorCredentialSelectionIsComplete('saved', true, true, 'inherit'), true);
   assert.equal(
-    connectionEditorCredentialSelectionIsValid(
-      'saved',
-      'ssh',
-      true,
-      'inherit',
-      availableCredentials,
-    ),
+    connectionEditorCredentialSelectionIsComplete('saved', true, true, ' credential-1 '),
     true,
   );
+  assert.equal(connectionEditorCredentialSelectionIsComplete('saved', true, true, 'none'), false);
   assert.equal(
-    connectionEditorCredentialSelectionIsValid(
-      'saved',
-      'rdp',
-      true,
-      ' credential-1 ',
-      availableCredentials,
-    ),
+    connectionEditorCredentialSelectionIsComplete('saved', true, true, 'deleted-credential'),
     true,
   );
-  assert.equal(
-    connectionEditorCredentialSelectionIsValid('saved', 'vnc', true, 'none', availableCredentials),
-    false,
-  );
-  assert.equal(
-    connectionEditorCredentialSelectionIsValid(
-      'saved',
-      'ssh',
-      true,
-      'deleted-credential',
-      availableCredentials,
-    ),
-    false,
-  );
-  assert.equal(
-    connectionEditorCredentialSelectionIsValid('saved', 'ssh', true, '', availableCredentials),
-    false,
-  );
-  assert.equal(
-    connectionEditorCredentialSelectionIsValid('saved', 'ssh', false, 'none', availableCredentials),
-    true,
-  );
-  assert.equal(
-    connectionEditorCredentialSelectionIsValid('saved', 'https', true, 'none', []),
-    true,
-  );
-  assert.equal(connectionEditorCredentialSelectionIsValid('quick', 'ssh', true, 'none', []), true);
+  assert.equal(connectionEditorCredentialSelectionIsComplete('saved', true, true, ''), false);
+  assert.equal(connectionEditorCredentialSelectionIsComplete('saved', true, false, 'none'), true);
+  assert.equal(connectionEditorCredentialSelectionIsComplete('saved', false, true, 'none'), true);
+  assert.equal(connectionEditorCredentialSelectionIsComplete('quick', true, true, 'none'), true);
 });
 
 test('saved connection form blocks missing credential selections before workspace writes', () => {
@@ -147,12 +112,15 @@ test('saved connection form blocks missing credential selections before workspac
   );
   assert.match(
     submitSource,
-    /if \(!connectionEditorCredentialSelectionValid\)[\s\S]*?return;[\s\S]*?updateWorkspaceNode/,
+    /if \(!connectionEditorCredentialSelectionComplete\)[\s\S]*?return;[\s\S]*?updateWorkspaceNode/,
   );
-  assert.match(appSource, /disabled=\{editorBusy \|\| !connectionEditorCredentialSelectionValid\}/);
+  assert.match(
+    appSource,
+    /disabled=\{editorBusy \|\| !connectionEditorCredentialSelectionComplete\}/,
+  );
   assert.match(
     credentialFieldSource,
-    /!connectionEditorCredentialSelectionValid[\s\S]*?connectionCredentialSelectionError/,
+    /!connectionEditorCredentialSelectionComplete[\s\S]*?connectionCredentialSelectionError/,
   );
 });
 
