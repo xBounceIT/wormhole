@@ -63,7 +63,11 @@ import {
   shouldAutoCopyTerminalSelection,
   shouldUseTerminalClipboardShortcut,
 } from './terminal-clipboard';
-import { terminalVisibleScrollback } from './terminal-frame';
+import {
+  nextTerminalViewportResetSequence,
+  terminalScrollEventKeepsBottomPin,
+  terminalVisibleScrollback,
+} from './terminal-frame';
 import {
   failedSshReconnectState,
   reconnectingSshState,
@@ -615,6 +619,10 @@ function parseDraggedNodeIds(value: string): string[] {
   return [value];
 }
 
+type RenderedTerminalFrame = WormholeSshTerminalFrame & {
+  viewportResetSequence?: number;
+};
+
 type Session = {
   id: string;
   title: string;
@@ -625,7 +633,7 @@ type Session = {
   canTransfer?: boolean;
   backendSessionId?: string;
   status: 'connecting' | 'connected' | 'failed' | 'closed' | 'placeholder';
-  terminalFrame?: WormholeSshTerminalFrame;
+  terminalFrame?: RenderedTerminalFrame;
   tunnelProgress?: { phase: string; detail?: string } | null;
   tunnelConfigId?: string;
   credentialId?: string;
@@ -937,9 +945,9 @@ function createBlankTerminalCells(columns: number, rows: number): WormholeSshTer
 }
 
 function applySshTerminalFrame(
-  previous: WormholeSshTerminalFrame | undefined,
+  previous: RenderedTerminalFrame | undefined,
   incoming: WormholeSshTerminalFrame,
-): WormholeSshTerminalFrame {
+): RenderedTerminalFrame {
   const cellCount = incoming.columns * incoming.rows;
   const hasMatchingPrevious =
     previous &&
@@ -976,7 +984,16 @@ function applySshTerminalFrame(
   } else {
     scrollback = incoming.scrollback?.slice(-terminalMaxScrollbackLines) ?? [];
   }
-  return { ...incoming, full: true, cells, scrollback };
+  return {
+    ...incoming,
+    full: true,
+    cells,
+    scrollback,
+    viewportResetSequence: nextTerminalViewportResetSequence(
+      previous?.viewportResetSequence,
+      incoming,
+    ),
+  };
 }
 
 const navItems: Array<{ id: NavItem; label: string; hint: string }> = [
@@ -8755,6 +8772,8 @@ function SshTerminalSurface({
   const surfaceRef = useRef<HTMLDivElement>(null);
   const resizeSignatureRef = useRef('');
   const stickToBottomRef = useRef(true);
+  const automaticScrollTopRef = useRef<number | undefined>(undefined);
+  const handledViewportResetSequenceRef = useRef<number | undefined>(undefined);
 
   useEffect(() => {
     const surface = surfaceRef.current;
@@ -8802,22 +8821,33 @@ function SshTerminalSurface({
     };
   }, [isActive, isSerial, session.backendSessionId, session.status]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     stickToBottomRef.current = true;
+    automaticScrollTopRef.current = undefined;
+    handledViewportResetSequenceRef.current = undefined;
   }, [session.backendSessionId, session.status]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!isActive || session.status !== 'connected') return;
     const surface = surfaceRef.current;
     if (!surface) return;
-    if (session.terminalFrame?.viewportReset) stickToBottomRef.current = true;
+    const viewportResetSequence = session.terminalFrame?.viewportResetSequence;
+    if (
+      viewportResetSequence !== undefined &&
+      viewportResetSequence !== handledViewportResetSequenceRef.current
+    ) {
+      stickToBottomRef.current = true;
+      handledViewportResetSequenceRef.current = viewportResetSequence;
+    }
     if (!stickToBottomRef.current) return;
-    surface.scrollTop = surface.scrollHeight;
+    const bottom = Math.max(0, surface.scrollHeight - surface.clientHeight);
+    automaticScrollTopRef.current = bottom;
+    surface.scrollTop = bottom;
   }, [
     isActive,
     session.backendSessionId,
     session.status,
-    session.terminalFrame?.viewportReset,
+    session.terminalFrame?.viewportResetSequence,
     session.terminalFrame?.sequence,
   ]);
 
@@ -8844,6 +8874,7 @@ function SshTerminalSurface({
       event.preventDefault();
       event.stopPropagation();
 
+      automaticScrollTopRef.current = undefined;
       surface.scrollLeft = nextScrollLeft;
       surface.scrollTop = nextScrollTop;
       stickToBottomRef.current = terminalIsAtBottom(surface);
@@ -9015,7 +9046,12 @@ function SshTerminalSurface({
       }}
       onScroll={(event) => {
         const surface = event.currentTarget;
-        stickToBottomRef.current = terminalIsAtBottom(surface);
+        stickToBottomRef.current = terminalScrollEventKeepsBottomPin(
+          surface.scrollTop,
+          terminalIsAtBottom(surface),
+          automaticScrollTopRef.current,
+        );
+        automaticScrollTopRef.current = undefined;
       }}
       ref={surfaceRef}
       role="application"
