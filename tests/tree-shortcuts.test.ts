@@ -11,7 +11,10 @@ import {
   type ConnectionTreeShortcutEvent,
   type ConnectionTreeShortcutNode,
 } from '../src/tree-shortcuts.ts';
-import { isWormholeShortcutSuppressed } from '../src/app-shortcuts.ts';
+import {
+  isWormholeShortcutSuppressed,
+  markWormholeShortcutSuppressed,
+} from '../src/app-shortcuts.ts';
 import {
   parseWorkspaceNodesRequest,
   workspaceDeleteNodesMaxRequestBytes,
@@ -260,16 +263,22 @@ test('Wormhole window handlers honor session shortcut suppression', () => {
     },
   } as unknown as EventTarget;
   const ordinaryTarget = { closest: () => null } as unknown as EventTarget;
+  const eventFor = (target: EventTarget | null) => ({ target }) as Event;
 
-  assert.equal(isWormholeShortcutSuppressed(sessionTarget), true);
+  assert.equal(isWormholeShortcutSuppressed(eventFor(sessionTarget)), true);
   assert.equal(receivedSelector, '[data-wormhole-shortcuts-disabled]');
-  assert.equal(isWormholeShortcutSuppressed(ordinaryTarget), false);
-  assert.equal(isWormholeShortcutSuppressed(null), false);
+  assert.equal(isWormholeShortcutSuppressed(eventFor(ordinaryTarget)), false);
+  assert.equal(isWormholeShortcutSuppressed(eventFor(null)), false);
+
+  const portaledSessionEvent = eventFor(ordinaryTarget);
+  markWormholeShortcutSuppressed(portaledSessionEvent);
+  assert.equal(isWormholeShortcutSuppressed(portaledSessionEvent), true);
+  assert.equal(isWormholeShortcutSuppressed(eventFor(ordinaryTarget)), false);
 
   for (const source of [appSource, sidebarSource]) {
     assert.match(
       source,
-      /const handleKeyDown = \(event: KeyboardEvent\) => \{\s*if \(isWormholeShortcutSuppressed\(event\.target\)\) return;/,
+      /const handleKeyDown = \(event: KeyboardEvent\) => \{\s*if \(isWormholeShortcutSuppressed\(event\)\) return;/,
     );
   }
 });

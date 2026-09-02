@@ -54,7 +54,7 @@ import {
   formatBitwardenVaultStatus,
 } from './bitwarden-cli-view';
 import { writeClipboardText } from './clipboard';
-import { isWormholeShortcutSuppressed } from './app-shortcuts';
+import { isWormholeShortcutSuppressed, markWormholeShortcutSuppressed } from './app-shortcuts';
 import { buildMcpConfig, type McpClient } from './mcp-config';
 import {
   hasNewerReleaseWithoutInstaller,
@@ -2948,7 +2948,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (isWormholeShortcutSuppressed(event.target)) return;
+      if (isWormholeShortcutSuppressed(event)) return;
       const target = event.target instanceof Element ? event.target : null;
       const editableTarget = target?.closest<HTMLElement>(
         'input, textarea, select, [contenteditable]:not([contenteditable="false"])',
@@ -10497,6 +10497,7 @@ function SessionsPage({
             className="absolute min-h-0 min-w-0 overflow-hidden"
             data-wormhole-shortcuts-disabled=""
             key={session.id}
+            onKeyDownCapture={(event) => markWormholeShortcutSuppressed(event.nativeEvent)}
             onPointerDownCapture={() => {
               if (pane) activateSession(pane.id, session.id);
             }}

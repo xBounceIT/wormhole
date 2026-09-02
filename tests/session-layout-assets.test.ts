@@ -41,6 +41,10 @@ test('live surfaces are keyed only by session identity in one stable workspace l
   );
   assert.match(surfaceLayer, /key=\{session\.id\}/);
   assert.match(surfaceLayer, /data-wormhole-shortcuts-disabled=""/);
+  assert.match(
+    surfaceLayer,
+    /onKeyDownCapture=\{\(event\) => markWormholeShortcutSuppressed\(event\.nativeEvent\)\}/,
+  );
   assert.match(surfaceLayer, /<SessionSurface/);
   assert.doesNotMatch(surfaceLayer, /key=\{`?\$?\{?pane/);
 });
