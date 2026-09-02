@@ -13,9 +13,13 @@ import {
 } from '../electron/terminal-clipboard.ts';
 import { writeClipboardText } from '../src/clipboard.ts';
 import {
+  clearTerminalSelectionIfUnchanged,
+  copyAndClearTerminalSelection,
   normalizeTerminalPasteText,
   shouldAutoCopyTerminalSelection,
   shouldUseTerminalClipboardShortcut,
+  terminalCopyChordAfterKeyDown,
+  terminalCopyChordAfterKeyUp,
 } from '../src/terminal-clipboard.ts';
 import { terminalControlKeyData } from '../src/terminal-keyboard.ts';
 import {
@@ -52,6 +56,95 @@ test('paste shortcuts stay in Chromium instead of becoming SSH control input', (
 test('copy uses the clipboard only when terminal text is selected', () => {
   assert.equal(shouldUseTerminalClipboardShortcut(shortcut('c'), true), true);
   assert.equal(shouldUseTerminalClipboardShortcut(shortcut('c'), false), false);
+});
+
+test('copy key repeats stay in Chromium until the copied chord is released', () => {
+  const copyKey = shortcut('c');
+  let copyChordActive = false;
+
+  assert.equal(shouldUseTerminalClipboardShortcut(copyKey, true, copyChordActive), true);
+  copyChordActive = terminalCopyChordAfterKeyDown(copyKey, true, copyChordActive);
+  assert.equal(copyChordActive, true);
+
+  assert.equal(shouldUseTerminalClipboardShortcut(copyKey, false, copyChordActive), true);
+  assert.equal(
+    shouldUseTerminalClipboardShortcut(shortcut('c', { ctrlKey: false }), false, copyChordActive),
+    true,
+  );
+  assert.equal(terminalCopyChordAfterKeyUp({ key: 'Control' }, copyChordActive), true);
+
+  copyChordActive = terminalCopyChordAfterKeyUp({ key: 'C' }, copyChordActive);
+  assert.equal(copyChordActive, false);
+  assert.equal(shouldUseTerminalClipboardShortcut(copyKey, false, copyChordActive), false);
+});
+
+test('non-copy shortcuts never start the retained copy chord', () => {
+  assert.equal(terminalCopyChordAfterKeyDown(shortcut('v'), true, false), false);
+  assert.equal(terminalCopyChordAfterKeyDown(shortcut('c'), false, false), false);
+  assert.equal(terminalCopyChordAfterKeyDown(shortcut('c', { altKey: true }), true, false), false);
+});
+
+test('copying terminal text writes plain text and clears the selection', () => {
+  const calls: string[] = [];
+  const clipboardData = {
+    setData(format: string, text: string) {
+      calls.push(`${format}:${text}`);
+    },
+  };
+
+  assert.equal(
+    copyAndClearTerminalSelection('selected command', clipboardData, () => calls.push('clear')),
+    true,
+  );
+  assert.deepEqual(calls, ['text/plain:selected command', 'clear']);
+
+  calls.length = 0;
+  assert.equal(
+    copyAndClearTerminalSelection('', clipboardData, () => calls.push('clear')),
+    false,
+  );
+  assert.deepEqual(calls, []);
+});
+
+test('auto-copy clears only the selection that completed copying', () => {
+  const anchorNode = {};
+  const focusNode = {};
+  const copiedSelection = { anchorNode, anchorOffset: 2, focusNode, focusOffset: 8 };
+  let clearCount = 0;
+
+  assert.equal(
+    clearTerminalSelectionIfUnchanged(
+      { ...copiedSelection, removeAllRanges: () => clearCount++ },
+      copiedSelection,
+    ),
+    true,
+  );
+  assert.equal(clearCount, 1);
+
+  assert.equal(
+    clearTerminalSelectionIfUnchanged(
+      {
+        anchorNode: focusNode,
+        anchorOffset: 8,
+        focusNode: anchorNode,
+        focusOffset: 2,
+        removeAllRanges: () => clearCount++,
+      },
+      copiedSelection,
+    ),
+    true,
+  );
+  assert.equal(clearCount, 2);
+
+  assert.equal(
+    clearTerminalSelectionIfUnchanged(
+      { ...copiedSelection, focusOffset: 9, removeAllRanges: () => clearCount++ },
+      copiedSelection,
+    ),
+    false,
+  );
+  assert.equal(clearTerminalSelectionIfUnchanged(undefined, copiedSelection), false);
+  assert.equal(clearCount, 2);
 });
 
 test('unrelated and alt-modified shortcuts remain terminal input', () => {
@@ -239,6 +332,62 @@ test('live terminal wires automatic scroll tracking into frame and user scroll h
   );
 });
 
+test('live terminal clears its DOM selection after a copy event', () => {
+  const terminalSurfaceSource = appSource.slice(
+    appSource.indexOf('function SshTerminalSurface'),
+    appSource.indexOf("type SftpPaneKind = 'local' | 'remote'"),
+  );
+  const copyHandlerSource = terminalSurfaceSource.slice(
+    terminalSurfaceSource.indexOf('onCopy='),
+    terminalSurfaceSource.indexOf('onPaste='),
+  );
+
+  assert.match(
+    copyHandlerSource,
+    /copyAndClearTerminalSelection\([\s\S]*terminalSelectionText\(event\.currentTarget\),[\s\S]*event\.clipboardData,[\s\S]*removeAllRanges\(\)[\s\S]*event\.preventDefault\(\);/,
+  );
+});
+
+test('live terminal retains the copy chord until key release and clears it on focus loss', () => {
+  const terminalSurfaceSource = appSource.slice(
+    appSource.indexOf('function SshTerminalSurface'),
+    appSource.indexOf("type SftpPaneKind = 'local' | 'remote'"),
+  );
+  const keyboardHandlerSource = terminalSurfaceSource.slice(
+    terminalSurfaceSource.indexOf('onKeyDown='),
+    terminalSurfaceSource.indexOf('onCopy='),
+  );
+
+  assert.match(
+    keyboardHandlerSource,
+    /shouldUseTerminalClipboardShortcut\([\s\S]*terminalCopyChordActiveRef\.current[\s\S]*terminalCopyChordAfterKeyDown\([\s\S]*if \(useClipboard\) return;/,
+  );
+  assert.match(
+    keyboardHandlerSource,
+    /onKeyUp=\{[\s\S]*terminalCopyChordAfterKeyUp\([\s\S]*onBlur=\{[\s\S]*terminalCopyChordActiveRef\.current = false;/,
+  );
+  assert.match(
+    terminalSurfaceSource,
+    /window\.addEventListener\('blur', resetCopyChord\);[\s\S]*document\.addEventListener\('visibilitychange', resetCopyChordWhenHidden\);[\s\S]*window\.removeEventListener\('blur', resetCopyChord\);[\s\S]*document\.removeEventListener\('visibilitychange', resetCopyChordWhenHidden\);/,
+  );
+});
+
+test('auto-copy clears the copied terminal selection only after a successful write', () => {
+  const terminalSurfaceSource = appSource.slice(
+    appSource.indexOf('function SshTerminalSurface'),
+    appSource.indexOf("type SftpPaneKind = 'local' | 'remote'"),
+  );
+  const mouseUpHandlerSource = terminalSurfaceSource.slice(
+    terminalSurfaceSource.indexOf('onMouseUp='),
+    terminalSurfaceSource.indexOf('onContextMenu='),
+  );
+
+  assert.match(
+    mouseUpHandlerSource,
+    /copyTextToClipboard\(text\)\s*\.then\(\(\) => \{[\s\S]*clearTerminalSelectionIfUnchanged\(terminalSelection\(surface\), copiedSelection\);[\s\S]*\.catch\(\(\) => undefined\);/,
+  );
+});
+
 test('styled runs remain inline and preserve spaces when Chromium copies a terminal row', () => {
   const terminalGridSource = appSource.slice(
     appSource.indexOf('const TerminalScrollback'),
@@ -270,13 +419,16 @@ app.whenReady().then(async () => {
   const window = new BrowserWindow({ show: false });
   try {
     await window.loadURL('data:text/html;charset=utf-8,' + html);
-    const selectedText = await window.webContents.executeJavaScript(
-      "const range=document.createRange();range.selectNodeContents(document.getElementById('terminal'));const selection=window.getSelection();selection.removeAllRanges();selection.addRange(range);selection.toString()",
+    const result = await window.webContents.executeJavaScript(
+      "const terminal=document.getElementById('terminal');terminal.addEventListener('copy',(event)=>{const selection=window.getSelection();const text=selection.toString();if(!text)return;event.clipboardData.setData('text/plain',text);selection.removeAllRanges();event.preventDefault()});const range=document.createRange();range.selectNodeContents(terminal);const selection=window.getSelection();selection.removeAllRanges();selection.addRange(range);const selectedText=selection.toString();const clipboardData=new DataTransfer();const copyEvent=new ClipboardEvent('copy',{bubbles:true,cancelable:true,clipboardData});terminal.dispatchEvent(copyEvent);({clipboardText:clipboardData.getData('text/plain'),defaultPrevented:copyEvent.defaultPrevented,selectedText,remainingText:selection.toString()})",
     );
-    assert.equal(
-      selectedText,
-      'docker stack deploy -c portainer-agent-stack.yml portainer\nprintf done',
-    );
+    const expectedText = 'docker stack deploy -c portainer-agent-stack.yml portainer\nprintf done';
+    assert.deepEqual(result, {
+      clipboardText: expectedText,
+      defaultPrevented: true,
+      selectedText: expectedText,
+      remainingText: '',
+    });
   } finally {
     window.destroy();
   }

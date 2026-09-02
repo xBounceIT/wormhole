@@ -62,9 +62,13 @@ import {
   shouldOfferUpdate,
 } from './update-state';
 import {
+  clearTerminalSelectionIfUnchanged,
+  copyAndClearTerminalSelection,
   normalizeTerminalPasteText,
   shouldAutoCopyTerminalSelection,
   shouldUseTerminalClipboardShortcut,
+  terminalCopyChordAfterKeyDown,
+  terminalCopyChordAfterKeyUp,
 } from './terminal-clipboard';
 import { terminalControlKeyData } from './terminal-keyboard';
 import {
@@ -8759,7 +8763,7 @@ function terminalKeyData(event: React.KeyboardEvent, appCursor: boolean): string
   return undefined;
 }
 
-function terminalSelectionText(surface: HTMLElement): string {
+function terminalSelection(surface: HTMLElement): Selection | undefined {
   const selection = window.getSelection();
   if (
     !selection ||
@@ -8769,9 +8773,13 @@ function terminalSelectionText(surface: HTMLElement): string {
     !surface.contains(selection.anchorNode) ||
     !surface.contains(selection.focusNode)
   ) {
-    return '';
+    return undefined;
   }
-  return selection.toString();
+  return selection;
+}
+
+function terminalSelectionText(surface: HTMLElement): string {
+  return terminalSelection(surface)?.toString() ?? '';
 }
 
 function SshTerminalSurface({
@@ -8796,6 +8804,7 @@ function SshTerminalSurface({
   const stickToBottomRef = useRef(true);
   const automaticScrollTopRef = useRef<number | undefined>(undefined);
   const handledViewportResetSequenceRef = useRef<number | undefined>(undefined);
+  const terminalCopyChordActiveRef = useRef(false);
 
   useEffect(() => {
     const surface = surfaceRef.current;
@@ -8847,6 +8856,7 @@ function SshTerminalSurface({
     stickToBottomRef.current = true;
     automaticScrollTopRef.current = undefined;
     handledViewportResetSequenceRef.current = undefined;
+    terminalCopyChordActiveRef.current = false;
   }, [session.backendSessionId, session.status]);
 
   useLayoutEffect(() => {
@@ -8914,6 +8924,27 @@ function SshTerminalSurface({
     const frame = requestAnimationFrame(focus);
     return () => cancelAnimationFrame(frame);
   }, [isActive, session.backendSessionId, session.status]);
+
+  useEffect(() => {
+    if (!isActive || session.status !== 'connected') {
+      terminalCopyChordActiveRef.current = false;
+      return;
+    }
+
+    const resetCopyChord = () => {
+      terminalCopyChordActiveRef.current = false;
+    };
+    const resetCopyChordWhenHidden = () => {
+      if (document.visibilityState !== 'visible') resetCopyChord();
+    };
+    window.addEventListener('blur', resetCopyChord);
+    document.addEventListener('visibilitychange', resetCopyChordWhenHidden);
+    return () => {
+      window.removeEventListener('blur', resetCopyChord);
+      document.removeEventListener('visibilitychange', resetCopyChordWhenHidden);
+      resetCopyChord();
+    };
+  }, [isActive, session.status]);
 
   const isConnected = session.status === 'connected';
   if (!isConnected) {
@@ -9034,18 +9065,39 @@ function SshTerminalSurface({
       className="terminal-scrollbar h-full min-h-0 min-w-0 flex-1 cursor-text overflow-x-auto overflow-y-auto overscroll-contain bg-[#090909] text-[#e5e7eb] outline-none"
       onClick={(event) => event.currentTarget.focus({ preventScroll: true })}
       onKeyDown={(event) => {
-        if (
-          shouldUseTerminalClipboardShortcut(
-            event,
-            Boolean(terminalSelectionText(event.currentTarget)),
-          )
-        ) {
-          return;
-        }
+        const hasSelection = Boolean(terminalSelectionText(event.currentTarget));
+        const useClipboard = shouldUseTerminalClipboardShortcut(
+          event,
+          hasSelection,
+          terminalCopyChordActiveRef.current,
+        );
+        terminalCopyChordActiveRef.current = terminalCopyChordAfterKeyDown(
+          event,
+          hasSelection,
+          terminalCopyChordActiveRef.current,
+        );
+        if (useClipboard) return;
         const data = terminalKeyData(event, session.terminalFrame?.applicationCursor ?? false);
         if (data === undefined) return;
         event.preventDefault();
         onInput(session.id, data);
+      }}
+      onKeyUp={(event) => {
+        terminalCopyChordActiveRef.current = terminalCopyChordAfterKeyUp(
+          event,
+          terminalCopyChordActiveRef.current,
+        );
+      }}
+      onBlur={() => {
+        terminalCopyChordActiveRef.current = false;
+      }}
+      onCopy={(event) => {
+        const copied = copyAndClearTerminalSelection(
+          terminalSelectionText(event.currentTarget),
+          event.clipboardData,
+          () => window.getSelection()?.removeAllRanges(),
+        );
+        if (copied) event.preventDefault();
       }}
       onPaste={(event) => {
         const text = event.clipboardData.getData('text');
@@ -9055,8 +9107,21 @@ function SshTerminalSurface({
       }}
       onMouseUp={(event) => {
         if (!shouldAutoCopyTerminalSelection(autoCopyOnSelect, event.button)) return;
-        const text = terminalSelectionText(event.currentTarget);
-        if (text) void copyTextToClipboard(text).catch(() => undefined);
+        const surface = event.currentTarget;
+        const selection = terminalSelection(surface);
+        const text = selection?.toString() ?? '';
+        if (!selection || !text) return;
+        const copiedSelection = {
+          anchorNode: selection.anchorNode,
+          anchorOffset: selection.anchorOffset,
+          focusNode: selection.focusNode,
+          focusOffset: selection.focusOffset,
+        };
+        void copyTextToClipboard(text)
+          .then(() => {
+            clearTerminalSelectionIfUnchanged(terminalSelection(surface), copiedSelection);
+          })
+          .catch(() => undefined);
       }}
       onContextMenu={(event) => {
         if (isSerial || !session.backendSessionId) return;
