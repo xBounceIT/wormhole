@@ -8925,6 +8925,27 @@ function SshTerminalSurface({
     return () => cancelAnimationFrame(frame);
   }, [isActive, session.backendSessionId, session.status]);
 
+  useEffect(() => {
+    if (!isActive || session.status !== 'connected') {
+      terminalCopyChordActiveRef.current = false;
+      return;
+    }
+
+    const resetCopyChord = () => {
+      terminalCopyChordActiveRef.current = false;
+    };
+    const resetCopyChordWhenHidden = () => {
+      if (document.visibilityState !== 'visible') resetCopyChord();
+    };
+    window.addEventListener('blur', resetCopyChord);
+    document.addEventListener('visibilitychange', resetCopyChordWhenHidden);
+    return () => {
+      window.removeEventListener('blur', resetCopyChord);
+      document.removeEventListener('visibilitychange', resetCopyChordWhenHidden);
+      resetCopyChord();
+    };
+  }, [isActive, session.status]);
+
   const isConnected = session.status === 'connected';
   if (!isConnected) {
     const isConnecting = session.status === 'connecting';

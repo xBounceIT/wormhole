@@ -348,7 +348,7 @@ test('live terminal clears its DOM selection after a copy event', () => {
   );
 });
 
-test('live terminal retains the copy chord until key release and clears it on blur', () => {
+test('live terminal retains the copy chord until key release and clears it on focus loss', () => {
   const terminalSurfaceSource = appSource.slice(
     appSource.indexOf('function SshTerminalSurface'),
     appSource.indexOf("type SftpPaneKind = 'local' | 'remote'"),
@@ -365,6 +365,10 @@ test('live terminal retains the copy chord until key release and clears it on bl
   assert.match(
     keyboardHandlerSource,
     /onKeyUp=\{[\s\S]*terminalCopyChordAfterKeyUp\([\s\S]*onBlur=\{[\s\S]*terminalCopyChordActiveRef\.current = false;/,
+  );
+  assert.match(
+    terminalSurfaceSource,
+    /window\.addEventListener\('blur', resetCopyChord\);[\s\S]*document\.addEventListener\('visibilitychange', resetCopyChordWhenHidden\);[\s\S]*window\.removeEventListener\('blur', resetCopyChord\);[\s\S]*document\.removeEventListener\('visibilitychange', resetCopyChordWhenHidden\);/,
   );
 });
 
