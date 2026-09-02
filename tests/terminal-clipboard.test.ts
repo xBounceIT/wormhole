@@ -17,6 +17,7 @@ import {
   shouldAutoCopyTerminalSelection,
   shouldUseTerminalClipboardShortcut,
 } from '../src/terminal-clipboard.ts';
+import { terminalControlKeyData } from '../src/terminal-keyboard.ts';
 import {
   nextTerminalViewportResetSequence,
   terminalScrollEventKeepsBottomPin,
@@ -56,6 +57,28 @@ test('copy uses the clipboard only when terminal text is selected', () => {
 test('unrelated and alt-modified shortcuts remain terminal input', () => {
   assert.equal(shouldUseTerminalClipboardShortcut(shortcut('x'), true), false);
   assert.equal(shouldUseTerminalClipboardShortcut(shortcut('v', { altKey: true }), true), false);
+});
+
+test('Ctrl+K remains terminal input and encodes its remote control character', () => {
+  assert.equal(shouldUseTerminalClipboardShortcut(shortcut('k'), false), false);
+  assert.equal(terminalControlKeyData('k'), '\u000b');
+  assert.equal(terminalControlKeyData('K'), '\u000b');
+});
+
+test('terminal control-key encoding preserves letters, punctuation, and invalid keys', () => {
+  assert.equal(terminalControlKeyData(' '), '\u0000');
+  assert.equal(terminalControlKeyData('a'), '\u0001');
+  assert.equal(terminalControlKeyData('Z'), '\u001a');
+  assert.deepEqual(['@', '[', '\\', ']', '^', '_'].map(terminalControlKeyData), [
+    '\u0000',
+    '\u001b',
+    '\u001c',
+    '\u001d',
+    '\u001e',
+    '\u001f',
+  ]);
+  assert.equal(terminalControlKeyData('1'), undefined);
+  assert.equal(terminalControlKeyData('Enter'), undefined);
 });
 
 test('auto-copy only handles selection gestures from the primary mouse button', () => {

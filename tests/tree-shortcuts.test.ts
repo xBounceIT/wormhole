@@ -11,6 +11,7 @@ import {
   type ConnectionTreeShortcutEvent,
   type ConnectionTreeShortcutNode,
 } from '../src/tree-shortcuts.ts';
+import { isWormholeShortcutSuppressed } from '../src/app-shortcuts.ts';
 import {
   parseWorkspaceNodesRequest,
   workspaceDeleteNodesMaxRequestBytes,
@@ -243,6 +244,34 @@ test('guards block shortcuts while typing, in dialogs, outside the tree, or lock
     ),
     { kind: 'quick-connect' },
   );
+});
+
+test('Wormhole window handlers honor session shortcut suppression', () => {
+  const appSource = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  const sidebarSource = readFileSync(
+    new URL('../src/components/ui/sidebar.tsx', import.meta.url),
+    'utf8',
+  );
+  let receivedSelector = '';
+  const sessionTarget = {
+    closest(selector: string) {
+      receivedSelector = selector;
+      return {};
+    },
+  } as unknown as EventTarget;
+  const ordinaryTarget = { closest: () => null } as unknown as EventTarget;
+
+  assert.equal(isWormholeShortcutSuppressed(sessionTarget), true);
+  assert.equal(receivedSelector, '[data-wormhole-shortcuts-disabled]');
+  assert.equal(isWormholeShortcutSuppressed(ordinaryTarget), false);
+  assert.equal(isWormholeShortcutSuppressed(null), false);
+
+  for (const source of [appSource, sidebarSource]) {
+    assert.match(
+      source,
+      /const handleKeyDown = \(event: KeyboardEvent\) => \{\s*if \(isWormholeShortcutSuppressed\(event\.target\)\) return;/,
+    );
+  }
 });
 
 test('editable-target classification covers form controls and contenteditable surfaces', () => {
