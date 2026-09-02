@@ -94,8 +94,10 @@ import {
   parseTunnelTestRequest,
 } from './tunnel-test-contract.js';
 import {
+  encodeTunnelOAuthCallback,
   isSameCertificateHostname,
   isMatchingOAuthRedirect,
+  tunnelPromptValueMaxBytes,
   tunnelAuthPartition,
   type TunnelBrowserCompletion,
 } from './tunnel-auth.js';
@@ -2693,23 +2695,24 @@ async function runTunnelBrowserAuth(
     }
     if (event.completion === 'oauth-code') {
       if (!matchesOAuthRedirect(current)) return;
-      const state = current.searchParams.get('state') ?? '';
-      const code = current.searchParams.get('code') ?? '';
-      const oauthError = current.searchParams.get('error') ?? '';
-      const description = current.searchParams.get('error_description') ?? '';
-      const value = JSON.stringify({
-        code,
-        state,
-        error: oauthError,
-        description,
-      });
+      const value = encodeTunnelOAuthCallback(current);
+      if (value === undefined) {
+        await complete(true);
+        return;
+      }
       await complete(false, value);
       return;
     }
     if (current.origin !== fireboxOrigin) return;
     const username = current.searchParams.get('user')?.trim() ?? '';
     const token = current.searchParams.get('token') ?? '';
-    if (!username || !token || username.length > 1024 || token.length > 16 * 1024) return;
+    if (
+      !username ||
+      !token ||
+      username.length > 1024 ||
+      Buffer.byteLength(token, 'utf8') > tunnelPromptValueMaxBytes
+    )
+      return;
     const cookies = await browserSession.cookies.get({ url: cookieScopeURL });
     const value = JSON.stringify({
       username,
@@ -2723,7 +2726,7 @@ async function runTunnelBrowserAuth(
         httpOnly: cookie.httpOnly,
       })),
     });
-    if (Buffer.byteLength(value, 'utf8') > 16 * 1024) {
+    if (Buffer.byteLength(value, 'utf8') > tunnelPromptValueMaxBytes) {
       await complete(true);
       return;
     }
@@ -2766,20 +2769,38 @@ async function runTunnelBrowserAuth(
   });
   authWindow.webContents.on('did-navigate', (_event, url) => void inspectNavigation(url));
   authWindow.webContents.on('did-navigate-in-page', (_event, url) => void inspectNavigation(url));
-  authWindow.webContents.on('will-navigate', (navigationEvent, url) => {
+  const captureOAuthRedirect = (
+    navigationEvent: Electron.Event<{ isMainFrame: boolean; url: string }>,
+  ) => {
+    if (!navigationEvent.isMainFrame) return;
     if (event.completion === 'oauth-code') {
       try {
-        if (matchesOAuthRedirect(new URL(url))) {
+        if (matchesOAuthRedirect(new URL(navigationEvent.url))) {
           navigationEvent.preventDefault();
-          void inspectNavigation(url);
+          void inspectNavigation(navigationEvent.url);
         }
       } catch {
         // Chromium handles malformed navigation attempts as ordinary load failures.
       }
     }
-  });
-  authWindow.webContents.on('did-fail-load', (_event, _code, _description, _url, isMainFrame) => {
+  };
+  authWindow.webContents.on('will-navigate', captureOAuthRedirect);
+  // Microsoft completes Entra ID authorization with an HTTP redirect to the loopback callback.
+  // Chromium reports server-side redirects through will-redirect rather than will-navigate; catch
+  // the callback before localhost:2023 can fail with ERR_CONNECTION_REFUSED.
+  authWindow.webContents.on('will-redirect', captureOAuthRedirect);
+  authWindow.webContents.on('did-fail-load', (_event, _code, _description, url, isMainFrame) => {
     if (!isMainFrame || settled) return;
+    // Keep a defensive fallback for Chromium versions that report an unreachable loopback target
+    // without first delivering a cancellable navigation event.
+    try {
+      if (matchesOAuthRedirect(new URL(url))) {
+        void inspectNavigation(url);
+        return;
+      }
+    } catch {
+      // A malformed failure URL cannot be an OAuth callback and follows normal fallback handling.
+    }
     candidate++;
     if (candidate < event.urls.length) {
       void authWindow.loadURL(event.urls[candidate]).catch(() => undefined);
@@ -7925,7 +7946,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       promptId.length === 0 ||
       promptId.length > 128 ||
       typeof promptValue !== 'string' ||
-      promptValue.length > 16 * 1024 ||
+      Buffer.byteLength(promptValue, 'utf8') > tunnelPromptValueMaxBytes ||
       typeof cancelled !== 'boolean'
     ) {
       throw new Error('VPN authentication response is invalid.');

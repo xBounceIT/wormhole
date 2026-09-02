@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 
 export type TunnelBrowserCompletion = 'query-token' | 'oauth-code' | 'cookie';
+export const tunnelPromptValueMaxBytes = 16 * 1024;
 export type TunnelAuthPartitionRequest =
   | { completion: 'cookie' | 'oauth-code' }
   | {
@@ -50,4 +51,14 @@ export function isMatchingOAuthRedirect(candidate: URL, expectedRaw: string): bo
     !candidate.username &&
     !candidate.password
   );
+}
+
+export function encodeTunnelOAuthCallback(candidate: URL): string | undefined {
+  const value = JSON.stringify({
+    code: candidate.searchParams.get('code') ?? '',
+    state: candidate.searchParams.get('state') ?? '',
+    error: candidate.searchParams.get('error') ?? '',
+    description: candidate.searchParams.get('error_description') ?? '',
+  });
+  return Buffer.byteLength(value, 'utf8') <= tunnelPromptValueMaxBytes ? value : undefined;
 }

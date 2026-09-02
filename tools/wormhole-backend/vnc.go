@@ -133,6 +133,15 @@ func newBackendLineWriter(output io.Writer) *backendLineWriter {
 }
 
 func (w *backendLineWriter) write(value any) error {
+	if response, ok := value.(backendResponse); ok && !response.OK {
+		message := strings.TrimSpace(response.Error)
+		if message == "" {
+			message = "unspecified backend failure"
+		}
+		// Every service error crosses this single response boundary. Logging here prevents an
+		// individual protocol or asynchronous handler from accidentally omitting diagnostics.
+		logError("backend request failed: %s", message)
+	}
 	encoded, err := json.Marshal(value)
 	if err != nil {
 		return err
