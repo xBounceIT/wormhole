@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -92,6 +94,43 @@ func TestAppLoggerWritesDebugUnderDebugLevel(t *testing.T) {
 	for _, expected := range []string{"debug trace", "info message"} {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("log under Debug level misses %q:\n%s", expected, text)
+		}
+	}
+}
+
+func TestBackendFailuresIncludeTracebackAtInfoLevel(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	logger, err := newAppLogger(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := appLog
+	appLog = logger
+	t.Cleanup(func() {
+		logger.close()
+		appLog = previous
+	})
+
+	var protocol bytes.Buffer
+	writer := &backendLineWriter{writer: bufio.NewWriter(&protocol)}
+	if err := writer.write(backendResponse{
+		ID: "test-request", OK: false, Error: "VPN authentication was cancelled",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	contents, err := os.ReadFile(currentDayLogFilePath(databasePath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(contents)
+	for _, expected := range []string{
+		"[ERR] backend request failed: VPN authentication was cancelled",
+		"traceback:",
+		"backendLineWriter).write",
+	} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("Info log misses %q:\n%s", expected, text)
 		}
 	}
 }

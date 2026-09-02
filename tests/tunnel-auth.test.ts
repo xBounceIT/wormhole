@@ -1,12 +1,16 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import {
+  encodeTunnelOAuthCallback,
   isMatchingOAuthRedirect,
   isSameCertificateHostname,
+  tunnelPromptValueMaxBytes,
   tunnelAuthPartition,
 } from '../electron/tunnel-auth.ts';
 
 const redirect = 'http://localhost:2023/';
+const mainSource = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
 
 test('OAuth callback matching accepts only the configured loopback endpoint', () => {
   assert.equal(isMatchingOAuthRedirect(new URL('http://localhost:2023/?code=ok'), redirect), true);
@@ -26,6 +30,42 @@ test('OAuth callback matching accepts only the configured loopback endpoint', ()
     isMatchingOAuthRedirect(new URL('https://localhost:2023/?code=no'), redirect),
     false,
   );
+});
+
+test('Azure captures server redirects and failed loopback loads before treating auth as cancelled', () => {
+  const flow = mainSource.slice(
+    mainSource.indexOf('async function runTunnelBrowserAuth'),
+    mainSource.indexOf('class NativeBackendProcess'),
+  );
+  assert.match(flow, /webContents\.on\('will-redirect', captureOAuthRedirect\)/);
+  assert.match(flow, /if \(!navigationEvent\.isMainFrame\) return/);
+
+  const failedLoad = flow.slice(
+    flow.indexOf("webContents.on('did-fail-load'"),
+    flow.indexOf("authWindow.once('closed'"),
+  );
+  const callbackFallback = failedLoad.indexOf('matchesOAuthRedirect(new URL(url))');
+  const cancellationFallback = failedLoad.indexOf('candidate++');
+  assert.ok(callbackFallback >= 0);
+  assert.ok(cancellationFallback > callbackFallback);
+});
+
+test('Azure callback payloads preserve OAuth results within the backend byte limit', () => {
+  const payload = encodeTunnelOAuthCallback(
+    new URL(
+      'http://localhost:2023/?code=auth-code&state=expected&error=denied&error_description=No',
+    ),
+  );
+  assert.deepEqual(JSON.parse(payload ?? ''), {
+    code: 'auth-code',
+    state: 'expected',
+    error: 'denied',
+    description: 'No',
+  });
+
+  const oversized = new URL('http://localhost:2023/');
+  oversized.searchParams.set('error_description', 'é'.repeat(tunnelPromptValueMaxBytes));
+  assert.equal(encodeTunnelOAuthCallback(oversized), undefined);
 });
 
 test('VPN browser authentication uses isolated persistent provider profiles', () => {

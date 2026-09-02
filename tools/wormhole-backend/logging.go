@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -15,8 +16,9 @@ import (
 // retained-file limit equal to the configured retention days. Go owns the file; the
 // renderer and the Electron main process never write logs directly.
 const (
-	logFileNamePrefix = "wormhole-"
-	logFileNameSuffix = ".log"
+	logFileNamePrefix       = "wormhole-"
+	logFileNameSuffix       = ".log"
+	maximumLogTracebackSize = 32 * 1024
 )
 
 // Log levels. The default is Info: only high-level lifecycle events (boot, connection,
@@ -147,7 +149,17 @@ func (l *appLogger) close() {
 func logInfo(format string, args ...any)  { appLog.write("INF", format, args...) }
 func logDebug(format string, args ...any) { appLog.write("DBG", format, args...) }
 func logWarn(format string, args ...any)  { appLog.write("WRN", format, args...) }
-func logError(format string, args ...any) { appLog.write("ERR", format, args...) }
+
+// Error entries always carry a bounded Go traceback. ERR is admitted by both supported log
+// levels, so failures remain diagnosable when the application is left at its default Info level.
+func logError(format string, args ...any) {
+	message := fmt.Sprintf(format, args...)
+	traceback := strings.TrimSpace(string(debug.Stack()))
+	if len(traceback) > maximumLogTracebackSize {
+		traceback = traceback[:maximumLogTracebackSize] + "\n[traceback truncated]"
+	}
+	appLog.write("ERR", "%s\ntraceback:\n%s", message, traceback)
+}
 
 func closeAppLog() { appLog.close() }
 
