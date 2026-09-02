@@ -60,6 +60,7 @@ type appSettingsSnapshot struct {
 	PromptBeforeTunnelConnect bool                          `json:"promptBeforeTunnelConnect"`
 	AutoCopyOnSelect          bool                          `json:"autoCopyOnSelect"`
 	ConfirmOnTabClose         bool                          `json:"confirmOnTabClose"`
+	ConfirmOnWindowClose      bool                          `json:"confirmOnWindowClose"`
 	SidebarWidth              int                           `json:"sidebarWidth"`
 	ConnectionTreeExpansion   *connectionTreeExpansionState `json:"connectionTreeExpansion"`
 	AutoCheckForUpdates       bool                          `json:"autoCheckForUpdates"`
@@ -572,6 +573,7 @@ func runBackendCLI(args []string, input io.Reader, output io.Writer, errorOutput
 				"promptBeforeTunnelConnect": settings.PromptBeforeTunnelConnect,
 				"autoCopyOnSelect":          settings.AutoCopyOnSelect,
 				"confirmOnTabClose":         settings.ConfirmOnTabClose,
+				"confirmOnWindowClose":      settings.ConfirmOnWindowClose,
 				"sidebarWidth":              settings.SidebarWidth,
 				"connectionTreeExpansion":   settings.ConnectionTreeExpansion,
 				"autoCheckForUpdates":       settings.AutoCheckForUpdates,
@@ -631,6 +633,20 @@ func runBackendCLI(args []string, input io.Reader, output io.Writer, errorOutput
 		}
 		if err == nil && request.Enabled != nil {
 			err = writeConfirmOnTabClose(*databasePath, *request.Enabled)
+			if err == nil {
+				result = map[string]bool{"updated": true}
+			}
+		}
+	case "settings-set-confirm-on-window-close":
+		var request struct {
+			Enabled *bool `json:"enabled"`
+		}
+		err = decodeInput(&request)
+		if err == nil && request.Enabled == nil {
+			err = errors.New("window close setting is invalid")
+		}
+		if err == nil && request.Enabled != nil {
+			err = writeConfirmOnWindowClose(*databasePath, *request.Enabled)
 			if err == nil {
 				result = map[string]bool{"updated": true}
 			}
@@ -1061,6 +1077,7 @@ func loadAppSettingsSnapshot(databasePath string) (appSettingsSnapshot, error) {
 		PromptBeforeTunnelConnect: settings.PromptBeforeTunnelConnect,
 		AutoCopyOnSelect:          settings.AutoCopyOnSelect,
 		ConfirmOnTabClose:         settings.ConfirmOnTabClose,
+		ConfirmOnWindowClose:      settings.ConfirmOnWindowClose,
 		SidebarWidth:              settings.SidebarWidth,
 		ConnectionTreeExpansion:   settings.ConnectionTreeExpansion,
 		AutoCheckForUpdates:       settings.AutoCheckForUpdates,
