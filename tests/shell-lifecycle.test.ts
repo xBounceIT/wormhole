@@ -25,6 +25,8 @@ import {
   updateInstallerExtension,
 } from '../electron/update-installer.ts';
 import {
+  normalizeWindowCloseConfirmation,
+  parseWindowCloseSettingUpdate,
   runWindowTeardown,
   WindowCloseCoordinator,
   WindowCloseReasonTracker,
@@ -1034,6 +1036,7 @@ test('window close cancellation is fail-closed and duplicate requests do not pro
   let closes = 0;
   const request = {
     reason: 'window' as const,
+    confirmationEnabled: true,
     confirm: async () => {
       prompts++;
       return false;
@@ -1062,6 +1065,7 @@ test('confirmed and non-interactive closes teardown once before closing', async 
     const order: string[] = [];
     await coordinator.request({
       reason,
+      confirmationEnabled: true,
       confirm: async () => {
         order.push('confirm');
         return true;
@@ -1076,6 +1080,62 @@ test('confirmed and non-interactive closes teardown once before closing', async 
       reason === 'window' ? ['confirm', 'teardown', 'close'] : ['teardown', 'close'],
     );
   }
+});
+
+test('disabled active-session confirmation closes the window without prompting', async () => {
+  const coordinator = new WindowCloseCoordinator();
+  coordinator.updateActiveCount(1);
+  const order: string[] = [];
+  await coordinator.request({
+    reason: 'window',
+    confirmationEnabled: false,
+    confirm: async () => {
+      order.push('confirm');
+      return false;
+    },
+    teardown: async () => {
+      order.push('teardown');
+    },
+    close: () => order.push('close'),
+  });
+  assert.deepEqual(order, ['teardown', 'close']);
+
+  const mainSource = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
+  const quitHandler = mainSource.slice(mainSource.indexOf("app.on('before-quit'"));
+  assert.match(quitHandler, /if \(!skipQuitConfirmation && confirmOnWindowClose\)/);
+});
+
+test('window close confirmation defaults fail closed and accepts only a confirmed settings write', () => {
+  assert.equal(normalizeWindowCloseConfirmation(false), false);
+  for (const value of [true, undefined, null, 0, 'false', {}]) {
+    assert.equal(normalizeWindowCloseConfirmation(value), true);
+  }
+
+  assert.deepEqual(parseWindowCloseSettingUpdate({ updated: true }), { updated: true });
+  for (const value of [undefined, null, false, {}, { updated: false }, { updated: 'true' }]) {
+    assert.throws(
+      () => parseWindowCloseSettingUpdate(value),
+      /invalid window close setting response/,
+    );
+  }
+});
+
+test('window close confirmation preference is wired through settings and the preload bridge', () => {
+  const appSource = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  const mainSource = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
+  const preloadSource = readFileSync(new URL('../electron/preload.cts', import.meta.url), 'utf8');
+
+  assert.match(appSource, /initialSettings\.confirmOnWindowClose/);
+  assert.match(appSource, /label="Confirm before closing Wormhole"/);
+  assert.match(
+    appSource,
+    /await api\.setConfirmOnWindowClose\(enabled\);[\s\S]*setConfirmOnWindowClose\(enabled\)/,
+  );
+  assert.match(appSource, /disabled=\{confirmOnWindowCloseBusy\}/);
+  assert.match(preloadSource, /settings:set-confirm-on-window-close/);
+  assert.match(mainSource, /normalizeWindowCloseConfirmation/);
+  assert.match(mainSource, /parseWindowCloseSettingUpdate/);
+  assert.match(mainSource, /'settings-set-confirm-on-window-close'/);
 });
 
 test('window teardown flushes browser state before sessions and still releases sessions on failure', async () => {

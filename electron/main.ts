@@ -34,6 +34,8 @@ import {
 import { initializeLocalCrashDiagnostics } from './crash-diagnostics.js';
 import { isAppTheme, parseThemeStartupRequest, type AppTheme } from './theme-settings.js';
 import {
+  normalizeWindowCloseConfirmation,
+  parseWindowCloseSettingUpdate,
   runWindowTeardown,
   WindowCloseCoordinator,
   WindowCloseReasonTracker,
@@ -291,6 +293,7 @@ type BackendOperation =
   | 'open-logs-folder'
   | 'settings-set-auto-copy-on-select'
   | 'settings-set-confirm-on-tab-close'
+  | 'settings-set-confirm-on-window-close'
   | 'settings-set-sidebar-width'
   | 'settings-set-connection-tree-expansion'
   | 'bitwarden-onboarding-read'
@@ -428,6 +431,7 @@ type AppSettings = {
   promptBeforeTunnelConnect: boolean;
   autoCopyOnSelect: boolean;
   confirmOnTabClose: boolean;
+  confirmOnWindowClose: boolean;
   sidebarWidth: number;
   connectionTreeExpansion: ConnectionTreeExpansionSetting | null;
   autoCheckForUpdates: boolean;
@@ -436,6 +440,7 @@ type AppSettings = {
 };
 
 const windowCloseCoordinators = new WeakMap<BrowserWindow, WindowCloseCoordinator>();
+let confirmOnWindowClose = true;
 const closeConfirmationReadyWindows = new WeakSet<BrowserWindow>();
 const closeConfirmationWaiters = new Map<
   string,
@@ -6782,6 +6787,10 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
         throw new Error('Wormhole could not load the locked workspace.');
       }
       rememberAuthState(startup.auth, false);
+      confirmOnWindowClose = normalizeWindowCloseConfirmation(
+        startup.settings.confirmOnWindowClose,
+      );
+      startup.settings.confirmOnWindowClose = confirmOnWindowClose;
       scheduleStartupUpdateCheck(startup.settings);
       if (startup.migrationFailed) {
         console.error(
@@ -7225,6 +7234,18 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       return runBackend<{ updated: boolean }>('settings-set-confirm-on-tab-close', {
         enabled: value,
       });
+    });
+  });
+
+  ipcMain.handle('settings:set-confirm-on-window-close', async (_event, value: unknown) => {
+    if (typeof value !== 'boolean') throw new Error('Window close setting is invalid.');
+    return serializeAuthOperation(async () => {
+      await requireWorkspaceAuth();
+      const result = parseWindowCloseSettingUpdate(
+        await runBackend<unknown>('settings-set-confirm-on-window-close', { enabled: value }),
+      );
+      confirmOnWindowClose = value;
+      return result;
     });
   });
 
@@ -9285,6 +9306,7 @@ function createWindow() {
     void closeCoordinator
       .request({
         reason: closeReason.reason,
+        confirmationEnabled: confirmOnWindowClose,
         confirm: (activeCount) => requestRendererCloseConfirmation(window, activeCount, 'window'),
         teardown: async () => {
           await runWindowTeardown(
@@ -9425,7 +9447,7 @@ app.on('before-quit', (event) => {
   if (quitCleanupStarted) return;
   quitCleanupStarted = true;
   void (async () => {
-    if (!skipQuitConfirmation) {
+    if (!skipQuitConfirmation && confirmOnWindowClose) {
       const windows = BrowserWindow.getAllWindows();
       const activeCount = windows.reduce(
         (count, window) =>

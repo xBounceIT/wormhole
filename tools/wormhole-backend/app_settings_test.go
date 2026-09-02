@@ -431,10 +431,13 @@ func TestShellSettingsDefaultPersistAndClamp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !settings.ConfirmOnTabClose || settings.SidebarWidth != defaultSidebarWidth {
+	if !settings.ConfirmOnTabClose || !settings.ConfirmOnWindowClose || settings.SidebarWidth != defaultSidebarWidth {
 		t.Fatalf("defaults = %+v", settings)
 	}
 	if err := writeConfirmOnTabClose(databasePath, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeConfirmOnWindowClose(databasePath, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := writeSidebarWidth(databasePath, maxSidebarWidth+1000); err != nil {
@@ -444,7 +447,7 @@ func TestShellSettingsDefaultPersistAndClamp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if settings.ConfirmOnTabClose || settings.SidebarWidth != maxSidebarWidth {
+	if settings.ConfirmOnTabClose || settings.ConfirmOnWindowClose || settings.SidebarWidth != maxSidebarWidth {
 		t.Fatalf("persisted settings = %+v", settings)
 	}
 }
@@ -473,6 +476,16 @@ func TestShellSettingsRejectBadLegacyValuesSafely(t *testing.T) {
 				t.Fatalf("sidebar width = %d, want %d", settings.SidebarWidth, test.want)
 			}
 		})
+	}
+
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	bitwardenTestWriteSettings(t, databasePath, map[string]any{confirmOnWindowCloseKey: "false"})
+	settings, err := readAppSettings(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !settings.ConfirmOnWindowClose {
+		t.Fatal("invalid window close confirmation setting did not use the safe default")
 	}
 }
 

@@ -98,6 +98,7 @@ func TestRunBackendCLIRejectsMalformedRequestsForEveryInputOperation(t *testing.
 		"settings-set-prompt-before-tunnel",
 		"settings-set-auto-copy-on-select",
 		"settings-set-confirm-on-tab-close",
+		"settings-set-confirm-on-window-close",
 		"settings-set-sidebar-width",
 		"settings-set-connection-tree-expansion",
 		"settings-set-update-preferences",
@@ -170,6 +171,7 @@ func TestRunBackendCLIDispatchesSemanticallyInvalidRequests(t *testing.T) {
 		{operation: "auth-update-settings", input: `{}`},
 		{operation: "settings-set-theme", input: `{"theme":"invalid"}`},
 		{operation: "settings-set-confirm-on-tab-close", input: `{}`},
+		{operation: "settings-set-confirm-on-window-close", input: `{}`},
 		{operation: "settings-set-sidebar-width", input: `{}`},
 		{operation: "settings-set-connection-tree-expansion", input: `{}`},
 		{operation: "settings-set-update-preferences", input: `{"skippedUpdateVersion":42}`},
@@ -225,6 +227,7 @@ func TestRunBackendCLIExecutesSafeOneShotOperations(t *testing.T) {
 		{name: "set tunnel prompt", operation: "settings-set-prompt-before-tunnel", input: `{"enabled":false}`},
 		{name: "set auto copy", operation: "settings-set-auto-copy-on-select", input: `{"enabled":true}`},
 		{name: "set tab confirmation", operation: "settings-set-confirm-on-tab-close", input: `{"enabled":false}`},
+		{name: "set window confirmation", operation: "settings-set-confirm-on-window-close", input: `{"enabled":false}`},
 		{name: "set sidebar width", operation: "settings-set-sidebar-width", input: `{"width":420}`},
 		{name: "set connection tree expansion", operation: "settings-set-connection-tree-expansion", input: `{"defaultExpanded":false,"folderIds":[]}`},
 		{name: "set update preferences", operation: "settings-set-update-preferences", input: `{"autoCheckForUpdates":false,"skippedUpdateVersion":"9.9.9"}`},
@@ -250,6 +253,48 @@ func TestRunBackendCLIExecutesSafeOneShotOperations(t *testing.T) {
 				t.Fatalf("stdout is not JSON: %q", stdout.String())
 			}
 		})
+	}
+}
+
+func TestRunBackendCLIWindowCloseConfirmationRoundTrip(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	run := func(operation, input string) []byte {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		code := runBackendCLI(
+			[]string{"-database", databasePath, "-operation", operation},
+			strings.NewReader(input), &stdout, &stderr,
+		)
+		if code != 0 {
+			t.Fatalf("%s: exit code = %d, stdout = %q, stderr = %q", operation, code, stdout.String(), stderr.String())
+		}
+		return stdout.Bytes()
+	}
+	readConfirmation := func() bool {
+		t.Helper()
+		var settings struct {
+			ConfirmOnWindowClose bool `json:"confirmOnWindowClose"`
+		}
+		if err := json.Unmarshal(run("settings-read", ""), &settings); err != nil {
+			t.Fatal(err)
+		}
+		return settings.ConfirmOnWindowClose
+	}
+
+	if !readConfirmation() {
+		t.Fatal("window close confirmation did not default to enabled")
+	}
+	var update struct {
+		Updated bool `json:"updated"`
+	}
+	if err := json.Unmarshal(
+		run("settings-set-confirm-on-window-close", `{"enabled":false}`),
+		&update,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if !update.Updated || readConfirmation() {
+		t.Fatalf("window close confirmation update = %+v, enabled = %v", update, readConfirmation())
 	}
 }
 
