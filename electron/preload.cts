@@ -302,6 +302,7 @@ const wormholeBridge = {
       promptBeforeTunnelConnect: boolean;
       autoCopyOnSelect: boolean;
       confirmOnTabClose: boolean;
+      confirmOnWindowClose: boolean;
       sidebarWidth: number;
       connectionTreeExpansion: { defaultExpanded: boolean; folderIds: string[] } | null;
       autoCheckForUpdates: boolean;
@@ -315,6 +316,8 @@ const wormholeBridge = {
     ipcRenderer.invoke('settings:set-auto-copy-on-select', enabled),
   setConfirmOnTabClose: (enabled: boolean) =>
     ipcRenderer.invoke('settings:set-confirm-on-tab-close', enabled),
+  setConfirmOnWindowClose: (enabled: boolean) =>
+    ipcRenderer.invoke('settings:set-confirm-on-window-close', enabled),
   setSidebarWidth: (width: number) => ipcRenderer.invoke('settings:set-sidebar-width', width),
   setConnectionTreeExpansion: (state: { defaultExpanded: boolean; folderIds: string[] }) =>
     ipcRenderer.invoke('settings:set-connection-tree-expansion', state),

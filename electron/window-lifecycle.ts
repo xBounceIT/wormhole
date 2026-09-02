@@ -5,6 +5,17 @@ export type WindowCloseReason =
   | 'system-shutdown'
   | 'renderer-failure';
 
+export function normalizeWindowCloseConfirmation(value: unknown): boolean {
+  return value !== false;
+}
+
+export function parseWindowCloseSettingUpdate(value: unknown): { updated: true } {
+  if (!value || typeof value !== 'object' || (value as { updated?: unknown }).updated !== true) {
+    throw new Error('Wormhole returned an invalid window close setting response.');
+  }
+  return { updated: true };
+}
+
 type ReasonScheduler = {
   set(callback: () => void, delayMs: number): unknown;
   clear(handle: unknown): void;
@@ -59,6 +70,7 @@ export class WindowCloseReasonTracker {
 
 export type WindowCloseRequest = {
   reason: WindowCloseReason;
+  confirmationEnabled: boolean;
   confirm(activeCount: number): Promise<boolean>;
   teardown(): Promise<void>;
   close(): void;
@@ -100,7 +112,7 @@ export class WindowCloseCoordinator {
     }
     if (this.state !== 'idle') return false;
 
-    if (request.reason === 'window' && this.activeCount > 0) {
+    if (request.reason === 'window' && request.confirmationEnabled && this.activeCount > 0) {
       this.state = 'prompting';
       let confirmed = false;
       try {

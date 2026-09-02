@@ -612,6 +612,7 @@ interface WormholeAppSettings {
   promptBeforeTunnelConnect: boolean;
   autoCopyOnSelect: boolean;
   confirmOnTabClose: boolean;
+  confirmOnWindowClose: boolean;
   sidebarWidth: number;
   connectionTreeExpansion: { defaultExpanded: boolean; folderIds: string[] } | null;
   autoCheckForUpdates: boolean;
@@ -972,6 +973,7 @@ interface Window {
     setTheme(theme: 'system' | 'light' | 'dark'): Promise<{ updated: boolean }>;
     setPromptBeforeTunnelConnect(enabled: boolean): Promise<{ updated: boolean }>;
     setConfirmOnTabClose(enabled: boolean): Promise<{ updated: boolean }>;
+    setConfirmOnWindowClose(enabled: boolean): Promise<{ updated: boolean }>;
     setSidebarWidth(width: number): Promise<{ updated: boolean; sidebarWidth: number }>;
     setConnectionTreeExpansion(state: {
       defaultExpanded: boolean;

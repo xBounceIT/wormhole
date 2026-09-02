@@ -1867,6 +1867,11 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   );
   const [autoCopyOnSelect, setAutoCopyOnSelect] = useState(initialSettings.autoCopyOnSelect);
   const [confirmOnTabClose, setConfirmOnTabClose] = useState(initialSettings.confirmOnTabClose);
+  const [confirmOnWindowClose, setConfirmOnWindowClose] = useState(
+    initialSettings.confirmOnWindowClose,
+  );
+  const [confirmOnWindowCloseBusy, setConfirmOnWindowCloseBusy] = useState(false);
+  const confirmOnWindowCloseSavePending = useRef(false);
   const [pendingSessionClose, setPendingSessionClose] = useState<{
     id: string;
     preferredNextSessionId?: string;
@@ -3920,6 +3925,23 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   function handleConfirmOnTabCloseChange(enabled: boolean) {
     setConfirmOnTabClose(enabled);
     void window.wormhole?.setConfirmOnTabClose(enabled).catch(() => undefined);
+  }
+
+  async function handleConfirmOnWindowCloseChange(enabled: boolean) {
+    if (confirmOnWindowCloseSavePending.current || enabled === confirmOnWindowClose) return;
+    const api = window.wormhole;
+    if (!api) return;
+    confirmOnWindowCloseSavePending.current = true;
+    setConfirmOnWindowCloseBusy(true);
+    try {
+      await api.setConfirmOnWindowClose(enabled);
+      setConfirmOnWindowClose(enabled);
+    } catch {
+      // Keep the applied value when persistence fails so the switch never promises a stale policy.
+    } finally {
+      confirmOnWindowCloseSavePending.current = false;
+      setConfirmOnWindowCloseBusy(false);
+    }
   }
 
   async function performSessionClose(id: string, preferredNextSessionId?: string) {
@@ -6773,11 +6795,14 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                   autoCopyOnSelect={autoCopyOnSelect}
                   backupEncryptionRequired={backupExportRequiresEncryption(credentials)}
                   confirmOnTabClose={confirmOnTabClose}
+                  confirmOnWindowClose={confirmOnWindowClose}
+                  confirmOnWindowCloseBusy={confirmOnWindowCloseBusy}
                   authGate={authGate}
                   authState={authState}
                   onAuthStateChange={setAuthState}
                   onAutoCopyOnSelectChange={handleAutoCopyOnSelectChange}
                   onConfirmOnTabCloseChange={handleConfirmOnTabCloseChange}
+                  onConfirmOnWindowCloseChange={handleConfirmOnWindowCloseChange}
                   onBackupImported={(workspace) => {
                     setTree(workspace.tree);
                     setCredentials(workspace.credentials);
@@ -14457,6 +14482,8 @@ function SettingsPage({
   autoCopyOnSelect,
   backupEncryptionRequired,
   confirmOnTabClose,
+  confirmOnWindowClose,
+  confirmOnWindowCloseBusy,
   theme,
   onThemeChange,
   authGate,
@@ -14464,6 +14491,7 @@ function SettingsPage({
   onAuthStateChange,
   onAutoCopyOnSelectChange,
   onConfirmOnTabCloseChange,
+  onConfirmOnWindowCloseChange,
   onBackupImported,
   onRequestAuthentication,
   onCheckForUpdates,
@@ -14478,6 +14506,8 @@ function SettingsPage({
   autoCopyOnSelect: boolean;
   backupEncryptionRequired: boolean;
   confirmOnTabClose: boolean;
+  confirmOnWindowClose: boolean;
+  confirmOnWindowCloseBusy: boolean;
   theme: Theme;
   onThemeChange: (theme: Theme) => void;
   authGate: 'loading' | 'locked' | 'unlocked' | 'error';
@@ -14485,6 +14515,7 @@ function SettingsPage({
   onAuthStateChange: (state: WormholeAuthState) => void;
   onAutoCopyOnSelectChange: (enabled: boolean) => void;
   onConfirmOnTabCloseChange: (enabled: boolean) => void;
+  onConfirmOnWindowCloseChange: (enabled: boolean) => void;
   onBackupImported: (workspace: WormholeWorkspaceSnapshot) => void;
   onRequestAuthentication: (reason: string) => Promise<boolean>;
   onCheckForUpdates: () => void;
@@ -15783,6 +15814,16 @@ function SettingsPage({
               description="Ask before closing a connected session tab."
               label="Confirm before closing a connected tab"
               onCheckedChange={onConfirmOnTabCloseChange}
+            />
+          </SettingsSection>
+
+          <SettingsSection title="Application">
+            <SettingsSwitch
+              checked={confirmOnWindowClose}
+              description="Ask before closing Wormhole while one or more sessions are active."
+              disabled={confirmOnWindowCloseBusy}
+              label="Confirm before closing Wormhole"
+              onCheckedChange={onConfirmOnWindowCloseChange}
             />
           </SettingsSection>
 

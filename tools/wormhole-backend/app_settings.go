@@ -32,10 +32,11 @@ type themeMigrationResult struct {
 }
 
 const (
-	confirmOnTabCloseKey                    = "ConfirmOnTabClose"
-	sidebarWidthKey                         = "SidebarWidth"
-	connectionTreeExpansionKey              = "ConnectionTreeExpansion"
-	defaultSidebarWidth                     = 320
+	confirmOnTabCloseKey       = "ConfirmOnTabClose"
+	confirmOnWindowCloseKey    = "ConfirmOnWindowClose"
+	sidebarWidthKey            = "SidebarWidth"
+	connectionTreeExpansionKey = "ConnectionTreeExpansion"
+	defaultSidebarWidth        = 320
 	// Keep this aligned with src/sidebar-settings.ts so persisted widths cannot hide header actions.
 	minSidebarWidth                         = 256
 	maxSidebarWidth                         = 600
@@ -329,6 +330,10 @@ func writeConfirmOnTabClose(databasePath string, enabled bool) error {
 	return writeSettingsValues(databasePath, map[string]any{confirmOnTabCloseKey: enabled})
 }
 
+func writeConfirmOnWindowClose(databasePath string, enabled bool) error {
+	return writeSettingsValues(databasePath, map[string]any{confirmOnWindowCloseKey: enabled})
+}
+
 func clampSidebarWidth(width int) int {
 	if width < minSidebarWidth {
 		return minSidebarWidth
@@ -398,6 +403,7 @@ type appSettingsValues struct {
 	PromptBeforeTunnelConnect bool
 	AutoCopyOnSelect          bool
 	ConfirmOnTabClose         bool
+	ConfirmOnWindowClose      bool
 	SidebarWidth              int
 	ConnectionTreeExpansion   *connectionTreeExpansionState
 	AutoCheckForUpdates       bool
@@ -406,13 +412,15 @@ type appSettingsValues struct {
 }
 
 // readAppSettings reads the shared settings.json document. Absent or invalid values use safe
-// defaults, including confirmation for connected tabs and a bounded sidebar width.
+// defaults, including confirmation for connected tabs and active sessions during window close,
+// plus a bounded sidebar width.
 func readAppSettings(databasePath string) (appSettingsValues, error) {
 	settings := appSettingsValues{
 		Theme:                     applicationThemeSystem,
 		PromptBeforeTunnelConnect: true,
 		AutoCopyOnSelect:          true,
 		ConfirmOnTabClose:         true,
+		ConfirmOnWindowClose:      true,
 		SidebarWidth:              defaultSidebarWidth,
 		AutoCheckForUpdates:       true,
 	}
@@ -450,6 +458,12 @@ func readAppSettings(databasePath string) (appSettingsValues, error) {
 		var enabled bool
 		if json.Unmarshal(value, &enabled) == nil {
 			settings.ConfirmOnTabClose = enabled
+		}
+	}
+	if value, ok := document[confirmOnWindowCloseKey]; ok {
+		var enabled bool
+		if json.Unmarshal(value, &enabled) == nil {
+			settings.ConfirmOnWindowClose = enabled
 		}
 	}
 	if value, ok := document[sidebarWidthKey]; ok {
