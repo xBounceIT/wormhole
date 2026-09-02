@@ -61,6 +61,7 @@ import {
   shouldOfferUpdate,
 } from './update-state';
 import {
+  clearTerminalSelectionIfUnchanged,
   copyAndClearTerminalSelection,
   normalizeTerminalPasteText,
   shouldAutoCopyTerminalSelection,
@@ -8770,7 +8771,7 @@ function terminalKeyData(event: React.KeyboardEvent, appCursor: boolean): string
   return undefined;
 }
 
-function terminalSelectionText(surface: HTMLElement): string {
+function terminalSelection(surface: HTMLElement): Selection | undefined {
   const selection = window.getSelection();
   if (
     !selection ||
@@ -8780,9 +8781,13 @@ function terminalSelectionText(surface: HTMLElement): string {
     !surface.contains(selection.anchorNode) ||
     !surface.contains(selection.focusNode)
   ) {
-    return '';
+    return undefined;
   }
-  return selection.toString();
+  return selection;
+}
+
+function terminalSelectionText(surface: HTMLElement): string {
+  return terminalSelection(surface)?.toString() ?? '';
 }
 
 function SshTerminalSurface({
@@ -9074,8 +9079,21 @@ function SshTerminalSurface({
       }}
       onMouseUp={(event) => {
         if (!shouldAutoCopyTerminalSelection(autoCopyOnSelect, event.button)) return;
-        const text = terminalSelectionText(event.currentTarget);
-        if (text) void copyTextToClipboard(text).catch(() => undefined);
+        const surface = event.currentTarget;
+        const selection = terminalSelection(surface);
+        const text = selection?.toString() ?? '';
+        if (!selection || !text) return;
+        const copiedSelection = {
+          anchorNode: selection.anchorNode,
+          anchorOffset: selection.anchorOffset,
+          focusNode: selection.focusNode,
+          focusOffset: selection.focusOffset,
+        };
+        void copyTextToClipboard(text)
+          .then(() => {
+            clearTerminalSelectionIfUnchanged(terminalSelection(surface), copiedSelection);
+          })
+          .catch(() => undefined);
       }}
       onContextMenu={(event) => {
         if (isSerial || !session.backendSessionId) return;

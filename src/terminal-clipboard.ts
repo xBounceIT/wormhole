@@ -30,6 +30,31 @@ export function copyAndClearTerminalSelection(
   return true;
 }
 
+type TerminalSelectionIdentity = Pick<
+  Selection,
+  'anchorNode' | 'anchorOffset' | 'focusNode' | 'focusOffset'
+>;
+
+export function clearTerminalSelectionIfUnchanged(
+  currentSelection: (TerminalSelectionIdentity & Pick<Selection, 'removeAllRanges'>) | undefined,
+  copiedSelection: TerminalSelectionIdentity,
+): boolean {
+  if (!currentSelection) return false;
+  const sameDirection =
+    currentSelection.anchorNode === copiedSelection.anchorNode &&
+    currentSelection.anchorOffset === copiedSelection.anchorOffset &&
+    currentSelection.focusNode === copiedSelection.focusNode &&
+    currentSelection.focusOffset === copiedSelection.focusOffset;
+  const reversedDirection =
+    currentSelection.anchorNode === copiedSelection.focusNode &&
+    currentSelection.anchorOffset === copiedSelection.focusOffset &&
+    currentSelection.focusNode === copiedSelection.anchorNode &&
+    currentSelection.focusOffset === copiedSelection.anchorOffset;
+  if (!sameDirection && !reversedDirection) return false;
+  currentSelection.removeAllRanges();
+  return true;
+}
+
 export function shouldAutoCopyTerminalSelection(enabled: boolean, mouseButton: number): boolean {
   return enabled && mouseButton === 0;
 }

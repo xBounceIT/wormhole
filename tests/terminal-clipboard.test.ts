@@ -13,6 +13,7 @@ import {
 } from '../electron/terminal-clipboard.ts';
 import { writeClipboardText } from '../src/clipboard.ts';
 import {
+  clearTerminalSelectionIfUnchanged,
   copyAndClearTerminalSelection,
   normalizeTerminalPasteText,
   shouldAutoCopyTerminalSelection,
@@ -74,6 +75,47 @@ test('copying terminal text writes plain text and clears the selection', () => {
     false,
   );
   assert.deepEqual(calls, []);
+});
+
+test('auto-copy clears only the selection that completed copying', () => {
+  const anchorNode = {};
+  const focusNode = {};
+  const copiedSelection = { anchorNode, anchorOffset: 2, focusNode, focusOffset: 8 };
+  let clearCount = 0;
+
+  assert.equal(
+    clearTerminalSelectionIfUnchanged(
+      { ...copiedSelection, removeAllRanges: () => clearCount++ },
+      copiedSelection,
+    ),
+    true,
+  );
+  assert.equal(clearCount, 1);
+
+  assert.equal(
+    clearTerminalSelectionIfUnchanged(
+      {
+        anchorNode: focusNode,
+        anchorOffset: 8,
+        focusNode: anchorNode,
+        focusOffset: 2,
+        removeAllRanges: () => clearCount++,
+      },
+      copiedSelection,
+    ),
+    true,
+  );
+  assert.equal(clearCount, 2);
+
+  assert.equal(
+    clearTerminalSelectionIfUnchanged(
+      { ...copiedSelection, focusOffset: 9, removeAllRanges: () => clearCount++ },
+      copiedSelection,
+    ),
+    false,
+  );
+  assert.equal(clearTerminalSelectionIfUnchanged(undefined, copiedSelection), false);
+  assert.equal(clearCount, 2);
 });
 
 test('unrelated and alt-modified shortcuts remain terminal input', () => {
@@ -252,6 +294,22 @@ test('live terminal clears its DOM selection after a copy event', () => {
   assert.match(
     copyHandlerSource,
     /copyAndClearTerminalSelection\([\s\S]*terminalSelectionText\(event\.currentTarget\),[\s\S]*event\.clipboardData,[\s\S]*removeAllRanges\(\)[\s\S]*event\.preventDefault\(\);/,
+  );
+});
+
+test('auto-copy clears the copied terminal selection only after a successful write', () => {
+  const terminalSurfaceSource = appSource.slice(
+    appSource.indexOf('function SshTerminalSurface'),
+    appSource.indexOf("type SftpPaneKind = 'local' | 'remote'"),
+  );
+  const mouseUpHandlerSource = terminalSurfaceSource.slice(
+    terminalSurfaceSource.indexOf('onMouseUp='),
+    terminalSurfaceSource.indexOf('onContextMenu='),
+  );
+
+  assert.match(
+    mouseUpHandlerSource,
+    /copyTextToClipboard\(text\)\s*\.then\(\(\) => \{[\s\S]*clearTerminalSelectionIfUnchanged\(terminalSelection\(surface\), copiedSelection\);[\s\S]*\.catch\(\(\) => undefined\);/,
   );
 });
 
