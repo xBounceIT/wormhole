@@ -18,6 +18,8 @@ import {
   normalizeTerminalPasteText,
   shouldAutoCopyTerminalSelection,
   shouldUseTerminalClipboardShortcut,
+  terminalCopyChordAfterKeyDown,
+  terminalCopyChordAfterKeyUp,
 } from '../src/terminal-clipboard.ts';
 import { terminalControlKeyData } from '../src/terminal-keyboard.ts';
 import {
@@ -54,6 +56,32 @@ test('paste shortcuts stay in Chromium instead of becoming SSH control input', (
 test('copy uses the clipboard only when terminal text is selected', () => {
   assert.equal(shouldUseTerminalClipboardShortcut(shortcut('c'), true), true);
   assert.equal(shouldUseTerminalClipboardShortcut(shortcut('c'), false), false);
+});
+
+test('copy key repeats stay in Chromium until the copied chord is released', () => {
+  const copyKey = shortcut('c');
+  let copyChordActive = false;
+
+  assert.equal(shouldUseTerminalClipboardShortcut(copyKey, true, copyChordActive), true);
+  copyChordActive = terminalCopyChordAfterKeyDown(copyKey, true, copyChordActive);
+  assert.equal(copyChordActive, true);
+
+  assert.equal(shouldUseTerminalClipboardShortcut(copyKey, false, copyChordActive), true);
+  assert.equal(
+    shouldUseTerminalClipboardShortcut(shortcut('c', { ctrlKey: false }), false, copyChordActive),
+    true,
+  );
+  assert.equal(terminalCopyChordAfterKeyUp({ key: 'Control' }, copyChordActive), true);
+
+  copyChordActive = terminalCopyChordAfterKeyUp({ key: 'C' }, copyChordActive);
+  assert.equal(copyChordActive, false);
+  assert.equal(shouldUseTerminalClipboardShortcut(copyKey, false, copyChordActive), false);
+});
+
+test('non-copy shortcuts never start the retained copy chord', () => {
+  assert.equal(terminalCopyChordAfterKeyDown(shortcut('v'), true, false), false);
+  assert.equal(terminalCopyChordAfterKeyDown(shortcut('c'), false, false), false);
+  assert.equal(terminalCopyChordAfterKeyDown(shortcut('c', { altKey: true }), true, false), false);
 });
 
 test('copying terminal text writes plain text and clears the selection', () => {
@@ -317,6 +345,26 @@ test('live terminal clears its DOM selection after a copy event', () => {
   assert.match(
     copyHandlerSource,
     /copyAndClearTerminalSelection\([\s\S]*terminalSelectionText\(event\.currentTarget\),[\s\S]*event\.clipboardData,[\s\S]*removeAllRanges\(\)[\s\S]*event\.preventDefault\(\);/,
+  );
+});
+
+test('live terminal retains the copy chord until key release and clears it on blur', () => {
+  const terminalSurfaceSource = appSource.slice(
+    appSource.indexOf('function SshTerminalSurface'),
+    appSource.indexOf("type SftpPaneKind = 'local' | 'remote'"),
+  );
+  const keyboardHandlerSource = terminalSurfaceSource.slice(
+    terminalSurfaceSource.indexOf('onKeyDown='),
+    terminalSurfaceSource.indexOf('onCopy='),
+  );
+
+  assert.match(
+    keyboardHandlerSource,
+    /shouldUseTerminalClipboardShortcut\([\s\S]*terminalCopyChordActiveRef\.current[\s\S]*terminalCopyChordAfterKeyDown\([\s\S]*if \(useClipboard\) return;/,
+  );
+  assert.match(
+    keyboardHandlerSource,
+    /onKeyUp=\{[\s\S]*terminalCopyChordAfterKeyUp\([\s\S]*onBlur=\{[\s\S]*terminalCopyChordActiveRef\.current = false;/,
   );
 });
 

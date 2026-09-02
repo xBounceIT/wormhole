@@ -67,6 +67,8 @@ import {
   normalizeTerminalPasteText,
   shouldAutoCopyTerminalSelection,
   shouldUseTerminalClipboardShortcut,
+  terminalCopyChordAfterKeyDown,
+  terminalCopyChordAfterKeyUp,
 } from './terminal-clipboard';
 import { terminalControlKeyData } from './terminal-keyboard';
 import {
@@ -8802,6 +8804,7 @@ function SshTerminalSurface({
   const stickToBottomRef = useRef(true);
   const automaticScrollTopRef = useRef<number | undefined>(undefined);
   const handledViewportResetSequenceRef = useRef<number | undefined>(undefined);
+  const terminalCopyChordActiveRef = useRef(false);
 
   useEffect(() => {
     const surface = surfaceRef.current;
@@ -8853,6 +8856,7 @@ function SshTerminalSurface({
     stickToBottomRef.current = true;
     automaticScrollTopRef.current = undefined;
     handledViewportResetSequenceRef.current = undefined;
+    terminalCopyChordActiveRef.current = false;
   }, [session.backendSessionId, session.status]);
 
   useLayoutEffect(() => {
@@ -9040,18 +9044,31 @@ function SshTerminalSurface({
       className="terminal-scrollbar h-full min-h-0 min-w-0 flex-1 cursor-text overflow-x-auto overflow-y-auto overscroll-contain bg-[#090909] text-[#e5e7eb] outline-none"
       onClick={(event) => event.currentTarget.focus({ preventScroll: true })}
       onKeyDown={(event) => {
-        if (
-          shouldUseTerminalClipboardShortcut(
-            event,
-            Boolean(terminalSelectionText(event.currentTarget)),
-          )
-        ) {
-          return;
-        }
+        const hasSelection = Boolean(terminalSelectionText(event.currentTarget));
+        const useClipboard = shouldUseTerminalClipboardShortcut(
+          event,
+          hasSelection,
+          terminalCopyChordActiveRef.current,
+        );
+        terminalCopyChordActiveRef.current = terminalCopyChordAfterKeyDown(
+          event,
+          hasSelection,
+          terminalCopyChordActiveRef.current,
+        );
+        if (useClipboard) return;
         const data = terminalKeyData(event, session.terminalFrame?.applicationCursor ?? false);
         if (data === undefined) return;
         event.preventDefault();
         onInput(session.id, data);
+      }}
+      onKeyUp={(event) => {
+        terminalCopyChordActiveRef.current = terminalCopyChordAfterKeyUp(
+          event,
+          terminalCopyChordActiveRef.current,
+        );
+      }}
+      onBlur={() => {
+        terminalCopyChordActiveRef.current = false;
       }}
       onCopy={(event) => {
         const copied = copyAndClearTerminalSelection(
