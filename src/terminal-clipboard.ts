@@ -19,6 +19,17 @@ export function shouldUseTerminalClipboardShortcut(
   return key === 'c' && hasSelection;
 }
 
+export function copyAndClearTerminalSelection(
+  text: string,
+  clipboardData: Pick<DataTransfer, 'setData'>,
+  clearSelection: () => void,
+): boolean {
+  if (!text) return false;
+  clipboardData.setData('text/plain', text);
+  clearSelection();
+  return true;
+}
+
 export function shouldAutoCopyTerminalSelection(enabled: boolean, mouseButton: number): boolean {
   return enabled && mouseButton === 0;
 }

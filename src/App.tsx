@@ -61,6 +61,7 @@ import {
   shouldOfferUpdate,
 } from './update-state';
 import {
+  copyAndClearTerminalSelection,
   normalizeTerminalPasteText,
   shouldAutoCopyTerminalSelection,
   shouldUseTerminalClipboardShortcut,
@@ -9056,6 +9057,14 @@ function SshTerminalSurface({
         if (data === undefined) return;
         event.preventDefault();
         onInput(session.id, data);
+      }}
+      onCopy={(event) => {
+        const copied = copyAndClearTerminalSelection(
+          terminalSelectionText(event.currentTarget),
+          event.clipboardData,
+          () => window.getSelection()?.removeAllRanges(),
+        );
+        if (copied) event.preventDefault();
       }}
       onPaste={(event) => {
         const text = event.clipboardData.getData('text');
