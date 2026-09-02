@@ -12,6 +12,10 @@ import {
   type ConnectionTreeShortcutNode,
 } from '../src/tree-shortcuts.ts';
 import {
+  isWormholeShortcutSuppressed,
+  markWormholeShortcutSuppressed,
+} from '../src/app-shortcuts.ts';
+import {
   parseWorkspaceNodesRequest,
   workspaceDeleteNodesMaxRequestBytes,
 } from '../electron/workspace-delete-contract.ts';
@@ -243,6 +247,40 @@ test('guards block shortcuts while typing, in dialogs, outside the tree, or lock
     ),
     { kind: 'quick-connect' },
   );
+});
+
+test('Wormhole window handlers honor session shortcut suppression', () => {
+  const appSource = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  const sidebarSource = readFileSync(
+    new URL('../src/components/ui/sidebar.tsx', import.meta.url),
+    'utf8',
+  );
+  let receivedSelector = '';
+  const sessionTarget = {
+    closest(selector: string) {
+      receivedSelector = selector;
+      return {};
+    },
+  } as unknown as EventTarget;
+  const ordinaryTarget = { closest: () => null } as unknown as EventTarget;
+  const eventFor = (target: EventTarget | null) => ({ target }) as Event;
+
+  assert.equal(isWormholeShortcutSuppressed(eventFor(sessionTarget)), true);
+  assert.equal(receivedSelector, '[data-wormhole-shortcuts-disabled]');
+  assert.equal(isWormholeShortcutSuppressed(eventFor(ordinaryTarget)), false);
+  assert.equal(isWormholeShortcutSuppressed(eventFor(null)), false);
+
+  const portaledSessionEvent = eventFor(ordinaryTarget);
+  markWormholeShortcutSuppressed(portaledSessionEvent);
+  assert.equal(isWormholeShortcutSuppressed(portaledSessionEvent), true);
+  assert.equal(isWormholeShortcutSuppressed(eventFor(ordinaryTarget)), false);
+
+  for (const source of [appSource, sidebarSource]) {
+    assert.match(
+      source,
+      /const handleKeyDown = \(event: KeyboardEvent\) => \{\s*if \(isWormholeShortcutSuppressed\(event\)\) return;/,
+    );
+  }
 });
 
 test('editable-target classification covers form controls and contenteditable surfaces', () => {

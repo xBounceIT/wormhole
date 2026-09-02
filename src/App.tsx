@@ -54,6 +54,7 @@ import {
   formatBitwardenVaultStatus,
 } from './bitwarden-cli-view';
 import { writeClipboardText } from './clipboard';
+import { isWormholeShortcutSuppressed, markWormholeShortcutSuppressed } from './app-shortcuts';
 import { buildMcpConfig, type McpClient } from './mcp-config';
 import {
   hasNewerReleaseWithoutInstaller,
@@ -67,6 +68,7 @@ import {
   shouldAutoCopyTerminalSelection,
   shouldUseTerminalClipboardShortcut,
 } from './terminal-clipboard';
+import { terminalControlKeyData } from './terminal-keyboard';
 import {
   nextTerminalViewportResetSequence,
   terminalScrollEventKeepsBottomPin,
@@ -2948,6 +2950,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
+      if (isWormholeShortcutSuppressed(event)) return;
       const target = event.target instanceof Element ? event.target : null;
       const editableTarget = target?.closest<HTMLElement>(
         'input, textarea, select, [contenteditable]:not([contenteditable="false"])',
@@ -8724,21 +8727,8 @@ function terminalKeyData(event: React.KeyboardEvent, appCursor: boolean): string
   if (event.nativeEvent.isComposing || event.metaKey) return undefined;
   const key = event.key;
   if (event.ctrlKey && !event.altKey) {
-    if (key === ' ') return '\u0000';
-    if (key.length === 1) {
-      const code = key.toUpperCase().charCodeAt(0);
-      if (code >= 65 && code <= 90) return String.fromCharCode(code - 64);
-      return (
-        {
-          '@': '\u0000',
-          '[': '\u001b',
-          '\\': '\u001c',
-          ']': '\u001d',
-          '^': '\u001e',
-          _: '\u001f',
-        } as Record<string, string>
-      )[key];
-    }
+    const controlData = terminalControlKeyData(key);
+    if (controlData !== undefined) return controlData;
   }
 
   if (key === 'Enter') return '\r';
@@ -10532,7 +10522,9 @@ function SessionsPage({
           <div
             aria-hidden={!active}
             className="absolute min-h-0 min-w-0 overflow-hidden"
+            data-wormhole-shortcuts-disabled=""
             key={session.id}
+            onKeyDownCapture={(event) => markWormholeShortcutSuppressed(event.nativeEvent)}
             onPointerDownCapture={() => {
               if (pane) activateSession(pane.id, session.id);
             }}
