@@ -72,6 +72,7 @@ const (
 	mcpDefaultConnectionListLimit = 100
 	mcpMaxConnectionListLimit     = 500
 	mcpMaxConnectionFolderBytes   = 4096
+	mcpMaxPendingApprovals        = 32
 )
 
 type mcpController struct {
@@ -747,6 +748,10 @@ func (controller *mcpController) ensureApproval(
 			return ctx.Err()
 		}
 	}
+	if len(controller.pending) >= mcpMaxPendingApprovals {
+		controller.approvalMu.Unlock()
+		return errors.New("too many MCP approval requests are pending")
+	}
 
 	requestID, err := newMcpRequestID()
 	if err != nil {
@@ -841,6 +846,10 @@ func (controller *mcpController) ensureConnectionOpenApproval(
 	if controller.locked {
 		controller.approvalMu.Unlock()
 		return errors.New("Wormhole is locked. Unlock the app before using MCP tools.")
+	}
+	if len(controller.pending) >= mcpMaxPendingApprovals {
+		controller.approvalMu.Unlock()
+		return errors.New("too many MCP approval requests are pending")
 	}
 	controller.pending[requestID] = waiter
 	controller.server.output.write(sshWireEvent{

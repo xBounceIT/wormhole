@@ -1582,6 +1582,26 @@ func waitForMcpApprovalWaiterCount(t *testing.T, controller *mcpController, expe
 	}
 }
 
+func waitForMcpPendingRequestCount(t *testing.T, controller *mcpController, expected int) {
+	t.Helper()
+	deadline := time.After(time.Second)
+	for {
+		controller.approvalMu.Lock()
+		pending := len(controller.pending)
+		controller.approvalMu.Unlock()
+		if pending == expected {
+			return
+		}
+
+		select {
+		case <-deadline:
+			t.Fatalf("pending approval count = %d, want %d", pending, expected)
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+}
+
 func requireMcpApprovalCancellationSequence(
 	t *testing.T,
 	output *bytes.Buffer,
@@ -2049,6 +2069,52 @@ func TestMcpOpenConnectionRequiresFreshApprovalForEveryRequest(t *testing.T) {
 			t.Fatalf("attempt %d approval event = %#v", attempt, event)
 		}
 	}
+}
+
+func TestMcpConnectionOpenApprovalsAreBounded(t *testing.T) {
+	server := &sshServer{output: &sshEventWriter{encoder: json.NewEncoder(io.Discard)}}
+	controller := newMcpController(server)
+	controller.setLocked(false)
+	connection := mcpConnectionInfo{ID: "ssh-node", Name: "Shell", Protocol: "ssh", Host: "ssh.example", Port: 22}
+	cancels := make([]context.CancelFunc, 0, mcpMaxPendingApprovals)
+	cancelAll := func() {
+		for _, cancel := range cancels {
+			cancel()
+		}
+	}
+	defer cancelAll()
+	results := make(chan error, mcpMaxPendingApprovals)
+	for range mcpMaxPendingApprovals {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancels = append(cancels, cancel)
+		go func() { results <- controller.ensureConnectionOpenApproval(ctx, connection) }()
+	}
+	waitForMcpPendingRequestCount(t, controller, mcpMaxPendingApprovals)
+
+	if err := controller.ensureConnectionOpenApproval(context.Background(), connection); err == nil ||
+		!strings.Contains(err.Error(), "too many MCP approval requests") {
+		t.Fatalf("overflowing approval returned %v", err)
+	}
+	controller.approvalMu.Lock()
+	pending := len(controller.pending)
+	controller.approvalMu.Unlock()
+	if pending != mcpMaxPendingApprovals {
+		t.Fatalf("overflow changed pending count to %d", pending)
+	}
+
+	cancelAll()
+	deadline := time.After(time.Second)
+	for range mcpMaxPendingApprovals {
+		select {
+		case err := <-results:
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("cancelled bounded approval returned %v", err)
+			}
+		case <-deadline:
+			t.Fatal("bounded approvals did not finish after cancellation")
+		}
+	}
+	waitForMcpPendingRequestCount(t, controller, 0)
 }
 
 func TestMcpApprovalCancellationReportsLockReason(t *testing.T) {
