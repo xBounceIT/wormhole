@@ -15,6 +15,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 type callbackWriteCloser struct {
@@ -1639,6 +1642,370 @@ func TestMcpApprovalWaiterBroadcastsToConcurrentCallers(t *testing.T) {
 	}
 }
 
+func createMcpConnectionTestDatabase(t *testing.T) string {
+	t.Helper()
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	_, err = database.Exec(`
+CREATE TABLE Nodes (
+    Id TEXT PRIMARY KEY NOT NULL,
+    ParentId TEXT NULL,
+    Name TEXT NOT NULL,
+    Kind INTEGER NOT NULL,
+    SortOrder INTEGER NOT NULL DEFAULT 0,
+    Protocol INTEGER NULL,
+    Host TEXT NULL,
+    Port INTEGER NULL,
+    HttpPath TEXT NULL,
+    UpdatedAt TEXT NOT NULL
+);
+INSERT INTO Nodes (Id, ParentId, Name, Kind, SortOrder, Protocol, Host, Port, HttpPath, UpdatedAt) VALUES
+    ('folder', NULL, 'Production', 0, 0, NULL, NULL, NULL, NULL, 'now'),
+    ('ssh-node', 'folder', 'Shell', 1, 0, 0, 'ssh.example', 22, NULL, 'now'),
+    ('web-node', NULL, 'Dashboard', 1, 1, 3, 'web.example', 8080, '/admin', 'now');
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return databasePath
+}
+
+func TestMcpControllerListsSavedConnectionsWithoutCredentials(t *testing.T) {
+	controller := newMcpController(&sshServer{databasePath: createMcpConnectionTestDatabase(t)})
+	if _, err := controller.listConnectionPage(0, mcpDefaultConnectionListLimit); err == nil {
+		t.Fatal("locked MCP controller exposed saved connections")
+	}
+	controller.setLocked(false)
+
+	page, err := controller.listConnectionPage(0, mcpDefaultConnectionListLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connections := page.Connections
+	want := []mcpConnectionInfo{
+		{ID: "ssh-node", Name: "Shell", Protocol: "ssh", Host: "ssh.example", Port: 22, Folder: "Production"},
+		{ID: "web-node", Name: "Dashboard", Protocol: "http", Host: "web.example", Port: 8080, Path: "/admin"},
+	}
+	if len(connections) != len(want) {
+		t.Fatalf("connections = %#v", connections)
+	}
+	for index := range want {
+		if connections[index] != want[index] {
+			t.Fatalf("connection %d = %#v, want %#v", index, connections[index], want[index])
+		}
+	}
+
+	resolved, err := controller.resolveConnectionTarget("SSH-NODE")
+	if err != nil || resolved != want[0] {
+		t.Fatalf("resolved connection = %#v, %v", resolved, err)
+	}
+	for _, connectionID := range []string{"", " spaced ", strings.Repeat("x", 129), "missing"} {
+		if _, err := controller.resolveConnectionTarget(connectionID); err == nil {
+			t.Fatalf("invalid connection %q was resolved", connectionID)
+		}
+	}
+}
+
+func TestMcpConnectionListPaginationIsBounded(t *testing.T) {
+	failFast := newMcpController(nil)
+	failFast.setLocked(false)
+	if _, err := failFast.listConnectionPage(-1, 1); err == nil {
+		t.Fatal("invalid page reached the database instead of failing fast")
+	}
+	controller := newMcpController(&sshServer{databasePath: createMcpConnectionTestDatabase(t)})
+	controller.setLocked(false)
+	page, err := controller.listConnectionPage(1, mcpMaxConnectionListLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Connections) != 1 || page.Total != 2 || page.NextOffset != 0 || page.Connections[0].ID != "web-node" {
+		t.Fatalf("last page = %#v", page)
+	}
+	defaultLimit, err := validateMcpConnectionPage(0, 0)
+	if err != nil || defaultLimit != mcpDefaultConnectionListLimit {
+		t.Fatalf("default limit = %d, %v", defaultLimit, err)
+	}
+	for _, input := range []struct{ offset, limit int }{
+		{offset: -1, limit: 1},
+		{offset: 0, limit: -1},
+		{offset: 0, limit: mcpMaxConnectionListLimit + 1},
+	} {
+		if _, err := validateMcpConnectionPage(input.offset, input.limit); err == nil {
+			t.Fatalf("invalid page offset=%d limit=%d was accepted", input.offset, input.limit)
+		}
+	}
+	folder := boundedMcpConnectionFolderValue(strings.Repeat("é", mcpMaxConnectionFolderBytes))
+	if len(folder) > mcpMaxConnectionFolderBytes || !strings.HasPrefix(folder, "…") || !utf8.ValidString(folder) {
+		t.Fatalf("bounded folder is not valid UTF-8 within the wire limit: %q", folder)
+	}
+}
+
+func TestMcpConnectionWalkHandlesDeepTreesWithoutRecursiveStackGrowth(t *testing.T) {
+	leaf := &treeNode{ID: "connection", Name: "Shell", Kind: "connection", Protocol: "ssh"}
+	for depth := 4096; depth > 0; depth-- {
+		leaf = &treeNode{
+			ID:       fmt.Sprintf("folder-%d", depth),
+			Name:     strings.Repeat("é", 32),
+			Kind:     "folder",
+			Children: []*treeNode{leaf},
+		}
+	}
+	visited := 0
+	walkMcpConnections([]*treeNode{leaf}, func(connection mcpConnectionInfo) bool {
+		visited++
+		if connection.ID != "connection" || len(connection.Folder) > mcpMaxConnectionFolderBytes ||
+			!utf8.ValidString(connection.Folder) || !strings.HasPrefix(connection.Folder, "…") {
+			t.Fatalf("deep connection = %#v", connection)
+		}
+		return true
+	})
+	if visited != 1 {
+		t.Fatalf("visited connections = %d, want 1", visited)
+	}
+}
+
+func TestMcpOpenConnectionApprovesEffectiveTargetAndRejectsChanges(t *testing.T) {
+	databasePath := createMcpConnectionTestDatabase(t)
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = database.Exec(`
+UPDATE Nodes SET Protocol = 0, Host = 'inherited.example', Port = 2222 WHERE Id = 'folder';
+UPDATE Nodes SET Protocol = NULL, Host = NULL, Port = NULL WHERE Id = 'ssh-node';
+`)
+	if closeErr := database.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var output bytes.Buffer
+	server := &sshServer{
+		databasePath: databasePath,
+		output:       &sshEventWriter{encoder: json.NewEncoder(&output)},
+	}
+	controller := newMcpController(server)
+	controller.setLocked(false)
+	result := make(chan error, 1)
+	go func() {
+		_, requestErr := controller.requestOpenConnection(context.Background(), "ssh-node")
+		result <- requestErr
+	}()
+	requestID := waitForMcpApprovalRequest(t, controller)
+
+	var approval sshWireEvent
+	if err := json.NewDecoder(bytes.NewReader(output.Bytes())).Decode(&approval); err != nil {
+		t.Fatal(err)
+	}
+	if approval.Host != "inherited.example" || approval.Port != 2222 || approval.Protocol != "ssh" {
+		t.Fatalf("approval target = %#v", approval)
+	}
+
+	database, err = openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, updateErr := database.Exec("UPDATE Nodes SET Host = 'changed.example' WHERE Id = 'folder';")
+	closeErr := database.Close()
+	if updateErr != nil {
+		t.Fatal(updateErr)
+	}
+	if closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	if err := controller.resolveApproval(requestID, true); err == nil || !strings.Contains(err.Error(), "changed while approval was pending") {
+		t.Fatalf("changed target approval returned %v", err)
+	}
+	select {
+	case err := <-result:
+		if err == nil || !strings.Contains(err.Error(), "changed while approval was pending") {
+			t.Fatalf("changed target request returned %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("changed target request did not finish")
+	}
+	requireMcpApprovalCancellationSequence(t, &output, requestID, "ssh-node")
+}
+
+func TestMcpOpenConnectionResolvesEverySupportedProtocolTarget(t *testing.T) {
+	databasePath := createMcpConnectionTestDatabase(t)
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, insertErr := database.Exec(`
+INSERT INTO Nodes (Id, ParentId, Name, Kind, SortOrder, Protocol, Host, Port, HttpPath, UpdatedAt) VALUES
+    ('rdp-node', NULL, 'Desktop', 1, 2, 1, 'rdp.example', NULL, NULL, 'now'),
+    ('vnc-node', NULL, 'Screen', 1, 3, 6, 'vnc.example:5902', NULL, NULL, 'now'),
+    ('serial-node', NULL, 'Console', 1, 4, 5, 'COM9', NULL, NULL, 'now'),
+    ('web-folder', NULL, 'Applications', 0, 5, 4, 'secure.example', 8443, '/inherited', 'now'),
+    ('inherited-web', 'web-folder', 'Admin', 1, 0, NULL, NULL, NULL, NULL, 'now'),
+    ('unrelated-cycle-a', 'unrelated-cycle-b', 'Broken leaf', 1, 6, NULL, NULL, NULL, NULL, 'now'),
+    ('unrelated-cycle-b', 'unrelated-cycle-a', 'Broken folder', 0, 0, NULL, NULL, NULL, NULL, 'now');
+`)
+	closeErr := database.Close()
+	if insertErr != nil {
+		t.Fatal(insertErr)
+	}
+	if closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	controller := newMcpController(&sshServer{databasePath: databasePath})
+	controller.setLocked(false)
+
+	want := map[string]mcpConnectionInfo{
+		"ssh-node":      {ID: "ssh-node", Name: "Shell", Protocol: "ssh", Host: "ssh.example", Port: 22, Folder: "Production"},
+		"rdp-node":      {ID: "rdp-node", Name: "Desktop", Protocol: "rdp", Host: "rdp.example", Port: 3389},
+		"vnc-node":      {ID: "vnc-node", Name: "Screen", Protocol: "vnc", Host: "vnc.example", Port: 5902},
+		"serial-node":   {ID: "serial-node", Name: "Console", Protocol: "serial", Host: "COM9"},
+		"inherited-web": {ID: "inherited-web", Name: "Admin", Protocol: "https", Host: "secure.example", Port: 8443, Path: "/inherited", Folder: "Applications"},
+	}
+	for connectionID, expected := range want {
+		resolved, err := controller.resolveConnectionTarget(connectionID)
+		if err != nil {
+			t.Fatalf("resolve %s: %v", connectionID, err)
+		}
+		if resolved != expected {
+			t.Fatalf("resolve %s = %#v, want %#v", connectionID, resolved, expected)
+		}
+	}
+}
+
+func TestMcpDeniedOpenDecisionIsAcceptedWithoutBeingRemembered(t *testing.T) {
+	server := &sshServer{
+		databasePath: createMcpConnectionTestDatabase(t),
+		output:       &sshEventWriter{encoder: json.NewEncoder(&bytes.Buffer{})},
+	}
+	controller := newMcpController(server)
+	controller.setLocked(false)
+	result := make(chan error, 1)
+	go func() {
+		_, requestErr := controller.requestOpenConnection(context.Background(), "ssh-node")
+		result <- requestErr
+	}()
+	requestID := waitForMcpApprovalRequest(t, controller)
+	if err := controller.resolveApproval(requestID, false); err != nil {
+		t.Fatalf("valid denial was rejected: %v", err)
+	}
+	select {
+	case err := <-result:
+		if err == nil || !strings.Contains(err.Error(), "denied opening") {
+			t.Fatalf("denied open returned %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("denied open request did not finish")
+	}
+	controller.approvalMu.Lock()
+	_, remembered := controller.decisions["ssh-node"]
+	controller.approvalMu.Unlock()
+	if remembered {
+		t.Fatal("denied open decision was remembered")
+	}
+}
+
+func TestMcpCancelledOpenNeverSurvivesAConcurrentApproval(t *testing.T) {
+	server := &sshServer{
+		databasePath: createMcpConnectionTestDatabase(t),
+		output:       &sshEventWriter{encoder: json.NewEncoder(&bytes.Buffer{})},
+	}
+	controller := newMcpController(server)
+	controller.setLocked(false)
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, requestErr := controller.requestOpenConnection(ctx, "ssh-node")
+		result <- requestErr
+	}()
+	requestID := waitForMcpApprovalRequest(t, controller)
+	cancel()
+	approvalErr := controller.resolveApproval(requestID, true)
+	if approvalErr != nil && !errors.Is(approvalErr, context.Canceled) &&
+		!strings.Contains(approvalErr.Error(), "no longer pending") {
+		t.Fatalf("concurrent approval returned %v", approvalErr)
+	}
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancelled open returned %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancelled open request did not finish")
+	}
+}
+
+func TestMcpOpenConnectionRequiresFreshApprovalForEveryRequest(t *testing.T) {
+	var output bytes.Buffer
+	server := &sshServer{
+		databasePath: createMcpConnectionTestDatabase(t),
+		output:       &sshEventWriter{encoder: json.NewEncoder(&output)},
+	}
+	controller := newMcpController(server)
+	controller.setLocked(false)
+	requestIDs := make([]string, 0, 2)
+
+	for attempt := range 2 {
+		result := make(chan struct {
+			value mcpOpenConnectionResult
+			err   error
+		}, 1)
+		go func() {
+			value, err := controller.requestOpenConnection(context.Background(), "ssh-node")
+			result <- struct {
+				value mcpOpenConnectionResult
+				err   error
+			}{value: value, err: err}
+		}()
+		requestID := waitForMcpApprovalRequest(t, controller)
+		requestIDs = append(requestIDs, requestID)
+		controller.approvalMu.Lock()
+		remembered, decisionExists := controller.decisions["ssh-node"]
+		pendingTargetCount := len(controller.pendingByTarget)
+		controller.approvalMu.Unlock()
+		if decisionExists || remembered || pendingTargetCount != 0 {
+			t.Fatalf(
+				"attempt %d reused approval state: decision=%t/%t targets=%d",
+				attempt,
+				remembered,
+				decisionExists,
+				pendingTargetCount,
+			)
+		}
+		if err := controller.resolveApproval(requestID, true); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case opened := <-result:
+			if opened.err != nil || opened.value.Status != "opening" || opened.value.Connection.ID != "ssh-node" {
+				t.Fatalf("attempt %d result = %#v, %v", attempt, opened.value, opened.err)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("attempt %d did not complete", attempt)
+		}
+	}
+
+	if requestIDs[0] == requestIDs[1] {
+		t.Fatal("separate open requests reused the same approval id")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(output.Bytes()))
+	for attempt, requestID := range requestIDs {
+		var event sshWireEvent
+		if err := decoder.Decode(&event); err != nil {
+			t.Fatal(err)
+		}
+		if event.Type != "mcp.approval" || event.RequestID != requestID ||
+			event.ApprovalKind != "open_connection" || event.ConnectionID != "ssh-node" ||
+			event.Protocol != "ssh" || event.Tool != "open_connection" {
+			t.Fatalf("attempt %d approval event = %#v", attempt, event)
+		}
+	}
+}
+
 func TestMcpApprovalCancellationReportsLockReason(t *testing.T) {
 	var output bytes.Buffer
 	server := &sshServer{output: &sshEventWriter{encoder: json.NewEncoder(&output)}}
@@ -1749,11 +2116,98 @@ func TestMcpCommandTimeoutValidationRejectsOverflowingInput(t *testing.T) {
 }
 
 func TestMcpServerRegistersTypedToolSurface(t *testing.T) {
-	server := &sshServer{}
+	server := &sshServer{databasePath: createMcpConnectionTestDatabase(t)}
 	server.output = &sshEventWriter{encoder: json.NewEncoder(&bytes.Buffer{})}
 	controller := newMcpController(server)
-	if newMcpServer(controller) == nil {
-		t.Fatal("MCP server was not created")
+	controller.setLocked(false)
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	serverSession, err := newMcpServer(controller).Connect(context.Background(), serverTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = serverSession.Close() })
+	client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "1"}, nil)
+	clientSession, err := client.Connect(context.Background(), clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = clientSession.Close() })
+	tools, err := clientSession.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make(map[string]bool, len(tools.Tools))
+	for _, tool := range tools.Tools {
+		names[tool.Name] = true
+	}
+	for _, name := range []string{
+		"list_connections",
+		"open_connection",
+		"list_sessions",
+		"run_command",
+		"send_text",
+		"read_terminal",
+	} {
+		if !names[name] {
+			t.Fatalf("MCP tool %q was not registered: %#v", name, names)
+		}
+	}
+	listed, err := clientSession.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "list_connections", Arguments: map[string]any{"limit": 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if listed.IsError {
+		t.Fatalf("list_connections failed: %#v", listed.Content)
+	}
+	encoded, err := json.Marshal(listed.StructuredContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var page mcpConnectionList
+	if err := json.Unmarshal(encoded, &page); err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Connections) != 1 || page.Total != 2 || page.NextOffset != 1 || page.Connections[0].ID != "ssh-node" {
+		t.Fatalf("list_connections result = %#v", page)
+	}
+	opened := make(chan *mcp.CallToolResult, 1)
+	openErrors := make(chan error, 1)
+	go func() {
+		result, err := clientSession.CallTool(context.Background(), &mcp.CallToolParams{
+			Name: "open_connection", Arguments: map[string]any{"connectionId": "ssh-node"},
+		})
+		if err != nil {
+			openErrors <- err
+			return
+		}
+		opened <- result
+	}()
+	requestID := waitForMcpApprovalRequest(t, controller)
+	if err := controller.resolveApproval(requestID, true); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-openErrors:
+		t.Fatal(err)
+	case result := <-opened:
+		if result.IsError {
+			t.Fatalf("open_connection failed: %#v", result.Content)
+		}
+		encoded, err := json.Marshal(result.StructuredContent)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var openedConnection mcpOpenConnectionResult
+		if err := json.Unmarshal(encoded, &openedConnection); err != nil {
+			t.Fatal(err)
+		}
+		if openedConnection.Status != "opening" || openedConnection.Connection.ID != "ssh-node" {
+			t.Fatalf("open_connection result = %#v", openedConnection)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("open_connection tool did not finish after approval")
 	}
 }
 

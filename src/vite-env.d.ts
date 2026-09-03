@@ -577,11 +577,16 @@ interface WormholeMcpApproval {
   type: 'mcp.approval';
   requestId: string;
   sessionId: string;
+  approvalKind: 'session_control' | 'open_connection';
   host: string;
   port: number;
   username: string;
   title: string;
   tool: string;
+  connectionId?: string;
+  connectionFolder?: string;
+  protocol?: 'ssh' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial';
+  path?: string;
 }
 
 interface WormholeMcpApprovalCancelled {

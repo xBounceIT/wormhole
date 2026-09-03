@@ -479,6 +479,59 @@ test('MCP approval restores and foregrounds the Wormhole window before notifying
   );
 });
 
+test('MCP connection opens use a validated one-time approval before the normal renderer flow', () => {
+  const mainSource = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
+  const parser = mainSource.slice(
+    mainSource.indexOf('function parseMcpBackendMessage'),
+    mainSource.indexOf('type TunnelBrowserEvent'),
+  );
+  assert.match(parser, /value\.approval_kind === 'open_connection'/);
+  assert.match(parser, /value\.connection_id === value\.session_id/);
+  assert.match(parser, /isMcpConnectionProtocol\(value\.protocol\)/);
+  assert.match(parser, /value\.tool === 'open_connection'/);
+
+  const appSource = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  const matcher = appSource.slice(
+    appSource.indexOf('function matchesMcpOpenConnectionApproval'),
+    appSource.indexOf('function containsTreeNode'),
+  );
+  for (const field of [
+    'node.persisted === true',
+    'node.protocol === approval.protocol',
+    'node.name === approval.title',
+  ]) {
+    assert.ok(matcher.includes(field), `MCP connection approval does not validate ${field}`);
+  }
+  assert.doesNotMatch(
+    matcher,
+    /node\.(?:host|port|httpPath)/,
+    'the renderer must not compare raw fields with the effective target resolved by Go',
+  );
+
+  const resolver = appSource.slice(
+    appSource.indexOf('async function resolveMcpApproval'),
+    appSource.indexOf('async function resolveTunnelPrompt'),
+  );
+  const response = resolver.indexOf('await window.wormhole.respondMcpApproval');
+  const open = resolver.indexOf('openConnection(connection)');
+  assert.match(resolver, /approved && approvalMatches/);
+  assert.ok(
+    response >= 0 && response < open,
+    'the approved MCP request must be recorded before opening',
+  );
+  const nativeResponder = mainSource.slice(
+    mainSource.indexOf('async respondMcpApproval'),
+    mainSource.indexOf('async setMcpLocked'),
+  );
+  assert.ok(
+    nativeResponder.indexOf('await this.sendMcpControl') <
+      nativeResponder.indexOf('this.broadcastMcpApprovalCancellation(approvalId)'),
+    'other windows must dismiss the approval only after the backend accepts the decision',
+  );
+  assert.doesNotMatch(nativeResponder, /finally/);
+  assert.match(appSource, /Every MCP request to open a connection requires a new approval\./);
+});
+
 test('MCP approval temporarily preempts tunnel browser authentication windows', () => {
   function createWindow() {
     const calls: string[] = [];

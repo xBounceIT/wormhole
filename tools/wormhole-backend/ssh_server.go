@@ -140,6 +140,10 @@ type sshWireEvent struct {
 	Username            string             `json:"username,omitempty"`
 	Title               string             `json:"title,omitempty"`
 	Tool                string             `json:"tool,omitempty"`
+	ApprovalKind        string             `json:"approval_kind,omitempty"`
+	ConnectionID        string             `json:"connection_id,omitempty"`
+	ConnectionFolder    string             `json:"connection_folder,omitempty"`
+	Protocol            string             `json:"protocol,omitempty"`
 	Fingerprint         string             `json:"fingerprint,omitempty"`
 	Error               string             `json:"error,omitempty"`
 	McpStatus           *mcpStatusResponse `json:"mcp_status,omitempty"`
@@ -3407,6 +3411,70 @@ func loadSSHTarget(databasePath, nodeID string, electronUserDataPath ...string) 
 	return loadSSHTargetWithOverrides(databasePath, nodeID, "", "", false, false, electronUserDataPath...)
 }
 
+type sshNodeEndpoint struct {
+	protocol int64
+	host     string
+	port     int
+}
+
+func resolveSSHNodeEndpoint(nodes map[string]*sshNode, nodeID string) (sshNodeEndpoint, error) {
+	current := nodes[normalizeID(nodeID)]
+	if current == nil || current.kind == 0 {
+		return sshNodeEndpoint{}, errors.New("SSH connection was not found")
+	}
+	var protocol int64
+	protocolSet := false
+	host := ""
+	port := int64(0)
+	portSet := false
+	var portContextProtocol *int64
+	seen := make(map[string]struct{})
+	for current != nil {
+		if _, duplicate := seen[current.id]; duplicate {
+			return sshNodeEndpoint{}, errors.New("SSH connection tree contains a cycle")
+		}
+		seen[current.id] = struct{}{}
+		if !protocolSet && current.protocol != nil {
+			protocol = *current.protocol
+			protocolSet = true
+		}
+		if host == "" && strings.TrimSpace(current.host) != "" {
+			host = strings.TrimSpace(current.host)
+		}
+		if !portSet && current.port != nil {
+			port = *current.port
+			portSet = true
+			if current.protocol != nil {
+				value := *current.protocol
+				portContextProtocol = &value
+			}
+		} else if portSet && portContextProtocol == nil && current.protocol != nil {
+			value := *current.protocol
+			portContextProtocol = &value
+		}
+		if current.parentID == "" {
+			break
+		}
+		current = nodes[current.parentID]
+	}
+	if !protocolSet {
+		return sshNodeEndpoint{}, errors.New("SSH connection has no protocol")
+	}
+	if protocol != 0 {
+		return sshNodeEndpoint{}, errors.New("the selected connection is not an SSH connection")
+	}
+	if host == "" {
+		return sshNodeEndpoint{}, errors.New("SSH connection has no host")
+	}
+	if portContextProtocol != nil && *portContextProtocol != protocol {
+		port = 0
+	}
+	if port <= 0 || port > 65535 {
+		port = 22
+	}
+	return sshNodeEndpoint{protocol: protocol, host: host, port: int(port)}, nil
+}
+
 func loadSSHTargetWithOverrides(
 	databasePath, nodeID, usernameOverride, passwordOverride string,
 	credentialOverride bool,
@@ -3440,13 +3508,11 @@ func loadSSHTargetWithCredentialOverrides(
 	if root == nil || root.kind == 0 {
 		return sshTarget{}, errors.New("SSH connection was not found")
 	}
+	endpoint, err := resolveSSHNodeEndpoint(nodes, root.id)
+	if err != nil {
+		return sshTarget{}, err
+	}
 
-	protocol := int64(0)
-	protocolSet := false
-	host := ""
-	port := int64(0)
-	portSet := false
-	var portContextProtocol *int64
 	username := ""
 	credentialID := ""
 	credentialResolved := root.useInlinePassword
@@ -3466,24 +3532,6 @@ func loadSSHTargetWithCredentialOverrides(
 			return sshTarget{}, errors.New("SSH connection tree contains a cycle")
 		}
 		seen[current.id] = struct{}{}
-		if !protocolSet && current.protocol != nil {
-			protocol = *current.protocol
-			protocolSet = true
-		}
-		if host == "" && strings.TrimSpace(current.host) != "" {
-			host = strings.TrimSpace(current.host)
-		}
-		if !portSet && current.port != nil {
-			port = *current.port
-			portSet = true
-			if current.protocol != nil {
-				value := *current.protocol
-				portContextProtocol = &value
-			}
-		} else if portSet && portContextProtocol == nil && current.protocol != nil {
-			value := *current.protocol
-			portContextProtocol = &value
-		}
 		if !identityBoundary && username == "" && strings.TrimSpace(current.username) != "" {
 			username = strings.TrimSpace(current.username)
 		}
@@ -3530,34 +3578,18 @@ func loadSSHTargetWithCredentialOverrides(
 		current = nodes[current.parentID]
 	}
 
-	if !protocolSet {
-		return sshTarget{}, errors.New("SSH connection has no protocol")
-	}
-	if protocol != 0 {
-		return sshTarget{}, errors.New("the selected connection is not an SSH connection")
-	}
 	if tunnelSet && tunnelEnabled && tunnelConfigID == "" {
 		return sshTarget{}, errors.New("SSH connection enables a VPN tunnel but no tunnel is configured")
 	}
-	if host == "" {
-		return sshTarget{}, errors.New("SSH connection has no host")
-	}
-	if portContextProtocol != nil && *portContextProtocol != protocol {
-		portSet = false
-		port = 0
-	}
-	if credentialContextProtocol != nil && *credentialContextProtocol != protocol {
+	if credentialContextProtocol != nil && *credentialContextProtocol != endpoint.protocol {
 		credentialID = ""
-	}
-	if port <= 0 || port > 65535 {
-		port = 22
 	}
 
 	target := sshTarget{
 		nodeID:               root.id,
 		title:                root.name,
-		host:                 host,
-		port:                 int(port),
+		host:                 endpoint.host,
+		port:                 endpoint.port,
 		username:             username,
 		knownHostFingerprint: knownFingerprint,
 		autoSudo:             autoSudo,

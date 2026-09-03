@@ -506,6 +506,21 @@ function findTreeNode(nodes: TreeNode[], nodeId: string): TreeNode | undefined {
   return undefined;
 }
 
+function matchesMcpOpenConnectionApproval(
+  node: TreeNode | undefined,
+  approval: WormholeMcpApproval,
+): node is TreeNode & { kind: 'connection'; protocol: Protocol } {
+  return Boolean(
+    node &&
+    approval.approvalKind === 'open_connection' &&
+    approval.connectionId === node.id &&
+    node.kind === 'connection' &&
+    node.persisted === true &&
+    node.protocol === approval.protocol &&
+    node.name === approval.title,
+  );
+}
+
 function containsTreeNode(node: TreeNode, nodeId: string): boolean {
   return Boolean(
     node.children?.some((child) => child.id === nodeId || containsTreeNode(child, nodeId)),
@@ -2237,10 +2252,18 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   async function resolveMcpApproval(approved: boolean) {
     const approval = mcpApprovals[0];
     if (!approval || !window.wormhole) return;
+    const connection =
+      approved && approval.approvalKind === 'open_connection' && approval.connectionId
+        ? findTreeNode(tree, approval.connectionId)
+        : undefined;
+    const approvalMatches =
+      approval.approvalKind !== 'open_connection' ||
+      matchesMcpOpenConnectionApproval(connection, approval);
     try {
-      await window.wormhole.respondMcpApproval(approval.requestId, approved);
+      await window.wormhole.respondMcpApproval(approval.requestId, approved && approvalMatches);
+      if (approved && approvalMatches && connection) openConnection(connection);
     } catch {
-      // A lock or disconnected SSH session can invalidate the prompt before the user clicks it.
+      // A lock, changed connection, or disconnected SSH session can invalidate the prompt.
     } finally {
       setMcpApprovals((current) => current.filter((item) => item.requestId !== approval.requestId));
     }
@@ -6503,9 +6526,15 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           overlayClassName="z-[60]"
         >
           <DialogHeader>
-            <DialogTitle>Allow AI agent control?</DialogTitle>
+            <DialogTitle>
+              {mcpApprovals[0]?.approvalKind === 'open_connection'
+                ? 'Allow AI agent to open this connection?'
+                : 'Allow AI agent control?'}
+            </DialogTitle>
             <DialogDescription>
-              An MCP client is requesting access to one of Wormhole&apos;s live SSH sessions.
+              {mcpApprovals[0]?.approvalKind === 'open_connection'
+                ? 'An MCP client is asking Wormhole to open a saved connection.'
+                : "An MCP client is requesting access to one of Wormhole's live SSH sessions."}
             </DialogDescription>
           </DialogHeader>
           {mcpApprovals[0] ? (
@@ -6513,9 +6542,18 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
               <div className="flex items-start gap-2">
                 <AlertCircle className="mt-0.5 size-4 shrink-0 text-amber-400" />
                 <div className="min-w-0 space-y-1">
-                  <p className="font-medium">{mcpApprovals[0].title || 'SSH session'}</p>
+                  <p className="font-medium">
+                    {mcpApprovals[0].approvalKind === 'open_connection' &&
+                    mcpApprovals[0].connectionFolder
+                      ? `${mcpApprovals[0].connectionFolder} / ${mcpApprovals[0].title}`
+                      : mcpApprovals[0].title || 'SSH session'}
+                  </p>
                   <p className="break-all text-muted-foreground">
-                    {mcpApprovals[0].username}@{mcpApprovals[0].host}:{mcpApprovals[0].port}
+                    {mcpApprovals[0].approvalKind === 'open_connection'
+                      ? `${mcpApprovals[0].protocol?.toUpperCase()} · ${mcpApprovals[0].host}${
+                          mcpApprovals[0].port > 0 ? `:${mcpApprovals[0].port}` : ''
+                        }${mcpApprovals[0].path ?? ''}`
+                      : `${mcpApprovals[0].username}@${mcpApprovals[0].host}:${mcpApprovals[0].port}`}
                   </p>
                   <p className="text-muted-foreground">
                     Requested tool: <span className="font-mono">{mcpApprovals[0].tool}</span>
@@ -6523,8 +6561,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                 </div>
               </div>
               <p className="text-[11px] leading-relaxed text-muted-foreground">
-                Allowing this request grants the MCP client access to this session for the rest of
-                the session&apos;s lifetime. MCP tools can run only while Wormhole is unlocked.
+                {mcpApprovals[0].approvalKind === 'open_connection'
+                  ? 'This approval applies only to this open request. Every MCP request to open a connection requires a new approval.'
+                  : "Allowing this request grants the MCP client access to this session for the rest of the session's lifetime. MCP tools can run only while Wormhole is unlocked."}
               </p>
             </div>
           ) : null}
@@ -16456,12 +16495,13 @@ function SettingsPage({
 
         <SettingsTabPanel value="mcp">
           <SettingsSection
-            description="Let an approved local AI agent control already-open SSH sessions."
+            description="Let an approved local AI agent open saved connections and control live SSH sessions."
             title="AI Agent (MCP)"
           >
             <p className="text-xs leading-relaxed text-muted-foreground">
-              The local MCP server listens on localhost only and requires a bearer token. The first
-              time an agent touches a session, Wormhole asks you to approve it.
+              The local MCP server listens on localhost only and requires a bearer token. Wormhole
+              asks before every connection opened by an agent, and again the first time the agent
+              touches a live SSH session.
             </p>
             <SettingsSwitch
               checked={mcpEnabled}
