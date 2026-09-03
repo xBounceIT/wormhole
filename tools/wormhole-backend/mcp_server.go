@@ -380,28 +380,6 @@ func (controller *mcpController) listSessions() ([]mcpSessionInfo, error) {
 	return result, nil
 }
 
-func (controller *mcpController) loadConnectionTree() ([]*treeNode, error) {
-	if err := controller.ensureUnlocked(); err != nil {
-		return nil, err
-	}
-	database, err := openDatabase(controller.server.databasePath, true)
-	if err != nil {
-		return nil, err
-	}
-	if database == nil {
-		return []*treeNode{}, nil
-	}
-	defer database.Close()
-	tree, err := loadTree(database)
-	if err != nil {
-		return nil, err
-	}
-	if err := controller.ensureUnlocked(); err != nil {
-		return nil, err
-	}
-	return tree, nil
-}
-
 func validateMcpConnectionPage(offset int, limit int) (int, error) {
 	if offset < 0 {
 		return 0, errors.New("offset is out of range")
@@ -420,7 +398,18 @@ func (controller *mcpController) listConnectionPage(offset int, limit int) (mcpC
 	if err != nil {
 		return mcpConnectionList{}, err
 	}
-	tree, err := controller.loadConnectionTree()
+	if err := controller.ensureUnlocked(); err != nil {
+		return mcpConnectionList{}, err
+	}
+	database, err := openDatabase(controller.server.databasePath, true)
+	if err != nil {
+		return mcpConnectionList{}, err
+	}
+	if database == nil {
+		return mcpConnectionList{Connections: []mcpConnectionInfo{}}, nil
+	}
+	defer database.Close()
+	tree, err := loadTree(database)
 	if err != nil {
 		return mcpConnectionList{}, err
 	}
@@ -433,6 +422,18 @@ func (controller *mcpController) listConnectionPage(offset int, limit int) (mcpC
 		total++
 		return true
 	})
+	resolver := mcpConnectionTargetResolver{database: database}
+	for index := range connections {
+		connection := connections[index]
+		resolved, err := resolver.resolve(connection)
+		if err != nil {
+			return mcpConnectionList{}, fmt.Errorf("cannot resolve saved connection %q: %w", connection.ID, err)
+		}
+		connections[index] = resolved
+	}
+	if err := controller.ensureUnlocked(); err != nil {
+		return mcpConnectionList{}, err
+	}
 	result := mcpConnectionList{Connections: connections, Total: total}
 	if offset < total && len(connections) < total-offset {
 		result.NextOffset = offset + len(connections)
@@ -563,26 +564,34 @@ LIMIT 1;`, currentID).Scan(&id, &parentID, &name, &kind, &protocol)
 	return connection, nil
 }
 
-func resolveMcpSSHConnection(database *sql.DB, connection mcpConnectionInfo) (mcpConnectionInfo, error) {
-	nodes, err := loadSSHNodes(database)
-	if err != nil {
-		return mcpConnectionInfo{}, err
-	}
-	endpoint, err := resolveSSHNodeEndpoint(nodes, connection.ID)
-	if err != nil {
-		return mcpConnectionInfo{}, err
-	}
-	connection.Host = endpoint.host
-	connection.Port = endpoint.port
-	return connection, nil
+type mcpConnectionTargetResolver struct {
+	database     *sql.DB
+	sshNodes     map[string]*sshNode
+	sshLoaded    bool
+	webNodes     map[string]*webNode
+	webLoaded    bool
+	serialNodes  map[string]*serialNode
+	serialLoaded bool
 }
 
-func resolveMcpConnectionTarget(database *sql.DB, connection mcpConnectionInfo) (mcpConnectionInfo, error) {
+func (resolver *mcpConnectionTargetResolver) resolve(connection mcpConnectionInfo) (mcpConnectionInfo, error) {
 	switch connection.Protocol {
 	case "ssh":
-		return resolveMcpSSHConnection(database, connection)
+		if !resolver.sshLoaded {
+			nodes, err := loadSSHNodes(resolver.database)
+			if err != nil {
+				return mcpConnectionInfo{}, err
+			}
+			resolver.sshNodes, resolver.sshLoaded = nodes, true
+		}
+		endpoint, err := resolveSSHNodeEndpoint(resolver.sshNodes, connection.ID)
+		if err != nil {
+			return mcpConnectionInfo{}, err
+		}
+		connection.Host, connection.Port = endpoint.host, endpoint.port
+		return connection, nil
 	case "rdp":
-		chain, err := loadRdpNodeChain(database, connection.ID)
+		chain, err := loadRdpNodeChain(resolver.database, connection.ID)
 		if err != nil {
 			return mcpConnectionInfo{}, err
 		}
@@ -593,7 +602,7 @@ func resolveMcpConnectionTarget(database *sql.DB, connection mcpConnectionInfo) 
 		connection.Host, connection.Port = host, port
 		return connection, nil
 	case "vnc":
-		target, err := readVncTargetFromDatabase(database, connection.ID, "", false)
+		target, err := readVncTargetFromDatabase(resolver.database, connection.ID, "", false)
 		if err != nil {
 			return mcpConnectionInfo{}, err
 		}
@@ -607,15 +616,18 @@ func resolveMcpConnectionTarget(database *sql.DB, connection mcpConnectionInfo) 
 		connection.Host, connection.Port = host, port
 		return connection, nil
 	case "http", "https":
-		nodes, err := loadWebNodes(database)
-		if err != nil {
-			return mcpConnectionInfo{}, err
+		if !resolver.webLoaded {
+			nodes, err := loadWebNodes(resolver.database)
+			if err != nil {
+				return mcpConnectionInfo{}, err
+			}
+			resolver.webNodes, resolver.webLoaded = nodes, true
 		}
-		leaf := nodes[normalizeID(connection.ID)]
+		leaf := resolver.webNodes[normalizeID(connection.ID)]
 		if leaf == nil || leaf.Kind != workspaceNodeConnection {
 			return mcpConnectionInfo{}, errors.New("web connection was not found")
 		}
-		target, err := resolveWebTargetFromNodes(leaf, nodes)
+		target, err := resolveWebTargetFromNodes(leaf, resolver.webNodes)
 		if err != nil {
 			return mcpConnectionInfo{}, err
 		}
@@ -623,11 +635,14 @@ func resolveMcpConnectionTarget(database *sql.DB, connection mcpConnectionInfo) 
 		connection.Host, connection.Port, connection.Path = target.Host, target.Port, target.path
 		return connection, nil
 	case "serial":
-		nodes, err := loadSerialNodes(database)
-		if err != nil {
-			return mcpConnectionInfo{}, err
+		if !resolver.serialLoaded {
+			nodes, err := loadSerialNodes(resolver.database)
+			if err != nil {
+				return mcpConnectionInfo{}, err
+			}
+			resolver.serialNodes, resolver.serialLoaded = nodes, true
 		}
-		target, err := resolveSerialTargetFromNodes(nodes, connection.ID)
+		target, err := resolveSerialTargetFromNodes(resolver.serialNodes, connection.ID)
 		if err != nil {
 			return mcpConnectionInfo{}, err
 		}
@@ -636,6 +651,11 @@ func resolveMcpConnectionTarget(database *sql.DB, connection mcpConnectionInfo) 
 	default:
 		return mcpConnectionInfo{}, errors.New("connection protocol is not supported")
 	}
+}
+
+func resolveMcpConnectionTarget(database *sql.DB, connection mcpConnectionInfo) (mcpConnectionInfo, error) {
+	resolver := mcpConnectionTargetResolver{database: database}
+	return resolver.resolve(connection)
 }
 
 func (controller *mcpController) resolveConnectionTarget(connectionID string) (mcpConnectionInfo, error) {

@@ -1710,6 +1710,51 @@ func TestMcpControllerListsSavedConnectionsWithoutCredentials(t *testing.T) {
 	}
 }
 
+func TestMcpConnectionListReturnsEffectiveInheritedTargets(t *testing.T) {
+	databasePath := createMcpConnectionTestDatabase(t)
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, updateErr := database.Exec(`
+UPDATE Nodes SET Protocol = 0, Host = 'inherited-ssh.example', Port = 2222 WHERE Id = 'folder';
+UPDATE Nodes SET Protocol = NULL, Host = NULL, Port = NULL WHERE Id = 'ssh-node';
+INSERT INTO Nodes (Id, ParentId, Name, Kind, SortOrder, Protocol, Host, Port, HttpPath, UpdatedAt) VALUES
+    ('vnc-folder', NULL, 'Screens', 0, 2, 6, 'inherited-vnc.example:5902', NULL, NULL, 'now'),
+    ('inherited-vnc', 'vnc-folder', 'Screen', 1, 0, NULL, NULL, NULL, NULL, 'now'),
+    ('web-folder', NULL, 'Applications', 0, 3, 4, 'inherited-web.example', 8443, '/admin', 'now'),
+    ('inherited-web', 'web-folder', 'Dashboard', 1, 0, NULL, NULL, NULL, NULL, 'now');
+`)
+	closeErr := database.Close()
+	if updateErr != nil {
+		t.Fatal(updateErr)
+	}
+	if closeErr != nil {
+		t.Fatal(closeErr)
+	}
+
+	controller := newMcpController(&sshServer{databasePath: databasePath})
+	controller.setLocked(false)
+	page, err := controller.listConnectionPage(0, mcpDefaultConnectionListLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed := make(map[string]mcpConnectionInfo, len(page.Connections))
+	for _, connection := range page.Connections {
+		listed[connection.ID] = connection
+	}
+	want := map[string]mcpConnectionInfo{
+		"ssh-node":      {ID: "ssh-node", Name: "Shell", Protocol: "ssh", Host: "inherited-ssh.example", Port: 2222, Folder: "Production"},
+		"inherited-vnc": {ID: "inherited-vnc", Name: "Screen", Protocol: "vnc", Host: "inherited-vnc.example", Port: 5902, Folder: "Screens"},
+		"inherited-web": {ID: "inherited-web", Name: "Dashboard", Protocol: "https", Host: "inherited-web.example", Port: 8443, Path: "/admin", Folder: "Applications"},
+	}
+	for connectionID, expected := range want {
+		if listed[connectionID] != expected {
+			t.Errorf("listed %s = %#v, want %#v", connectionID, listed[connectionID], expected)
+		}
+	}
+}
+
 func TestMcpConnectionListPaginationIsBounded(t *testing.T) {
 	failFast := newMcpController(nil)
 	failFast.setLocked(false)
