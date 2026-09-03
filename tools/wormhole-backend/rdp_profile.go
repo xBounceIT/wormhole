@@ -479,6 +479,27 @@ func workspaceRdpTargetFromChain(chain []map[string]any) (string, int) {
 	return host, port
 }
 
+func resolveRdpTargetFromChain(chain []map[string]any) (string, int, error) {
+	if len(chain) == 0 {
+		return "", 0, errors.New("RDP connection was not found")
+	}
+	if kind, ok := workspaceNodeValueInt64(chain[0]["Kind"]); !ok || kind != workspaceNodeConnection {
+		return "", 0, errors.New("RDP target is not a connection")
+	}
+	var protocol int64
+	protocolFound := false
+	for _, row := range chain {
+		if protocol, protocolFound = workspaceNodeValueInt64(row["Protocol"]); protocolFound {
+			break
+		}
+	}
+	if !protocolFound || protocol != rdpProtocolValue {
+		return "", 0, errors.New("connection is not an RDP profile")
+	}
+	host, port := workspaceRdpTargetFromChain(chain)
+	return normalizeRdpTarget(host, port)
+}
+
 func (m *vncManager) resolveRdpRuntimeProfile(nodeID string, manual *rdpManualCredential) (rdpProfile, error) {
 	return m.resolveRdpProfile(nodeID, manual, false, "")
 }
@@ -533,9 +554,6 @@ func (m *vncManager) resolveRdpProfile(
 	if err != nil {
 		return rdpProfile{}, err
 	}
-	if kind, ok := workspaceNodeValueInt64(chain[0]["Kind"]); !ok || kind != workspaceNodeConnection {
-		return rdpProfile{}, errors.New("RDP target is not a connection")
-	}
 	firstString := func(column string) string {
 		for _, row := range chain {
 			if row[column] != nil {
@@ -554,12 +572,7 @@ func (m *vncManager) resolveRdpProfile(
 		}
 		return 0, false
 	}
-	protocol, protocolFound := firstInt("Protocol")
-	if !protocolFound || int64(protocol) != rdpProtocolValue {
-		return rdpProfile{}, errors.New("connection is not an RDP profile")
-	}
-	host, port := workspaceRdpTargetFromChain(chain)
-	host, port, err = normalizeRdpTarget(host, port)
+	host, port, err := resolveRdpTargetFromChain(chain)
 	if err != nil {
 		return rdpProfile{}, err
 	}

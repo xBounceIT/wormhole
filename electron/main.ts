@@ -1096,11 +1096,16 @@ type McpApprovalEvent = {
   type: 'mcp.approval';
   requestId: string;
   sessionId: string;
+  approvalKind: 'session_control' | 'open_connection';
   host: string;
   port: number;
   username: string;
   title: string;
   tool: string;
+  connectionId?: string;
+  connectionFolder?: string;
+  protocol?: 'ssh' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial';
+  path?: string;
 };
 
 type McpApprovalCancelledEvent = {
@@ -2394,6 +2399,19 @@ function isMcpRequestId(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0 && value.length <= 128;
 }
 
+function isMcpConnectionProtocol(
+  value: unknown,
+): value is 'ssh' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial' {
+  return (
+    value === 'ssh' ||
+    value === 'rdp' ||
+    value === 'http' ||
+    value === 'https' ||
+    value === 'vnc' ||
+    value === 'serial'
+  );
+}
+
 function parseMcpBackendMessage(
   line: string,
 ): McpControlResponse | McpApprovalEvent | McpApprovalCancelledEvent | undefined {
@@ -2440,32 +2458,82 @@ function parseMcpBackendMessage(
     return { type: 'mcp.approval-cancelled', requestId: value.request_id };
   }
 
+  const approvalKind =
+    value.approval_kind === undefined
+      ? 'session_control'
+      : value.approval_kind === 'open_connection'
+        ? 'open_connection'
+        : undefined;
+  const openConnectionApproval = approvalKind === 'open_connection';
+  const approvalHost =
+    typeof value.host === 'string'
+      ? value.host
+      : openConnectionApproval && value.host === undefined
+        ? ''
+        : undefined;
+  const approvalPort =
+    typeof value.port === 'number'
+      ? value.port
+      : openConnectionApproval && value.port === undefined
+        ? 0
+        : undefined;
+  const approvalUsername =
+    typeof value.username === 'string'
+      ? value.username
+      : openConnectionApproval && value.username === undefined
+        ? ''
+        : undefined;
   if (
     value.type === 'mcp.approval' &&
+    approvalKind !== undefined &&
     isMcpRequestId(value.request_id) &&
     isSshSessionId(value.session_id) &&
-    typeof value.host === 'string' &&
-    value.host.length <= 1024 &&
-    typeof value.port === 'number' &&
-    Number.isInteger(value.port) &&
-    value.port > 0 &&
-    value.port <= 65535 &&
-    typeof value.username === 'string' &&
-    value.username.length <= 1024 &&
+    approvalHost !== undefined &&
+    approvalHost.length <= (openConnectionApproval ? 4096 : 1024) &&
+    approvalPort !== undefined &&
+    Number.isInteger(approvalPort) &&
+    approvalPort >= (openConnectionApproval ? 0 : 1) &&
+    approvalPort <= 65535 &&
+    approvalUsername !== undefined &&
+    approvalUsername.length <= 1024 &&
     typeof value.title === 'string' &&
     value.title.length <= 2048 &&
     typeof value.tool === 'string' &&
-    value.tool.length <= 128
+    value.tool.length <= 128 &&
+    (!openConnectionApproval ||
+      (value.tool === 'open_connection' &&
+        isSshSessionId(value.connection_id) &&
+        value.connection_id === value.session_id &&
+        isMcpConnectionProtocol(value.protocol) &&
+        (value.connection_folder === undefined ||
+          (typeof value.connection_folder === 'string' &&
+            value.connection_folder.length <= 4096)) &&
+        (value.path === undefined ||
+          (typeof value.path === 'string' && value.path.length <= 4096))))
   ) {
     return {
       type: 'mcp.approval',
       requestId: value.request_id,
       sessionId: value.session_id,
-      host: value.host,
-      port: value.port,
-      username: value.username,
+      approvalKind,
+      host: approvalHost,
+      port: approvalPort,
+      username: approvalUsername,
       title: value.title,
       tool: value.tool,
+      connectionId:
+        openConnectionApproval && typeof value.connection_id === 'string'
+          ? value.connection_id
+          : undefined,
+      connectionFolder:
+        openConnectionApproval && typeof value.connection_folder === 'string'
+          ? value.connection_folder
+          : undefined,
+      protocol:
+        openConnectionApproval && isMcpConnectionProtocol(value.protocol)
+          ? value.protocol
+          : undefined,
+      path: openConnectionApproval && typeof value.path === 'string' ? value.path : undefined,
     };
   }
   return undefined;
@@ -6307,6 +6375,10 @@ class NativeSshBackend {
       approval_id: approvalId,
       approved,
     });
+    // The approval is shown in every main window, but only one window can resolve it. Remove the
+    // stale copy everywhere only after the backend has accepted this window's decision. Backend
+    // revalidation failures emit their own cancellation event.
+    this.broadcastMcpApprovalCancellation(approvalId);
   }
 
   async setMcpLocked(locked: boolean): Promise<void> {

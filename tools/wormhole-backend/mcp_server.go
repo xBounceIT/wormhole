@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -35,13 +36,44 @@ type mcpSettings struct {
 }
 
 type mcpApprovalWaiter struct {
-	requestID string
-	sessionID string
-	done      chan struct{}
-	approved  bool
-	err       error
-	waiters   int
+	requestID        string
+	sessionID        string
+	done             chan struct{}
+	approved         bool
+	err              error
+	waiters          int
+	rememberDecision bool
+	processed        chan struct{}
+	processingErr    error
 }
+
+type mcpConnectionInfo struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Protocol string `json:"protocol"`
+	Host     string `json:"host,omitempty"`
+	Port     int    `json:"port,omitempty"`
+	Path     string `json:"path,omitempty"`
+	Folder   string `json:"folder,omitempty"`
+}
+
+type mcpOpenConnectionResult struct {
+	Connection mcpConnectionInfo `json:"connection"`
+	Status     string            `json:"status"`
+}
+
+type mcpConnectionList struct {
+	Connections []mcpConnectionInfo `json:"connections"`
+	Total       int                 `json:"total"`
+	NextOffset  int                 `json:"nextOffset,omitempty"`
+}
+
+const (
+	mcpDefaultConnectionListLimit = 100
+	mcpMaxConnectionListLimit     = 500
+	mcpMaxConnectionFolderBytes   = 4096
+	mcpMaxPendingApprovals        = 32
+)
 
 type mcpController struct {
 	server *sshServer
@@ -349,6 +381,317 @@ func (controller *mcpController) listSessions() ([]mcpSessionInfo, error) {
 	return result, nil
 }
 
+func validateMcpConnectionPage(offset int, limit int) (int, error) {
+	if offset < 0 {
+		return 0, errors.New("offset is out of range")
+	}
+	if limit == 0 {
+		limit = mcpDefaultConnectionListLimit
+	}
+	if limit < 1 || limit > mcpMaxConnectionListLimit {
+		return 0, fmt.Errorf("limit must be between 1 and %d", mcpMaxConnectionListLimit)
+	}
+	return limit, nil
+}
+
+func (controller *mcpController) listConnectionPage(offset int, limit int) (mcpConnectionList, error) {
+	limit, err := validateMcpConnectionPage(offset, limit)
+	if err != nil {
+		return mcpConnectionList{}, err
+	}
+	if err := controller.ensureUnlocked(); err != nil {
+		return mcpConnectionList{}, err
+	}
+	database, err := openDatabase(controller.server.databasePath, true)
+	if err != nil {
+		return mcpConnectionList{}, err
+	}
+	if database == nil {
+		return mcpConnectionList{Connections: []mcpConnectionInfo{}}, nil
+	}
+	defer database.Close()
+	tree, err := loadTree(database)
+	if err != nil {
+		return mcpConnectionList{}, err
+	}
+	connections := make([]mcpConnectionInfo, 0, limit)
+	total := 0
+	walkMcpConnections(tree, func(connection mcpConnectionInfo) bool {
+		if total >= offset && len(connections) < limit {
+			connections = append(connections, connection)
+		}
+		total++
+		return true
+	})
+	resolver := mcpConnectionTargetResolver{database: database}
+	for index := range connections {
+		connection := connections[index]
+		resolved, err := resolver.resolve(connection)
+		if err != nil {
+			return mcpConnectionList{}, fmt.Errorf("cannot resolve saved connection %q: %w", connection.ID, err)
+		}
+		connections[index] = resolved
+	}
+	if err := controller.ensureUnlocked(); err != nil {
+		return mcpConnectionList{}, err
+	}
+	result := mcpConnectionList{Connections: connections, Total: total}
+	if offset < total && len(connections) < total-offset {
+		result.NextOffset = offset + len(connections)
+	}
+	return result, nil
+}
+
+func walkMcpConnections(nodes []*treeNode, visit func(mcpConnectionInfo) bool) {
+	type frame struct {
+		nodes  []*treeNode
+		index  int
+		folder string
+	}
+	stack := []frame{{nodes: nodes}}
+	for len(stack) > 0 {
+		current := &stack[len(stack)-1]
+		if current.index >= len(current.nodes) {
+			stack = stack[:len(stack)-1]
+			continue
+		}
+		node := current.nodes[current.index]
+		current.index++
+		if node == nil {
+			continue
+		}
+		if node.Kind == "folder" {
+			stack = append(stack, frame{
+				nodes:  node.Children,
+				folder: appendBoundedMcpConnectionFolder(current.folder, node.Name),
+			})
+			continue
+		}
+		if node.Kind != "connection" || node.ID == "" || node.Protocol == "" {
+			continue
+		}
+		if !visit(mcpConnectionInfo{
+			ID:       node.ID,
+			Name:     node.Name,
+			Protocol: node.Protocol,
+			Host:     node.Host,
+			Port:     node.Port,
+			Path:     node.HTTPPath,
+			Folder:   current.folder,
+		}) {
+			return
+		}
+	}
+}
+
+func appendBoundedMcpConnectionFolder(parent string, name string) string {
+	if parent == "" {
+		return boundedMcpConnectionFolderValue(name)
+	}
+	return boundedMcpConnectionFolderValue(parent + " / " + name)
+}
+
+func boundedMcpConnectionFolderValue(value string) string {
+	if len(value) <= mcpMaxConnectionFolderBytes {
+		return value
+	}
+	const prefix = "…"
+	start := len(value) - (mcpMaxConnectionFolderBytes - len(prefix))
+	for start < len(value) && !utf8.RuneStart(value[start]) {
+		start++
+	}
+	return prefix + value[start:]
+}
+
+func loadMcpConnection(database *sql.DB, connectionID string) (mcpConnectionInfo, error) {
+	currentID := normalizeID(connectionID)
+	seen := make(map[string]struct{})
+	folders := make([]string, 0, 4)
+	connection := mcpConnectionInfo{}
+	var resolvedProtocol sql.NullInt64
+	for currentID != "" {
+		if _, duplicate := seen[currentID]; duplicate {
+			return mcpConnectionInfo{}, errors.New("connection tree contains a cycle")
+		}
+		seen[currentID] = struct{}{}
+		var (
+			id       string
+			parentID sql.NullString
+			name     string
+			kind     int64
+			protocol sql.NullInt64
+		)
+		err := database.QueryRow(`
+SELECT Id, ParentId, Name, Kind, Protocol
+FROM Nodes
+WHERE lower(Id) = ?
+LIMIT 1;`, currentID).Scan(&id, &parentID, &name, &kind, &protocol)
+		if errors.Is(err, sql.ErrNoRows) {
+			if connection.ID == "" {
+				return mcpConnectionInfo{}, fmt.Errorf("no saved connection with id '%s'", connectionID)
+			}
+			break
+		}
+		if err != nil {
+			return mcpConnectionInfo{}, fmt.Errorf("cannot read connection metadata: %w", err)
+		}
+		if connection.ID == "" {
+			if kind != workspaceNodeConnection {
+				return mcpConnectionInfo{}, fmt.Errorf("no saved connection with id '%s'", connectionID)
+			}
+			connection.ID = strings.TrimSpace(id)
+			connection.Name = name
+		} else if kind == workspaceNodeFolder {
+			folders = append(folders, name)
+		}
+		if !resolvedProtocol.Valid && protocol.Valid {
+			resolvedProtocol = protocol
+		}
+		if !parentID.Valid || strings.TrimSpace(parentID.String) == "" {
+			break
+		}
+		currentID = normalizeID(parentID.String)
+	}
+	if !resolvedProtocol.Valid {
+		return mcpConnectionInfo{}, errors.New("connection has no protocol")
+	}
+	connection.Protocol = protocolName(resolvedProtocol)
+	if protocolValue, ok := workspaceProtocolValue(connection.Protocol); !ok || protocolValue != resolvedProtocol.Int64 {
+		return mcpConnectionInfo{}, errors.New("connection protocol is not supported")
+	}
+	for index := len(folders) - 1; index >= 0; index-- {
+		connection.Folder = appendBoundedMcpConnectionFolder(connection.Folder, folders[index])
+	}
+	return connection, nil
+}
+
+type mcpConnectionTargetResolver struct {
+	database     *sql.DB
+	sshNodes     map[string]*sshNode
+	sshLoaded    bool
+	webNodes     map[string]*webNode
+	webLoaded    bool
+	serialNodes  map[string]*serialNode
+	serialLoaded bool
+}
+
+func (resolver *mcpConnectionTargetResolver) resolve(connection mcpConnectionInfo) (mcpConnectionInfo, error) {
+	switch connection.Protocol {
+	case "ssh":
+		if !resolver.sshLoaded {
+			nodes, err := loadSSHNodes(resolver.database)
+			if err != nil {
+				return mcpConnectionInfo{}, err
+			}
+			resolver.sshNodes, resolver.sshLoaded = nodes, true
+		}
+		endpoint, err := resolveSSHNodeEndpoint(resolver.sshNodes, connection.ID)
+		if err != nil {
+			return mcpConnectionInfo{}, err
+		}
+		connection.Host, connection.Port = endpoint.host, endpoint.port
+		return connection, nil
+	case "rdp":
+		chain, err := loadRdpNodeChain(resolver.database, connection.ID)
+		if err != nil {
+			return mcpConnectionInfo{}, err
+		}
+		host, port, err := resolveRdpTargetFromChain(chain)
+		if err != nil {
+			return mcpConnectionInfo{}, err
+		}
+		connection.Host, connection.Port = host, port
+		return connection, nil
+	case "vnc":
+		target, err := readVncTargetFromDatabase(resolver.database, connection.ID, "", false)
+		if err != nil {
+			return mcpConnectionInfo{}, err
+		}
+		host, port, err := splitVncHostPort(target.host, target.port)
+		if err != nil {
+			return mcpConnectionInfo{}, err
+		}
+		if host == "" {
+			return mcpConnectionInfo{}, errors.New("VNC host is invalid")
+		}
+		connection.Host, connection.Port = host, port
+		return connection, nil
+	case "http", "https":
+		if !resolver.webLoaded {
+			nodes, err := loadWebNodes(resolver.database)
+			if err != nil {
+				return mcpConnectionInfo{}, err
+			}
+			resolver.webNodes, resolver.webLoaded = nodes, true
+		}
+		leaf := resolver.webNodes[normalizeID(connection.ID)]
+		if leaf == nil || leaf.Kind != workspaceNodeConnection {
+			return mcpConnectionInfo{}, errors.New("web connection was not found")
+		}
+		target, err := resolveWebTargetFromNodes(leaf, resolver.webNodes)
+		if err != nil {
+			return mcpConnectionInfo{}, err
+		}
+		connection.Protocol = target.Protocol
+		connection.Host, connection.Port, connection.Path = target.Host, target.Port, target.path
+		return connection, nil
+	case "serial":
+		if !resolver.serialLoaded {
+			nodes, err := loadSerialNodes(resolver.database)
+			if err != nil {
+				return mcpConnectionInfo{}, err
+			}
+			resolver.serialNodes, resolver.serialLoaded = nodes, true
+		}
+		target, err := resolveSerialTargetFromNodes(resolver.serialNodes, connection.ID)
+		if err != nil {
+			return mcpConnectionInfo{}, err
+		}
+		connection.Host, connection.Port, connection.Path = target.PortName, 0, ""
+		return connection, nil
+	default:
+		return mcpConnectionInfo{}, errors.New("connection protocol is not supported")
+	}
+}
+
+func resolveMcpConnectionTarget(database *sql.DB, connection mcpConnectionInfo) (mcpConnectionInfo, error) {
+	resolver := mcpConnectionTargetResolver{database: database}
+	return resolver.resolve(connection)
+}
+
+func (controller *mcpController) resolveConnectionTarget(connectionID string) (mcpConnectionInfo, error) {
+	if connectionID == "" || len(connectionID) > 128 || strings.TrimSpace(connectionID) != connectionID {
+		return mcpConnectionInfo{}, errors.New("connection id is invalid")
+	}
+	if err := controller.ensureUnlocked(); err != nil {
+		return mcpConnectionInfo{}, err
+	}
+	database, err := openDatabase(controller.server.databasePath, true)
+	if err != nil {
+		return mcpConnectionInfo{}, err
+	}
+	if database == nil {
+		return mcpConnectionInfo{}, errors.New("Wormhole database has no connections")
+	}
+	defer database.Close()
+	connection, err := loadMcpConnection(database, connectionID)
+	if err != nil {
+		return mcpConnectionInfo{}, err
+	}
+	connection, err = resolveMcpConnectionTarget(database, connection)
+	if err != nil {
+		return mcpConnectionInfo{}, err
+	}
+	if len([]byte(connection.Name)) > 2048 || len([]byte(connection.Host)) > 4096 ||
+		len([]byte(connection.Path)) > 4096 || len([]byte(connection.Folder)) > mcpMaxConnectionFolderBytes {
+		return mcpConnectionInfo{}, errors.New("connection metadata is too large for an approval request")
+	}
+	if err := controller.ensureUnlocked(); err != nil {
+		return mcpConnectionInfo{}, err
+	}
+	return connection, nil
+}
+
 func (controller *mcpController) resolveSession(sessionID string) (*sshNativeSession, error) {
 	if err := controller.ensureUnlocked(); err != nil {
 		return nil, err
@@ -405,6 +748,10 @@ func (controller *mcpController) ensureApproval(
 			return ctx.Err()
 		}
 	}
+	if len(controller.pending) >= mcpMaxPendingApprovals {
+		controller.approvalMu.Unlock()
+		return errors.New("too many MCP approval requests are pending")
+	}
 
 	requestID, err := newMcpRequestID()
 	if err != nil {
@@ -412,10 +759,11 @@ func (controller *mcpController) ensureApproval(
 		return err
 	}
 	waiter := &mcpApprovalWaiter{
-		requestID: requestID,
-		sessionID: sessionID,
-		done:      make(chan struct{}),
-		waiters:   1,
+		requestID:        requestID,
+		sessionID:        sessionID,
+		done:             make(chan struct{}),
+		waiters:          1,
+		rememberDecision: true,
 	}
 	controller.pending[requestID] = waiter
 	controller.pendingByTarget[sessionID] = waiter
@@ -453,21 +801,131 @@ func (controller *mcpController) ensureApproval(
 	}
 }
 
+func (controller *mcpController) requestOpenConnection(
+	ctx context.Context,
+	connectionID string,
+) (mcpOpenConnectionResult, error) {
+	connection, err := controller.resolveConnectionTarget(connectionID)
+	if err != nil {
+		return mcpOpenConnectionResult{}, err
+	}
+	if err := controller.ensureConnectionOpenApproval(ctx, connection); err != nil {
+		return mcpOpenConnectionResult{}, err
+	}
+	return mcpOpenConnectionResult{Connection: connection, Status: "opening"}, nil
+}
+
+func (controller *mcpController) ensureConnectionOpenApproval(
+	ctx context.Context,
+	connection mcpConnectionInfo,
+) (resultErr error) {
+	if err := controller.ensureUnlocked(); err != nil {
+		return err
+	}
+	requestID, err := newMcpRequestID()
+	if err != nil {
+		return err
+	}
+	waiter := &mcpApprovalWaiter{
+		requestID: requestID,
+		sessionID: connection.ID,
+		done:      make(chan struct{}),
+		waiters:   1,
+		processed: make(chan struct{}),
+	}
+	defer func() {
+		controller.approvalMu.Lock()
+		if waiter.approved {
+			waiter.processingErr = resultErr
+		}
+		controller.approvalMu.Unlock()
+		close(waiter.processed)
+	}()
+
+	controller.approvalMu.Lock()
+	if controller.locked {
+		controller.approvalMu.Unlock()
+		return errors.New("Wormhole is locked. Unlock the app before using MCP tools.")
+	}
+	if len(controller.pending) >= mcpMaxPendingApprovals {
+		controller.approvalMu.Unlock()
+		return errors.New("too many MCP approval requests are pending")
+	}
+	controller.pending[requestID] = waiter
+	controller.server.output.write(sshWireEvent{
+		Type:             "mcp.approval",
+		RequestID:        requestID,
+		SessionID:        connection.ID,
+		Host:             connection.Host,
+		Port:             connection.Port,
+		Title:            connection.Name,
+		Tool:             "open_connection",
+		ApprovalKind:     "open_connection",
+		ConnectionID:     connection.ID,
+		Protocol:         connection.Protocol,
+		Path:             connection.Path,
+		ConnectionFolder: connection.Folder,
+	})
+	controller.approvalMu.Unlock()
+
+	select {
+	case <-waiter.done:
+		controller.approvalMu.Lock()
+		approved := waiter.approved
+		waitErr := waiter.err
+		controller.approvalMu.Unlock()
+		if waitErr != nil {
+			return waitErr
+		}
+		if approved {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			current, err := controller.resolveConnectionTarget(connection.ID)
+			if err != nil {
+				return err
+			}
+			if current != connection {
+				return errors.New("the saved connection changed while approval was pending")
+			}
+			return ctx.Err()
+		}
+		return errors.New("the user denied opening that connection")
+	case <-ctx.Done():
+		controller.releasePending(waiter)
+		return ctx.Err()
+	}
+}
+
 func (controller *mcpController) resolveApproval(requestID string, approved bool) error {
 	controller.approvalMu.Lock()
 	waiter := controller.pending[requestID]
+	var processed chan struct{}
 	if waiter != nil {
 		delete(controller.pending, requestID)
-		delete(controller.pendingByTarget, waiter.sessionID)
-		if !controller.locked {
+		if controller.pendingByTarget[waiter.sessionID] == waiter {
+			delete(controller.pendingByTarget, waiter.sessionID)
+		}
+		if !controller.locked && waiter.rememberDecision {
 			controller.decisions[waiter.sessionID] = approved
 		}
 		waiter.approved = approved
 		close(waiter.done)
+		processed = waiter.processed
 	}
 	controller.approvalMu.Unlock()
 	if waiter == nil {
 		return errors.New("MCP approval request is no longer pending")
+	}
+	if processed != nil {
+		<-processed
+		controller.approvalMu.Lock()
+		processingErr := waiter.processingErr
+		controller.approvalMu.Unlock()
+		if processingErr != nil {
+			controller.emitApprovalCancelled(waiter)
+			return processingErr
+		}
 	}
 	return nil
 }
@@ -479,7 +937,9 @@ func (controller *mcpController) releasePending(waiter *mcpApprovalWaiter) {
 		waiter.waiters--
 		if waiter.waiters <= 0 {
 			delete(controller.pending, waiter.requestID)
-			delete(controller.pendingByTarget, waiter.sessionID)
+			if controller.pendingByTarget[waiter.sessionID] == waiter {
+				delete(controller.pendingByTarget, waiter.sessionID)
+			}
 			waiter.approved = false
 			cancelled = true
 		}
@@ -496,7 +956,9 @@ func (controller *mcpController) cancelPending(reason string) {
 	controller.approvalMu.Lock()
 	for requestID, waiter := range controller.pending {
 		delete(controller.pending, requestID)
-		delete(controller.pendingByTarget, waiter.sessionID)
+		if controller.pendingByTarget[waiter.sessionID] == waiter {
+			delete(controller.pendingByTarget, waiter.sessionID)
+		}
 		waiter.approved = false
 		waiter.err = errors.New(reason)
 		cancelledWaiters = append(cancelledWaiters, waiter)
@@ -538,6 +1000,29 @@ func (controller *mcpController) emitApprovalCancelled(waiter *mcpApprovalWaiter
 
 func newMcpServer(controller *mcpController) *mcp.Server {
 	server := mcp.NewServer(&mcp.Implementation{Name: "wormhole", Version: "0.9.0"}, nil)
+	type listConnectionsInput struct {
+		Offset int `json:"offset,omitempty"`
+		Limit  int `json:"limit,omitempty"`
+	}
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "list_connections",
+		Description: "List saved Wormhole connections without exposing credentials. Returns a bounded page with each connection's id, name, protocol, host, port, and folder path. Pass nextOffset as offset to continue, then use an id with open_connection.",
+	}, func(_ context.Context, _ *mcp.CallToolRequest, input listConnectionsInput) (*mcp.CallToolResult, mcpConnectionList, error) {
+		page, err := controller.listConnectionPage(input.Offset, input.Limit)
+		return nil, page, err
+	})
+
+	type openConnectionInput struct {
+		ConnectionID string `json:"connectionId"`
+	}
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "open_connection",
+		Description: "Open a saved Wormhole connection in the desktop app. Wormhole asks the user for explicit approval every time this tool is called; approval is never remembered for a later open request.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, input openConnectionInput) (*mcp.CallToolResult, mcpOpenConnectionResult, error) {
+		result, err := controller.requestOpenConnection(ctx, input.ConnectionID)
+		return nil, result, err
+	})
+
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "list_sessions",
 		Description: "List the SSH sessions currently open and connected in Wormhole. Returns each session's id, host, port, username, tab title, and status.",

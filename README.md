@@ -77,11 +77,14 @@ do not use VPN routing.
 ## AI agent control
 
 Wormhole includes an opt-in
-[Model Context Protocol](https://modelcontextprotocol.io) server for already-open
-SSH sessions. It is loopback-only and protected by a bearer token owned by the
-Go backend. The available operations are intentionally limited to listing
-sessions, running commands, sending text, and reading recent terminal output.
-It cannot open connections or read saved credentials.
+[Model Context Protocol](https://modelcontextprotocol.io) server for opening saved
+connections and controlling live SSH sessions. It is loopback-only and protected
+by a bearer token owned by the Go backend. The available operations are
+intentionally limited to listing saved connections and live sessions, opening a
+saved connection in the desktop app, running commands, sending text, and reading
+recent terminal output. Every request to open a connection requires explicit user
+approval; approval is never reused for a later open request. MCP cannot read saved
+credentials.
 
 ## Requirements
 

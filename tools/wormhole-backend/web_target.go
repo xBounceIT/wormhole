@@ -32,6 +32,7 @@ type webTargetResponse struct {
 	IgnoreCertErrors bool   `json:"ignoreCertErrors"`
 	TunnelConfigID   string `json:"tunnelConfigId,omitempty"`
 	ProxyURL         string `json:"proxyUrl,omitempty"`
+	path             string
 }
 
 type webNode struct {
@@ -280,6 +281,7 @@ func resolveWebTargetFromNodes(leaf *webNode, nodes map[string]*webNode) (webTar
 		Port:             resolvedPort,
 		IgnoreCertErrors: ignoreCertErrors,
 		TunnelConfigID:   resolvedTunnelID,
+		path:             resolvedPath,
 	}, nil
 }
 
