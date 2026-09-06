@@ -43,35 +43,6 @@ func TestNewNetstackDialer_IPv6OnlyDnsFailsClosedForHostnames(t *testing.T) {
 	}
 }
 
-// Locks W4 — confirm the FQDN-construction logic produces a valid dnsmessage.Name for both
-// "host.example.com" (bare) and "host.example.com." (already-qualified). Pre-fix, the
-// trailing-dot case became "host.example.com.." which dnsmessage.NewName rejects.
-func TestResolveViaVPN_FQDNConstruction(t *testing.T) {
-	cases := []struct {
-		in   string
-		want string
-	}{
-		{"host.example.com", "host.example.com."},
-		{"host.example.com.", "host.example.com."},
-		{"a", "a."},
-		{"a.", "a."},
-	}
-	for _, tc := range cases {
-		t.Run(tc.in, func(t *testing.T) {
-			fqdn := tc.in
-			if !strings.HasSuffix(fqdn, ".") {
-				fqdn += "."
-			}
-			if fqdn != tc.want {
-				t.Errorf("got %q want %q", fqdn, tc.want)
-			}
-			if _, err := dnsmessage.NewName(fqdn); err != nil {
-				t.Errorf("dnsmessage.NewName(%q): %v", fqdn, err)
-			}
-		})
-	}
-}
-
 // Locks W15 — parseDNSResponse must return the first A record when present, fall back to
 // the first CNAME otherwise, and error out only when neither is in the answer section.
 // Before W15 the resolver returned "no A records" the moment a recursive resolver answered
@@ -479,8 +450,6 @@ func TestQueryServersUntilAnswer_FailsOverToSecondServerWithinRound(t *testing.T
 	}
 }
 
-// resolveViaVPNQuery must follow a CNAME-only answer to its terminal A record. The new tests
-// otherwise only exercise queryServersUntilAnswer directly; this drives the outer hop loop.
 func TestResolveViaVPNQuery_FollowsCNAMEChain(t *testing.T) {
 	servers := []netip.Addr{netip.MustParseAddr("10.72.0.1")}
 	want := netip.AddrFrom4([4]byte{10, 155, 50, 7})
@@ -496,12 +465,16 @@ func TestResolveViaVPNQuery_FollowsCNAMEChain(t *testing.T) {
 		}
 	}
 
-	addr, err := resolveViaVPNQuery(context.Background(), servers, "host.dynartis.local", query)
-	if err != nil {
-		t.Fatalf("expected the CNAME chain to resolve, got: %v", err)
-	}
-	if addr != want {
-		t.Errorf("addr: got %v want %v", addr, want)
+	for _, host := range []string{"host.dynartis.local", "host.dynartis.local."} {
+		t.Run(host, func(t *testing.T) {
+			addr, err := resolveViaVPNQuery(context.Background(), servers, host, query)
+			if err != nil {
+				t.Fatalf("expected the CNAME chain to resolve, got: %v", err)
+			}
+			if addr != want {
+				t.Errorf("addr: got %v want %v", addr, want)
+			}
+		})
 	}
 }
 

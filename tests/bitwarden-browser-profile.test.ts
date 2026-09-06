@@ -45,8 +45,6 @@ test('Bitwarden forwarder profiles stay stable because they have no session-wide
   );
   const context = buildBitwardenBrowserContext(undefined, routeKey);
   assert.equal(context, `route-key=${routeKey}`);
-  assert.equal(
-    getBitwardenBrowserPartition(context, false),
-    getBitwardenBrowserPartition(context, false),
-  );
+  const partition = getBitwardenBrowserPartition(context, false);
+  assert.equal(getBitwardenBrowserPartition(context, false), partition);
 });

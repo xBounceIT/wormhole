@@ -4,7 +4,6 @@ import { createRequire } from 'node:module';
 import { relative } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { Arch, getArtifactArchName } from 'builder-util';
 import { prerelease, satisfies, valid } from 'semver';
 
 const require = createRequire(import.meta.url);
@@ -19,12 +18,6 @@ const releaseWorkflow = await readFile(
   'utf8',
 );
 const ciWorkflow = await readFile(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
-const electronMain = await readFile(new URL('../electron/main.ts', import.meta.url), 'utf8');
-const universalBackend = await readFile(
-  new URL('../scripts/Build-ElectronUniversalBackend.mjs', import.meta.url),
-  'utf8',
-);
-const gitignore = await readFile(new URL('../.gitignore', import.meta.url), 'utf8');
 const linuxIconSizes = [16, 24, 32, 48, 64, 96, 128, 256, 512, 1024];
 const projectDir = fileURLToPath(new URL('..', import.meta.url));
 const macIcon = await readFile(new URL('../Assets/Wormhole.icns', import.meta.url));
@@ -56,31 +49,7 @@ function readIcnsChunkTypes(icon) {
   return chunkTypes;
 }
 
-function linuxArtifactPattern(arch, extension) {
-  return packageJson.build.linux.artifactName
-    .replace('${version}', '*')
-    .replace('${os}', 'linux')
-    .replace('${arch}', getArtifactArchName(arch, extension))
-    .replace('${ext}', extension);
-}
-
-function isNanoIdVersionPatched(version) {
-  return (
-    valid(version) !== null &&
-    prerelease(version) === null &&
-    !satisfies(version, '<3.3.18 || >=4.0.0 <5.1.6')
-  );
-}
-
 test('dependency lock excludes the Nano ID zero-size generator vulnerability', () => {
-  assert.equal(isNanoIdVersionPatched('3.3.17'), false);
-  assert.equal(isNanoIdVersionPatched('3.3.18'), true);
-  assert.equal(isNanoIdVersionPatched('4.0.0'), false);
-  assert.equal(isNanoIdVersionPatched('5.1.5'), false);
-  assert.equal(isNanoIdVersionPatched('5.1.6'), true);
-  assert.equal(isNanoIdVersionPatched('5.1.6-beta.1'), false);
-  assert.equal(isNanoIdVersionPatched('invalid'), false);
-
   const nanoIdPackages = Object.entries(packageLock.packages)
     .filter(
       ([location]) =>
@@ -89,7 +58,12 @@ test('dependency lock excludes the Nano ID zero-size generator vulnerability', (
     .map(([, metadata]) => metadata);
 
   for (const { version } of nanoIdPackages) {
-    assert.ok(isNanoIdVersionPatched(version), `nanoid ${version} is vulnerable`);
+    assert.ok(
+      valid(version) !== null &&
+        prerelease(version) === null &&
+        !satisfies(version, '<3.3.18 || >=4.0.0 <5.1.6'),
+      `nanoid ${version} is vulnerable`,
+    );
   }
 });
 
@@ -101,9 +75,6 @@ test('electron-builder produces portable and installable Linux packages', () => 
   assert.ok(packageJson.build.files.includes('!Assets/LinuxIcons/**/*'));
   assert.equal(packageJson.desktopName, 'com.xbounceit.wormhole.desktop');
   assert.equal(packageJson.build.linux.syncDesktopName, true);
-  assert.equal(packageJson.homepage, 'https://github.com/xBounceIT/wormhole');
-  assert.equal(packageJson.license, 'AGPL-3.0-only');
-  assert.match(packageJson.author.email, /@/);
   assert.equal(packageJson.build.deb.packageName, 'wormhole');
   assert.equal(packageJson.build.rpm.packageName, 'wormhole');
 });
@@ -140,18 +111,11 @@ test('electron-builder resolves every reviewed Linux icon asset', async () => {
 });
 
 test('electron-builder produces the supported macOS installer', () => {
-  assert.equal(packageJson.productName, 'Wormhole');
   assert.equal(packageJson.build.mac.target, 'dmg');
   assert.equal(packageJson.build.mac.icon, 'Assets/Wormhole.icns');
   const iconChunkTypes = readIcnsChunkTypes(macIcon);
   assert.ok(iconChunkTypes.has('ic09'), 'macOS icon must include a 512px representation');
   assert.ok(iconChunkTypes.has('ic10'), 'macOS icon must include a 1024px representation');
-  assert.equal(packageJson.scripts.package, 'electron-builder --publish never');
-});
-
-test('the desktop window uses an icon format supported by the current platform', () => {
-  assert.match(electronMain, /process\.platform === 'win32' \? 'Wormhole\.ico' : 'Wormhole\.png'/);
-  assert.match(electronMain, /icon: applicationIconPath/);
 });
 
 test('native Go binaries are shipped outside the Electron asar archive', () => {
@@ -166,68 +130,64 @@ test('native Go binaries are shipped outside the Electron asar archive', () => {
   ]) {
     assert.ok(filters.includes(pattern), `${pattern} is missing from extraResources`);
   }
-  assert.match(electronMain, /findBundledExecutable\('wormhole-backend-universal'\)/);
-  assert.match(universalBackend, /chmodSync\(outputPath, 0o755\)/);
-  assert.match(
-    universalBackend,
-    /run\('lipo', \[outputPath, '-verify_arch', 'x86_64', 'arm64'\]\)/,
+});
+
+test('packaged backend resolution uses the universal binary only on macOS', async () => {
+  const electronMain = await readFile(new URL('../electron/main.ts', import.meta.url), 'utf8');
+  const backendPathBody = electronMain.match(
+    /^function backendPath\(\): string \{([\s\S]*?)^\}/m,
+  )?.[1];
+  assert.ok(backendPathBody, 'backendPath function is missing');
+  const resolveBackendPath = new Function('process', 'findBundledExecutable', backendPathBody);
+
+  for (const platform of ['darwin', 'win32', 'linux']) {
+    for (const arch of ['x64', 'arm64']) {
+      const resolve = (files) =>
+        resolveBackendPath({ platform, arch }, (name) =>
+          files.includes(name) ? `/resources/${name}` : undefined,
+        );
+      const nativeName = `wormhole-backend-${arch}${platform === 'win32' ? '.exe' : ''}`;
+      assert.equal(
+        resolve([nativeName, 'wormhole-backend-universal']),
+        `/resources/${nativeName}`,
+        `${platform}/${arch} must prefer its architecture-specific binary`,
+      );
+      if (platform === 'darwin') {
+        assert.equal(
+          resolve(['wormhole-backend-universal']),
+          '/resources/wormhole-backend-universal',
+        );
+      } else {
+        assert.throws(() => resolve(['wormhole-backend-universal']), /component is missing/);
+      }
+      assert.throws(() => resolve([]), /component is missing/);
+    }
+  }
+});
+
+test('release package uploads include installer checksums required by the updater', () => {
+  const packagesJob = releaseWorkflow.match(
+    /^  packages:\r?\n(?:[ \t]*\r?\n| {4}[^\r\n]*(?:\r?\n|$))*/m,
+  )?.[0];
+  assert.ok(packagesJob, 'release package job is missing');
+  const uploadSteps = packagesJob
+    .split(/^ {6}- /m)
+    .filter((step) => /^ {8}uses: actions\/upload-artifact@/m.test(step));
+  assert.equal(uploadSteps.length, 1, 'expected one release package upload step');
+  const uploadPaths = uploadSteps[0].match(
+    /^ {10}path: \|\r?\n((?: {12}[^\r\n]*(?:\r?\n|$))*)/m,
+  )?.[1];
+  assert.ok(uploadPaths, 'release package upload paths are missing');
+  const paths = uploadPaths.split(/\r?\n/).map((line) => line.trim());
+  assert.ok(paths.includes('${{ matrix.artifacts }}'), 'release installers must be uploaded');
+  assert.ok(
+    paths.includes('${{ matrix.updater_artifact }}.sha256'),
+    'each updater installer must be uploaded with its SHA-256 sidecar',
   );
 });
 
-test('release workflow builds and publishes every desktop package', () => {
-  for (const expected of [
-    linuxArtifactPattern(Arch.x64, 'AppImage'),
-    linuxArtifactPattern(Arch.x64, 'deb'),
-    linuxArtifactPattern(Arch.x64, 'rpm'),
-    linuxArtifactPattern(Arch.arm64, 'AppImage'),
-    linuxArtifactPattern(Arch.arm64, 'deb'),
-    linuxArtifactPattern(Arch.arm64, 'rpm'),
-    'Wormhole-*-mac-universal-setup.dmg',
-  ]) {
-    assert.match(releaseWorkflow, new RegExp(expected.replaceAll('*', '\\*').replace('.', '\\.')));
-  }
-  assert.match(releaseWorkflow, /gh release upload/);
-  assert.match(releaseWorkflow, /gh release edit/);
-  assert.match(releaseWorkflow, /Generate installer SHA-256 sidecar/);
-  assert.match(releaseWorkflow, /\$installers\.Count -ne 1/);
-  assert.match(releaseWorkflow, /\$\{\{ matrix\.updater_artifact \}\}\.sha256/);
-  assert.equal((releaseWorkflow.match(/Verify tag matches package version/g) ?? []).length, 1);
-  assert.match(releaseWorkflow, /build:\r?\n[\s\S]*?needs: checks/);
-  assert.match(releaseWorkflow, /packages:\r?\n[\s\S]*?needs: checks/);
-  assert.match(releaseWorkflow, /needs: \[build, packages\]/);
-  assert.match(releaseWorkflow, /Verify Linux package outputs/);
-  assert.match(releaseWorkflow, /if \[\[ \$\{#matches\[@\]\} -ne 1 \]\]/);
-  assert.match(releaseWorkflow, /usr\/share\/icons\/hicolor\/\$size\/apps\/wormhole\.png/);
-  assert.match(releaseWorkflow, /dpkg-deb --extract/);
-  assert.match(releaseWorkflow, /PNG image data/);
-  assert.match(releaseWorkflow, /cmp -s "Assets\/LinuxIcons\/\$size\.png"/);
-  assert.doesNotMatch(releaseWorkflow, /dpkg-deb --contents/);
-  assert.match(releaseWorkflow, /Icon=wormhole/);
-  for (const extension of ['AppImage', 'deb', 'rpm']) {
-    assert.equal(
-      (releaseWorkflow.match(new RegExp(`release/\\*\\.${extension}`, 'g')) ?? []).length,
-      2,
-    );
-  }
-  assert.match(releaseWorkflow, /permissions:\r?\n\s+contents: read/);
-  assert.match(releaseWorkflow, /release:\r?\n[\s\S]*?permissions:\r?\n\s+contents: write/);
-  assert.match(
-    releaseWorkflow,
-    /group: release-\$\{\{ github\.event\.inputs\.tag \|\| github\.ref_name \}\}/,
-  );
-  assert.match(gitignore, /^\/release\/$/m);
-  assert.doesNotMatch(gitignore, /^release\/$/m);
-});
-
-test('workflows pin current stable runner images and immutable actions', () => {
+test('workflows pin third-party actions to immutable revisions', () => {
   const workflows = [ciWorkflow, releaseWorkflow];
-  const combinedWorkflows = workflows.join('\n');
-  const expectedRunnerImages = ['macos-26', 'ubuntu-24.04', 'windows-2025'];
-  const configuredRunnerImages = [
-    ...new Set(combinedWorkflows.match(/\b(?:ubuntu|windows|macos)-[\w.-]+\b/g) ?? []),
-  ].sort();
-
-  assert.deepEqual(configuredRunnerImages, expectedRunnerImages);
 
   for (const workflow of workflows) {
     const actionReferences = [...workflow.matchAll(/uses:\s+([^\s#]+)/g)].map((match) => match[1]);

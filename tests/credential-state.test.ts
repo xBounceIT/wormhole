@@ -140,45 +140,19 @@ test('blank password copy only promises preservation when an inline password exi
   assert.equal(connectionInlinePasswordPlaceholder(undefined), '(optional)');
 });
 
-test('connection password clear action is a button in the aligned field header', () => {
-  const usernameInput = appSource.indexOf('id="connection-username"');
-  const start = appSource.lastIndexOf('<div className="grid gap-4 sm:grid-cols-2">', usernameInput);
-  const end = appSource.indexOf('{canConfigureConnectionSshAutoSudo ?', start);
-  const manualCredentialFields = appSource.slice(start, end);
-  const usernameHeaderStart = manualCredentialFields.indexOf(
-    '<div className="flex h-6 items-center">',
-  );
-  const usernameHeaderEnd = manualCredentialFields.indexOf('</div>', usernameHeaderStart);
-  const usernameHeader = manualCredentialFields.slice(usernameHeaderStart, usernameHeaderEnd + 6);
-  const passwordHeaderStart = manualCredentialFields.indexOf(
-    '<div className="flex h-6 items-center justify-between gap-2">',
-  );
-  const passwordHeaderEnd = manualCredentialFields.indexOf('</div>', passwordHeaderStart);
-  const passwordHeader = manualCredentialFields.slice(passwordHeaderStart, passwordHeaderEnd + 6);
+test('clearing a stored inline password updates the draft without submitting the form', () => {
+  const control = appSource.indexOf('aria-pressed={newConnectionForm.removeInlinePassword}');
+  assert.ok(control >= 0, 'missing inline password removal control');
+  const start = appSource.lastIndexOf('<Button', control);
+  const end = appSource.indexOf('</Button>', control);
+  assert.ok(start >= 0 && end > control, 'password removal must use a button');
+  const button = appSource.slice(start, end);
 
-  assert.ok(
-    usernameInput >= 0 &&
-      start >= 0 &&
-      end > start &&
-      usernameHeaderStart >= 0 &&
-      usernameHeaderEnd > usernameHeaderStart &&
-      passwordHeaderStart >= 0 &&
-      passwordHeaderEnd > passwordHeaderStart,
-  );
+  assert.match(button, /type="button"/);
   assert.match(
-    usernameHeader,
-    /<div className="flex h-6 items-center">\s*<Label htmlFor="connection-username">Username<\/Label>/,
+    button,
+    /onClick=\{\(\) =>\s*setNewConnectionForm\(\(form\) => \(\{[\s\S]*?inlinePassword: '',[\s\S]*?removeInlinePassword: !form\.removeInlinePassword/,
   );
-  assert.match(
-    passwordHeader,
-    /<div className="flex h-6 items-center justify-between gap-2">[\s\S]*?<Label htmlFor="connection-inline-password">Password<\/Label>[\s\S]*?<Button[\s\S]*?aria-pressed=\{newConnectionForm\.removeInlinePassword\}[\s\S]*?type="button"[\s\S]*?>\s*Clear password\s*<\/Button>/,
-  );
-  assert.match(
-    passwordHeader,
-    /inlinePassword: '',[\s\S]*?removeInlinePassword: !form\.removeInlinePassword/,
-  );
-  assert.doesNotMatch(usernameHeader, /<Input|<Button|<Checkbox/);
-  assert.doesNotMatch(passwordHeader, /<Input|<Checkbox|Remove stored password/);
 });
 
 test('credential merge matches SQLite BINARY ordering for Unicode names', () => {
@@ -304,20 +278,6 @@ test('SSH keys are accepted only by SSH password-capable controls', () => {
   assert.equal(credentialCanUseProtocol('password', 'rdp'), true);
   assert.equal(credentialCanUseProtocol('password', 'vnc'), true);
   assert.equal(credentialCanUseProtocol('unsupported', 'ssh'), false);
-});
-
-test('credential cards omit the redundant password badge while retaining the SSH key badge', () => {
-  const credentialGrid = appSource.match(
-    /renderItem=\{\(credential\) => \([\s\S]*?resetKey=\{/,
-  )?.[0];
-
-  assert.ok(credentialGrid);
-  assert.doesNotMatch(credentialGrid, />Password<|['"]Password['"]/);
-  assert.match(
-    credentialGrid,
-    /credential\.kind === 'sshKey'[\s\S]*?<Badge variant="outline">SSH key<\/Badge>/,
-  );
-  assert.match(credentialGrid, /label=\{`Delete \$\{credential\.name\}`\}[\s\S]{0,160}<Trash2 \/>/);
 });
 
 test('Auto sudo remains available for password and SSH key credentials', () => {

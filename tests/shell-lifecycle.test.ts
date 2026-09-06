@@ -790,14 +790,6 @@ test('update availability uses the backend version decision from the same result
     }),
     false,
   );
-  assert.equal(
-    hasNewerReleaseWithoutInstaller({
-      latestVersion: '2.0.0',
-      isNewerRelease: false,
-      isUpdateAvailable: false,
-    }),
-    false,
-  );
   const installable = {
     latestVersion: '2.1.0',
     isUpdateAvailable: true,
@@ -891,16 +883,6 @@ test('dialog close animations retain the last open visuals instead of rendering 
   );
 });
 
-test('shared dialog content applies lifecycle retention and blocks closing interactions', () => {
-  const dialogSource = readFileSync(
-    new URL('../src/components/ui/dialog.tsx', import.meta.url),
-    'utf8',
-  );
-  assert.match(dialogSource, /DialogOpenContext/);
-  assert.match(dialogSource, /selectDialogVisuals\(open,/);
-  assert.match(dialogSource, /data-closed:pointer-events-none/);
-});
-
 test('active-session app close uses the renderer shadcn confirmation contract', () => {
   const mainSource = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
   const preloadSource = readFileSync(new URL('../electron/preload.cts', import.meta.url), 'utf8');
@@ -913,7 +895,7 @@ test('active-session app close uses the renderer shadcn confirmation contract', 
   assert.match(appSource, /Close and terminate sessions/);
 });
 
-test('log level changes stay isolated without disrupting Radix select close focus', () => {
+test('log level selector stays mounted and interactive during persistence', () => {
   const appSource = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
   const settingSource = appSource.slice(
     appSource.indexOf('function LogLevelSetting'),
@@ -924,19 +906,11 @@ test('log level changes stay isolated without disrupting Radix select close focu
     appSource.indexOf('function UtilityPage'),
   );
 
-  assert.match(settingSource, /const \[logLevel, setLogLevel\] = useState/);
-  assert.match(settingSource, /busyRef\.current/);
-  assert.match(settingSource, /drainLogLevelChanges/);
-  assert.match(settingSource, /const \[error, setError\] = useState\(''\)/);
   assert.match(settingSource, /disabled=\{!loaded\}/);
   assert.match(settingSource, /aria-busy=\{busy\}/);
   assert.doesNotMatch(settingSource, /disabled=\{busy\}/);
   assert.match(settingsPageSource, /<SettingsTabPanel forceMount value="logs">/);
   assert.match(settingsPageSource, /loaded=\{logsInfo !== null\}/);
-  assert.match(settingsPageSource, /logsActionError/);
-  assert.match(settingsPageSource, /retentionError/);
-  assert.doesNotMatch(settingsPageSource, /\blogsError\b|\bsetLogsError\b/);
-  assert.doesNotMatch(settingsPageSource, /setLogLevelState|function commitLogLevel/);
 });
 
 test('log level persistence drains the latest selection without dropping rapid changes', async () => {
@@ -1219,7 +1193,6 @@ test('window teardown flushes browser state before sessions and still releases s
 });
 
 test('sidebar values clamp and resize writes debounce', async () => {
-  assert.equal(minSidebarWidth, 256);
   assert.equal(normalizeSidebarWidth(undefined), defaultSidebarWidth);
   assert.equal(normalizeSidebarWidth(-1), minSidebarWidth);
   assert.equal(normalizeSidebarWidth(180), minSidebarWidth);

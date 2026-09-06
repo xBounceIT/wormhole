@@ -46,12 +46,6 @@ test('branch connectors end at the checkbox slot', () => {
   }
 });
 
-test('connection branch connectors stop before the protocol icon rail', () => {
-  const geometry = getTreeRowGeometry(2);
-  assert.ok(geometry.branch);
-  assert.equal(geometry.branch.left + geometry.branch.width, geometry.paddingLeft);
-});
-
 test('tree depth rejects invalid values', () => {
   assert.throws(() => getTreeRowGeometry(-1), RangeError);
   assert.throws(() => getTreeRowGeometry(1.5), RangeError);

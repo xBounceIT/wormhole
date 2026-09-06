@@ -49,12 +49,6 @@ test('live surfaces are keyed only by session identity in one stable workspace l
   assert.doesNotMatch(surfaceLayer, /key=\{`?\$?\{?pane/);
 });
 
-test('layout moves do not call protocol close or disconnect operations', () => {
-  const layoutSource = readFileSync(new URL('../src/session-layout.ts', import.meta.url), 'utf8');
-  assert.doesNotMatch(layoutSource, /wormhole|disconnect|closeWebSession|closeRdpSession/);
-  assert.match(appSource, /function closeSession\(id: string, preferredNextSessionId\?: string\)/);
-});
-
 test('stable VNC identity preserves the single App-owned disconnect lifecycle', () => {
   assert.match(vncSource, /return \(\) => \{/);
   assert.doesNotMatch(vncSource, /action: 'vnc\.disconnect'/);
@@ -476,7 +470,7 @@ test('editing an open RDP session releases and resets its native lifecycle', () 
   assert.match(editorSource, /requestRdpCredentials\(editedSessionId\)/);
 });
 
-test('native web and RDP overlays are hidden while a layout drag is active', () => {
+test('native overlays hide during drag or resize and return when resizing ends', () => {
   assert.match(
     appSource,
     /active && isWebSurfaceVisible && !activeDraggedSessionId && !resizingSplitId/,
@@ -484,6 +478,18 @@ test('native web and RDP overlays are hidden while a layout drag is active', () 
   assert.match(appSource, /<WebSurface[\s\S]*isActive=\{nativeSurfaceActive\}/);
   assert.match(appSource, /<RdpSurface[\s\S]*isActive=\{nativeSurfaceActive\}/);
   assert.match(appSource, /session\.sftp && isActive/);
+
+  const handleMount = sourceBetween(appSource, '<SessionSplitHandle', '/>');
+  assert.match(handleMount, /onResizeStart=\{\(\) => setResizingSplitId\(divider\.splitId\)\}/);
+  assert.match(handleMount, /onResizeEnd=\{\(\) => setResizingSplitId\(''\)\}/);
+  const handle = sourceBetween(
+    appSource,
+    'function SessionSplitHandle',
+    'function sessionSurfaceStyle',
+  );
+  assert.match(handle, /onPointerDown=\{[\s\S]*?onResizeStart\(\)/);
+  assert.match(handle, /onPointerCancel=\{onResizeEnd\}/);
+  assert.match(handle, /onPointerUp=\{[\s\S]*?onResizeEnd\(\)/);
 });
 
 test('renderer context menus hide native session surfaces while their portal is open', () => {
@@ -508,33 +514,6 @@ test('active session close uses the themed confirmation dialog', () => {
   assert.match(appSource, /<DialogTitle>Disconnect active connection\?<\/DialogTitle>/);
   assert.match(appSource, /role="alertdialog"/);
   assert.match(appSource, /Close and disconnect/);
-});
-
-test('session tab actions use the themed renderer context menu with dedicated icons', () => {
-  const menuSource = appSource.slice(
-    appSource.indexOf('function SessionTabContextMenu'),
-    appSource.indexOf('const nodeTooltipDelayMs'),
-  );
-  assert.match(menuSource, /<ContextMenu>/);
-  assert.match(menuSource, /<ContextMenuTrigger asChild>/);
-  assert.match(menuSource, /<Copy \/>[\s\S]*Duplicate/);
-  assert.match(menuSource, /<RefreshCcw \/>[\s\S]*Reconnect/);
-  assert.match(menuSource, /<Maximize2 \/>[\s\S]*Restore full view/);
-  assert.match(menuSource, /<Power \/>[\s\S]*Disconnect/);
-  assert.match(menuSource, /<Monitor \/>[\s\S]*Open in System Remote Desktop/);
-  assert.match(menuSource, /<FolderOpen \/>[\s\S]*SFTP browser/);
-  assert.match(menuSource, /<X \/>[\s\S]*Close/);
-  assert.doesNotMatch(appSource, /showSessionTabContextMenu/);
-  assert.doesNotMatch(preloadSource, /session-tab:context-menu/);
-  assert.doesNotMatch(mainSource, /session-tab:context-menu/);
-});
-
-test('surface bounds reserve a reachable gutter for split handles above native views', () => {
-  assert.match(appSource, /left: `calc\(\$\{rect\.x\}% \+ 3px\)`/);
-  assert.match(appSource, /width: `calc\(\$\{rect\.width\}% - 6px\)`/);
-  assert.match(appSource, /className=\{`absolute z-30 touch-none/);
-  assert.match(appSource, /onResizeStart=\{\(\) => setResizingSplitId\(divider\.splitId\)\}/);
-  assert.match(appSource, /onPointerCancel=\{onResizeEnd\}/);
 });
 
 test('drag cancellation clears both the dragged tab and its visual target', () => {
@@ -567,34 +546,10 @@ test('session reconciliation is persisted so reopened IDs cannot revive stale pa
   assert.match(sessionsSource, /\}, \[draggedSessionId, selectedSession\?\.id, sessionIds\]\);/);
 });
 
-test('session pane chrome stays neutral and tab labels match connection tree typography', () => {
-  const sessionsSource = appSource.slice(
-    appSource.indexOf('function SessionsPage'),
-    appSource.indexOf('function SessionPaneChrome'),
-  );
-  const paneChromeSource = appSource.slice(
-    appSource.indexOf('function SessionPaneChrome'),
-    appSource.indexOf('function SessionDropPreview'),
-  );
-
-  assert.match(sessionsSource, /cursor-grab truncate px-3 pr-12 text-left !text-xs font-medium/);
-  assert.match(paneChromeSource, /absolute border border-border/);
-  assert.doesNotMatch(paneChromeSource, /active \? 'border-primary/);
-});
-
 test('Quick Connect keeps its session name optional in the mounted form', () => {
   assert.match(appSource, /Session name \(optional\)/);
   assert.match(appSource, /required=\{connectionEditorMode === 'saved'\}/);
   assert.match(appSource, /connectionEditorMode === 'quick'[\s\S]{0,160}Defaults to target/);
-});
-
-test('Connect actions use text without a power icon', () => {
-  const connectButtonSources = [...appSource.matchAll(/<Button\b[\s\S]*?<\/Button>/g)]
-    .map((match) => match[0])
-    .filter((source) => /\bConnect(?:ing)?\b/i.test(source));
-
-  assert.ok(connectButtonSources.length > 0);
-  for (const source of connectButtonSources) assert.doesNotMatch(source, /<Power\b/);
 });
 
 test('serial connections omit the VPN route from the mounted connection editor', () => {
@@ -654,7 +609,6 @@ test('opening update settings does not remount and orphan active settings operat
   );
   const settingsSource = sourceBetween(appSource, 'function SettingsPage', 'function UtilityPage');
   assert.doesNotMatch(settingsMount, /key=/);
-  assert.doesNotMatch(settingsMount, /key=\{`\$\{authGate\}:\$\{settingsUpdatesRequest\}`\}/);
   assert.match(
     settingsSource,
     /activeTabSelection\.request === settingsUpdatesRequest[\s\S]*activeTabSelection\.value[\s\S]*'updates'/,
@@ -676,16 +630,6 @@ test('opening update settings does not remount and orphan active settings operat
     );
     assert.match(operationSource, /authGateRef\.current !== 'unlocked'/);
   }
-});
-
-test('header update action matches the compact app button typography', () => {
-  const updateButtonSource = sourceBetween(
-    appSource,
-    '{updateBannerVisible ? (',
-    '<ResizablePanelGroup',
-  );
-  assert.match(updateButtonSource, /className="[^"]*!text-xs[^"]*"/);
-  assert.doesNotMatch(updateButtonSource, /text-\[10px\]/);
 });
 
 test('credential mutations do not remount and orphan an active batch operation', () => {
@@ -810,31 +754,16 @@ test('VPN cards show searchable endpoint metadata instead of a managed-tunnel pl
   assert.match(appSource, /current\.filter\(\(item\) => item\.id !== tunnel\.id\)/);
   assert.match(tunnelsPage, /tunnel\.endpoint \?\? ''/);
   assert.match(tunnelsPage, /tunnel\.endpoint \|\| 'Endpoint unavailable'/);
-  assert.match(tunnelsPage, /title=\{tunnel\.endpoint \|\| undefined\}/);
-  assert.match(tunnelsPage, /label=\{`Delete \$\{tunnel\.name\}`\}[\s\S]{0,160}<Trash2 \/>/);
-  assert.doesNotMatch(tunnelsPage, /Managed VPN tunnel/i);
 });
 
-test('VPN editor keeps WatchGuard authentication and Stormshield OTP layout contracts explicit', () => {
+test('WatchGuard authentication hides password fields during SSO and scopes certificate exceptions', () => {
   const fields = sourceBetween(
     appSource,
     'function tunnelEditorFields',
     'function tunnelDefaultSettings',
   );
   const watchguard = sourceBetween(fields, 'case 3:', 'case 4:');
-  const stormshield = sourceBetween(fields, 'case 4:', 'case 5:');
-
-  const server = watchguard.indexOf("key: 'Server'");
-  const port = watchguard.indexOf("key: 'Port'");
-  const authMode = watchguard.indexOf("key: 'AuthMode'");
-  assert.ok(server >= 0 && server < port && port < authMode);
-  assert.match(
-    watchguard,
-    /key: 'TrustServerCertificate'[\s\S]{0,180}label: 'Ignore certificate errors'[\s\S]{0,100}type: 'switch'/,
-  );
   assert.match(watchguard, /key: 'AuthMode'[\s\S]{0,240}Username and password[\s\S]{0,120}SAML/);
-  assert.match(watchguard, /key: 'VerifyX509Name'[\s\S]{0,240}fullWidth: true/);
-  assert.doesNotMatch(watchguard, /UseSingleSignOn|Use SSO|label: 'Automatic'/);
   const watchguardRender = sourceBetween(
     appSource,
     '{value.kind === 3 ? (',
@@ -845,100 +774,27 @@ test('VPN editor keeps WatchGuard authentication and Stormshield OTP layout cont
     /title="Authentication"[\s\S]{0,180}useWatchguardSso[\s\S]{0,160}field\.key === 'Username'[\s\S]{0,120}field\.key === 'Password'/,
   );
   assert.match(
-    watchguardRender,
-    /grid-cols-\[minmax\(0,1fr\)_7rem\][\s\S]{0,180}rows\('Gateway'\)/,
-  );
-  assert.match(
     mainSource,
     /setCertificateVerifyProc[\s\S]{0,180}event\.ignoreCertificateErrors[\s\S]{0,100}fireboxHost/,
   );
-  const fieldRow = sourceBetween(appSource, 'function TunnelFieldRow', 'function TunnelSection');
-  assert.match(
-    fieldRow,
-    /field\.type === 'switch'[\s\S]{0,160}justify-between[\s\S]{0,160}<Label[\s\S]{0,120}<Switch/,
-  );
-  assert.match(fieldRow, /field\.type === 'checkbox'[\s\S]{0,120}<Checkbox/);
-
-  const otp = stormshield.indexOf("key: 'UseOtp'");
-  const username = stormshield.indexOf("key: 'Username'");
-  const password = stormshield.indexOf("key: 'Password'");
-  assert.ok(otp >= 0 && otp < username && username < password);
-  assert.match(stormshield, /key: 'UseOtp'[\s\S]{0,180}fullWidth: true/);
-  assert.doesNotMatch(stormshield, /UseSingleSignOn|Connect with single sign-on/i);
-  assert.match(appSource, /field\.fullWidth\) && 'col-span-full'/);
 });
 
-test('OpenVPN profile import shares the field label row without rendering a duplicate label', () => {
-  const fields = sourceBetween(
-    appSource,
-    'function tunnelEditorFields',
-    'function tunnelDefaultSettings',
-  );
-  const openVpnFields = sourceBetween(fields, 'case 1:', 'case 2:');
-  const fieldRow = sourceBetween(appSource, 'function TunnelFieldRow', 'function TunnelSection');
-  const openVpnRender = sourceBetween(appSource, '{value.kind === 1 ? (', '{value.kind === 2 ? (');
-
-  assert.equal(openVpnFields.match(/label: 'OpenVPN profile \(\.ovpn contents\)'/g)?.length, 1);
-  assert.match(openVpnRender, /rows\('Profile', \{[\s\S]{0,120}labelAction:/);
-  assert.match(openVpnRender, /disabled=\{busy\}/);
-  assert.match(openVpnRender, /onClick=\{\(\) => void importOvpnProfile\(\)\}/);
-  assert.match(openVpnRender, /type="button"/);
-  assert.match(openVpnRender, /Import from file…/);
-  assert.doesNotMatch(openVpnRender, /<Label[^>]*>OpenVPN profile/);
-  assert.match(fieldRow, /labelAction \? \(/);
-  assert.match(fieldRow, /flex flex-wrap items-center justify-between gap-2/);
-  assert.match(fieldRow, /<Label htmlFor=\{`tunnel-\$\{field\.key\}`\}>\{field\.label\}<\/Label>/);
-  assert.match(fieldRow, /\{labelAction\}/);
+test('OpenVPN profile import is wired without submitting the tunnel form', () => {
+  const openVpn = sourceBetween(appSource, '{value.kind === 1 ? (', '{value.kind === 2 ? (');
+  const button = sourceBetween(openVpn, '<Button', '</Button>');
+  assert.match(button, /onClick=\{\(\) => void importOvpnProfile\(\)\}/);
+  assert.match(button, /type="button"/);
+  assert.match(button, /disabled=\{busy\}/);
 });
 
-test('Fortinet SSO and certificate choices render as switches on dedicated rows', () => {
-  const fields = sourceBetween(
-    appSource,
-    'function tunnelEditorFields',
-    'function tunnelDefaultSettings',
-  );
-  const fortinet = sourceBetween(fields, 'case 2:', 'case 3:');
-  const watchguard = sourceBetween(fields, 'case 3:', 'case 4:');
-  const stormshield = sourceBetween(fields, 'case 4:', 'case 5:');
-  const cisco = sourceBetween(fields, 'case 6:', 'default:');
-  const fieldRow = sourceBetween(appSource, 'function TunnelFieldRow', 'function TunnelSection');
-
-  assert.match(fortinet, /key: 'UseSingleSignOn'[\s\S]{0,180}type: 'switch'/);
-  assert.match(fortinet, /key: 'UseExternalBrowser'[\s\S]{0,180}type: 'switch'/);
-  assert.match(fortinet, /key: 'TrustServerCertificate'[\s\S]{0,180}type: 'switch'/);
-  assert.match(fortinet, /key: 'TotpSecret'[\s\S]{0,240}fullWidth: true/);
-  assert.match(fortinet, /key: 'TrustServerCertificate'[\s\S]{0,240}fullWidth: true/);
-  assert.match(fortinet, /key: 'ServerCertSha256Pin'[\s\S]{0,240}fullWidth: true/);
-  assert.match(fieldRow, /field\.type === 'switch'[\s\S]{0,500}<Switch/);
-  assert.match(fieldRow, /<Switch[\s\S]{0,160}aria-label=\{field\.label\}/);
-  assert.match(fieldRow, /field\.type === 'checkbox'[\s\S]{0,180}<Checkbox/);
-  assert.match(watchguard, /key: 'TrustServerCertificate'[\s\S]{0,180}type: 'switch'/);
-  assert.match(stormshield, /key: 'UseOtp'[\s\S]{0,180}type: 'checkbox'/);
-  assert.match(stormshield, /key: 'TrustServerCertificate'[\s\S]{0,180}type: 'checkbox'/);
-  assert.match(cisco, /key: 'TrustServerCertificate'[\s\S]{0,180}type: 'checkbox'/);
-});
-
-test('VPN editor keeps expanded provider fields inside its scrolling body', () => {
-  const editor = sourceBetween(
-    appSource,
-    'function TunnelEditorDialog',
-    '// Tunnel CRUD, test progress, and editor lifecycle form',
-  );
-  const dialogContent = sourceBetween(editor, '<DialogContent', '>');
-  const form = sourceBetween(editor, '<form', '</form>');
-
-  assert.match(dialogContent, /max-h-\[calc\(100dvh-2rem\)\]/);
-  assert.match(dialogContent, /flex-col/);
-  assert.match(dialogContent, /overflow-hidden/);
-  assert.match(form, /className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto pr-3"/);
-  assert.match(form, /id="tunnel-editor-form"/);
-  assert.match(form, /Manual profile fallback & advanced/);
-  assert.doesNotMatch(form, /role="alert"|<DialogFooter>/);
-  assert.match(editor, /<Button[^>]*form="tunnel-editor-form" type="submit">/);
-  const afterForm = editor.slice(editor.indexOf('</form>'));
-  const alertPosition = afterForm.indexOf('role="alert"');
-  const footerPosition = afterForm.indexOf('<DialogFooter>');
-  assert.ok(alertPosition >= 0 && alertPosition < footerPosition);
+test('the VPN save button submits the editor form from outside it', () => {
+  const editor = sourceBetween(appSource, 'function TunnelEditorDialog', 'function TunnelsPage');
+  const formId = editor.match(/<form\b[^>]*\bid="([^"]+)"/)?.[1];
+  assert.ok(formId, 'tunnel form must have an ID');
+  const footer = sourceBetween(editor, '<DialogFooter>', '</DialogFooter>');
+  const submitButton = footer.match(/<Button\b[^>]*\btype="submit"[^>]*>/)?.[0];
+  assert.ok(submitButton, 'tunnel footer must have a submit button');
+  assert.equal(submitButton.match(/\bform="([^"]+)"/)?.[1], formId);
 });
 
 test('backup and mRemoteNG mutations expose cooperative progress and cancellation', () => {

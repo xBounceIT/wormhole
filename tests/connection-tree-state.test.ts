@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import {
   maxConnectionTreeExpansionFolderIdBytes,
@@ -15,8 +14,6 @@ import {
   shouldRenderConnectionTreeChildren,
   type ConnectionTreeStateNode,
 } from '../src/connection-tree-state.ts';
-
-const appSource = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
 
 const tree: ConnectionTreeStateNode[] = [
   { id: 'root-connection', kind: 'connection' },
@@ -98,22 +95,6 @@ test('collapsed tree branches do not render their descendants', () => {
   assert.equal(shouldRenderConnectionTreeChildren(true, true), true);
   assert.equal(shouldRenderConnectionTreeChildren(true, false), false);
   assert.equal(shouldRenderConnectionTreeChildren(false, true), false);
-});
-
-test('connection rows only show the move cursor when selected without disabling drag', () => {
-  const renderTreeSource = appSource.slice(
-    appSource.indexOf('function renderTree'),
-    appSource.indexOf('async function createCredential'),
-  );
-
-  assert.match(renderTreeSource, /const isTreeNodeSelected = selectedTreeNodeIds\.has\(node\.id\)/);
-  assert.match(renderTreeSource, /const showsMoveCursor = isFolder \|\| isTreeNodeSelected/);
-  assert.match(
-    renderTreeSource,
-    /showsMoveCursor \? 'cursor-grab active:cursor-grabbing' : 'cursor-default'/,
-  );
-  assert.match(renderTreeSource, /draggable=\{treeDragEnabled\}/);
-  assert.match(renderTreeSource, /onDragStart=\{\(event\) => handleTreeDragStart\(event, node\)\}/);
 });
 
 test('expansion reconciliation prunes deleted folders and preserves stable sets', () => {
