@@ -788,7 +788,7 @@ test('WatchGuard authentication hides password fields during SSO and scopes cert
   );
 });
 
-test('Fortinet and Stormshield authentication fields have mounted editor sections', () => {
+test('VPN authentication and certificate controls preserve their mounted sections and value types', () => {
   const fieldSource = sourceBetween(
     appSource,
     'function tunnelEditorFields',
@@ -799,6 +799,7 @@ test('Fortinet and Stormshield authentication fields have mounted editor section
     fieldSource.slice(fieldSource.indexOf('{') + 1, fieldSource.lastIndexOf('}')),
   );
   const editor = sourceBetween(appSource, 'function TunnelEditorDialog', 'function TunnelsPage');
+  const providerSections = sourceBetween(editor, '{value.kind === 0 ? (', '</form>');
   const providers = [
     [
       2,
@@ -810,15 +811,16 @@ test('Fortinet and Stormshield authentication fields have mounted editor section
         ServerCertSha256Pin: undefined,
       },
     ],
+    [3, { TrustServerCertificate: 'switch' }],
     [4, { UseOtp: 'checkbox', TrustServerCertificate: 'checkbox' }],
+    [6, { TrustServerCertificate: 'checkbox' }],
   ] as const;
   for (const [kind, controls] of providers) {
     const fields = fieldsForKind(kind) as { key: string; section: string; type?: string }[];
-    const mounted = sourceBetween(
-      editor,
-      `{value.kind === ${kind} ? (`,
-      `{value.kind === ${kind + 1} ? (`,
-    );
+    const start = providerSections.indexOf(`{value.kind === ${kind} ? (`);
+    assert.ok(start >= 0, `provider ${kind} must have a mounted editor`);
+    const end = providerSections.indexOf('{value.kind ===', start + 1);
+    const mounted = providerSections.slice(start, end < 0 ? undefined : end);
     for (const [key, type] of Object.entries(controls)) {
       const field = fields.find((candidate) => candidate.key === key);
       assert.ok(field, `provider ${kind} must expose ${key}`);
