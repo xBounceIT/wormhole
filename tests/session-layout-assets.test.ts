@@ -877,6 +877,11 @@ test('OpenVPN profile import is wired without submitting the tunnel form', () =>
   assert.match(button, /onClick=\{\(\) => void importOvpnProfile\(\)\}/);
   assert.match(button, /type="button"/);
   assert.match(button, /disabled=\{busy\}/);
+  assert.ok(
+    />\s*[^<>{}\s][^<>{}]*(?=<|$)/.test(button) ||
+      /aria-label="[^"\r\n]*[^"\s][^"\r\n]*"/.test(button),
+    'profile import requires visible text or an accessible label',
+  );
 });
 
 test('the VPN editor keeps fields scrollable and its footer wired to the form', () => {

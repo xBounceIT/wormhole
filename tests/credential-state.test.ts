@@ -149,6 +149,11 @@ test('clearing a stored inline password updates the draft without submitting the
   const button = appSource.slice(start, end);
 
   assert.match(button, /type="button"/);
+  assert.ok(
+    />\s*[^<>{}\s][^<>{}]*(?=<|$)/.test(button) ||
+      /aria-label="[^"\r\n]*[^"\s][^"\r\n]*"/.test(button),
+    'password removal requires visible text or an accessible label',
+  );
   assert.match(
     button,
     /onClick=\{\(\) =>\s*setNewConnectionForm\(\(form\) => \(\{[\s\S]*?inlinePassword: '',[\s\S]*?removeInlinePassword: !form\.removeInlinePassword/,
@@ -278,6 +283,16 @@ test('SSH keys are accepted only by SSH password-capable controls', () => {
   assert.equal(credentialCanUseProtocol('password', 'rdp'), true);
   assert.equal(credentialCanUseProtocol('password', 'vnc'), true);
   assert.equal(credentialCanUseProtocol('unsupported', 'ssh'), false);
+});
+
+test('credential deletion names its target for assistive technology', () => {
+  const grid = appSource.match(/renderItem=\{\(credential\) => \([\s\S]*?resetKey=\{/)?.[0];
+  assert.ok(grid, 'credential grid is missing');
+  const button = grid
+    .match(/<IconButton\b[\s\S]*?<\/IconButton>/g)
+    ?.find((candidate) => candidate.includes('setPendingDeletion([credential.id])'));
+  assert.ok(button, 'credential deletion control is missing');
+  assert.match(button, /label=\{`Delete \$\{credential\.name\}`\}/);
 });
 
 test('Auto sudo remains available for password and SSH key credentials', () => {
