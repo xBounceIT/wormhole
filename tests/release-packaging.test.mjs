@@ -167,6 +167,42 @@ test('packaged backend resolution uses the universal binary only on macOS', asyn
   }
 });
 
+test('universal backend builds verify both architectures and set executable permissions', async () => {
+  const script = await readFile(
+    new URL('../scripts/Build-ElectronUniversalBackend.mjs', import.meta.url),
+    'utf8',
+  );
+  const mergeBody = script.match(/^function mergeUniversalBinary\([^\n]+\) \{([\s\S]*?)^\}/m)?.[1];
+  assert.ok(mergeBody, 'universal binary merge function is missing');
+  const commands = [];
+  const merge = new Function(
+    'x64Path',
+    'arm64Path',
+    'outputPath',
+    'assertFileExists',
+    'rmSync',
+    'run',
+    'chmodSync',
+    'console',
+    mergeBody,
+  );
+  merge(
+    'backend-x64',
+    'backend-arm64',
+    'backend-universal',
+    () => {},
+    () => {},
+    (command, args) => commands.push([command, ...args]),
+    (file, mode) => commands.push(['chmod', file, mode]),
+    { log() {} },
+  );
+  assert.deepEqual(commands, [
+    ['lipo', '-create', 'backend-x64', 'backend-arm64', '-output', 'backend-universal'],
+    ['lipo', 'backend-universal', '-verify_arch', 'x86_64', 'arm64'],
+    ['chmod', 'backend-universal', 0o755],
+  ]);
+});
+
 test('release matrices build every supported platform and architecture', () => {
   assert.deepEqual([...releaseJobs.build.strategy.matrix.platform].sort(), ['arm64', 'x64']);
   const targets = releaseJobs.packages.strategy.matrix.include.map(
@@ -191,6 +227,23 @@ test('release package uploads include installer checksums required by the update
     paths.includes('${{ matrix.updater_artifact }}.sha256'),
     'each updater installer must be uploaded with its SHA-256 sidecar',
   );
+});
+
+test('release publication waits for every build and publishes the downloaded assets', () => {
+  const release = releaseJobs.release;
+  assert.deepEqual([...release.needs].sort(), ['build', 'packages']);
+  assert.equal(release.permissions.contents, 'write');
+  const download = release.steps.find((step) =>
+    step.uses?.startsWith('actions/download-artifact@'),
+  );
+  assert.equal(download?.with.path, 'dist');
+  assert.equal(download.with['merge-multiple'], true);
+  const publish = release.steps.find((step) => step.run?.includes('gh release create'));
+  assert.ok(publish, 'release publication step is missing');
+  assert.match(publish.run, /gh release create[\s\S]*?dist\/\*/);
+  assert.match(publish.run, /for asset in dist\/\*/);
+  assert.match(publish.run, /gh release upload "\$RELEASE_TAG" "\$asset" --repo "\$REPOSITORY"/);
+  assert.match(publish.run, /gh release edit[\s\S]*?--draft=false/);
 });
 
 test('workflows pin third-party actions to immutable revisions', () => {

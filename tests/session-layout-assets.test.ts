@@ -479,6 +479,15 @@ test('native overlays hide during drag or resize and return when resizing ends',
   assert.match(appSource, /<RdpSurface[\s\S]*isActive=\{nativeSurfaceActive\}/);
   assert.match(appSource, /session\.sftp && isActive/);
 
+  // The native view must leave the six-pixel split handle reachable before resizing starts.
+  const surfaceStyle = sourceBetween(
+    appSource,
+    'function sessionSurfaceStyle',
+    'function SessionPaneChrome',
+  );
+  assert.match(surfaceStyle, /left: `calc\(\$\{rect\.x\}% \+ 3px\)`/);
+  assert.match(surfaceStyle, /width: `calc\(\$\{rect\.width\}% - 6px\)`/);
+
   const handleMount = sourceBetween(appSource, '<SessionSplitHandle', '/>');
   assert.match(handleMount, /onResizeStart=\{\(\) => setResizingSplitId\(divider\.splitId\)\}/);
   assert.match(handleMount, /onResizeEnd=\{\(\) => setResizingSplitId\(''\)\}/);
