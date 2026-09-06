@@ -868,10 +868,17 @@ test('SSH backend exit closes active and retained mismatch sessions exactly once
 
 test('closing dialogs retain their last open visuals without accepting pointer input', () => {
   const source = readFileSync(new URL('../src/components/ui/dialog.tsx', import.meta.url), 'utf8');
+  const dialog = source.slice(
+    source.indexOf('function Dialog('),
+    source.indexOf('function DialogTrigger'),
+  );
+  assert.match(dialog, /const open = controlled \? controlledOpen : uncontrolledOpen/);
+  assert.match(dialog, /<DialogOpenContext\.Provider value=\{open\}>[\s\S]*<DialogPrimitive\.Root/);
   const content = source.slice(
     source.indexOf('function DialogContent'),
     source.indexOf('function DialogHeader'),
   );
+  assert.match(content, /const open = React\.useContext\(DialogOpenContext\)/);
   assert.match(content, /selectDialogVisuals\(open,/);
   assert.match(content, /data-closed:pointer-events-none/);
   const retained = { icon: 'success', message: 'Extension updated.' };

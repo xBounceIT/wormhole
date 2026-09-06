@@ -49,6 +49,12 @@ test('live surfaces are keyed only by session identity in one stable workspace l
   assert.doesNotMatch(surfaceLayer, /key=\{`?\$?\{?pane/);
 });
 
+test('layout moves do not call protocol close or disconnect operations', () => {
+  const layoutSource = readFileSync(new URL('../src/session-layout.ts', import.meta.url), 'utf8');
+  assert.doesNotMatch(layoutSource, /wormhole|disconnect|closeWebSession|closeRdpSession/);
+  assert.match(appSource, /function closeSession\(id: string, preferredNextSessionId\?: string\)/);
+});
+
 test('stable VNC identity preserves the single App-owned disconnect lifecycle', () => {
   assert.match(vncSource, /return \(\) => \{/);
   assert.doesNotMatch(vncSource, /action: 'vnc\.disconnect'/);
@@ -532,6 +538,8 @@ test('session tab menu actions stay labeled and wired to the selected session', 
     'const nodeTooltipDelayMs',
   );
   const mount = sourceBetween(appSource, '<SessionTabContextMenu', '</SessionTabContextMenu>');
+  assert.match(menu, /<ContextMenu>/);
+  assert.match(menu, /<ContextMenuTrigger asChild>/);
   const items = [...menu.matchAll(/<ContextMenuItem\b([^>]*)>([\s\S]*?)<\/ContextMenuItem>/g)];
   for (const [action, handler] of [
     ['onDuplicate', 'onDuplicateSession'],
@@ -789,6 +797,7 @@ test('VPN cards show searchable endpoint metadata instead of a managed-tunnel pl
   assert.match(appSource, /current\.filter\(\(item\) => item\.id !== tunnel\.id\)/);
   assert.match(tunnelsPage, /tunnel\.endpoint \?\? ''/);
   assert.match(tunnelsPage, /tunnel\.endpoint \|\| 'Endpoint unavailable'/);
+  assert.match(tunnelsPage, /label=\{`Delete \$\{tunnel\.name\}`\}/);
 });
 
 test('WatchGuard authentication hides password fields during SSO and scopes certificate exceptions', () => {
@@ -827,6 +836,7 @@ test('VPN authentication and certificate controls preserve their mounted section
   const editor = sourceBetween(appSource, 'function TunnelEditorDialog', 'function TunnelsPage');
   const providerSections = sourceBetween(editor, '{value.kind === 0 ? (', '</form>');
   const providers = [
+    [1, { ProfileOvpn: 'textarea' }],
     [
       2,
       {
@@ -837,7 +847,7 @@ test('VPN authentication and certificate controls preserve their mounted section
         ServerCertSha256Pin: undefined,
       },
     ],
-    [3, { TrustServerCertificate: 'switch' }],
+    [3, { TrustServerCertificate: 'switch', VerifyX509Name: undefined }],
     [4, { UseOtp: 'checkbox', TrustServerCertificate: 'checkbox' }],
     [6, { TrustServerCertificate: 'checkbox' }],
   ] as const;
@@ -855,6 +865,13 @@ test('VPN authentication and certificate controls preserve their mounted section
     }
   }
   const row = sourceBetween(appSource, 'function TunnelFieldRow', 'function TunnelSection');
+  assert.match(row, /<Switch[\s\S]*?aria-label=\{field\.label\}/);
+  const labels = [...row.matchAll(/<Label\b([^>]*)>([\s\S]*?)<\/Label>/g)];
+  assert.ok(labels.length > 0, 'VPN controls require field labels');
+  for (const [, props, text] of labels) {
+    assert.match(props, /htmlFor=\{`tunnel-\$\{field\.key\}`\}/);
+    assert.match(text, /\{field\.label\}/);
+  }
   assert.match(
     row,
     /field\.type === 'switch' \? \([\s\S]*?<Switch[\s\S]*?onCheckedChange=\{\(checked\) => onChange\(field\.key, checked\)\}/,
