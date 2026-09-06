@@ -59,6 +59,7 @@ test('theme persistence crosses the validated Electron-to-Go settings bridge', (
     /ipcMain\.handle\('settings:set-theme',[\s\S]*?await requireWorkspaceAuth\(\)[\s\S]*?'settings-set-theme'/,
   );
   assert.match(appSource, /window\.wormhole\?\.setTheme\(nextTheme\)/);
+  assert.doesNotMatch(appSource, /localStorage\.setItem/);
   assert.match(startupSource, /loadStartup\(legacyTheme \?\? undefined\)/);
   assert.match(startupSource, /applyTheme\(startup\.settings\.theme\)/);
   assert.match(startupSource, /startup\.themeMigration\.handled/);

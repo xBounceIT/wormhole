@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import {
   maxConnectionTreeExpansionFolderIdBytes,
@@ -26,6 +27,16 @@ const tree: ConnectionTreeStateNode[] = [
     ],
   },
 ];
+
+test('connection tree rows wire enabled drags to the node drag handler', () => {
+  const source = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  const start = source.indexOf('function renderTree(');
+  const end = source.indexOf('async function createCredential(', start);
+  assert.ok(start >= 0 && end > start, 'connection tree renderer is missing');
+  const renderer = source.slice(start, end);
+  assert.match(renderer, /draggable=\{treeDragEnabled\}/);
+  assert.match(renderer, /onDragStart=\{\(event\) => handleTreeDragStart\(event, node\)\}/);
+});
 
 test('tree index collects folders and parents in one traversal', () => {
   const index = indexConnectionTree(tree);

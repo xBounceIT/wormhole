@@ -788,6 +788,45 @@ test('WatchGuard authentication hides password fields during SSO and scopes cert
   );
 });
 
+test('Fortinet and Stormshield authentication fields have mounted editor sections', () => {
+  const fieldSource = sourceBetween(
+    appSource,
+    'function tunnelEditorFields',
+    'function tunnelDefaultSettings',
+  );
+  const fieldsForKind = new Function(
+    'kind',
+    fieldSource.slice(fieldSource.indexOf('{') + 1, fieldSource.lastIndexOf('}')),
+  );
+  const editor = sourceBetween(appSource, 'function TunnelEditorDialog', 'function TunnelsPage');
+  const providers = [
+    [
+      2,
+      [
+        'UseSingleSignOn',
+        'UseExternalBrowser',
+        'TrustServerCertificate',
+        'TotpSecret',
+        'ServerCertSha256Pin',
+      ],
+    ],
+    [4, ['UseOtp', 'TrustServerCertificate']],
+  ] as const;
+  for (const [kind, keys] of providers) {
+    const fields = fieldsForKind(kind) as { key: string; section: string }[];
+    const mounted = sourceBetween(
+      editor,
+      `{value.kind === ${kind} ? (`,
+      `{value.kind === ${kind + 1} ? (`,
+    );
+    for (const key of keys) {
+      const field = fields.find((candidate) => candidate.key === key);
+      assert.ok(field, `provider ${kind} must expose ${key}`);
+      assert.ok(mounted.includes(`rows('${field.section}'`), `${key} must have a mounted section`);
+    }
+  }
+});
+
 test('OpenVPN profile import is wired without submitting the tunnel form', () => {
   const openVpn = sourceBetween(appSource, '{value.kind === 1 ? (', '{value.kind === 2 ? (');
   const button = sourceBetween(openVpn, '<Button', '</Button>');
@@ -796,8 +835,21 @@ test('OpenVPN profile import is wired without submitting the tunnel form', () =>
   assert.match(button, /disabled=\{busy\}/);
 });
 
-test('the VPN save button submits the editor form from outside it', () => {
+test('the VPN editor keeps fields scrollable and its footer wired to the form', () => {
   const editor = sourceBetween(appSource, 'function TunnelEditorDialog', 'function TunnelsPage');
+  const dialog = sourceBetween(editor, '<DialogContent', '>');
+  const dialogClasses = dialog.match(/className="([^"]+)"/)?.[1].split(/\s+/) ?? [];
+  for (const token of ['flex', 'flex-col', 'overflow-hidden', 'max-h-[calc(100dvh-2rem)]']) {
+    assert.ok(
+      dialogClasses.includes(token),
+      `VPN dialog requires ${token} to stay inside the viewport`,
+    );
+  }
+  const form = sourceBetween(editor, '<form', '>');
+  const formClasses = form.match(/className="([^"]+)"/)?.[1].split(/\s+/) ?? [];
+  for (const token of ['min-h-0', 'flex-1', 'overflow-y-auto']) {
+    assert.ok(formClasses.includes(token), `VPN fields require ${token} to remain scrollable`);
+  }
   const formId = editor.match(/<form\b[^>]*\bid="([^"]+)"/)?.[1];
   assert.ok(formId, 'tunnel form must have an ID');
   const footer = sourceBetween(editor, '<DialogFooter>', '</DialogFooter>');

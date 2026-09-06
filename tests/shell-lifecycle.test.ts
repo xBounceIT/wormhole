@@ -866,7 +866,14 @@ test('SSH backend exit closes active and retained mismatch sessions exactly once
   assert.equal(retained.size, 0);
 });
 
-test('dialog close animations retain the last open visuals instead of rendering cleared state', () => {
+test('closing dialogs retain their last open visuals without accepting pointer input', () => {
+  const source = readFileSync(new URL('../src/components/ui/dialog.tsx', import.meta.url), 'utf8');
+  const content = source.slice(
+    source.indexOf('function DialogContent'),
+    source.indexOf('function DialogHeader'),
+  );
+  assert.match(content, /selectDialogVisuals\(open,/);
+  assert.match(content, /data-closed:pointer-events-none/);
   const retained = { icon: 'success', message: 'Extension updated.' };
 
   assert.deepEqual(
@@ -908,6 +915,10 @@ test('log level selector stays mounted and interactive during persistence', () =
 
   assert.match(settingSource, /disabled=\{!loaded\}/);
   assert.match(settingSource, /aria-busy=\{busy\}/);
+  assert.match(
+    settingSource,
+    /await drainLogLevelChanges\(\s*saveState\.current,\s*async \(target\) => \(await api\.setLogLevel\(target\)\)\.logLevel,\s*onSaved,/,
+  );
   assert.doesNotMatch(settingSource, /disabled=\{busy\}/);
   assert.match(settingsPageSource, /<SettingsTabPanel forceMount value="logs">/);
   assert.match(settingsPageSource, /loaded=\{logsInfo !== null\}/);
