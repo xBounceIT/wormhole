@@ -544,7 +544,7 @@ test('session tab menu actions stay labeled and wired to the selected session', 
   ]) {
     const item = items.find(([, props]) => props.includes(`onSelect={${action}}`));
     assert.ok(item, `${action} must remain available in the session tab menu`);
-    assert.ok(item[2].replace(/<[^>]*>/g, '').trim(), `${action} requires a visible label`);
+    assert.match(item[2], /(?:^|>)\s*[^<>\s][^<>]*(?=<|$)/, `${action} requires a visible label`);
     const callback = mount.match(new RegExp(`${action}=\\{([^}]*)\\}`))?.[1];
     assert.ok(callback, `${action} must be wired on the mounted menu`);
     assert.match(callback, new RegExp(`\\b${handler}\\([^)]*\\bsession\\.id\\)`));
