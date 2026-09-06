@@ -525,6 +525,32 @@ test('active session close uses the themed confirmation dialog', () => {
   assert.match(appSource, /Close and disconnect/);
 });
 
+test('session tab menu actions stay labeled and wired to the selected session', () => {
+  const menu = sourceBetween(
+    appSource,
+    'function SessionTabContextMenu',
+    'const nodeTooltipDelayMs',
+  );
+  const mount = sourceBetween(appSource, '<SessionTabContextMenu', '</SessionTabContextMenu>');
+  const items = [...menu.matchAll(/<ContextMenuItem\b([^>]*)>([\s\S]*?)<\/ContextMenuItem>/g)];
+  for (const [action, handler] of [
+    ['onDuplicate', 'onDuplicateSession'],
+    ['onReconnect', 'onReconnectSession'],
+    ['onRestoreFullView', 'restoreFullView'],
+    ['onDisconnect', 'onDisconnectSession'],
+    ['onOpenSystemRdp', 'onOpenSystemRdp'],
+    ['onFileTransfer', 'onOpenFileTransfer'],
+    ['onClose', 'closePaneSession'],
+  ]) {
+    const item = items.find(([, props]) => props.includes(`onSelect={${action}}`));
+    assert.ok(item, `${action} must remain available in the session tab menu`);
+    assert.ok(item[2].replace(/<[^>]*>/g, '').trim(), `${action} requires a visible label`);
+    const callback = mount.match(new RegExp(`${action}=\\{([^}]*)\\}`))?.[1];
+    assert.ok(callback, `${action} must be wired on the mounted menu`);
+    assert.match(callback, new RegExp(`\\b${handler}\\([^)]*\\bsession\\.id\\)`));
+  }
+});
+
 test('drag cancellation clears both the dragged tab and its visual target', () => {
   assert.match(
     appSource,
