@@ -17,6 +17,15 @@ import {
   setSessionSplitRatio,
   splitSession,
 } from '../src/session-layout.ts';
+import { newSessionToken } from '../src/session-token.ts';
+
+test('creates unique cryptographically secure session tokens', () => {
+  const first = newSessionToken();
+  const second = newSessionToken();
+
+  assert.match(first, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+  assert.notEqual(first, second);
+});
 
 test('splits on every edge with deterministic orientation and order', () => {
   for (const edge of ['left', 'right', 'top', 'bottom'] as const) {

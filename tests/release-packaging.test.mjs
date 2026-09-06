@@ -121,6 +121,15 @@ test('electron-builder produces the supported macOS installer', () => {
   assert.ok(iconChunkTypes.has('ic10'), 'macOS icon must include a 1024px representation');
 });
 
+test('the desktop window uses an icon format supported by the current platform', async () => {
+  const electronMain = await readFile(new URL('../electron/main.ts', import.meta.url), 'utf8');
+  assert.match(
+    electronMain,
+    /const applicationIconPath = path\.join\([^;]*process\.platform === 'win32' \? 'Wormhole\.ico' : 'Wormhole\.png'/,
+  );
+  assert.match(electronMain, /const window = new BrowserWindow\(\{[^;]*icon: applicationIconPath/);
+});
+
 test('native Go binaries are shipped outside the Electron asar archive', () => {
   assert.equal(packageJson.build.asar, true);
   const filters = packageJson.build.extraResources.flatMap((resource) => resource.filter ?? []);

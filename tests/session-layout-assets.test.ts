@@ -866,7 +866,13 @@ test('VPN authentication and certificate controls preserve their mounted section
 });
 
 test('OpenVPN profile import is wired without submitting the tunnel form', () => {
-  const openVpn = sourceBetween(appSource, '{value.kind === 1 ? (', '{value.kind === 2 ? (');
+  const row = sourceBetween(appSource, 'function TunnelFieldRow', 'function TunnelSection');
+  assert.match(row, /\{labelAction\}/);
+  const editor = sourceBetween(appSource, 'function TunnelEditorDialog', 'function TunnelsPage');
+  const rows = sourceBetween(editor, 'const rows =', 'const useFortinetSso');
+  assert.match(rows, /labelAction=\{options\?\.labelAction\?\.\(field\)\}/);
+  const openVpn = sourceBetween(editor, '{value.kind === 1 ? (', '{value.kind === 2 ? (');
+  assert.match(openVpn, /rows\('Profile', \{\s*labelAction: \(\) => \(/);
   const button = sourceBetween(openVpn, '<Button', '</Button>');
   assert.match(button, /onClick=\{\(\) => void importOvpnProfile\(\)\}/);
   assert.match(button, /type="button"/);
