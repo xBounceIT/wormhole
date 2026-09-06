@@ -162,9 +162,7 @@ func TestOpenExternalURLUsesThePlatformLauncherWithoutASecretChannel(t *testing.
 	newExternalURLCommand = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		program = name
 		arguments = append([]string(nil), args...)
-		command := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestFortinetExternalURLCommandHelper$")
-		command.Env = append(os.Environ(), "WORMHOLE_FORTINET_URL_HELPER=1")
-		return command
+		return exec.CommandContext(ctx, os.Args[0], "-test.run=^$")
 	}
 	target := "https://vpn.example.test/remote/saml/start?redirect=1"
 	if err := openExternalURL(context.Background(), target); err != nil {
@@ -186,12 +184,6 @@ func TestOpenExternalURLUsesThePlatformLauncherWithoutASecretChannel(t *testing.
 	}
 	if err := openExternalURL(context.Background(), target); err == nil {
 		t.Fatal("missing browser launcher returned no error")
-	}
-}
-
-func TestFortinetExternalURLCommandHelper(t *testing.T) {
-	if os.Getenv("WORMHOLE_FORTINET_URL_HELPER") != "1" {
-		return
 	}
 }
 

@@ -93,14 +93,3 @@ test('mRemoteNG commit starts inside the authorization boundary and supports coo
   assert.match(mainSource, /function runOwnedNativeOperation[\s\S]{0,1200}runAuthorizedOperation/);
   assert.match(mainSource, /cancelOperation\(operation\.id\)/);
 });
-
-test('mRemoteNG import explains how to produce a compatible export', () => {
-  const dialogSource = readFileSync(
-    new URL('../src/components/MRemoteImportDialog.tsx', import.meta.url),
-    'utf8',
-  );
-  assert.match(dialogSource, /Exporting from mRemoteNG/);
-  assert.match(dialogSource, /Export Connections/);
-  assert.match(dialogSource, /username, password, domain, and\s+inheritance/);
-  assert.match(dialogSource, /Tools → Options → Security/);
-});

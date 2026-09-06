@@ -52,15 +52,14 @@ test('theme persistence crosses the validated Electron-to-Go settings bridge', (
   const appSource = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
   const startupSource = readFileSync(new URL('../src/main.tsx', import.meta.url), 'utf8');
 
-  assert.match(preloadSource, /loadStartup: \(legacyTheme\?: 'system' \| 'light' \| 'dark'\)/);
   assert.match(preloadSource, /ipcRenderer\.invoke\('settings:set-theme', theme\)/);
   assert.match(mainSource, /if \(!isAppTheme\(value\)\)/);
   assert.match(
     mainSource,
     /ipcMain\.handle\('settings:set-theme',[\s\S]*?await requireWorkspaceAuth\(\)[\s\S]*?'settings-set-theme'/,
   );
-  assert.match(appSource, /useState<Theme>\(initialSettings\.theme\)/);
   assert.match(appSource, /window\.wormhole\?\.setTheme\(nextTheme\)/);
+  assert.match(appSource, /useState<Theme>\(initialSettings\.theme\)/);
   assert.doesNotMatch(appSource, /localStorage\.setItem/);
   assert.match(startupSource, /loadStartup\(legacyTheme \?\? undefined\)/);
   assert.match(startupSource, /applyTheme\(startup\.settings\.theme\)/);

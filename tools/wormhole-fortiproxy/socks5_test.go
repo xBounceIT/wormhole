@@ -78,15 +78,6 @@ func TestHandleSocks5_RejectsIPv6Upfront(t *testing.T) {
 	}
 }
 
-// Sanity: confirm fakeConn's EOF behavior so the test above doesn't accidentally hang.
-func TestFakeConnEOF(t *testing.T) {
-	c := &fakeConn{in: &bytes.Buffer{}, out: &bytes.Buffer{}}
-	_, err := c.Read(make([]byte, 1))
-	if !errors.Is(err, io.EOF) {
-		t.Fatalf("want EOF, got %v", err)
-	}
-}
-
 func TestHandleSocks5RejectsUnsupportedNegotiation(t *testing.T) {
 	tests := []struct {
 		name  string

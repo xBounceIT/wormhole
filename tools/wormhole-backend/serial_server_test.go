@@ -428,8 +428,14 @@ func TestSerialServerOpenReportsResolutionAndNativeFailures(t *testing.T) {
 	waitForSerialOutput(t, &output, "open failed")
 	waitForSerialPendingClear(t, server, "open")
 
+	releaseOpen := make(chan struct{})
+	openNativeSerialForOpen = func(context.Context, serialTarget, uint32, uint32) (*serialNativeSession, error) {
+		<-releaseOpen
+		return nil, errors.New("open failed")
+	}
 	server.open(serialWireCommand{SessionID: "pending", PortName: "COM1"})
 	server.open(serialWireCommand{SessionID: "pending", PortName: "COM1"})
+	close(releaseOpen)
 	waitForSerialOutput(t, &output, "already connecting")
 	waitForSerialPendingClear(t, server, "pending")
 }

@@ -12,6 +12,7 @@ test('web session attempts are invalidated when a tab closes before its open com
   const opening = attempts.begin('web-1');
 
   attempts.cancel('web-1');
+  assert.equal(attempts.isCurrent('web-1', opening), false);
   const reopened = attempts.begin('web-1');
 
   assert.equal(attempts.isCurrent('web-1', opening), false);
@@ -37,15 +38,6 @@ test('bulk cancellation invalidates every in-flight session without reusing gene
   assert.equal(attempts.isCurrent('first', first), false);
   assert.equal(attempts.isCurrent('second', second), false);
   assert.ok(attempts.begin('first') > first);
-});
-
-test('credential editor reset invalidates an in-flight Bitwarden search', () => {
-  const attempts = new WebSessionAttemptTracker();
-  const searching = attempts.begin('credential-search');
-
-  attempts.cancel('credential-search');
-
-  assert.equal(attempts.isCurrent('credential-search', searching), false);
 });
 
 test('saved web addresses restore their context path in the shared connection editor', () => {

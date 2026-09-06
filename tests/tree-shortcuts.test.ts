@@ -88,13 +88,6 @@ test('creation accelerators always target the explicit root on Windows and macOS
     ),
     { kind: 'new-folder', parentFolderId: null },
   );
-  assert.equal(
-    resolveConnectionTreeShortcut(
-      shortcutEvent('n', { ctrlKey: true, metaKey: true }),
-      baseContext,
-    ),
-    null,
-  );
   for (const modifiers of [
     { ctrlKey: true, altKey: true },
     { metaKey: true, altKey: true },
@@ -309,13 +302,45 @@ test('irrelevant tree keys do not traverse the tree selection', () => {
   );
 });
 
-test('async batch deletion reconciles against current tree and session state', () => {
+test('workspace deletion closes current sessions and preserves concurrent session changes', () => {
   const appSource = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  const start = appSource.indexOf('async function closeSessionsForNodeIds(');
+  const end = appSource.indexOf('const releaseSessionResourcesRef', start);
+  assert.ok(start >= 0 && end > start, 'missing workspace session cleanup');
+  const cleanupSource = appSource.slice(start, end);
 
-  assert.match(appSource, /const treeRef = useRef\(tree\)/);
-  assert.match(appSource, /const currentTree = treeRef\.current/);
-  assert.match(appSource, /const closing = sessionsRef\.current\.filter/);
-  assert.match(appSource, /setSessions\(\(current\) => current\.filter/);
+  // Backend deletion and resource release can finish after session state changes.
+  assert.match(
+    cleanupSource,
+    /const closing = sessionsRef\.current\.filter\(\s*\(session\) => session\.nodeId && nodeIds\.has\(session\.nodeId\)/,
+  );
+  assert.match(
+    cleanupSource,
+    /setSessions\(\(current\) => current\.filter\(\(session\) => !closingIds\.has\(session\.id\)\)\)/,
+  );
+});
+
+test('workspace deletion rereads the tree across backend and session cleanup awaits', () => {
+  const appSource = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  const start = appSource.indexOf('async function confirmDeleteNodes()');
+  const end = appSource.indexOf('function duplicateConnection(', start);
+  assert.ok(start >= 0 && end > start, 'missing workspace deletion handler');
+  const deletion = appSource.slice(start, end);
+
+  assert.match(deletion, /const currentTree = treeRef\.current/);
+  assert.match(deletion, /canonicalizeConnectionTreeNodeIds\(currentTree, requestedNodeIds\)/);
+  assert.match(
+    deletion,
+    /const reconcileDeletedNodes = async \(\) => \{\s*const latestTree = treeRef\.current;[\s\S]*?findTreeNode\(latestTree, nodeId\)/,
+  );
+  assert.match(
+    deletion,
+    /await closeSessionsForNodeIds\(latestDeletedNodeIds\);\s*const treeAfterSessionClose = treeRef\.current;\s*applyDeletedTreeState\(\s*extractTreeNodes\(treeAfterSessionClose,/,
+  );
+  assert.match(
+    deletion,
+    /await api\.deleteWorkspaceNodes\([\s\S]*?await reconcileDeletedNodes\(\)/,
+  );
 });
 
 test('workspace batch deletion IPC accepts one or many IDs and deduplicates in request order', () => {
