@@ -334,10 +334,24 @@ test('release publication waits for every build and publishes the downloaded ass
   assert.match(publish.run, /gh release edit[\s\S]*?--draft=false/);
 });
 
-test('workflows pin third-party actions to immutable revisions', () => {
-  const workflows = [ciWorkflow, releaseWorkflow];
+test('workflows pin runner images and third-party action revisions', () => {
+  const pinnedRunners = new Set(['ubuntu-24.04', 'windows-2025', 'macos-26']);
+  const workflows = [
+    { source: ciWorkflow, config: parse(ciWorkflow) },
+    { source: releaseWorkflow, config: releaseConfig },
+  ];
 
-  for (const workflow of workflows) {
+  for (const { source: workflow, config } of workflows) {
+    for (const [name, job] of Object.entries(config.jobs)) {
+      const runners =
+        job['runs-on'] === '${{ matrix.runner }}'
+          ? job.strategy.matrix.include.map(({ runner }) => runner)
+          : [job['runs-on']];
+      assert.ok(runners.length > 0, `${name} must select a runner`);
+      for (const runner of runners) {
+        assert.ok(pinnedRunners.has(runner), `${name} uses an unreviewed runner image: ${runner}`);
+      }
+    }
     const actionReferences = [...workflow.matchAll(/uses:\s+([^\s#]+)/g)].map((match) => match[1]);
     assert.ok(actionReferences.length > 0, 'workflow must use at least one action');
     for (const reference of actionReferences) {
