@@ -205,10 +205,13 @@ test('universal backend builds verify both architectures and set executable perm
 });
 
 test('release matrices build and upload every supported platform and package format', () => {
+  assert.match(releaseJobs.build['runs-on'], /^windows-/);
+  assert.equal(releaseJobs.packages['runs-on'], '${{ matrix.runner }}');
   assert.deepEqual([...releaseJobs.build.strategy.matrix.platform].sort(), ['arm64', 'x64']);
   const targets = releaseJobs.packages.strategy.matrix.include.map(
-    ({ builder_platform, builder_arch, backend_arch, artifacts, updater_artifact }) => ({
+    ({ builder_platform, builder_arch, backend_arch, runner, artifacts, updater_artifact }) => ({
       target: `${builder_platform}/${builder_arch}/${backend_arch}`,
+      runnerPlatform: runner.split('-')[0],
       artifacts: artifacts.trim().split(/\s+/).sort(),
       updater: updater_artifact,
     }),
@@ -218,16 +221,19 @@ test('release matrices build and upload every supported platform and package for
     [
       {
         target: 'linux/arm64/arm64',
+        runnerPlatform: 'ubuntu',
         artifacts: ['release/*.AppImage', 'release/*.deb', 'release/*.rpm'],
         updater: 'release/Wormhole-*-linux-arm64.AppImage',
       },
       {
         target: 'linux/x64/x64',
+        runnerPlatform: 'ubuntu',
         artifacts: ['release/*.AppImage', 'release/*.deb', 'release/*.rpm'],
         updater: 'release/Wormhole-*-linux-x86_64.AppImage',
       },
       {
         target: 'mac/universal/universal',
+        runnerPlatform: 'macos',
         artifacts: ['release/Wormhole-*-mac-universal-setup.dmg'],
         updater: 'release/Wormhole-*-mac-universal-setup.dmg',
       },
@@ -284,6 +290,7 @@ test('release packages generate and upload the installer checksums required by t
 });
 
 test('release publication waits for every build and publishes the downloaded assets', () => {
+  assert.equal(releaseConfig.permissions.contents, 'read');
   assert.match(packageJson.scripts.package, /--publish never(?:\s|$)/);
   assert.equal(
     releaseConfig.concurrency.group,
