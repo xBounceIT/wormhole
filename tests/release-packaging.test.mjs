@@ -19,7 +19,8 @@ const releaseWorkflow = await readFile(
   'utf8',
 );
 const ciWorkflow = await readFile(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
-const releaseJobs = parse(releaseWorkflow).jobs;
+const releaseConfig = parse(releaseWorkflow);
+const releaseJobs = releaseConfig.jobs;
 const linuxIconSizes = [16, 24, 32, 48, 64, 96, 128, 256, 512, 1024];
 const projectDir = fileURLToPath(new URL('..', import.meta.url));
 const macIcon = await readFile(new URL('../Assets/Wormhole.icns', import.meta.url));
@@ -203,20 +204,73 @@ test('universal backend builds verify both architectures and set executable perm
   ]);
 });
 
-test('release matrices build every supported platform and architecture', () => {
+test('release matrices build and upload every supported platform and package format', () => {
   assert.deepEqual([...releaseJobs.build.strategy.matrix.platform].sort(), ['arm64', 'x64']);
   const targets = releaseJobs.packages.strategy.matrix.include.map(
-    ({ builder_platform, builder_arch, backend_arch }) =>
-      `${builder_platform}/${builder_arch}/${backend_arch}`,
+    ({ builder_platform, builder_arch, backend_arch, artifacts, updater_artifact }) => ({
+      target: `${builder_platform}/${builder_arch}/${backend_arch}`,
+      artifacts: artifacts.trim().split(/\s+/).sort(),
+      updater: updater_artifact,
+    }),
   );
-  assert.deepEqual(targets.sort(), [
-    'linux/arm64/arm64',
-    'linux/x64/x64',
-    'mac/universal/universal',
-  ]);
+  assert.deepEqual(
+    targets.sort((a, b) => a.target.localeCompare(b.target)),
+    [
+      {
+        target: 'linux/arm64/arm64',
+        artifacts: ['release/*.AppImage', 'release/*.deb', 'release/*.rpm'],
+        updater: 'release/Wormhole-*-linux-arm64.AppImage',
+      },
+      {
+        target: 'linux/x64/x64',
+        artifacts: ['release/*.AppImage', 'release/*.deb', 'release/*.rpm'],
+        updater: 'release/Wormhole-*-linux-x86_64.AppImage',
+      },
+      {
+        target: 'mac/universal/universal',
+        artifacts: ['release/Wormhole-*-mac-universal-setup.dmg'],
+        updater: 'release/Wormhole-*-mac-universal-setup.dmg',
+      },
+    ],
+  );
 });
 
-test('release package uploads include installer checksums required by the updater', () => {
+test('release verifies the Linux package outputs and their installed desktop assets', () => {
+  const verify = releaseJobs.packages.steps.find((step) =>
+    step.run?.includes('dpkg-deb --extract'),
+  );
+  assert.ok(verify, 'Linux package validation is missing');
+  assert.equal(verify.if, "matrix.builder_platform == 'linux'");
+  for (const suffix of [
+    'x86_64.AppImage',
+    'amd64.deb',
+    'x86_64.rpm',
+    'arm64.AppImage',
+    'arm64.deb',
+    'aarch64.rpm',
+  ]) {
+    assert.ok(
+      verify.run.includes(`release/Wormhole-*-linux-${suffix}`),
+      `${suffix} must be verified`,
+    );
+  }
+  assert.match(verify.run, /if \[\[ \$\{#matches\[@\]\} -ne 1 \]\]; then[\s\S]*?exit 1/);
+  assert.match(verify.run, /usr\/share\/icons\/hicolor\/\$size\/apps\/wormhole\.png/);
+  assert.match(verify.run, /PNG image data, \$icon_width x \$icon_height,/);
+  assert.match(verify.run, /cmp -s "Assets\/LinuxIcons\/\$size\.png" "\$icon_path"/);
+  assert.match(verify.run, /grep -Fxq 'Icon=wormhole' "\$desktop_entry"/);
+});
+
+test('release packages generate and upload the installer checksums required by the updater', () => {
+  const checksum = releaseJobs.packages.steps.find((step) => step.run?.includes('Get-FileHash'));
+  assert.ok(checksum, 'installer checksum generation is missing');
+  assert.match(checksum.run, /Get-ChildItem "\$\{\{ matrix\.updater_artifact \}\}" -File/);
+  assert.match(checksum.run, /if \(\$installers\.Count -ne 1\)\s*\{\s*throw /);
+  assert.match(checksum.run, /Get-FileHash -Algorithm SHA256 -LiteralPath \$_\.FullName/);
+  assert.match(
+    checksum.run,
+    /"\$hash  \$\(\$_\.Name\)" \| Set-Content -LiteralPath "\$\(\$_\.FullName\)\.sha256" -Encoding ascii/,
+  );
   const uploadSteps = releaseJobs.packages.steps.filter((step) =>
     step.uses?.startsWith('actions/upload-artifact@'),
   );
@@ -230,6 +284,24 @@ test('release package uploads include installer checksums required by the update
 });
 
 test('release publication waits for every build and publishes the downloaded assets', () => {
+  assert.match(packageJson.scripts.package, /--publish never(?:\s|$)/);
+  assert.equal(
+    releaseConfig.concurrency.group,
+    'release-${{ github.event.inputs.tag || github.ref_name }}',
+  );
+  assert.equal(releaseConfig.concurrency['cancel-in-progress'], false);
+  assert.equal(releaseJobs.build.needs, 'checks');
+  assert.equal(releaseJobs.packages.needs, 'checks');
+  const tagCheck = releaseJobs.checks.steps.find((step) => step.env?.RELEASE_TAG);
+  assert.equal(tagCheck?.env.RELEASE_TAG, '${{ github.event.inputs.tag || github.ref_name }}');
+  const tagCheckBody = tagCheck?.run.match(/^node -e "([\s\S]*)"$/)?.[1];
+  assert.ok(tagCheckBody, 'release tag validation is missing');
+  const verifyTag = new Function('require', 'process', tagCheckBody);
+  const rootRequire = createRequire(new URL('../package.json', import.meta.url));
+  const checkTag = (tag) => verifyTag(rootRequire, { env: { RELEASE_TAG: tag } });
+  assert.doesNotThrow(() => checkTag(`v${packageJson.version}`));
+  assert.throws(() => checkTag('v0.0.0-mismatched'), /does not match/);
+
   const release = releaseJobs.release;
   assert.deepEqual([...release.needs].sort(), ['build', 'packages']);
   assert.equal(release.permissions.contents, 'write');
