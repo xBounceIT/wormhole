@@ -320,6 +320,29 @@ test('workspace deletion closes current sessions and preserves concurrent sessio
   );
 });
 
+test('workspace deletion rereads the tree across backend and session cleanup awaits', () => {
+  const appSource = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  const start = appSource.indexOf('async function confirmDeleteNodes()');
+  const end = appSource.indexOf('function duplicateConnection(', start);
+  assert.ok(start >= 0 && end > start, 'missing workspace deletion handler');
+  const deletion = appSource.slice(start, end);
+
+  assert.match(deletion, /const currentTree = treeRef\.current/);
+  assert.match(deletion, /canonicalizeConnectionTreeNodeIds\(currentTree, requestedNodeIds\)/);
+  assert.match(
+    deletion,
+    /const reconcileDeletedNodes = async \(\) => \{\s*const latestTree = treeRef\.current;[\s\S]*?findTreeNode\(latestTree, nodeId\)/,
+  );
+  assert.match(
+    deletion,
+    /await closeSessionsForNodeIds\(latestDeletedNodeIds\);\s*const treeAfterSessionClose = treeRef\.current;\s*applyDeletedTreeState\(\s*extractTreeNodes\(treeAfterSessionClose,/,
+  );
+  assert.match(
+    deletion,
+    /await api\.deleteWorkspaceNodes\([\s\S]*?await reconcileDeletedNodes\(\)/,
+  );
+});
+
 test('workspace batch deletion IPC accepts one or many IDs and deduplicates in request order', () => {
   assert.deepEqual(parseWorkspaceNodesRequest({ nodeIds: ['one'] }), { nodeIds: ['one'] });
   assert.deepEqual(parseWorkspaceNodesRequest({ nodeIds: ['two', 'one', 'two'] }), {

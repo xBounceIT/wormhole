@@ -5,6 +5,7 @@ import { relative } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { prerelease, satisfies, valid } from 'semver';
+import { parse } from 'yaml';
 
 const require = createRequire(import.meta.url);
 const { convertIcon } = require('app-builder-lib/out/util/iconConverter.js');
@@ -18,6 +19,7 @@ const releaseWorkflow = await readFile(
   'utf8',
 );
 const ciWorkflow = await readFile(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
+const releaseJobs = parse(releaseWorkflow).jobs;
 const linuxIconSizes = [16, 24, 32, 48, 64, 96, 128, 256, 512, 1024];
 const projectDir = fileURLToPath(new URL('..', import.meta.url));
 const macIcon = await readFile(new URL('../Assets/Wormhole.icns', import.meta.url));
@@ -165,20 +167,25 @@ test('packaged backend resolution uses the universal binary only on macOS', asyn
   }
 });
 
+test('release matrices build every supported platform and architecture', () => {
+  assert.deepEqual([...releaseJobs.build.strategy.matrix.platform].sort(), ['arm64', 'x64']);
+  const targets = releaseJobs.packages.strategy.matrix.include.map(
+    ({ builder_platform, builder_arch, backend_arch }) =>
+      `${builder_platform}/${builder_arch}/${backend_arch}`,
+  );
+  assert.deepEqual(targets.sort(), [
+    'linux/arm64/arm64',
+    'linux/x64/x64',
+    'mac/universal/universal',
+  ]);
+});
+
 test('release package uploads include installer checksums required by the updater', () => {
-  const packagesJob = releaseWorkflow.match(
-    /^  packages:\r?\n(?:[ \t]*\r?\n| {4}[^\r\n]*(?:\r?\n|$))*/m,
-  )?.[0];
-  assert.ok(packagesJob, 'release package job is missing');
-  const uploadSteps = packagesJob
-    .split(/^ {6}- /m)
-    .filter((step) => /^ {8}uses: actions\/upload-artifact@/m.test(step));
+  const uploadSteps = releaseJobs.packages.steps.filter((step) =>
+    step.uses?.startsWith('actions/upload-artifact@'),
+  );
   assert.equal(uploadSteps.length, 1, 'expected one release package upload step');
-  const uploadPaths = uploadSteps[0].match(
-    /^ {10}path: \|\r?\n((?: {12}[^\r\n]*(?:\r?\n|$))*)/m,
-  )?.[1];
-  assert.ok(uploadPaths, 'release package upload paths are missing');
-  const paths = uploadPaths.split(/\r?\n/).map((line) => line.trim());
+  const paths = uploadSteps[0].with.path.split(/\r?\n/).map((line) => line.trim());
   assert.ok(paths.includes('${{ matrix.artifacts }}'), 'release installers must be uploaded');
   assert.ok(
     paths.includes('${{ matrix.updater_artifact }}.sha256'),
