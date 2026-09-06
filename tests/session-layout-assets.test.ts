@@ -802,29 +802,39 @@ test('Fortinet and Stormshield authentication fields have mounted editor section
   const providers = [
     [
       2,
-      [
-        'UseSingleSignOn',
-        'UseExternalBrowser',
-        'TrustServerCertificate',
-        'TotpSecret',
-        'ServerCertSha256Pin',
-      ],
+      {
+        UseSingleSignOn: 'switch',
+        UseExternalBrowser: 'switch',
+        TrustServerCertificate: 'switch',
+        TotpSecret: 'password',
+        ServerCertSha256Pin: undefined,
+      },
     ],
-    [4, ['UseOtp', 'TrustServerCertificate']],
+    [4, { UseOtp: 'checkbox', TrustServerCertificate: 'checkbox' }],
   ] as const;
-  for (const [kind, keys] of providers) {
-    const fields = fieldsForKind(kind) as { key: string; section: string }[];
+  for (const [kind, controls] of providers) {
+    const fields = fieldsForKind(kind) as { key: string; section: string; type?: string }[];
     const mounted = sourceBetween(
       editor,
       `{value.kind === ${kind} ? (`,
       `{value.kind === ${kind + 1} ? (`,
     );
-    for (const key of keys) {
+    for (const [key, type] of Object.entries(controls)) {
       const field = fields.find((candidate) => candidate.key === key);
       assert.ok(field, `provider ${kind} must expose ${key}`);
+      assert.equal(field.type, type, `${key} must preserve its input value type`);
       assert.ok(mounted.includes(`rows('${field.section}'`), `${key} must have a mounted section`);
     }
   }
+  const row = sourceBetween(appSource, 'function TunnelFieldRow', 'function TunnelSection');
+  assert.match(
+    row,
+    /field\.type === 'switch' \? \([\s\S]*?<Switch[\s\S]*?onCheckedChange=\{\(checked\) => onChange\(field\.key, checked\)\}/,
+  );
+  assert.match(
+    row,
+    /field\.type === 'checkbox' \? \([\s\S]*?<Checkbox[\s\S]*?onCheckedChange=\{\(checked\) => onChange\(field\.key, checked === true\)\}/,
+  );
 });
 
 test('OpenVPN profile import is wired without submitting the tunnel form', () => {
