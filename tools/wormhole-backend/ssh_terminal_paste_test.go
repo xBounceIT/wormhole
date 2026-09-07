@@ -1,11 +1,84 @@
 package main
 
 import (
+	"bytes"
 	"encoding/base64"
+	"encoding/json"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
 )
+
+func TestSSHServerPasteNormalizedSizeLimit(t *testing.T) {
+	for _, bracketed := range []bool{false, true} {
+		for _, tc := range []struct {
+			name, text      string
+			paste, accepted bool
+		}{
+			{"maximum CRLF", strings.Repeat("\r\n", sshInputMaxBytes), true, true},
+			{"maximum LF", strings.Repeat("\n", sshInputMaxBytes), true, true},
+			{"maximum ASCII", strings.Repeat("a", sshInputMaxBytes), true, true},
+			{"oversized normalized", strings.Repeat("a", sshInputMaxBytes+1), true, false},
+			{"oversized Unicode", strings.Repeat("é", sshInputMaxBytes/2+1), true, false},
+			{"oversized wire", strings.Repeat("\r\n", sshInputMaxBytes+1), true, false},
+			{"raw keyboard limit", strings.Repeat("\r\n", sshInputMaxBytes), false, false},
+		} {
+			t.Run(tc.name+fmt.Sprint(bracketed), func(t *testing.T) {
+				var output bytes.Buffer
+				server := newSSHTestServer(&output)
+				native := &sshNativeSession{inputQueue: make(chan []byte, 1), done: make(chan struct{})}
+				native.pasteMode.enabled = bracketed
+				server.sessions["paste"] = native
+				server.input(sshWireCommand{SessionID: "paste", Data: base64.StdEncoding.EncodeToString([]byte(tc.text)), Paste: tc.paste})
+				if !tc.accepted {
+					if len(native.inputQueue) != 0 || output.Len() == 0 {
+						t.Fatal("oversized input was not rejected")
+					}
+					return
+				}
+				if len(native.inputQueue) != 1 || output.Len() != 0 {
+					t.Fatal("valid normalized input was rejected")
+				}
+				data := <-native.inputQueue
+				if bracketed {
+					if !bytes.HasPrefix(data, []byte("\x1b[200~")) || !bytes.HasSuffix(data, []byte("\x1b[201~")) {
+						t.Fatal("missing paste envelope")
+					}
+					data = data[6 : len(data)-6]
+				}
+				if len(data) != sshInputMaxBytes {
+					t.Fatalf("normalized size = %d", len(data))
+				}
+				if strings.ContainsAny(tc.text, "\r\n") && bytes.Count(data, []byte("\r")) != sshInputMaxBytes {
+					t.Fatal("newline normalization changed")
+				}
+			})
+		}
+	}
+}
+
+func TestSSHCommandChannelAcceptsMaximumRawPaste(t *testing.T) {
+	var input, output bytes.Buffer
+	encoder := json.NewEncoder(&input)
+	for _, data := range []string{strings.Repeat("\r\n", sshInputMaxBytes), "next"} {
+		if err := encoder.Encode(sshWireCommand{Type: "input", SessionID: "missing", Paste: true, Data: base64.StdEncoding.EncodeToString([]byte(data))}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := serveSSH("", &input, &output); err != nil {
+		t.Fatal(err)
+	}
+	events := decodeSSHEvents(t, output.Bytes())
+	if len(events) != 2 {
+		t.Fatalf("channel stopped processing after large paste: %d events", len(events))
+	}
+	for _, event := range events {
+		if event.Error != "SSH session is not connected" {
+			t.Fatalf("unexpected event: %#v", event)
+		}
+	}
+}
 
 func TestSSHTerminalPasteMode(t *testing.T) {
 	cases := []struct {
@@ -66,12 +139,20 @@ func TestSSHTerminalPasteEncoding(t *testing.T) {
 			if bracketed && tc.input != "" {
 				expected = "\x1b[200~" + expected + "\x1b[201~"
 			}
-			if got := string(sshTerminalPaste([]byte(tc.input), bracketed)); got != expected {
+			data, err := sshTerminalPaste([]byte(tc.input), bracketed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := string(data); got != expected {
 				t.Fatalf("paste(%q, %v) = %q, want %q", tc.input, bracketed, got, expected)
 			}
 		}
 	}
-	if got := string(sshTerminalPaste([]byte("a\x1b[201~\rbad"), true)); got != "\x1b[200~a[201~\rbad\x1b[201~" {
+	data, err := sshTerminalPaste([]byte("a\x1b[201~\rbad"), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(data); got != "\x1b[200~a[201~\rbad\x1b[201~" {
 		t.Fatalf("escape broke envelope: %q", got)
 	}
 }

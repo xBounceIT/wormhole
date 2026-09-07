@@ -1765,8 +1765,8 @@ function parseCredentialDeleteRequest(value: unknown): CredentialDeleteRequest {
   return { id };
 }
 
-function isSshInput(value: unknown): value is string {
-  return isEncodedSshInput(value);
+function isSshInput(value: unknown, paste = false): value is string {
+  return isEncodedSshInput(value, paste);
 }
 
 function isSftpPath(value: unknown): value is string {
@@ -8317,7 +8317,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
   ipcMain.handle(
     'ssh:input',
     async (_event, sessionId: unknown, data: unknown, paste: unknown = false) => {
-      if (!isSshSessionId(sessionId) || !isSshInput(data) || typeof paste !== 'boolean') {
+      if (!isSshSessionId(sessionId) || typeof paste !== 'boolean' || !isSshInput(data, paste)) {
         throw new Error('SSH input request is invalid.');
       }
       return serializeAuthOperation(async () => {

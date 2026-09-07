@@ -330,6 +330,16 @@ test('SSH clipboard IPC forwards paste identity to Go and validates its type', a
     ['session', 'YQ==', true],
     ['session', Buffer.from(clipboardText).toString('base64'), true],
   ]);
+  clipboardText = '\r\n'.repeat(1024 * 1024);
+  const largePaste = Buffer.from(clipboardText).toString('base64');
+  await input(null, 'session', largePaste, true);
+  assert.deepEqual(await clipboard(null, 'session'), { pasted: true });
+  assert.equal(calls.length, 5);
+  for (const call of calls.slice(3)) {
+    assert.equal(call[1], largePaste);
+    assert.equal(call[2], true);
+  }
+  await assert.rejects(input(null, 'session', largePaste), /invalid/);
   clipboardText = '';
   assert.deepEqual(await clipboard(null, 'session'), { pasted: false });
   await assert.rejects(input(null, 'session', 'YQ==', 'true'), /invalid/);
@@ -339,7 +349,7 @@ test('SSH clipboard IPC forwards paste identity to Go and validates its type', a
   authorized = false;
   await assert.rejects(clipboard(null, 'session'), /locked/);
   await assert.rejects(input(null, 'session', 'YQ==', true), /locked/);
-  assert.equal(calls.length, 3);
+  assert.equal(calls.length, 5);
 
   const backendSource = main.slice(main.indexOf('class NativeSshBackend'));
   const method = backendSource.match(/  sendInput\([^]*?\n  \}/)?.[0];
@@ -515,7 +525,7 @@ test('right-click paste encodes Unicode text for the SSH wire protocol', () => {
 test('right-click paste ignores an empty clipboard and rejects oversized text', () => {
   assert.equal(encodeTerminalClipboardText(''), undefined);
   assert.doesNotThrow(() => encodeTerminalClipboardText('a'.repeat(1024 * 1024)));
-  assert.throws(() => encodeTerminalClipboardText('a'.repeat(1024 * 1024 + 1)), /too large/i);
+  assert.throws(() => encodeTerminalClipboardText('a'.repeat(2 * 1024 * 1024 + 1)), /too large/i);
 });
 
 test('SSH input validation rejects malformed and oversized base64', () => {
@@ -523,6 +533,14 @@ test('SSH input validation rejects malformed and oversized base64', () => {
   assert.equal(isEncodedSshInput('YQ='), false);
   assert.equal(isEncodedSshInput(Buffer.alloc(1024 * 1024).toString('base64')), true);
   assert.equal(isEncodedSshInput(Buffer.alloc(1024 * 1024 + 1).toString('base64')), false);
+  const maximumCrLfPaste = encodeTerminalClipboardText('\r\n'.repeat(1024 * 1024));
+  assert.equal(isEncodedSshInput(maximumCrLfPaste), false);
+  assert.equal(isEncodedSshInput(maximumCrLfPaste, true), true);
+  assert.equal(isEncodedSshInput('YQ=', true), false);
+  assert.equal(
+    isEncodedSshInput(Buffer.alloc(2 * 1024 * 1024 + 1).toString('base64'), true),
+    false,
+  );
 });
 
 test('clipboard writes fall back after the async API rejects', async () => {

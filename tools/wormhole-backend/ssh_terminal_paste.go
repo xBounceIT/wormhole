@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 )
 
@@ -82,17 +83,20 @@ func (mode *sshTerminalPasteMode) write(data []byte) {
 	}
 }
 
-func sshTerminalPaste(data []byte, bracketed bool) []byte {
+func sshTerminalPaste(data []byte, bracketed bool) ([]byte, error) {
 	if len(data) == 0 {
-		return nil
+		return nil, nil
 	}
 	data = bytes.ReplaceAll(data, []byte("\r\n"), []byte("\r"))
 	data = bytes.ReplaceAll(data, []byte("\n"), []byte("\r"))
+	if len(data) > sshInputMaxBytes {
+		return nil, errors.New("SSH clipboard text is too large to paste")
+	}
 	if !bracketed {
-		return data
+		return data, nil
 	}
 	// Clipboard text must not be able to terminate its own paste envelope.
 	data = bytes.ReplaceAll(data, []byte{0x1b}, nil)
 	result := append([]byte("\x1b[200~"), data...)
-	return append(result, []byte("\x1b[201~")...)
+	return append(result, []byte("\x1b[201~")...), nil
 }

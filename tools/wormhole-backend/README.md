@@ -36,6 +36,9 @@ endings and adds a bracketed-paste envelope only when the remote application has
 enabled DEC mode 2004. Supporting shells keep the entire multiline block in the
 editing buffer until the user presses Enter; ordinary keyboard input stays raw.
 Both Chromium paste events and native right-click paste use this contract.
+The clipboard transport allows up to 2 MiB of raw text for CRLF expansion; Go
+enforces the existing 1 MiB input limit after newline normalization and before
+adding the paste envelope. Keyboard input keeps the 1 MiB transport limit.
 
 `serial` keeps a local serial line alive over the same JSON-lines terminal
 contract. It resolves the inherited baud rate, data bits, stop bits, parity, and

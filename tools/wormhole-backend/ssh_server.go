@@ -30,6 +30,7 @@ const (
 	sshKeepAliveInterval               = 30 * time.Second
 	sshOutputDrainTimeout              = 2 * time.Second
 	sshInputMaxBytes                   = 1024 * 1024
+	sshPasteMaxBytes                   = 2 * sshInputMaxBytes
 	sshInputQueueCapacity              = 16
 	sshOutputChunk                     = 16 * 1024
 	sshMaxColumns                      = 500
@@ -435,7 +436,8 @@ func serveSSH(databasePath string, input io.Reader, output io.Writer, electronUs
 	server.mcp = newMcpController(server)
 
 	scanner := bufio.NewScanner(input)
-	scanner.Buffer(make([]byte, 4096), 2*1024*1024)
+	// A maximum CRLF paste needs almost 3 MiB after base64 encoding.
+	scanner.Buffer(make([]byte, 4096), 4*1024*1024)
 	for scanner.Scan() {
 		var command sshWireCommand
 		if err := json.Unmarshal(scanner.Bytes(), &command); err != nil {
@@ -772,7 +774,11 @@ func (server *sshServer) openNativeSSH(
 
 func (server *sshServer) input(command sshWireCommand) {
 	data, err := base64.StdEncoding.DecodeString(command.Data)
-	if err != nil || len(data) > sshInputMaxBytes {
+	maxBytes := sshInputMaxBytes
+	if command.Paste {
+		maxBytes = sshPasteMaxBytes
+	}
+	if err != nil || len(data) > maxBytes {
 		server.writeError(command.SessionID, "SSH input is invalid")
 		return
 	}
@@ -788,7 +794,11 @@ func (server *sshServer) input(command sshWireCommand) {
 		native.terminalOutputMu.Lock()
 		bracketed := native.pasteMode.enabled
 		native.terminalOutputMu.Unlock()
-		data = sshTerminalPaste(data, bracketed)
+		data, err = sshTerminalPaste(data, bracketed)
+		if err != nil {
+			server.writeError(command.SessionID, err.Error())
+			return
+		}
 	}
 	if err := native.write(data); err != nil {
 		if server.isActive(native) {
