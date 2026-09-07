@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { createRequire } from 'node:module';
+import { createRequire, stripTypeScriptTypes } from 'node:module';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -10,11 +10,7 @@ import { runInNewContext } from 'node:vm';
 import * as React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
-import {
-  encodeTerminalClipboardText,
-  isEncodedSshInput,
-  normalizeTerminalPasteText as normalizeNativeTerminalPasteText,
-} from '../electron/terminal-clipboard.ts';
+import { encodeTerminalClipboardText, isEncodedSshInput } from '../electron/terminal-clipboard.ts';
 import { writeClipboardText } from '../src/clipboard.ts';
 import {
   clearTerminalSelectionIfUnchanged,
@@ -239,6 +235,136 @@ test('terminal state content keeps its parent surface, focus, and protocol resiz
   );
 });
 
+test('terminal paste events preserve the SSH block and retain serial newline handling', () => {
+  const terminalSource = appSource.slice(appSource.indexOf('function SshTerminalSurface'));
+  const handler = terminalSource.match(/onPaste=\{\(event\) => \{([\s\S]*?)\n      \}\}/)?.[1];
+  assert.ok(handler);
+  const paste = new Function(
+    'event',
+    'onInput',
+    'session',
+    'isSerial',
+    'normalizeTerminalPasteText',
+    handler,
+  );
+  for (const isSerial of [false, true]) {
+    const calls: unknown[][] = [];
+    let prevented = false;
+    const text = 'sudo first\r\nsudo second\nlast';
+    const event = {
+      clipboardData: { getData: () => text },
+      preventDefault: () => {
+        prevented = true;
+      },
+    };
+    paste(
+      event,
+      (...args: unknown[]) => calls.push(args),
+      { id: 'session' },
+      isSerial,
+      normalizeTerminalPasteText,
+    );
+    assert.equal(prevented, true);
+    assert.deepEqual(calls, [
+      ['session', isSerial ? 'sudo first\rsudo second\rlast' : text, !isSerial],
+    ]);
+    event.clipboardData.getData = () => '';
+    paste(
+      event,
+      (...args: unknown[]) => calls.push(args),
+      { id: 'session' },
+      isSerial,
+      normalizeTerminalPasteText,
+    );
+    assert.equal(calls.length, 1);
+  }
+});
+
+test('SSH clipboard IPC forwards paste identity to Go and validates its type', async () => {
+  const main = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8').replace(
+    /\r\n/g,
+    '\n',
+  );
+  const handlersSource = main.slice(
+    main.indexOf("  ipcMain.handle(\n    'ssh:input'"),
+    main.indexOf("  ipcMain.handle(\n    'ssh:resize'"),
+  );
+  assert.ok(handlersSource.includes('ssh:paste-clipboard'));
+  const transpile = stripTypeScriptTypes;
+  const handlers = new Map<string, (...args: unknown[]) => Promise<unknown>>();
+  const calls: unknown[][] = [];
+  let clipboardText = 'first\r\nsecond';
+  let authorized = true;
+  new Function(
+    'ipcMain',
+    'isSshSessionId',
+    'isSshInput',
+    'serializeAuthOperation',
+    'requireWorkspaceAuth',
+    'sshBackend',
+    'encodeTerminalClipboardText',
+    'clipboard',
+    transpile(handlersSource),
+  )(
+    {
+      handle: (name: string, handler: (...args: unknown[]) => Promise<unknown>) =>
+        handlers.set(name, handler),
+    },
+    (id: unknown) => id === 'session',
+    isEncodedSshInput,
+    (operation: () => Promise<unknown>) => operation(),
+    async () => {
+      if (!authorized) throw new Error('locked');
+    },
+    { sendInput: (...args: unknown[]) => calls.push(args) },
+    encodeTerminalClipboardText,
+    { readText: () => clipboardText },
+  );
+  const input = handlers.get('ssh:input')!;
+  const clipboard = handlers.get('ssh:paste-clipboard')!;
+  await input(null, 'session', 'DQ==');
+  await input(null, 'session', 'YQ==', true);
+  assert.deepEqual(await clipboard(null, 'session'), { pasted: true });
+  assert.deepEqual(calls, [
+    ['session', 'DQ==', false],
+    ['session', 'YQ==', true],
+    ['session', Buffer.from(clipboardText).toString('base64'), true],
+  ]);
+  clipboardText = '\r\n'.repeat(1024 * 1024);
+  const largePaste = Buffer.from(clipboardText).toString('base64');
+  await input(null, 'session', largePaste, true);
+  assert.deepEqual(await clipboard(null, 'session'), { pasted: true });
+  assert.equal(calls.length, 5);
+  for (const call of calls.slice(3)) {
+    assert.equal(call[1], largePaste);
+    assert.equal(call[2], true);
+  }
+  await assert.rejects(input(null, 'session', largePaste), /invalid/);
+  clipboardText = '';
+  assert.deepEqual(await clipboard(null, 'session'), { pasted: false });
+  await assert.rejects(input(null, 'session', 'YQ==', 'true'), /invalid/);
+  await assert.rejects(input(null, 'session', 'bad'), /invalid/);
+  await assert.rejects(input(null, 'invalid', 'YQ==', true), /invalid/);
+  await assert.rejects(clipboard(null, 'invalid'), /invalid/);
+  authorized = false;
+  await assert.rejects(clipboard(null, 'session'), /locked/);
+  await assert.rejects(input(null, 'session', 'YQ==', true), /locked/);
+  assert.equal(calls.length, 5);
+
+  const backendSource = main.slice(main.indexOf('class NativeSshBackend'));
+  const method = backendSource.match(/  sendInput\([^]*?\n  \}/)?.[0];
+  assert.ok(method);
+  const backend = new Function('return ' + transpile(`(new class { ${method} })`))();
+  const messages: unknown[] = [];
+  backend.write = (message: unknown) => messages.push(message);
+  backend.sendInput('session', 'YQ==', true);
+  backend.sendInput('session', 'DQ==');
+  assert.deepEqual(messages, [
+    { type: 'input', session_id: 'session', data: 'YQ==', paste: true },
+    { type: 'input', session_id: 'session', data: 'DQ==', paste: false },
+  ]);
+});
+
 const shortcut = (
   key: string,
   overrides: Partial<Parameters<typeof shouldUseTerminalClipboardShortcut>[0]> = {},
@@ -392,15 +518,14 @@ test('right-click paste encodes Unicode text for the SSH wire protocol', () => {
   const normalized = 'printf "caffè ☕"\rprintf "done"\r';
   const encoded = encodeTerminalClipboardText(text);
   assert.equal(normalizeTerminalPasteText(text), normalized);
-  assert.equal(normalizeNativeTerminalPasteText(text), normalized);
-  assert.equal(encoded, Buffer.from(normalized, 'utf8').toString('base64'));
+  assert.equal(encoded, Buffer.from(text, 'utf8').toString('base64'));
   assert.equal(isEncodedSshInput(encoded), true);
 });
 
 test('right-click paste ignores an empty clipboard and rejects oversized text', () => {
   assert.equal(encodeTerminalClipboardText(''), undefined);
   assert.doesNotThrow(() => encodeTerminalClipboardText('a'.repeat(1024 * 1024)));
-  assert.throws(() => encodeTerminalClipboardText('a'.repeat(1024 * 1024 + 1)), /too large/i);
+  assert.throws(() => encodeTerminalClipboardText('a'.repeat(2 * 1024 * 1024 + 1)), /too large/i);
 });
 
 test('SSH input validation rejects malformed and oversized base64', () => {
@@ -408,6 +533,14 @@ test('SSH input validation rejects malformed and oversized base64', () => {
   assert.equal(isEncodedSshInput('YQ='), false);
   assert.equal(isEncodedSshInput(Buffer.alloc(1024 * 1024).toString('base64')), true);
   assert.equal(isEncodedSshInput(Buffer.alloc(1024 * 1024 + 1).toString('base64')), false);
+  const maximumCrLfPaste = encodeTerminalClipboardText('\r\n'.repeat(1024 * 1024));
+  assert.equal(isEncodedSshInput(maximumCrLfPaste), false);
+  assert.equal(isEncodedSshInput(maximumCrLfPaste, true), true);
+  assert.equal(isEncodedSshInput('YQ=', true), false);
+  assert.equal(
+    isEncodedSshInput(Buffer.alloc(2 * 1024 * 1024 + 1).toString('base64'), true),
+    false,
+  );
 });
 
 test('clipboard writes fall back after the async API rejects', async () => {

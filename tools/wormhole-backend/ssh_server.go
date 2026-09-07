@@ -30,6 +30,7 @@ const (
 	sshKeepAliveInterval               = 30 * time.Second
 	sshOutputDrainTimeout              = 2 * time.Second
 	sshInputMaxBytes                   = 1024 * 1024
+	sshPasteMaxBytes                   = 2 * sshInputMaxBytes
 	sshInputQueueCapacity              = 16
 	sshOutputChunk                     = 16 * 1024
 	sshMaxColumns                      = 500
@@ -110,6 +111,7 @@ type sshWireCommand struct {
 	KeyPassphraseOverride         string                `json:"key_passphrase_override,omitempty"`
 	TunnelEnabled                 *bool                 `json:"tunnel_enabled,omitempty"`
 	Data                          string                `json:"data"`
+	Paste                         bool                  `json:"paste,omitempty"`
 	Path                          string                `json:"path"`
 	DestinationPath               string                `json:"destination_path"`
 	RequestID                     string                `json:"request_id"`
@@ -262,6 +264,7 @@ type sshNativeSession struct {
 	stderr           io.Reader
 	server           *sshServer
 	terminal         *sshTerminalEmulator
+	pasteMode        sshTerminalPasteMode // Guarded by terminalOutputMu; survives display recovery.
 	autoSudo         *sshAutoSudoDriver
 	mcpSession       mcpSessionInfo
 	mcpReplay        *mcpReplayBuffer
@@ -434,7 +437,8 @@ func serveSSH(databasePath string, input io.Reader, output io.Writer, electronUs
 	server.mcp = newMcpController(server)
 
 	scanner := bufio.NewScanner(input)
-	scanner.Buffer(make([]byte, 4096), 2*1024*1024)
+	// A maximum CRLF paste needs almost 3 MiB after base64 encoding.
+	scanner.Buffer(make([]byte, 4096), 4*1024*1024)
 	for scanner.Scan() {
 		var command sshWireCommand
 		if err := json.Unmarshal(scanner.Bytes(), &command); err != nil {
@@ -771,7 +775,11 @@ func (server *sshServer) openNativeSSH(
 
 func (server *sshServer) input(command sshWireCommand) {
 	data, err := base64.StdEncoding.DecodeString(command.Data)
-	if err != nil || len(data) > sshInputMaxBytes {
+	maxBytes := sshInputMaxBytes
+	if command.Paste {
+		maxBytes = sshPasteMaxBytes
+	}
+	if err != nil || len(data) > maxBytes {
 		server.writeError(command.SessionID, "SSH input is invalid")
 		return
 	}
@@ -782,6 +790,16 @@ func (server *sshServer) input(command sshWireCommand) {
 	if native == nil {
 		server.writeError(command.SessionID, "SSH session is not connected")
 		return
+	}
+	if command.Paste {
+		native.terminalOutputMu.Lock()
+		bracketed := native.pasteMode.enabled
+		native.terminalOutputMu.Unlock()
+		data, err = sshTerminalPaste(data, bracketed)
+		if err != nil {
+			server.writeError(command.SessionID, err.Error())
+			return
+		}
 	}
 	if err := native.write(data); err != nil {
 		if server.isActive(native) {
@@ -1346,6 +1364,9 @@ func (native *sshNativeSession) publishTerminalData(data []byte) {
 	if native.isClosed() {
 		return
 	}
+	// Input modes belong to the remote stream, before MCP display filtering and
+	// independently of any emulator replacement after malformed output.
+	native.pasteMode.write(data)
 	if native.autoSudo != nil {
 		native.autoSudo.observe(data)
 	}
@@ -1783,7 +1804,8 @@ func (driver *sshAutoSudoDriver) queueUserInput(data []byte) (bool, error) {
 	if driver.state == sshAutoSudoDone {
 		return false, nil
 	}
-	if len(driver.pendingInput)+len(data) > sshInputMaxBytes {
+	// Reserve the envelope as well as the maximum normalized clipboard text.
+	if len(driver.pendingInput)+len(data) > sshInputMaxBytes+sshTerminalPasteOverhead {
 		return true, errSSHInputFull
 	}
 	driver.pendingInput = append(driver.pendingInput, data...)

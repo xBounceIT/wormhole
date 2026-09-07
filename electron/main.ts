@@ -1766,8 +1766,8 @@ function parseCredentialDeleteRequest(value: unknown): CredentialDeleteRequest {
   return { id };
 }
 
-function isSshInput(value: unknown): value is string {
-  return isEncodedSshInput(value);
+function isSshInput(value: unknown, paste = false): value is string {
+  return isEncodedSshInput(value, paste);
 }
 
 function isSftpPath(value: unknown): value is string {
@@ -6180,8 +6180,8 @@ class NativeSshBackend {
     });
   }
 
-  sendInput(sessionId: string, data: string): void {
-    this.write({ type: 'input', session_id: sessionId, data });
+  sendInput(sessionId: string, data: string, paste = false): void {
+    this.write({ type: 'input', session_id: sessionId, data, paste });
   }
 
   resize(sessionId: string, columns: number, rows: number): void {
@@ -8320,22 +8320,25 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       () => sshBackend.close(request.sessionId),
     );
   });
-  ipcMain.handle('ssh:input', async (_event, sessionId: unknown, data: unknown) => {
-    if (!isSshSessionId(sessionId) || !isSshInput(data)) {
-      throw new Error('SSH input request is invalid.');
-    }
-    return serializeAuthOperation(async () => {
-      await requireWorkspaceAuth();
-      sshBackend.sendInput(sessionId, data);
-    });
-  });
+  ipcMain.handle(
+    'ssh:input',
+    async (_event, sessionId: unknown, data: unknown, paste: unknown = false) => {
+      if (!isSshSessionId(sessionId) || typeof paste !== 'boolean' || !isSshInput(data, paste)) {
+        throw new Error('SSH input request is invalid.');
+      }
+      return serializeAuthOperation(async () => {
+        await requireWorkspaceAuth();
+        sshBackend.sendInput(sessionId, data, paste);
+      });
+    },
+  );
   ipcMain.handle('ssh:paste-clipboard', async (_event, sessionId: unknown) => {
     if (!isSshSessionId(sessionId)) throw new Error('SSH paste request is invalid.');
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
       const data = encodeTerminalClipboardText(clipboard.readText());
       if (!data) return { pasted: false };
-      sshBackend.sendInput(sessionId, data);
+      sshBackend.sendInput(sessionId, data, true);
       return { pasted: true };
     });
   });
