@@ -6,6 +6,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { promisify } from 'node:util';
+import { runInNewContext } from 'node:vm';
+import * as React from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import { transformWithOxc } from 'vite';
 import {
   encodeTerminalClipboardText,
   isEncodedSshInput,
@@ -32,6 +36,208 @@ const appSource = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8
 const require = createRequire(import.meta.url);
 const electronExecutable = require('electron') as string;
 const execFileAsync = promisify(execFile);
+
+type TerminalConnectionStateProps = {
+  session: {
+    id: string;
+    status: 'connecting' | 'failed' | 'disconnected';
+    host?: string;
+    error?: string;
+    hostKeyMismatch?: { expected: string; received: string };
+    tunnelProgress?: object;
+  };
+  isSerial: boolean;
+  onReconnect: (sessionId: string) => void;
+  onTrustHostKey?: (sessionId: string, mismatch: object) => void;
+};
+
+// Execute the production JSX without loading App's unrelated native session lifecycles.
+const connectionStateStart = appSource.indexOf('function SshTerminalConnectionState');
+const connectionStateEnd = appSource.indexOf('function SshTerminalSurface', connectionStateStart);
+assert.ok(connectionStateStart >= 0 && connectionStateEnd > connectionStateStart);
+const connectionStateTransform = await transformWithOxc(
+  appSource.slice(connectionStateStart, connectionStateEnd),
+  'terminal-connection-state.tsx',
+  { jsx: { runtime: 'classic' } },
+);
+const renderConnectionState = runInNewContext(
+  `${connectionStateTransform.code}\nSshTerminalConnectionState;`,
+  {
+    React,
+    Button: 'button',
+    LoaderCircle: 'loading-icon',
+    AlertCircle: 'error-icon',
+    Terminal: 'terminal-icon',
+    RefreshCcw: 'reconnect-icon',
+    ConnectionStepper: 'connection-stepper',
+  },
+) as (props: TerminalConnectionStateProps) => React.ReactElement<Record<string, unknown>>;
+
+function connectionStateElements(
+  node: React.ReactNode,
+): React.ReactElement<Record<string, unknown>>[] {
+  if (!React.isValidElement<Record<string, unknown>>(node)) return [];
+  return [
+    node,
+    ...React.Children.toArray(node.props.children as React.ReactNode).flatMap(
+      connectionStateElements,
+    ),
+  ];
+}
+
+test('terminal connection states preserve SSH and serial copy, status icons, and reconnect', () => {
+  for (const isSerial of [false, true]) {
+    for (const status of ['connecting', 'failed', 'disconnected'] as const) {
+      const reconnects: string[] = [];
+      const element = renderConnectionState({
+        session: { id: 'terminal-1', status },
+        isSerial,
+        onReconnect: (id) => reconnects.push(id),
+      });
+      const markup = renderToStaticMarkup(element);
+      const protocol = isSerial ? 'Serial' : 'SSH';
+      const expectedTitle =
+        status === 'connecting'
+          ? isSerial
+            ? 'Opening serial port'
+            : 'Connecting to SSH'
+          : `${protocol} ${status === 'failed' ? 'connection failed' : 'session closed'}`;
+      const expectedMessage =
+        status === 'connecting'
+          ? isSerial
+            ? 'Opening the local serial line.'
+            : 'Opening a secure shell session.'
+          : isSerial
+            ? 'The serial port closed the session.'
+            : 'The remote host closed the connection.';
+      assert.ok(markup.includes(expectedTitle), expectedTitle);
+      assert.ok(markup.includes(expectedMessage), expectedMessage);
+      assert.ok(markup.includes(isSerial ? 'Serial terminal' : 'Secure shell'));
+      assert.ok(markup.includes('inherited target'));
+      const elements = connectionStateElements(element);
+      const icon =
+        status === 'connecting'
+          ? 'loading-icon'
+          : status === 'failed'
+            ? 'error-icon'
+            : 'terminal-icon';
+      assert.ok(elements.some((child) => child.type === icon));
+      const reconnect = elements.find((child) => child.type === 'button');
+      if (status === 'connecting') {
+        assert.equal(reconnect, undefined);
+        assert.ok(
+          markup.includes(isSerial ? 'Opening local serial line' : 'Negotiating secure session'),
+        );
+      } else {
+        assert.equal(typeof reconnect?.props.onClick, 'function');
+        (reconnect!.props.onClick as () => void)();
+        assert.deepEqual(reconnects, ['terminal-1']);
+      }
+    }
+  }
+});
+
+test('terminal errors retain escaped diagnostics and only failed SSH can trust a changed host key', () => {
+  const mismatch = { expected: 'SHA256:saved', received: 'SHA256:presented' };
+  const trusted: unknown[][] = [];
+  const props: TerminalConnectionStateProps = {
+    session: {
+      id: 'terminal-2',
+      status: 'failed',
+      host: 'server.example',
+      error: '<remote failure>',
+      hostKeyMismatch: mismatch,
+    },
+    isSerial: false,
+    onReconnect: () => assert.fail('trust must retain its separate reconnect lifecycle'),
+    onTrustHostKey: (...args) => trusted.push(args),
+  };
+  const element = renderConnectionState(props);
+  const markup = renderToStaticMarkup(element);
+  assert.ok(
+    markup.includes('The server identity changed. Verify the new fingerprint before trusting it.'),
+  );
+  assert.ok(markup.includes('SHA256:saved') && markup.includes('SHA256:presented'));
+  assert.ok(markup.includes('server.example'));
+  assert.ok(markup.includes('Trust new key &amp; reconnect'));
+  assert.ok(!markup.includes('&lt;remote failure&gt;'));
+  const trust = connectionStateElements(element).find((child) => child.type === 'button');
+  (trust!.props.onClick as () => void)();
+  assert.equal(trusted.length, 1);
+  assert.equal(trusted[0][0], 'terminal-2');
+  assert.equal(trusted[0][1], mismatch);
+  const optionalTrust = renderConnectionState({ ...props, onTrustHostKey: undefined });
+  const optionalButton = connectionStateElements(optionalTrust).find(
+    (child) => child.type === 'button',
+  );
+  assert.doesNotThrow(() => (optionalButton!.props.onClick as () => void)());
+
+  for (const override of [
+    { isSerial: true },
+    { session: { ...props.session, status: 'connecting' as const } },
+    { session: { ...props.session, status: 'disconnected' as const } },
+    { session: { ...props.session, hostKeyMismatch: undefined } },
+  ]) {
+    const ordinaryMarkup = renderToStaticMarkup(renderConnectionState({ ...props, ...override }));
+    assert.ok(!ordinaryMarkup.includes('Host key changed'));
+    assert.ok(ordinaryMarkup.includes('&lt;remote failure&gt;'));
+  }
+});
+
+test('only connecting SSH renders the tunnel progress stepper', () => {
+  const tunnelProgress = { phase: 'connecting', message: 'Opening VPN' };
+  for (const isSerial of [false, true]) {
+    for (const status of ['connecting', 'failed', 'disconnected'] as const) {
+      const element = renderConnectionState({
+        session: { id: 'terminal-3', status, tunnelProgress },
+        isSerial,
+        onReconnect: () => undefined,
+      });
+      const stepper = connectionStateElements(element).find(
+        (child) => child.type === 'connection-stepper',
+      );
+      if (!isSerial && status === 'connecting') {
+        assert.equal(stepper?.props.tunnelProgress, tunnelProgress);
+        assert.equal(
+          connectionStateElements(element).some((child) => child.type === 'button'),
+          false,
+        );
+      } else {
+        assert.equal(stepper, undefined);
+      }
+    }
+  }
+});
+
+test('terminal state content keeps its parent surface, focus, and protocol resize lifecycle', () => {
+  const surfaceSource = appSource.slice(
+    connectionStateEnd,
+    appSource.indexOf("type SftpPaneKind = 'local' | 'remote'", connectionStateEnd),
+  );
+  const stateRender = surfaceSource.slice(
+    surfaceSource.indexOf("if (session.status !== 'connected')"),
+    surfaceSource.indexOf("aria-label={isSerial ? 'Live serial terminal'"),
+  );
+  assert.match(stateRender, /return \(\s*<div[\s\S]*ref=\{surfaceRef\}/);
+  assert.match(
+    stateRender,
+    /aria-label=\{isSerial \? 'Serial connection state' : 'SSH connection state'\}/,
+  );
+  const content = stateRender.match(/<SshTerminalConnectionState[\s\S]*?\/>/)?.[0] ?? '';
+  for (const prop of ['session', 'isSerial', 'onReconnect', 'onTrustHostKey']) {
+    assert.ok(content.includes(`${prop}={${prop}}`), `${prop} stays connected to the parent`);
+  }
+  assert.equal(surfaceSource.match(/ref=\{surfaceRef\}/g)?.length, 2);
+  assert.match(surfaceSource, /const focus = \(\) => surface\.focus\(\{ preventScroll: true \}\);/);
+  assert.match(
+    surfaceSource,
+    /const frame = requestAnimationFrame\(focus\);\s*return \(\) => cancelAnimationFrame\(frame\);/,
+  );
+  assert.match(
+    surfaceSource,
+    /isSerial\s*\? window\.wormhole\?\.resizeSerialSession\(backendSessionId, columns, rows\)\s*: window\.wormhole\?\.resizeSshSession\(backendSessionId, columns, rows\)/,
+  );
+});
 
 const shortcut = (
   key: string,

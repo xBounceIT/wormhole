@@ -8846,6 +8846,118 @@ function terminalSelectionText(surface: HTMLElement): string {
   return terminalSelection(surface)?.toString() ?? '';
 }
 
+function SshTerminalConnectionState({
+  session,
+  isSerial,
+  onReconnect,
+  onTrustHostKey,
+}: {
+  session: Session;
+  isSerial: boolean;
+  onReconnect: (sessionId: string) => void;
+  onTrustHostKey?: (sessionId: string, mismatch: NonNullable<Session['hostKeyMismatch']>) => void;
+}) {
+  const isConnecting = session.status === 'connecting';
+  const isFailed = session.status === 'failed';
+  const hostKeyMismatch = !isSerial && isFailed ? session.hostKeyMismatch : undefined;
+  const showTunnelStepper = isConnecting && !isSerial && Boolean(session.tunnelProgress);
+  const title = isConnecting
+    ? isSerial
+      ? 'Opening serial port'
+      : 'Connecting to SSH'
+    : isFailed
+      ? isSerial
+        ? 'Serial connection failed'
+        : 'SSH connection failed'
+      : isSerial
+        ? 'Serial session closed'
+        : 'SSH session closed';
+  const message = hostKeyMismatch
+    ? 'The server identity changed. Verify the new fingerprint before trusting it.'
+    : session.error ||
+      (isConnecting
+        ? isSerial
+          ? 'Opening the local serial line.'
+          : 'Opening a secure shell session.'
+        : isSerial
+          ? 'The serial port closed the session.'
+          : 'The remote host closed the connection.');
+
+  return showTunnelStepper ? (
+    <ConnectionStepper tunnelProgress={session.tunnelProgress} />
+  ) : (
+    <div className="flex w-full max-w-2xl flex-col items-center text-center">
+      <div
+        className={`mb-5 grid size-14 place-items-center rounded-full border ${
+          isFailed
+            ? 'border-red-400/20 bg-red-400/10 text-red-300'
+            : 'border-white/10 bg-white/[0.06] text-zinc-300'
+        }`}
+      >
+        {isConnecting ? (
+          <LoaderCircle className="size-6 animate-spin" />
+        ) : isFailed ? (
+          <AlertCircle className="size-6" />
+        ) : (
+          <Terminal className="size-6" />
+        )}
+      </div>
+      <p className="font-mono text-[9px] uppercase tracking-[0.16em] text-zinc-500">
+        {isSerial ? 'Serial terminal' : 'Secure shell'}
+      </p>
+      <h3 className="mt-2 text-sm font-semibold text-zinc-100">{title}</h3>
+      <p className="mt-2 max-w-xl break-words text-sm leading-relaxed text-zinc-400">{message}</p>
+      <p className="mt-3 max-w-xl truncate font-mono text-[10px] text-zinc-600">
+        {session.host || 'inherited target'}
+      </p>
+      {hostKeyMismatch ? (
+        <div className="mt-5 w-full max-w-xl rounded-lg border border-amber-400/20 bg-amber-400/[0.06] p-4 text-left">
+          <p className="text-xs font-semibold text-amber-200">Host key changed</p>
+          <p className="mt-1 text-[11px] leading-relaxed text-amber-100/65">
+            Only trust this key if you verified the server was rebuilt, rekeyed, or moved to a new
+            host.
+          </p>
+          <div className="mt-3 grid gap-2 font-mono text-[10px]">
+            <div className="grid gap-1 sm:grid-cols-[5rem_minmax(0,1fr)] sm:items-start sm:gap-3">
+              <span className="text-zinc-500">Saved</span>
+              <code className="break-all text-zinc-300">{hostKeyMismatch.expected}</code>
+            </div>
+            <div className="grid gap-1 sm:grid-cols-[5rem_minmax(0,1fr)] sm:items-start sm:gap-3">
+              <span className="text-amber-300/70">Presented</span>
+              <code className="break-all text-amber-100">{hostKeyMismatch.received}</code>
+            </div>
+          </div>
+          <div className="mt-4 flex justify-end">
+            <Button
+              onClick={() => onTrustHostKey?.(session.id, hostKeyMismatch)}
+              size="sm"
+              variant="secondary"
+            >
+              <RefreshCcw data-icon="inline-start" />
+              Trust new key & reconnect
+            </Button>
+          </div>
+        </div>
+      ) : isConnecting ? (
+        <div className="mt-6 flex items-center gap-2 text-[10px] text-zinc-500">
+          <span className="size-1.5 animate-pulse rounded-full bg-amber-400" />
+          {isSerial ? 'Opening local serial line' : 'Negotiating secure session'}
+        </div>
+      ) : (
+        <Button
+          className="mt-6"
+          onClick={() => onReconnect(session.id)}
+          size="sm"
+          variant="secondary"
+        >
+          <RefreshCcw data-icon="inline-start" />
+          Reconnect
+        </Button>
+      )}
+    </div>
+  );
+}
+
 function SshTerminalSurface({
   session,
   isActive,
@@ -9010,115 +9122,19 @@ function SshTerminalSurface({
     };
   }, [isActive, session.status]);
 
-  const isConnected = session.status === 'connected';
-  if (!isConnected) {
-    const isConnecting = session.status === 'connecting';
-    const isFailed = session.status === 'failed';
-    const hostKeyMismatch = !isSerial && isFailed ? session.hostKeyMismatch : undefined;
-    const showTunnelStepper = isConnecting && !isSerial && Boolean(session.tunnelProgress);
-    const title = isConnecting
-      ? isSerial
-        ? 'Opening serial port'
-        : 'Connecting to SSH'
-      : isFailed
-        ? isSerial
-          ? 'Serial connection failed'
-          : 'SSH connection failed'
-        : isSerial
-          ? 'Serial session closed'
-          : 'SSH session closed';
-    const message = hostKeyMismatch
-      ? 'The server identity changed. Verify the new fingerprint before trusting it.'
-      : session.error ||
-        (isConnecting
-          ? isSerial
-            ? 'Opening the local serial line.'
-            : 'Opening a secure shell session.'
-          : isSerial
-            ? 'The serial port closed the session.'
-            : 'The remote host closed the connection.');
-
+  if (session.status !== 'connected') {
     return (
       <div
         aria-label={isSerial ? 'Serial connection state' : 'SSH connection state'}
         className="flex h-full min-h-0 min-w-0 flex-1 items-center justify-center overflow-auto bg-[#090909] px-6 py-10 text-zinc-100"
         ref={surfaceRef}
       >
-        {showTunnelStepper ? (
-          <ConnectionStepper tunnelProgress={session.tunnelProgress} />
-        ) : (
-          <div className="flex w-full max-w-2xl flex-col items-center text-center">
-            <div
-              className={`mb-5 grid size-14 place-items-center rounded-full border ${
-                isFailed
-                  ? 'border-red-400/20 bg-red-400/10 text-red-300'
-                  : 'border-white/10 bg-white/[0.06] text-zinc-300'
-              }`}
-            >
-              {isConnecting ? (
-                <LoaderCircle className="size-6 animate-spin" />
-              ) : isFailed ? (
-                <AlertCircle className="size-6" />
-              ) : (
-                <Terminal className="size-6" />
-              )}
-            </div>
-            <p className="font-mono text-[9px] uppercase tracking-[0.16em] text-zinc-500">
-              {isSerial ? 'Serial terminal' : 'Secure shell'}
-            </p>
-            <h3 className="mt-2 text-sm font-semibold text-zinc-100">{title}</h3>
-            <p className="mt-2 max-w-xl break-words text-sm leading-relaxed text-zinc-400">
-              {message}
-            </p>
-            <p className="mt-3 max-w-xl truncate font-mono text-[10px] text-zinc-600">
-              {session.host || 'inherited target'}
-            </p>
-            {hostKeyMismatch ? (
-              <div className="mt-5 w-full max-w-xl rounded-lg border border-amber-400/20 bg-amber-400/[0.06] p-4 text-left">
-                <p className="text-xs font-semibold text-amber-200">Host key changed</p>
-                <p className="mt-1 text-[11px] leading-relaxed text-amber-100/65">
-                  Only trust this key if you verified the server was rebuilt, rekeyed, or moved to a
-                  new host.
-                </p>
-                <div className="mt-3 grid gap-2 font-mono text-[10px]">
-                  <div className="grid gap-1 sm:grid-cols-[5rem_minmax(0,1fr)] sm:items-start sm:gap-3">
-                    <span className="text-zinc-500">Saved</span>
-                    <code className="break-all text-zinc-300">{hostKeyMismatch.expected}</code>
-                  </div>
-                  <div className="grid gap-1 sm:grid-cols-[5rem_minmax(0,1fr)] sm:items-start sm:gap-3">
-                    <span className="text-amber-300/70">Presented</span>
-                    <code className="break-all text-amber-100">{hostKeyMismatch.received}</code>
-                  </div>
-                </div>
-                <div className="mt-4 flex justify-end">
-                  <Button
-                    onClick={() => onTrustHostKey?.(session.id, hostKeyMismatch)}
-                    size="sm"
-                    variant="secondary"
-                  >
-                    <RefreshCcw data-icon="inline-start" />
-                    Trust new key & reconnect
-                  </Button>
-                </div>
-              </div>
-            ) : isConnecting ? (
-              <div className="mt-6 flex items-center gap-2 text-[10px] text-zinc-500">
-                <span className="size-1.5 animate-pulse rounded-full bg-amber-400" />
-                {isSerial ? 'Opening local serial line' : 'Negotiating secure session'}
-              </div>
-            ) : (
-              <Button
-                className="mt-6"
-                onClick={() => onReconnect(session.id)}
-                size="sm"
-                variant="secondary"
-              >
-                <RefreshCcw data-icon="inline-start" />
-                Reconnect
-              </Button>
-            )}
-          </div>
-        )}
+        <SshTerminalConnectionState
+          isSerial={isSerial}
+          onReconnect={onReconnect}
+          onTrustHostKey={onTrustHostKey}
+          session={session}
+        />
       </div>
     );
   }
@@ -11075,6 +11091,11 @@ function SessionSurface({
   );
 }
 
+function discardPrivateKeySelection(selectionId: string) {
+  if (!selectionId) return;
+  void window.wormhole?.discardSshPrivateKeySelection({ selectionId }).catch(() => undefined);
+}
+
 // Credential editing and Bitwarden lookup deliberately share one authorization boundary so every
 // close, lock, and failed lookup scrubs the same renderer-held secret state.
 // react-doctor-disable-next-line react-doctor/no-giant-component, react-doctor/prefer-useReducer
@@ -11231,11 +11252,6 @@ function CredentialsPage({
     setPrivateKeyPassphraseRetryRequired(false);
     setOperationError('');
     resetBitwardenSearch();
-  }
-
-  function discardPrivateKeySelection(selectionId: string) {
-    if (!selectionId) return;
-    void window.wormhole?.discardSshPrivateKeySelection({ selectionId }).catch(() => undefined);
   }
 
   async function selectPrivateKey() {

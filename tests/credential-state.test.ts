@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { stripTypeScriptTypes } from 'node:module';
 import test from 'node:test';
+import { runInNewContext } from 'node:vm';
 
 import {
   buildCredentialListProjection,
@@ -29,6 +31,34 @@ import {
 } from '../src/bitwarden-cli-view.ts';
 
 const appSource = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+
+test('SSH key selection cleanup is shared and tolerates absent or rejected native requests', async () => {
+  const source = appSource.match(/^function discardPrivateKeySelection\([^]*?^\}/m)?.[0];
+  assert.ok(source, 'cleanup must remain at module scope');
+  assert.ok(appSource.indexOf(source) < appSource.indexOf('function CredentialsPage('));
+
+  const requests: string[] = [];
+  const bridge = {
+    async discardSshPrivateKeySelection({ selectionId }: { selectionId: string }) {
+      requests.push(selectionId);
+      if (selectionId === 'expired-selection') throw new Error('Selection already discarded');
+    },
+  };
+  const window: { wormhole?: typeof bridge } = { wormhole: bridge };
+  const discard = runInNewContext(stripTypeScriptTypes(`${source}\ndiscardPrivateKeySelection;`), {
+    window,
+  }) as (selectionId: string) => void;
+
+  discard('');
+  assert.deepEqual(requests, []);
+  discard('selected-key');
+  discard('expired-selection');
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(requests, ['selected-key', 'expired-selection']);
+
+  window.wormhole = undefined;
+  assert.doesNotThrow(() => discard('closed-workspace'));
+});
 
 test('connection credential choices expose inheritance and saved credentials only', () => {
   assert.deepEqual(
