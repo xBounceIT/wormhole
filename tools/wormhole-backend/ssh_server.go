@@ -1803,7 +1803,8 @@ func (driver *sshAutoSudoDriver) queueUserInput(data []byte) (bool, error) {
 	if driver.state == sshAutoSudoDone {
 		return false, nil
 	}
-	if len(driver.pendingInput)+len(data) > sshInputMaxBytes {
+	// Reserve the envelope as well as the maximum normalized clipboard text.
+	if len(driver.pendingInput)+len(data) > sshInputMaxBytes+sshTerminalPasteOverhead {
 		return true, errSSHInputFull
 	}
 	driver.pendingInput = append(driver.pendingInput, data...)

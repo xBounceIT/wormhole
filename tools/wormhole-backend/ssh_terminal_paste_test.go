@@ -4,11 +4,44 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
 	"testing"
 )
+
+func TestSSHAutoSudoBuffersMaximumBracketedPaste(t *testing.T) {
+	input := &recordingSSHInput{}
+	server := newSSHTestServer(io.Discard)
+	native := &sshNativeSession{id: "paste", server: server, stdin: input}
+	server.sessions[native.id] = native
+	native.pasteMode.enabled = true
+	driver := newSSHAutoSudoDriver(native, "secret")
+	native.autoSudo = driver
+	defer driver.dispose()
+	driver.start()
+	initial := input.String()
+	server.input(sshWireCommand{SessionID: native.id, Paste: true,
+		Data: base64.StdEncoding.EncodeToString([]byte(strings.Repeat("\r\n", sshInputMaxBytes)))})
+	if len(driver.pendingInput) != sshInputMaxBytes+12 {
+		t.Fatalf("pending paste size = %d", len(driver.pendingInput))
+	}
+	if input.String() != initial {
+		t.Fatal("paste reached remote before the sudo prompt")
+	}
+	if handled, err := driver.queueUserInput([]byte("x")); !handled || !errors.Is(err, errSSHInputFull) {
+		t.Fatalf("buffer overflow = %v, %v", handled, err)
+	}
+	driver.observe([]byte("[sudo] password for operator: "))
+	want := initial + "secret\r\x1b[200~" + strings.Repeat("\r", sshInputMaxBytes) + "\x1b[201~"
+	if input.String() != want {
+		t.Fatal("password and complete paste were not sent in order")
+	}
+	if len(driver.pendingInput) != 0 {
+		t.Fatal("pending paste was not released")
+	}
+}
 
 func TestSSHServerPasteNormalizedSizeLimit(t *testing.T) {
 	for _, bracketed := range []bool{false, true} {

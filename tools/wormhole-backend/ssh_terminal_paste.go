@@ -6,6 +6,12 @@ import (
 	"strings"
 )
 
+const (
+	sshTerminalPasteStart    = "\x1b[200~"
+	sshTerminalPasteEnd      = "\x1b[201~"
+	sshTerminalPasteOverhead = len(sshTerminalPasteStart) + len(sshTerminalPasteEnd)
+)
+
 // Track DECSET/DECRST 2004 independently because vt10x does not expose it.
 // The parser retains bounded state across remote output chunks and ignores
 // escape-looking text inside OSC/DCS/APC/PM strings and legacy screen titles.
@@ -97,6 +103,6 @@ func sshTerminalPaste(data []byte, bracketed bool) ([]byte, error) {
 	}
 	// Clipboard text must not be able to terminate its own paste envelope.
 	data = bytes.ReplaceAll(data, []byte{0x1b}, nil)
-	result := append([]byte("\x1b[200~"), data...)
-	return append(result, []byte("\x1b[201~")...), nil
+	result := append([]byte(sshTerminalPasteStart), data...)
+	return append(result, []byte(sshTerminalPasteEnd)...), nil
 }
