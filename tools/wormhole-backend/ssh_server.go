@@ -147,6 +147,7 @@ type sshWireEvent struct {
 	Fingerprint         string             `json:"fingerprint,omitempty"`
 	Error               string             `json:"error,omitempty"`
 	McpStatus           *mcpStatusResponse `json:"mcp_status,omitempty"`
+	McpAccessible       *bool              `json:"mcp_accessible,omitempty"`
 	Token               string             `json:"token,omitempty"`
 	HostKeyExpected     string             `json:"host_key_expected,omitempty"`
 	HostKeyReceived     string             `json:"host_key_received,omitempty"`
