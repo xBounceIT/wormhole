@@ -1427,9 +1427,12 @@ function AuthPrompt({
   const [status, setStatus] = useState('');
   const [busy, setBusy] = useState(false);
   const [helloBusy, setHelloBusy] = useState(false);
+  const [helloStatus, setHelloStatus] = useState<string | null>(null);
   const activeHelloRequest = useRef<string | null>(null);
   const helloInFlight = useRef<string | null>(null);
   const dialogRef = useRef<HTMLDialogElement>(null);
+  const secretInputRef = useRef<HTMLInputElement>(null);
+  const helloButtonRef = useRef<HTMLButtonElement>(null);
   const onResultRef = useRef(onResult);
   const method: WormholeAuthFallback =
     state.mode === 'password' || (state.mode === 'windowsHello' && state.fallback === 'password')
@@ -1437,6 +1440,8 @@ function AuthPrompt({
       : 'pin';
   const isHelloMode = state.mode === 'windowsHello';
   const fallbackName = method === 'pin' ? 'Wormhole PIN' : 'Wormhole password';
+  const helloMessage =
+    helloStatus ?? (state.windowsHello.available ? '' : state.windowsHello.message);
   const helloRequestKey = `${request.kind}\0${request.reason}\0${request.autoWindowsHello}\0${isHelloMode}\0${method}`;
 
   useLayoutEffect(() => {
@@ -1451,13 +1456,15 @@ function AuthPrompt({
       const isCurrent = () => activeHelloRequest.current === requestKey;
       helloInFlight.current = requestKey;
       setHelloBusy(true);
-      setStatus('Waiting for Windows Hello…');
+      setHelloStatus('');
       return api
         .checkWindowsHello()
         .then((availability) => {
           if (!isCurrent()) return;
           if (!availability.available) {
-            setStatus(`${availability.message} You can use your ${fallbackName} instead.`);
+            setHelloStatus(
+              availability.message || `Windows Hello is unavailable. Use your ${fallbackName}.`,
+            );
             return;
           }
           return api.verifyWindowsHello().then((result) => {
@@ -1466,14 +1473,14 @@ function AuthPrompt({
               onResultRef.current(true);
               return;
             }
-            setStatus(
+            setHelloStatus(
               result.message || `Windows Hello didn't recognize you. Use your ${fallbackName}.`,
             );
           });
         })
         .catch(() => {
           if (isCurrent()) {
-            setStatus(`Windows Hello isn't available right now. Use your ${fallbackName}.`);
+            setHelloStatus(`Windows Hello isn't available right now. Use your ${fallbackName}.`);
           }
         })
         .finally(() => {
@@ -1488,6 +1495,7 @@ function AuthPrompt({
     activeHelloRequest.current = helloRequestKey;
     setSecret('');
     setStatus('');
+    setHelloStatus(null);
     if (request.autoWindowsHello && isHelloMode) {
       void tryWindowsHello(helloRequestKey);
     }
@@ -1502,6 +1510,18 @@ function AuthPrompt({
     dialog.showModal();
     return () => dialog.close();
   }, []);
+
+  useEffect(() => {
+    if (helloBusy || (isHelloMode && request.autoWindowsHello && !helloMessage)) return;
+    const focused = document.activeElement;
+    if (
+      focused === document.body ||
+      focused === dialogRef.current ||
+      focused === helloButtonRef.current
+    ) {
+      secretInputRef.current?.focus();
+    }
+  }, [helloBusy, helloMessage, isHelloMode, request.autoWindowsHello]);
 
   async function submitSecret(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -1518,7 +1538,9 @@ function AuthPrompt({
       setSecret('');
       setStatus(result.message || (method === 'pin' ? 'Invalid PIN.' : 'Invalid password.'));
     } catch {
-      setStatus("Wormhole couldn't check your PIN. Try again.");
+      setStatus(
+        `Wormhole couldn't check your ${method === 'pin' ? 'PIN' : 'password'}. Try again.`,
+      );
     } finally {
       setBusy(false);
     }
@@ -1551,16 +1573,14 @@ function AuthPrompt({
             </div>
           </div>
           <p className="text-xs leading-relaxed text-muted-foreground" id="auth-prompt-description">
-            {isHelloMode
-              ? `Windows Hello will open now. You can also use your ${fallbackName} below.`
-              : `Enter your ${fallbackName} to continue.`}
+            {`Enter your ${fallbackName} to continue.`}
           </p>
         </CardHeader>
         <CardContent className="space-y-4 border-t border-border/60 px-5 py-4">
           {isHelloMode ? (
-            <div className="space-y-2 rounded-lg border border-border/70 bg-background/50 p-3">
-              <p className="text-[11px] text-muted-foreground">{state.windowsHello.message}</p>
+            <div>
               <Button
+                ref={helloButtonRef}
                 className="w-full"
                 disabled={helloBusy}
                 onClick={() => void tryWindowsHello()}
@@ -1573,20 +1593,29 @@ function AuthPrompt({
                 ) : (
                   <KeyRound data-icon="inline-start" />
                 )}
-                {helloBusy ? 'Waiting for Windows Hello…' : 'Use Windows Hello'}
+                Use Windows Hello
               </Button>
+              <p
+                className="text-xs leading-relaxed text-muted-foreground [&:not(:empty)]:mt-2"
+                role="status"
+              >
+                {helloBusy ? 'Waiting for Windows Hello…' : helloMessage}
+              </p>
             </div>
           ) : null}
           <form className="space-y-3" onSubmit={submitSecret}>
             <div className="grid gap-2">
               <Label htmlFor="auth-secret">{fallbackName}</Label>
               {isHelloMode && method === 'pin' ? (
-                <p className="text-[11px] leading-relaxed text-muted-foreground">
+                <p className="text-xs leading-relaxed text-muted-foreground">
                   Use the PIN you created in Wormhole, not your Windows PIN.
                 </p>
               ) : null}
               <Input
-                autoFocus={!isHelloMode || !request.autoWindowsHello}
+                ref={secretInputRef}
+                autoFocus={
+                  !isHelloMode || !request.autoWindowsHello || !state.windowsHello.available
+                }
                 autoComplete="current-password"
                 id="auth-secret"
                 inputMode={method === 'pin' ? 'numeric' : undefined}
@@ -1598,8 +1627,8 @@ function AuthPrompt({
             </div>
             {status ? (
               <p
-                className={`text-[11px] ${helloBusy || busy ? 'text-muted-foreground' : 'text-destructive'}`}
-                role={helloBusy || busy ? 'status' : 'alert'}
+                className={`text-xs leading-relaxed ${busy ? 'text-muted-foreground' : 'text-destructive'}`}
+                role={busy ? 'status' : 'alert'}
               >
                 {status}
               </p>
