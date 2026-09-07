@@ -5089,13 +5089,13 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     else refresh?.remote(pending.id, request.path);
   }, [sessions]);
 
-  function sendSshInput(sessionId: string, value: string) {
+  function sendSshInput(sessionId: string, value: string, paste = false) {
     const session = sessions.find((candidate) => candidate.id === sessionId);
     if (!session?.backendSessionId || session.status !== 'connected') return;
     const backendSessionId = session.backendSessionId;
 
     void window.wormhole
-      ?.sendSshInput(backendSessionId, encodeTerminalData(value))
+      ?.sendSshInput(backendSessionId, encodeTerminalData(value), paste)
       .catch((error: unknown) => {
         setSessions((current) =>
           current.map((candidate) =>
@@ -8970,7 +8970,7 @@ function SshTerminalSurface({
   session: Session;
   isActive: boolean;
   autoCopyOnSelect: boolean;
-  onInput: (sessionId: string, value: string) => void;
+  onInput: (sessionId: string, value: string, paste?: boolean) => void;
   onReconnect: (sessionId: string) => void;
   onTrustHostKey?: (sessionId: string, mismatch: NonNullable<Session['hostKeyMismatch']>) => void;
   isSerial?: boolean;
@@ -9183,7 +9183,7 @@ function SshTerminalSurface({
         const text = event.clipboardData.getData('text');
         if (!text) return;
         event.preventDefault();
-        onInput(session.id, normalizeTerminalPasteText(text));
+        onInput(session.id, isSerial ? normalizeTerminalPasteText(text) : text, !isSerial);
       }}
       onMouseUp={(event) => {
         if (!shouldAutoCopyTerminalSelection(autoCopyOnSelect, event.button)) return;
@@ -10344,7 +10344,7 @@ function SessionsPage({
   onSftpTransferRemove: (sessionId: string, transferId: string, itemId: string) => void;
   onSftpNavigate: (sessionId: string, path: string) => void;
   onSftpRefresh: (id: string) => void;
-  onSshInput: (sessionId: string, value: string) => void;
+  onSshInput: (sessionId: string, value: string, paste?: boolean) => void;
   onSerialInput: (sessionId: string, value: string) => void;
   onTrustSshHostKey: (sessionId: string, mismatch: NonNullable<Session['hostKeyMismatch']>) => void;
   onRetryRdp: (id: string) => void;
@@ -10945,7 +10945,7 @@ function SessionSurface({
   onSftpTransferCancel: (sessionId: string, transferId: string, itemId: string) => void;
   onSftpTransferErrorClear: (sessionId: string) => void;
   onSftpTransferRemove: (sessionId: string, transferId: string, itemId: string) => void;
-  onSshInput: (sessionId: string, value: string) => void;
+  onSshInput: (sessionId: string, value: string, paste?: boolean) => void;
   onTrustSshHostKey: (sessionId: string, mismatch: NonNullable<Session['hostKeyMismatch']>) => void;
   onVncStatusChange: (sessionId: string, status: Session['status']) => void;
 }) {

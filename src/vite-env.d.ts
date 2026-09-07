@@ -1083,7 +1083,7 @@ interface Window {
       expected: string;
       received: string;
     }): Promise<WormholeSshConnected>;
-    sendSshInput(sessionId: string, data: string): Promise<void>;
+    sendSshInput(sessionId: string, data: string, paste?: boolean): Promise<void>;
     pasteClipboardToSsh(sessionId: string): Promise<{ pasted: boolean }>;
     resizeSshSession(sessionId: string, columns: number, rows: number): Promise<void>;
     openSftpBrowser(sessionId: string, requestId?: string): Promise<void>;

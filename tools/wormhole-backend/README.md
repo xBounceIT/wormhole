@@ -31,6 +31,12 @@ frames plus lifecycle events; the TypeScript renderer only handles keyboard and
 paste input and paints those frames. `ssh-trust-host-key` replaces a saved
 fingerprint only when the expected fingerprint still matches the database.
 
+SSH clipboard input uses `input` messages with `paste: true`. Go normalizes line
+endings and adds a bracketed-paste envelope only when the remote application has
+enabled DEC mode 2004. Supporting shells keep the entire multiline block in the
+editing buffer until the user presses Enter; ordinary keyboard input stays raw.
+Both Chromium paste events and native right-click paste use this contract.
+
 `serial` keeps a local serial line alive over the same JSON-lines terminal
 contract. It resolves the inherited baud rate, data bits, stop bits, parity, and
 flow-control settings, opens the port in Go, and owns VT/ANSI emulation. Serial

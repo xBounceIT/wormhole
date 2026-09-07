@@ -110,6 +110,7 @@ type sshWireCommand struct {
 	KeyPassphraseOverride         string                `json:"key_passphrase_override,omitempty"`
 	TunnelEnabled                 *bool                 `json:"tunnel_enabled,omitempty"`
 	Data                          string                `json:"data"`
+	Paste                         bool                  `json:"paste,omitempty"`
 	Path                          string                `json:"path"`
 	DestinationPath               string                `json:"destination_path"`
 	RequestID                     string                `json:"request_id"`
@@ -261,6 +262,7 @@ type sshNativeSession struct {
 	stderr           io.Reader
 	server           *sshServer
 	terminal         *sshTerminalEmulator
+	pasteMode        sshTerminalPasteMode // Guarded by terminalOutputMu; survives display recovery.
 	autoSudo         *sshAutoSudoDriver
 	mcpSession       mcpSessionInfo
 	mcpReplay        *mcpReplayBuffer
@@ -781,6 +783,12 @@ func (server *sshServer) input(command sshWireCommand) {
 	if native == nil {
 		server.writeError(command.SessionID, "SSH session is not connected")
 		return
+	}
+	if command.Paste {
+		native.terminalOutputMu.Lock()
+		bracketed := native.pasteMode.enabled
+		native.terminalOutputMu.Unlock()
+		data = sshTerminalPaste(data, bracketed)
 	}
 	if err := native.write(data); err != nil {
 		if server.isActive(native) {
@@ -1345,6 +1353,9 @@ func (native *sshNativeSession) publishTerminalData(data []byte) {
 	if native.isClosed() {
 		return
 	}
+	// Input modes belong to the remote stream, before MCP display filtering and
+	// independently of any emulator replacement after malformed output.
+	native.pasteMode.write(data)
 	if native.autoSudo != nil {
 		native.autoSudo.observe(data)
 	}

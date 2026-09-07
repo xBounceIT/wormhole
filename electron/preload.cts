@@ -476,8 +476,8 @@ const wormholeBridge = {
     expected: string;
     received: string;
   }) => ipcRenderer.invoke('ssh:trust-host-key', request),
-  sendSshInput: (sessionId: string, data: string) =>
-    ipcRenderer.invoke('ssh:input', sessionId, data),
+  sendSshInput: (sessionId: string, data: string, paste = false) =>
+    ipcRenderer.invoke('ssh:input', sessionId, data, paste),
   pasteClipboardToSsh: (sessionId: string) => ipcRenderer.invoke('ssh:paste-clipboard', sessionId),
   resizeSshSession: (sessionId: string, columns: number, rows: number) =>
     ipcRenderer.invoke('ssh:resize', sessionId, columns, rows),
