@@ -334,6 +334,7 @@ interface WormholeSftpQuickPath {
 }
 
 type WormholeSshEvent =
+  | { type: 'mcp.access'; sessionId: string; accessible: boolean }
   | ({ type: 'connected' } & WormholeSshConnected)
   | { type: 'screen'; sessionId: string; frame: WormholeSshTerminalFrame }
   | { type: 'closed'; sessionId: string }

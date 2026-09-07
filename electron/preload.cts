@@ -604,6 +604,7 @@ const wormholeBridge = {
   onSshEvent: (
     listener: (event: {
       type:
+        | 'mcp.access'
         | 'connected'
         | 'screen'
         | 'reconnecting'
@@ -619,6 +620,7 @@ const wormholeBridge = {
         | 'sftp.conflict'
         | 'sftp.transfer'
         | 'sftp.closed';
+      accessible?: boolean;
       sessionId: string;
       host?: string;
       port?: number;

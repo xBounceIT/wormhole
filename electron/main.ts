@@ -933,6 +933,7 @@ type SshSftpTransferItem = {
 };
 
 type SshBackendEvent =
+  | { type: 'mcp.access'; sessionId: string; accessible: boolean }
   | {
       type: 'connected';
       sessionId: string;
@@ -2117,6 +2118,11 @@ function parseSshBackendEvent(line: string): SshBackendEvent | undefined {
   if (value.type === 'screen') {
     const frame = parseSshTerminalFrame(value.frame);
     return frame ? { type: 'screen', sessionId: value.session_id, frame } : undefined;
+  }
+  if (value.type === 'mcp.access') {
+    return typeof value.mcp_accessible === 'boolean'
+      ? { type: 'mcp.access', sessionId: value.session_id, accessible: value.mcp_accessible }
+      : undefined;
   }
   if (value.type === 'reconnecting' || value.type === 'reconnect-failed') {
     if (

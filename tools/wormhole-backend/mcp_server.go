@@ -88,6 +88,8 @@ type mcpController struct {
 
 	approvalMu      sync.Mutex
 	locked          bool
+	accessRunning   bool
+	activeTools     map[string]int
 	decisions       map[string]bool
 	pending         map[string]*mcpApprovalWaiter
 	pendingByTarget map[string]*mcpApprovalWaiter
@@ -101,6 +103,7 @@ func newMcpController(server *sshServer) *mcpController {
 		server:          server,
 		locked:          true,
 		decisions:       make(map[string]bool),
+		activeTools:     make(map[string]int),
 		pending:         make(map[string]*mcpApprovalWaiter),
 		pendingByTarget: make(map[string]*mcpApprovalWaiter),
 	}
@@ -184,6 +187,7 @@ func (controller *mcpController) start(port int, persist bool) error {
 	controller.listener = listener
 	controller.httpServer = httpServer
 	controller.port = port
+	controller.setAccessRunning(true)
 	controller.lifecycleMu.Unlock()
 
 	if persist {
@@ -208,6 +212,7 @@ func (controller *mcpController) serve(httpServer *http.Server, listener net.Lis
 		controller.httpServer = nil
 		controller.listener = nil
 		controller.port = 0
+		controller.setAccessRunning(false)
 	}
 	controller.lifecycleMu.Unlock()
 	controller.cancelPending("MCP server stopped unexpectedly")
@@ -230,6 +235,7 @@ func (controller *mcpController) stop(persist bool) error {
 	controller.httpServer = nil
 	controller.listener = nil
 	controller.port = 0
+	controller.setAccessRunning(false)
 	controller.lifecycleMu.Unlock()
 
 	controller.cancelPending("MCP server stopped")
@@ -348,6 +354,7 @@ func (controller *mcpController) currentToken() string {
 func (controller *mcpController) setLocked(locked bool) {
 	controller.approvalMu.Lock()
 	controller.locked = locked
+	controller.emitSessionAccessChangesLocked()
 	controller.approvalMu.Unlock()
 	if locked {
 		controller.cancelPending("Wormhole is locked. Unlock the app before using MCP tools.")
@@ -908,6 +915,7 @@ func (controller *mcpController) resolveApproval(requestID string, approved bool
 		}
 		if !controller.locked && waiter.rememberDecision {
 			controller.decisions[waiter.sessionID] = approved
+			controller.emitSessionAccessLocked(waiter.sessionID)
 		}
 		waiter.approved = approved
 		close(waiter.done)
@@ -972,7 +980,11 @@ func (controller *mcpController) cancelPending(reason string) {
 
 func (controller *mcpController) forgetSession(sessionID string) {
 	controller.approvalMu.Lock()
+	approved := controller.decisions[sessionID]
 	delete(controller.decisions, sessionID)
+	if approved {
+		controller.emitSessionAccessLocked(sessionID)
+	}
 	waiter := controller.pendingByTarget[sessionID]
 	if waiter != nil {
 		delete(controller.pending, waiter.requestID)
@@ -984,6 +996,56 @@ func (controller *mcpController) forgetSession(sessionID string) {
 	if waiter != nil {
 		controller.emitApprovalCancelled(waiter)
 		close(waiter.done)
+	}
+}
+
+// Publish permission metadata in decision order, including suspension while locked or stopped.
+// The grants remain valid for the SSH session's lifetime and resume on unlock/start.
+func (controller *mcpController) setAccessRunning(running bool) {
+	controller.approvalMu.Lock()
+	defer controller.approvalMu.Unlock()
+	controller.accessRunning = running
+	controller.emitSessionAccessChangesLocked()
+}
+
+func (controller *mcpController) emitSessionAccessChangesLocked() {
+	for sessionID, approved := range controller.decisions {
+		if approved {
+			controller.emitSessionAccessLocked(sessionID)
+		}
+	}
+}
+
+func (controller *mcpController) emitSessionAccessLocked(sessionID string) {
+	if controller.server == nil || controller.server.output == nil {
+		return
+	}
+	accessible := controller.decisions[sessionID] && !controller.locked &&
+		(controller.accessRunning || controller.activeTools[sessionID] > 0)
+	controller.server.output.write(sshWireEvent{
+		Type: "mcp.access", SessionID: sessionID, McpAccessible: &accessible,
+	})
+}
+
+// HTTP shutdown stops new requests but lets admitted tools finish. Keep their session
+// indicator visible until the last request releases its access, even after shutdown times out.
+func (controller *mcpController) trackSessionTool(sessionID string) func() {
+	controller.approvalMu.Lock()
+	controller.activeTools[sessionID]++
+	if !controller.accessRunning {
+		controller.emitSessionAccessLocked(sessionID)
+	}
+	controller.approvalMu.Unlock()
+	return func() {
+		controller.approvalMu.Lock()
+		defer controller.approvalMu.Unlock()
+		controller.activeTools[sessionID]--
+		if controller.activeTools[sessionID] == 0 {
+			delete(controller.activeTools, sessionID)
+			if !controller.accessRunning {
+				controller.emitSessionAccessLocked(sessionID)
+			}
+		}
 	}
 }
 
@@ -1047,6 +1109,7 @@ func newMcpServer(controller *mcpController) *mcp.Server {
 		if err := controller.ensureApproval(ctx, native, "run_command"); err != nil {
 			return nil, mcpCommandResult{}, err
 		}
+		defer controller.trackSessionTool(native.id)()
 		timeout, err := mcpCommandTimeout(input.TimeoutSeconds)
 		if err != nil {
 			return nil, mcpCommandResult{}, err
@@ -1073,6 +1136,7 @@ func newMcpServer(controller *mcpController) *mcp.Server {
 		if err := controller.ensureApproval(ctx, native, "send_text"); err != nil {
 			return nil, "", err
 		}
+		defer controller.trackSessionTool(native.id)()
 		if err := native.write([]byte(input.Text)); err != nil {
 			return nil, "", err
 		}
@@ -1094,6 +1158,7 @@ func newMcpServer(controller *mcpController) *mcp.Server {
 		if err := controller.ensureApproval(ctx, native, "read_terminal"); err != nil {
 			return nil, "", err
 		}
+		defer controller.trackSessionTool(native.id)()
 		maxBytes := input.MaxBytes
 		if maxBytes <= 0 {
 			maxBytes = mcpDefaultReadBytes

@@ -19,6 +19,7 @@ import {
   type ReactNode,
 } from 'react';
 import './index.css';
+import { applySessionMcpAccess, sessionTabPresentation } from './session-tab-state';
 import { backupExportPasswordIsValid, backupExportRequiresEncryption } from './backup-state';
 import wormholeIcon from '../Assets/Wormhole.png';
 import bitwardenIcon from '../Assets/Bitwarden/bitwarden-icon.png';
@@ -170,6 +171,7 @@ import {
   Pencil,
   Plus,
   Power,
+  Bot,
   Radio,
   RefreshCcw,
   Search,
@@ -658,6 +660,7 @@ type Session = {
   port?: number;
   canTransfer?: boolean;
   backendSessionId?: string;
+  mcpAccessible?: boolean;
   status: 'connecting' | 'connected' | 'failed' | 'closed' | 'placeholder';
   terminalFrame?: RenderedTerminalFrame;
   tunnelProgress?: { phase: string; detail?: string } | null;
@@ -2319,6 +2322,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
 
   useEffect(() => {
     const unsubscribe = window.wormhole?.onSshEvent((event) => {
+      if (event.type === 'mcp.access') {
+        setSessions((current) => applySessionMcpAccess(current, event));
+        return;
+      }
       if (settlesSshHostKeyTrustAttempt(event.type)) {
         sshHostKeyTrustInFlight.current.delete(event.sessionId);
       }
@@ -3815,6 +3822,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           ? {
               ...candidate,
               backendSessionId,
+              mcpAccessible: false,
               status: 'connecting',
               terminalFrame: undefined,
               sftp: undefined,
@@ -4164,6 +4172,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
             ? {
                 ...session,
                 backendSessionId,
+                mcpAccessible: false,
                 status: 'connecting',
                 terminalFrame: undefined,
                 sftp: undefined,
@@ -4182,6 +4191,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
             ? {
                 ...session,
                 backendSessionId,
+                mcpAccessible: false,
                 status: 'connecting',
                 terminalFrame: undefined,
                 sftp: undefined,
@@ -4208,6 +4218,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
             ? {
                 ...session,
                 backendSessionId: undefined,
+                mcpAccessible: false,
                 status: 'placeholder',
                 terminalFrame: undefined,
                 sftp: undefined,
@@ -4258,6 +4269,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       ...source,
       id: `session-duplicate-${newSessionToken()}`,
       title: `${source.title} (copy)`,
+      mcpAccessible: false,
       backendSessionId:
         (source.protocol === 'ssh' && (source.nodeId || source.credentialId)) ||
         source.protocol === 'serial'
@@ -5819,6 +5831,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                   canTransfer: newConnectionForm.protocol === 'ssh',
                   nodeId: editingId,
                   backendSessionId,
+                  mcpAccessible: false,
                   status:
                     newConnectionForm.protocol === 'ssh' ||
                     newConnectionForm.protocol === 'vnc' ||
@@ -10557,6 +10570,7 @@ function SessionsPage({
               const session = sessionById.get(sessionId);
               if (!session) return null;
               const active = sessionId === pane.activeSessionId;
+              const tabPresentation = sessionTabPresentation(session, active);
               return (
                 <SessionTabContextMenu
                   key={session.id}
@@ -10572,13 +10586,13 @@ function SessionsPage({
                   session={session}
                 >
                   <div
-                    className={`relative flex h-9 min-w-[8rem] max-w-[15rem] flex-1 border-r border-border/60 ${active ? 'bg-card text-foreground' : 'text-muted-foreground hover:bg-muted/25'}`}
+                    className={`relative flex h-9 min-w-[8rem] max-w-[15rem] flex-1 border-r border-border/60 ${tabPresentation.className}`}
                     data-session-tab-index={tabIndex}
                   >
                     <button
-                      aria-label={`${session.title}. Drag to a pane edge to split.`}
+                      aria-label={`${session.title}. ${tabPresentation.accessLabel}Drag to a pane edge to split.`}
                       aria-selected={active}
-                      className="min-w-0 flex-1 cursor-grab truncate px-3 pr-12 text-left !text-xs font-medium outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+                      className="flex min-w-0 flex-1 cursor-grab items-center gap-2 px-3 pr-12 text-left !text-xs font-medium outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
                       data-session-tab-id={session.id}
                       draggable
                       onAuxClick={(event) => {
@@ -10602,10 +10616,17 @@ function SessionsPage({
                       }}
                       role="tab"
                       tabIndex={active ? 0 : -1}
-                      title="Drag to another tab bar to move, or to a pane edge to split. Alt+Shift+Arrow also splits."
+                      title={`${tabPresentation.accessLabel}Drag to another tab bar to move, or to a pane edge to split. Alt+Shift+Arrow also splits.`}
                       type="button"
                     >
-                      {session.title}
+                      <span aria-hidden="true" className="shrink-0">
+                        {tabPresentation.aiAccessible ? (
+                          <Bot size={15} />
+                        ) : (
+                          <ProtocolIcon protocol={session.protocol} />
+                        )}
+                      </span>
+                      <span className="truncate">{session.title}</span>
                     </button>
                     <div className="absolute right-1 top-1/2 flex -translate-y-1/2 items-center">
                       {session.canTransfer && session.status === 'connected' ? (
