@@ -10650,13 +10650,13 @@ function SessionsPage({
                   session={session}
                 >
                   <div
-                    className={`relative flex h-9 min-w-[8rem] max-w-[15rem] flex-1 border-r border-border/60 ${tabPresentation.className}`}
+                    className={`relative flex h-9 min-w-[8rem] max-w-[18rem] flex-1 border-r border-border/60 ${tabPresentation.className}`}
                     data-session-tab-index={tabIndex}
                   >
                     <button
                       aria-label={`${session.title}. ${tabPresentation.accessLabel}Drag to a pane edge to split.`}
                       aria-selected={active}
-                      className="flex min-w-0 flex-1 cursor-grab items-center gap-2 px-3 pr-12 text-left !text-xs font-medium outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+                      className="flex min-w-0 flex-1 cursor-grab items-center gap-2 pl-3 pr-2 text-left !text-xs font-medium outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
                       data-session-tab-id={session.id}
                       draggable
                       onAuxClick={(event) => {
@@ -10692,7 +10692,7 @@ function SessionsPage({
                       </span>
                       <span className="truncate">{session.title}</span>
                     </button>
-                    <div className="absolute right-1 top-1/2 flex -translate-y-1/2 items-center">
+                    <div className="flex shrink-0 items-center pr-1">
                       {session.canTransfer && session.status === 'connected' ? (
                         <IconButton
                           label={`Open SFTP browser for ${session.title}`}
