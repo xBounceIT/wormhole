@@ -559,6 +559,36 @@ test('session tab menu actions stay labeled and wired to the selected session', 
   }
 });
 
+test('session tab titles reserve action width with and without SFTP', () => {
+  const mount = sourceBetween(appSource, '<SessionTabContextMenu', '</SessionTabContextMenu>');
+  const titleButton = sourceBetween(mount, '<button', '</button>');
+  const titleClasses = titleButton.match(/className="([^"]+)"/)?.[1].split(/\s+/) ?? [];
+  for (const token of ['flex', 'min-w-0', 'flex-1', 'pr-2']) {
+    assert.ok(titleClasses.includes(token), `title button needs ${token}`);
+  }
+  assert.match(titleButton, /<span className="truncate">\{session\.title\}<\/span>/);
+
+  const actions = mount.slice(mount.indexOf('</button>') + '</button>'.length);
+  const actionContainer = actions.match(/^\s*<div className="([^"]+)">([\s\S]*?)<\/div>/);
+  assert.ok(actionContainer, 'actions must be siblings of the title button');
+  const actionClasses = actionContainer[1].split(/\s+/);
+  for (const token of ['flex', 'shrink-0']) {
+    assert.ok(actionClasses.includes(token), `actions must reserve their width with ${token}`);
+  }
+  assert.ok(!actionClasses.includes('absolute') && !actionClasses.includes('fixed'));
+
+  const sftpAction = sourceBetween(
+    actionContainer[2],
+    "{session.canTransfer && session.status === 'connected' ? (",
+    ') : null}',
+  );
+  assert.match(sftpAction, /label=\{`Open SFTP browser for \$\{session\.title\}`\}/);
+  assert.match(sftpAction, /onClick=\{\(\) => onOpenFileTransfer\(session\.id\)\}/);
+  const alwaysVisibleActions = actionContainer[2].slice(actionContainer[2].indexOf(') : null}'));
+  assert.match(alwaysVisibleActions, /label=\{`Close \$\{session\.title\}`\}/);
+  assert.match(alwaysVisibleActions, /onClick=\{\(\) => closePaneSession\(pane, session\.id\)\}/);
+});
+
 test('drag cancellation clears both the dragged tab and its visual target', () => {
   assert.match(
     appSource,
