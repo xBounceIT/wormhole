@@ -261,9 +261,8 @@ func (terminal *sshTerminalEmulator) write(data []byte) (*sshTerminalFrame, bool
 		historyRows,
 	)
 	if frame == nil && (scrollbackChanged || viewportReset) {
-		terminal.state.Lock()
-		frame, _ = terminal.snapshotLocked(true)
-		terminal.state.Unlock()
+		// The viewport is unchanged; publish only the new history/reset metadata.
+		frame = terminal.nextFrame()
 		changed = true
 	}
 	if frame == nil {
@@ -421,25 +420,31 @@ func (terminal *sshTerminalEmulator) snapshotLocked(forceFull bool) (*sshTermina
 		return nil, false
 	}
 
-	terminal.sequence++
-	frame := &sshTerminalFrame{
-		Columns:           columns,
-		Rows:              rows,
-		Full:              full,
-		CursorX:           cursorX,
-		CursorY:           cursorY,
-		CursorVisible:     cursorVisible,
-		ApplicationCursor: applicationCursor,
-		AlternateScreen:   alternateScreen,
-		Title:             title,
-		Sequence:          terminal.sequence,
-	}
+	frame := terminal.nextFrame()
+	frame.Full = full
 	if full {
 		frame.Cells = cells
 	} else {
 		frame.Changes = changes
 	}
 	return frame, true
+}
+
+// Called after snapshotLocked has recorded the current viewport, under the
+// owning session's output lock (like write, resize and snapshot).
+func (terminal *sshTerminalEmulator) nextFrame() *sshTerminalFrame {
+	terminal.sequence++
+	return &sshTerminalFrame{
+		Columns:           terminal.columns,
+		Rows:              terminal.rows,
+		CursorX:           terminal.previousCursorX,
+		CursorY:           terminal.previousCursorY,
+		CursorVisible:     terminal.previousCursorVisible,
+		ApplicationCursor: terminal.previousAppCursor,
+		AlternateScreen:   terminal.previousAltScreen,
+		Title:             terminal.previousTitle,
+		Sequence:          terminal.sequence,
+	}
 }
 
 func newSSHHistoryRecorder(
@@ -790,7 +795,13 @@ func (terminal *sshTerminalEmulator) appendScrollbackRows(rows []sshTerminalScro
 	terminal.scrollback = append(terminal.scrollback, rows...)
 	if len(terminal.scrollback) > sshTerminalMaxScrollbackLines {
 		overflow := len(terminal.scrollback) - sshTerminalMaxScrollbackLines
-		terminal.scrollback = append([]sshTerminalScrollbackLine(nil), terminal.scrollback[overflow:]...)
+		clear(terminal.scrollback[:overflow])
+		terminal.scrollback = terminal.scrollback[overflow:]
+	}
+	// The renderer applies the same rolling limit. Eviction is not a reset: sending
+	// the entire history on every subsequent read amplifies sustained output by
+	// thousands of lines. Only a batch exceeding the wire limit needs a snapshot.
+	if len(rows) >= sshTerminalMaxScrollbackLines {
 		return true, nil
 	}
 	return false, rows

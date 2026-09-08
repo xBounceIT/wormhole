@@ -74,6 +74,9 @@ import {
 import { terminalControlKeyData } from './terminal-keyboard';
 import { selectTerminalDoubleClick } from './terminal-selection';
 import {
+  mergeTerminalScrollback,
+  sameTerminalScrollbackChunk,
+  terminalScrollbackChunks,
   nextTerminalViewportResetSequence,
   scrollTerminalToBottom,
   terminalScrollEventKeepsBottomPin,
@@ -651,6 +654,7 @@ function parseDraggedNodeIds(value: string): string[] {
 
 type RenderedTerminalFrame = WormholeSshTerminalFrame & {
   viewportResetSequence?: number;
+  scrollbackStart?: number;
 };
 
 type Session = {
@@ -1002,22 +1006,11 @@ function applySshTerminalFrame(
     };
   }
 
-  const sameViewport = previous?.columns === incoming.columns && previous.rows === incoming.rows;
-  let scrollback: WormholeSshTerminalScrollbackLine[];
-  if (incoming.scrollbackReset) {
-    scrollback = incoming.scrollback?.slice(-terminalMaxScrollbackLines) ?? [];
-  } else if (sameViewport) {
-    scrollback = incoming.scrollback?.length
-      ? [...(previous?.scrollback ?? []), ...incoming.scrollback].slice(-terminalMaxScrollbackLines)
-      : (previous?.scrollback ?? []);
-  } else {
-    scrollback = incoming.scrollback?.slice(-terminalMaxScrollbackLines) ?? [];
-  }
   return {
     ...incoming,
     full: true,
     cells,
-    scrollback,
+    ...mergeTerminalScrollback(previous, incoming, terminalMaxScrollbackLines),
     viewportResetSequence: nextTerminalViewportResetSequence(
       previous?.viewportResetSequence,
       incoming,
@@ -8728,63 +8721,70 @@ function terminalTextRuns(frame: WormholeSshTerminalFrame, row: number): Termina
   return runs;
 }
 
+const TerminalScrollbackChunk = memo(function TerminalScrollbackChunk({
+  lines,
+  start,
+}: {
+  lines: WormholeSshTerminalScrollbackLine[];
+  start: number;
+}) {
+  return (
+    <div
+      className="terminal-scrollback-chunk"
+      style={{ height: `${lines.length * terminalLineHeight}px` }}
+    >
+      {lines.map((line, index) => {
+        const runs = line.runs.length
+          ? line.runs
+          : [
+              {
+                text: ' ',
+                cells: 1,
+                foreground: terminalDefaultForeground,
+                background: terminalDefaultBackground,
+              },
+            ];
+        return (
+          <div data-terminal-row className="h-[18px] min-w-max whitespace-pre" key={start + index}>
+            {runs.map((run, runIndex) => (
+              <span
+                className="inline-block overflow-hidden align-top"
+                key={`${start + index}-${runIndex}`}
+                style={{
+                  backgroundColor: terminalColor(run.background, '#090909'),
+                  color: terminalColor(run.foreground, '#e5e7eb'),
+                  height: `${terminalLineHeight}px`,
+                  width: `${run.cells}ch`,
+                }}
+              >
+                {run.text}
+              </span>
+            ))}
+          </div>
+        );
+      })}
+    </div>
+  );
+}, sameTerminalScrollbackChunk);
+
 const TerminalScrollback = memo(function TerminalScrollback({
   lines,
+  start = 0,
 }: {
   lines?: WormholeSshTerminalScrollbackLine[];
+  start?: number;
 }) {
   if (!lines?.length) return null;
 
-  const chunks = [];
-  for (let start = 0; start < lines.length; start += terminalScrollbackChunkSize) {
-    const chunk = lines.slice(start, start + terminalScrollbackChunkSize);
-    chunks.push(
-      <div
-        className="terminal-scrollback-chunk"
-        key={start}
-        style={{ height: `${chunk.length * terminalLineHeight}px` }}
-      >
-        {chunk.map((line, index) => {
-          const runs = line.runs.length
-            ? line.runs
-            : [
-                {
-                  text: ' ',
-                  cells: 1,
-                  foreground: terminalDefaultForeground,
-                  background: terminalDefaultBackground,
-                },
-              ];
-          return (
-            <div
-              data-terminal-row
-              className="h-[18px] min-w-max whitespace-pre"
-              key={start + index}
-            >
-              {runs.map((run, runIndex) => (
-                <span
-                  className="inline-block overflow-hidden align-top"
-                  key={`${start + index}-${runIndex}`}
-                  style={{
-                    backgroundColor: terminalColor(run.background, '#090909'),
-                    color: terminalColor(run.foreground, '#e5e7eb'),
-                    height: `${terminalLineHeight}px`,
-                    width: `${run.cells}ch`,
-                  }}
-                >
-                  {run.text}
-                </span>
-              ))}
-            </div>
-          );
-        })}
-      </div>,
-    );
-  }
-
   return (
     <div aria-label="SSH terminal scrollback" className="terminal-scrollback">
-      {chunks}
+      {terminalScrollbackChunks(lines, start, terminalScrollbackChunkSize).map((chunk) => (
+        <TerminalScrollbackChunk
+          key={Math.floor(chunk.start / terminalScrollbackChunkSize)}
+          start={chunk.start}
+          lines={chunk.lines}
+        />
+      ))}
     </div>
   );
 });
@@ -8792,7 +8792,7 @@ const TerminalScrollback = memo(function TerminalScrollback({
 const TerminalTextGrid = memo(function TerminalTextGrid({
   frame,
 }: {
-  frame?: WormholeSshTerminalFrame;
+  frame?: RenderedTerminalFrame;
 }) {
   if (!frame?.cells) return null;
   return (
@@ -8807,7 +8807,7 @@ const TerminalTextGrid = memo(function TerminalTextGrid({
         fontVariantLigatures: 'none',
       }}
     >
-      <TerminalScrollback lines={terminalVisibleScrollback(frame)} />
+      <TerminalScrollback lines={terminalVisibleScrollback(frame)} start={frame.scrollbackStart} />
       {Array.from({ length: frame.rows }, (_, row) => (
         <div data-terminal-row className="h-[18px] min-w-max whitespace-pre" key={row}>
           {terminalTextRuns(frame, row).map((run, index) => (
