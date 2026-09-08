@@ -75,6 +75,7 @@ import { terminalControlKeyData } from './terminal-keyboard';
 import { selectTerminalDoubleClick } from './terminal-selection';
 import {
   nextTerminalViewportResetSequence,
+  scrollTerminalToBottom,
   terminalScrollEventKeepsBottomPin,
   terminalVisibleScrollback,
 } from './terminal-frame';
@@ -9044,6 +9045,9 @@ function SshTerminalSurface({
     resizeSignatureRef.current = '';
     let retryFrame: number | undefined;
     const resize = () => {
+      if (stickToBottomRef.current) {
+        automaticScrollTopRef.current = scrollTerminalToBottom(surface);
+      }
       const cellWidth = measureTerminalCellWidth();
       if (surface.clientWidth < cellWidth || surface.clientHeight < terminalLineHeight) {
         if (retryFrame === undefined) {
@@ -9095,9 +9099,7 @@ function SshTerminalSurface({
       handledViewportResetSequenceRef.current = viewportResetSequence;
     }
     if (!stickToBottomRef.current) return;
-    const bottom = Math.max(0, surface.scrollHeight - surface.clientHeight);
-    automaticScrollTopRef.current = bottom;
-    surface.scrollTop = bottom;
+    automaticScrollTopRef.current = scrollTerminalToBottom(surface);
   }, [
     isActive,
     session.backendSessionId,
@@ -9129,10 +9131,12 @@ function SshTerminalSurface({
       event.preventDefault();
       event.stopPropagation();
 
-      automaticScrollTopRef.current = undefined;
       surface.scrollLeft = nextScrollLeft;
-      surface.scrollTop = nextScrollTop;
-      stickToBottomRef.current = terminalIsAtBottom(surface);
+      if (deltaY !== 0) {
+        automaticScrollTopRef.current = undefined;
+        surface.scrollTop = nextScrollTop;
+        stickToBottomRef.current = terminalIsAtBottom(surface);
+      }
     };
 
     surface.addEventListener('wheel', handleWheel, { passive: false });
@@ -9281,12 +9285,17 @@ function SshTerminalSurface({
       }}
       onScroll={(event) => {
         const surface = event.currentTarget;
-        stickToBottomRef.current = terminalScrollEventKeepsBottomPin(
+        const isAutomaticScroll = terminalScrollEventKeepsBottomPin(
           surface.scrollTop,
-          terminalIsAtBottom(surface),
+          false,
           automaticScrollTopRef.current,
         );
-        automaticScrollTopRef.current = undefined;
+        stickToBottomRef.current = isAutomaticScroll || terminalIsAtBottom(surface);
+        // Output may have grown since Chromium queued this event. Catch up now,
+        // including the final frame, and retain the marker for subsequent events.
+        automaticScrollTopRef.current = isAutomaticScroll
+          ? scrollTerminalToBottom(surface)
+          : undefined;
       }}
       ref={surfaceRef}
       role="application"
