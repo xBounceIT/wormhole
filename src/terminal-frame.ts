@@ -1,3 +1,71 @@
+type TerminalViewport = {
+  cells?: unknown[];
+  columns: number;
+  rows: number;
+  cursorX: number;
+  cursorY: number;
+  cursorVisible: boolean;
+};
+
+export function sameTerminalViewport(
+  previous: TerminalViewport,
+  incoming: TerminalViewport,
+): boolean {
+  return (
+    previous.cells === incoming.cells &&
+    previous.columns === incoming.columns &&
+    previous.rows === incoming.rows &&
+    previous.cursorX === incoming.cursorX &&
+    previous.cursorY === incoming.cursorY &&
+    previous.cursorVisible === incoming.cursorVisible
+  );
+}
+
+export function mergeTerminalScrollback<T>(
+  previous:
+    | { columns: number; rows: number; scrollback?: T[]; scrollbackStart?: number }
+    | undefined,
+  incoming: { columns: number; rows: number; scrollbackReset: boolean; scrollback?: T[] },
+  limit: number,
+): { scrollback: T[]; scrollbackStart: number } {
+  if (
+    incoming.scrollbackReset ||
+    previous?.columns !== incoming.columns ||
+    previous?.rows !== incoming.rows
+  ) {
+    return { scrollback: incoming.scrollback?.slice(-limit) ?? [], scrollbackStart: 0 };
+  }
+  const retained = previous.scrollback ?? [];
+  const start = previous.scrollbackStart ?? 0;
+  if (!incoming.scrollback?.length) return { scrollback: retained, scrollbackStart: start };
+  const overflow = Math.max(0, retained.length + incoming.scrollback.length - limit);
+  return {
+    scrollback: retained.concat(incoming.scrollback).slice(-limit),
+    scrollbackStart: start + overflow,
+  };
+}
+
+export function terminalScrollbackChunks<T>(lines: T[], start: number, size: number) {
+  const chunks: { start: number; lines: T[] }[] = [];
+  for (let index = 0; index < lines.length;) {
+    const length = Math.min(size - ((start + index) % size), lines.length - index);
+    chunks.push({ start: start + index, lines: lines.slice(index, index + length) });
+    index += length;
+  }
+  return chunks;
+}
+
+export function sameTerminalScrollbackChunk<T>(
+  previous: { start: number; lines: T[] },
+  incoming: { start: number; lines: T[] },
+): boolean {
+  return (
+    previous.start === incoming.start &&
+    previous.lines.length === incoming.lines.length &&
+    previous.lines.every((line, index) => line === incoming.lines[index])
+  );
+}
+
 export function terminalVisibleScrollback<T>(frame: {
   alternateScreen: boolean;
   scrollback?: T[];

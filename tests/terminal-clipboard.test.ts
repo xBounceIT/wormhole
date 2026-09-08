@@ -841,8 +841,12 @@ test('mounted SSH and serial terminals follow long output and preserve manual sc
     new URL('../src/terminal-selection.ts', import.meta.url),
     'utf8',
   ).replaceAll('export function', 'function');
+  const frameApplicationSource = appSource.slice(
+    appSource.indexOf('function createBlankTerminalCells'),
+    appSource.indexOf('const navItems'),
+  );
   const transformed = await transformWithOxc(
-    helpers + selectionSource + appSource.slice(start, end) + fixture,
+    helpers + selectionSource + frameApplicationSource + appSource.slice(start, end) + fixture,
     'terminal-scroll.tsx',
     {
       jsx: { runtime: 'classic' },
