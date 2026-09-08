@@ -842,6 +842,13 @@ test('styled runs remain inline and preserve spaces when Chromium copies a termi
     appSource.indexOf('function terminalCsiWithModifier'),
   );
 
+  // Both live rows and scrollback must opt into the shared selection handler.
+  assert.equal(terminalGridSource.match(/data-terminal-row/g)?.length, 2);
+  const terminalSurfaceSource = appSource.slice(
+    appSource.indexOf('function SshTerminalSurface'),
+    appSource.indexOf("type SftpPaneKind = 'local' | 'remote'"),
+  );
+  assert.match(terminalSurfaceSource, /onMouseDown={selectTerminalDoubleClick}/);
   assert.equal(terminalGridSource.match(/inline-block overflow-hidden align-top/g)?.length, 2);
   assert.equal(
     terminalGridSource.match(/className="h-\[18px\] min-w-max whitespace-pre"/g)?.length,
@@ -859,8 +866,12 @@ test('mounted SSH and serial terminals follow long output and preserve manual sc
     'utf8',
   ).replaceAll('export function', 'function');
   const fixture = readFileSync(new URL('./fixtures/terminal-scroll.tsx', import.meta.url), 'utf8');
+  const selectionSource = readFileSync(
+    new URL('../src/terminal-selection.ts', import.meta.url),
+    'utf8',
+  ).replaceAll('export function', 'function');
   const transformed = await transformWithOxc(
-    helpers + appSource.slice(start, end) + fixture,
+    helpers + selectionSource + appSource.slice(start, end) + fixture,
     'terminal-scroll.tsx',
     {
       jsx: { runtime: 'classic' },
@@ -908,11 +919,34 @@ test('mounted SSH and serial terminals follow long output and preserve manual sc
   }
 });
 
-test('Chromium keeps styled runs on one clipboard line and separates real terminal rows', async () => {
+test('Chromium preserves clipboard rows and selects words across the full terminal cell height', async () => {
   const temporaryDirectory = mkdtempSync(join(tmpdir(), 'wormhole-terminal-clipboard-'));
   const harnessPath = join(temporaryDirectory, 'selection.cjs');
   const { ELECTRON_RUN_AS_NODE: _electronRunAsNode, ...environment } = process.env;
   try {
+    const selectionSource = stripTypeScriptTypes(
+      readFileSync(new URL('../src/terminal-selection.ts', import.meta.url), 'utf8'),
+    ).replace('export function', 'function');
+    const doubleClickChecks =
+      selectionSource +
+      `
+      terminal.innerHTML = '<div data-terminal-row style="white-space:pre;font:13px/18px monospace;height:18px"><span style="display:inline-block;height:18px;overflow:hidden;vertical-align:top">log: ti</span><span style="display:inline-block;height:18px;overflow:hidden;vertical-align:top;color:red">me    </span></div>';
+      const row = terminal.firstElementChild;
+      const first = row.firstElementChild.firstChild;
+      const second = row.lastElementChild.firstChild;
+      const selectAt = (node, offset) => {
+        const hit = document.createRange();
+        hit.setStart(node, offset); hit.setEnd(node, offset + 1);
+        const rect = hit.getBoundingClientRect();
+        const event = new MouseEvent('mousedown', { bubbles: true, cancelable: true,
+          button: 0, detail: 2, clientX: (rect.left + rect.right) / 2,
+          clientY: (rect.top + rect.bottom) / 2 });
+        node.parentElement.dispatchEvent(event);
+        return { text: window.getSelection().toString(), prevented: event.defaultPrevented };
+      };
+      terminal.addEventListener('mousedown', selectTerminalDoubleClick);
+      [selectAt(first, 5), selectAt(second, 1), selectAt(second, 2), selectAt(first, 4)];
+    `;
     writeFileSync(
       harnessPath,
       String.raw`
@@ -928,6 +962,25 @@ app.whenReady().then(async () => {
     const result = await window.webContents.executeJavaScript(
       "const terminal=document.getElementById('terminal');terminal.addEventListener('copy',(event)=>{const selection=window.getSelection();const text=selection.toString();if(!text)return;event.clipboardData.setData('text/plain',text);selection.removeAllRanges();event.preventDefault()});const range=document.createRange();range.selectNodeContents(terminal);const selection=window.getSelection();selection.removeAllRanges();selection.addRange(range);const selectedText=selection.toString();const clipboardData=new DataTransfer();const copyEvent=new ClipboardEvent('copy',{bubbles:true,cancelable:true,clipboardData});terminal.dispatchEvent(copyEvent);({clipboardText:clipboardData.getData('text/plain'),defaultPrevented:copyEvent.defaultPrevented,selectedText,remainingText:selection.toString()})",
     );
+    const doubleClicks = await window.webContents.executeJavaScript(${JSON.stringify(doubleClickChecks)});
+    assert.deepEqual(doubleClicks, [
+      { text: 'time', prevented: true },
+      { text: 'time', prevented: true },
+      { text: 'log: time    ', prevented: true },
+      { text: 'log: time    ', prevented: true },
+    ]);
+    // Native mouse input exercises Chromium's default actions, which dispatchEvent skips.
+    const points = await window.webContents.executeJavaScript(
+      "(() => { const hit = document.createRange(); hit.setStart(first, 5); hit.setEnd(first, 6); const glyph = hit.getBoundingClientRect(); const bounds = row.getBoundingClientRect(); return [bounds.top, (bounds.top + bounds.bottom) / 2, bounds.bottom - 1].map(y => ({ x: Math.round((glyph.left + glyph.right) / 2), y: Math.round(y), expected: 'time' })).concat([{ x: Math.round(row.lastElementChild.getBoundingClientRect().right + 10), y: Math.round(bounds.top + 9), expected: row.textContent }]); })()"
+    );
+    window.webContents.focus();
+    for (const { expected, ...point } of points) {
+      await window.webContents.executeJavaScript("window.nativeSelection = new Promise(resolve => terminal.addEventListener('mouseup', () => setTimeout(() => resolve(window.getSelection().toString()), 0), {once:true})); undefined");
+      window.webContents.sendInputEvent({ type: 'mouseMove', ...point });
+      window.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 2, ...point });
+      window.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 2, ...point });
+      assert.equal(await window.webContents.executeJavaScript('window.nativeSelection'), expected);
+    }
     const expectedText = 'docker stack deploy -c portainer-agent-stack.yml portainer\nprintf done';
     assert.deepEqual(result, {
       clipboardText: expectedText,
