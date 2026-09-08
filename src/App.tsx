@@ -76,6 +76,7 @@ import { selectTerminalDoubleClick } from './terminal-selection';
 import {
   mergeTerminalScrollback,
   sameTerminalScrollbackChunk,
+  sameTerminalViewport,
   terminalScrollbackChunks,
   nextTerminalViewportResetSequence,
   scrollTerminalToBottom,
@@ -991,13 +992,15 @@ function applySshTerminalFrame(
     incoming.full && incoming.cells?.length === cellCount
       ? incoming.cells.slice()
       : hasMatchingPrevious
-        ? previous.cells!.slice()
+        ? incoming.changes.length > 0
+          ? previous.cells!.slice()
+          : previous.cells!
         : createBlankTerminalCells(incoming.columns, incoming.rows);
 
   for (const change of incoming.changes) {
     if (change.index < 0 || change.index >= cells.length) continue;
-    // React Doctor mistakes this fresh local buffer for React state. It is copied above and never
-    // aliases the previous frame.
+    // Frames with cell changes always get a fresh buffer above, so this never mutates
+    // the previous frame. React Doctor mistakes that local buffer for React state.
     // react-doctor-disable-next-line react-doctor/no-side-effect-in-state-updater-function
     cells[change.index] = {
       character: change.character,
@@ -8808,27 +8811,38 @@ const TerminalTextGrid = memo(function TerminalTextGrid({
       }}
     >
       <TerminalScrollback lines={terminalVisibleScrollback(frame)} start={frame.scrollbackStart} />
-      {Array.from({ length: frame.rows }, (_, row) => (
-        <div data-terminal-row className="h-[18px] min-w-max whitespace-pre" key={row}>
-          {terminalTextRuns(frame, row).map((run, index) => (
-            <span
-              className={`inline-block overflow-hidden align-top ${run.cursor ? 'terminal-cursor' : ''}`}
-              key={`${row}-${index}`}
-              style={{
-                backgroundColor: run.background,
-                color: run.foreground,
-                height: `${terminalLineHeight}px`,
-                width: `${run.cellCount}ch`,
-              }}
-            >
-              {run.text}
-            </span>
-          ))}
-        </div>
-      ))}
+      <TerminalViewport frame={frame} />
     </div>
   );
 });
+
+const TerminalViewport = memo(
+  function TerminalViewport({ frame }: { frame: WormholeSshTerminalFrame }) {
+    return (
+      <>
+        {Array.from({ length: frame.rows }, (_, row) => (
+          <div data-terminal-row className="h-[18px] min-w-max whitespace-pre" key={row}>
+            {terminalTextRuns(frame, row).map((run, index) => (
+              <span
+                className={`inline-block overflow-hidden align-top ${run.cursor ? 'terminal-cursor' : ''}`}
+                key={`${row}-${index}`}
+                style={{
+                  backgroundColor: run.background,
+                  color: run.foreground,
+                  height: `${terminalLineHeight}px`,
+                  width: `${run.cellCount}ch`,
+                }}
+              >
+                {run.text}
+              </span>
+            ))}
+          </div>
+        ))}
+      </>
+    );
+  },
+  (previous, incoming) => sameTerminalViewport(previous.frame, incoming.frame),
+);
 
 function terminalCsiWithModifier(final: string, event: React.KeyboardEvent, appCursor: boolean) {
   const modifier = 1 + (event.shiftKey ? 1 : 0) + (event.altKey ? 2 : 0) + (event.ctrlKey ? 4 : 0);

@@ -1,3 +1,26 @@
+type TerminalViewport = {
+  cells?: unknown[];
+  columns: number;
+  rows: number;
+  cursorX: number;
+  cursorY: number;
+  cursorVisible: boolean;
+};
+
+export function sameTerminalViewport(
+  previous: TerminalViewport,
+  incoming: TerminalViewport,
+): boolean {
+  return (
+    previous.cells === incoming.cells &&
+    previous.columns === incoming.columns &&
+    previous.rows === incoming.rows &&
+    previous.cursorX === incoming.cursorX &&
+    previous.cursorY === incoming.cursorY &&
+    previous.cursorVisible === incoming.cursorVisible
+  );
+}
+
 export function mergeTerminalScrollback<T>(
   previous:
     | { columns: number; rows: number; scrollback?: T[]; scrollbackStart?: number }

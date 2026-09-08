@@ -3,10 +3,42 @@ import test from 'node:test';
 import {
   mergeTerminalScrollback,
   sameTerminalScrollbackChunk,
+  sameTerminalViewport,
   terminalScrollbackChunks,
 } from '../src/terminal-frame.ts';
 
 const viewport = { columns: 80, rows: 24, scrollbackReset: false };
+
+test('viewport memo ignores history and metadata but invalidates cells, dimensions and cursor', () => {
+  const frame = {
+    cells: [{ character: 'x' }],
+    columns: 1,
+    rows: 1,
+    cursorX: 0,
+    cursorY: 0,
+    cursorVisible: false,
+    sequence: 1,
+    scrollback: [],
+  };
+  assert.equal(sameTerminalViewport(frame, { ...frame }), true);
+  const historyOnly = {
+    ...frame,
+    sequence: 2,
+    scrollback: [{ text: 'history' }],
+    title: 'changed',
+  };
+  assert.equal(sameTerminalViewport(frame, historyOnly), true);
+  for (const update of [
+    { cells: frame.cells.slice() },
+    { columns: 2 },
+    { rows: 2 },
+    { cursorX: 1 },
+    { cursorY: 1 },
+    { cursorVisible: true },
+  ]) {
+    assert.equal(sameTerminalViewport(frame, { ...frame, ...update }), false);
+  }
+});
 
 test('scrollback deltas preserve retained identities and track eviction without mutating frames', () => {
   const lines = Array.from({ length: 5000 }, (_, index) => ({ text: `line-${index}` }));

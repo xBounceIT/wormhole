@@ -167,10 +167,14 @@ async function runTerminalScrollTests() {
       atBottom();
 
       // At capacity, new output must reuse retained DOM/text nodes and selection.
+      let viewportReads = 0;
       await receiveFrame({
         full: true,
         cells: Array.from({ length: 800 }, () => ({
-          character: 'x',
+          get character() {
+            viewportReads++;
+            return 'x';
+          },
           foreground: 7,
           background: 0,
         })),
@@ -180,6 +184,10 @@ async function runTerminalScrollTests() {
         })),
       });
       await settle();
+      assert.ok(viewportReads > 0, 'viewport instrumentation must observe the initial paint');
+      const previousCells = session.terminalFrame.cells;
+      Object.freeze(previousCells);
+      viewportReads = 0;
       const scrollback = surface().querySelector('.terminal-scrollback');
       const retained = scrollback.querySelectorAll('[data-terminal-row]')[2000];
       const selection = document.getSelection();
@@ -206,6 +214,12 @@ async function runTerminalScrollTests() {
             })),
           });
           await settle();
+          assert.equal(
+            session.terminalFrame.cells,
+            previousCells,
+            'history delta copied viewport cells',
+          );
+          assert.equal(viewportReads, 0, 'history delta rescanned the unchanged viewport');
           assert.ok(mutations < 300, `output rebuilt history: ${mutations} DOM mutations`);
           const rows = scrollback.querySelectorAll('[data-terminal-row]');
           assert.equal(rows.length, 5000);
@@ -227,10 +241,25 @@ async function runTerminalScrollTests() {
         'x'.repeat(80),
       );
       await receiveFrame({ changes: [{ index: 0, character: 'Z', foreground: 1, background: 0 }] });
+      assert.notEqual(
+        session.terminalFrame.cells,
+        previousCells,
+        'cell changes must copy the buffer',
+      );
+      assert.equal(previousCells[0].character, 'x', 'cell delta mutated the previous frame');
       assert.equal(
         surface().querySelectorAll('[data-terminal-row]')[5000].textContent,
         'Z' + 'x'.repeat(79),
       );
+      const changedCells = session.terminalFrame.cells;
+      await receiveFrame({ cursorVisible: true, cursorX: 1 });
+      assert.equal(
+        session.terminalFrame.cells,
+        changedCells,
+        'cursor movement copied viewport cells',
+      );
+      assert.equal(surface().querySelectorAll('.terminal-cursor').length, 1);
+      assert.equal(surface().querySelector('.terminal-cursor').textContent, 'x');
       await receiveFrame({ scrollbackReset: true, viewportReset: true });
       await settle();
       assert.equal(surface().querySelector('.terminal-scrollback'), null);
