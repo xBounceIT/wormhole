@@ -72,6 +72,7 @@ import {
   terminalCopyChordAfterKeyUp,
 } from './terminal-clipboard';
 import { terminalControlKeyData } from './terminal-keyboard';
+import { selectTerminalDoubleClick } from './terminal-selection';
 import {
   nextTerminalViewportResetSequence,
   terminalScrollEventKeepsBottomPin,
@@ -8754,7 +8755,11 @@ const TerminalScrollback = memo(function TerminalScrollback({
                 },
               ];
           return (
-            <div className="h-[18px] min-w-max whitespace-pre" key={start + index}>
+            <div
+              data-terminal-row
+              className="h-[18px] min-w-max whitespace-pre"
+              key={start + index}
+            >
               {runs.map((run, runIndex) => (
                 <span
                   className="inline-block overflow-hidden align-top"
@@ -8803,7 +8808,7 @@ const TerminalTextGrid = memo(function TerminalTextGrid({
     >
       <TerminalScrollback lines={terminalVisibleScrollback(frame)} />
       {Array.from({ length: frame.rows }, (_, row) => (
-        <div className="h-[18px] min-w-max whitespace-pre" key={row}>
+        <div data-terminal-row className="h-[18px] min-w-max whitespace-pre" key={row}>
           {terminalTextRuns(frame, row).map((run, index) => (
             <span
               className={`inline-block overflow-hidden align-top ${run.cursor ? 'terminal-cursor' : ''}`}
@@ -9198,6 +9203,7 @@ function SshTerminalSurface({
       aria-label={isSerial ? 'Live serial terminal' : 'Live SSH terminal'}
       className="terminal-scrollbar h-full min-h-0 min-w-0 flex-1 cursor-text overflow-x-auto overflow-y-auto overscroll-contain bg-[#090909] text-[#e5e7eb] outline-none"
       onClick={(event) => event.currentTarget.focus({ preventScroll: true })}
+      onMouseDown={selectTerminalDoubleClick}
       onKeyDown={(event) => {
         const hasSelection = Boolean(terminalSelectionText(event.currentTarget));
         const useClipboard = shouldUseTerminalClipboardShortcut(
