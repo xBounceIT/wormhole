@@ -20,3 +20,13 @@ export function terminalScrollEventKeepsBottomPin(
   if (atBottom) return true;
   return automaticScrollTop !== undefined && Math.abs(scrollTop - automaticScrollTop) <= 1;
 }
+
+export function scrollTerminalToBottom(surface: {
+  scrollHeight: number;
+  clientHeight: number;
+  scrollTop: number;
+}): number {
+  surface.scrollTop = Math.max(0, surface.scrollHeight - surface.clientHeight);
+  // Chromium can clamp or round the requested offset. Track the applied position.
+  return surface.scrollTop;
+}

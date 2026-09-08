@@ -3,7 +3,7 @@ import { execFile } from 'node:child_process';
 import { createRequire, stripTypeScriptTypes } from 'node:module';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import test from 'node:test';
 import { promisify } from 'node:util';
 import { runInNewContext } from 'node:vm';
@@ -24,6 +24,7 @@ import {
 import { terminalControlKeyData } from '../src/terminal-keyboard.ts';
 import {
   nextTerminalViewportResetSequence,
+  scrollTerminalToBottom,
   terminalScrollEventKeepsBottomPin,
   terminalVisibleScrollback,
 } from '../src/terminal-frame.ts';
@@ -635,6 +636,114 @@ test('terminal scroll events still release the bottom pin after manual scrolling
   assert.equal(terminalScrollEventKeepsBottomPin(360, true, undefined), true);
 });
 
+test('automatic terminal scrolling tracks the applied offset and clamps short content', () => {
+  const short = { scrollHeight: 100, clientHeight: 200, scrollTop: 50 };
+  assert.equal(scrollTerminalToBottom(short), 0);
+  let applied = 0;
+  const rounded = {
+    scrollHeight: 1000,
+    clientHeight: 200,
+    get scrollTop() {
+      return applied;
+    },
+    set scrollTop(value: number) {
+      applied = value - 0.5;
+    },
+  };
+  assert.equal(scrollTerminalToBottom(rounded), 799.5);
+});
+
+test('live scroll handler catches the final output and preserves the pin across delayed events', () => {
+  const surfaceSource = appSource.slice(
+    appSource.indexOf('function SshTerminalSurface'),
+    appSource.indexOf("type SftpPaneKind = 'local' | 'remote'"),
+  );
+  const handler = surfaceSource
+    .slice(
+      surfaceSource.indexOf('onScroll={(event) => {') + 'onScroll={'.length,
+      surfaceSource.indexOf('\n      ref={surfaceRef}', surfaceSource.indexOf('onScroll=')),
+    )
+    .trim()
+    .slice(0, -1);
+  const stickToBottomRef = { current: true };
+  const automaticScrollTopRef: { current: number | undefined } = { current: 360 };
+  const onScroll = runInNewContext(`(${handler})`, {
+    stickToBottomRef,
+    automaticScrollTopRef,
+    terminalScrollEventKeepsBottomPin,
+    scrollTerminalToBottom,
+    terminalIsAtBottom: (surface: {
+      scrollHeight: number;
+      clientHeight: number;
+      scrollTop: number;
+    }) => surface.scrollHeight - surface.clientHeight - surface.scrollTop <= 18,
+  });
+  const surface = { scrollHeight: 900, clientHeight: 180, scrollTop: 360 };
+  // The last output arrived after the browser queued the automatic scroll event.
+  onScroll({ currentTarget: surface });
+  assert.equal(surface.scrollTop, 720);
+  assert.equal(automaticScrollTopRef.current, 720);
+  for (let frame = 0; frame < 100; frame++) {
+    surface.scrollHeight += 180;
+    onScroll({ currentTarget: surface });
+    assert.equal(surface.scrollTop, surface.scrollHeight - surface.clientHeight);
+    assert.equal(stickToBottomRef.current, true);
+  }
+  // Reading earlier output must release the pin and preserve the user's position.
+  surface.scrollTop -= 180;
+  const manualPosition = surface.scrollTop;
+  onScroll({ currentTarget: surface });
+  assert.equal(stickToBottomRef.current, false);
+  assert.equal(automaticScrollTopRef.current, undefined);
+  surface.scrollHeight += 180;
+  onScroll({ currentTarget: surface });
+  assert.equal(surface.scrollTop, manualPosition);
+  surface.scrollTop = surface.scrollHeight - surface.clientHeight;
+  onScroll({ currentTarget: surface });
+  assert.equal(stickToBottomRef.current, true);
+});
+
+test('horizontal terminal wheel scrolling preserves following while vertical scrolling can release it', () => {
+  const start = appSource.indexOf('const handleWheel = (event: WheelEvent) => {');
+  const source = appSource.slice(
+    start,
+    appSource.indexOf("surface.addEventListener('wheel'", start),
+  );
+  const surface = {
+    scrollTop: 360,
+    scrollLeft: 0,
+    scrollHeight: 900,
+    clientHeight: 180,
+    scrollWidth: 1000,
+    clientWidth: 500,
+  };
+  const automaticScrollTopRef = { current: 360 };
+  const stickToBottomRef = { current: true };
+  const handleWheel = runInNewContext(
+    stripTypeScriptTypes(`${source}\nhandleWheel`, { mode: 'strip' }),
+    {
+      surface,
+      automaticScrollTopRef,
+      stickToBottomRef,
+      terminalWheelDelta: (_surface: unknown, delta: number) => delta,
+      terminalIsAtBottom: () =>
+        surface.scrollHeight - surface.scrollTop - surface.clientHeight <= 18,
+    },
+  );
+  const event = { deltaMode: 0, preventDefault() {}, stopPropagation() {} };
+  handleWheel({ ...event, deltaX: 100, deltaY: 0 });
+  assert.equal(surface.scrollLeft, 100);
+  assert.equal(automaticScrollTopRef.current, 360);
+  assert.equal(stickToBottomRef.current, true);
+  handleWheel({ ...event, deltaX: 0, deltaY: -180 });
+  assert.equal(surface.scrollTop, 180);
+  assert.equal(automaticScrollTopRef.current, undefined);
+  assert.equal(stickToBottomRef.current, false);
+  handleWheel({ ...event, deltaX: 0, deltaY: 10000 });
+  assert.equal(surface.scrollTop, 720);
+  assert.equal(stickToBottomRef.current, true);
+});
+
 test('live terminal wires automatic scroll tracking into frame and user scroll handling', () => {
   const frameApplicationSource = appSource.slice(
     appSource.indexOf('function applySshTerminalFrame'),
@@ -659,15 +768,15 @@ test('live terminal wires automatic scroll tracking into frame and user scroll h
   );
   assert.match(
     terminalSurfaceSource,
-    /const bottom = Math\.max\(0, surface\.scrollHeight - surface\.clientHeight\);\s*automaticScrollTopRef\.current = bottom;\s*surface\.scrollTop = bottom;/,
+    /automaticScrollTopRef\.current = scrollTerminalToBottom\(surface\);/,
   );
   assert.match(
     terminalSurfaceSource,
-    /onScroll=\{\(event\) => \{[\s\S]*terminalScrollEventKeepsBottomPin\([\s\S]*automaticScrollTopRef\.current,[\s\S]*automaticScrollTopRef\.current = undefined;/,
+    /onScroll=\{\(event\) => \{[\s\S]*terminalScrollEventKeepsBottomPin\([\s\S]*automaticScrollTopRef\.current,[\s\S]*\? scrollTerminalToBottom\(surface\)/,
   );
   assert.match(
     terminalSurfaceSource,
-    /automaticScrollTopRef\.current = undefined;\s*surface\.scrollLeft = nextScrollLeft;\s*surface\.scrollTop = nextScrollTop;/,
+    /if \(deltaY !== 0\) \{\s*automaticScrollTopRef\.current = undefined;\s*surface\.scrollTop = nextScrollTop;/,
   );
 });
 
@@ -739,6 +848,64 @@ test('styled runs remain inline and preserve spaces when Chromium copies a termi
     2,
   );
   assert.doesNotMatch(terminalGridSource, /className=(?:"|{`)[^"`]*block flex-none/);
+});
+
+test('mounted SSH and serial terminals follow long output and preserve manual scroll in Chromium', async () => {
+  const start = appSource.indexOf('const terminalFontSize');
+  const end = appSource.indexOf("type SftpPaneKind = 'local' | 'remote'", start);
+  assert.ok(start >= 0 && end > start);
+  const helpers = readFileSync(
+    new URL('../src/terminal-frame.ts', import.meta.url),
+    'utf8',
+  ).replaceAll('export function', 'function');
+  const fixture = readFileSync(new URL('./fixtures/terminal-scroll.tsx', import.meta.url), 'utf8');
+  const transformed = await transformWithOxc(
+    helpers + appSource.slice(start, end) + fixture,
+    'terminal-scroll.tsx',
+    {
+      jsx: { runtime: 'classic' },
+    },
+  );
+  const renderer = `
+    const assert = require('node:assert/strict');
+    const React = require(${JSON.stringify(require.resolve('react'))});
+    const { createRoot } = require(${JSON.stringify(require.resolve('react-dom/client'))});
+    const { memo, useRef, useEffect, useLayoutEffect } = React;
+    globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+    ${transformed.code}
+  `;
+  const directory = mkdtempSync(join(tmpdir(), 'wormhole-terminal-scroll-'));
+  const harnessPath = join(directory, 'scroll.cjs');
+  const { ELECTRON_RUN_AS_NODE: _electronRunAsNode, ...environment } = process.env;
+  try {
+    writeFileSync(
+      harnessPath,
+      `
+      const { app, BrowserWindow } = require('electron');
+      app.whenReady().then(async () => {
+        const window = new BrowserWindow({ show: false, webPreferences: {
+          nodeIntegration: true, contextIsolation: false, backgroundThrottling: false, offscreen: true,
+        } });
+        try {
+          await window.loadURL('data:text/html,' + encodeURIComponent('<style>.terminal-scrollbar{height:180px;width:500px;overflow:auto}.min-w-max{min-width:max-content}.whitespace-pre{white-space:pre}.inline-block{display:inline-block}.overflow-hidden{overflow:hidden}.align-top{vertical-align:top}</style><div id="root"></div>'));
+          await window.webContents.executeJavaScript(${JSON.stringify(renderer)});
+        } finally { window.destroy(); }
+        app.quit();
+      }).catch((error) => { console.error(error); app.exit(1); });
+    `,
+    );
+    const needsDisplay = process.platform === 'linux' && !environment.DISPLAY;
+    await execFileAsync(
+      needsDisplay ? 'xvfb-run' : electronExecutable,
+      needsDisplay
+        ? ['--auto-servernum', electronExecutable, '--no-sandbox', harnessPath]
+        : [harnessPath],
+      { env: environment, timeout: 30_000, windowsHide: true },
+    );
+  } finally {
+    assert.equal(resolve(directory, '..'), resolve(tmpdir()));
+    rmSync(directory, { force: true, recursive: true });
+  }
 });
 
 test('Chromium keeps styled runs on one clipboard line and separates real terminal rows', async () => {
