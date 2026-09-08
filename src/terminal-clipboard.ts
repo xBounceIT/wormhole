@@ -42,14 +42,12 @@ export function terminalCopyChordAfterKeyUp(
   return copyChordActive && event.key.toLowerCase() !== 'c';
 }
 
-export function copyAndClearTerminalSelection(
+export function copyTerminalSelection(
   text: string,
   clipboardData: Pick<DataTransfer, 'setData'>,
-  clearSelection: () => void,
 ): boolean {
   if (!text) return false;
   clipboardData.setData('text/plain', text);
-  clearSelection();
   return true;
 }
 
