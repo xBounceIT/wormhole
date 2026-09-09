@@ -78,14 +78,38 @@ test('double click selects a word across styled runs without trailing spaces', (
   }
 });
 
-test('only empty space selects the full row, including beyond its text', () => {
+test('empty space selects the row only through its last non-whitespace character', () => {
   for (const clientX of [45, 90, 115, 200]) {
     const f = fixture();
     f.event.clientX = clientX;
-    assert.deepEqual(f.run(), { selected: 'log: time   ', prevented: true });
+    assert.deepEqual(f.run(), { selected: 'log: time', prevented: true });
   }
-  assert.deepEqual(fixture(['   ']).run(), { selected: '   ', prevented: true });
+  assert.deepEqual(fixture(['   ']).run(), { selected: '', prevented: true });
   assert.deepEqual(fixture([]).run(), { selected: '', prevented: true });
+});
+
+test('row selection preserves indentation and inner spaces across styled runs', () => {
+  for (const parts of [
+    ['  log: ', 'time', '   ', '  '],
+    ['', '  log: time', '', ' \t '],
+    ['  log: time'],
+  ]) {
+    const f = fixture(parts);
+    f.event.clientX = 400;
+    assert.deepEqual(f.run(), { selected: '  log: time', prevented: true });
+  }
+});
+
+test('row selection preserves Unicode at the end and collapses whitespace-only rows', () => {
+  for (const [parts, expected] of [
+    [['caffè 😀', '   '], 'caffè 😀'],
+    [['e\u0301', '  '], 'e\u0301'],
+    [['', '  ', '\t'], ''],
+  ] as const) {
+    const f = fixture([...parts]);
+    f.event.clientX = 400;
+    assert.deepEqual(f.run(), { selected: expected, prevented: true });
+  }
 });
 
 test('Unicode words and punctuation do not absorb adjacent whitespace', () => {

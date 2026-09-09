@@ -991,12 +991,12 @@ app.whenReady().then(async () => {
     assert.deepEqual(doubleClicks, [
       { text: 'time', prevented: true },
       { text: 'time', prevented: true },
-      { text: 'log: time    ', prevented: true },
-      { text: 'log: time    ', prevented: true },
+      { text: 'log: time', prevented: true },
+      { text: 'log: time', prevented: true },
     ]);
     // Native mouse input exercises Chromium's default actions, which dispatchEvent skips.
     const points = await window.webContents.executeJavaScript(
-      "(() => { const hit = document.createRange(); hit.setStart(first, 5); hit.setEnd(first, 6); const glyph = hit.getBoundingClientRect(); const bounds = row.getBoundingClientRect(); return [bounds.top, (bounds.top + bounds.bottom) / 2, bounds.bottom - 1].map(y => ({ x: Math.round((glyph.left + glyph.right) / 2), y: Math.round(y), expected: 'time' })).concat([{ x: Math.round(row.lastElementChild.getBoundingClientRect().right + 10), y: Math.round(bounds.top + 9), expected: row.textContent }]); })()"
+      "(() => { const hit = document.createRange(); hit.setStart(first, 5); hit.setEnd(first, 6); const glyph = hit.getBoundingClientRect(); const bounds = row.getBoundingClientRect(); return [bounds.top, (bounds.top + bounds.bottom) / 2, bounds.bottom - 1].map(y => ({ x: Math.round((glyph.left + glyph.right) / 2), y: Math.round(y), expected: 'time' })).concat([{ x: Math.round(row.lastElementChild.getBoundingClientRect().right + 10), y: Math.round(bounds.top + 9), expected: row.textContent.trimEnd() }]); })()"
     );
     window.webContents.focus();
     for (const { expected, ...point } of points) {
@@ -1005,7 +1005,52 @@ app.whenReady().then(async () => {
       window.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 2, ...point });
       window.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 2, ...point });
       assert.equal(await window.webContents.executeJavaScript('window.nativeSelection'), expected);
+      if (expected === 'log: time') {
+        assert.equal(await window.webContents.executeJavaScript(
+          'selection.focusNode === second && selection.focusOffset === 2'
+        ), true);
+      }
     }
+    const rowBoundaries = await window.webContents.executeJavaScript(${JSON.stringify(`
+      const cases = [
+        ['  log: ', 'time', '   ', '  '],
+        ['caffè 😀', '  '],
+        ['e\u0301', '  '],
+        ['', '  ', ' '],
+        [],
+      ];
+      cases.map(parts => {
+        row.replaceChildren(...parts.map(text => {
+          const span = document.createElement('span');
+          span.style.cssText = 'display:inline-block;overflow:hidden;vertical-align:top';
+          span.appendChild(document.createTextNode(text));
+          return span;
+        }));
+        const bounds = row.getBoundingClientRect();
+        row.dispatchEvent(new MouseEvent('mousedown', {
+          bubbles: true, cancelable: true, button: 0, detail: 2,
+          clientX: bounds.right - 1, clientY: bounds.top + 9,
+        }));
+        const selected = document.getSelection();
+        const clipboardData = new DataTransfer();
+        row.dispatchEvent(new ClipboardEvent('copy', {
+          bubbles: true, cancelable: true, clipboardData,
+        }));
+        return {
+          text: selected.toString(),
+          copied: clipboardData.getData('text/plain'),
+          endRun: [...row.children].findIndex(span => span.contains(selected.focusNode)),
+          endOffset: selected.focusOffset,
+        };
+      });
+    `)});
+    assert.deepEqual(rowBoundaries, [
+      { text: '  log: time', copied: '  log: time', endRun: 1, endOffset: 4 },
+      { text: 'caffè 😀', copied: 'caffè 😀', endRun: 0, endOffset: 8 },
+      { text: 'e\u0301', copied: 'e\u0301', endRun: 0, endOffset: 2 },
+      { text: '', copied: '', endRun: 0, endOffset: 0 },
+      { text: '', copied: '', endRun: -1, endOffset: 0 },
+    ]);
   } finally {
     window.destroy();
   }

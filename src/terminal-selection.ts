@@ -39,17 +39,23 @@ export function selectTerminalDoubleClick(event: {
     base += node.length;
   }
   range.selectNodeContents(row);
+  let start = 0;
+  let end = text.trimEnd().length;
   if (hit >= 0 && !/\s/u.test(text[hit])) {
     const segments = new Intl.Segmenter(undefined, { granularity: 'word' }).segment(text);
     const segment = segments.containing(hit)!;
-    const start = segment.index;
-    const end = start + segment.segment.length;
-    base = 0;
-    for (const node of nodes) {
-      if (start >= base && start < base + node.length) range.setStart(node, start - base);
-      if (end > base && end <= base + node.length) range.setEnd(node, end - base);
-      base += node.length;
+    start = segment.index;
+    end = start + segment.segment.length;
+  }
+  base = 0;
+  for (const node of nodes) {
+    if (start >= base && start < base + node.length) range.setStart(node, start - base);
+    if (end >= base && end <= base + node.length) {
+      // End inside the final text run so the highlight excludes blank cells too.
+      range.setEnd(node, end - base);
+      break;
     }
+    base += node.length;
   }
   event.preventDefault();
   selection.removeAllRanges();
