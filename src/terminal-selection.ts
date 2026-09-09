@@ -40,7 +40,9 @@ export function selectTerminalDoubleClick(event: {
   }
   range.selectNodeContents(row);
   let start = 0;
-  let end = text.trimEnd().length;
+  let end = text.length;
+  // Empty terminal cells use ASCII spaces; other whitespace belongs to the output.
+  while (end > 0 && text[end - 1] === ' ') end--;
   if (hit >= 0 && !/\s/u.test(text[hit])) {
     const segments = new Intl.Segmenter(undefined, { granularity: 'word' }).segment(text);
     const segment = segments.containing(hit)!;

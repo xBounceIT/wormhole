@@ -1016,6 +1016,8 @@ app.whenReady().then(async () => {
         ['  log: ', 'time', '   ', '  '],
         ['caffè 😀', '  '],
         ['e\u0301', '  '],
+        ['value', '\u00a0', '  '],
+        ['\u2003', '  '],
         ['', '  ', ' '],
         [],
       ];
@@ -1048,6 +1050,8 @@ app.whenReady().then(async () => {
       { text: '  log: time', copied: '  log: time', endRun: 1, endOffset: 4 },
       { text: 'caffè 😀', copied: 'caffè 😀', endRun: 0, endOffset: 8 },
       { text: 'e\u0301', copied: 'e\u0301', endRun: 0, endOffset: 2 },
+      { text: 'value\u00a0', copied: 'value\u00a0', endRun: 1, endOffset: 1 },
+      { text: '\u2003', copied: '\u2003', endRun: 0, endOffset: 1 },
       { text: '', copied: '', endRun: 0, endOffset: 0 },
       { text: '', copied: '', endRun: -1, endOffset: 0 },
     ]);

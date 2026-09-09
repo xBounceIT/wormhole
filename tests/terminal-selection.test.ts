@@ -78,7 +78,7 @@ test('double click selects a word across styled runs without trailing spaces', (
   }
 });
 
-test('empty space selects the row only through its last non-whitespace character', () => {
+test('empty space selects the row without trailing ASCII padding', () => {
   for (const clientX of [45, 90, 115, 200]) {
     const f = fixture();
     f.event.clientX = clientX;
@@ -91,7 +91,7 @@ test('empty space selects the row only through its last non-whitespace character
 test('row selection preserves indentation and inner spaces across styled runs', () => {
   for (const parts of [
     ['  log: ', 'time', '   ', '  '],
-    ['', '  log: time', '', ' \t '],
+    ['', '  log: time', '', '   '],
     ['  log: time'],
   ]) {
     const f = fixture(parts);
@@ -100,15 +100,28 @@ test('row selection preserves indentation and inner spaces across styled runs', 
   }
 });
 
-test('row selection preserves Unicode at the end and collapses whitespace-only rows', () => {
+test('row selection preserves Unicode at the end and clears padding-only rows', () => {
   for (const [parts, expected] of [
     [['caffè 😀', '   '], 'caffè 😀'],
     [['e\u0301', '  '], 'e\u0301'],
-    [['', '  ', '\t'], ''],
+    [['', '  ', ' '], ''],
   ] as const) {
     const f = fixture([...parts]);
     f.event.clientX = 400;
     assert.deepEqual(f.run(), { selected: expected, prevented: true });
+  }
+});
+
+test('row selection preserves non-padding whitespace before trailing blank cells', () => {
+  for (const whitespace of ['\u00a0', '\u2003', '\u202f', '\u3000', '\t']) {
+    for (const parts of [
+      ['value', whitespace, '   '],
+      [whitespace, '   '],
+    ]) {
+      const f = fixture(parts);
+      f.event.clientX = 400;
+      assert.deepEqual(f.run(), { selected: parts.slice(0, -1).join(''), prevented: true });
+    }
   }
 });
 
