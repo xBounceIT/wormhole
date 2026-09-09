@@ -9458,6 +9458,16 @@ function SftpFilePane({
   const listViewportRef = useRef<HTMLDivElement>(null);
   const listViewportStateRef = useRef(listViewport);
 
+  useEffect(() => {
+    const clearDropPath = () => setDropPath(undefined);
+    window.addEventListener('dragend', clearDropPath);
+    window.addEventListener('drop', clearDropPath, true);
+    return () => {
+      window.removeEventListener('dragend', clearDropPath);
+      window.removeEventListener('drop', clearDropPath, true);
+    };
+  }, []);
+
   const syncListViewport = useCallback((height: number, scrollTop: number) => {
     const next = { height, scrollTop: sftpVirtualScrollAnchor(scrollTop) };
     const current = listViewportStateRef.current;
@@ -9632,10 +9642,19 @@ function SftpFilePane({
   return (
     <section
       aria-label={`${pane === 'local' ? 'Local' : 'Remote'} files`}
-      className={`relative flex min-h-0 min-w-0 flex-1 flex-col gap-2 overflow-hidden ${
-        dropPath === state.path ? 'rounded-md bg-primary/5 ring-1 ring-primary/70' : ''
+      className={`relative flex min-h-0 min-w-0 flex-1 flex-col gap-2 overflow-hidden rounded-md ${
+        dropPath === state.path ? 'bg-primary/5' : ''
       }`}
-      onDragLeave={() => setDropPath(undefined)}
+      onDragEnter={(event) => setDragState(event)}
+      onDragLeave={(event) => {
+        if (
+          event.relatedTarget instanceof Node &&
+          event.currentTarget.contains(event.relatedTarget)
+        ) {
+          return;
+        }
+        setDropPath(undefined);
+      }}
       onDragOver={(event) => setDragState(event)}
       onKeyDown={(event) => {
         if (
@@ -9662,6 +9681,12 @@ function SftpFilePane({
       onDrop={(event) => handleDrop(event)}
       tabIndex={-1}
     >
+      {dropPath === state.path ? (
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-0 z-10 rounded-md border border-primary/70"
+        />
+      ) : null}
       <div className="flex shrink-0 items-center">
         <span className="text-sm font-semibold text-foreground">
           {pane === 'local' ? 'Local' : 'Remote'}
@@ -9768,8 +9793,6 @@ function SftpFilePane({
 
       <div
         className="min-h-0 flex-1 overflow-auto rounded-sm border border-border"
-        onDragOver={(event) => setDragState(event)}
-        onDrop={(event) => handleDrop(event)}
         onScroll={(event) => {
           const viewport = event.currentTarget;
           syncListViewport(viewport.clientHeight, viewport.scrollTop);
@@ -9841,7 +9864,11 @@ function SftpFilePane({
                             if (entry.isDirectory) onNavigate(entry.fullPath);
                             else if (pane === 'local') onOperation('open', entry.fullPath);
                           }}
-                          onDragEnd={() => setDropPath(undefined)}
+                          onDragEnter={(event) => {
+                            if (!entry.isDirectory) return;
+                            event.stopPropagation();
+                            setDragState(event, entry.fullPath);
+                          }}
                           onDragOver={(event) => {
                             if (!entry.isDirectory) return;
                             event.stopPropagation();
