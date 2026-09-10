@@ -478,14 +478,14 @@ func TestSSHTerminalEmulatorIgnoresRedundantAlternateScreenExit(t *testing.T) {
 
 func TestSSHTerminalEmulatorAlternateScreenDetectionHandlesChunksWithoutRepeating(t *testing.T) {
 	emulator := &sshTerminalEmulator{}
-	if transitions := emulator.alternateScreenTransitions([]byte("\x1b[?1049")); len(transitions) != 0 {
+	if transitions := emulator.controlParser.write([]byte("\x1b[?1049")); len(transitions) != 0 {
 		t.Fatal("partial alternate-screen transition was reported too early")
 	}
-	transitions := emulator.alternateScreenTransitions([]byte("h"))
+	transitions := emulator.controlParser.write([]byte("h"))
 	if len(transitions) != 1 || transitions[0].end != 1 || !transitions[0].active {
 		t.Fatal("split alternate-screen transition was not recognized")
 	}
-	if transitions := emulator.alternateScreenTransitions([]byte("later output")); len(transitions) != 0 {
+	if transitions := emulator.controlParser.write([]byte("later output")); len(transitions) != 0 {
 		t.Fatal("alternate-screen transition repeated on later output")
 	}
 }

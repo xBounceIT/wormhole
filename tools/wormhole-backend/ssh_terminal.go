@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"strings"
@@ -64,8 +63,10 @@ type sshTerminalFrame struct {
 }
 
 type sshTerminalControlEffects struct {
-	scrollbackReset bool
-	viewportReset   bool
+	scrollbackReset           bool
+	viewportReset             bool
+	fullRedraw                bool
+	alternateScreenTransition bool
 }
 
 type sshTerminalHistoryEscapeMode uint8
@@ -76,47 +77,6 @@ const (
 	sshTerminalHistoryEscapeCsi
 	sshTerminalHistoryEscapeString
 )
-
-var sshViewportClearSequences = [][]byte{
-	[]byte("\x1b[J"),
-	[]byte("\x1b[0J"),
-	[]byte("\x1b[2J"),
-	[]byte("\x1b[3J"),
-}
-
-type sshTerminalAlternateScreenTransition struct {
-	end      int
-	active   bool
-	sequence []byte
-}
-
-type sshTerminalAlternateScreenEscapeMode uint8
-
-const (
-	sshTerminalAlternateScreenEscapeNone sshTerminalAlternateScreenEscapeMode = iota
-	sshTerminalAlternateScreenEscapeAfterEsc
-	sshTerminalAlternateScreenEscapeCSI
-	sshTerminalAlternateScreenEscapeParameters
-)
-
-type sshTerminalAlternateScreenParser struct {
-	escapeMode         sshTerminalAlternateScreenEscapeMode
-	parameter          int
-	parameterSeen      bool
-	alternateParameter int
-}
-
-var sshAlternateScreenModes = []struct {
-	parameter int
-	enter     []byte
-	exit      []byte
-}{
-	{47, []byte("\x1b[?47h"), []byte("\x1b[?47l")},
-	{1047, []byte("\x1b[?1047h"), []byte("\x1b[?1047l")},
-	{1049, []byte("\x1b[?1049h"), []byte("\x1b[?1049l")},
-}
-
-var sshScrollbackEraseSequence = []byte("\x1b[3J")
 
 type sshTerminalEmulator struct {
 	state        *vt10x.State
@@ -131,13 +91,11 @@ type sshTerminalEmulator struct {
 	historyLineCount  int
 	historyAltScreen  bool
 	scrollback        []sshTerminalScrollbackLine
-	resetEscape       bool
-	clearTail         []byte
 	historyEscapeMode sshTerminalHistoryEscapeMode
 	historyStringEsc  bool
 	historyCapture    []sshTerminalCell
 	historyCaptureOK  bool
-	alternateParser   sshTerminalAlternateScreenParser
+	controlParser     sshTerminalControlParser
 
 	previousCells         []sshTerminalCell
 	previousCursorX       int
@@ -220,14 +178,14 @@ func (terminal *sshTerminalEmulator) write(data []byte) (*sshTerminalFrame, bool
 	}
 
 	completeData := terminal.pending[:complete]
-	alternateScreenTransitions := terminal.alternateScreenTransitions(completeData)
-	if err := terminal.writeVT(completeData, alternateScreenTransitions); err != nil {
+	controls := terminal.controlParser.write(completeData)
+	controlEffects, err := terminal.writeVT(completeData, controls)
+	if err != nil {
 		return nil, false, err
 	}
-	controlEffects := terminal.sawTerminalControlEffects(completeData)
 	terminalReset := controlEffects.scrollbackReset
-	terminalAltTransition := len(alternateScreenTransitions) > 0
-	viewportReset := controlEffects.viewportReset || terminalAltTransition
+	terminalAltTransition := controlEffects.alternateScreenTransition
+	viewportReset := controlEffects.viewportReset
 	var historyRows []sshTerminalScrollbackLine
 	if terminal.historyVT != nil {
 		var err error
@@ -242,7 +200,9 @@ func (terminal *sshTerminalEmulator) write(data []byte) (*sshTerminalFrame, bool
 	terminal.pending = append(terminal.pending[:0], terminal.pending[complete:]...)
 
 	terminal.state.Lock()
-	frame, changed := terminal.snapshotLocked(false)
+	// Full clears and buffer switches repair a stale renderer. Partial erases
+	// (for example a progress line) keep using bounded cell deltas.
+	frame, changed := terminal.snapshotLocked(controlEffects.fullRedraw)
 	cells := append([]sshTerminalCell(nil), terminal.previousCells...)
 	cursorX := terminal.previousCursorX
 	cursorY := terminal.previousCursorY
@@ -325,28 +285,52 @@ func logTerminalRecoveryOnce(logged *bool, protocol string) {
 
 func (terminal *sshTerminalEmulator) writeVT(
 	data []byte,
-	transitions []sshTerminalAlternateScreenTransition,
-) error {
+	controls []sshTerminalControl,
+) (sshTerminalControlEffects, error) {
+	var effects sshTerminalControlEffects
 	offset := 0
-	for _, transition := range transitions {
-		if _, err := terminal.vt.Write(data[offset:transition.end]); err != nil {
-			return err
+	for _, control := range controls {
+		// Classify an erase at its execution point, before following text or
+		// cursor movement changes the cursor. This also works across reads.
+		if _, err := terminal.vt.Write(data[offset : control.end-1]); err != nil {
+			return effects, err
 		}
-		offset = transition.end
-
-		terminal.state.Lock()
-		active := terminal.state.Mode(vt10x.ModeAltScreen)
-		terminal.state.Unlock()
-		if active != transition.active {
-			if _, err := terminal.vt.Write(transition.sequence); err != nil {
-				return err
+		effects.viewportReset = true
+		switch control.kind {
+		case sshTerminalControlErase:
+			terminal.state.Lock()
+			x, y := terminal.state.Cursor()
+			terminal.state.Unlock()
+			effects.fullRedraw = effects.fullRedraw || control.parameter == 2 ||
+				control.parameter == 3 || control.parameter == 0 && x == 0 && y == 0
+			effects.scrollbackReset = effects.scrollbackReset || control.parameter == 3
+		case sshTerminalControlReset:
+			effects.fullRedraw = true
+			effects.scrollbackReset = true
+		case sshTerminalControlAlternateScreen:
+			effects.fullRedraw = true
+			effects.alternateScreenTransition = true
+		}
+		if _, err := terminal.vt.Write(data[control.end-1 : control.end]); err != nil {
+			return effects, err
+		}
+		offset = control.end
+		if control.kind == sshTerminalControlAlternateScreen {
+			terminal.state.Lock()
+			active := terminal.state.Mode(vt10x.ModeAltScreen)
+			terminal.state.Unlock()
+			if active != control.active {
+				sequence := fmt.Sprintf("\x1b[?%d%c", control.parameter, data[control.end-1])
+				if _, err := terminal.vt.Write([]byte(sequence)); err != nil {
+					return effects, err
+				}
 			}
 		}
 	}
 	if _, err := terminal.vt.Write(data[offset:]); err != nil {
-		return err
+		return effects, err
 	}
-	return nil
+	return effects, nil
 }
 
 func completeUTF8Prefix(data []byte) int {
@@ -885,166 +869,6 @@ func (terminal *sshTerminalEmulator) updateScrollback(
 		terminal.rebaseHistoryRecorder(cells, cursorX, cursorY, applicationCursor)
 	}
 	return changed, reset, appended
-}
-
-func (terminal *sshTerminalEmulator) sawTerminalControlEffects(data []byte) sshTerminalControlEffects {
-	viewportReset := false
-	for _, sequence := range sshViewportClearSequences {
-		if terminalControlSequenceSeen(terminal.clearTail, data, sequence) {
-			viewportReset = true
-			break
-		}
-	}
-	scrollbackReset := terminalControlSequenceSeen(terminal.clearTail, data, sshScrollbackEraseSequence)
-	for _, value := range data {
-		if terminal.resetEscape {
-			terminal.resetEscape = false
-			if value == 'c' {
-				scrollbackReset = true
-				viewportReset = true
-				continue
-			}
-		}
-		if value == 0x1b {
-			terminal.resetEscape = true
-		}
-	}
-	terminal.clearTail = terminalTail(terminal.clearTail, data, 3)
-	return sshTerminalControlEffects{
-		scrollbackReset: scrollbackReset,
-		viewportReset:   viewportReset,
-	}
-}
-
-func terminalControlSequenceSeen(tail, data, sequence []byte) bool {
-	if bytes.Contains(data, sequence) {
-		return true
-	}
-	for prefixLength := 1; prefixLength < len(sequence); prefixLength++ {
-		if len(tail) < prefixLength || len(data) < len(sequence)-prefixLength {
-			continue
-		}
-		if bytes.Equal(tail[len(tail)-prefixLength:], sequence[:prefixLength]) &&
-			bytes.Equal(data[:len(sequence)-prefixLength], sequence[prefixLength:]) {
-			return true
-		}
-	}
-	return false
-}
-
-func (terminal *sshTerminalEmulator) alternateScreenTransitions(data []byte) []sshTerminalAlternateScreenTransition {
-	var transitions []sshTerminalAlternateScreenTransition
-	parser := &terminal.alternateParser
-	for index, value := range data {
-		switch parser.escapeMode {
-		case sshTerminalAlternateScreenEscapeNone:
-			if value == 0x1b {
-				parser.escapeMode = sshTerminalAlternateScreenEscapeAfterEsc
-				parser.resetParameters()
-			}
-		case sshTerminalAlternateScreenEscapeAfterEsc:
-			switch value {
-			case '[':
-				parser.escapeMode = sshTerminalAlternateScreenEscapeCSI
-			case 0x1b:
-				parser.resetParameters()
-			default:
-				parser.escapeMode = sshTerminalAlternateScreenEscapeNone
-			}
-		case sshTerminalAlternateScreenEscapeCSI:
-			switch value {
-			case '?':
-				parser.escapeMode = sshTerminalAlternateScreenEscapeParameters
-				parser.resetParameters()
-			case 0x1b:
-				parser.escapeMode = sshTerminalAlternateScreenEscapeAfterEsc
-				parser.resetParameters()
-			default:
-				parser.escapeMode = sshTerminalAlternateScreenEscapeNone
-			}
-		case sshTerminalAlternateScreenEscapeParameters:
-			switch {
-			case value >= '0' && value <= '9':
-				parser.appendParameterDigit(value)
-			case value == ';':
-				parser.finishParameter()
-			case value == 'h' || value == 'l':
-				parser.finishParameter()
-				active := value == 'h'
-				if sequence := sshAlternateScreenSequence(parser.alternateParameter, active); sequence != nil {
-					transitions = append(transitions, sshTerminalAlternateScreenTransition{
-						end:      index + 1,
-						active:   active,
-						sequence: sequence,
-					})
-				}
-				parser.escapeMode = sshTerminalAlternateScreenEscapeNone
-				parser.resetParameters()
-			case value == 0x1b:
-				parser.escapeMode = sshTerminalAlternateScreenEscapeAfterEsc
-				parser.resetParameters()
-			default:
-				parser.escapeMode = sshTerminalAlternateScreenEscapeNone
-				parser.resetParameters()
-			}
-		}
-	}
-	return transitions
-}
-
-func (parser *sshTerminalAlternateScreenParser) resetParameters() {
-	parser.parameter = 0
-	parser.parameterSeen = false
-	parser.alternateParameter = 0
-}
-
-func (parser *sshTerminalAlternateScreenParser) appendParameterDigit(value byte) {
-	digit := int(value - '0')
-	if parser.parameter > (1049-digit)/10 {
-		parser.parameter = 1050
-	} else {
-		parser.parameter = parser.parameter*10 + digit
-	}
-	parser.parameterSeen = true
-}
-
-func (parser *sshTerminalAlternateScreenParser) finishParameter() {
-	if parser.parameterSeen && parser.alternateParameter == 0 {
-		if sshAlternateScreenSequence(parser.parameter, true) != nil {
-			parser.alternateParameter = parser.parameter
-		}
-	}
-	parser.parameter = 0
-	parser.parameterSeen = false
-}
-
-func sshAlternateScreenSequence(parameter int, active bool) []byte {
-	for _, mode := range sshAlternateScreenModes {
-		if mode.parameter != parameter {
-			continue
-		}
-		if active {
-			return mode.enter
-		}
-		return mode.exit
-	}
-	return nil
-}
-
-func terminalTail(previous, data []byte, limit int) []byte {
-	if limit <= 0 {
-		return nil
-	}
-	if len(data) >= limit {
-		return append([]byte(nil), data[len(data)-limit:]...)
-	}
-	previousLength := limit - len(data)
-	if previousLength > len(previous) {
-		previousLength = len(previous)
-	}
-	tail := make([]byte, 0, previousLength+len(data))
-	tail = append(tail, previous[len(previous)-previousLength:]...)
-	return append(tail, data...)
 }
 
 func minInt(left, right int) int {
