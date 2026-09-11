@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	vt10x "github.com/ActiveState/vt10x"
+	"github.com/xBounceIT/wormhole/tools/wormhole-backend/internal/vt10x"
 )
 
 func TestSSHTerminalEmulatorParsesANSIIntoCells(t *testing.T) {
@@ -482,7 +482,7 @@ func TestSSHTerminalEmulatorAlternateScreenDetectionHandlesChunksWithoutRepeatin
 		t.Fatal("partial alternate-screen transition was reported too early")
 	}
 	transitions := emulator.controlParser.write([]byte("h"))
-	if len(transitions) != 1 || transitions[0].end != 1 || !transitions[0].active {
+	if len(transitions) != 1 || transitions[0].end != 1 || transitions[0].kind != sshTerminalControlAlternateScreen {
 		t.Fatal("split alternate-screen transition was not recognized")
 	}
 	if transitions := emulator.controlParser.write([]byte("later output")); len(transitions) != 0 {

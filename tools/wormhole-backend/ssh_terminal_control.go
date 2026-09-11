@@ -14,7 +14,6 @@ type sshTerminalControl struct {
 	end       int
 	kind      sshTerminalControlKind
 	parameter int
-	active    bool
 }
 
 // Observe screen controls without retaining unbounded remote output. Match
@@ -108,18 +107,10 @@ func (parser *sshTerminalControlParser) finish(final byte) (sshTerminalControl, 
 	}
 	if (final == 'h' || final == 'l') && strings.HasPrefix(parameters, "?") {
 		for _, parameter := range strings.Split(parameters[1:], ";") {
-			var mode int
 			switch strings.TrimLeft(parameter, "0") {
-			case "47":
-				mode = 47
-			case "1047":
-				mode = 1047
-			case "1049":
-				mode = 1049
-			default:
-				continue
+			case "47", "1047", "1049":
+				return sshTerminalControl{kind: sshTerminalControlAlternateScreen}, true
 			}
-			return sshTerminalControl{kind: sshTerminalControlAlternateScreen, parameter: mode, active: final == 'h'}, true
 		}
 	}
 	return sshTerminalControl{}, false

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	vt10x "github.com/ActiveState/vt10x"
+	"github.com/xBounceIT/wormhole/tools/wormhole-backend/internal/vt10x"
 )
 
 const (
@@ -315,17 +315,6 @@ func (terminal *sshTerminalEmulator) writeVT(
 			return effects, err
 		}
 		offset = control.end
-		if control.kind == sshTerminalControlAlternateScreen {
-			terminal.state.Lock()
-			active := terminal.state.Mode(vt10x.ModeAltScreen)
-			terminal.state.Unlock()
-			if active != control.active {
-				sequence := fmt.Sprintf("\x1b[?%d%c", control.parameter, data[control.end-1])
-				if _, err := terminal.vt.Write([]byte(sequence)); err != nil {
-					return effects, err
-				}
-			}
-		}
 	}
 	if _, err := terminal.vt.Write(data[offset:]); err != nil {
 		return effects, err
