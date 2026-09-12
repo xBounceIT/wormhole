@@ -26,6 +26,8 @@ type mcpExecutionArguments struct {
 	Text           *string `json:"text,omitempty"`
 	TimeoutSeconds int     `json:"timeoutSeconds,omitempty"`
 	MaxBytes       int     `json:"maxBytes,omitempty"`
+	Offset         int     `json:"offset,omitempty"`
+	Limit          int     `json:"limit,omitempty"`
 }
 
 type mcpExecutionPreview struct {

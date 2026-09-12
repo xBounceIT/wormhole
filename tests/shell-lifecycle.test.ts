@@ -533,7 +533,7 @@ test('MCP connection opens use a validated one-time approval before the normal r
     new URL('../src/components/McpApprovalDialog.tsx', import.meta.url),
     'utf8',
   );
-  assert.match(approvalDialog, /Every MCP request to open a connection requires a new approval\./);
+  assert.match(approvalDialog, /This approval applies only to this open request\./);
 });
 
 test('MCP approval temporarily preempts tunnel browser authentication windows', () => {

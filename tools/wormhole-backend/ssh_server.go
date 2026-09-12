@@ -116,6 +116,7 @@ type sshWireCommand struct {
 	DestinationPath               string                `json:"destination_path"`
 	RequestID                     string                `json:"request_id"`
 	ApprovalID                    string                `json:"approval_id"`
+	ApprovalMode                  mcpApprovalMode       `json:"approval_mode"`
 	Pane                          string                `json:"pane"`
 	Operation                     string                `json:"operation"`
 	TransferID                    string                `json:"transfer_id"`
@@ -143,6 +144,7 @@ type sshWireEvent struct {
 	Title               string               `json:"title,omitempty"`
 	Tool                string               `json:"tool,omitempty"`
 	ApprovalKind        string               `json:"approval_kind,omitempty"`
+	ApprovalMode        mcpApprovalMode      `json:"approval_mode,omitempty"`
 	ExecutionPreview    *mcpExecutionPreview `json:"execution_preview,omitempty"`
 	ConnectionID        string               `json:"connection_id,omitempty"`
 	ConnectionFolder    string               `json:"connection_folder,omitempty"`
@@ -680,6 +682,9 @@ func (server *sshServer) connectSSH(ctx context.Context, state *sshReconnectStat
 		return
 	}
 	logInfo("SSH session connected: %s@%s:%d", target.username, target.host, target.port)
+	if server.mcp != nil {
+		server.mcp.sessionConnected(native)
+	}
 	native.publishTerminalFrame(native.terminal.initialFrame())
 	native.start()
 }

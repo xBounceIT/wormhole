@@ -37,12 +37,16 @@ export function McpApprovalDialog({
           <DialogTitle>
             {approval?.approvalKind === 'open_connection'
               ? 'Allow AI agent to open this connection?'
-              : 'Allow AI agent control?'}
+              : approval?.approvalMode === 'always-ask'
+                ? 'Allow this AI agent action?'
+                : 'Allow AI agent control?'}
           </DialogTitle>
           <DialogDescription>
             {approval?.approvalKind === 'open_connection'
               ? 'An MCP client is asking Wormhole to open a saved connection.'
-              : "An MCP client is requesting access to one of Wormhole's live SSH sessions."}
+              : approval?.approvalKind === 'tool'
+                ? 'An MCP client is requesting information from Wormhole.'
+                : "An MCP client is requesting access to one of Wormhole's live SSH sessions."}
           </DialogDescription>
         </DialogHeader>
         {approval ? (
@@ -55,13 +59,15 @@ export function McpApprovalDialog({
                     ? `${approval.connectionFolder} / ${approval.title}`
                     : approval.title || 'SSH session'}
                 </p>
-                <p className="break-all text-muted-foreground">
-                  {approval.approvalKind === 'open_connection'
-                    ? `${approval.protocol?.toUpperCase()} · ${approval.host}${
-                        approval.port > 0 ? `:${approval.port}` : ''
-                      }${approval.path ?? ''}`
-                    : `${approval.username}@${approval.host}:${approval.port}`}
-                </p>
+                {approval.approvalKind !== 'tool' ? (
+                  <p className="break-all text-muted-foreground">
+                    {approval.approvalKind === 'open_connection'
+                      ? `${approval.protocol?.toUpperCase()} · ${approval.host}${
+                          approval.port > 0 ? `:${approval.port}` : ''
+                        }${approval.path ?? ''}`
+                      : `${approval.username}@${approval.host}:${approval.port}`}
+                  </p>
+                ) : null}
                 <p className="text-muted-foreground">
                   Requested tool: <span className="font-mono">{approval.tool}</span>
                 </p>
@@ -95,8 +101,10 @@ export function McpApprovalDialog({
             </div>
             <p className="text-[11px] leading-relaxed text-muted-foreground">
               {approval.approvalKind === 'open_connection'
-                ? 'This approval applies only to this open request. Every MCP request to open a connection requires a new approval.'
-                : 'Allowing this request grants the MCP client access until you disconnect the AI agent or close this session. MCP tools can run only while Wormhole is unlocked.'}
+                ? 'This approval applies only to this open request.'
+                : approval.approvalMode === 'always-ask'
+                  ? 'This approval applies only to this action. The next action will require a new approval.'
+                  : 'Allowing this request grants the MCP client access until you disconnect the AI agent or close this session. MCP tools can run only while Wormhole is unlocked.'}
             </p>
           </div>
         ) : null}

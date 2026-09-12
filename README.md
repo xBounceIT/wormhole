@@ -82,9 +82,23 @@ connections and controlling live SSH sessions. It is loopback-only and protected
 by a bearer token owned by the Go backend. The available operations are
 intentionally limited to listing saved connections and live sessions, opening a
 saved connection in the desktop app, running commands, sending text, and reading
-recent terminal output. Every request to open a connection requires explicit user
-approval; approval is never reused for a later open request. MCP cannot read saved
-credentials.
+recent terminal output. MCP cannot read saved credentials.
+
+Settings > AI Agent (MCP) offers three approval modes:
+
+- **Full access:** all MCP tools run without approval popups.
+- **Always ask:** every tool call needs its own approval, including listing
+  connections and sessions or reading terminal output.
+- **Ask on first access** (default): approve control once per live SSH session;
+  each request to open a saved connection also needs approval.
+
+Disconnect AI Agent cancels active and queued requests without closing SSH.
+Later calls follow the selected mode: full access continues authorizing them
+automatically; the other modes ask for approval again.
+
+The selection is saved and takes effect immediately. Changing modes clears
+remembered decisions and cancels pending approval requests. MCP tools remain
+available only while Wormhole is unlocked.
 
 ## Requirements
 

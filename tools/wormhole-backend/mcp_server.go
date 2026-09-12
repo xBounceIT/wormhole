@@ -24,15 +24,17 @@ import (
 )
 
 type mcpStatusResponse struct {
-	Enabled  bool   `json:"enabled"`
-	Running  bool   `json:"running"`
-	Port     int    `json:"port"`
-	Endpoint string `json:"endpoint"`
+	Enabled      bool            `json:"enabled"`
+	Running      bool            `json:"running"`
+	Port         int             `json:"port"`
+	Endpoint     string          `json:"endpoint"`
+	ApprovalMode mcpApprovalMode `json:"approvalMode"`
 }
 
 type mcpSettings struct {
-	Enabled bool
-	Port    int
+	Enabled      bool
+	Port         int
+	ApprovalMode mcpApprovalMode
 }
 
 type mcpApprovalWaiter struct {
@@ -45,10 +47,13 @@ type mcpApprovalWaiter struct {
 	rememberDecision bool
 	processed        chan struct{}
 	processingErr    error
+	generation       uint64
 }
 
 type mcpSessionTool struct {
-	cancel context.CancelFunc
+	context.Context
+	cancel   context.CancelFunc
+	approved bool
 }
 
 type mcpConnectionInfo struct {
@@ -90,13 +95,16 @@ type mcpController struct {
 	tokenMu sync.Mutex
 	token   string
 
-	approvalMu      sync.Mutex
-	locked          bool
-	accessRunning   bool
-	activeTools     map[string]map[*mcpSessionTool]struct{}
-	decisions       map[string]bool
-	pending         map[string]*mcpApprovalWaiter
-	pendingByTarget map[string]*mcpApprovalWaiter
+	approvalMu         sync.Mutex
+	locked             bool
+	accessRunning      bool
+	activeTools        map[string]map[*mcpSessionTool]struct{}
+	decisions          map[string]bool
+	pending            map[string]*mcpApprovalWaiter
+	pendingByTarget    map[string]*mcpApprovalWaiter
+	approvalMode       mcpApprovalMode
+	approvalGeneration uint64
+	trackedSessions    map[string]bool
 }
 
 // This indirection keeps legacy-token read tests independent of the host operating system.
@@ -110,6 +118,8 @@ func newMcpController(server *sshServer) *mcpController {
 		activeTools:     make(map[string]map[*mcpSessionTool]struct{}),
 		pending:         make(map[string]*mcpApprovalWaiter),
 		pendingByTarget: make(map[string]*mcpApprovalWaiter),
+		approvalMode:    mcpApprovalOnFirstAccess,
+		trackedSessions: make(map[string]bool),
 	}
 }
 
@@ -119,9 +129,10 @@ func loadPersistedMcpStatus(databasePath string) (mcpStatusResponse, error) {
 		return mcpStatusResponse{}, err
 	}
 	return mcpStatusResponse{
-		Enabled:  settings.Enabled,
-		Port:     settings.Port,
-		Endpoint: mcpEndpointURL(settings.Port),
+		Enabled:      settings.Enabled,
+		Port:         settings.Port,
+		Endpoint:     mcpEndpointURL(settings.Port),
+		ApprovalMode: settings.ApprovalMode,
 	}, nil
 }
 
@@ -166,6 +177,15 @@ func (controller *mcpController) start(port int, persist bool) error {
 		controller.lifecycleMu.Unlock()
 		return err
 	}
+	controller.approvalMu.Lock()
+	settings, err := loadMcpSettings(controller.server.databasePath)
+	if err != nil {
+		controller.approvalMu.Unlock()
+		controller.lifecycleMu.Unlock()
+		return err
+	}
+	controller.applyApprovalModeLocked(settings.ApprovalMode)
+	controller.approvalMu.Unlock()
 	listener, err := net.Listen("tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
 	if err != nil {
 		controller.lifecycleMu.Unlock()
@@ -719,105 +739,6 @@ func (controller *mcpController) resolveSession(sessionID string) (*sshNativeSes
 	return native, nil
 }
 
-func (controller *mcpController) ensureApproval(
-	ctx context.Context,
-	native *sshNativeSession,
-	tool string,
-	arguments mcpExecutionArguments,
-) error {
-	if err := controller.ensureUnlocked(); err != nil {
-		return err
-	}
-	sessionID := native.id
-
-	controller.approvalMu.Lock()
-	if err := ctx.Err(); err != nil {
-		controller.approvalMu.Unlock()
-		return err
-	}
-	if approved, exists := controller.decisions[sessionID]; exists {
-		controller.approvalMu.Unlock()
-		if approved {
-			return controller.ensureUnlocked()
-		}
-		return errors.New("the user denied AI-agent control of that session")
-	}
-	if pending := controller.pendingByTarget[sessionID]; pending != nil {
-		pending.waiters++
-		done := pending.done
-		controller.approvalMu.Unlock()
-		select {
-		case <-done:
-			controller.approvalMu.Lock()
-			approved := pending.approved
-			waitErr := pending.err
-			controller.approvalMu.Unlock()
-			if waitErr != nil {
-				return waitErr
-			}
-			if approved {
-				return controller.ensureUnlocked()
-			}
-			return errors.New("the user denied AI-agent control of that session")
-		case <-ctx.Done():
-			controller.releasePending(pending)
-			return ctx.Err()
-		}
-	}
-	if len(controller.pending) >= mcpMaxPendingApprovals {
-		controller.approvalMu.Unlock()
-		return errors.New("too many MCP approval requests are pending")
-	}
-
-	requestID, err := newMcpRequestID()
-	if err != nil {
-		controller.approvalMu.Unlock()
-		return err
-	}
-	waiter := &mcpApprovalWaiter{
-		requestID:        requestID,
-		sessionID:        sessionID,
-		done:             make(chan struct{}),
-		waiters:          1,
-		rememberDecision: true,
-	}
-	controller.pending[requestID] = waiter
-	controller.pendingByTarget[sessionID] = waiter
-	controller.server.output.write(sshWireEvent{
-		Type:             "mcp.approval",
-		RequestID:        requestID,
-		SessionID:        native.id,
-		Host:             native.mcpSession.Host,
-		Port:             native.mcpSession.Port,
-		Username:         native.mcpSession.Username,
-		Title:            native.mcpSession.Title,
-		Tool:             tool,
-		ExecutionPreview: newMcpExecutionPreview(arguments),
-	})
-	controller.approvalMu.Unlock()
-
-	select {
-	case <-waiter.done:
-		controller.approvalMu.Lock()
-		approved := waiter.approved
-		waitErr := waiter.err
-		controller.approvalMu.Unlock()
-		if waitErr != nil {
-			return waitErr
-		}
-		if approved {
-			return controller.ensureUnlocked()
-		}
-		return errors.New("the user denied AI-agent control of that session")
-	case <-ctx.Done():
-		controller.releasePending(waiter)
-		return ctx.Err()
-	case <-native.done:
-		controller.releasePending(waiter)
-		return errSSHSessionClosed
-	}
-}
-
 func (controller *mcpController) requestOpenConnection(
 	ctx context.Context,
 	connectionID string,
@@ -864,6 +785,7 @@ func (controller *mcpController) ensureConnectionOpenApproval(
 		controller.approvalMu.Unlock()
 		return errors.New("Wormhole is locked. Unlock the app before using MCP tools.")
 	}
+	waiter.generation = controller.approvalGeneration
 	if len(controller.pending) >= mcpMaxPendingApprovals {
 		controller.approvalMu.Unlock()
 		return errors.New("too many MCP approval requests are pending")
@@ -878,6 +800,7 @@ func (controller *mcpController) ensureConnectionOpenApproval(
 		Title:            connection.Name,
 		Tool:             "open_connection",
 		ApprovalKind:     "open_connection",
+		ApprovalMode:     controller.approvalMode,
 		ConnectionID:     connection.ID,
 		Protocol:         connection.Protocol,
 		Path:             connection.Path,
@@ -896,6 +819,9 @@ func (controller *mcpController) ensureConnectionOpenApproval(
 			return waitErr
 		}
 		if approved {
+			if err := controller.checkApprovalGeneration(waiter); err != nil {
+				return err
+			}
 			if err := ctx.Err(); err != nil {
 				return err
 			}
@@ -906,7 +832,10 @@ func (controller *mcpController) ensureConnectionOpenApproval(
 			if current != connection {
 				return errors.New("the saved connection changed while approval was pending")
 			}
-			return ctx.Err()
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			return controller.checkApprovalGeneration(waiter)
 		}
 		return errors.New("the user denied opening that connection")
 	case <-ctx.Done():
@@ -990,7 +919,7 @@ func (controller *mcpController) cancelPending(reason string) {
 }
 
 func (controller *mcpController) forgetSession(sessionID string) {
-	controller.clearSessionApproval(sessionID, errSSHSessionClosed)
+	controller.clearSessionApproval(sessionID, errSSHSessionClosed, true)
 }
 
 func (controller *mcpController) revokeSessionAccess(sessionID string) error {
@@ -998,37 +927,39 @@ func (controller *mcpController) revokeSessionAccess(sessionID string) error {
 		return err
 	}
 	// Cancel access and queued commands without closing SSH or interrupting commands
-	// already sent to the remote shell. Later requests must ask for approval again.
-	controller.clearSessionApproval(sessionID, errors.New("the user disconnected AI-agent control of that session"))
+	// already sent to the remote shell. Later requests follow the selected approval mode.
+	controller.clearSessionApproval(sessionID, errors.New("the user disconnected AI-agent control of that session"), false)
 	return nil
 }
 
-func (controller *mcpController) clearSessionApproval(sessionID string, reason error) {
+func (controller *mcpController) clearSessionApproval(sessionID string, reason error, closed bool) {
 	controller.approvalMu.Lock()
 	for tool := range controller.activeTools[sessionID] {
 		tool.cancel()
 	}
-	approved := controller.decisions[sessionID]
+	approved := controller.decisions[sessionID] || controller.trackedSessions[sessionID]
 	delete(controller.decisions, sessionID)
+	if closed {
+		delete(controller.trackedSessions, sessionID)
+	}
 	if approved {
 		controller.emitSessionAccessLocked(sessionID)
 	}
-	waiter := controller.pendingByTarget[sessionID]
-	if waiter != nil {
-		delete(controller.pending, waiter.requestID)
-		delete(controller.pendingByTarget, sessionID)
-		waiter.approved = false
-		waiter.err = reason
+	for requestID, waiter := range controller.pending {
+		if waiter.sessionID == sessionID && waiter.processed == nil {
+			delete(controller.pending, requestID)
+			delete(controller.pendingByTarget, sessionID)
+			waiter.approved = false
+			waiter.err = reason
+			controller.emitApprovalCancelled(waiter)
+			close(waiter.done)
+		}
 	}
 	controller.approvalMu.Unlock()
-	if waiter != nil {
-		controller.emitApprovalCancelled(waiter)
-		close(waiter.done)
-	}
 }
 
 // Publish permission metadata in decision order, including suspension while locked or stopped.
-// Grants resume on unlock/start unless explicitly revoked or the SSH session ends.
+// Remembered grants resume on unlock/start unless revoked or the SSH session ends.
 func (controller *mcpController) setAccessRunning(running bool) {
 	controller.approvalMu.Lock()
 	defer controller.approvalMu.Unlock()
@@ -1037,10 +968,17 @@ func (controller *mcpController) setAccessRunning(running bool) {
 }
 
 func (controller *mcpController) emitSessionAccessChangesLocked() {
+	sessions := make(map[string]bool, len(controller.trackedSessions))
+	for sessionID := range controller.trackedSessions {
+		sessions[sessionID] = true
+	}
 	for sessionID, approved := range controller.decisions {
 		if approved {
-			controller.emitSessionAccessLocked(sessionID)
+			sessions[sessionID] = true
 		}
+	}
+	for sessionID := range sessions {
+		controller.emitSessionAccessLocked(sessionID)
 	}
 }
 
@@ -1048,8 +986,18 @@ func (controller *mcpController) emitSessionAccessLocked(sessionID string) {
 	if controller.server == nil || controller.server.output == nil {
 		return
 	}
-	accessible := controller.decisions[sessionID] && !controller.locked &&
-		(controller.accessRunning || len(controller.activeTools[sessionID]) > 0)
+	granted := controller.approvalMode == mcpApprovalFullAccess && controller.trackedSessions[sessionID] ||
+		controller.approvalMode == mcpApprovalOnFirstAccess && controller.decisions[sessionID]
+	active := false
+	if controller.trackedSessions[sessionID] || controller.decisions[sessionID] {
+		for tool := range controller.activeTools[sessionID] {
+			if tool.Err() == nil && (tool.approved || granted) {
+				active = true
+				break
+			}
+		}
+	}
+	accessible := !controller.locked && (controller.accessRunning && granted || active)
 	controller.server.output.write(sshWireEvent{
 		Type: "mcp.access", SessionID: sessionID, McpAccessible: &accessible,
 	})
@@ -1057,9 +1005,9 @@ func (controller *mcpController) emitSessionAccessLocked(sessionID string) {
 
 // HTTP shutdown stops new requests but lets admitted tools finish. Keep their session
 // indicator visible until the last request releases its access, even after shutdown times out.
-func (controller *mcpController) trackSessionTool(ctx context.Context, sessionID string) (context.Context, func()) {
+func (controller *mcpController) trackSessionTool(ctx context.Context, sessionID string) (*mcpSessionTool, func()) {
 	ctx, cancel := context.WithCancel(ctx)
-	tool := &mcpSessionTool{cancel: cancel}
+	tool := &mcpSessionTool{Context: ctx, cancel: cancel}
 	controller.approvalMu.Lock()
 	if controller.activeTools[sessionID] == nil {
 		controller.activeTools[sessionID] = make(map[*mcpSessionTool]struct{})
@@ -1069,16 +1017,17 @@ func (controller *mcpController) trackSessionTool(ctx context.Context, sessionID
 		controller.emitSessionAccessLocked(sessionID)
 	}
 	controller.approvalMu.Unlock()
-	return ctx, func() {
+	return tool, func() {
 		cancel()
 		controller.approvalMu.Lock()
 		defer controller.approvalMu.Unlock()
 		delete(controller.activeTools[sessionID], tool)
-		if len(controller.activeTools[sessionID]) == 0 {
+		last := len(controller.activeTools[sessionID]) == 0
+		if last {
 			delete(controller.activeTools, sessionID)
-			if !controller.accessRunning {
-				controller.emitSessionAccessLocked(sessionID)
-			}
+		}
+		if (last || tool.approved) && (!controller.accessRunning || controller.approvalMode != mcpApprovalFullAccess && !controller.decisions[sessionID]) {
+			controller.emitSessionAccessLocked(sessionID)
 		}
 	}
 }
@@ -1086,16 +1035,24 @@ func (controller *mcpController) trackSessionTool(ctx context.Context, sessionID
 func (controller *mcpController) authorizeSessionTool(ctx context.Context, native *sshNativeSession, tool string, arguments mcpExecutionArguments) (context.Context, func(), error) {
 	// Register before checking approval so revocation cannot miss a request between
 	// receiving consent and waiting for the native command gate.
-	ctx, release := controller.trackSessionTool(ctx, native.id)
-	err := controller.ensureApproval(ctx, native, tool, arguments)
+	tracked, release := controller.trackSessionTool(ctx, native.id)
+	err := controller.ensureApproval(tracked, native, tool, arguments)
+	controller.approvalMu.Lock()
 	if err == nil {
-		err = ctx.Err()
+		err = tracked.Err()
 	}
+	if err == nil {
+		tracked.approved = true
+		if controller.approvalMode == mcpApprovalAlwaysAsk {
+			controller.emitSessionAccessLocked(native.id)
+		}
+	}
+	controller.approvalMu.Unlock()
 	if err != nil {
 		release()
 		return nil, nil, err
 	}
-	return ctx, release, nil
+	return tracked, release, nil
 }
 
 func (controller *mcpController) emitApprovalCancelled(waiter *mcpApprovalWaiter) {
@@ -1118,7 +1075,16 @@ func newMcpServer(controller *mcpController) *mcp.Server {
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "list_connections",
 		Description: "List saved Wormhole connections without exposing credentials. Returns a bounded page with each connection's id, name, protocol, host, port, and folder path. Pass nextOffset as offset to continue, then use an id with open_connection.",
-	}, func(_ context.Context, _ *mcp.CallToolRequest, input listConnectionsInput) (*mcp.CallToolResult, mcpConnectionList, error) {
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, input listConnectionsInput) (*mcp.CallToolResult, mcpConnectionList, error) {
+		limit, err := validateMcpConnectionPage(input.Offset, input.Limit)
+		if err != nil {
+			return nil, mcpConnectionList{}, err
+		}
+		if err := controller.ensureApproval(ctx, nil, "list_connections", mcpExecutionArguments{
+			Offset: input.Offset, Limit: limit,
+		}); err != nil {
+			return nil, mcpConnectionList{}, err
+		}
 		page, err := controller.listConnectionPage(input.Offset, input.Limit)
 		return nil, page, err
 	})
@@ -1128,7 +1094,7 @@ func newMcpServer(controller *mcpController) *mcp.Server {
 	}
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "open_connection",
-		Description: "Open a saved Wormhole connection in the desktop app. Wormhole asks the user for explicit approval every time this tool is called; approval is never remembered for a later open request.",
+		Description: "Open a saved Wormhole connection in the desktop app. Approval follows the mode selected in Wormhole: full access opens without a prompt; other modes ask for approval for each open request.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input openConnectionInput) (*mcp.CallToolResult, mcpOpenConnectionResult, error) {
 		result, err := controller.requestOpenConnection(ctx, input.ConnectionID)
 		return nil, result, err
@@ -1137,7 +1103,10 @@ func newMcpServer(controller *mcpController) *mcp.Server {
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "list_sessions",
 		Description: "List the SSH sessions currently open and connected in Wormhole. Returns each session's id, host, port, username, tab title, and status.",
-	}, func(_ context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, []mcpSessionInfo, error) {
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, []mcpSessionInfo, error) {
+		if err := controller.ensureApproval(ctx, nil, "list_sessions", mcpExecutionArguments{}); err != nil {
+			return nil, nil, err
+		}
 		sessions, err := controller.listSessions()
 		return nil, sessions, err
 	})
@@ -1149,7 +1118,7 @@ func newMcpServer(controller *mcpController) *mcp.Server {
 	}
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "run_command",
-		Description: "Run a single shell command on a connected SSH session and return its captured output and exit code. This drives the user's live terminal, so it assumes a normal POSIX shell prompt is in the foreground. A timed-out command can remain active and blocks another run_command call until it finishes; use send_text to interrupt it when needed. The first action on a session asks the user to approve AI-agent control.",
+		Description: "Run a single shell command on a connected SSH session and return its captured output and exit code. This drives the user's live terminal, so it assumes a normal POSIX shell prompt is in the foreground. A timed-out command can remain active and blocks another run_command call until it finishes; use send_text to interrupt it when needed. Approval follows the mode selected in Wormhole: full access, every action, or the first access to each session.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input runCommandInput) (*mcp.CallToolResult, mcpCommandResult, error) {
 		native, err := controller.resolveSession(input.SessionID)
 		if err != nil {
@@ -1179,7 +1148,7 @@ func newMcpServer(controller *mcpController) *mcp.Server {
 	}
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "send_text",
-		Description: "Type raw text into a connected SSH session exactly as if the user typed it; no output is captured. Append a carriage return to submit a line. The first action on a session asks the user to approve AI-agent control.",
+		Description: "Type raw text into a connected SSH session exactly as if the user typed it; no output is captured. Append a carriage return to submit a line. Approval follows the mode selected in Wormhole: full access, every action, or the first access to each session.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input sendTextInput) (*mcp.CallToolResult, string, error) {
 		if len(input.Text) > mcpMaxSendTextBytes {
 			return nil, "", errors.New("text is too large")
@@ -1207,7 +1176,7 @@ func newMcpServer(controller *mcpController) *mcp.Server {
 	}
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "read_terminal",
-		Description: "Return recent terminal output from a connected SSH session as plain text with ANSI codes stripped. The first action on a session asks the user to approve AI-agent control.",
+		Description: "Return recent terminal output from a connected SSH session as plain text with ANSI codes stripped. Approval follows the mode selected in Wormhole: full access, every action, or the first access to each session.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input readTerminalInput) (*mcp.CallToolResult, string, error) {
 		native, err := controller.resolveSession(input.SessionID)
 		if err != nil {
@@ -1337,7 +1306,7 @@ func mcpCommandTimeout(timeoutSeconds int) (time.Duration, error) {
 }
 
 func loadMcpSettings(databasePath string) (mcpSettings, error) {
-	settings := mcpSettings{Port: McpDefaultPort}
+	settings := mcpSettings{Port: McpDefaultPort, ApprovalMode: mcpApprovalOnFirstAccess}
 	_, settingsPath := authPaths(databasePath)
 	contents, err := readAuthSettingsFile(settingsPath)
 	if errors.Is(err, os.ErrNotExist) {
@@ -1358,6 +1327,10 @@ func loadMcpSettings(databasePath string) (mcpSettings, error) {
 		if json.Unmarshal(value, &port) == nil && validateMcpPort(port) == nil {
 			settings.Port = port
 		}
+	}
+	var mode mcpApprovalMode
+	if json.Unmarshal(document[mcpApprovalModeKey], &mode) == nil && validMcpApprovalMode(mode) {
+		settings.ApprovalMode = mode
 	}
 	return settings, nil
 }
@@ -1435,6 +1408,9 @@ func (server *sshServer) handleMcp(command sshWireCommand) {
 		respond(&status, "", err)
 	case "mcp.set-port":
 		status, err := server.mcp.setPort(command.Port)
+		respond(&status, "", err)
+	case "mcp.set-approval-mode":
+		status, err := server.mcp.setApprovalMode(command.ApprovalMode)
 		respond(&status, "", err)
 	case "mcp.get-token":
 		token, err := server.mcp.getOrCreateToken()

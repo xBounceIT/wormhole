@@ -126,10 +126,7 @@ async function runMcpApprovalDialogTests() {
   });
   assert.match(dialog().textContent, /HTTPS · example.test:443\/console/);
   assert.match(dialog().textContent, /Servers \/ Production SSH/);
-  assert.match(
-    dialog().textContent,
-    /Every MCP request to open a connection requires a new approval/,
-  );
+  assert.match(dialog().textContent, /This approval applies only to this open request/);
   assert.doesNotMatch(dialog().textContent, /disconnect the AI agent/);
   assert.equal(preview().textContent, '{"connectionId":"web-node"}');
   await mount();

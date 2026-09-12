@@ -1083,7 +1083,10 @@ type McpStatusResponse = {
   running: boolean;
   port: number;
   endpoint: string;
+  approvalMode: McpApprovalMode;
 };
+
+type McpApprovalMode = 'full-access' | 'always-ask' | 'first-access';
 
 type McpControlResponse = {
   type: 'mcp.response';
@@ -1097,7 +1100,8 @@ type McpApprovalEvent = {
   type: 'mcp.approval';
   requestId: string;
   sessionId: string;
-  approvalKind: 'session_control' | 'open_connection';
+  approvalKind: 'session_control' | 'open_connection' | 'tool';
+  approvalMode: McpApprovalMode;
   host: string;
   port: number;
   username: string;
@@ -2419,6 +2423,10 @@ function isMcpConnectionProtocol(
   );
 }
 
+function isMcpApprovalMode(value: unknown): value is McpApprovalMode {
+  return value === 'full-access' || value === 'always-ask' || value === 'first-access';
+}
+
 function parseMcpBackendMessage(
   line: string,
 ): McpControlResponse | McpApprovalEvent | McpApprovalCancelledEvent | undefined {
@@ -2447,7 +2455,8 @@ function parseMcpBackendMessage(
         rawStatus.port < 1 ||
         rawStatus.port > 65535 ||
         typeof rawStatus.endpoint !== 'string' ||
-        rawStatus.endpoint.length > 512
+        rawStatus.endpoint.length > 512 ||
+        !isMcpApprovalMode(rawStatus.approvalMode)
       ) {
         return undefined;
       }
@@ -2456,6 +2465,7 @@ function parseMcpBackendMessage(
         running: rawStatus.running,
         port: rawStatus.port,
         endpoint: rawStatus.endpoint,
+        approvalMode: rawStatus.approvalMode,
       };
     }
     return response;
@@ -2466,12 +2476,17 @@ function parseMcpBackendMessage(
   }
 
   const approvalKind =
-    value.approval_kind === undefined
+    value.approval_kind === undefined || value.approval_kind === 'session_control'
       ? 'session_control'
       : value.approval_kind === 'open_connection'
         ? 'open_connection'
-        : undefined;
+        : value.approval_kind === 'tool'
+          ? 'tool'
+          : undefined;
   const openConnectionApproval = approvalKind === 'open_connection';
+  const inventoryApproval = approvalKind === 'tool';
+  const optionalSessionTarget = openConnectionApproval || inventoryApproval;
+  const approvalMode = value.approval_mode === undefined ? 'first-access' : value.approval_mode;
   const rawPreview = value.execution_preview;
   let executionPreview: McpApprovalEvent['executionPreview'];
   if (rawPreview !== undefined) {
@@ -2493,31 +2508,36 @@ function parseMcpBackendMessage(
   const approvalHost =
     typeof value.host === 'string'
       ? value.host
-      : openConnectionApproval && value.host === undefined
+      : optionalSessionTarget && value.host === undefined
         ? ''
         : undefined;
   const approvalPort =
     typeof value.port === 'number'
       ? value.port
-      : openConnectionApproval && value.port === undefined
+      : optionalSessionTarget && value.port === undefined
         ? 0
         : undefined;
   const approvalUsername =
     typeof value.username === 'string'
       ? value.username
-      : openConnectionApproval && value.username === undefined
+      : optionalSessionTarget && value.username === undefined
         ? ''
         : undefined;
   if (
     value.type === 'mcp.approval' &&
     approvalKind !== undefined &&
+    isMcpApprovalMode(approvalMode) &&
+    (approvalMode !== 'full-access' || openConnectionApproval) &&
+    (!inventoryApproval ||
+      (approvalMode === 'always-ask' &&
+        (value.tool === 'list_sessions' || value.tool === 'list_connections'))) &&
     isMcpRequestId(value.request_id) &&
     isSshSessionId(value.session_id) &&
     approvalHost !== undefined &&
     approvalHost.length <= (openConnectionApproval ? 4096 : 1024) &&
     approvalPort !== undefined &&
     Number.isInteger(approvalPort) &&
-    approvalPort >= (openConnectionApproval ? 0 : 1) &&
+    approvalPort >= (optionalSessionTarget ? 0 : 1) &&
     approvalPort <= 65535 &&
     approvalUsername !== undefined &&
     approvalUsername.length <= 1024 &&
@@ -2541,6 +2561,7 @@ function parseMcpBackendMessage(
       requestId: value.request_id,
       sessionId: value.session_id,
       approvalKind,
+      approvalMode,
       host: approvalHost,
       port: approvalPort,
       username: approvalUsername,
@@ -6381,6 +6402,15 @@ class NativeSshBackend {
     return response.status;
   }
 
+  async setMcpApprovalMode(approvalMode: McpApprovalMode): Promise<McpStatusResponse> {
+    const response = await this.sendMcpControl({
+      type: 'mcp.set-approval-mode',
+      approval_mode: approvalMode,
+    });
+    if (!response.status) throw new Error('MCP service returned no status.');
+    return response.status;
+  }
+
   async getMcpToken(): Promise<string> {
     const response = await this.sendMcpControl({ type: 'mcp.get-token' });
     if (!response.token) throw new Error('MCP service returned no token.');
@@ -6583,6 +6613,16 @@ class NativeSshBackend {
     }
     if (mcpMessage?.type === 'mcp.approval') {
       if (!authSession.isAccessAllowed) return;
+      if (mcpMessage.approvalMode === 'full-access') {
+        // Go has authorized this open. One main window acknowledges and opens it without a popup.
+        const target = selectMcpApprovalWindow(
+          BrowserWindow.getAllWindows(),
+          BrowserWindow.getFocusedWindow(),
+          (window) => windowCloseCoordinators.has(window),
+        );
+        target?.webContents.send('mcp:approval', mcpMessage);
+        return;
+      }
       const presentationReady = mcpApprovalWindowCoordinator.beginApproval(mcpMessage.requestId);
       webSurfaces.closeBitwardenFloatingWindows();
       void presentationReady.then(() => {
@@ -8240,6 +8280,13 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       return sshBackend.getMcpToken();
     });
   });
+  ipcMain.handle('mcp:set-approval-mode', async (_event, mode: unknown) => {
+    if (!isMcpApprovalMode(mode)) throw new Error('MCP approval mode is invalid.');
+    return serializeAuthOperation(async () => {
+      await requireWorkspaceAuth();
+      return sshBackend.setMcpApprovalMode(mode);
+    });
+  });
   ipcMain.handle('mcp:regenerate-token', async () => {
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
@@ -8251,7 +8298,9 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     return serializeAuthOperation(async () => {
       try {
         await requireWorkspaceAuth();
+        const authorizationEpoch = authSession.authorizationEpoch;
         await sshBackend.respondMcpApproval(approval.requestId, approval.approved);
+        requireAuthorizationEpoch(authorizationEpoch);
       } finally {
         mcpApprovalWindowCoordinator.finishApproval(approval.requestId);
       }

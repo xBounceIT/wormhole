@@ -6,6 +6,7 @@ import {
   useCallback,
   useDeferredValue,
   useEffect,
+  useEffectEvent,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -2314,8 +2315,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     settleAuthConfirmation(succeeded);
   }
 
-  async function resolveMcpApproval(approved: boolean) {
-    const approval = mcpApprovals[0];
+  async function resolveMcpApproval(approved: boolean, approval = mcpApprovals[0]) {
     if (!approval || !window.wormhole) return;
     const connection =
       approved && approval.approvalKind === 'open_connection' && approval.connectionId
@@ -2333,6 +2333,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       setMcpApprovals((current) => current.filter((item) => item.requestId !== approval.requestId));
     }
   }
+
+  const openAuthorizedMcpConnection = useEffectEvent((approval: WormholeMcpApproval) => {
+    void resolveMcpApproval(true, approval);
+  });
 
   async function resolveTunnelPrompt(cancelled: boolean) {
     const prompt = tunnelPrompts[0];
@@ -2798,6 +2802,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         setMcpApprovals((current) =>
           current.filter((approval) => approval.requestId !== event.requestId),
         );
+        return;
+      }
+      if (event.approvalMode === 'full-access' && event.approvalKind === 'open_connection') {
+        openAuthorizedMcpConnection(event);
         return;
       }
       settleAuthConfirmation(false);
@@ -3935,7 +3943,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       return;
     }
 
-    const existing = sessions.find((session) => session.id === sessionId);
+    const existing = sessionsRef.current.find((session) => session.id === sessionId);
     if (existing) {
       setSelectedSessionId(existing.id);
       setActivePage('sessions');
@@ -3977,6 +3985,8 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     };
 
     sessionResourceReleaseGate.current.reset(session.id);
+    // Concurrent MCP opens can finish before React renders the first new tab.
+    sessionsRef.current = [...sessionsRef.current, session];
     setSessions((current) => [...current, session]);
     setSelectedSessionId(session.id);
     setActivePage('sessions');
@@ -15598,6 +15608,21 @@ function SettingsPage({
     }
   }
 
+  async function handleMcpApprovalMode(mode: WormholeMcpApprovalMode) {
+    if (mcpBusy || !window.wormhole || mode === mcpState?.approvalMode) return;
+    setMcpBusy(true);
+    setMcpError('');
+    setMcpMessage('');
+    try {
+      setMcpState(await window.wormhole.setMcpApprovalMode(mode));
+      setMcpMessage('MCP approval mode saved.');
+    } catch (error) {
+      setMcpError(authSettingsErrorMessage(error));
+    } finally {
+      setMcpBusy(false);
+    }
+  }
+
   async function revealMcpToken() {
     if (mcpBusy || !window.wormhole) return;
     if (mcpTokenRevealed) {
@@ -16652,13 +16677,12 @@ function SettingsPage({
 
         <SettingsTabPanel value="mcp">
           <SettingsSection
-            description="Let an approved local AI agent open saved connections and control live SSH sessions."
+            description="Let a local AI agent open saved connections and control live SSH sessions."
             title="AI Agent (MCP)"
           >
             <p className="text-xs leading-relaxed text-muted-foreground">
-              The local MCP server listens on localhost only and requires a bearer token. Wormhole
-              asks before every connection opened by an agent, and again the first time the agent
-              touches a live SSH session.
+              The local MCP server listens on localhost only and requires a bearer token. Choose
+              when Wormhole asks you to approve AI agent actions.
             </p>
             <SettingsSwitch
               checked={mcpEnabled}
@@ -16666,6 +16690,39 @@ function SettingsPage({
               label="Enable MCP server"
               onCheckedChange={(checked) => void handleMcpToggle(checked)}
             />
+            <div className="grid max-w-md gap-2">
+              <Label htmlFor="settings-mcp-approval-mode">Approval mode</Label>
+              <Select
+                disabled={mcpBusy || !mcpState}
+                onValueChange={(value) =>
+                  void handleMcpApprovalMode(value as WormholeMcpApprovalMode)
+                }
+                value={mcpState?.approvalMode ?? 'first-access'}
+              >
+                <SelectTrigger
+                  aria-describedby="settings-mcp-approval-description"
+                  className="w-full"
+                  id="settings-mcp-approval-mode"
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="full-access">Full access</SelectItem>
+                  <SelectItem value="always-ask">Always ask</SelectItem>
+                  <SelectItem value="first-access">Ask on first access</SelectItem>
+                </SelectContent>
+              </Select>
+              <p
+                className="text-[11px] leading-relaxed text-muted-foreground"
+                id="settings-mcp-approval-description"
+              >
+                {mcpState?.approvalMode === 'full-access'
+                  ? 'AI agents can use all MCP tools without approval popups.'
+                  : mcpState?.approvalMode === 'always-ask'
+                    ? 'Every MCP action requires approval in a popup, including listing connections and reading terminal output.'
+                    : 'Approve access once per SSH session. Opening a saved connection also requires approval.'}
+              </p>
+            </div>
             <div className="grid max-w-52 gap-2">
               <Label htmlFor="settings-mcp-port">Port</Label>
               <Input
