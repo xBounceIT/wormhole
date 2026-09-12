@@ -727,6 +727,8 @@ const wormholeBridge = {
   regenerateMcpToken: () => ipcRenderer.invoke('mcp:regenerate-token'),
   respondMcpApproval: (requestId: string, approved: boolean) =>
     ipcRenderer.invoke('mcp:approval', { requestId, approved }),
+  revokeMcpSessionAccess: (sessionId: string) =>
+    ipcRenderer.invoke('mcp:revoke-session', sessionId),
   onMcpApproval: (
     listener: (
       event:

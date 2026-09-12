@@ -121,7 +121,7 @@ test('MCP selector and queued approval popups work in the Electron renderer', as
     let popup = document.querySelector('[role="dialog"]');
     assert.match(popup.textContent, /Allow this AI agent action/);
     assert.match(popup.textContent, /only to this action/);
-    assert.doesNotMatch(popup.textContent, /@:0|session's lifetime/);
+    assert.doesNotMatch(popup.textContent, /@:0|disconnect the AI agent/);
     await act(async () => Array.from(popup.querySelectorAll('button')).find(button => button.textContent.trim() === 'Deny').click());
     popup = document.querySelector('[role="dialog"]');
     assert.match(popup.textContent, /list_connections/);
@@ -131,7 +131,7 @@ test('MCP selector and queued approval popups work in the Electron renderer', as
     await act(async () => window.setApprovals([{ ...action, requestId: 'session', approvalKind: 'session_control', approvalMode: 'first-access',
       title: 'Shell', host: 'host.example', port: 22, username: 'user', tool: 'read_terminal' }]));
     popup = document.querySelector('[role="dialog"]');
-    assert.match(popup.textContent, /session's lifetime/);
+    assert.match(popup.textContent, /disconnect the AI agent/);
     assert.match(popup.textContent, /user@host.example:22/);
     await act(async () => root.unmount());
     return { ok: true };

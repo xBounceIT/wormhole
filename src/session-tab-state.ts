@@ -1,6 +1,7 @@
 type McpSession = {
   backendSessionId?: string;
   mcpAccessible?: boolean;
+  mcpAccessError?: string;
 };
 
 export function applySessionMcpAccess<T extends McpSession>(
@@ -9,7 +10,7 @@ export function applySessionMcpAccess<T extends McpSession>(
 ): T[] {
   return sessions.map((session) =>
     session.backendSessionId === event.sessionId
-      ? { ...session, mcpAccessible: event.accessible }
+      ? { ...session, mcpAccessible: event.accessible, mcpAccessError: undefined }
       : session,
   );
 }
@@ -31,4 +32,10 @@ export function sessionTabPresentation(
         ? 'bg-card text-foreground'
         : 'text-muted-foreground hover:bg-muted/25',
   };
+}
+
+export function canDisconnectSessionAiAgent(
+  session: McpSession & { protocol: string; status: string },
+): boolean {
+  return Boolean(session.backendSessionId) && sessionTabPresentation(session, false).aiAccessible;
 }

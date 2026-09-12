@@ -85,10 +85,11 @@ func (controller *mcpController) sessionConnected(native *sshNativeSession) {
 // A nil session denotes an inventory tool. Only always-ask prompts for inventory, and only
 // first-access shares an approval (and its decision) between requests for the same session.
 func (controller *mcpController) ensureApproval(ctx context.Context, native *sshNativeSession, tool string, arguments mcpExecutionArguments) error {
+	controller.approvalMu.Lock()
 	if err := ctx.Err(); err != nil {
+		controller.approvalMu.Unlock()
 		return err
 	}
-	controller.approvalMu.Lock()
 	if controller.locked {
 		controller.approvalMu.Unlock()
 		return errors.New("Wormhole is locked. Unlock the app before using MCP tools.")

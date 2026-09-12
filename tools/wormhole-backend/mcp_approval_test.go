@@ -387,7 +387,11 @@ func TestMcpFullAccessStillRequiresUnlockAndAlwaysAskShowsOnlyActiveTools(t *tes
 		t.Fatal(err)
 	}
 	before := output.Len()
-	finish := controller.trackSessionTool(native.id)
+	tracked, finish := controller.trackSessionTool(context.Background(), native.id)
+	controller.approvalMu.Lock()
+	tracked.approved = true
+	controller.emitSessionAccessLocked(native.id)
+	controller.approvalMu.Unlock()
 	if _, err := controller.setApprovalMode(mcpApprovalOnFirstAccess); err != nil {
 		t.Fatal(err)
 	}
@@ -424,7 +428,7 @@ func TestMcpAdmittedToolDoesNotRestoreClosedSessionAccess(t *testing.T) {
 	// The SSH session can close after approval, before the HTTP tool starts tracking access.
 	native.close(false)
 	before := output.Len()
-	finish := controller.trackSessionTool(native.id)
+	_, finish := controller.trackSessionTool(context.Background(), native.id)
 	finish()
 	controller.setLocked(true)
 	controller.setLocked(false)
@@ -440,5 +444,107 @@ func TestMcpAdmittedToolDoesNotRestoreClosedSessionAccess(t *testing.T) {
 		if event.McpAccessible != nil && *event.McpAccessible {
 			t.Error("a closed session regained AI access after unlock")
 		}
+	}
+}
+
+func TestMcpAlwaysAskTracksOnlyApprovedToolsDuringRevocation(t *testing.T) {
+	controller, native, output := newMcpApprovalTestController(t)
+	if _, err := controller.setApprovalMode(mcpApprovalAlwaysAsk); err != nil {
+		t.Fatal(err)
+	}
+	controller.setAccessRunning(true)
+	accessible := func() bool {
+		t.Helper()
+		value := false
+		decoder := json.NewDecoder(bytes.NewReader(output.Bytes()))
+		for decoder.More() {
+			var event sshWireEvent
+			if err := decoder.Decode(&event); err != nil {
+				t.Fatal(err)
+			}
+			if event.SessionID == native.id && event.McpAccessible != nil {
+				value = *event.McpAccessible
+			}
+		}
+		return value
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	type authorization struct {
+		release func()
+		err     error
+	}
+	authorize := func() <-chan authorization {
+		done := make(chan authorization, 1)
+		go func() {
+			_, release, err := controller.authorizeSessionTool(ctx, native, "read_terminal", mcpExecutionArguments{})
+			done <- authorization{release, err}
+		}()
+		return done
+	}
+	first := authorize()
+	requestID := waitForMcpApprovalRequest(t, controller)
+	if accessible() {
+		t.Fatal("a pending request displayed approved AI access")
+	}
+	if err := controller.resolveApproval(requestID, true); err != nil {
+		t.Fatal(err)
+	}
+	approved := <-first
+	if approved.err != nil {
+		t.Fatal(approved.err)
+	}
+	defer approved.release()
+	if !accessible() {
+		t.Fatal("approved tool did not display AI access")
+	}
+	second := authorize()
+	requestID = waitForMcpApprovalRequest(t, controller)
+	approved.release()
+	if accessible() {
+		t.Fatal("pending work kept AI access visible after the approved action ended")
+	}
+	if err := controller.revokeSessionAccess(native.id); err != nil {
+		t.Fatal(err)
+	}
+	revoked := <-second
+	if revoked.err == nil || revoked.release != nil {
+		t.Fatalf("revoked action retained authorization: %v", revoked.err)
+	}
+	if err := controller.resolveApproval(requestID, true); err == nil {
+		t.Fatal("stale approval restored a revoked action")
+	}
+	if accessible() || len(controller.pending) != 0 || len(controller.activeTools) != 0 || native.isClosed() {
+		t.Fatal("revocation leaked access, retained work, or closed SSH")
+	}
+}
+
+func TestMcpFullAccessRevocationCancelsWorkAndPreservesSelectedPolicy(t *testing.T) {
+	controller, native, output := newMcpApprovalTestController(t)
+	requestContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := controller.setApprovalMode(mcpApprovalFullAccess); err != nil {
+		t.Fatal(err)
+	}
+	controller.setAccessRunning(true)
+	ctx, release, err := controller.authorizeSessionTool(requestContext, native, "read_terminal", mcpExecutionArguments{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if err := controller.revokeSessionAccess(native.id); err != nil {
+		t.Fatal(err)
+	}
+	if ctx.Err() != context.Canceled || native.isClosed() || !controller.trackedSessions[native.id] {
+		t.Fatal("revocation did not cancel work while preserving the live SSH session")
+	}
+	release()
+	renewed, finish, err := controller.authorizeSessionTool(requestContext, native, "read_terminal", mcpExecutionArguments{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer finish()
+	if renewed.Err() != nil || len(mcpApprovalEvents(t, output)) != 0 {
+		t.Fatal("full access required a popup after cancelling previous work")
 	}
 }

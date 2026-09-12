@@ -104,7 +104,7 @@ export function McpApprovalDialog({
                 ? 'This approval applies only to this open request.'
                 : approval.approvalMode === 'always-ask'
                   ? 'This approval applies only to this action. The next action will require a new approval.'
-                  : "Allowing this request grants the MCP client access to this session for the rest of the session's lifetime. MCP tools can run only while Wormhole is unlocked."}
+                  : 'Allowing this request grants the MCP client access until you disconnect the AI agent or close this session. MCP tools can run only while Wormhole is unlocked.'}
             </p>
           </div>
         ) : null}
