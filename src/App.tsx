@@ -1416,10 +1416,12 @@ function AuthPrompt({
   state,
   request,
   onResult,
+  onDialogElementChange,
 }: {
   state: WormholeAuthState;
   request: AuthPromptRequest;
   onResult: (succeeded: boolean) => void;
+  onDialogElementChange?: (dialog: HTMLDialogElement | null) => void;
 }) {
   const [secret, setSecret] = useState('');
   const [status, setStatus] = useState('');
@@ -1506,8 +1508,12 @@ function AuthPrompt({
     const dialog = dialogRef.current;
     if (!dialog) return;
     dialog.showModal();
-    return () => dialog.close();
-  }, []);
+    onDialogElementChange?.(dialog);
+    return () => {
+      onDialogElementChange?.(null);
+      dialog.close();
+    };
+  }, [onDialogElementChange]);
 
   useEffect(() => {
     if (helloBusy || (isHelloMode && request.autoWindowsHello && !helloMessage)) return;
@@ -1550,6 +1556,7 @@ function AuthPrompt({
       aria-describedby="auth-prompt-description"
       aria-labelledby="auth-prompt-title"
       className="fixed inset-0 z-[100] m-0 h-auto max-h-none w-auto max-w-none border-0 bg-background/85 p-5 backdrop-blur-md open:flex open:items-center open:justify-center"
+      closedby={request.kind === 'lock' ? 'none' : 'closerequest'}
       onCancel={(event) => {
         event.preventDefault();
         if (request.kind === 'confirmation') onResult(false);
@@ -1760,6 +1767,8 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   const [authGate, setAuthGate] = useState<'locked' | 'unlocked'>('unlocked');
   const [lockReason, setLockReason] = useState('Unlock Wormhole to continue.');
   const [authPrompt, setAuthPrompt] = useState<AuthPromptRequest | null>(null);
+  // Close confirmation must stay inside the native modal's top layer to remain interactive.
+  const [authDialog, setAuthDialog] = useState<HTMLDialogElement | null>(null);
   const [mcpApprovals, setMcpApprovals] = useState<WormholeMcpApproval[]>([]);
   const [tunnelPrompts, setTunnelPrompts] = useState<WormholeTunnelPrompt[]>([]);
   const [tunnelPromptValue, setTunnelPromptValue] = useState('');
@@ -6326,6 +6335,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     <TooltipProvider delayDuration={300}>
       {visibleAuthPrompt && authState ? (
         <AuthPrompt
+          onDialogElementChange={setAuthDialog}
           onResult={handleAuthPromptResult}
           request={visibleAuthPrompt}
           state={authState}
@@ -6978,6 +6988,12 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           <DialogContent
             aria-describedby="wormhole-close-description"
             className="overflow-hidden border-border/70 bg-card p-0 text-card-foreground sm:max-w-md"
+            container={authDialog}
+            onCloseAutoFocus={(event) => {
+              if (pendingWindowClose || !authDialog?.open) return;
+              event.preventDefault();
+              authDialog.querySelector<HTMLInputElement>('#auth-secret')?.focus();
+            }}
             onEscapeKeyDown={(event) => {
               if (windowCloseBusy) event.preventDefault();
             }}
