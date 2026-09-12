@@ -19,6 +19,7 @@ import {
   type ReactNode,
 } from 'react';
 import './index.css';
+import { McpApprovalDialog } from './components/McpApprovalDialog';
 import {
   applySessionMcpAccess,
   canDisconnectSessionAiAgent,
@@ -1429,15 +1430,18 @@ function AuthPrompt({
   state,
   request,
   onResult,
+  onDialogElementChange,
 }: {
   state: WormholeAuthState;
   request: AuthPromptRequest;
   onResult: (succeeded: boolean) => void;
+  onDialogElementChange?: (dialog: HTMLDialogElement | null) => void;
 }) {
   const [secret, setSecret] = useState('');
   const [status, setStatus] = useState('');
   const [busy, setBusy] = useState(false);
   const [helloBusy, setHelloBusy] = useState(false);
+  const [helloAvailable, setHelloAvailable] = useState(false);
   const [helloStatus, setHelloStatus] = useState<string | null>(null);
   const activeHelloRequest = useRef<string | null>(null);
   const helloInFlight = useRef<string | null>(null);
@@ -1460,7 +1464,7 @@ function AuthPrompt({
   }, [onResult]);
 
   const tryWindowsHello = useCallback(
-    (requestKey = helloRequestKey) => {
+    (requestKey = helloRequestKey, verify = true) => {
       if (helloInFlight.current === requestKey || !window.wormhole) return;
 
       const api = window.wormhole;
@@ -1468,29 +1472,37 @@ function AuthPrompt({
       helloInFlight.current = requestKey;
       setHelloBusy(true);
       setHelloStatus('');
-      return api
-        .checkWindowsHello()
-        .then((availability) => {
+      const checkAvailability = async () => {
+        const availability = await api.checkWindowsHello();
+        if (!isCurrent()) return false;
+        setHelloAvailable(availability.available);
+        if (!availability.available) {
+          setHelloStatus(
+            availability.message || `Windows Hello is unavailable. Use your ${fallbackName}.`,
+          );
+        }
+        return availability.available;
+      };
+      return checkAvailability()
+        .then(async (available) => {
+          if (!available || !verify || !isCurrent()) return;
+          const result = await api.verifyWindowsHello().catch(() => ({
+            succeeded: false,
+            message: `Windows Hello couldn't verify you. Try again or use your ${fallbackName}.`,
+          }));
           if (!isCurrent()) return;
-          if (!availability.available) {
-            setHelloStatus(
-              availability.message || `Windows Hello is unavailable. Use your ${fallbackName}.`,
-            );
+          if (result.succeeded) {
+            onResultRef.current(true);
             return;
           }
-          return api.verifyWindowsHello().then((result) => {
-            if (!isCurrent()) return;
-            if (result.succeeded) {
-              onResultRef.current(true);
-              return;
-            }
-            setHelloStatus(
-              result.message || `Windows Hello didn't recognize you. Use your ${fallbackName}.`,
-            );
-          });
+          setHelloStatus(
+            result.message || `Windows Hello didn't recognize you. Use your ${fallbackName}.`,
+          );
+          await checkAvailability();
         })
         .catch(() => {
           if (isCurrent()) {
+            setHelloAvailable(false);
             setHelloStatus(`Windows Hello isn't available right now. Use your ${fallbackName}.`);
           }
         })
@@ -1506,9 +1518,10 @@ function AuthPrompt({
     activeHelloRequest.current = helloRequestKey;
     setSecret('');
     setStatus('');
+    setHelloAvailable(false);
     setHelloStatus(null);
-    if (request.autoWindowsHello && isHelloMode) {
-      void tryWindowsHello(helloRequestKey);
+    if (isHelloMode) {
+      void tryWindowsHello(helloRequestKey, request.autoWindowsHello);
     }
     return () => {
       if (activeHelloRequest.current === helloRequestKey) activeHelloRequest.current = null;
@@ -1519,8 +1532,12 @@ function AuthPrompt({
     const dialog = dialogRef.current;
     if (!dialog) return;
     dialog.showModal();
-    return () => dialog.close();
-  }, []);
+    onDialogElementChange?.(dialog);
+    return () => {
+      onDialogElementChange?.(null);
+      dialog.close();
+    };
+  }, [onDialogElementChange]);
 
   useEffect(() => {
     if (helloBusy || (isHelloMode && request.autoWindowsHello && !helloMessage)) return;
@@ -1563,6 +1580,7 @@ function AuthPrompt({
       aria-describedby="auth-prompt-description"
       aria-labelledby="auth-prompt-title"
       className="fixed inset-0 z-[100] m-0 h-auto max-h-none w-auto max-w-none border-0 bg-background/85 p-5 backdrop-blur-md open:flex open:items-center open:justify-center"
+      closedby={request.kind === 'lock' ? 'none' : 'closerequest'}
       onCancel={(event) => {
         event.preventDefault();
         if (request.kind === 'confirmation') onResult(false);
@@ -1590,22 +1608,24 @@ function AuthPrompt({
         <CardContent className="space-y-4 border-t border-border/60 px-5 py-4">
           {isHelloMode ? (
             <div>
-              <Button
-                ref={helloButtonRef}
-                className="w-full"
-                disabled={helloBusy}
-                onClick={() => void tryWindowsHello()}
-                size="sm"
-                type="button"
-                variant="outline"
-              >
-                {helloBusy ? (
-                  <LoaderCircle className="animate-spin" data-icon="inline-start" />
-                ) : (
-                  <KeyRound data-icon="inline-start" />
-                )}
-                Use Windows Hello
-              </Button>
+              {helloAvailable ? (
+                <Button
+                  ref={helloButtonRef}
+                  className="w-full"
+                  disabled={helloBusy}
+                  onClick={() => void tryWindowsHello()}
+                  size="sm"
+                  type="button"
+                  variant="outline"
+                >
+                  {helloBusy ? (
+                    <LoaderCircle className="animate-spin" data-icon="inline-start" />
+                  ) : (
+                    <KeyRound data-icon="inline-start" />
+                  )}
+                  Use Windows Hello
+                </Button>
+              ) : null}
               <p
                 className="text-xs leading-relaxed text-muted-foreground [&:not(:empty)]:mt-2"
                 role="status"
@@ -1773,6 +1793,8 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   const [authGate, setAuthGate] = useState<'locked' | 'unlocked'>('unlocked');
   const [lockReason, setLockReason] = useState('Unlock Wormhole to continue.');
   const [authPrompt, setAuthPrompt] = useState<AuthPromptRequest | null>(null);
+  // Close confirmation must stay inside the native modal's top layer to remain interactive.
+  const [authDialog, setAuthDialog] = useState<HTMLDialogElement | null>(null);
   const [mcpApprovals, setMcpApprovals] = useState<WormholeMcpApproval[]>([]);
   const [tunnelPrompts, setTunnelPrompts] = useState<WormholeTunnelPrompt[]>([]);
   const [tunnelPromptValue, setTunnelPromptValue] = useState('');
@@ -6358,6 +6380,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     <TooltipProvider delayDuration={300}>
       {visibleAuthPrompt && authState ? (
         <AuthPrompt
+          onDialogElementChange={setAuthDialog}
           onResult={handleAuthPromptResult}
           request={visibleAuthPrompt}
           state={authState}
@@ -6587,68 +6610,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           </DialogFooter>
         </DialogContent>
       </Dialog>
-      <Dialog
-        onOpenChange={(open) => {
-          if (!open) void resolveMcpApproval(false);
-        }}
-        open={mcpApprovals.length > 0}
-      >
-        <DialogContent
-          className="z-[60] border-border/70 bg-card text-card-foreground sm:max-w-md"
-          overlayClassName="z-[60]"
-        >
-          <DialogHeader>
-            <DialogTitle>
-              {mcpApprovals[0]?.approvalKind === 'open_connection'
-                ? 'Allow AI agent to open this connection?'
-                : 'Allow AI agent control?'}
-            </DialogTitle>
-            <DialogDescription>
-              {mcpApprovals[0]?.approvalKind === 'open_connection'
-                ? 'An MCP client is asking Wormhole to open a saved connection.'
-                : "An MCP client is requesting access to one of Wormhole's live SSH sessions."}
-            </DialogDescription>
-          </DialogHeader>
-          {mcpApprovals[0] ? (
-            <div className="space-y-3 rounded-lg border border-border/70 bg-muted/20 p-3 text-xs">
-              <div className="flex items-start gap-2">
-                <AlertCircle className="mt-0.5 size-4 shrink-0 text-amber-400" />
-                <div className="min-w-0 space-y-1">
-                  <p className="font-medium">
-                    {mcpApprovals[0].approvalKind === 'open_connection' &&
-                    mcpApprovals[0].connectionFolder
-                      ? `${mcpApprovals[0].connectionFolder} / ${mcpApprovals[0].title}`
-                      : mcpApprovals[0].title || 'SSH session'}
-                  </p>
-                  <p className="break-all text-muted-foreground">
-                    {mcpApprovals[0].approvalKind === 'open_connection'
-                      ? `${mcpApprovals[0].protocol?.toUpperCase()} · ${mcpApprovals[0].host}${
-                          mcpApprovals[0].port > 0 ? `:${mcpApprovals[0].port}` : ''
-                        }${mcpApprovals[0].path ?? ''}`
-                      : `${mcpApprovals[0].username}@${mcpApprovals[0].host}:${mcpApprovals[0].port}`}
-                  </p>
-                  <p className="text-muted-foreground">
-                    Requested tool: <span className="font-mono">{mcpApprovals[0].tool}</span>
-                  </p>
-                </div>
-              </div>
-              <p className="text-[11px] leading-relaxed text-muted-foreground">
-                {mcpApprovals[0].approvalKind === 'open_connection'
-                  ? 'This approval applies only to this open request. Every MCP request to open a connection requires a new approval.'
-                  : 'Allowing this request grants the MCP client access until you disconnect the AI agent or close this session. MCP tools can run only while Wormhole is unlocked.'}
-              </p>
-            </div>
-          ) : null}
-          <DialogFooter>
-            <Button onClick={() => void resolveMcpApproval(false)} type="button" variant="ghost">
-              Deny
-            </Button>
-            <Button onClick={() => void resolveMcpApproval(true)} type="button">
-              Allow
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <McpApprovalDialog
+        approval={mcpApprovals[0]}
+        onDecision={(approved) => void resolveMcpApproval(approved)}
+      />
       <div
         aria-hidden={authGate !== 'unlocked'}
         className="flex h-full min-w-[960px] flex-col bg-background font-sans text-foreground"
@@ -7011,6 +6976,12 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           <DialogContent
             aria-describedby="wormhole-close-description"
             className="overflow-hidden border-border/70 bg-card p-0 text-card-foreground sm:max-w-md"
+            container={authDialog}
+            onCloseAutoFocus={(event) => {
+              if (pendingWindowClose || !authDialog?.open) return;
+              event.preventDefault();
+              authDialog.querySelector<HTMLInputElement>('#auth-secret')?.focus();
+            }}
             onEscapeKeyDown={(event) => {
               if (windowCloseBusy) event.preventDefault();
             }}

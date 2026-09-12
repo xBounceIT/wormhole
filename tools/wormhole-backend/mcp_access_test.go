@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -73,14 +74,17 @@ func TestMcpRevocationRequiresNewApprovalForEachSessionTool(t *testing.T) {
 			}
 			defer clientSession.Close()
 			done := make(chan error, 1)
+			arguments := map[string]any{"sessionId": "session"}
+			switch tool {
+			case "run_command":
+				arguments["command"] = "echo example"
+				arguments["timeoutSeconds"] = float64(9)
+			case "send_text":
+				arguments["text"] = "echo example\r"
+			case "read_terminal":
+				arguments["maxBytes"] = float64(256)
+			}
 			go func() {
-				arguments := map[string]any{"sessionId": "session"}
-				if tool == "run_command" {
-					arguments["command"] = "echo example"
-				}
-				if tool == "send_text" {
-					arguments["text"] = "echo example\r"
-				}
 				result, err := clientSession.CallTool(ctx, &mcp.CallToolParams{Name: tool, Arguments: arguments})
 				if err == nil && !result.IsError {
 					err = errors.New("tool ran without renewed consent")
@@ -88,6 +92,26 @@ func TestMcpRevocationRequiresNewApprovalForEachSessionTool(t *testing.T) {
 				done <- err
 			}()
 			requestID := waitForMcpApprovalRequest(t, controller)
+			server.output.mu.Lock()
+			wire := append([]byte(nil), output.Bytes()...)
+			server.output.mu.Unlock()
+			decoder = json.NewDecoder(bytes.NewReader(wire))
+			var approval sshWireEvent
+			for approval.Type != "mcp.approval" || approval.RequestID != requestID {
+				if err := decoder.Decode(&approval); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if approval.Tool != tool || approval.ExecutionPreview == nil {
+				t.Fatalf("renewed approval is missing execution details: %#v", approval)
+			}
+			var previewArguments map[string]any
+			if err := json.Unmarshal([]byte(approval.ExecutionPreview.Content), &previewArguments); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(previewArguments, arguments) {
+				t.Fatalf("renewed approval arguments = %#v, want %#v", previewArguments, arguments)
+			}
 			select {
 			case err := <-done:
 				t.Fatalf("tool completed before approval: %v", err)
@@ -104,7 +128,9 @@ func TestMcpRevocationRequiresNewApprovalForEachSessionTool(t *testing.T) {
 			if err := controller.revokeSessionAccess("session"); err != nil {
 				t.Fatal(err)
 			}
-			go func() { done <- controller.ensureApproval(ctx, native, "read_terminal") }()
+			go func() {
+				done <- controller.ensureApproval(ctx, native, "read_terminal", mcpExecutionArguments{SessionID: native.id, MaxBytes: mcpDefaultReadBytes})
+			}()
 			requestID = waitForMcpApprovalRequest(t, controller)
 			if err := controller.resolveApproval(requestID, true); err != nil {
 				t.Fatal(err)
@@ -174,7 +200,9 @@ func TestMcpRevocationValidatesTargetAndCancelsStaleApprovals(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- controller.ensureApproval(ctx, native, "read_terminal") }()
+	go func() {
+		done <- controller.ensureApproval(ctx, native, "read_terminal", mcpExecutionArguments{SessionID: native.id, MaxBytes: mcpDefaultReadBytes})
+	}()
 	requestID := waitForMcpApprovalRequest(t, controller)
 	if err := controller.revokeSessionAccess("session"); err != nil {
 		t.Fatal(err)
@@ -319,7 +347,7 @@ func TestMcpRevocationIsolatesOtherSessionsAndRenewedAccess(t *testing.T) {
 	}
 	done := make(chan authorization, 1)
 	go func() {
-		requestContext, release, err := controller.authorizeSessionTool(ctx, native, "read_terminal")
+		requestContext, release, err := controller.authorizeSessionTool(ctx, native, "read_terminal", mcpExecutionArguments{SessionID: native.id, MaxBytes: mcpDefaultReadBytes})
 		done <- authorization{requestContext, release, err}
 	}()
 	requestID := waitForMcpApprovalRequest(t, controller)
@@ -355,7 +383,7 @@ func TestMcpRevocationIsolatesOtherSessionsAndRenewedAccess(t *testing.T) {
 
 	cancelled, cancelRequest := context.WithCancel(ctx)
 	cancelRequest()
-	if _, release, err := controller.authorizeSessionTool(cancelled, native, "read_terminal"); !errors.Is(err, context.Canceled) || release != nil {
+	if _, release, err := controller.authorizeSessionTool(cancelled, native, "read_terminal", mcpExecutionArguments{SessionID: native.id, MaxBytes: mcpDefaultReadBytes}); !errors.Is(err, context.Canceled) || release != nil {
 		t.Fatalf("cancelled authorization = %v, release present = %v", err, release != nil)
 	}
 	if len(controller.pending) != 0 || len(controller.pendingByTarget) != 0 || len(controller.activeTools) != 0 {
@@ -382,7 +410,7 @@ func TestMcpRevocationRacingApprovalCannotRestoreAccess(t *testing.T) {
 			}
 			authorized := make(chan authorization, 1)
 			go func() {
-				requestContext, release, err := controller.authorizeSessionTool(ctx, native, "read_terminal")
+				requestContext, release, err := controller.authorizeSessionTool(ctx, native, "read_terminal", mcpExecutionArguments{SessionID: native.id, MaxBytes: mcpDefaultReadBytes})
 				authorized <- authorization{requestContext, release, err}
 			}()
 			requestID := waitForMcpApprovalRequest(t, controller)
