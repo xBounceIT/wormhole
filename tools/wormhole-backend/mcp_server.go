@@ -719,6 +719,7 @@ func (controller *mcpController) ensureApproval(
 	ctx context.Context,
 	native *sshNativeSession,
 	tool string,
+	arguments mcpExecutionArguments,
 ) error {
 	if err := controller.ensureUnlocked(); err != nil {
 		return err
@@ -775,14 +776,15 @@ func (controller *mcpController) ensureApproval(
 	controller.pending[requestID] = waiter
 	controller.pendingByTarget[sessionID] = waiter
 	controller.server.output.write(sshWireEvent{
-		Type:      "mcp.approval",
-		RequestID: requestID,
-		SessionID: native.id,
-		Host:      native.mcpSession.Host,
-		Port:      native.mcpSession.Port,
-		Username:  native.mcpSession.Username,
-		Title:     native.mcpSession.Title,
-		Tool:      tool,
+		Type:             "mcp.approval",
+		RequestID:        requestID,
+		SessionID:        native.id,
+		Host:             native.mcpSession.Host,
+		Port:             native.mcpSession.Port,
+		Username:         native.mcpSession.Username,
+		Title:            native.mcpSession.Title,
+		Tool:             tool,
+		ExecutionPreview: newMcpExecutionPreview(arguments),
 	})
 	controller.approvalMu.Unlock()
 
@@ -872,6 +874,7 @@ func (controller *mcpController) ensureConnectionOpenApproval(
 		Protocol:         connection.Protocol,
 		Path:             connection.Path,
 		ConnectionFolder: connection.Folder,
+		ExecutionPreview: newMcpExecutionPreview(mcpExecutionArguments{ConnectionID: connection.ID}),
 	})
 	controller.approvalMu.Unlock()
 
@@ -1106,14 +1109,19 @@ func newMcpServer(controller *mcpController) *mcp.Server {
 		if err != nil {
 			return nil, mcpCommandResult{}, err
 		}
-		if err := controller.ensureApproval(ctx, native, "run_command"); err != nil {
-			return nil, mcpCommandResult{}, err
+		if len(input.Command) == 0 || len(input.Command) > mcpMaxCommandBytes {
+			return nil, mcpCommandResult{}, errors.New("MCP command is empty or too large")
 		}
-		defer controller.trackSessionTool(native.id)()
 		timeout, err := mcpCommandTimeout(input.TimeoutSeconds)
 		if err != nil {
 			return nil, mcpCommandResult{}, err
 		}
+		if err := controller.ensureApproval(ctx, native, "run_command", mcpExecutionArguments{
+			SessionID: native.id, Command: &input.Command, TimeoutSeconds: int(timeout / time.Second),
+		}); err != nil {
+			return nil, mcpCommandResult{}, err
+		}
+		defer controller.trackSessionTool(native.id)()
 		result, err := native.runMcpCommand(ctx, input.Command, timeout)
 		return nil, result, err
 	})
@@ -1133,7 +1141,9 @@ func newMcpServer(controller *mcpController) *mcp.Server {
 		if err != nil {
 			return nil, "", err
 		}
-		if err := controller.ensureApproval(ctx, native, "send_text"); err != nil {
+		if err := controller.ensureApproval(ctx, native, "send_text", mcpExecutionArguments{
+			SessionID: native.id, Text: &input.Text,
+		}); err != nil {
 			return nil, "", err
 		}
 		defer controller.trackSessionTool(native.id)()
@@ -1155,10 +1165,6 @@ func newMcpServer(controller *mcpController) *mcp.Server {
 		if err != nil {
 			return nil, "", err
 		}
-		if err := controller.ensureApproval(ctx, native, "read_terminal"); err != nil {
-			return nil, "", err
-		}
-		defer controller.trackSessionTool(native.id)()
 		maxBytes := input.MaxBytes
 		if maxBytes <= 0 {
 			maxBytes = mcpDefaultReadBytes
@@ -1166,6 +1172,12 @@ func newMcpServer(controller *mcpController) *mcp.Server {
 		if maxBytes > mcpMaxReadBytes {
 			return nil, "", errors.New("maxBytes is out of range")
 		}
+		if err := controller.ensureApproval(ctx, native, "read_terminal", mcpExecutionArguments{
+			SessionID: native.id, MaxBytes: maxBytes,
+		}); err != nil {
+			return nil, "", err
+		}
+		defer controller.trackSessionTool(native.id)()
 		return nil, string(stripMcpAnsi(native.mcpReplay.snapshotTail(maxBytes))), nil
 	})
 	return server
