@@ -9,12 +9,13 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import tailwindcss from '@tailwindcss/vite';
 import { build, transformWithOxc } from 'vite';
+import { coverageThreshold } from '../scripts/test-coverage.ts';
 
 const require = createRequire(import.meta.url);
 
-// TSX is excluded from Node's loaded-module coverage. Exercise these modal surfaces,
-// including browser top-layer hit testing and focus, in real React and Chromium.
-test('authentication and window-close prompts remain usable while the app is locked', async () => {
+// Node coverage excludes TSX and process entrypoints. Measure these isolated login
+// and close handlers in Chromium, including native modal hit testing and focus.
+test('authentication and window-close prompts remain usable while the app is locked', async (context) => {
   const source = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
   const start = source.indexOf('function AuthPrompt');
   const end = source.indexOf('type WormholeAppProps', start);
@@ -70,9 +71,22 @@ test('authentication and window-close prompts remain usable while the app is loc
     new URL('../src/dialog-lifecycle.ts', import.meta.url),
     'utf8',
   ).replace(/^export /gm, '');
+  const startupSource = readFileSync(new URL('../src/main.tsx', import.meta.url), 'utf8');
+  const cardStart = startupSource.indexOf('function renderCard');
+  const cardEnd = startupSource.indexOf('function showError', cardStart);
+  const unlockStart = startupSource.indexOf('function showUnlock');
+  const unlockEnd = startupSource.indexOf('async function bootstrap', unlockStart);
+  assert.ok(cardStart >= 0 && cardEnd > cardStart);
+  assert.ok(unlockStart >= 0 && unlockEnd > unlockStart);
   const fixture = readFileSync(new URL('./fixtures/auth-prompt.tsx', import.meta.url), 'utf8');
   const transformed = await transformWithOxc(
-    dialogLifecycle + dialogSource + source.slice(start, end) + closeHarness + fixture,
+    dialogLifecycle +
+      dialogSource +
+      source.slice(start, end) +
+      closeHarness +
+      startupSource.slice(cardStart, cardEnd) +
+      startupSource.slice(unlockStart, unlockEnd) +
+      fixture,
     'auth-prompt.tsx',
     {
       jsx: { runtime: 'classic' },
@@ -105,11 +119,13 @@ test('authentication and window-close prompts remain usable while the app is loc
     const Card = 'div', CardHeader = 'div', CardTitle = 'h2', CardDescription = 'p';
     const CardContent = 'div', Button = 'button', Input = 'input', Label = 'label';
     const KeyRound = 'span', LoaderCircle = 'span', XIcon = 'span', TriangleAlert = 'span', Power = 'span', Badge = 'span';
+    const root = document.getElementById('root');
     globalThis.IS_REACT_ACT_ENVIRONMENT = true;
     const style = document.createElement('style');
     style.textContent = ${JSON.stringify(css)};
     document.head.append(style);
     ${transformed.code}
+    //# sourceURL=wormhole-auth-prompt.js
   `;
   const directory = mkdtempSync(join(tmpdir(), 'wormhole-auth-prompt-'));
   const harnessPath = join(directory, 'auth-prompt.cjs');
@@ -131,7 +147,31 @@ test('authentication and window-close prompts remain usable while the app is loc
         });
         try {
           await window.loadURL('data:text/html,<div id="root"></div>');
+          window.webContents.debugger.attach('1.3');
+          await window.webContents.debugger.sendCommand('Profiler.enable');
+          await window.webContents.debugger.sendCommand('Profiler.startPreciseCoverage', {
+            callCount: true, detailed: true,
+          });
           await window.webContents.executeJavaScript(${JSON.stringify(renderer)});
+          const coverage = await window.webContents.debugger.sendCommand('Profiler.takePreciseCoverage');
+          const script = coverage.result.find(item => item.url === 'wormhole-auth-prompt.js');
+          if (!script) throw new Error('Missing authentication renderer coverage.');
+          for (const name of ['AuthPrompt', 'showUnlock', 'AppCloseHarness', 'DialogContent']) {
+            const parent = script.functions.find(item => item.functionName === name);
+            if (!parent) throw new Error('Missing coverage for ' + name);
+            const range = parent.ranges[0];
+            const ranges = script.functions
+              .filter(item => item.ranges[0].startOffset >= range.startOffset &&
+                item.ranges[0].endOffset <= range.endOffset)
+              .flatMap(item => item.ranges);
+            const covered = ranges.filter(item => item.count > 0).length;
+            const percent = 100 * covered / ranges.length;
+            console.log(name + ': V8 block coverage ' + covered + '/' + ranges.length +
+              ' (' + percent.toFixed(2) + '%)');
+            if (percent < ${coverageThreshold}) {
+              throw new Error(name + ' coverage is below ${coverageThreshold}%.');
+            }
+          }
         } finally { window.destroy(); }
         app.quit();
       }).catch((error) => { console.error(error); app.exit(1); });
@@ -144,7 +184,7 @@ test('authentication and window-close prompts remain usable while the app is loc
       needsDisplay ? ['--auto-servernum', electron, '--no-sandbox', harnessPath] : [harnessPath],
       { env: { ...environment, NODE_ENV: 'test' }, timeout: 60_000, windowsHide: true },
     );
-    if (stdout.trim()) process.stdout.write(stdout);
+    for (const line of stdout.trim().split(/\r?\n/)) context.diagnostic(line);
     if (stderr.trim()) process.stderr.write(stderr);
   } finally {
     assert.equal(resolve(directory, '..'), resolve(tmpdir()));

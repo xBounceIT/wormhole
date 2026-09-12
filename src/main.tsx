@@ -124,42 +124,59 @@ function showUnlock(startup: WormholeStartupSnapshot) {
   });
   form.append(label, input, status, submit);
 
+  const hello = document.createElement('button');
+  hello.className = 'startup-button startup-button-secondary';
+  hello.type = 'button';
+  hello.textContent = 'Use Windows Hello';
+  hello.addEventListener('click', () => void tryWindowsHello());
+
   async function tryWindowsHello() {
     if (busy || !window.wormhole) return;
+    const api = window.wormhole;
     busy = true;
     input.disabled = true;
     submit.disabled = true;
     status.textContent = 'Waiting for Windows Hello…';
-    try {
-      const availability = await window.wormhole.checkWindowsHello();
+    const checkAvailability = async () => {
+      const availability = await api.checkWindowsHello().catch((error: unknown) => {
+        hello.remove();
+        throw error;
+      });
       if (!availability.available) {
+        hello.remove();
         status.textContent = `${availability.message} You can use your ${fallbackName} instead.`;
-        return;
+      } else if (!hello.isConnected) {
+        card.insertBefore(hello, form);
       }
-      const result = await window.wormhole.verifyWindowsHello();
+      return availability.available;
+    };
+    try {
+      if (!(await checkAvailability())) return;
+      const result = await api.verifyWindowsHello().catch(() => ({
+        succeeded: false,
+        message: `Windows Hello couldn't verify you. Try again or use your ${fallbackName}.`,
+      }));
       if (!result.succeeded) {
         status.textContent = result.message || `Windows Hello didn't recognize you.`;
+        await checkAvailability();
         return;
       }
-      const workspace = await window.wormhole.loadWorkspace();
-      await mountWorkspace(startup, workspace);
+      try {
+        const workspace = await api.loadWorkspace();
+        await mountWorkspace(startup, workspace);
+      } catch {
+        status.textContent = "Wormhole couldn't load the workspace. Try again.";
+      }
     } catch {
       status.textContent = `Windows Hello isn't available right now. Use your ${fallbackName}.`;
     } finally {
       busy = false;
       input.disabled = false;
       submit.disabled = input.value.length === 0;
+      if (!hello.isConnected) input.focus();
     }
   }
 
-  if (isHelloMode) {
-    const hello = document.createElement('button');
-    hello.className = 'startup-button startup-button-secondary';
-    hello.type = 'button';
-    hello.textContent = 'Use Windows Hello';
-    hello.addEventListener('click', () => void tryWindowsHello());
-    card.append(hello);
-  }
   card.append(form);
   if (!isHelloMode) input.focus();
 
