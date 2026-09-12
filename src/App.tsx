@@ -19,6 +19,7 @@ import {
   type ReactNode,
 } from 'react';
 import './index.css';
+import { McpApprovalDialog } from './components/McpApprovalDialog';
 import { applySessionMcpAccess, sessionTabPresentation } from './session-tab-state';
 import { backupExportPasswordIsValid, backupExportRequiresEncryption } from './backup-state';
 import wormholeIcon from '../Assets/Wormhole.png';
@@ -6555,68 +6556,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           </DialogFooter>
         </DialogContent>
       </Dialog>
-      <Dialog
-        onOpenChange={(open) => {
-          if (!open) void resolveMcpApproval(false);
-        }}
-        open={mcpApprovals.length > 0}
-      >
-        <DialogContent
-          className="z-[60] border-border/70 bg-card text-card-foreground sm:max-w-md"
-          overlayClassName="z-[60]"
-        >
-          <DialogHeader>
-            <DialogTitle>
-              {mcpApprovals[0]?.approvalKind === 'open_connection'
-                ? 'Allow AI agent to open this connection?'
-                : 'Allow AI agent control?'}
-            </DialogTitle>
-            <DialogDescription>
-              {mcpApprovals[0]?.approvalKind === 'open_connection'
-                ? 'An MCP client is asking Wormhole to open a saved connection.'
-                : "An MCP client is requesting access to one of Wormhole's live SSH sessions."}
-            </DialogDescription>
-          </DialogHeader>
-          {mcpApprovals[0] ? (
-            <div className="space-y-3 rounded-lg border border-border/70 bg-muted/20 p-3 text-xs">
-              <div className="flex items-start gap-2">
-                <AlertCircle className="mt-0.5 size-4 shrink-0 text-amber-400" />
-                <div className="min-w-0 space-y-1">
-                  <p className="font-medium">
-                    {mcpApprovals[0].approvalKind === 'open_connection' &&
-                    mcpApprovals[0].connectionFolder
-                      ? `${mcpApprovals[0].connectionFolder} / ${mcpApprovals[0].title}`
-                      : mcpApprovals[0].title || 'SSH session'}
-                  </p>
-                  <p className="break-all text-muted-foreground">
-                    {mcpApprovals[0].approvalKind === 'open_connection'
-                      ? `${mcpApprovals[0].protocol?.toUpperCase()} · ${mcpApprovals[0].host}${
-                          mcpApprovals[0].port > 0 ? `:${mcpApprovals[0].port}` : ''
-                        }${mcpApprovals[0].path ?? ''}`
-                      : `${mcpApprovals[0].username}@${mcpApprovals[0].host}:${mcpApprovals[0].port}`}
-                  </p>
-                  <p className="text-muted-foreground">
-                    Requested tool: <span className="font-mono">{mcpApprovals[0].tool}</span>
-                  </p>
-                </div>
-              </div>
-              <p className="text-[11px] leading-relaxed text-muted-foreground">
-                {mcpApprovals[0].approvalKind === 'open_connection'
-                  ? 'This approval applies only to this open request. Every MCP request to open a connection requires a new approval.'
-                  : "Allowing this request grants the MCP client access to this session for the rest of the session's lifetime. MCP tools can run only while Wormhole is unlocked."}
-              </p>
-            </div>
-          ) : null}
-          <DialogFooter>
-            <Button onClick={() => void resolveMcpApproval(false)} type="button" variant="ghost">
-              Deny
-            </Button>
-            <Button onClick={() => void resolveMcpApproval(true)} type="button">
-              Allow
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <McpApprovalDialog
+        approval={mcpApprovals[0]}
+        onDecision={(approved) => void resolveMcpApproval(approved)}
+      />
       <div
         aria-hidden={authGate !== 'unlocked'}
         className="flex h-full min-w-[960px] flex-col bg-background font-sans text-foreground"

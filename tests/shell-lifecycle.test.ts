@@ -529,7 +529,11 @@ test('MCP connection opens use a validated one-time approval before the normal r
     'other windows must dismiss the approval only after the backend accepts the decision',
   );
   assert.doesNotMatch(nativeResponder, /finally/);
-  assert.match(appSource, /Every MCP request to open a connection requires a new approval\./);
+  const approvalDialog = readFileSync(
+    new URL('../src/components/McpApprovalDialog.tsx', import.meta.url),
+    'utf8',
+  );
+  assert.match(approvalDialog, /Every MCP request to open a connection requires a new approval\./);
 });
 
 test('MCP approval temporarily preempts tunnel browser authentication windows', () => {
@@ -677,9 +681,9 @@ test('MCP approval stays above renderer dialogs and hides native session surface
     new URL('../src/components/ui/dialog.tsx', import.meta.url),
     'utf8',
   );
-  const approvalDialog = appSource.slice(
-    appSource.indexOf('open={mcpApprovals.length > 0}'),
-    appSource.indexOf('<div', appSource.indexOf('open={mcpApprovals.length > 0}')),
+  const approvalDialog = readFileSync(
+    new URL('../src/components/McpApprovalDialog.tsx', import.meta.url),
+    'utf8',
   );
   const nativeSurfaceVisibility = appSource.slice(
     appSource.indexOf('isWebSurfaceVisible={'),
@@ -690,6 +694,7 @@ test('MCP approval stays above renderer dialogs and hides native session surface
   assert.match(dialogSource, /<DialogOverlay className=\{overlayClassName\} \/>/);
   assert.match(approvalDialog, /className="z-\[60\]/);
   assert.match(approvalDialog, /overlayClassName="z-\[60\]"/);
+  assert.match(appSource, /<McpApprovalDialog\s+approval=\{mcpApprovals\[0\]\}/);
   assert.match(nativeSurfaceVisibility, /mcpApprovals\.length === 0/);
 });
 
