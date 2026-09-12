@@ -206,9 +206,19 @@ func TestMcpToolsPreviewEffectiveArgumentsBeforeApproval(t *testing.T) {
 			controller.server.output.mu.Lock()
 			wire := append([]byte(nil), output.Bytes()...)
 			controller.server.output.mu.Unlock()
+			decoder := json.NewDecoder(bytes.NewReader(wire))
 			var event sshWireEvent
-			if err := json.Unmarshal(bytes.TrimSpace(wire), &event); err != nil {
-				t.Fatal(err)
+			for {
+				event = sshWireEvent{}
+				if err := decoder.Decode(&event); err != nil {
+					t.Fatal(err)
+				}
+				if event.Type != "mcp.access" {
+					break
+				}
+				if event.SessionID != native.id || event.McpAccessible == nil || *event.McpAccessible {
+					t.Fatal("session became AI-accessible before approval")
+				}
 			}
 			if event.Type != "mcp.approval" || event.RequestID != requestID || event.Tool != scenario.tool || event.ExecutionPreview == nil {
 				t.Fatalf("unexpected approval: %#v", event)

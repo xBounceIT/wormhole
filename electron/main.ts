@@ -6407,6 +6407,10 @@ class NativeSshBackend {
     this.broadcastMcpApprovalCancellation(approvalId);
   }
 
+  async revokeMcpSessionAccess(sessionId: string): Promise<void> {
+    await this.sendMcpControl({ type: 'mcp.revoke-session', session_id: sessionId });
+  }
+
   async setMcpLocked(locked: boolean): Promise<void> {
     if (!this.child || this.child.killed) return;
     await this.sendMcpControl({ type: locked ? 'mcp.lock' : 'mcp.unlock' });
@@ -8251,6 +8255,13 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       } finally {
         mcpApprovalWindowCoordinator.finishApproval(approval.requestId);
       }
+    });
+  });
+  ipcMain.handle('mcp:revoke-session', async (_event, sessionId: unknown) => {
+    if (!isSshSessionId(sessionId)) throw new Error('SSH session id is invalid.');
+    return serializeAuthOperation(async () => {
+      await requireWorkspaceAuth();
+      await sshBackend.revokeMcpSessionAccess(sessionId);
     });
   });
 

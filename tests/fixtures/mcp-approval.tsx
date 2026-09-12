@@ -44,7 +44,7 @@ async function runMcpApprovalDialogTests() {
   assert.equal(window.injected, undefined);
   assert.match(dialog().textContent, /Preview truncated/);
   assert.match(dialog().textContent, /Detected sensitive values are hidden/);
-  assert.match(dialog().textContent, /rest of the session's lifetime/);
+  assert.match(dialog().textContent, /until you disconnect the AI agent or close this session/);
   assert.match(dialog().textContent, /alice@example.test:22/);
   assert.equal(preview().getAttribute('aria-label'), 'Requested execution');
   assert.equal(preview().getAttribute('dir'), 'ltr');
@@ -130,7 +130,7 @@ async function runMcpApprovalDialogTests() {
     dialog().textContent,
     /Every MCP request to open a connection requires a new approval/,
   );
-  assert.doesNotMatch(dialog().textContent, /rest of the session's lifetime/);
+  assert.doesNotMatch(dialog().textContent, /disconnect the AI agent/);
   assert.equal(preview().textContent, '{"connectionId":"web-node"}');
   await mount();
   assert.equal(preview(), null);

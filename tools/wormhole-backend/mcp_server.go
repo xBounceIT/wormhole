@@ -47,6 +47,10 @@ type mcpApprovalWaiter struct {
 	processingErr    error
 }
 
+type mcpSessionTool struct {
+	cancel context.CancelFunc
+}
+
 type mcpConnectionInfo struct {
 	ID       string `json:"id"`
 	Name     string `json:"name"`
@@ -89,7 +93,7 @@ type mcpController struct {
 	approvalMu      sync.Mutex
 	locked          bool
 	accessRunning   bool
-	activeTools     map[string]int
+	activeTools     map[string]map[*mcpSessionTool]struct{}
 	decisions       map[string]bool
 	pending         map[string]*mcpApprovalWaiter
 	pendingByTarget map[string]*mcpApprovalWaiter
@@ -103,7 +107,7 @@ func newMcpController(server *sshServer) *mcpController {
 		server:          server,
 		locked:          true,
 		decisions:       make(map[string]bool),
-		activeTools:     make(map[string]int),
+		activeTools:     make(map[string]map[*mcpSessionTool]struct{}),
 		pending:         make(map[string]*mcpApprovalWaiter),
 		pendingByTarget: make(map[string]*mcpApprovalWaiter),
 	}
@@ -727,6 +731,10 @@ func (controller *mcpController) ensureApproval(
 	sessionID := native.id
 
 	controller.approvalMu.Lock()
+	if err := ctx.Err(); err != nil {
+		controller.approvalMu.Unlock()
+		return err
+	}
 	if approved, exists := controller.decisions[sessionID]; exists {
 		controller.approvalMu.Unlock()
 		if approved {
@@ -982,7 +990,24 @@ func (controller *mcpController) cancelPending(reason string) {
 }
 
 func (controller *mcpController) forgetSession(sessionID string) {
+	controller.clearSessionApproval(sessionID, errSSHSessionClosed)
+}
+
+func (controller *mcpController) revokeSessionAccess(sessionID string) error {
+	if _, err := controller.resolveSession(sessionID); err != nil {
+		return err
+	}
+	// Cancel access and queued commands without closing SSH or interrupting commands
+	// already sent to the remote shell. Later requests must ask for approval again.
+	controller.clearSessionApproval(sessionID, errors.New("the user disconnected AI-agent control of that session"))
+	return nil
+}
+
+func (controller *mcpController) clearSessionApproval(sessionID string, reason error) {
 	controller.approvalMu.Lock()
+	for tool := range controller.activeTools[sessionID] {
+		tool.cancel()
+	}
 	approved := controller.decisions[sessionID]
 	delete(controller.decisions, sessionID)
 	if approved {
@@ -993,7 +1018,7 @@ func (controller *mcpController) forgetSession(sessionID string) {
 		delete(controller.pending, waiter.requestID)
 		delete(controller.pendingByTarget, sessionID)
 		waiter.approved = false
-		waiter.err = errSSHSessionClosed
+		waiter.err = reason
 	}
 	controller.approvalMu.Unlock()
 	if waiter != nil {
@@ -1003,7 +1028,7 @@ func (controller *mcpController) forgetSession(sessionID string) {
 }
 
 // Publish permission metadata in decision order, including suspension while locked or stopped.
-// The grants remain valid for the SSH session's lifetime and resume on unlock/start.
+// Grants resume on unlock/start unless explicitly revoked or the SSH session ends.
 func (controller *mcpController) setAccessRunning(running bool) {
 	controller.approvalMu.Lock()
 	defer controller.approvalMu.Unlock()
@@ -1024,7 +1049,7 @@ func (controller *mcpController) emitSessionAccessLocked(sessionID string) {
 		return
 	}
 	accessible := controller.decisions[sessionID] && !controller.locked &&
-		(controller.accessRunning || controller.activeTools[sessionID] > 0)
+		(controller.accessRunning || len(controller.activeTools[sessionID]) > 0)
 	controller.server.output.write(sshWireEvent{
 		Type: "mcp.access", SessionID: sessionID, McpAccessible: &accessible,
 	})
@@ -1032,24 +1057,45 @@ func (controller *mcpController) emitSessionAccessLocked(sessionID string) {
 
 // HTTP shutdown stops new requests but lets admitted tools finish. Keep their session
 // indicator visible until the last request releases its access, even after shutdown times out.
-func (controller *mcpController) trackSessionTool(sessionID string) func() {
+func (controller *mcpController) trackSessionTool(ctx context.Context, sessionID string) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(ctx)
+	tool := &mcpSessionTool{cancel: cancel}
 	controller.approvalMu.Lock()
-	controller.activeTools[sessionID]++
+	if controller.activeTools[sessionID] == nil {
+		controller.activeTools[sessionID] = make(map[*mcpSessionTool]struct{})
+	}
+	controller.activeTools[sessionID][tool] = struct{}{}
 	if !controller.accessRunning {
 		controller.emitSessionAccessLocked(sessionID)
 	}
 	controller.approvalMu.Unlock()
-	return func() {
+	return ctx, func() {
+		cancel()
 		controller.approvalMu.Lock()
 		defer controller.approvalMu.Unlock()
-		controller.activeTools[sessionID]--
-		if controller.activeTools[sessionID] == 0 {
+		delete(controller.activeTools[sessionID], tool)
+		if len(controller.activeTools[sessionID]) == 0 {
 			delete(controller.activeTools, sessionID)
 			if !controller.accessRunning {
 				controller.emitSessionAccessLocked(sessionID)
 			}
 		}
 	}
+}
+
+func (controller *mcpController) authorizeSessionTool(ctx context.Context, native *sshNativeSession, tool string, arguments mcpExecutionArguments) (context.Context, func(), error) {
+	// Register before checking approval so revocation cannot miss a request between
+	// receiving consent and waiting for the native command gate.
+	ctx, release := controller.trackSessionTool(ctx, native.id)
+	err := controller.ensureApproval(ctx, native, tool, arguments)
+	if err == nil {
+		err = ctx.Err()
+	}
+	if err != nil {
+		release()
+		return nil, nil, err
+	}
+	return ctx, release, nil
 }
 
 func (controller *mcpController) emitApprovalCancelled(waiter *mcpApprovalWaiter) {
@@ -1116,13 +1162,14 @@ func newMcpServer(controller *mcpController) *mcp.Server {
 		if err != nil {
 			return nil, mcpCommandResult{}, err
 		}
-		if err := controller.ensureApproval(ctx, native, "run_command", mcpExecutionArguments{
+		toolContext, release, err := controller.authorizeSessionTool(ctx, native, "run_command", mcpExecutionArguments{
 			SessionID: native.id, Command: &input.Command, TimeoutSeconds: int(timeout / time.Second),
-		}); err != nil {
+		})
+		if err != nil {
 			return nil, mcpCommandResult{}, err
 		}
-		defer controller.trackSessionTool(native.id)()
-		result, err := native.runMcpCommand(ctx, input.Command, timeout)
+		defer release()
+		result, err := native.runMcpCommand(toolContext, input.Command, timeout)
 		return nil, result, err
 	})
 
@@ -1141,12 +1188,13 @@ func newMcpServer(controller *mcpController) *mcp.Server {
 		if err != nil {
 			return nil, "", err
 		}
-		if err := controller.ensureApproval(ctx, native, "send_text", mcpExecutionArguments{
+		_, release, err := controller.authorizeSessionTool(ctx, native, "send_text", mcpExecutionArguments{
 			SessionID: native.id, Text: &input.Text,
-		}); err != nil {
+		})
+		if err != nil {
 			return nil, "", err
 		}
-		defer controller.trackSessionTool(native.id)()
+		defer release()
 		if err := native.write([]byte(input.Text)); err != nil {
 			return nil, "", err
 		}
@@ -1172,12 +1220,13 @@ func newMcpServer(controller *mcpController) *mcp.Server {
 		if maxBytes > mcpMaxReadBytes {
 			return nil, "", errors.New("maxBytes is out of range")
 		}
-		if err := controller.ensureApproval(ctx, native, "read_terminal", mcpExecutionArguments{
+		_, release, err := controller.authorizeSessionTool(ctx, native, "read_terminal", mcpExecutionArguments{
 			SessionID: native.id, MaxBytes: maxBytes,
-		}); err != nil {
+		})
+		if err != nil {
 			return nil, "", err
 		}
-		defer controller.trackSessionTool(native.id)()
+		defer release()
 		return nil, string(stripMcpAnsi(native.mcpReplay.snapshotTail(maxBytes))), nil
 	})
 	return server
@@ -1405,6 +1454,8 @@ func (server *sshServer) handleMcp(command sshWireCommand) {
 			return
 		}
 		respond(nil, "", nil)
+	case "mcp.revoke-session":
+		respond(nil, "", server.mcp.revokeSessionAccess(command.SessionID))
 	default:
 		respond(nil, "", fmt.Errorf("unsupported MCP command %q", command.Type))
 	}

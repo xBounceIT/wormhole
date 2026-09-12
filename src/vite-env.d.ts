@@ -1167,6 +1167,7 @@ interface Window {
     getMcpToken(): Promise<string>;
     regenerateMcpToken(): Promise<string>;
     respondMcpApproval(requestId: string, approved: boolean): Promise<void>;
+    revokeMcpSessionAccess(sessionId: string): Promise<void>;
     onMcpApproval(listener: (event: WormholeMcpApprovalEvent) => void): () => void;
     sendVncCommand(command: WormholeVncCommand): Promise<WormholeBackendResponse>;
     onBackendEvent(listener: (event: WormholeBackendEvent) => void): () => void;

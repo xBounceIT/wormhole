@@ -20,7 +20,11 @@ import {
 } from 'react';
 import './index.css';
 import { McpApprovalDialog } from './components/McpApprovalDialog';
-import { applySessionMcpAccess, sessionTabPresentation } from './session-tab-state';
+import {
+  applySessionMcpAccess,
+  canDisconnectSessionAiAgent,
+  sessionTabPresentation,
+} from './session-tab-state';
 import { backupExportPasswordIsValid, backupExportRequiresEncryption } from './backup-state';
 import wormholeIcon from '../Assets/Wormhole.png';
 import bitwardenIcon from '../Assets/Bitwarden/bitwarden-icon.png';
@@ -669,6 +673,7 @@ type Session = {
   canTransfer?: boolean;
   backendSessionId?: string;
   mcpAccessible?: boolean;
+  mcpAccessError?: string;
   status: 'connecting' | 'connected' | 'failed' | 'closed' | 'placeholder';
   terminalFrame?: RenderedTerminalFrame;
   tunnelProgress?: { phase: string; detail?: string } | null;
@@ -1247,6 +1252,7 @@ function SessionTabContextMenu({
   onReconnect,
   onRestoreFullView,
   onDisconnect,
+  onDisconnectAiAgent,
   onDuplicate,
   onOpenSystemRdp,
   onClose,
@@ -1257,6 +1263,7 @@ function SessionTabContextMenu({
   onReconnect: () => void;
   onRestoreFullView?: () => void;
   onDisconnect: () => void;
+  onDisconnectAiAgent: () => void;
   onDuplicate: () => void;
   onOpenSystemRdp: () => void;
   onClose: () => void;
@@ -1284,6 +1291,12 @@ function SessionTabContextMenu({
           <ContextMenuItem onSelect={onDisconnect}>
             <Power />
             Disconnect
+          </ContextMenuItem>
+        ) : null}
+        {canDisconnectSessionAiAgent(session) ? (
+          <ContextMenuItem onSelect={onDisconnectAiAgent}>
+            <Bot />
+            Disconnect AI Agent
           </ContextMenuItem>
         ) : null}
         {canOpenRdpSystemClient(session) ? (
@@ -3704,6 +3717,25 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       }
     }
   }, [refreshRdpSystemClientCapability, tree]);
+
+  async function disconnectSessionAiAgent(sessionId: string): Promise<void> {
+    const source = sessionsRef.current.find((session) => session.id === sessionId);
+    if (!source?.backendSessionId || !canDisconnectSessionAiAgent(source)) return;
+    try {
+      const api = window.wormhole;
+      if (!api) throw new Error('The MCP service is unavailable.');
+      await api.revokeMcpSessionAccess(source.backendSessionId);
+      // The backend access event updates every tab; a late response must not overwrite a new grant.
+    } catch {
+      setSessions((current) =>
+        current.map((session) =>
+          session.backendSessionId === source.backendSessionId
+            ? { ...session, mcpAccessError: 'Could not disconnect the AI agent. Try again.' }
+            : session,
+        ),
+      );
+    }
+  }
 
   async function disconnectRemoteDesktopSession(sessionId: string): Promise<boolean> {
     const source = sessionsRef.current.find((session) => session.id === sessionId);
@@ -6791,6 +6823,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                   onCloseSession={closeSession}
                   onConnectRdp={requestRdpCredentials}
                   onDisconnectSession={disconnectRemoteDesktopSession}
+                  onDisconnectAiAgent={disconnectSessionAiAgent}
                   onDuplicateSession={duplicateSession}
                   onCloseSftpBrowser={closeSftpBrowser}
                   onOpenFileTransfer={openFileTransfer}
@@ -10369,6 +10402,7 @@ function SessionsPage({
   onConnectRdp,
   onOpenSystemRdp,
   onDisconnectSession,
+  onDisconnectAiAgent,
   onDuplicateSession,
   onCloseSftpBrowser,
   onOpenFileTransfer,
@@ -10401,6 +10435,7 @@ function SessionsPage({
   onConnectRdp: (id: string) => void;
   onOpenSystemRdp: (id: string) => void;
   onDisconnectSession: (id: string) => void;
+  onDisconnectAiAgent: (id: string) => void;
   onDuplicateSession: (id: string) => void;
   onCloseSftpBrowser: (id: string) => void;
   onOpenFileTransfer: (id: string) => void;
@@ -10652,6 +10687,7 @@ function SessionsPage({
                   key={session.id}
                   onClose={() => closePaneSession(pane, session.id)}
                   onDisconnect={() => onDisconnectSession(session.id)}
+                  onDisconnectAiAgent={() => onDisconnectAiAgent(session.id)}
                   onDuplicate={() => onDuplicateSession(session.id)}
                   onFileTransfer={() => onOpenFileTransfer(session.id)}
                   onOpenSystemRdp={() => onOpenSystemRdp(session.id)}
@@ -10745,6 +10781,14 @@ function SessionsPage({
             }}
             style={sessionSurfaceStyle(rect, active)}
           >
+            {session.mcpAccessible && session.mcpAccessError ? (
+              <p
+                className="absolute inset-x-3 top-3 z-10 rounded-md border border-destructive/30 bg-background px-3 py-2 text-xs text-destructive"
+                role="alert"
+              >
+                {session.mcpAccessError}
+              </p>
+            ) : null}
             <SessionSurface
               autoCopyOnSelect={autoCopyOnSelect}
               bitwardenOpen={bitwardenOpenSessionId === session.id}
