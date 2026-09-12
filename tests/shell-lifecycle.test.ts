@@ -529,7 +529,7 @@ test('MCP connection opens use a validated one-time approval before the normal r
     'other windows must dismiss the approval only after the backend accepts the decision',
   );
   assert.doesNotMatch(nativeResponder, /finally/);
-  assert.match(appSource, /Every MCP request to open a connection requires a new approval\./);
+  assert.match(appSource, /This approval applies only to this open request\./);
 });
 
 test('MCP approval temporarily preempts tunnel browser authentication windows', () => {

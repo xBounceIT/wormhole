@@ -567,18 +567,22 @@ interface WormholeTunnelPrompt {
   acceptLabel?: string;
 }
 
+type WormholeMcpApprovalMode = 'full-access' | 'always-ask' | 'first-access';
+
 interface WormholeMcpStatus {
   enabled: boolean;
   running: boolean;
   port: number;
   endpoint: string;
+  approvalMode: WormholeMcpApprovalMode;
 }
 
 interface WormholeMcpApproval {
   type: 'mcp.approval';
   requestId: string;
   sessionId: string;
-  approvalKind: 'session_control' | 'open_connection';
+  approvalKind: 'session_control' | 'open_connection' | 'tool';
+  approvalMode: WormholeMcpApprovalMode;
   host: string;
   port: number;
   username: string;
@@ -1163,6 +1167,7 @@ interface Window {
     startMcp(port: number): Promise<WormholeMcpStatus>;
     stopMcp(): Promise<WormholeMcpStatus>;
     setMcpPort(port: number): Promise<WormholeMcpStatus>;
+    setMcpApprovalMode(mode: WormholeMcpApprovalMode): Promise<WormholeMcpStatus>;
     getMcpToken(): Promise<string>;
     regenerateMcpToken(): Promise<string>;
     respondMcpApproval(requestId: string, approved: boolean): Promise<void>;

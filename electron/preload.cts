@@ -721,6 +721,8 @@ const wormholeBridge = {
   startMcp: (port: number) => ipcRenderer.invoke('mcp:start', port),
   stopMcp: () => ipcRenderer.invoke('mcp:stop'),
   setMcpPort: (port: number) => ipcRenderer.invoke('mcp:set-port', port),
+  setMcpApprovalMode: (mode: 'full-access' | 'always-ask' | 'first-access') =>
+    ipcRenderer.invoke('mcp:set-approval-mode', mode),
   getMcpToken: () => ipcRenderer.invoke('mcp:get-token'),
   regenerateMcpToken: () => ipcRenderer.invoke('mcp:regenerate-token'),
   respondMcpApproval: (requestId: string, approved: boolean) =>
@@ -732,7 +734,8 @@ const wormholeBridge = {
             type: 'mcp.approval';
             requestId: string;
             sessionId: string;
-            approvalKind: 'session_control' | 'open_connection';
+            approvalKind: 'session_control' | 'open_connection' | 'tool';
+            approvalMode: 'full-access' | 'always-ask' | 'first-access';
             host: string;
             port: number;
             username: string;

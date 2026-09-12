@@ -2477,6 +2477,8 @@ func TestHandleMcpDispatchesControllerOperations(t *testing.T) {
 	commands := []sshWireCommand{
 		{Type: "mcp.status", RequestID: "status"},
 		{Type: "mcp.set-port", RequestID: "set-port", Port: port},
+		{Type: "mcp.set-approval-mode", RequestID: "set-mode", ApprovalMode: mcpApprovalAlwaysAsk},
+		{Type: "mcp.set-approval-mode", RequestID: "invalid-mode", ApprovalMode: "invalid"},
 		{Type: "mcp.get-token", RequestID: "get-token"},
 		{Type: "mcp.regenerate-token", RequestID: "regenerate-token"},
 		{Type: "mcp.unlock", RequestID: "unlock"},
@@ -2507,12 +2509,12 @@ func TestHandleMcpDispatchesControllerOperations(t *testing.T) {
 	for _, event := range events {
 		byID[event.RequestID] = event
 	}
-	for _, id := range []string{"status", "set-port", "get-token", "regenerate-token", "unlock", "lock", "start", "stop"} {
+	for _, id := range []string{"status", "set-port", "set-mode", "get-token", "regenerate-token", "unlock", "lock", "start", "stop"} {
 		if byID[id].Error != "" {
 			t.Fatalf("MCP command %s failed: %#v", id, byID[id])
 		}
 	}
-	for _, id := range []string{"", "no-controller", "approve-missing", "unsupported"} {
+	for _, id := range []string{"", "no-controller", "approve-missing", "unsupported", "invalid-mode"} {
 		if byID[id].Error == "" {
 			t.Fatalf("MCP command %q did not report an error", id)
 		}
