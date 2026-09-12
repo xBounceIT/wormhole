@@ -23,13 +23,19 @@ test('MCP selector and queued approval popups work in the Electron renderer', as
     source.lastIndexOf('<div', selectorIndex),
     source.indexOf('<div className="grid max-w-52 gap-2">', selectorIndex),
   );
-  const dialogIndex = source.indexOf('open={mcpApprovals.length > 0}');
-  const approvalDialog = source.slice(
-    source.lastIndexOf('<Dialog', dialogIndex),
-    source.indexOf('</Dialog>', dialogIndex) + '</Dialog>'.length,
+  const approvalSource = readFileSync(
+    new URL('../src/components/McpApprovalDialog.tsx', import.meta.url),
+    'utf8',
   );
+  const selectSource = readFileSync(
+    new URL('../src/components/ui/select.tsx', import.meta.url),
+    'utf8',
+  );
+  const approvalDialog = extract('<McpApprovalDialog', '\n      <div');
   const transformed = await transformWithOxc(
     `
+    ${selectSource.slice(selectSource.indexOf('function Select('), selectSource.lastIndexOf('export {'))}
+    ${approvalSource.slice(approvalSource.indexOf('export function McpApprovalDialog')).replace('export function', 'function')}
     ${extract('function matchesMcpOpenConnectionApproval(', 'function containsTreeNode(')}
     function Harness() {
       const [mcpState, setMcpState] = useState({ approvalMode: 'first-access' });
@@ -52,12 +58,12 @@ test('MCP selector and queued approval popups work in the Electron renderer', as
     const React = require(${JSON.stringify(require.resolve('react'))});
     const { createRoot } = require(${JSON.stringify(require.resolve('react-dom/client'))});
     const { Select: S, Dialog: D } = require(${JSON.stringify(require.resolve('radix-ui'))});
-    const { useState, act } = React;
-    const Select = S.Root, SelectTrigger = S.Trigger, SelectValue = S.Value;
-    const SelectContent = ({ children }) => React.createElement(S.Portal, null,
-      React.createElement(S.Content, null, React.createElement(S.Viewport, null, children)));
-    const SelectItem = ({ children, ...props }) => React.createElement(S.Item, props,
-      React.createElement(S.ItemText, null, children));
+    const { useState, useLayoutEffect, useRef, act } = React;
+    const SelectPrimitive = S;
+    const { clsx } = require(${JSON.stringify(require.resolve('clsx'))});
+    const { twMerge } = require(${JSON.stringify(require.resolve('tailwind-merge'))});
+    const cn = (...values) => twMerge(clsx(values));
+    const ChevronDownIcon = 'span', CheckIcon = 'span', ChevronUpIcon = 'span';
     const Dialog = D.Root, DialogTitle = D.Title, DialogDescription = D.Description;
     const DialogContent = ({ overlayClassName, ...props }) => React.createElement(D.Portal, null,
       React.createElement(D.Overlay), React.createElement(D.Content, props));
@@ -80,11 +86,24 @@ test('MCP selector and queued approval popups work in the Electron renderer', as
     const trigger = () => document.getElementById('settings-mcp-approval-mode');
     assert.equal(trigger().getAttribute('role'), 'combobox');
     assert.match(document.body.textContent, /Approve access once per SSH session/);
+    async function waitFor(predicate, description) {
+      const deadline = performance.now() + 5000;
+      while (!predicate()) {
+        assert.ok(performance.now() < deadline, description);
+        await act(async () => new Promise(resolve => setTimeout(resolve, 10)));
+      }
+    }
     async function choose(label) {
-      await act(async () => trigger().dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true })));
+      await act(async () => {
+        trigger().focus();
+        trigger().dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+      });
+      // Portal/layout work can finish after act when Chromium is running alongside other UI tests.
+      await waitFor(() => document.querySelectorAll('[role="option"]').length > 0, 'MCP options did not render');
       const options = Array.from(document.querySelectorAll('[role="option"]'));
       assert.deepEqual(options.map(option => option.textContent), ['Full access', 'Always ask', 'Ask on first access']);
       await act(async () => options.find(option => option.textContent === label).click());
+      await waitFor(() => trigger().getAttribute('aria-expanded') === 'false' && !trigger().disabled, 'MCP selection did not settle');
     }
     await choose('Full access');
     assert.match(trigger().textContent, /Full access/);
@@ -125,8 +144,9 @@ test('MCP selector and queued approval popups work in the Electron renderer', as
       harness,
       `
       const { app, BrowserWindow } = require('electron');
+      app.setPath('userData', ${JSON.stringify(directory)});
       app.whenReady().then(async () => {
-        const window = new BrowserWindow({ show: false, webPreferences: { nodeIntegration: true, contextIsolation: false } });
+        const window = new BrowserWindow({ show: false, webPreferences: { nodeIntegration: true, contextIsolation: false, backgroundThrottling: false } });
         try {
           await window.loadURL('data:text/html,<div id="root"></div>');
           const result = await window.webContents.executeJavaScript(${JSON.stringify(renderer)});

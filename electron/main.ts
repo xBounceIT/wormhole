@@ -1107,6 +1107,7 @@ type McpApprovalEvent = {
   username: string;
   title: string;
   tool: string;
+  executionPreview?: { content: string; truncated: boolean; redacted: boolean };
   connectionId?: string;
   connectionFolder?: string;
   protocol?: 'ssh' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial';
@@ -2486,6 +2487,24 @@ function parseMcpBackendMessage(
   const inventoryApproval = approvalKind === 'tool';
   const optionalSessionTarget = openConnectionApproval || inventoryApproval;
   const approvalMode = value.approval_mode === undefined ? 'first-access' : value.approval_mode;
+  const rawPreview = value.execution_preview;
+  let executionPreview: McpApprovalEvent['executionPreview'];
+  if (rawPreview !== undefined) {
+    if (
+      !isRecord(rawPreview) ||
+      typeof rawPreview.content !== 'string' ||
+      rawPreview.content.length > 64 * 1024 ||
+      typeof rawPreview.truncated !== 'boolean' ||
+      typeof rawPreview.redacted !== 'boolean'
+    ) {
+      return undefined;
+    }
+    executionPreview = {
+      content: rawPreview.content,
+      truncated: rawPreview.truncated,
+      redacted: rawPreview.redacted,
+    };
+  }
   const approvalHost =
     typeof value.host === 'string'
       ? value.host
@@ -2548,6 +2567,7 @@ function parseMcpBackendMessage(
       username: approvalUsername,
       title: value.title,
       tool: value.tool,
+      executionPreview,
       connectionId:
         openConnectionApproval && typeof value.connection_id === 'string'
           ? value.connection_id

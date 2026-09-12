@@ -84,7 +84,7 @@ func (controller *mcpController) sessionConnected(native *sshNativeSession) {
 
 // A nil session denotes an inventory tool. Only always-ask prompts for inventory, and only
 // first-access shares an approval (and its decision) between requests for the same session.
-func (controller *mcpController) ensureApproval(ctx context.Context, native *sshNativeSession, tool string) error {
+func (controller *mcpController) ensureApproval(ctx context.Context, native *sshNativeSession, tool string, arguments mcpExecutionArguments) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -147,6 +147,7 @@ func (controller *mcpController) ensureApproval(ctx context.Context, native *ssh
 		controller.pendingByTarget[event.SessionID] = waiter
 	}
 	event.RequestID = requestID
+	event.ExecutionPreview = newMcpExecutionPreview(arguments)
 	controller.server.output.write(event)
 	controller.approvalMu.Unlock()
 	return controller.waitForApproval(ctx, waiter, sessionDone)

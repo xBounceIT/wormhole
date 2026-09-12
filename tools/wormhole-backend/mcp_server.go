@@ -799,6 +799,7 @@ func (controller *mcpController) ensureConnectionOpenApproval(
 		Protocol:         connection.Protocol,
 		Path:             connection.Path,
 		ConnectionFolder: connection.Folder,
+		ExecutionPreview: newMcpExecutionPreview(mcpExecutionArguments{ConnectionID: connection.ID}),
 	})
 	controller.approvalMu.Unlock()
 
@@ -1013,7 +1014,13 @@ func newMcpServer(controller *mcpController) *mcp.Server {
 		Name:        "list_connections",
 		Description: "List saved Wormhole connections without exposing credentials. Returns a bounded page with each connection's id, name, protocol, host, port, and folder path. Pass nextOffset as offset to continue, then use an id with open_connection.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input listConnectionsInput) (*mcp.CallToolResult, mcpConnectionList, error) {
-		if err := controller.ensureApproval(ctx, nil, "list_connections"); err != nil {
+		limit, err := validateMcpConnectionPage(input.Offset, input.Limit)
+		if err != nil {
+			return nil, mcpConnectionList{}, err
+		}
+		if err := controller.ensureApproval(ctx, nil, "list_connections", mcpExecutionArguments{
+			Offset: input.Offset, Limit: limit,
+		}); err != nil {
 			return nil, mcpConnectionList{}, err
 		}
 		page, err := controller.listConnectionPage(input.Offset, input.Limit)
@@ -1035,7 +1042,7 @@ func newMcpServer(controller *mcpController) *mcp.Server {
 		Name:        "list_sessions",
 		Description: "List the SSH sessions currently open and connected in Wormhole. Returns each session's id, host, port, username, tab title, and status.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, []mcpSessionInfo, error) {
-		if err := controller.ensureApproval(ctx, nil, "list_sessions"); err != nil {
+		if err := controller.ensureApproval(ctx, nil, "list_sessions", mcpExecutionArguments{}); err != nil {
 			return nil, nil, err
 		}
 		sessions, err := controller.listSessions()
@@ -1055,14 +1062,19 @@ func newMcpServer(controller *mcpController) *mcp.Server {
 		if err != nil {
 			return nil, mcpCommandResult{}, err
 		}
-		if err := controller.ensureApproval(ctx, native, "run_command"); err != nil {
-			return nil, mcpCommandResult{}, err
+		if len(input.Command) == 0 || len(input.Command) > mcpMaxCommandBytes {
+			return nil, mcpCommandResult{}, errors.New("MCP command is empty or too large")
 		}
-		defer controller.trackSessionTool(native.id)()
 		timeout, err := mcpCommandTimeout(input.TimeoutSeconds)
 		if err != nil {
 			return nil, mcpCommandResult{}, err
 		}
+		if err := controller.ensureApproval(ctx, native, "run_command", mcpExecutionArguments{
+			SessionID: native.id, Command: &input.Command, TimeoutSeconds: int(timeout / time.Second),
+		}); err != nil {
+			return nil, mcpCommandResult{}, err
+		}
+		defer controller.trackSessionTool(native.id)()
 		result, err := native.runMcpCommand(ctx, input.Command, timeout)
 		return nil, result, err
 	})
@@ -1082,7 +1094,9 @@ func newMcpServer(controller *mcpController) *mcp.Server {
 		if err != nil {
 			return nil, "", err
 		}
-		if err := controller.ensureApproval(ctx, native, "send_text"); err != nil {
+		if err := controller.ensureApproval(ctx, native, "send_text", mcpExecutionArguments{
+			SessionID: native.id, Text: &input.Text,
+		}); err != nil {
 			return nil, "", err
 		}
 		defer controller.trackSessionTool(native.id)()
@@ -1104,10 +1118,6 @@ func newMcpServer(controller *mcpController) *mcp.Server {
 		if err != nil {
 			return nil, "", err
 		}
-		if err := controller.ensureApproval(ctx, native, "read_terminal"); err != nil {
-			return nil, "", err
-		}
-		defer controller.trackSessionTool(native.id)()
 		maxBytes := input.MaxBytes
 		if maxBytes <= 0 {
 			maxBytes = mcpDefaultReadBytes
@@ -1115,6 +1125,12 @@ func newMcpServer(controller *mcpController) *mcp.Server {
 		if maxBytes > mcpMaxReadBytes {
 			return nil, "", errors.New("maxBytes is out of range")
 		}
+		if err := controller.ensureApproval(ctx, native, "read_terminal", mcpExecutionArguments{
+			SessionID: native.id, MaxBytes: maxBytes,
+		}); err != nil {
+			return nil, "", err
+		}
+		defer controller.trackSessionTool(native.id)()
 		return nil, string(stripMcpAnsi(native.mcpReplay.snapshotTail(maxBytes))), nil
 	})
 	return server

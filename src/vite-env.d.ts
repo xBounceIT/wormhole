@@ -588,6 +588,7 @@ interface WormholeMcpApproval {
   username: string;
   title: string;
   tool: string;
+  executionPreview?: { content: string; truncated: boolean; redacted: boolean };
   connectionId?: string;
   connectionFolder?: string;
   protocol?: 'ssh' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial';

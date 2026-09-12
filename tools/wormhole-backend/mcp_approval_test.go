@@ -121,6 +121,13 @@ func TestMcpApprovalModesApplyToEveryTool(t *testing.T) {
 						if len(events) != before+1 || events[before].Tool != call.name || events[before].ApprovalMode != mode {
 							t.Fatalf("unexpected approval for %s: %#v", call.name, events)
 						}
+						preview := events[before].ExecutionPreview
+						if preview == nil {
+							t.Fatalf("%s approval lost its execution details", call.name)
+						}
+						if call.name == "list_connections" && !strings.Contains(preview.Content, `"limit": 1`) {
+							t.Fatalf("inventory approval lost its page limit: %s", preview.Content)
+						}
 						if err := controller.resolveApproval(id, !denied); err != nil {
 							t.Fatal(err)
 						}
@@ -159,7 +166,7 @@ func TestMcpAlwaysAskSeparatesConcurrentDecisionsAndDoesNotRememberDenials(t *te
 	defer cancel()
 	results := make(chan error, 2)
 	for range 2 {
-		go func() { results <- controller.ensureApproval(ctx, native, "send_text") }()
+		go func() { results <- controller.ensureApproval(ctx, native, "send_text", mcpExecutionArguments{}) }()
 	}
 	waitForMcpPendingRequestCount(t, controller, 2)
 	events := mcpApprovalEvents(t, output)
@@ -182,7 +189,7 @@ func TestMcpAlwaysAskSeparatesConcurrentDecisionsAndDoesNotRememberDenials(t *te
 	if len(controller.decisions) != 0 {
 		t.Fatal("always-ask remembered a decision")
 	}
-	go func() { results <- controller.ensureApproval(ctx, native, "read_terminal") }()
+	go func() { results <- controller.ensureApproval(ctx, native, "read_terminal", mcpExecutionArguments{}) }()
 	id := waitForMcpApprovalRequest(t, controller)
 	if err := controller.resolveApproval(id, true); err != nil {
 		t.Fatal(err)
@@ -199,7 +206,9 @@ func TestMcpApprovalPolicyChangesCancelRequestsAndRevokeGrants(t *testing.T) {
 			controller.decisions["old-session"] = true
 			controller.decisions["denied-session"] = false
 			result := make(chan error, 1)
-			go func() { result <- controller.ensureApproval(context.Background(), native, "read_terminal") }()
+			go func() {
+				result <- controller.ensureApproval(context.Background(), native, "read_terminal", mcpExecutionArguments{})
+			}()
 			id := waitForMcpApprovalRequest(t, controller)
 			controller.approvalMu.Lock()
 			waiter := controller.pending[id]
@@ -238,7 +247,7 @@ func TestMcpApprovalCancellationAndBoundsInAlwaysAsk(t *testing.T) {
 			defer cancel()
 			results := make(chan error, 2)
 			for range 2 {
-				go func() { results <- controller.ensureApproval(ctx, native, "read_terminal") }()
+				go func() { results <- controller.ensureApproval(ctx, native, "read_terminal", mcpExecutionArguments{}) }()
 			}
 			waitForMcpPendingRequestCount(t, controller, 2)
 			switch reason {
@@ -278,16 +287,16 @@ func TestMcpApprovalCancellationAndBoundsInAlwaysAsk(t *testing.T) {
 		id := strings.Repeat("r", index+1)
 		controller.pending[id] = &mcpApprovalWaiter{requestID: id, done: make(chan struct{})}
 	}
-	if err := controller.ensureApproval(context.Background(), native, "send_text"); err == nil {
+	if err := controller.ensureApproval(context.Background(), native, "send_text", mcpExecutionArguments{}); err == nil {
 		t.Fatal("approval bound ignored")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := controller.ensureApproval(ctx, native, "send_text"); !errors.Is(err, context.Canceled) {
+	if err := controller.ensureApproval(ctx, native, "send_text", mcpExecutionArguments{}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled call: %v", err)
 	}
 	native.closed = true
-	if err := controller.ensureApproval(context.Background(), native, "read_terminal"); !errors.Is(err, errSSHSessionClosed) {
+	if err := controller.ensureApproval(context.Background(), native, "read_terminal", mcpExecutionArguments{}); !errors.Is(err, errSSHSessionClosed) {
 		t.Fatalf("closed session: %v", err)
 	}
 }
@@ -357,7 +366,7 @@ func TestMcpFullAccessStillRequiresUnlockAndAlwaysAskShowsOnlyActiveTools(t *tes
 		t.Fatal(err)
 	}
 	controller.decisions[native.id] = false
-	if err := controller.ensureApproval(context.Background(), native, "send_text"); err != nil {
+	if err := controller.ensureApproval(context.Background(), native, "send_text", mcpExecutionArguments{}); err != nil {
 		t.Fatal(err)
 	}
 	controller.setAccessRunning(true)
@@ -367,10 +376,10 @@ func TestMcpFullAccessStillRequiresUnlockAndAlwaysAskShowsOnlyActiveTools(t *tes
 		t.Fatal("closed session regained access")
 	}
 	controller.setLocked(true)
-	if err := controller.ensureApproval(context.Background(), native, "send_text"); err == nil {
+	if err := controller.ensureApproval(context.Background(), native, "send_text", mcpExecutionArguments{}); err == nil {
 		t.Fatal("full access bypassed app lock")
 	}
-	if err := controller.ensureApproval(context.Background(), nil, "list_sessions"); err == nil {
+	if err := controller.ensureApproval(context.Background(), nil, "list_sessions", mcpExecutionArguments{}); err == nil {
 		t.Fatal("locked inventory allowed")
 	}
 	controller.setLocked(false)
@@ -409,7 +418,7 @@ func TestMcpAdmittedToolDoesNotRestoreClosedSessionAccess(t *testing.T) {
 		t.Fatal(err)
 	}
 	controller.setAccessRunning(true)
-	if err := controller.ensureApproval(context.Background(), native, "read_terminal"); err != nil {
+	if err := controller.ensureApproval(context.Background(), native, "read_terminal", mcpExecutionArguments{}); err != nil {
 		t.Fatal(err)
 	}
 	// The SSH session can close after approval, before the HTTP tool starts tracking access.

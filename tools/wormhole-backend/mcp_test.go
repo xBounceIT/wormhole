@@ -1642,7 +1642,9 @@ func TestMcpApprovalWaiterBroadcastsToConcurrentCallers(t *testing.T) {
 	defer cancel()
 	results := make(chan error, 2)
 	for range 2 {
-		go func() { results <- controller.ensureApproval(ctx, native, "read_terminal") }()
+		go func() {
+			results <- controller.ensureApproval(ctx, native, "read_terminal", mcpExecutionArguments{SessionID: native.id, MaxBytes: mcpDefaultReadBytes})
+		}()
 	}
 
 	deadline := time.After(time.Second)
@@ -2126,7 +2128,9 @@ func TestMcpApprovalCancellationReportsLockReason(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	result := make(chan error, 1)
-	go func() { result <- controller.ensureApproval(ctx, native, "read_terminal") }()
+	go func() {
+		result <- controller.ensureApproval(ctx, native, "read_terminal", mcpExecutionArguments{SessionID: native.id, MaxBytes: mcpDefaultReadBytes})
+	}()
 
 	requestID := waitForMcpApprovalRequest(t, controller)
 	controller.setLocked(true)
@@ -2150,7 +2154,9 @@ func TestMcpApprovalCancellationReportsSessionClosed(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	result := make(chan error, 1)
-	go func() { result <- controller.ensureApproval(ctx, native, "read_terminal") }()
+	go func() {
+		result <- controller.ensureApproval(ctx, native, "read_terminal", mcpExecutionArguments{SessionID: native.id, MaxBytes: mcpDefaultReadBytes})
+	}()
 
 	requestID := waitForMcpApprovalRequest(t, controller)
 	controller.forgetSession(native.id)
@@ -2174,12 +2180,16 @@ func TestMcpCancelledConcurrentApprovalWaiterIsReleased(t *testing.T) {
 	leaderContext, cancelLeader := context.WithCancel(context.Background())
 	defer cancelLeader()
 	leaderResult := make(chan error, 1)
-	go func() { leaderResult <- controller.ensureApproval(leaderContext, native, "read_terminal") }()
+	go func() {
+		leaderResult <- controller.ensureApproval(leaderContext, native, "read_terminal", mcpExecutionArguments{SessionID: native.id, MaxBytes: mcpDefaultReadBytes})
+	}()
 	requestID := waitForMcpApprovalRequest(t, controller)
 
 	followerContext, cancelFollower := context.WithCancel(context.Background())
 	followerResult := make(chan error, 1)
-	go func() { followerResult <- controller.ensureApproval(followerContext, native, "read_terminal") }()
+	go func() {
+		followerResult <- controller.ensureApproval(followerContext, native, "read_terminal", mcpExecutionArguments{SessionID: native.id, MaxBytes: mcpDefaultReadBytes})
+	}()
 	waitForMcpApprovalWaiterCount(t, controller, 2)
 	cancelFollower()
 	if err := <-followerResult; !errors.Is(err, context.Canceled) {
