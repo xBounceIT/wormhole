@@ -1426,6 +1426,7 @@ function AuthPrompt({
   const [status, setStatus] = useState('');
   const [busy, setBusy] = useState(false);
   const [helloBusy, setHelloBusy] = useState(false);
+  const [helloAvailable, setHelloAvailable] = useState(false);
   const [helloStatus, setHelloStatus] = useState<string | null>(null);
   const activeHelloRequest = useRef<string | null>(null);
   const helloInFlight = useRef<string | null>(null);
@@ -1448,7 +1449,7 @@ function AuthPrompt({
   }, [onResult]);
 
   const tryWindowsHello = useCallback(
-    (requestKey = helloRequestKey) => {
+    (requestKey = helloRequestKey, verify = true) => {
       if (helloInFlight.current === requestKey || !window.wormhole) return;
 
       const api = window.wormhole;
@@ -1456,29 +1457,37 @@ function AuthPrompt({
       helloInFlight.current = requestKey;
       setHelloBusy(true);
       setHelloStatus('');
-      return api
-        .checkWindowsHello()
-        .then((availability) => {
+      const checkAvailability = async () => {
+        const availability = await api.checkWindowsHello();
+        if (!isCurrent()) return false;
+        setHelloAvailable(availability.available);
+        if (!availability.available) {
+          setHelloStatus(
+            availability.message || `Windows Hello is unavailable. Use your ${fallbackName}.`,
+          );
+        }
+        return availability.available;
+      };
+      return checkAvailability()
+        .then(async (available) => {
+          if (!available || !verify || !isCurrent()) return;
+          const result = await api.verifyWindowsHello().catch(() => ({
+            succeeded: false,
+            message: `Windows Hello couldn't verify you. Try again or use your ${fallbackName}.`,
+          }));
           if (!isCurrent()) return;
-          if (!availability.available) {
-            setHelloStatus(
-              availability.message || `Windows Hello is unavailable. Use your ${fallbackName}.`,
-            );
+          if (result.succeeded) {
+            onResultRef.current(true);
             return;
           }
-          return api.verifyWindowsHello().then((result) => {
-            if (!isCurrent()) return;
-            if (result.succeeded) {
-              onResultRef.current(true);
-              return;
-            }
-            setHelloStatus(
-              result.message || `Windows Hello didn't recognize you. Use your ${fallbackName}.`,
-            );
-          });
+          setHelloStatus(
+            result.message || `Windows Hello didn't recognize you. Use your ${fallbackName}.`,
+          );
+          await checkAvailability();
         })
         .catch(() => {
           if (isCurrent()) {
+            setHelloAvailable(false);
             setHelloStatus(`Windows Hello isn't available right now. Use your ${fallbackName}.`);
           }
         })
@@ -1494,9 +1503,10 @@ function AuthPrompt({
     activeHelloRequest.current = helloRequestKey;
     setSecret('');
     setStatus('');
+    setHelloAvailable(false);
     setHelloStatus(null);
-    if (request.autoWindowsHello && isHelloMode) {
-      void tryWindowsHello(helloRequestKey);
+    if (isHelloMode) {
+      void tryWindowsHello(helloRequestKey, request.autoWindowsHello);
     }
     return () => {
       if (activeHelloRequest.current === helloRequestKey) activeHelloRequest.current = null;
@@ -1578,22 +1588,24 @@ function AuthPrompt({
         <CardContent className="space-y-4 border-t border-border/60 px-5 py-4">
           {isHelloMode ? (
             <div>
-              <Button
-                ref={helloButtonRef}
-                className="w-full"
-                disabled={helloBusy}
-                onClick={() => void tryWindowsHello()}
-                size="sm"
-                type="button"
-                variant="outline"
-              >
-                {helloBusy ? (
-                  <LoaderCircle className="animate-spin" data-icon="inline-start" />
-                ) : (
-                  <KeyRound data-icon="inline-start" />
-                )}
-                Use Windows Hello
-              </Button>
+              {helloAvailable ? (
+                <Button
+                  ref={helloButtonRef}
+                  className="w-full"
+                  disabled={helloBusy}
+                  onClick={() => void tryWindowsHello()}
+                  size="sm"
+                  type="button"
+                  variant="outline"
+                >
+                  {helloBusy ? (
+                    <LoaderCircle className="animate-spin" data-icon="inline-start" />
+                  ) : (
+                    <KeyRound data-icon="inline-start" />
+                  )}
+                  Use Windows Hello
+                </Button>
+              ) : null}
               <p
                 className="text-xs leading-relaxed text-muted-foreground [&:not(:empty)]:mt-2"
                 role="status"
