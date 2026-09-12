@@ -9,11 +9,418 @@ import (
 	"net"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+func TestMcpRevocationRequiresNewApprovalForEachSessionTool(t *testing.T) {
+	for _, tool := range []string{"run_command", "send_text", "read_terminal"} {
+		t.Run(tool, func(t *testing.T) {
+			var output bytes.Buffer
+			native := &sshNativeSession{id: "session", done: make(chan struct{}), mcpReplay: newMcpReplayBuffer(mcpReplayCapacity)}
+			server := &sshServer{
+				output:   &sshEventWriter{encoder: json.NewEncoder(&output)},
+				sessions: map[string]*sshNativeSession{"session": native},
+			}
+			controller := newMcpController(server)
+			server.mcp = controller
+			controller.locked = false
+			controller.accessRunning = true
+			controller.decisions["session"] = true
+			controller.decisions["other"] = true
+			server.handle(sshWireCommand{Type: "mcp.revoke-session", RequestID: "revoke", SessionID: "session"})
+			decoder := json.NewDecoder(&output)
+			var access, response sshWireEvent
+			if err := decoder.Decode(&access); err != nil {
+				t.Fatal(err)
+			}
+			if err := decoder.Decode(&response); err != nil {
+				t.Fatal(err)
+			}
+			if access.Type != "mcp.access" || access.SessionID != "session" || access.McpAccessible == nil || *access.McpAccessible {
+				t.Fatalf("revoked access = %#v", access)
+			}
+			if response.Type != "mcp.response" || response.RequestID != "revoke" || response.Error != "" {
+				t.Fatalf("revocation response = %#v", response)
+			}
+			if !controller.decisions["other"] || native.isClosed() || server.sessions["session"] != native {
+				t.Fatal("revocation affected another grant or the SSH connection")
+			}
+			output.Reset()
+			controller.setLocked(true)
+			controller.setLocked(false)
+			controller.setAccessRunning(false)
+			controller.setAccessRunning(true)
+			if _, exists := controller.decisions["session"]; exists {
+				t.Fatal("lock or restart restored the revoked decision")
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			serverTransport, clientTransport := mcp.NewInMemoryTransports()
+			serverSession, err := newMcpServer(controller).Connect(ctx, serverTransport, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer serverSession.Close()
+			client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "1"}, nil)
+			clientSession, err := client.Connect(ctx, clientTransport, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer clientSession.Close()
+			done := make(chan error, 1)
+			go func() {
+				arguments := map[string]any{"sessionId": "session"}
+				if tool == "run_command" {
+					arguments["command"] = "echo example"
+				}
+				if tool == "send_text" {
+					arguments["text"] = "echo example\r"
+				}
+				result, err := clientSession.CallTool(ctx, &mcp.CallToolParams{Name: tool, Arguments: arguments})
+				if err == nil && !result.IsError {
+					err = errors.New("tool ran without renewed consent")
+				}
+				done <- err
+			}()
+			requestID := waitForMcpApprovalRequest(t, controller)
+			select {
+			case err := <-done:
+				t.Fatalf("tool completed before approval: %v", err)
+			default:
+			}
+			if err := controller.resolveApproval(requestID, false); err != nil {
+				t.Fatal(err)
+			}
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+
+			// A subsequent explicit grant restores access to the same live terminal.
+			if err := controller.revokeSessionAccess("session"); err != nil {
+				t.Fatal(err)
+			}
+			go func() { done <- controller.ensureApproval(ctx, native, "read_terminal") }()
+			requestID = waitForMcpApprovalRequest(t, controller)
+			if err := controller.resolveApproval(requestID, true); err != nil {
+				t.Fatal(err)
+			}
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+			result, err := clientSession.CallTool(ctx, &mcp.CallToolParams{
+				Name: "read_terminal", Arguments: map[string]any{"sessionId": "session"},
+			})
+			if err != nil || result.IsError {
+				t.Fatalf("renewed grant failed: %v, %#v", err, result)
+			}
+		})
+	}
+}
+
+func TestMcpRevocationValidatesTargetAndCancelsStaleApprovals(t *testing.T) {
+	var output bytes.Buffer
+	native := &sshNativeSession{id: "session", done: make(chan struct{})}
+	server := &sshServer{
+		output:   &sshEventWriter{encoder: json.NewEncoder(&output)},
+		sessions: map[string]*sshNativeSession{"session": native, "closed": {id: "closed", closed: true}},
+	}
+	controller := newMcpController(server)
+	server.mcp = controller
+	controller.decisions["session"] = true
+	if err := controller.revokeSessionAccess("session"); err == nil || !controller.decisions["session"] {
+		t.Fatalf("locked revocation changed the grant: %v", err)
+	}
+	controller.locked = false
+	for _, id := range []string{"", " session", "session ", strings.Repeat("x", 129), "missing", "closed"} {
+		server.handle(sshWireCommand{Type: "mcp.revoke-session", RequestID: "invalid", SessionID: id})
+		var event sshWireEvent
+		if err := json.NewDecoder(&output).Decode(&event); err != nil {
+			t.Fatal(err)
+		}
+		if event.Type != "mcp.response" || event.Error == "" || !controller.decisions["session"] {
+			t.Fatalf("invalid target %q: %#v", id, event)
+		}
+		output.Reset()
+	}
+	toolContext, finish := controller.trackSessionTool(context.Background(), "session")
+	if err := controller.revokeSessionAccess("session"); err != nil {
+		t.Fatal(err)
+	}
+	if !errors.Is(toolContext.Err(), context.Canceled) {
+		t.Fatal("revocation did not cancel an admitted tool")
+	}
+	output.Reset()
+	finish()
+	var access sshWireEvent
+	if err := json.NewDecoder(&output).Decode(&access); err != nil {
+		t.Fatal(err)
+	}
+	if access.McpAccessible == nil || *access.McpAccessible {
+		t.Fatal("late completion restored access")
+	}
+	output.Reset()
+	if err := controller.revokeSessionAccess("session"); err != nil {
+		t.Fatal(err)
+	}
+	if output.Len() != 0 {
+		t.Fatal("repeated revocation emitted a new grant")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- controller.ensureApproval(ctx, native, "read_terminal") }()
+	requestID := waitForMcpApprovalRequest(t, controller)
+	if err := controller.revokeSessionAccess("session"); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err == nil || !strings.Contains(err.Error(), "disconnected AI-agent control") {
+		t.Fatalf("cancelled approval returned %v", err)
+	}
+	if err := controller.resolveApproval(requestID, true); err == nil {
+		t.Fatal("a stale approval restored revoked access")
+	}
+	if len(controller.pending) != 0 || len(controller.pendingByTarget) != 0 || native.isClosed() {
+		t.Fatal("revocation left pending permissions or closed SSH")
+	}
+	requireMcpApprovalCancellationSequence(t, &output, requestID, "session")
+}
+
+func TestMcpRevocationPreventsQueuedCommandExecution(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	writes := make(chan struct{}, 1)
+	native := &sshNativeSession{
+		id: "session", done: make(chan struct{}),
+		mcpReplay:        newMcpReplayBuffer(mcpReplayCapacity),
+		mcpCommandReplay: newMcpReplayBuffer(mcpReplayCapacity),
+		stdin: callbackWriteCloser{write: func([]byte) (int, error) {
+			writes <- struct{}{}
+			return 0, errors.New("unexpected remote write")
+		}},
+	}
+	if err := native.acquireMcpCommand(ctx); err != nil {
+		t.Fatal(err)
+	}
+	gateHeld := true
+	defer func() {
+		if gateHeld {
+			native.releaseMcpCommand()
+		}
+	}()
+	controller := newMcpController(&sshServer{
+		output:   &sshEventWriter{encoder: json.NewEncoder(io.Discard)},
+		sessions: map[string]*sshNativeSession{"session": native},
+	})
+	controller.locked = false
+	controller.accessRunning = true
+	controller.decisions["session"] = true
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	serverSession, err := newMcpServer(controller).Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer serverSession.Close()
+	client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "1"}, nil)
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clientSession.Close()
+	done := make(chan error, 1)
+	go func() {
+		result, err := clientSession.CallTool(ctx, &mcp.CallToolParams{
+			Name: "run_command", Arguments: map[string]any{"sessionId": "session", "command": "echo queued"},
+		})
+		if err == nil && !result.IsError {
+			err = errors.New("revoked tool completed successfully")
+		}
+		done <- err
+	}()
+	for {
+		controller.approvalMu.Lock()
+		active := len(controller.activeTools["session"]) > 0
+		controller.approvalMu.Unlock()
+		if active {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("command did not reach the occupied execution gate")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	if err := controller.revokeSessionAccess("session"); err != nil {
+		t.Fatal(err)
+	}
+	// Let the next queued command contend for the gate after consent was revoked.
+	native.releaseMcpCommand()
+	gateHeld = false
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-ctx.Done():
+		t.Fatal("revoked queued command did not finish")
+	}
+	select {
+	case <-writes:
+		t.Fatal("a queued command executed after AI-agent access was revoked")
+	default:
+	}
+	if native.isClosed() {
+		t.Fatal("revoking queued work closed the user's SSH session")
+	}
+	controller.approvalMu.Lock()
+	remaining := len(controller.activeTools)
+	controller.approvalMu.Unlock()
+	if remaining != 0 {
+		t.Fatal("revoked command retained its access registration")
+	}
+}
+
+func TestMcpRevocationIsolatesOtherSessionsAndRenewedAccess(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	native := &sshNativeSession{id: "session", done: make(chan struct{})}
+	controller := newMcpController(&sshServer{
+		output:   &sshEventWriter{encoder: json.NewEncoder(io.Discard)},
+		sessions: map[string]*sshNativeSession{"session": native},
+	})
+	controller.locked = false
+	controller.accessRunning = true
+	controller.decisions["session"] = true
+	controller.decisions["other"] = true
+	firstContext, firstRelease := controller.trackSessionTool(ctx, "session")
+	secondContext, secondRelease := controller.trackSessionTool(ctx, "session")
+	otherContext, otherRelease := controller.trackSessionTool(ctx, "other")
+	defer firstRelease()
+	defer secondRelease()
+	defer otherRelease()
+	if err := controller.revokeSessionAccess("session"); err != nil {
+		t.Fatal(err)
+	}
+	if firstContext.Err() != context.Canceled || secondContext.Err() != context.Canceled {
+		t.Fatal("revocation did not cancel every request for the selected session")
+	}
+	if otherContext.Err() != nil || !controller.decisions["other"] {
+		t.Fatal("revocation affected another session")
+	}
+	type authorization struct {
+		ctx     context.Context
+		release func()
+		err     error
+	}
+	done := make(chan authorization, 1)
+	go func() {
+		requestContext, release, err := controller.authorizeSessionTool(ctx, native, "read_terminal")
+		done <- authorization{requestContext, release, err}
+	}()
+	requestID := waitForMcpApprovalRequest(t, controller)
+	if err := controller.resolveApproval(requestID, true); err != nil {
+		t.Fatal(err)
+	}
+	var renewed authorization
+	select {
+	case renewed = <-done:
+	case <-ctx.Done():
+		t.Fatal("renewed authorization did not finish")
+	}
+	if renewed.err != nil {
+		t.Fatal(renewed.err)
+	}
+	defer renewed.release()
+	firstRelease()
+	secondRelease()
+	if renewed.ctx.Err() != nil || len(controller.activeTools["session"]) != 1 {
+		t.Fatal("old request cleanup invalidated renewed access")
+	}
+	if err := controller.revokeSessionAccess("session"); err != nil {
+		t.Fatal(err)
+	}
+	if renewed.ctx.Err() != context.Canceled || otherContext.Err() != nil {
+		t.Fatal("a later revocation did not target only renewed session access")
+	}
+	renewed.release()
+	otherRelease()
+	if len(controller.activeTools) != 0 {
+		t.Fatal("finished request registrations leaked")
+	}
+
+	cancelled, cancelRequest := context.WithCancel(ctx)
+	cancelRequest()
+	if _, release, err := controller.authorizeSessionTool(cancelled, native, "read_terminal"); !errors.Is(err, context.Canceled) || release != nil {
+		t.Fatalf("cancelled authorization = %v, release present = %v", err, release != nil)
+	}
+	if len(controller.pending) != 0 || len(controller.pendingByTarget) != 0 || len(controller.activeTools) != 0 {
+		t.Fatal("cancelled authorization left an approval prompt or tool registration")
+	}
+}
+
+func TestMcpRevocationRacingApprovalCannotRestoreAccess(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for _, order := range []string{"approve-first", "revoke-first", "concurrent"} {
+		t.Run(order, func(t *testing.T) {
+			native := &sshNativeSession{id: "session", done: make(chan struct{})}
+			controller := newMcpController(&sshServer{
+				output:   &sshEventWriter{encoder: json.NewEncoder(io.Discard)},
+				sessions: map[string]*sshNativeSession{"session": native},
+			})
+			controller.locked = false
+			controller.accessRunning = true
+			type authorization struct {
+				ctx     context.Context
+				release func()
+				err     error
+			}
+			authorized := make(chan authorization, 1)
+			go func() {
+				requestContext, release, err := controller.authorizeSessionTool(ctx, native, "read_terminal")
+				authorized <- authorization{requestContext, release, err}
+			}()
+			requestID := waitForMcpApprovalRequest(t, controller)
+			approved := make(chan error, 1)
+			if order == "approve-first" {
+				approved <- controller.resolveApproval(requestID, true)
+			} else if order == "concurrent" {
+				go func() { approved <- controller.resolveApproval(requestID, true) }()
+			}
+			if err := controller.revokeSessionAccess("session"); err != nil {
+				t.Fatal(err)
+			}
+			if order == "revoke-first" {
+				approved <- controller.resolveApproval(requestID, true)
+			}
+			if err := <-approved; err != nil && !strings.Contains(err.Error(), "no longer pending") {
+				t.Fatalf("concurrent approval: %v", err)
+			}
+			var result authorization
+			select {
+			case result = <-authorized:
+			case <-ctx.Done():
+				t.Fatal("revoked authorization did not finish")
+			}
+			if result.err == nil {
+				if result.ctx.Err() != context.Canceled {
+					t.Fatal("old approval retained live access after revocation")
+				}
+				result.release()
+			} else if !errors.Is(result.err, context.Canceled) && !strings.Contains(result.err.Error(), "disconnected AI-agent control") {
+				t.Fatalf("revoked authorization: %v", result.err)
+			}
+			if len(controller.decisions) != 0 || len(controller.pending) != 0 || len(controller.activeTools) != 0 {
+				t.Fatal("approval race left access or request registrations behind")
+			}
+		})
+	}
+}
 
 func TestMcpAccessTracksApprovalAndAvailability(t *testing.T) {
 	installMcpTestSecretStore(t)
@@ -176,8 +583,8 @@ func TestMcpAccessTracksOverlappingRequestsAndSessionClosure(t *testing.T) {
 	controller.locked = false
 	controller.accessRunning = true
 	controller.decisions["session"] = true
-	first := controller.trackSessionTool("session")
-	second := controller.trackSessionTool("session")
+	_, first := controller.trackSessionTool(context.Background(), "session")
+	_, second := controller.trackSessionTool(context.Background(), "session")
 	if output.Len() != 0 {
 		t.Fatal("tools changed an already visible grant")
 	}
@@ -210,7 +617,7 @@ func TestMcpAccessTracksOverlappingRequestsAndSessionClosure(t *testing.T) {
 	}
 
 	controller.decisions["session"] = true
-	finish := controller.trackSessionTool("session") // Admitted immediately before stop, resumed afterward.
+	_, finish := controller.trackSessionTool(context.Background(), "session") // Admitted immediately before stop, resumed afterward.
 	output.Reset()
 	controller.setLocked(true)
 	if err := json.NewDecoder(&output).Decode(&event); err != nil {
