@@ -421,6 +421,7 @@ const wormholeBridge = {
   importBitwardenExtensionZip: () => ipcRenderer.invoke('extensions:import-zip'),
   importBitwardenExtensionFolder: () => ipcRenderer.invoke('extensions:import-folder'),
   readBitwardenCli: () => ipcRenderer.invoke('bitwarden:read'),
+  readBitwardenStartupState: () => ipcRenderer.invoke('bitwarden:startup-state'),
   setBitwardenCliEnabled: (enabled: boolean) =>
     ipcRenderer.invoke('bitwarden:set-enabled', enabled),
   setBitwardenCliConfig: (config: { path: string; serverRegion: number }) =>

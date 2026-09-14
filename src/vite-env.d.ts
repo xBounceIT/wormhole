@@ -1032,6 +1032,10 @@ interface Window {
     importBitwardenExtensionZip(): Promise<WormholeBitwardenExtensionState | null>;
     importBitwardenExtensionFolder(): Promise<WormholeBitwardenExtensionState | null>;
     readBitwardenCli(): Promise<WormholeBitwardenCliState>;
+    readBitwardenStartupState(): Promise<{
+      serverRegion: WormholeBitwardenCliState['serverRegion'];
+      status: WormholeBitwardenCliStatus;
+    } | null>;
     setBitwardenCliEnabled(enabled: boolean): Promise<WormholeBitwardenCliState>;
     setBitwardenCliConfig(config: {
       path: string;

@@ -68,6 +68,7 @@ import {
   selectBitwardenCookiesForTarget,
 } from './bitwarden-cookie-seed.js';
 import { ExtensionMutationGuard } from './extension-mutation-guard.js';
+import { readBitwardenStartupState } from './bitwarden-startup.js';
 import { readDarwinHardwareModel, shouldDisableHardwareAcceleration } from './gpu-compatibility.js';
 import { KeyedSingleFlight } from './keyed-single-flight.js';
 import {
@@ -3361,23 +3362,19 @@ async function releaseNativeTunnelLease(leaseId: string): Promise<void> {
   await backend.releaseTunnel(leaseId);
 }
 
-async function runBitwardenCredentialMaintenance(ensureInstalled: boolean): Promise<void> {
+async function runBitwardenCredentialMaintenance(): Promise<void> {
   // WinUI starts both Bitwarden services only after startup authentication. Keep the same native
   // trust boundary here: a locked or not-yet-initialized renderer cannot trigger vault/installer
   // work merely because the background timer fired.
   if (isQuitting || !authSession.isAccessAllowed) return;
   const authorizationEpoch = authSession.authorizationEpoch;
   try {
-    let state = await runBitwardenBackend<BitwardenCliState>('bitwarden.read');
+    const state = await runBitwardenBackend<BitwardenCliState>('bitwarden.read');
     if (!isAuthorizationEpochCurrent(authorizationEpoch)) return;
-    if (state.enabled) {
-      if (!state.installed && ensureInstalled) {
-        state = await runBitwardenBackend<BitwardenCliState>('bitwarden.ensure-installed');
-        if (!isAuthorizationEpochCurrent(authorizationEpoch)) return;
-      }
-      if (state.installed && isAuthorizationEpochCurrent(authorizationEpoch)) {
-        await runBitwardenBackend('bitwarden.sync-if-stale');
-      }
+    // The post-login startup-state request owns automatic CLI installation. Background
+    // maintenance must not retry the same failed download during this startup.
+    if (state.enabled && state.installed) {
+      await runBitwardenBackend('bitwarden.sync-if-stale');
     }
   } catch (error) {
     console.warn('[Wormhole] Bitwarden credential background maintenance failed.', error);
@@ -3420,7 +3417,7 @@ async function runBitwardenExtensionStartupMaintenance(): Promise<void> {
 
 function runBitwardenStartupMaintenance(): Promise<void> {
   bitwardenStartupMaintenancePromise ??= Promise.all([
-    runBitwardenCredentialMaintenance(true),
+    runBitwardenCredentialMaintenance(),
     runBitwardenExtensionStartupMaintenance(),
   ])
     .then(() => undefined)
@@ -3435,7 +3432,7 @@ function startBitwardenBackgroundMaintenance(): void {
   // The five-minute timer refreshes only the credential catalog. Extension install/update is a
   // startup concern, so a failed download is not retried forever in the background.
   bitwardenBackgroundTimer ??= setInterval(
-    () => void runBitwardenCredentialMaintenance(false),
+    () => void runBitwardenCredentialMaintenance(),
     5 * 60_000,
   );
 }
@@ -7655,6 +7652,17 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     return runAuthorizedOperation(async () => {
       return runBitwardenBackend<BitwardenCliState>('bitwarden.read');
     });
+  });
+
+  ipcMain.handle('bitwarden:startup-state', async () => {
+    return runAuthorizedOperation((authorizationEpoch) =>
+      readBitwardenStartupState({
+        readState: () => runBitwardenBackend<BitwardenCliState>('bitwarden.read'),
+        ensureInstalled: () => runBitwardenBackend<BitwardenCliState>('bitwarden.ensure-installed'),
+        readStatus: () => runBitwardenBackend<BitwardenCliStatusResponse>('bitwarden.status'),
+        requireAuthorization: () => requireAuthorizationEpoch(authorizationEpoch),
+      }),
+    );
   });
 
   ipcMain.handle('bitwarden:set-enabled', async (_event, value: unknown) => {
