@@ -18,6 +18,17 @@ declare function DialogContent(props: Record<string, unknown>): import('react').
 declare function DialogTitle(props: Record<string, unknown>): import('react').ReactElement;
 declare function showUnlock(startup: Record<string, unknown>): void;
 
+async function pressNativeEscape() {
+  await React.act(async () => {
+    // The IPC response only queues input; wait for Chromium to deliver the complete key press.
+    const released = new Promise<void>((resolve) => {
+      window.addEventListener('keyup', () => resolve(), { once: true, capture: true });
+    });
+    await require('electron').ipcRenderer.invoke('test:escape');
+    await released;
+  });
+}
+
 async function runAuthPromptTests() {
   let root = createRoot(document.getElementById('root'));
   const remoteMessage =
@@ -390,9 +401,7 @@ async function runWindowCloseTests() {
     await finishAnimations();
   };
   const escape = async () => {
-    await React.act(async () => {
-      await require('electron').ipcRenderer.invoke('test:escape');
-    });
+    await pressNativeEscape();
     await finishAnimations();
   };
 
@@ -1091,11 +1100,7 @@ async function runBitwardenStartupTests() {
     assert.ok(button, `Missing button ${label}`);
     await React.act(async () => button.click());
   };
-  const escape = async () => {
-    await React.act(async () => {
-      await require('electron').ipcRenderer.invoke('test:escape');
-    });
-  };
+  const escape = pressNativeEscape;
 
   await mount(false);
   assert.equal(reads, 0, 'Wormhole must unlock before the extension is queried');

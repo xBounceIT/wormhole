@@ -14438,7 +14438,7 @@ function BitwardenOperationDialog({
       open={state !== null}
     >
       <DialogContent
-        className="border-border/70 bg-card text-card-foreground sm:max-w-sm"
+        className="max-h-[calc(100dvh-2rem)] grid-cols-1 grid-rows-[auto_minmax(0,1fr)_auto] border-border/70 bg-card text-card-foreground sm:max-w-sm"
         onEscapeKeyDown={(event) => {
           if (working) event.preventDefault();
         }}
@@ -14451,7 +14451,7 @@ function BitwardenOperationDialog({
           <DialogTitle>{title}</DialogTitle>
           <DialogDescription>{description}</DialogDescription>
         </DialogHeader>
-        <div className="flex items-start gap-3 rounded-lg border border-border/70 bg-background/40 p-3">
+        <div className="flex min-h-0 min-w-0 items-start gap-3 overflow-y-auto rounded-lg border border-border/70 bg-background/40 p-3">
           {state?.status === 'working' ? (
             <LoaderCircle className="mt-0.5 size-4 shrink-0 animate-spin text-muted-foreground" />
           ) : state?.status === 'success' ? (
@@ -14461,7 +14461,7 @@ function BitwardenOperationDialog({
           ) : (
             <AlertCircle className="mt-0.5 size-4 shrink-0 text-destructive" />
           )}
-          <p className="text-xs leading-relaxed">
+          <p className="min-w-0 text-xs leading-relaxed wrap-anywhere">
             {state?.message ?? 'Preparing Bitwarden operation…'}
           </p>
         </div>
