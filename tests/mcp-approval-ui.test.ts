@@ -83,6 +83,8 @@ test('MCP selector and queued approval popups work in the Electron renderer', as
     ${transformed.code}
     const root = createRoot(document.getElementById('root'));
     await act(async () => root.render(React.createElement(Harness)));
+    // Flush the initial viewport resize before Radix opens and installs its resize-to-close handler.
+    await act(async () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     const trigger = () => document.getElementById('settings-mcp-approval-mode');
     assert.equal(trigger().getAttribute('role'), 'combobox');
     assert.match(document.body.textContent, /Approve access once per SSH session/);
