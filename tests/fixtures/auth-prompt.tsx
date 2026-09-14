@@ -5,7 +5,11 @@ declare const createRoot: typeof import('react-dom/client').createRoot;
 declare const assert: typeof import('node:assert/strict');
 declare function AuthPrompt(props: Record<string, unknown>): import('react').ReactElement;
 declare function AppCloseHarness(props: Record<string, unknown>): import('react').ReactElement;
+declare function BitwardenSettingsHarness(
+  props: Record<string, unknown>,
+): import('react').ReactElement;
 declare function Dialog(props: Record<string, unknown>): import('react').ReactElement;
+declare function TooltipProvider(props: Record<string, unknown>): import('react').ReactElement;
 declare function DialogContent(props: Record<string, unknown>): import('react').ReactElement;
 declare function DialogTitle(props: Record<string, unknown>): import('react').ReactElement;
 declare function showUnlock(startup: Record<string, unknown>): void;
@@ -690,4 +694,314 @@ async function runStartupUnlockTests() {
   }
 }
 
-runAuthPromptTests().then(runWindowCloseTests).then(runStartupUnlockTests);
+async function runBitwardenPromptTests() {
+  const root = createRoot(document.getElementById('root'));
+  const loginRequests: Record<string, unknown>[] = [];
+  const unlockRequests: string[] = [];
+  const deferred = <T,>() => {
+    let resolve!: (value: T) => void;
+    let reject!: (error: unknown) => void;
+    const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+      resolve = resolvePromise;
+      reject = rejectPromise;
+    });
+    return { promise, resolve, reject };
+  };
+  let attempt = deferred<void>();
+  let sync = deferred<{ availableCount: number; lastSyncStatus: string }>();
+  let reload = async () => {};
+  let credentialsChanged = async () => {};
+  window.wormhole = {
+    loginBitwardenCli: (request) => {
+      loginRequests.push(request);
+      return attempt.promise;
+    },
+    unlockBitwardenCli: (password) => {
+      unlockRequests.push(password);
+      return attempt.promise;
+    },
+    syncBitwardenCli: () => sync.promise,
+  };
+  const dialog = () => document.querySelector<HTMLElement>('[role="dialog"]');
+  const settings = () => document.querySelector('[data-bitwarden-settings]');
+  const fill = async (id: string, value: string) => {
+    await React.act(async () => {
+      const input = document.getElementById(id);
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, value);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+  };
+  const open = async () => {
+    await React.act(async () => {
+      settings().querySelector('button').click();
+    });
+    assert.ok(dialog());
+    assert.equal(dialog().querySelector('[role="alert"]'), null);
+  };
+  const submit = async () => {
+    await React.act(async () => {
+      dialog().querySelector('form').requestSubmit();
+    });
+  };
+  const assertVisibleError = (message: string) => {
+    const alert = dialog().querySelector<HTMLElement>('form [role="alert"]');
+    assert.ok(alert, 'authentication errors must be inside the active dialog form');
+    assert.equal(alert.textContent, message);
+    assert.ok(
+      !settings().textContent.includes(message),
+      'do not duplicate the error behind the blur',
+    );
+    assert.equal(document.querySelectorAll('[role="alert"]').length, 1);
+    const bounds = alert.getBoundingClientRect();
+    const dialogBounds = dialog().getBoundingClientRect();
+    assert.ok(bounds.width > 0 && bounds.height > 0);
+    assert.ok(bounds.left >= dialogBounds.left && bounds.right <= dialogBounds.right);
+    assert.ok(bounds.top >= dialogBounds.top && bounds.bottom <= dialogBounds.bottom);
+    assert.equal(getComputedStyle(alert).visibility, 'visible');
+    assert.notEqual(getComputedStyle(alert).color, getComputedStyle(dialog()).backgroundColor);
+    assert.ok(
+      dialog().querySelector('[data-slot="dialog-footer"]').getBoundingClientRect().top >=
+        bounds.bottom,
+    );
+  };
+
+  for (const theme of ['light', 'dark']) {
+    document.documentElement.className = theme;
+    for (const mode of ['login', 'unlock']) {
+      attempt = deferred<void>();
+      sync = deferred();
+      reload = async () => {};
+      credentialsChanged = async () => {};
+      await React.act(async () => {
+        root.render(
+          <React.StrictMode>
+            <TooltipProvider>
+              <BitwardenSettingsHarness
+                key={`${theme}-${mode}`}
+                status={mode === 'login' ? 'Unauthenticated' : 'Locked'}
+                initialError="Previous operation failed."
+                reload={() => reload()}
+                credentialsChanged={() => credentialsChanged()}
+              />
+            </TooltipProvider>
+          </React.StrictMode>,
+        );
+      });
+      assert.ok(settings().textContent.includes('Previous operation failed.'));
+      await open();
+      assert.ok(!document.body.textContent.includes('Previous operation failed.'));
+      const passwordId = `bw-${mode}-password`;
+      const passwordInput = () => document.getElementById(passwordId) as HTMLInputElement;
+      const visibilityButton = () =>
+        dialog().querySelector<HTMLButtonElement>(`button[aria-controls="${passwordId}"]`);
+      const toggleVisibility = async () => {
+        await React.act(async () => {
+          const button = visibilityButton();
+          const bounds = button.getBoundingClientRect();
+          assert.ok(bounds.width > 0 && bounds.height > 0);
+          assert.ok(
+            button.contains(
+              document.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2),
+            ),
+          );
+          button.focus();
+          assert.equal(
+            document.activeElement,
+            button,
+            'password visibility must be keyboard accessible',
+          );
+          button.click();
+        });
+      };
+      assert.equal(passwordInput().type, 'password');
+      assert.equal(visibilityButton().getAttribute('aria-label'), 'Show password');
+      assert.equal(visibilityButton().getAttribute('aria-pressed'), 'false');
+      if (mode === 'login') {
+        await fill('bw-login-email', 'test@example.com');
+        await fill('bw-login-2fa', '123456');
+      }
+      await fill(passwordId, 'test-only-secret');
+      const attemptsBeforeToggle = loginRequests.length + unlockRequests.length;
+      await toggleVisibility();
+      assert.equal(passwordInput().type, 'text');
+      assert.equal(passwordInput().value, 'test-only-secret');
+      assert.equal(visibilityButton().getAttribute('aria-label'), 'Hide password');
+      assert.equal(visibilityButton().getAttribute('aria-pressed'), 'true');
+      await toggleVisibility();
+      assert.equal(passwordInput().type, 'password');
+      assert.equal(passwordInput().value, 'test-only-secret');
+      await toggleVisibility();
+      assert.equal(
+        loginRequests.length + unlockRequests.length,
+        attemptsBeforeToggle,
+        'toggling must not submit the form',
+      );
+      await submit();
+      assert.equal(passwordInput().value, '');
+      assert.equal(passwordInput().type, 'password', 'submitting must hide the next password');
+      assert.equal(visibilityButton().disabled, true);
+      assert.equal(dialog().querySelector('button[type="submit"]').textContent, 'Working…');
+      assert.equal(
+        dialog().querySelector<HTMLButtonElement>('button[type="submit"]').disabled,
+        true,
+      );
+      if (mode === 'login') {
+        assert.equal((document.getElementById('bw-login-2fa') as HTMLInputElement).value, '');
+        assert.deepEqual(loginRequests.at(-1), {
+          email: 'test@example.com',
+          masterPassword: 'test-only-secret',
+          authenticatorCode: '123456',
+          serverRegion: 2,
+        });
+      } else {
+        assert.equal(unlockRequests.at(-1), 'test-only-secret');
+      }
+      const message =
+        mode === 'login' ? 'Username or password is incorrect.' : 'Invalid master password.';
+      await React.act(async () => {
+        attempt.reject(new Error(message));
+      });
+      assertVisibleError(message);
+      assert.equal(visibilityButton().disabled, false);
+      assert.equal(
+        dialog().querySelector<HTMLButtonElement>('button[type="submit"]').disabled,
+        true,
+      );
+
+      // Retrying removes the previous failure immediately, before the native response arrives.
+      attempt = deferred<void>();
+      await fill(passwordId, 'test-only-retry');
+      await submit();
+      assert.equal(dialog().querySelector('[role="alert"]'), null);
+      await React.act(async () => {
+        attempt.reject('Bitwarden could not be reached. Please try again.');
+      });
+      assertVisibleError('Bitwarden could not be reached. Please try again.');
+      if (mode === 'login') {
+        assert.equal(
+          (document.getElementById('bw-login-email') as HTMLInputElement).value,
+          'test@example.com',
+        );
+        assert.equal(loginRequests.at(-1).authenticatorCode, undefined);
+      }
+
+      // Both dismiss paths must reopen a fresh prompt without a stale failure or secret.
+      await fill(passwordId, 'test-only-dismissed');
+      await toggleVisibility();
+      assert.equal(passwordInput().type, 'text');
+      await React.act(async () => {
+        const button =
+          theme === 'light'
+            ? [...dialog().querySelectorAll('button')].find((item) => item.textContent === 'Cancel')
+            : dialog().querySelector<HTMLButtonElement>('[data-slot="dialog-close"]');
+        button.click();
+      });
+      assert.equal(dialog(), null);
+      await open();
+      assert.equal(passwordInput().value, '');
+      assert.equal(passwordInput().type, 'password');
+      assert.equal(visibilityButton().getAttribute('aria-pressed'), 'false');
+      if (mode === 'login') {
+        assert.equal((document.getElementById('bw-login-email') as HTMLInputElement).value, '');
+        await fill('bw-login-email', 'test@example.com');
+      }
+      attempt = deferred<void>();
+      await fill(passwordId, 'test-only-success');
+      await submit();
+      if (mode === 'unlock' && theme === 'dark') {
+        reload = async () => {
+          throw new Error('Status refresh failed.');
+        };
+      }
+      await React.act(async () => {
+        attempt.resolve();
+      });
+      assert.equal(
+        dialog(),
+        null,
+        'successful authentication closes the prompt before synchronization',
+      );
+      if (mode === 'login') {
+        if (theme === 'light') {
+          credentialsChanged = async () => {
+            throw new Error('Workspace refresh failed.');
+          };
+        }
+        await React.act(async () => {
+          if (theme === 'dark') sync.reject(new Error('Vault sync failed.'));
+          else sync.resolve({ availableCount: 1, lastSyncStatus: 'Synced.' });
+        });
+        assert.ok(
+          settings().textContent.includes(
+            theme === 'dark' ? 'Vault sync failed.' : 'Workspace refresh failed.',
+          ),
+        );
+      } else if (theme === 'dark') {
+        assert.ok(settings().textContent.includes('Status refresh failed.'));
+      } else {
+        assert.equal(settings().querySelector('p'), null);
+      }
+    }
+  }
+  await require('electron').ipcRenderer.invoke('test:viewport', 980, 640);
+  for (const mode of ['login', 'unlock']) {
+    for (const message of [
+      'Cannot reach https://vault.example/'.padEnd(500, 'W'),
+      'Bitwarden could not connect to the server. '.repeat(12).slice(0, 500),
+    ]) {
+      attempt = deferred<void>();
+      await React.act(async () => {
+        root.render(
+          <TooltipProvider>
+            <BitwardenSettingsHarness
+              key={`${mode}-${message}`}
+              status={mode === 'login' ? 'Unauthenticated' : 'Locked'}
+              initialError=""
+              reload={() => {}}
+              credentialsChanged={() => {}}
+            />
+          </TooltipProvider>,
+        );
+      });
+      await open();
+      if (mode === 'login') await fill('bw-login-email', 'test@example.com');
+      await fill(`bw-${mode}-password`, 'test-only-long-error');
+      await submit();
+      await React.act(async () => attempt.reject(new Error(message)));
+      const bounds = dialog().getBoundingClientRect();
+      assert.ok(
+        bounds.top >= 0 && bounds.bottom <= window.innerHeight,
+        'long authentication errors must keep the dialog inside the viewport',
+      );
+      const form = dialog().querySelector('form');
+      assert.ok(
+        form.getBoundingClientRect().right <= bounds.right,
+        'unbroken errors must not widen the form beyond the dialog',
+      );
+      assert.ok(
+        dialog().scrollWidth <= dialog().clientWidth,
+        'errors must wrap without horizontal scrolling',
+      );
+      const alert = form.querySelector<HTMLElement>('[role="alert"]');
+      assert.equal(alert.textContent, message);
+      await fill(`bw-${mode}-password`, 'test-only-long-error-retry');
+      assert.equal(form.querySelector<HTMLButtonElement>('button[type="submit"]').disabled, false);
+      for (const element of [alert, form.querySelector<HTMLElement>('button[type="submit"]')]) {
+        element.scrollIntoView({ block: 'nearest' });
+        const rect = element.getBoundingClientRect();
+        assert.ok(
+          element.contains(
+            document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2),
+          ),
+          `${element.tagName} must remain reachable after a long authentication error`,
+        );
+      }
+    }
+  }
+  await React.act(async () => root.unmount());
+}
+
+runAuthPromptTests()
+  .then(runWindowCloseTests)
+  .then(runStartupUnlockTests)
+  .then(runBitwardenPromptTests);
