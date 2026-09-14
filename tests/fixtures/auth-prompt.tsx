@@ -383,7 +383,12 @@ async function runWindowCloseTests() {
   };
   const escape = async () => {
     await React.act(async () => {
+      // The IPC response only queues input; wait for Chromium to deliver the complete key press.
+      const released = new Promise<void>((resolve) => {
+        window.addEventListener('keyup', () => resolve(), { once: true, capture: true });
+      });
       await require('electron').ipcRenderer.invoke('test:escape');
+      await released;
     });
     await finishAnimations();
   };
