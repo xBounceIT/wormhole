@@ -76,11 +76,11 @@ test('authentication and window-close prompts keep errors and controls accessibl
     })
     .join('\n');
   const bitwardenHarness = `
-    const { BitwardenCliDialog, TooltipProvider } = (() => {
+    const { BitwardenCliDialog, BitwardenStartupPrompt, TooltipProvider } = (() => {
       ${bitwardenControls}
       ${slice('function IconButton(', 'function CredentialValueRow(')}
       ${slice('function BitwardenCliDialog', 'type BitwardenOperationDialogState')}
-      return { BitwardenCliDialog, TooltipProvider };
+      return { BitwardenCliDialog, BitwardenStartupPrompt, TooltipProvider };
     })();
     ${slice('function backendErrorMessage', 'function formatLocalDateTime')}
     function BitwardenSettingsHarness({ status, initialError, reload, credentialsChanged }) {
@@ -128,6 +128,26 @@ test('authentication and window-close prompts keep errors and controls accessibl
   assert.ok(cardStart >= 0 && cardEnd > cardStart);
   assert.ok(unlockStart >= 0 && unlockEnd > unlockStart);
   const fixture = readFileSync(new URL('./fixtures/auth-prompt.tsx', import.meta.url), 'utf8');
+  const bitwardenMount = slice("      {authGate === 'unlocked' ? (", '      {visibleAuthPrompt');
+  const nativeVisibility = slice(
+    '                  isWebSurfaceVisible={',
+    '                  selectedSession=',
+  );
+  const bitwardenStartupHarness = `
+    function BitwardenStartupHarness({ authorized, onAuthenticated }) {
+      const authGate = authorized ? 'unlocked' : 'locked';
+      const refreshWorkspaceCredentials = onAuthenticated;
+      const [bitwardenStartupPromptOpen, setBitwardenStartupPromptOpen] = useState(false);
+      const mcpApprovals = [];
+      const contextMenuOverlayOpen = false, newConnectionOpen = false, folderDetailsOpen = false;
+      const newFolderOpen = false, authPrompt = null, rdpCredentialPrompt = null;
+      const sshCredentialPrompt = null, sshKeyPassphrasePrompt = null, pendingSessionClose = null;
+      return <TooltipProvider>${bitwardenMount}<NativeSurfaceProbe ${nativeVisibility} /></TooltipProvider>;
+    }
+    function NativeSurfaceProbe({ isWebSurfaceVisible }) {
+      return <output id="native-surface-probe" data-visible={isWebSurfaceVisible} />;
+    }
+  `;
   const transformed = await transformWithOxc(
     dialogLifecycle +
       dialogSource +
@@ -135,7 +155,9 @@ test('authentication and window-close prompts keep errors and controls accessibl
       closeHarness +
       bitwardenHelpers +
       selectSource +
+      slice('function clearSecretInput(', 'function credentialSelectionFor(') +
       bitwardenHarness +
+      bitwardenStartupHarness +
       startupSource.slice(cardStart, cardEnd) +
       startupSource.slice(unlockStart, unlockEnd),
     'auth-prompt.tsx',
@@ -165,7 +187,13 @@ test('authentication and window-close prompts keep errors and controls accessibl
     const assert = require('node:assert/strict');
     const React = require(${JSON.stringify(require.resolve('react'))});
     const { createRoot } = require(${JSON.stringify(require.resolve('react-dom/client'))});
-    const { useState, useRef, useCallback, useEffect, useLayoutEffect } = React;
+    const { useRef, useCallback, useEffect, useLayoutEffect } = React;
+    const retainedStateValues = [];
+    const useState = initial => {
+      const state = React.useState(initial);
+      if (typeof state[0] === 'string') retainedStateValues.push(state[0]);
+      return state;
+    };
     const { Dialog: DialogPrimitive, Select: SelectPrimitive, Tooltip: TooltipPrimitive, Slot } = require(${JSON.stringify(require.resolve('radix-ui'))});
     const { cva } = require(${JSON.stringify(require.resolve('class-variance-authority'))});
     const { clsx } = require(${JSON.stringify(require.resolve('clsx'))});
@@ -217,7 +245,7 @@ test('authentication and window-close prompts keep errors and controls accessibl
           const coverage = await window.webContents.debugger.sendCommand('Profiler.takePreciseCoverage');
           const script = coverage.result.find(item => item.url === 'wormhole-auth-prompt.js');
           if (!script) throw new Error('Missing authentication renderer coverage.');
-          for (const name of ['AuthPrompt', 'showUnlock', 'AppCloseHarness', 'DialogContent', 'BitwardenCliDialog', 'BitwardenSettingsHarness']) {
+          for (const name of ['AuthPrompt', 'showUnlock', 'AppCloseHarness', 'DialogContent', 'BitwardenCliDialog', 'BitwardenSettingsHarness', 'BitwardenStartupPrompt', 'BitwardenStartupHarness']) {
             const parent = script.functions.find(item => item.functionName === name);
             if (!parent) throw new Error('Missing coverage for ' + name);
             const range = parent.ranges[0];

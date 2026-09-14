@@ -3,9 +3,13 @@
 declare const React: typeof import('react');
 declare const createRoot: typeof import('react-dom/client').createRoot;
 declare const assert: typeof import('node:assert/strict');
+declare const retainedStateValues: string[];
 declare function AuthPrompt(props: Record<string, unknown>): import('react').ReactElement;
 declare function AppCloseHarness(props: Record<string, unknown>): import('react').ReactElement;
 declare function BitwardenSettingsHarness(
+  props: Record<string, unknown>,
+): import('react').ReactElement;
+declare function BitwardenStartupHarness(
   props: Record<string, unknown>,
 ): import('react').ReactElement;
 declare function Dialog(props: Record<string, unknown>): import('react').ReactElement;
@@ -13,6 +17,17 @@ declare function TooltipProvider(props: Record<string, unknown>): import('react'
 declare function DialogContent(props: Record<string, unknown>): import('react').ReactElement;
 declare function DialogTitle(props: Record<string, unknown>): import('react').ReactElement;
 declare function showUnlock(startup: Record<string, unknown>): void;
+
+async function pressNativeEscape() {
+  await React.act(async () => {
+    // The IPC response only queues input; wait for Chromium to deliver the complete key press.
+    const released = new Promise<void>((resolve) => {
+      window.addEventListener('keyup', () => resolve(), { once: true, capture: true });
+    });
+    await require('electron').ipcRenderer.invoke('test:escape');
+    await released;
+  });
+}
 
 async function runAuthPromptTests() {
   let root = createRoot(document.getElementById('root'));
@@ -386,14 +401,7 @@ async function runWindowCloseTests() {
     await finishAnimations();
   };
   const escape = async () => {
-    await React.act(async () => {
-      // The IPC response only queues input; wait for Chromium to deliver the complete key press.
-      const released = new Promise<void>((resolve) => {
-        window.addEventListener('keyup', () => resolve(), { once: true, capture: true });
-      });
-      await require('electron').ipcRenderer.invoke('test:escape');
-      await released;
-    });
+    await pressNativeEscape();
     await finishAnimations();
   };
 
@@ -1001,7 +1009,281 @@ async function runBitwardenPromptTests() {
   await React.act(async () => root.unmount());
 }
 
+async function runBitwardenStartupTests() {
+  const root = createRoot(document.getElementById('root'));
+  const deferred = () => {
+    let resolve, reject;
+    const promise = new Promise((done, fail) => {
+      resolve = done;
+      reject = fail;
+    });
+    return { promise, resolve, reject };
+  };
+  const loggedOut = {
+    serverRegion: 'Europe',
+    status: {
+      status: 'Unauthenticated',
+      serverUrl: 'https://vault.bitwarden.eu',
+      hasSessionKey: false,
+    },
+  };
+  let reads = 0,
+    syncs = 0,
+    refreshes = 0;
+  const logins = [],
+    unlocks = [];
+  let read = async () => loggedOut;
+  let login = async () => {};
+  let unlock = async () => {};
+  let sync = async () => {};
+  let refresh = async () => {};
+  window.wormhole = {
+    readBitwardenStartupState: () => {
+      reads++;
+      return read();
+    },
+    loginBitwardenCli: (request) => {
+      logins.push(request);
+      return login();
+    },
+    unlockBitwardenCli: (password) => {
+      unlocks.push(password);
+      return unlock();
+    },
+    syncBitwardenCli: () => {
+      syncs++;
+      return sync();
+    },
+  };
+  let key = 0;
+  const render = async (authorized = true) => {
+    await React.act(async () => {
+      root.render(
+        <React.StrictMode>
+          <BitwardenStartupHarness
+            key={key}
+            authorized={authorized}
+            onAuthenticated={async () => {
+              refreshes++;
+              await refresh();
+            }}
+          />
+        </React.StrictMode>,
+      );
+    });
+  };
+  const mount = async (authorized = true) => {
+    key++;
+    await render(authorized);
+  };
+  const dialog = () => document.querySelector('[role="dialog"]');
+  const input = async (id, value) => {
+    const field = document.getElementById(id);
+    assert.ok(field, `Missing field ${id}`);
+    await React.act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(field, value);
+      field.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+  };
+  const submit = async () => {
+    await React.act(async () => dialog().querySelector('form').requestSubmit());
+  };
+  const password = 'test-only-vault-password';
+  const fillLogin = async () => {
+    await input('bw-login-email', 'alice@example.test');
+    await input('bw-login-password', password);
+  };
+  const press = async (label) => {
+    const button = [...dialog().querySelectorAll('button')].find(
+      (item) => item.textContent === label,
+    );
+    assert.ok(button, `Missing button ${label}`);
+    await React.act(async () => button.click());
+  };
+  const escape = pressNativeEscape;
+
+  await mount(false);
+  assert.equal(reads, 0, 'Wormhole must unlock before the extension is queried');
+  await render(true);
+  assert.equal(reads, 1, 'StrictMode must not duplicate the startup check');
+  assert.match(dialog().textContent, /Log in to Bitwarden/);
+  assert.match(dialog().textContent, /Europe/);
+  assert.equal(
+    document.getElementById('native-surface-probe').dataset.visible,
+    'false',
+    'native web and RDP surfaces must hide behind the startup authentication dialog',
+  );
+  assert.equal(document.activeElement.id, 'bw-login-email');
+  retainedStateValues.length = 0;
+  await fillLogin();
+  await input('bw-login-2fa', ' 123456 ');
+  assert.ok(
+    !retainedStateValues.includes(password),
+    'master passwords must never enter React state',
+  );
+  assert.ok(
+    !retainedStateValues.includes(' 123456 '),
+    'two-step codes must never enter React state',
+  );
+  const rejectedLogin = deferred();
+  login = () => rejectedLogin.promise;
+  await submit();
+  assert.deepEqual(logins[0], {
+    email: 'alice@example.test',
+    masterPassword: password,
+    authenticatorCode: '123456',
+    serverRegion: 1,
+  });
+  assert.equal(document.getElementById('bw-login-password').value, '');
+  assert.equal(document.getElementById('bw-login-2fa').value, '');
+  await escape();
+  assert.ok(dialog(), 'a pending authentication must not be dismissed by Escape');
+  await React.act(async () =>
+    dialog()
+      .querySelector('form')
+      .dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })),
+  );
+  assert.equal(logins.length, 1, 'duplicate submissions must not launch a second login');
+  await React.act(async () =>
+    rejectedLogin.reject(new Error('Invalid credentials or two-step code')),
+  );
+  assert.match(dialog().querySelector('[role="alert"]').textContent, /Invalid credentials/);
+  assert.equal(document.getElementById('bw-login-email').value, 'alice@example.test');
+  login = async () => {};
+  const syncing = deferred();
+  sync = () => syncing.promise;
+  await input('bw-login-password', password);
+  await submit();
+  assert.equal(dialog(), null, 'successful login closes before vault synchronization finishes');
+  assert.equal(refreshes, 0);
+  await React.act(async () => syncing.resolve());
+  assert.equal(refreshes, 1);
+  assert.equal(syncs, 1);
+  await render();
+  assert.equal(reads, 1, 'ordinary rerenders must not reopen the startup login');
+
+  await mount();
+  await fillLogin();
+  await press('Cancel');
+  await render();
+  assert.equal(dialog(), null, 'cancel allows the user to continue without another prompt');
+  assert.equal(document.getElementById('native-surface-probe').dataset.visible, 'true');
+  await mount();
+  assert.equal(document.getElementById('bw-login-password').value, '');
+  await escape();
+  assert.equal(dialog(), null);
+
+  read = async () => ({ ...loggedOut, status: { ...loggedOut.status, status: 'Locked' } });
+  await mount();
+  assert.match(dialog().textContent, /Unlock Bitwarden vault/);
+  assert.equal(document.getElementById('bw-login-email'), null);
+  assert.equal(document.activeElement.id, 'bw-unlock-password');
+  const syncsBeforeUnlock = syncs;
+  await input('bw-unlock-password', password);
+  await submit();
+  assert.deepEqual(unlocks, [password]);
+  assert.equal(syncs, syncsBeforeUnlock, 'native unlock already synchronizes the vault');
+  assert.equal(refreshes, 2);
+  assert.equal(dialog(), null);
+
+  for (const state of [
+    null,
+    { ...loggedOut, status: { ...loggedOut.status, status: 'Locked', hasSessionKey: true } },
+    { ...loggedOut, status: { ...loggedOut.status, status: 'Unknown' } },
+  ]) {
+    read = async () => state;
+    await mount();
+    assert.equal(dialog(), null, 'disabled, already unlocked or unknown vaults need no prompt');
+  }
+  read = async () => {
+    throw new Error('CLI is unavailable');
+  };
+  await mount();
+  assert.equal(dialog(), null, 'an optional extension failure must not block the workspace');
+
+  const pendingRead = deferred();
+  read = () => pendingRead.promise;
+  await mount();
+  await render(false);
+  await React.act(async () => pendingRead.resolve(loggedOut));
+  assert.equal(dialog(), null, 'a late status result must not open over the lock screen');
+  read = async () => loggedOut;
+  await render(true);
+  assert.ok(dialog(), 'the extension is checked again after unlocking Wormhole');
+  await fillLogin();
+  await input('bw-login-2fa', '654321');
+  const passwordBeforeLock = document.getElementById('bw-login-password');
+  const codeBeforeLock = document.getElementById('bw-login-2fa');
+  await render(false);
+  assert.equal(passwordBeforeLock.value, '', 'locking must scrub even detached password fields');
+  assert.equal(codeBeforeLock.value, '', 'locking must scrub even detached two-step code fields');
+  await render(true);
+  await fillLogin();
+  const pendingLogin = deferred();
+  login = () => pendingLogin.promise;
+  await submit();
+  const beforeLock = { syncs, refreshes };
+  await render(false);
+  assert.equal(document.querySelector('input[type="password"]'), null);
+  assert.equal(
+    document.getElementById('native-surface-probe').dataset.visible,
+    'true',
+    'closing the startup prompt must release its visibility gate',
+  );
+  await React.act(async () => pendingLogin.resolve());
+  assert.deepEqual({ syncs, refreshes }, beforeLock, 'a stale login must not sync or refresh');
+
+  read = async () => ({ ...loggedOut, status: { ...loggedOut.status, status: 'Locked' } });
+  const pendingUnlock = deferred();
+  unlock = () => pendingUnlock.promise;
+  await render(true);
+  await input('bw-unlock-password', password);
+  await submit();
+  await render(false);
+  await React.act(async () => pendingUnlock.reject(new Error('Workspace locked')));
+  assert.equal(dialog(), null, 'a stale unlock failure must not restore a secret prompt');
+  assert.deepEqual({ syncs, refreshes }, beforeLock);
+
+  login = async () => {};
+  read = async () => loggedOut;
+  const pendingSync = deferred();
+  sync = () => pendingSync.promise;
+  await render(true);
+  await fillLogin();
+  await submit();
+  await render(false);
+  await React.act(async () => pendingSync.resolve());
+  assert.equal(
+    refreshes,
+    beforeLock.refreshes,
+    'locking during sync prevents a stale catalog refresh',
+  );
+
+  sync = async () => {
+    throw new Error('Network unavailable');
+  };
+  refresh = async () => {
+    throw new Error('Catalog unavailable');
+  };
+  for (const [serverRegion, expected] of [
+    ['UnitedStates', 0],
+    ['Current', 2],
+  ]) {
+    read = async () => ({ ...loggedOut, serverRegion });
+    await mount();
+    if (serverRegion === 'Current') assert.match(dialog().textContent, /Current Server \(EU\)/);
+    await fillLogin();
+    await submit();
+    assert.equal(logins.at(-1).serverRegion, expected);
+    assert.equal(logins.at(-1).authenticatorCode, undefined);
+    assert.equal(dialog(), null, 'catalog failures after login must not reopen authentication');
+  }
+
+  await React.act(async () => root.unmount());
+}
+
 runAuthPromptTests()
   .then(runWindowCloseTests)
   .then(runStartupUnlockTests)
-  .then(runBitwardenPromptTests);
+  .then(runBitwardenPromptTests)
+  .then(runBitwardenStartupTests);

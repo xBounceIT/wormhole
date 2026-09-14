@@ -83,8 +83,6 @@ test('MCP selector and queued approval popups work in the Electron renderer', as
     ${transformed.code}
     const root = createRoot(document.getElementById('root'));
     await act(async () => root.render(React.createElement(Harness)));
-    // Flush the initial viewport resize before Radix opens and installs its resize-to-close handler.
-    await act(async () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     const trigger = () => document.getElementById('settings-mcp-approval-mode');
     assert.equal(trigger().getAttribute('role'), 'combobox');
     assert.match(document.body.textContent, /Approve access once per SSH session/);
@@ -148,11 +146,10 @@ test('MCP selector and queued approval popups work in the Electron renderer', as
       const { app, BrowserWindow } = require('electron');
       app.setPath('userData', ${JSON.stringify(directory)});
       app.whenReady().then(async () => {
-        const window = new BrowserWindow({ show: false, webPreferences: { nodeIntegration: true, contextIsolation: false, backgroundThrottling: false } });
+        // Keep native frame sizing from resizing the renderer and dismissing its first Radix menu.
+        const window = new BrowserWindow({ show: false, useContentSize: true, webPreferences: { nodeIntegration: true, contextIsolation: false, backgroundThrottling: false } });
         try {
-          const ready = new Promise(resolve => window.once('ready-to-show', resolve));
           await window.loadURL('data:text/html,<div id="root"></div>');
-          await ready;
           const result = await window.webContents.executeJavaScript(${JSON.stringify(renderer)});
           if (!result.ok) throw Error(result.error);
         } finally { window.destroy(); }
