@@ -764,7 +764,8 @@ test('virtual card grids label the semantic list rather than a generic scroll co
 });
 
 test('an asynchronous Bitwarden region refresh does not clear an open login form', () => {
-  const dialogMount = sourceBetween(appSource, '<BitwardenCliDialog', 'onUnlock={(masterPassword)');
+  const settings = sourceBetween(appSource, 'function SettingsPage(', 'function UtilityPage(');
+  const dialogMount = sourceBetween(settings, '<BitwardenCliDialog', 'onUnlock={(masterPassword)');
 
   assert.match(dialogMount, /key=\{bitwardenCliDialog\}/);
   assert.doesNotMatch(

@@ -146,7 +146,8 @@ test('MCP selector and queued approval popups work in the Electron renderer', as
       const { app, BrowserWindow } = require('electron');
       app.setPath('userData', ${JSON.stringify(directory)});
       app.whenReady().then(async () => {
-        const window = new BrowserWindow({ show: false, webPreferences: { nodeIntegration: true, contextIsolation: false, backgroundThrottling: false } });
+        // Keep native frame sizing from resizing the renderer and dismissing its first Radix menu.
+        const window = new BrowserWindow({ show: false, useContentSize: true, webPreferences: { nodeIntegration: true, contextIsolation: false, backgroundThrottling: false } });
         try {
           await window.loadURL('data:text/html,<div id="root"></div>');
           const result = await window.webContents.executeJavaScript(${JSON.stringify(renderer)});

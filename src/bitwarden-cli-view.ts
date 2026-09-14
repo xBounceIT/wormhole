@@ -1,5 +1,17 @@
 export type BitwardenCliStatusName = 'Unauthenticated' | 'Locked' | 'Unlocked' | 'Unknown';
 
+export function bitwardenCliAuthMode(status: {
+  status: BitwardenCliStatusName;
+  hasSessionKey?: boolean;
+}): 'login' | 'unlock' | null {
+  if (status.status === 'Unauthenticated') return 'login';
+  // The CLI status command has no session key. A locked CLI can still have an unlocked
+  // vault in the Go service, which is the session Wormhole actually uses.
+  if (status.hasSessionKey) return null;
+  if (status.status === 'Locked' || status.status === 'Unlocked') return 'unlock';
+  return null;
+}
+
 export function bitwardenCliIsLoggedIn(status: BitwardenCliStatusName | null | undefined): boolean {
   return status === 'Locked' || status === 'Unlocked';
 }

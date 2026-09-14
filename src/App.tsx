@@ -53,6 +53,7 @@ import {
   type LogLevel,
 } from './log-level-settings';
 import {
+  bitwardenCliAuthMode,
   bitwardenCliIsLoggedIn,
   bitwardenCliServerRegionCode,
   formatBitwardenCurrentServerLabel,
@@ -1894,6 +1895,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   const [bitwardenUnlockPassword, setBitwardenUnlockPassword] = useState('');
   const [bitwardenUnlockBusy, setBitwardenUnlockBusy] = useState(false);
   const [bitwardenUnlockError, setBitwardenUnlockError] = useState('');
+  const [bitwardenStartupPromptOpen, setBitwardenStartupPromptOpen] = useState(false);
   const [mremoteImportOpen, setMremoteImportOpen] = useState(false);
   const [newConnectionOpen, setNewConnectionOpen] = useState(false);
   const [connectionEditorMode, setConnectionEditorMode] = useState<'saved' | 'quick'>('saved');
@@ -6390,6 +6392,12 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
 
   return (
     <TooltipProvider delayDuration={300}>
+      {authGate === 'unlocked' ? (
+        <BitwardenStartupPrompt
+          onAuthenticated={refreshWorkspaceCredentials}
+          onOpenChange={setBitwardenStartupPromptOpen}
+        />
+      ) : null}
       {visibleAuthPrompt && authState ? (
         <AuthPrompt
           onDialogElementChange={setAuthDialog}
@@ -6866,6 +6874,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                   isAuthorized={authGate === 'unlocked'}
                   isWebSurfaceVisible={
                     mcpApprovals.length === 0 &&
+                    !bitwardenStartupPromptOpen &&
                     !contextMenuOverlayOpen &&
                     !newConnectionOpen &&
                     !folderDetailsOpen &&
@@ -14111,16 +14120,27 @@ function BitwardenCliDialog({
   onUnlock: (masterPassword: string) => void;
 }) {
   const [email, setEmail] = useState('');
-  const [masterPassword, setMasterPassword] = useState('');
+  const masterPasswordInput = useRef<HTMLInputElement>(null);
+  const authenticatorCodeInput = useRef<HTMLInputElement>(null);
+  const [hasMasterPassword, setHasMasterPassword] = useState(false);
   const [masterPasswordVisible, setMasterPasswordVisible] = useState(false);
-  const [authenticatorCode, setAuthenticatorCode] = useState('');
   const [serverRegion, setServerRegion] = useState(defaultServerRegion);
+
+  const bindMasterPasswordInput = useCallback((input: HTMLInputElement | null) => {
+    clearSecretInput(masterPasswordInput.current);
+    masterPasswordInput.current = input;
+  }, []);
+  const bindAuthenticatorCodeInput = useCallback((input: HTMLInputElement | null) => {
+    clearSecretInput(authenticatorCodeInput.current);
+    authenticatorCodeInput.current = input;
+  }, []);
 
   function reset() {
     setEmail('');
-    setMasterPassword('');
+    clearSecretInput(masterPasswordInput.current);
+    clearSecretInput(authenticatorCodeInput.current);
+    setHasMasterPassword(false);
     setMasterPasswordVisible(false);
-    setAuthenticatorCode('');
     setServerRegion(defaultServerRegion);
   }
 
@@ -14135,11 +14155,11 @@ function BitwardenCliDialog({
           autoFocus={!isLogin}
           className="pr-9"
           id={passwordInputId}
-          onChange={(event) => setMasterPassword(event.target.value)}
+          onChange={(event) => setHasMasterPassword(event.target.value.length > 0)}
+          ref={bindMasterPasswordInput}
           required
           spellCheck={false}
           type={masterPasswordVisible ? 'text' : 'password'}
-          value={masterPassword}
         />
         <IconButton
           aria-controls={passwordInputId}
@@ -14158,7 +14178,7 @@ function BitwardenCliDialog({
   return (
     <Dialog
       onOpenChange={(open) => {
-        if (!open) {
+        if (!open && !loginBusy) {
           reset();
           onClose();
         }
@@ -14170,16 +14190,16 @@ function BitwardenCliDialog({
           className="min-w-0 space-y-4"
           onSubmit={(event) => {
             event.preventDefault();
+            if (loginBusy) return;
+            const masterPassword = takeOneShotSecret(masterPasswordInput.current);
+            const authenticatorCode = takeOneShotSecret(authenticatorCodeInput.current);
+            setHasMasterPassword(false);
+            setMasterPasswordVisible(false);
             if (isLogin) {
               onLogin(email, masterPassword, authenticatorCode || undefined, serverRegion);
-              setAuthenticatorCode('');
             } else {
               onUnlock(masterPassword);
             }
-            // Match WinUI's secret prompts: hand the value to the native boundary, then remove it
-            // from renderer state even when the CLI rejects the attempt.
-            setMasterPassword('');
-            setMasterPasswordVisible(false);
           }}
         >
           <DialogHeader>
@@ -14241,11 +14261,10 @@ function BitwardenCliDialog({
                 <Input
                   autoComplete="one-time-code"
                   id="bw-login-2fa"
-                  onChange={(event) => setAuthenticatorCode(event.target.value)}
                   placeholder="000000"
+                  ref={bindAuthenticatorCodeInput}
                   spellCheck={false}
                   type="text"
-                  value={authenticatorCode}
                 />
               </div>
             </div>
@@ -14270,7 +14289,7 @@ function BitwardenCliDialog({
               Cancel
             </Button>
             <Button
-              disabled={loginBusy || !masterPassword || (isLogin && !email.trim())}
+              disabled={loginBusy || !hasMasterPassword || (isLogin && !email.trim())}
               type="submit"
             >
               {loginBusy ? 'Working…' : isLogin ? 'Log in' : 'Unlock'}
@@ -14279,6 +14298,118 @@ function BitwardenCliDialog({
         </form>
       </DialogContent>
     </Dialog>
+  );
+}
+
+function BitwardenStartupPrompt({
+  onAuthenticated,
+  onOpenChange,
+}: {
+  onAuthenticated: () => Promise<void>;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const [prompt, setPrompt] = useState<{
+    mode: 'login' | 'unlock';
+    serverRegion: WormholeBitwardenCliState['serverRegion'];
+    currentServerRegion: 'US' | 'EU' | null;
+  } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const active = useRef(false);
+  const submitting = useRef(false);
+  const startupRequest = useRef<ReturnType<
+    NonNullable<Window['wormhole']>['readBitwardenStartupState']
+  > | null>(null);
+  const open = prompt !== null;
+
+  useLayoutEffect(() => {
+    onOpenChange(open);
+    return () => onOpenChange(false);
+  }, [onOpenChange, open]);
+
+  useEffect(() => {
+    active.current = true;
+    let current = true;
+    const api = window.wormhole;
+    if (api) {
+      // Share the read across StrictMode's effect replay, but discard callbacks from a
+      // previous mount. App unmounts this prompt as soon as Wormhole locks.
+      startupRequest.current ??= api.readBitwardenStartupState();
+      void startupRequest.current
+        .then((state) => {
+          if (!current || !state) return;
+          const mode = bitwardenCliAuthMode(state.status);
+          if (mode) {
+            setPrompt({
+              mode,
+              serverRegion: state.serverRegion,
+              currentServerRegion: bitwardenCliServerRegionCode(state.status.serverUrl),
+            });
+          }
+        })
+        .catch(() => {
+          // An unavailable optional vault must not block entry to Wormhole. Its status
+          // and installation errors remain available in Settings.
+        });
+    }
+    return () => {
+      current = false;
+      active.current = false;
+    };
+  }, []);
+
+  async function authenticate(
+    operation: (api: NonNullable<Window['wormhole']>) => Promise<unknown>,
+    sync: boolean,
+  ) {
+    const api = window.wormhole;
+    if (!api || submitting.current) return;
+    submitting.current = true;
+    setBusy(true);
+    setError('');
+    try {
+      await operation(api);
+      if (!active.current) return;
+      setPrompt(null);
+      // Close the secret prompt as soon as authentication succeeds, before refreshing
+      // the catalog. Unlock already synchronizes the vault in the Go service.
+      if (sync) {
+        await api.syncBitwardenCli().catch(() => undefined);
+      }
+      if (active.current) await onAuthenticated().catch(() => undefined);
+    } catch (error) {
+      if (active.current) setError(backendErrorMessage(error));
+    } finally {
+      submitting.current = false;
+      if (active.current) setBusy(false);
+    }
+  }
+
+  if (!prompt) return null;
+  return (
+    <BitwardenCliDialog
+      currentServerRegion={prompt.currentServerRegion}
+      defaultServerRegion={prompt.serverRegion}
+      error={error}
+      loginBusy={busy}
+      mode={prompt.mode}
+      onClose={() => setPrompt(null)}
+      onLogin={(email, masterPassword, authenticatorCode, serverRegion) =>
+        void authenticate(
+          (api) =>
+            api.loginBitwardenCli({
+              email,
+              masterPassword,
+              authenticatorCode: authenticatorCode?.trim() || undefined,
+              serverRegion: serverRegion === 'UnitedStates' ? 0 : serverRegion === 'Europe' ? 1 : 2,
+            }),
+          true,
+        )
+      }
+      onUnlock={(masterPassword) =>
+        void authenticate((api) => api.unlockBitwardenCli(masterPassword), false)
+      }
+    />
   );
 }
 
