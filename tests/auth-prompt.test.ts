@@ -15,7 +15,7 @@ const require = createRequire(import.meta.url);
 
 // Node coverage excludes TSX and process entrypoints. Measure these isolated login
 // and close handlers in Chromium, including native modal hit testing and focus.
-test('authentication and window-close prompts remain usable while the app is locked', async (context) => {
+test('authentication and window-close prompts keep errors and controls accessible', async (context) => {
   const source = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
   const start = source.indexOf('function AuthPrompt');
   const end = source.indexOf('type WormholeAppProps', start);
@@ -62,6 +62,55 @@ test('authentication and window-close prompts remain usable while the app is loc
       </>;
     }
   `;
+  const bitwardenControls = [
+    ['input', 'function Input('],
+    ['button', 'const buttonVariants ='],
+    ['tooltip', 'function TooltipProvider('],
+  ]
+    .map(([name, start]) => {
+      const ui = readFileSync(new URL(`../src/components/ui/${name}.tsx`, import.meta.url), 'utf8');
+      const first = ui.indexOf(start);
+      const last = ui.indexOf('export {', first);
+      assert.ok(first >= 0 && last > first, `Missing UI component: ${name}`);
+      return ui.slice(first, last);
+    })
+    .join('\n');
+  const bitwardenHarness = `
+    const { BitwardenCliDialog, TooltipProvider } = (() => {
+      ${bitwardenControls}
+      ${slice('function IconButton(', 'function CredentialValueRow(')}
+      ${slice('function BitwardenCliDialog', 'type BitwardenOperationDialogState')}
+      return { BitwardenCliDialog, TooltipProvider };
+    })();
+    ${slice('function backendErrorMessage', 'function formatLocalDateTime')}
+    function BitwardenSettingsHarness({ status, initialError, reload, credentialsChanged }) {
+      const bitwardenCliStatus = { status };
+      const bitwardenEnabled = true;
+      const bitwardenServerRegion = 'Current';
+      const currentBitwardenServerRegion = 'US';
+      const [bitwardenBusy, setBitwardenBusy] = useState(false);
+      const [bitwardenError, setBitwardenError] = useState(initialError);
+      const [bitwardenCliDialog, setBitwardenCliDialog] = useState(null);
+      const [, setBitwardenLastSyncStatus] = useState('');
+      const [, setBitwardenAvailableCount] = useState(null);
+      const reloadBitwardenCliStatus = reload;
+      const onWorkspaceCredentialsChanged = credentialsChanged;
+      ${slice('  async function handleBitwardenCliLogin(', '  async function handleBitwardenCliSync()')}
+      return <>
+        <div data-bitwarden-settings>
+          ${slice('{bitwardenError', '<div className="flex flex-wrap gap-2">')}
+          ${slice("{bitwardenCliStatus?.status === 'Unauthenticated'", '{bitwardenLoggedIn ? (')}
+        </div>
+        ${slice('{bitwardenCliDialog ? (', '<BitwardenOperationDialog')}
+      </>;
+    }
+  `;
+  const bitwardenHelpers = readFileSync(
+    new URL('../src/bitwarden-cli-view.ts', import.meta.url),
+    'utf8',
+  ).replace(/^export /gm, '');
+  const select = readFileSync(new URL('../src/components/ui/select.tsx', import.meta.url), 'utf8');
+  const selectSource = select.slice(select.indexOf('function Select('), select.indexOf('export {'));
   const dialog = readFileSync(new URL('../src/components/ui/dialog.tsx', import.meta.url), 'utf8');
   const dialogSource = dialog.slice(
     dialog.indexOf('const DialogOpenContext'),
@@ -84,14 +133,19 @@ test('authentication and window-close prompts remain usable while the app is loc
       dialogSource +
       source.slice(start, end) +
       closeHarness +
+      bitwardenHelpers +
+      selectSource +
+      bitwardenHarness +
       startupSource.slice(cardStart, cardEnd) +
-      startupSource.slice(unlockStart, unlockEnd) +
-      fixture,
+      startupSource.slice(unlockStart, unlockEnd),
     'auth-prompt.tsx',
     {
       jsx: { runtime: 'classic' },
     },
   );
+  const transformedFixture = await transformWithOxc(fixture, 'auth-prompt-fixture.tsx', {
+    jsx: { runtime: 'classic' },
+  });
   const output = await build({
     configFile: false,
     logLevel: 'silent',
@@ -112,19 +166,23 @@ test('authentication and window-close prompts remain usable while the app is loc
     const React = require(${JSON.stringify(require.resolve('react'))});
     const { createRoot } = require(${JSON.stringify(require.resolve('react-dom/client'))});
     const { useState, useRef, useCallback, useEffect, useLayoutEffect } = React;
-    const { Dialog: DialogPrimitive } = require(${JSON.stringify(require.resolve('radix-ui'))});
+    const { Dialog: DialogPrimitive, Select: SelectPrimitive, Tooltip: TooltipPrimitive, Slot } = require(${JSON.stringify(require.resolve('radix-ui'))});
+    const { cva } = require(${JSON.stringify(require.resolve('class-variance-authority'))});
     const { clsx } = require(${JSON.stringify(require.resolve('clsx'))});
     const { twMerge } = require(${JSON.stringify(require.resolve('tailwind-merge'))});
     const cn = (...inputs) => twMerge(clsx(inputs));
     const Card = 'div', CardHeader = 'div', CardTitle = 'h2', CardDescription = 'p';
     const CardContent = 'div', Button = 'button', Input = 'input', Label = 'label';
     const KeyRound = 'span', LoaderCircle = 'span', XIcon = 'span', TriangleAlert = 'span', Power = 'span', Badge = 'span';
+    const ChevronDownIcon = 'span', ChevronUpIcon = 'span', CheckIcon = 'span';
+    const { Eye, EyeOff } = require(${JSON.stringify(require.resolve('lucide-react'))});
     const root = document.getElementById('root');
     globalThis.IS_REACT_ACT_ENVIRONMENT = true;
     const style = document.createElement('style');
     style.textContent = ${JSON.stringify(css)};
     document.head.append(style);
     ${transformed.code}
+    ${transformedFixture.code}
     //# sourceURL=wormhole-auth-prompt.js
   `;
   const directory = mkdtempSync(join(tmpdir(), 'wormhole-auth-prompt-'));
@@ -145,6 +203,9 @@ test('authentication and window-close prompts remain usable while the app is loc
           window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' });
           window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Escape' });
         });
+        ipcMain.handle('test:viewport', (_event, width, height) => {
+          window.setContentSize(width, height);
+        });
         try {
           await window.loadURL('data:text/html,<div id="root"></div>');
           window.webContents.debugger.attach('1.3');
@@ -156,7 +217,7 @@ test('authentication and window-close prompts remain usable while the app is loc
           const coverage = await window.webContents.debugger.sendCommand('Profiler.takePreciseCoverage');
           const script = coverage.result.find(item => item.url === 'wormhole-auth-prompt.js');
           if (!script) throw new Error('Missing authentication renderer coverage.');
-          for (const name of ['AuthPrompt', 'showUnlock', 'AppCloseHarness', 'DialogContent']) {
+          for (const name of ['AuthPrompt', 'showUnlock', 'AppCloseHarness', 'DialogContent', 'BitwardenCliDialog', 'BitwardenSettingsHarness']) {
             const parent = script.functions.find(item => item.functionName === name);
             if (!parent) throw new Error('Missing coverage for ' + name);
             const range = parent.ranges[0];

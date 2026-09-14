@@ -164,6 +164,8 @@ import {
   Copy,
   Database,
   Download,
+  Eye,
+  EyeOff,
   File,
   FilePlus2,
   FlaskConical,
@@ -14087,6 +14089,7 @@ function LogLevelSetting({
 function BitwardenCliDialog({
   currentServerRegion,
   defaultServerRegion,
+  error,
   loginBusy,
   mode,
   onClose,
@@ -14095,6 +14098,7 @@ function BitwardenCliDialog({
 }: {
   currentServerRegion: 'US' | 'EU' | null;
   defaultServerRegion: 'UnitedStates' | 'Europe' | 'Current';
+  error: string;
   loginBusy: boolean;
   mode: 'login' | 'unlock' | null;
   onClose: () => void;
@@ -14108,17 +14112,49 @@ function BitwardenCliDialog({
 }) {
   const [email, setEmail] = useState('');
   const [masterPassword, setMasterPassword] = useState('');
+  const [masterPasswordVisible, setMasterPasswordVisible] = useState(false);
   const [authenticatorCode, setAuthenticatorCode] = useState('');
   const [serverRegion, setServerRegion] = useState(defaultServerRegion);
 
   function reset() {
     setEmail('');
     setMasterPassword('');
+    setMasterPasswordVisible(false);
     setAuthenticatorCode('');
     setServerRegion(defaultServerRegion);
   }
 
   const isLogin = mode === 'login';
+  const passwordInputId = isLogin ? 'bw-login-password' : 'bw-unlock-password';
+  const passwordField = (
+    <div className="grid gap-2">
+      <Label htmlFor={passwordInputId}>Master password</Label>
+      <div className="relative">
+        <Input
+          autoComplete="current-password"
+          autoFocus={!isLogin}
+          className="pr-9"
+          id={passwordInputId}
+          onChange={(event) => setMasterPassword(event.target.value)}
+          required
+          spellCheck={false}
+          type={masterPasswordVisible ? 'text' : 'password'}
+          value={masterPassword}
+        />
+        <IconButton
+          aria-controls={passwordInputId}
+          aria-pressed={masterPasswordVisible}
+          className="absolute top-1/2 right-0.5 -translate-y-1/2 text-muted-foreground"
+          disabled={loginBusy}
+          label={masterPasswordVisible ? 'Hide password' : 'Show password'}
+          onClick={() => setMasterPasswordVisible((visible) => !visible)}
+          type="button"
+        >
+          {masterPasswordVisible ? <EyeOff /> : <Eye />}
+        </IconButton>
+      </div>
+    </div>
+  );
   return (
     <Dialog
       onOpenChange={(open) => {
@@ -14129,9 +14165,9 @@ function BitwardenCliDialog({
       }}
       open={mode !== null}
     >
-      <DialogContent className="border-border/70 bg-card text-card-foreground sm:max-w-md">
+      <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto border-border/70 bg-card text-card-foreground sm:max-w-md">
         <form
-          className="space-y-4"
+          className="min-w-0 space-y-4"
           onSubmit={(event) => {
             event.preventDefault();
             if (isLogin) {
@@ -14143,6 +14179,7 @@ function BitwardenCliDialog({
             // Match WinUI's secret prompts: hand the value to the native boundary, then remove it
             // from renderer state even when the CLI rejects the attempt.
             setMasterPassword('');
+            setMasterPasswordVisible(false);
           }}
         >
           <DialogHeader>
@@ -14196,17 +14233,7 @@ function BitwardenCliDialog({
                   value={email}
                 />
               </div>
-              <div className="grid gap-2">
-                <Label htmlFor="bw-login-password">Master password</Label>
-                <Input
-                  autoComplete="current-password"
-                  id="bw-login-password"
-                  onChange={(event) => setMasterPassword(event.target.value)}
-                  required
-                  type="password"
-                  value={masterPassword}
-                />
-              </div>
+              {passwordField}
               <div className="grid gap-2">
                 <Label htmlFor="bw-login-2fa">
                   Two-step login code <span className="text-muted-foreground">(optional)</span>
@@ -14223,19 +14250,13 @@ function BitwardenCliDialog({
               </div>
             </div>
           ) : (
-            <div className="grid gap-2">
-              <Label htmlFor="bw-unlock-password">Master password</Label>
-              <Input
-                autoComplete="current-password"
-                autoFocus
-                id="bw-unlock-password"
-                onChange={(event) => setMasterPassword(event.target.value)}
-                required
-                type="password"
-                value={masterPassword}
-              />
-            </div>
+            passwordField
           )}
+          {error ? (
+            <p className="text-sm break-words text-destructive" role="alert">
+              {error}
+            </p>
+          ) : null}
           <DialogFooter>
             <Button
               disabled={loginBusy}
@@ -16321,7 +16342,7 @@ function SettingsPage({
               {bitwardenInstallError ? (
                 <p className="text-[11px] text-destructive">{bitwardenInstallError}</p>
               ) : null}
-              {bitwardenError ? (
+              {bitwardenError && !bitwardenCliDialog ? (
                 <p className="text-[11px] text-destructive">{bitwardenError}</p>
               ) : null}
               <div className="flex flex-wrap gap-2">
@@ -16346,7 +16367,10 @@ function SettingsPage({
                 {bitwardenCliStatus?.status === 'Unauthenticated' ? (
                   <Button
                     disabled={bitwardenBusy || !bitwardenEnabled}
-                    onClick={() => setBitwardenCliDialog('login')}
+                    onClick={() => {
+                      setBitwardenError('');
+                      setBitwardenCliDialog('login');
+                    }}
                     size="sm"
                     type="button"
                     variant="outline"
@@ -16357,7 +16381,10 @@ function SettingsPage({
                 {bitwardenCliStatus?.status === 'Locked' ? (
                   <Button
                     disabled={bitwardenBusy || !bitwardenEnabled}
-                    onClick={() => setBitwardenCliDialog('unlock')}
+                    onClick={() => {
+                      setBitwardenError('');
+                      setBitwardenCliDialog('unlock');
+                    }}
                     size="sm"
                     type="button"
                     variant="outline"
@@ -16447,6 +16474,7 @@ function SettingsPage({
           <BitwardenCliDialog
             currentServerRegion={currentBitwardenServerRegion}
             defaultServerRegion={bitwardenServerRegion}
+            error={bitwardenError}
             key={bitwardenCliDialog}
             loginBusy={bitwardenBusy}
             mode={bitwardenCliDialog}
