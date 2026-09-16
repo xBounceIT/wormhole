@@ -244,6 +244,15 @@ test('authentication and window-close prompts keep errors and controls accessibl
         ipcMain.handle('test:viewport', (_event, width, height) => {
           window.setContentSize(width, height);
         });
+        ipcMain.handle('test:mouse', (_event, type, x, y) => {
+          window.webContents.sendInputEvent({
+            type,
+            x,
+            y,
+            button: 'left',
+            clickCount: 1,
+          });
+        });
         try {
           await window.loadURL('data:text/html,<div id="root"></div>');
           window.webContents.debugger.attach('1.3');
