@@ -14,7 +14,87 @@ export type ConnectionTreeExpansionState = {
   folderIds: string[];
 };
 
+export type ConnectionTreeSearchExpansionState = {
+  query: string;
+  folderOpenById: Map<string, boolean>;
+};
+
 export const connectionTreeExpansionSaveDelayMs = 250;
+
+export function filterConnectionTree<T extends { name: string; children?: T[] }>(
+  nodes: T[],
+  normalizedQuery: string,
+): T[] {
+  if (!normalizedQuery) return nodes;
+
+  const result: T[] = [];
+  const pending: Array<{
+    nodes: T[];
+    index: number;
+    result: T[];
+    parent?: { node: T; result: T[] };
+  }> = [{ nodes, index: 0, result }];
+
+  while (pending.length > 0) {
+    const frame = pending[pending.length - 1];
+    if (frame.index >= frame.nodes.length) {
+      pending.pop();
+      if (frame.parent && frame.result.length > 0) {
+        frame.parent.result.push({ ...frame.parent.node, children: frame.result });
+      }
+      continue;
+    }
+
+    const node = frame.nodes[frame.index++];
+    if (node.name.toLowerCase().includes(normalizedQuery)) {
+      frame.result.push(node);
+    } else if (node.children?.length) {
+      pending.push({
+        nodes: node.children,
+        index: 0,
+        result: [],
+        parent: { node, result: frame.result },
+      });
+    }
+  }
+
+  return result;
+}
+
+export function connectionTreeFolderIsExpanded(
+  folderId: string,
+  normalizedSearchQuery: string,
+  isDirectSearchMatch: boolean,
+  expandedFolderIds: ReadonlySet<string>,
+  searchExpansion: ConnectionTreeSearchExpansionState,
+): boolean {
+  if (!normalizedSearchQuery) return expandedFolderIds.has(folderId);
+  const defaultExpanded = !isDirectSearchMatch;
+  if (searchExpansion.query !== normalizedSearchQuery) return defaultExpanded;
+  return searchExpansion.folderOpenById.get(folderId) ?? defaultExpanded;
+}
+
+export function updateConnectionTreeSearchExpansion(
+  current: ConnectionTreeSearchExpansionState,
+  query: string,
+  folderId: string,
+  isExpanded: boolean,
+): ConnectionTreeSearchExpansionState {
+  const folderOpenById = current.query === query ? new Map(current.folderOpenById) : new Map();
+  folderOpenById.set(folderId, isExpanded);
+  return { query, folderOpenById };
+}
+
+export function projectVisibleConnectionTree<T extends { children?: T[] }>(
+  nodes: T[],
+  isExpanded: (node: T) => boolean,
+): T[] {
+  return nodes.map((node) => {
+    if (!node.children?.length) return node;
+    if (!isExpanded(node)) return { ...node, children: [] };
+    return { ...node, children: projectVisibleConnectionTree(node.children, isExpanded) };
+  });
+}
 
 export function indexConnectionTree(
   nodes: readonly ConnectionTreeStateNode[],
