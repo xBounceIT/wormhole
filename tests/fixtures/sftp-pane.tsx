@@ -127,9 +127,18 @@ async function runSftpPaneTests() {
   assert.equal(overlay(panes[1]), null, 'cancel at source must clear the destination pane');
   const external = new DataTransfer();
   external.items.add(new window.File(['test'], 'external.txt'));
+  const externalPath = navigator.platform.startsWith('Win')
+    ? 'C:\\Users\\operator\\external.txt'
+    : '/tmp/external.txt';
+  Object.defineProperty(window, 'wormhole', {
+    configurable: true,
+    value: { getPathForFile: () => externalPath },
+  });
   await drag(panes[1], 'dragenter', null, external);
   assert.ok(overlay(panes[1]), 'external files receive feedback');
-  await drag(document.body, 'drop', null, external);
+  await drag(panes[1], 'drop', null, external);
+  assert.equal(transfers.at(-1).payload.external, true);
+  assert.equal(transfers.at(-1).payload.items[0].sourcePath, externalPath);
   assert.equal(overlay(panes[1]), null);
   const unrelated = new DataTransfer();
   unrelated.setData('text/plain', 'text');

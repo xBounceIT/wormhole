@@ -3,7 +3,7 @@ import { execFile } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import test from 'node:test';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
@@ -11,6 +11,17 @@ import tailwindcss from '@tailwindcss/vite';
 import { build, transformWithOxc } from 'vite';
 
 const require = createRequire(import.meta.url);
+
+async function runElectronHarness(harnessPath: string): Promise<void> {
+  const { ELECTRON_RUN_AS_NODE: _electronRunAsNode, ...environment } = process.env;
+  const electron = require('electron') as string;
+  const needsDisplay = process.platform === 'linux' && !environment.DISPLAY;
+  await promisify(execFile)(
+    needsDisplay ? 'xvfb-run' : electron,
+    needsDisplay ? ['--auto-servernum', electron, '--no-sandbox', harnessPath] : [harnessPath],
+    { env: { ...environment, NODE_ENV: 'test' }, timeout: 30_000, windowsHide: true },
+  );
+}
 
 // scripts/test-coverage.ts excludes TSX from Node's loaded-module percentage.
 // Exercise the modified pane handlers and border geometry in real React/Chromium instead.
@@ -70,7 +81,6 @@ test('SFTP panes keep drag feedback stable and draw unclipped borders in Chromiu
   `;
   const directory = mkdtempSync(join(tmpdir(), 'wormhole-sftp-pane-'));
   const harnessPath = join(directory, 'sftp-pane.cjs');
-  const { ELECTRON_RUN_AS_NODE: _electronRunAsNode, ...environment } = process.env;
   try {
     writeFileSync(
       harnessPath,
@@ -88,13 +98,70 @@ test('SFTP panes keep drag feedback stable and draw unclipped borders in Chromiu
       }).catch((error) => { console.error(error); app.exit(1); });
     `,
     );
-    const electron = require('electron') as string;
-    const needsDisplay = process.platform === 'linux' && !environment.DISPLAY;
+    await runElectronHarness(harnessPath);
+  } finally {
+    assert.equal(resolve(directory, '..'), resolve(tmpdir()));
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test('isolated preload resolves the native path of a file selected by Chromium', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'wormhole-sftp-preload-'));
+  const nativeFilePath = join(directory, 'external.txt');
+  const preloadPath = join(directory, 'preload.cjs');
+  const harnessPath = join(directory, 'sftp-preload.cjs');
+  try {
+    writeFileSync(nativeFilePath, 'test');
+    const repositoryRoot = fileURLToPath(new URL('..', import.meta.url));
+    const typescriptBin = join(dirname(require.resolve('typescript/package.json')), 'bin', 'tsc');
     await promisify(execFile)(
-      needsDisplay ? 'xvfb-run' : electron,
-      needsDisplay ? ['--auto-servernum', electron, '--no-sandbox', harnessPath] : [harnessPath],
-      { env: { ...environment, NODE_ENV: 'test' }, timeout: 30_000, windowsHide: true },
+      process.execPath,
+      [
+        typescriptBin,
+        '-p',
+        join(repositoryRoot, 'electron', 'tsconfig.electron.json'),
+        '--outDir',
+        directory,
+        '--sourceMap',
+        'false',
+      ],
+      { cwd: repositoryRoot, timeout: 30_000, windowsHide: true },
     );
+    writeFileSync(
+      harnessPath,
+      `
+      const assert = require('node:assert/strict');
+      const path = require('node:path');
+      const { app, BrowserWindow } = require('electron');
+      app.whenReady().then(async () => {
+        const window = new BrowserWindow({ show: false, webPreferences: {
+          preload: ${JSON.stringify(preloadPath)}, contextIsolation: true, nodeIntegration: false,
+        } });
+        const browserDebugger = window.webContents.debugger;
+        try {
+          await window.loadURL('data:text/html,<input id="file" type="file">');
+          browserDebugger.attach('1.3');
+          await browserDebugger.sendCommand('DOM.enable');
+          const document = await browserDebugger.sendCommand('DOM.getDocument');
+          const input = await browserDebugger.sendCommand('DOM.querySelector', {
+            nodeId: document.root.nodeId, selector: '#file',
+          });
+          await browserDebugger.sendCommand('DOM.setFileInputFiles', {
+            files: [${JSON.stringify(nativeFilePath)}], nodeId: input.nodeId,
+          });
+          const resolved = await window.webContents.executeJavaScript(
+            "window.wormhole.getPathForFile(document.querySelector('#file').files[0])",
+          );
+          assert.equal(path.resolve(resolved), path.resolve(${JSON.stringify(nativeFilePath)}));
+        } finally {
+          if (browserDebugger.isAttached()) browserDebugger.detach();
+          window.destroy();
+        }
+        app.quit();
+      }).catch((error) => { console.error(error); app.exit(1); });
+    `,
+    );
+    await runElectronHarness(harnessPath);
   } finally {
     assert.equal(resolve(directory, '..'), resolve(tmpdir()));
     rmSync(directory, { force: true, recursive: true });

@@ -27,7 +27,11 @@ import {
   shouldRefreshSftpPane,
   updateSftpTransferError,
 } from '../src/sftp-state.ts';
-import { hasSftpDragPayload, sftpDragDataType } from '../src/sftp-dnd.ts';
+import {
+  externalSftpTransferItems,
+  hasSftpDragPayload,
+  sftpDragDataType,
+} from '../src/sftp-dnd.ts';
 
 function entry(
   name: string,
@@ -66,6 +70,51 @@ test('SFTP drag-over accepts protected custom and Explorer file payload types', 
   assert.equal(hasSftpDragPayload([sftpDragDataType]), true);
   assert.equal(hasSftpDragPayload(['Files']), true);
   assert.equal(hasSftpDragPayload(['text/plain']), false);
+});
+
+test('SFTP resolves absolute paths for files dragged from the operating system', () => {
+  const file = { name: 'report.txt', size: 12 } as File;
+  const directory = { name: 'archive', size: 0 } as File;
+  const items = [
+    { kind: 'string' },
+    { kind: 'file', webkitGetAsEntry: () => ({ isDirectory: false }) },
+    { kind: 'file', webkitGetAsEntry: () => ({ isDirectory: true }) },
+  ] as DataTransferItem[];
+
+  assert.deepEqual(
+    externalSftpTransferItems([file, directory], items, (candidate) =>
+      candidate === file ? 'C:\\Users\\operator\\report.txt' : 'C:\\Users\\operator\\archive',
+    ),
+    [
+      {
+        sourcePath: 'C:\\Users\\operator\\report.txt',
+        name: 'report.txt',
+        isDirectory: false,
+        size: 12,
+      },
+      {
+        sourcePath: 'C:\\Users\\operator\\archive',
+        name: 'archive',
+        isDirectory: true,
+        size: 0,
+      },
+    ],
+  );
+});
+
+test('SFTP skips external files whose native path cannot be resolved', () => {
+  const missing = { name: 'missing.txt', size: 1 } as File;
+  const rejected = { name: 'rejected.txt', size: 2 } as File;
+  assert.deepEqual(
+    externalSftpTransferItems([missing], [], () => ''),
+    [],
+  );
+  assert.deepEqual(
+    externalSftpTransferItems([rejected], [], () => {
+      throw new Error('not a native file');
+    }),
+    [],
+  );
 });
 
 test('SFTP ignores a ready event for an older request at the same path', () => {

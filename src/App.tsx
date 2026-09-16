@@ -300,7 +300,12 @@ import {
   type RdpUiStatus,
 } from './rdp-state';
 import { formatSftpDate, formatSftpSize } from './sftp-format';
-import { hasSftpDragPayload, sftpDragDataType } from './sftp-dnd';
+import {
+  externalSftpTransferItems,
+  hasSftpDragPayload,
+  sftpDragDataType,
+  type SftpTransferItem,
+} from './sftp-dnd';
 import { cn } from '@/lib/utils';
 import { WebSessionAttemptTracker } from '../electron/web-session-attempt';
 import {
@@ -9349,12 +9354,6 @@ function SshTerminalSurface({
 type SftpPaneKind = 'local' | 'remote';
 type SftpOperation = 'mkdir' | 'file' | 'delete' | 'rename' | 'open';
 type SftpTransferDirection = 'local-to-remote' | 'remote-to-local' | 'local-to-local';
-type SftpTransferItem = {
-  sourcePath: string;
-  name: string;
-  isDirectory: boolean;
-  size: number;
-};
 type SftpDragPayload = {
   sourcePane: SftpPaneKind;
   items: SftpTransferItem[];
@@ -9423,24 +9422,13 @@ function parseSftpDragPayload(data: DataTransfer): SftpDragPayload | undefined {
   }
 
   if (data.files.length === 0) return undefined;
-  const dataItems = Array.from(data.items);
-  const items = Array.from(data.files).reduce<SftpTransferItem[]>((result, file) => {
-    const candidate = file as File & { path?: string };
-    const transferItem = dataItems.find((item) => item.getAsFile()?.name === file.name) as
-      | (DataTransferItem & {
-          webkitGetAsEntry?: () => { isDirectory?: boolean } | null;
-        })
-      | undefined;
-    const fileSystemEntry = transferItem?.webkitGetAsEntry?.();
-    const item = {
-      sourcePath: candidate.path || file.name,
-      name: file.name,
-      isDirectory: fileSystemEntry?.isDirectory === true,
-      size: file.size,
-    } satisfies SftpTransferItem;
-    if (item.sourcePath.length > 0) result.push(item);
-    return result;
-  }, []);
+  const getPathForFile = window.wormhole?.getPathForFile;
+  if (!getPathForFile) return undefined;
+  const items = externalSftpTransferItems(
+    Array.from(data.files),
+    Array.from(data.items),
+    getPathForFile,
+  );
   return items.length > 0 ? { sourcePane: 'local', items, external: true } : undefined;
 }
 
