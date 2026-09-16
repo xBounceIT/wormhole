@@ -527,6 +527,7 @@ async function runStartupUnlockTests() {
   let check = async () => ({ available: false, message: remoteMessage });
   let verifyHello = async () => ({ succeeded: false, message: 'Windows Hello was canceled.' });
   let loadWorkspace = async () => ({ connections: [] });
+  let startupBitwardenReads = 0;
   const secrets: { method: string; secret: string }[] = [];
   const mounts: unknown[] = [];
   window.wormhole = {
@@ -544,6 +545,10 @@ async function runStartupUnlockTests() {
       return { succeeded: false, message: '' };
     },
     loadWorkspace: () => loadWorkspace(),
+    readBitwardenStartupState: async () => {
+      startupBitwardenReads++;
+      return null;
+    },
   };
   globalThis.mountWorkspace = async (startup, workspace) => {
     mounts.push({ startup, workspace });
@@ -687,10 +692,12 @@ async function runStartupUnlockTests() {
     "Wormhole couldn't load the workspace. Try again.",
   );
   assert.equal(mounts.length, 0);
+  assert.equal(startupBitwardenReads, 0, 'failed workspace loads must not start optional CLI work');
   loadWorkspace = async () => ({ connections: [] });
   helloButton().click();
   await settle();
   assert.equal(mounts.length, 1);
+  assert.equal(startupBitwardenReads, 1);
 
   for (const mode of ['pin', 'password']) {
     const checksBeforeMount = checks;
@@ -1056,13 +1063,14 @@ async function runBitwardenStartupTests() {
     },
   };
   let key = 0;
-  const render = async (authorized = true) => {
+  const render = async (authorized = true, initialState = undefined) => {
     await React.act(async () => {
       root.render(
         <React.StrictMode>
           <BitwardenStartupHarness
             key={key}
             authorized={authorized}
+            initialState={initialState}
             onAuthenticated={async () => {
               refreshes++;
               await refresh();
@@ -1072,9 +1080,9 @@ async function runBitwardenStartupTests() {
       );
     });
   };
-  const mount = async (authorized = true) => {
+  const mount = async (authorized = true, initialState = undefined) => {
     key++;
-    await render(authorized);
+    await render(authorized, initialState);
   };
   const dialog = () => document.querySelector('[role="dialog"]');
   const input = async (id, value) => {
@@ -1101,6 +1109,10 @@ async function runBitwardenStartupTests() {
     await React.act(async () => button.click());
   };
   const escape = pressNativeEscape;
+
+  await mount(true, loggedOut);
+  assert.equal(reads, 0, 'a preloaded startup decision must not repeat the Bitwarden check');
+  assert.match(dialog().textContent, /Log in to Bitwarden/);
 
   await mount(false);
   assert.equal(reads, 0, 'Wormhole must unlock before the extension is queried');
