@@ -14202,7 +14202,7 @@ function BitwardenCliDialog({
         <IconButton
           aria-controls={passwordInputId}
           aria-pressed={masterPasswordVisible}
-          className="absolute top-1/2 right-0.5 -translate-y-1/2 text-muted-foreground"
+          className="absolute inset-y-0 right-0.5 my-auto text-muted-foreground active:not-aria-[haspopup]:translate-y-0"
           disabled={loginBusy}
           label={masterPasswordVisible ? 'Hide password' : 'Show password'}
           onClick={() => setMasterPasswordVisible((visible) => !visible)}

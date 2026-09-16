@@ -810,22 +810,37 @@ async function runBitwardenPromptTests() {
       const visibilityButton = () =>
         dialog().querySelector<HTMLButtonElement>(`button[aria-controls="${passwordId}"]`);
       const toggleVisibility = async () => {
+        const button = visibilityButton();
+        const before = button.getBoundingClientRect();
+        const x = Math.round(before.x + before.width / 2);
+        const y = Math.round(before.y + before.height / 2);
         await React.act(async () => {
-          const button = visibilityButton();
-          const bounds = button.getBoundingClientRect();
-          assert.ok(bounds.width > 0 && bounds.height > 0);
-          assert.ok(
-            button.contains(
-              document.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2),
-            ),
-          );
+          assert.ok(before.width > 0 && before.height > 0);
+          assert.ok(button.contains(document.elementFromPoint(x, y)));
           button.focus();
           assert.equal(
             document.activeElement,
             button,
             'password visibility must be keyboard accessible',
           );
-          button.click();
+          const pointerDown = new Promise<void>((resolve) =>
+            button.addEventListener('pointerdown', () => resolve(), { once: true }),
+          );
+          await require('electron').ipcRenderer.invoke('test:mouse', 'mouseDown', x, y);
+          await pointerDown;
+          await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+          const pressed = button.getBoundingClientRect();
+          assert.equal(pressed.x, before.x, 'pressing the visibility button must not move it');
+          assert.equal(pressed.y, before.y, 'pressing the visibility button must not move it');
+
+          const clicked = Promise.race([
+            new Promise<boolean>((resolve) =>
+              button.addEventListener('click', () => resolve(true), { once: true }),
+            ),
+            new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 250)),
+          ]);
+          await require('electron').ipcRenderer.invoke('test:mouse', 'mouseUp', x, y);
+          assert.equal(await clicked, true, 'one pointer click must toggle password visibility');
         });
       };
       assert.equal(passwordInput().type, 'password');
