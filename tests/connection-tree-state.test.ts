@@ -7,12 +7,16 @@ import {
   parseConnectionTreeExpansionSetting,
 } from '../electron/connection-tree-settings.ts';
 import {
+  connectionTreeFolderIsExpanded,
   createConnectionTreeExpansionWriter,
+  filterConnectionTree,
   indexConnectionTree,
+  projectVisibleConnectionTree,
   reconcileExpandedFolderIds,
   restoreExpandedFolderIds,
   serializeConnectionTreeExpansion,
   shouldRenderConnectionTreeChildren,
+  updateConnectionTreeSearchExpansion,
   type ConnectionTreeStateNode,
 } from '../src/connection-tree-state.ts';
 
@@ -28,6 +32,138 @@ const tree: ConnectionTreeStateNode[] = [
   },
 ];
 
+type SearchTreeNode = {
+  id: string;
+  name: string;
+  kind: 'folder' | 'connection';
+  children?: SearchTreeNode[];
+};
+
+const searchTree: SearchTreeNode[] = [
+  {
+    id: 'clients',
+    name: 'Clienti',
+    kind: 'folder',
+    children: [
+      {
+        id: 'finrent',
+        name: 'FINRENT',
+        kind: 'folder',
+        children: [
+          { id: 'waf', name: 'WAF', kind: 'connection' },
+          { id: 'site', name: 'Sito', kind: 'connection' },
+        ],
+      },
+      { id: 'other-client', name: 'Other client', kind: 'folder', children: [] },
+    ],
+  },
+];
+
+test('matching folders retain their complete contents in connection tree searches', () => {
+  const result = filterConnectionTree(searchTree, 'finrent');
+
+  assert.deepEqual(result, [
+    {
+      ...searchTree[0],
+      children: [searchTree[0].children![0]],
+    },
+  ]);
+  assert.equal(result[0].children![0], searchTree[0].children![0]);
+  assert.deepEqual(
+    result[0].children![0].children?.map((node) => node.name),
+    ['WAF', 'Sito'],
+  );
+});
+
+test('connection tree searches still prune unrelated branches for descendant matches', () => {
+  const result = filterConnectionTree(searchTree, 'waf');
+
+  assert.deepEqual(
+    result[0].children?.[0].children?.map((node) => node.name),
+    ['WAF'],
+  );
+  assert.equal(
+    result[0].children?.some((node) => node.id === 'other-client'),
+    false,
+  );
+  assert.deepEqual(filterConnectionTree(searchTree, 'missing'), []);
+  assert.equal(filterConnectionTree(searchTree, ''), searchTree);
+});
+
+test('connection tree search handles deeply nested folders without recursive stack growth', () => {
+  let nested: SearchTreeNode = { id: 'target', name: 'Target', kind: 'connection' };
+  for (let depth = 0; depth < 10_000; depth++) {
+    nested = {
+      id: `folder-${depth}`,
+      name: `Folder ${depth}`,
+      kind: 'folder',
+      children: [nested],
+    };
+  }
+
+  const result = filterConnectionTree([nested], 'target');
+  let current = result[0];
+  let depth = 0;
+  while (current.children?.length) {
+    current = current.children[0];
+    depth++;
+  }
+  assert.equal(depth, 10_000);
+  assert.equal(current.id, 'target');
+});
+
+test('search expansion toggles independently and resets for a different query', () => {
+  const persisted = new Set<string>();
+  const initialSearchState = { query: '', folderOpenById: new Map<string, boolean>() };
+
+  assert.equal(
+    connectionTreeFolderIsExpanded('finrent', '', false, persisted, initialSearchState),
+    false,
+  );
+  assert.equal(
+    connectionTreeFolderIsExpanded('clients', 'finrent', false, persisted, initialSearchState),
+    true,
+  );
+  assert.equal(
+    connectionTreeFolderIsExpanded('finrent', 'finrent', true, persisted, initialSearchState),
+    false,
+  );
+
+  const expanded = updateConnectionTreeSearchExpansion(
+    initialSearchState,
+    'finrent',
+    'finrent',
+    true,
+  );
+  assert.equal(
+    connectionTreeFolderIsExpanded('finrent', 'finrent', true, persisted, expanded),
+    true,
+  );
+  assert.equal(
+    connectionTreeFolderIsExpanded('finrent', 'other', false, persisted, expanded),
+    true,
+  );
+
+  const collapsed = updateConnectionTreeSearchExpansion(expanded, 'finrent', 'finrent', false);
+  assert.equal(
+    connectionTreeFolderIsExpanded('finrent', 'finrent', true, persisted, collapsed),
+    false,
+  );
+  assert.deepEqual([...collapsed.folderOpenById], [['finrent', false]]);
+});
+
+test('collapsed search folders hide descendants from tree actions', () => {
+  const filtered = filterConnectionTree(searchTree, 'finrent');
+  const collapsed = projectVisibleConnectionTree(filtered, (node) => node.id !== 'finrent');
+  assert.deepEqual(collapsed[0].children?.[0].children, []);
+
+  const expanded = projectVisibleConnectionTree(filtered, () => true);
+  assert.deepEqual(
+    expanded[0].children?.[0].children?.map((node) => node.id),
+    ['waf', 'site'],
+  );
+});
+
 test('connection tree rows wire enabled drags to the node drag handler', () => {
   const source = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
   const start = source.indexOf('function renderTree(');
@@ -36,6 +172,10 @@ test('connection tree rows wire enabled drags to the node drag handler', () => {
   const renderer = source.slice(start, end);
   assert.match(renderer, /draggable=\{treeDragEnabled\}/);
   assert.match(renderer, /onDragStart=\{\(event\) => handleTreeDragStart\(event, node\)\}/);
+  assert.match(renderer, /const isExpanded = connectionTreeFolderIsExpanded\(/);
+  assert.match(renderer, /updateConnectionTreeSearchExpansion\(/);
+  assert.match(source, /visibleTree: interactiveVisibleTree/);
+  assert.match(source, /resolveVisibleConnectionTreeSelection\(\s*interactiveVisibleTree,/);
 });
 
 test('tree index collects folders and parents in one traversal', () => {

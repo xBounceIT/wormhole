@@ -323,12 +323,16 @@ import {
   normalizeSidebarWidth,
 } from './sidebar-settings';
 import {
+  connectionTreeFolderIsExpanded,
   createConnectionTreeExpansionWriter,
+  filterConnectionTree,
   indexConnectionTree,
+  projectVisibleConnectionTree,
   reconcileExpandedFolderIds,
   restoreExpandedFolderIds,
   serializeConnectionTreeExpansion,
   shouldRenderConnectionTreeChildren,
+  updateConnectionTreeSearchExpansion,
 } from './connection-tree-state';
 import { connectionAddressForProtocolChange, savedConnectionAddressForEditor } from './web-address';
 import {
@@ -1066,16 +1070,6 @@ function protocolTone(protocol: Protocol) {
     vnc: 'text-muted-foreground/80',
     serial: 'text-foreground/60',
   }[protocol];
-}
-
-function filterTree(nodes: TreeNode[], query: string): TreeNode[] {
-  if (!query) return nodes;
-
-  return nodes.flatMap((node) => {
-    const children = node.children ? filterTree(node.children, query) : [];
-    const matches = node.name.toLowerCase().includes(query);
-    return matches || children.length > 0 ? [{ ...node, children }] : [];
-  });
 }
 
 function collectFolders(nodes: TreeNode[]): TreeNode[] {
@@ -1853,6 +1847,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   );
   const [selectedTreeNodeIds, setSelectedTreeNodeIds] = useState<Set<string>>(() => new Set());
   const [searchText, setSearchText] = useState('');
+  const [connectionTreeSearchExpansion, setConnectionTreeSearchExpansion] = useState(() => ({
+    query: '',
+    folderOpenById: new Map<string, boolean>(),
+  }));
   const [sessions, setSessions] = useState<Session[]>([]);
   const sessionsRef = useRef(sessions);
   useLayoutEffect(() => {
@@ -2005,9 +2003,27 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   const normalizedConnectionTreeSearch = searchText.trim().toLowerCase();
   const connectionTreeSearchActive = normalizedConnectionTreeSearch.length > 0;
   const visibleTree = useMemo(
-    () => filterTree(tree, normalizedConnectionTreeSearch),
+    () => filterConnectionTree(tree, normalizedConnectionTreeSearch),
     [normalizedConnectionTreeSearch, tree],
   );
+  const interactiveVisibleTree = useMemo(() => {
+    if (!connectionTreeSearchActive) return visibleTree;
+    return projectVisibleConnectionTree(visibleTree, (node) =>
+      connectionTreeFolderIsExpanded(
+        node.id,
+        normalizedConnectionTreeSearch,
+        node.name.toLowerCase().includes(normalizedConnectionTreeSearch),
+        expanded,
+        connectionTreeSearchExpansion,
+      ),
+    );
+  }, [
+    connectionTreeSearchActive,
+    connectionTreeSearchExpansion,
+    expanded,
+    normalizedConnectionTreeSearch,
+    visibleTree,
+  ]);
   const editingConnectionHasInlineCredential = useMemo(
     () =>
       editingConnectionId
@@ -3081,7 +3097,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         withinTree: Boolean(target?.closest('[data-connection-tree-shortcut-scope]')),
         deleteBusy: deleteNodeBusy,
         tree,
-        visibleTree,
+        visibleTree: interactiveVisibleTree,
         selectedNodeId,
         selectedNodeIds: [...selectedTreeNodeIds],
       });
@@ -5441,7 +5457,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
 
   function openDeleteNode(node: TreeNode) {
     const selectedIds = resolveVisibleConnectionTreeSelection(
-      visibleTree,
+      interactiveVisibleTree,
       node.id,
       selectedTreeNodeIds.has(node.id) ? [...selectedTreeNodeIds] : [],
     );
@@ -6132,7 +6148,16 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       const isFolder = node.kind === 'folder';
       const protocol = node.protocol ?? 'ssh';
       const isLastSibling = index === nodes.length - 1;
-      const isExpanded = connectionTreeSearchActive || expanded.has(node.id);
+      const isDirectSearchMatch =
+        connectionTreeSearchActive &&
+        node.name.toLowerCase().includes(normalizedConnectionTreeSearch);
+      const isExpanded = connectionTreeFolderIsExpanded(
+        node.id,
+        normalizedConnectionTreeSearch,
+        isDirectSearchMatch,
+        expanded,
+        connectionTreeSearchExpansion,
+      );
       const hasChildren = Boolean(node.children?.length);
       const isTreeNodeSelected = selectedTreeNodeIds.has(node.id);
       const isSelected = node.kind === 'folder' && selectedNodeId === node.id;
@@ -6281,7 +6306,18 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           className="relative py-0.5"
           key={node.id}
           onOpenChange={(value) => {
-            if (!connectionTreeSearchActive) toggleFolder(node.id, value);
+            if (connectionTreeSearchActive) {
+              setConnectionTreeSearchExpansion((current) =>
+                updateConnectionTreeSearchExpansion(
+                  current,
+                  normalizedConnectionTreeSearch,
+                  node.id,
+                  value,
+                ),
+              );
+            } else {
+              toggleFolder(node.id, value);
+            }
           }}
           open={isExpanded}
         >
