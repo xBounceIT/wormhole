@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron';
+import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import type {
   RdpBackendEvent,
   RdpCommandRequest,
@@ -59,6 +59,7 @@ type WorkspaceRdpSettings = {
 
 const wormholeBridge = {
   platform: process.platform,
+  getPathForFile: (file: File) => webUtils.getPathForFile(file),
   loadStartup: (legacyTheme?: 'system' | 'light' | 'dark') =>
     ipcRenderer.invoke('startup:load', { legacyTheme }),
   unlockStartup: (request: { method: 'pin' | 'password'; secret: string }) =>
