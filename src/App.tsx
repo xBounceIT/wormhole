@@ -1686,6 +1686,7 @@ function AuthPrompt({
 
 type WormholeAppProps = {
   initialAuthState: WormholeAuthState;
+  initialBitwardenStartupState: WormholeBitwardenStartupState | null;
   initialWorkspace: WormholeWorkspaceSnapshot;
   initialSettings: WormholeAppSettings;
 };
@@ -1777,7 +1778,12 @@ function backupOperationErrorMessage(error: unknown): string {
 // updates). Folding those state machines into one reducer would couple unrelated transitions, and
 // splitting the coordinator would duplicate the native lifecycle boundary across components.
 // react-doctor-disable-next-line react-doctor/no-giant-component, react-doctor/prefer-useReducer
-function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAppProps) {
+function App({
+  initialAuthState,
+  initialBitwardenStartupState,
+  initialWorkspace,
+  initialSettings,
+}: WormholeAppProps) {
   const [theme, setTheme] = useState<Theme>(initialSettings.theme);
   const [systemTheme, setSystemTheme] = useState<ResolvedTheme>(getSystemTheme);
   const contextMenuOverlayOpen = useContextMenuOverlayOpen();
@@ -1899,6 +1905,13 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   const [bitwardenUnlockBusy, setBitwardenUnlockBusy] = useState(false);
   const [bitwardenUnlockError, setBitwardenUnlockError] = useState('');
   const [bitwardenStartupPromptOpen, setBitwardenStartupPromptOpen] = useState(false);
+  const [bitwardenStartupInitialState, setBitwardenStartupInitialState] = useState<
+    WormholeBitwardenStartupState | null | undefined
+  >(initialBitwardenStartupState);
+  const handleBitwardenStartupPromptOpenChange = useCallback((open: boolean) => {
+    setBitwardenStartupInitialState(undefined);
+    setBitwardenStartupPromptOpen(open);
+  }, []);
   const [mremoteImportOpen, setMremoteImportOpen] = useState(false);
   const [newConnectionOpen, setNewConnectionOpen] = useState(false);
   const [connectionEditorMode, setConnectionEditorMode] = useState<'saved' | 'quick'>('saved');
@@ -6435,8 +6448,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     <TooltipProvider delayDuration={300}>
       {authGate === 'unlocked' ? (
         <BitwardenStartupPrompt
+          initialState={bitwardenStartupInitialState}
           onAuthenticated={refreshWorkspaceCredentials}
-          onOpenChange={setBitwardenStartupPromptOpen}
+          onOpenChange={handleBitwardenStartupPromptOpenChange}
         />
       ) : null}
       {visibleAuthPrompt && authState ? (
@@ -14325,25 +14339,45 @@ function BitwardenCliDialog({
   );
 }
 
+type BitwardenStartupPromptState = {
+  mode: 'login' | 'unlock';
+  serverRegion: WormholeBitwardenCliState['serverRegion'];
+  currentServerRegion: 'US' | 'EU' | null;
+};
+
+function bitwardenStartupPromptState(
+  state: WormholeBitwardenStartupState | null | undefined,
+): BitwardenStartupPromptState | null {
+  if (!state) return null;
+  const mode = bitwardenCliAuthMode(state.status);
+  return mode
+    ? {
+        mode,
+        serverRegion: state.serverRegion,
+        currentServerRegion: bitwardenCliServerRegionCode(state.status.serverUrl),
+      }
+    : null;
+}
+
 function BitwardenStartupPrompt({
+  initialState,
   onAuthenticated,
   onOpenChange,
 }: {
+  initialState: WormholeBitwardenStartupState | null | undefined;
   onAuthenticated: () => Promise<void>;
   onOpenChange: (open: boolean) => void;
 }) {
-  const [prompt, setPrompt] = useState<{
-    mode: 'login' | 'unlock';
-    serverRegion: WormholeBitwardenCliState['serverRegion'];
-    currentServerRegion: 'US' | 'EU' | null;
-  } | null>(null);
+  const [prompt, setPrompt] = useState<BitwardenStartupPromptState | null>(() =>
+    bitwardenStartupPromptState(initialState),
+  );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const active = useRef(false);
   const submitting = useRef(false);
-  const startupRequest = useRef<ReturnType<
-    NonNullable<Window['wormhole']>['readBitwardenStartupState']
-  > | null>(null);
+  const startupRequest = useRef<Promise<WormholeBitwardenStartupState | null> | null>(
+    initialState === undefined ? null : Promise.resolve(initialState),
+  );
   const open = prompt !== null;
 
   useLayoutEffect(() => {
@@ -14362,14 +14396,7 @@ function BitwardenStartupPrompt({
       void startupRequest.current
         .then((state) => {
           if (!current || !state) return;
-          const mode = bitwardenCliAuthMode(state.status);
-          if (mode) {
-            setPrompt({
-              mode,
-              serverRegion: state.serverRegion,
-              currentServerRegion: bitwardenCliServerRegionCode(state.status.serverUrl),
-            });
-          }
+          setPrompt(bitwardenStartupPromptState(state));
         })
         .catch(() => {
           // An unavailable optional vault must not block entry to Wormhole. Its status

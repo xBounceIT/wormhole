@@ -5,6 +5,7 @@ import { ContextMenuOverlayProvider } from './components/ui/context-menu';
 
 type WorkspaceAppProps = {
   initialAuthState: WormholeAuthState;
+  initialBitwardenStartupState: WormholeBitwardenStartupState | null;
   initialWorkspace: WormholeWorkspaceSnapshot;
   initialSettings: WormholeAppSettings;
 };

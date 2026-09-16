@@ -121,6 +121,10 @@ test('authentication and window-close prompts keep errors and controls accessibl
     'utf8',
   ).replace(/^export /gm, '');
   const startupSource = readFileSync(new URL('../src/main.tsx', import.meta.url), 'utf8');
+  const startupGateSource = readFileSync(
+    new URL('../src/bitwarden-startup-gate.ts', import.meta.url),
+    'utf8',
+  ).replace(/^export /gm, '');
   const cardStart = startupSource.indexOf('function renderCard');
   const cardEnd = startupSource.indexOf('function showError', cardStart);
   const unlockStart = startupSource.indexOf('function showUnlock');
@@ -134,10 +138,15 @@ test('authentication and window-close prompts keep errors and controls accessibl
     '                  selectedSession=',
   );
   const bitwardenStartupHarness = `
-    function BitwardenStartupHarness({ authorized, onAuthenticated }) {
+    function BitwardenStartupHarness({ authorized, initialState, onAuthenticated }) {
       const authGate = authorized ? 'unlocked' : 'locked';
       const refreshWorkspaceCredentials = onAuthenticated;
       const [bitwardenStartupPromptOpen, setBitwardenStartupPromptOpen] = useState(false);
+      const [bitwardenStartupInitialState, setBitwardenStartupInitialState] = useState(initialState);
+      const handleBitwardenStartupPromptOpenChange = useCallback((open) => {
+        setBitwardenStartupInitialState(undefined);
+        setBitwardenStartupPromptOpen(open);
+      }, []);
       const mcpApprovals = [];
       const contextMenuOverlayOpen = false, newConnectionOpen = false, folderDetailsOpen = false;
       const newFolderOpen = false, authPrompt = null, rdpCredentialPrompt = null;
@@ -158,6 +167,7 @@ test('authentication and window-close prompts keep errors and controls accessibl
       slice('function clearSecretInput(', 'function credentialSelectionFor(') +
       bitwardenHarness +
       bitwardenStartupHarness +
+      startupGateSource +
       startupSource.slice(cardStart, cardEnd) +
       startupSource.slice(unlockStart, unlockEnd),
     'auth-prompt.tsx',

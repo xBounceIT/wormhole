@@ -5,6 +5,7 @@ import { runInNewContext } from 'node:vm';
 import { transformWithOxc } from 'vite';
 import { readBitwardenStartupState } from '../electron/bitwarden-startup.ts';
 import { bitwardenCliAuthMode } from '../src/bitwarden-cli-view.ts';
+import { prepareWorkspaceStartup } from '../src/bitwarden-startup-gate.ts';
 
 const enabled = { enabled: true, installed: {}, serverRegion: 'Europe' as const };
 const loggedOut = { status: 'Unauthenticated' as const, serverUrl: null, hasSessionKey: false };
@@ -103,6 +104,82 @@ test('startup selects login or unlock from the native vault session, not the HTT
     }
     assert.equal(bitwardenCliAuthMode({ status: 'Unknown', hasSessionKey }), null);
   }
+});
+
+test('workspace startup waits for the Bitwarden decision before exposing the workspace', async () => {
+  let releaseBitwarden!: (state: typeof loggedOut) => void;
+  const bitwarden = new Promise<typeof loggedOut>((resolve) => {
+    releaseBitwarden = resolve;
+  });
+  const workspace = { tree: ['ready'] };
+  let settled = false;
+  const prepared = prepareWorkspaceStartup(
+    { readBitwardenStartupState: () => bitwarden.then((status) => ({ ...enabled, status })) },
+    workspace,
+  ).finally(() => {
+    settled = true;
+  });
+
+  await Promise.resolve();
+  assert.equal(settled, false, 'the workspace became interactive before Bitwarden was ready');
+
+  releaseBitwarden(loggedOut);
+  assert.deepEqual(await prepared, {
+    workspace,
+    bitwarden: { ...enabled, status: loggedOut },
+  });
+});
+
+test('workspace startup remains available when the optional Bitwarden check fails', async () => {
+  const workspace = { tree: ['ready'] };
+  assert.deepEqual(
+    await prepareWorkspaceStartup(
+      {
+        readBitwardenStartupState: async () => {
+          throw new Error('Vault unavailable');
+        },
+      },
+      workspace,
+    ),
+    { workspace, bitwarden: null },
+  );
+});
+
+test('workspace startup never swallows authorization loss as an optional Bitwarden failure', async () => {
+  await assert.rejects(
+    prepareWorkspaceStartup(
+      {
+        readBitwardenStartupState: async () => {
+          throw new Error(
+            "Error invoking remote method 'bitwarden:startup-state': Authentication is required before accessing the Wormhole workspace.",
+          );
+        },
+      },
+      { tree: ['private'] },
+    ),
+    /Authentication is required/,
+  );
+});
+
+test('all initial unlock paths preload Bitwarden before mounting the workspace', () => {
+  const startupSource = readFileSync(new URL('../src/main.tsx', import.meta.url), 'utf8');
+  const appSource = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  assert.equal(
+    startupSource.match(/prepareWorkspaceStartup\(/g)?.length,
+    3,
+    'Windows Hello, secret unlock, and disabled Wormhole auth must all use the startup gate',
+  );
+  assert.equal(
+    startupSource.match(
+      /await mountWorkspace\(startup, prepared\.workspace, prepared\.bitwarden\);/g,
+    )?.length,
+    3,
+  );
+  assert.match(
+    appSource,
+    /useState<BitwardenStartupPromptState \| null>\(\(\) =>\s*bitwardenStartupPromptState\(initialState\)/,
+    'the preloaded prompt must be open on the first workspace render',
+  );
 });
 
 test('the startup IPC handler authorizes access and calls only the credential backend', async () => {
