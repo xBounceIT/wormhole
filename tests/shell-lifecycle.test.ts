@@ -16,6 +16,11 @@ import {
   type McpApprovalBlockingWindow,
   type McpApprovalWindow,
 } from '../electron/mcp-approval-window.ts';
+import {
+  restoreNativeAuthenticationWindow,
+  runWithNativeAuthenticationWindow,
+  type NativeAuthenticationWindow,
+} from '../electron/native-auth-window.ts';
 import { stopChildProcess } from '../electron/rdp.ts';
 import { drainSshBackendSessionIds } from '../electron/ssh-backend-lifecycle.ts';
 import { TunnelLeaseRegistry } from '../electron/tunnel-lease-registry.ts';
@@ -148,6 +153,86 @@ test('unsupported macOS on legacy Intel MacBook Air selects software rendering b
   assert.ok(overrideDecision < modelDetection);
   assert.ok(modelDetection < disableHardwareAcceleration);
   assert.ok(disableHardwareAcceleration < readiness);
+});
+
+test('native authentication always restores a disabled owner window', async () => {
+  const actions: string[] = [];
+  let enabled = false;
+  const window: NativeAuthenticationWindow = {
+    isDestroyed: () => false,
+    isEnabled: () => enabled,
+    setEnabled: (value) => {
+      enabled = value;
+      actions.push(`enabled:${value}`);
+    },
+    focus: () => actions.push('focus'),
+  };
+
+  await assert.rejects(
+    runWithNativeAuthenticationWindow(window, async () => {
+      throw new Error('Windows Hello was canceled.');
+    }),
+    /canceled/,
+  );
+  assert.equal(enabled, true);
+  assert.deepEqual(actions, ['enabled:true', 'focus']);
+
+  actions.length = 0;
+  assert.equal(await runWithNativeAuthenticationWindow(window, async () => 'verified'), 'verified');
+  assert.deepEqual(actions, ['focus']);
+});
+
+test('preempted native authentication restores its owner before approvals continue', async () => {
+  let enabled = false;
+  const window: NativeAuthenticationWindow = {
+    isDestroyed: () => false,
+    isEnabled: () => enabled,
+    setEnabled: (value) => {
+      enabled = value;
+    },
+    focus: () => {},
+  };
+  const coordinator = new McpApprovalWindowCoordinator<McpApprovalBlockingWindow>();
+  const operation = coordinator.runPreemptibleOperation((signal) =>
+    runWithNativeAuthenticationWindow(
+      window,
+      () =>
+        new Promise<never>((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(new Error('canceled')), { once: true });
+        }),
+    ),
+  );
+
+  const presentationReady = coordinator.beginApproval('approval');
+  await presentationReady;
+  assert.equal(enabled, true, 'approval presentation must wait for owner window recovery');
+  await assert.rejects(operation, /canceled/);
+});
+
+test('native authentication window recovery is safe during teardown', () => {
+  const actions: string[] = [];
+  restoreNativeAuthenticationWindow({
+    isDestroyed: () => true,
+    isEnabled: () => {
+      actions.push('enabled');
+      return false;
+    },
+    setEnabled: () => actions.push('set-enabled'),
+    focus: () => actions.push('focus'),
+  });
+  assert.deepEqual(actions, []);
+
+  assert.doesNotThrow(() =>
+    restoreNativeAuthenticationWindow({
+      isDestroyed: () => false,
+      isEnabled: () => false,
+      setEnabled: () => {
+        throw new Error('window closed');
+      },
+      focus: () => actions.push('focus-after-error'),
+    }),
+  );
+  assert.deepEqual(actions, ['focus-after-error']);
 });
 
 test('startup keeps optional native and renderer work off the first-frame path', () => {
@@ -366,7 +451,10 @@ test('MCP approval restores and foregrounds the Wormhole window before notifying
     mainSource.indexOf("ipcMain.handle('auth:hello-verify'"),
     mainSource.indexOf("ipcMain.handle('auth:system-idle'"),
   );
-  assert.match(windowsHelloHandler, /runPreemptibleOperation\(async \(signal\) =>/);
+  assert.match(
+    windowsHelloHandler,
+    /runPreemptibleOperation\(\(signal\) =>[\s\S]*runWithNativeAuthenticationWindow\(ownerWindow/,
+  );
   assert.match(windowsHelloHandler, /'auth-hello-verify',[\s\S]*backendTimeoutMs,[\s\S]*signal/);
   assert.match(windowsHelloHandler, /if \(signal\.aborted\)/);
 

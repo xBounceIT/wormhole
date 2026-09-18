@@ -76,6 +76,7 @@ import {
   workspaceDeleteNodesMaxRequestBytes,
 } from './workspace-delete-contract.js';
 import { KeyedTaskTracker } from './keyed-task-tracker.js';
+import { runWithNativeAuthenticationWindow } from './native-auth-window.js';
 import { shouldDeferExtensionReload } from './extension-reload-policy.js';
 import { encodeTerminalClipboardText, isEncodedSshInput } from './terminal-clipboard.js';
 import {
@@ -8233,23 +8234,25 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       }
       if (!ownerWindow.isVisible()) ownerWindow.show();
       ownerWindow.focus();
-      return mcpApprovalWindowCoordinator.runPreemptibleOperation(async (signal) => {
-        try {
-          const result = await runBackend<{ succeeded: boolean }>(
-            'auth-hello-verify',
-            { ownerWindow: nativeWindowHandle(ownerWindow) },
-            backendTimeoutMs,
-            signal,
-          );
-          if (result.succeeded) authSession.markUnlocked();
-          return result;
-        } catch (error) {
-          if (signal.aborted) {
-            return { succeeded: false, message: 'Windows Hello was canceled.' };
+      return mcpApprovalWindowCoordinator.runPreemptibleOperation((signal) =>
+        runWithNativeAuthenticationWindow(ownerWindow, async () => {
+          try {
+            const result = await runBackend<{ succeeded: boolean }>(
+              'auth-hello-verify',
+              { ownerWindow: nativeWindowHandle(ownerWindow) },
+              backendTimeoutMs,
+              signal,
+            );
+            if (result.succeeded) authSession.markUnlocked();
+            return result;
+          } catch (error) {
+            if (signal.aborted) {
+              return { succeeded: false, message: 'Windows Hello was canceled.' };
+            }
+            throw error;
           }
-          throw error;
-        }
-      });
+        }),
+      );
     });
   });
 
