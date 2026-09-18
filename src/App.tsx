@@ -6938,7 +6938,8 @@ function App({
                     !rdpCredentialPrompt &&
                     !sshCredentialPrompt &&
                     !sshKeyPassphrasePrompt &&
-                    !pendingSessionClose
+                    !pendingSessionClose &&
+                    !pendingWindowClose
                   }
                   selectedSession={selectedSession}
                   sessions={sessions}
