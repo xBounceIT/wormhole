@@ -68,6 +68,12 @@ export function formatBitwardenAuthenticationError(
   if (message.includes('cli is not installed')) {
     return "The Bitwarden CLI isn't installed. Install it from Settings and try again.";
   }
+  if (
+    mode === 'unlock' &&
+    (message.includes('not logged in') || message.includes('unauthenticated'))
+  ) {
+    return 'Bitwarden is logged out. Log in again from Settings.';
+  }
   if (message.includes('timeout') || message.includes('timed out')) {
     return 'Bitwarden took too long to respond. Check your connection and try again.';
   }

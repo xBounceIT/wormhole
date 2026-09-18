@@ -485,6 +485,12 @@ test('Bitwarden authentication errors are concise and do not expose native detai
     formatBitwardenAuthenticationError('The Bitwarden CLI is not installed.', 'login'),
     "The Bitwarden CLI isn't installed. Install it from Settings and try again.",
   );
+  for (const message of ['You are not logged in.', 'Unauthenticated']) {
+    assert.equal(
+      formatBitwardenAuthenticationError(message, 'unlock'),
+      'Bitwarden is logged out. Log in again from Settings.',
+    );
+  }
   assert.equal(
     formatBitwardenAuthenticationError('Unexpected native failure', 'unlock'),
     "Bitwarden couldn't unlock the vault. Please try again.",
