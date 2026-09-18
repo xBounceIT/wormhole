@@ -42,6 +42,10 @@ test('authentication and window-close prompts keep errors and controls accessibl
     '  useEffect(() => {',
     source.indexOf('return window.wormhole?.onWindowCloseConfirmationRequested'),
   );
+  const nativeVisibility = slice(
+    '                  isWebSurfaceVisible={',
+    '                  selectedSession=',
+  );
   const closeHarness = `
     function AppCloseHarness({ locked, onResult }) {
       const authGate = locked ? 'locked' : 'unlocked';
@@ -53,10 +57,16 @@ test('authentication and window-close prompts keep errors and controls accessibl
       ${slice('  const [pendingWindowClose,', '  const sidebarWidth =')}
       ${source.slice(subscriptionStart, source.indexOf('  function reconnectSession', subscriptionStart))}
       ${slice('  const visibleAuthPrompt =', '  const credentialResult =')}
+      const mcpApprovals = [];
+      const bitwardenStartupPromptOpen = false, contextMenuOverlayOpen = false;
+      const newConnectionOpen = false, folderDetailsOpen = false, newFolderOpen = false;
+      const rdpCredentialPrompt = null, sshCredentialPrompt = null;
+      const sshKeyPassphrasePrompt = null, pendingSessionClose = null;
       return <>
         ${source.slice(authMountStart, authMountEnd)}
         ${source.slice(workspaceStart, workspaceEnd)}
           <button id="workspace-action">Workspace action</button>
+          <NativeSurfaceProbe id="close-native-surface-probe" ${nativeVisibility} />
           ${source.slice(closeStart, closeEnd)}
         </div>
       </>;
@@ -133,10 +143,6 @@ test('authentication and window-close prompts keep errors and controls accessibl
   assert.ok(unlockStart >= 0 && unlockEnd > unlockStart);
   const fixture = readFileSync(new URL('./fixtures/auth-prompt.tsx', import.meta.url), 'utf8');
   const bitwardenMount = slice("      {authGate === 'unlocked' ? (", '      {visibleAuthPrompt');
-  const nativeVisibility = slice(
-    '                  isWebSurfaceVisible={',
-    '                  selectedSession=',
-  );
   const bitwardenStartupHarness = `
     function BitwardenStartupHarness({ authorized, initialState, onAuthenticated }) {
       const authGate = authorized ? 'unlocked' : 'locked';
@@ -151,10 +157,11 @@ test('authentication and window-close prompts keep errors and controls accessibl
       const contextMenuOverlayOpen = false, newConnectionOpen = false, folderDetailsOpen = false;
       const newFolderOpen = false, authPrompt = null, rdpCredentialPrompt = null;
       const sshCredentialPrompt = null, sshKeyPassphrasePrompt = null, pendingSessionClose = null;
+      const pendingWindowClose = null;
       return <TooltipProvider>${bitwardenMount}<NativeSurfaceProbe ${nativeVisibility} /></TooltipProvider>;
     }
-    function NativeSurfaceProbe({ isWebSurfaceVisible }) {
-      return <output id="native-surface-probe" data-visible={isWebSurfaceVisible} />;
+    function NativeSurfaceProbe({ id = 'native-surface-probe', isWebSurfaceVisible }) {
+      return <output id={id} data-visible={isWebSurfaceVisible} />;
     }
   `;
   const transformed = await transformWithOxc(

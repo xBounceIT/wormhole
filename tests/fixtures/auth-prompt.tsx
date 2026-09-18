@@ -407,7 +407,13 @@ async function runWindowCloseTests() {
 
   await mount(true);
   assertLocked('initial lock');
+  assert.equal(document.getElementById('close-native-surface-probe').dataset.visible, 'true');
   let pending = await requestClose();
+  assert.equal(
+    document.getElementById('close-native-surface-probe').dataset.visible,
+    'false',
+    'native session surfaces must hide while close confirmation is open',
+  );
   assert.equal(
     document.activeElement?.textContent,
     'Cancel',
@@ -419,6 +425,11 @@ async function runWindowCloseTests() {
   assert.equal(await closeListener({ action: 'window', activeSessionCount: 2 }), false);
   await click('Cancel');
   assert.equal(await pending.result, false);
+  assert.equal(
+    document.getElementById('close-native-surface-probe').dataset.visible,
+    'true',
+    'cancelling close must restore native session surfaces',
+  );
   assert.equal(
     document.activeElement?.id,
     'auth-secret',
