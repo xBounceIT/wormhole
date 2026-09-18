@@ -417,6 +417,18 @@ test('MCP approval restores and foregrounds the Wormhole window before notifying
     webSurfaceManager.indexOf('private async openBitwardenPopupCore'),
     webSurfaceManager.indexOf('async closeBitwardenPopup'),
   );
+  const closeBitwardenPopupFlow = webSurfaceManager.slice(
+    webSurfaceManager.indexOf('async closeBitwardenPopup'),
+    webSurfaceManager.indexOf('private serializeBitwardenStorage'),
+  );
+  const bitwardenStorageCoreFlow = webSurfaceManager.slice(
+    webSurfaceManager.indexOf('private async synchronizeBitwardenStorageCore'),
+    webSurfaceManager.indexOf('private async synchronizeBitwardenStorageInBridge'),
+  );
+  const bitwardenStorageBridgeFlow = webSurfaceManager.slice(
+    webSurfaceManager.indexOf('private async synchronizeBitwardenStorageInBridge'),
+    webSurfaceManager.indexOf('private synchronizeBitwardenStorageInContents'),
+  );
   assert.match(closeBitwardenWindowsFlow, /closeBitwardenPopup\(sessionId\)/);
   assert.match(closeBitwardenWindowsFlow, /bitwardenAuxiliaryWindows\.values\(\)/);
   assert.match(closeBitwardenWindowsFlow, /auxiliary\.window\.destroy\(\)/);
@@ -436,6 +448,40 @@ test('MCP approval restores and foregrounds the Wormhole window before notifying
   );
   const popupShow = openBitwardenPopupFlow.indexOf('popup.setVisible(true)');
   assert.ok(popupLoad < popupApprovalGuard && popupApprovalGuard < popupShow);
+  assert.match(openBitwardenPopupFlow, /popup\.webContents\.once\('destroyed'/);
+  assert.match(
+    openBitwardenPopupFlow,
+    /if \(this\.bitwardenPopups\.get\(sessionId\) !== popup\) return;/,
+  );
+  assert.match(openBitwardenPopupFlow, /this\.closeBitwardenPopup\(sessionId\)/);
+  assert.match(closeBitwardenPopupFlow, /await flushAndCloseBitwardenPopupContents/);
+  assert.match(closeBitwardenPopupFlow, /synchronizeBitwardenStorageInContents/);
+  assert.ok(
+    closeBitwardenPopupFlow.indexOf('await flushAndCloseBitwardenPopupContents') <
+      closeBitwardenPopupFlow.indexOf('await this.synchronizeBitwardenStorageInBridge'),
+  );
+  assert.match(bitwardenStorageCoreFlow, /if \(contents\.isDestroyed\(\)\) return false;/);
+  assert.match(bitwardenStorageCoreFlow, /return true;/);
+  assert.match(
+    bitwardenStorageBridgeFlow,
+    /if \(await this\.synchronizeBitwardenStorageCore\(partition, backgroundContents\)\) return;/,
+  );
+  const bridgeTry = bitwardenStorageBridgeFlow.indexOf(
+    'try {',
+    bitwardenStorageBridgeFlow.indexOf('const bridge = new WebContentsView'),
+  );
+  const bridgeAttach = bitwardenStorageBridgeFlow.indexOf('owner.contentView.addChildView(bridge)');
+  const bridgeFinally = bitwardenStorageBridgeFlow.indexOf('} finally {', bridgeAttach);
+  const bridgeClose = bitwardenStorageBridgeFlow.indexOf(
+    'closeBitwardenPopupContents(bridge)',
+    bridgeFinally,
+  );
+  assert.ok(
+    bridgeTry >= 0 &&
+      bridgeTry < bridgeAttach &&
+      bridgeAttach < bridgeFinally &&
+      bridgeFinally < bridgeClose,
+  );
 
   const tunnelAuth = mainSource.slice(
     mainSource.indexOf('async function runTunnelBrowserAuth'),
