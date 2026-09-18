@@ -56,6 +56,7 @@ import {
   bitwardenCliAuthMode,
   bitwardenCliIsLoggedIn,
   bitwardenCliServerRegionCode,
+  formatBitwardenAuthenticationError,
   formatBitwardenCurrentServerLabel,
   formatBitwardenLoginStatus,
   formatBitwardenSyncResult,
@@ -3450,9 +3451,7 @@ function App({
       setBitwardenUnlockPrompt(null);
       for (const retry of retries) retry();
     } catch (error: unknown) {
-      setBitwardenUnlockError(
-        error instanceof Error ? error.message : 'Bitwarden could not unlock the vault.',
-      );
+      setBitwardenUnlockError(formatBitwardenAuthenticationError(error, 'unlock'));
     } finally {
       setBitwardenUnlockBusy(false);
     }
@@ -11505,7 +11504,13 @@ function CredentialsPage({
         if (!masterPassword || !isBitwardenUnlockError(backendErrorMessage(error))) {
           throw error;
         }
-        await window.wormhole.unlockBitwardenCli(masterPassword);
+        try {
+          await window.wormhole.unlockBitwardenCli(masterPassword);
+        } catch (error) {
+          if (!bitwardenSearchAttempts.current.isCurrent('credential-search', generation)) return;
+          setBitwardenSearchStatus(formatBitwardenAuthenticationError(error, 'unlock'));
+          return;
+        }
         if (!bitwardenSearchAttempts.current.isCurrent('credential-search', generation)) return;
         response = await window.wormhole.searchBitwardenItems(bitwardenQuery);
       }
@@ -14411,7 +14416,7 @@ function BitwardenStartupPrompt({
 
   async function authenticate(
     operation: (api: NonNullable<Window['wormhole']>) => Promise<unknown>,
-    sync: boolean,
+    mode: 'login' | 'unlock',
   ) {
     const api = window.wormhole;
     if (!api || submitting.current) return;
@@ -14424,12 +14429,14 @@ function BitwardenStartupPrompt({
       setPrompt(null);
       // Close the secret prompt as soon as authentication succeeds, before refreshing
       // the catalog. Unlock already synchronizes the vault in the Go service.
-      if (sync) {
+      if (mode === 'login') {
         await api.syncBitwardenCli().catch(() => undefined);
       }
       if (active.current) await onAuthenticated().catch(() => undefined);
     } catch (error) {
-      if (active.current) setError(backendErrorMessage(error));
+      if (active.current) {
+        setError(formatBitwardenAuthenticationError(error, mode));
+      }
     } finally {
       submitting.current = false;
       if (active.current) setBusy(false);
@@ -14454,11 +14461,11 @@ function BitwardenStartupPrompt({
               authenticatorCode: authenticatorCode?.trim() || undefined,
               serverRegion: serverRegion === 'UnitedStates' ? 0 : serverRegion === 'Europe' ? 1 : 2,
             }),
-          true,
+          'login',
         )
       }
       onUnlock={(masterPassword) =>
-        void authenticate((api) => api.unlockBitwardenCli(masterPassword), false)
+        void authenticate((api) => api.unlockBitwardenCli(masterPassword), 'unlock')
       }
     />
   );
@@ -15322,7 +15329,7 @@ function SettingsPage({
           serverRegion: serverRegion === 'UnitedStates' ? 0 : serverRegion === 'Europe' ? 1 : 2,
         });
       } catch (error) {
-        setBitwardenError(backendErrorMessage(error));
+        setBitwardenError(formatBitwardenAuthenticationError(error, 'login'));
         return false;
       }
 
@@ -15360,14 +15367,18 @@ function SettingsPage({
     if (bitwardenBusy || !window.wormhole) return false;
     setBitwardenBusy(true);
     setBitwardenError('');
+    let unlocked = false;
     try {
       await window.wormhole.unlockBitwardenCli(masterPassword);
+      unlocked = true;
       setBitwardenCliDialog(null);
       await reloadBitwardenCliStatus();
       await onWorkspaceCredentialsChanged();
       return true;
     } catch (error) {
-      setBitwardenError(backendErrorMessage(error));
+      setBitwardenError(
+        unlocked ? backendErrorMessage(error) : formatBitwardenAuthenticationError(error, 'unlock'),
+      );
       return false;
     } finally {
       setBitwardenBusy(false);

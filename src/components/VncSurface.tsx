@@ -10,6 +10,7 @@ import {
 import { AlertCircle, KeyRound, LoaderCircle, Monitor, RefreshCcw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { formatBitwardenAuthenticationError } from '@/bitwarden-cli-view';
 import { isBitwardenUnlockError } from '@/runtime-credential-errors';
 import { ConnectionStepper, type TunnelProgress } from './ConnectionStepper';
 
@@ -516,11 +517,12 @@ export function VncSurface({
         await window.wormhole?.unlockBitwardenCli(value);
         await connect();
       } catch (error: unknown) {
-        const message =
-          error instanceof Error ? error.message : 'Bitwarden could not unlock the vault.';
+        const message = formatBitwardenAuthenticationError(error, 'unlock');
         updateStatus('failed');
         setMessage(message);
-        applyBitwardenUnlockRequirement(message, message);
+        const promptAllowed = bitwardenUnlockRequestRef.current.isAuthorized;
+        setBitwardenUnlockRequired(promptAllowed);
+        if (promptAllowed) notifyBitwardenUnlockRequired(message);
       }
       return;
     }

@@ -56,6 +56,68 @@ export function formatBitwardenCurrentServerLabel(region: 'US' | 'EU' | null): s
   return `Current Server${region ? ` (${region})` : ''}`;
 }
 
+export function formatBitwardenAuthenticationError(
+  error: unknown,
+  mode: 'login' | 'unlock',
+): string {
+  const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
+
+  if (message.includes('credential vault is disabled')) {
+    return 'Bitwarden is disabled. Enable it in Settings and try again.';
+  }
+  if (message.includes('cli is not installed')) {
+    return "The Bitwarden CLI isn't installed. Install it from Settings and try again.";
+  }
+  if (message.includes('timeout') || message.includes('timed out')) {
+    return 'Bitwarden took too long to respond. Check your connection and try again.';
+  }
+  if (
+    mode === 'login' &&
+    (message.includes('two-step login is required') ||
+      message.includes('two-step token is invalid') ||
+      message.includes('two-factor authentication is required'))
+  ) {
+    return 'Enter a valid two-step login code and try again.';
+  }
+
+  const credentialsWereRejected = [
+    'invalid master password',
+    'master password is invalid',
+    'master password is incorrect',
+    'invalid credentials',
+    'invalid password',
+    'password is incorrect',
+    'decryption operation failed',
+    'cryptography error',
+    'two-step code',
+    'two factor',
+    'two-factor',
+  ].some((fragment) => message.includes(fragment));
+
+  if (credentialsWereRejected) {
+    return mode === 'unlock'
+      ? "That master password didn't work. Check it and try again."
+      : 'Check your email, master password, and two-step login code, then try again.';
+  }
+
+  const serviceIsUnreachable = [
+    'could not be reached',
+    'cannot reach',
+    'could not connect',
+    'network',
+    'offline',
+    'econn',
+    'enotfound',
+  ].some((fragment) => message.includes(fragment));
+  if (serviceIsUnreachable) {
+    return "Bitwarden couldn't be reached. Check your connection and try again.";
+  }
+
+  return mode === 'unlock'
+    ? "Bitwarden couldn't unlock the vault. Please try again."
+    : "Bitwarden couldn't log in. Please try again.";
+}
+
 export function formatBitwardenSyncResult(result: {
   availableCount: number;
   lastSyncStatus: string;
