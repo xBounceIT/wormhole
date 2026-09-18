@@ -1128,6 +1128,37 @@ async function runBitwardenStartupTests() {
   await mount(true, loggedOut);
   assert.equal(reads, 0, 'a preloaded startup decision must not repeat the Bitwarden check');
   assert.match(dialog().textContent, /Log in to Bitwarden/);
+  const startupPasswordToggle = dialog().querySelector<HTMLButtonElement>(
+    'button[aria-controls="bw-login-password"]',
+  );
+  assert.ok(startupPasswordToggle);
+  const positionalTransitionProperties = new Set([
+    'all',
+    'bottom',
+    'height',
+    'left',
+    'right',
+    'rotate',
+    'scale',
+    'top',
+    'transform',
+    'translate',
+    'width',
+  ]);
+  const positionalTransitionPrefixes = ['inset', 'margin', 'max-', 'min-', 'offset', 'padding'];
+  const positionalTransitions = getComputedStyle(startupPasswordToggle)
+    .transitionProperty.split(',')
+    .map((property) => property.trim())
+    .filter(
+      (property) =>
+        positionalTransitionProperties.has(property) ||
+        positionalTransitionPrefixes.some((prefix) => property.startsWith(prefix)),
+    );
+  assert.deepEqual(
+    positionalTransitions,
+    [],
+    'the startup password toggle must not animate its position',
+  );
 
   await mount(false);
   assert.equal(reads, 0, 'Wormhole must unlock before the extension is queried');
