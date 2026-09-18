@@ -155,9 +155,9 @@ test('unsupported macOS on legacy Intel MacBook Air selects software rendering b
   assert.ok(disableHardwareAcceleration < readiness);
 });
 
-test('native authentication always restores a disabled owner window', async () => {
+test('native authentication restores only an owner that it disabled', async () => {
   const actions: string[] = [];
-  let enabled = false;
+  let enabled = true;
   const window: NativeAuthenticationWindow = {
     isDestroyed: () => false,
     isEnabled: () => enabled,
@@ -170,6 +170,7 @@ test('native authentication always restores a disabled owner window', async () =
 
   await assert.rejects(
     runWithNativeAuthenticationWindow(window, async () => {
+      enabled = false;
       throw new Error('Windows Hello was canceled.');
     }),
     /canceled/,
@@ -180,10 +181,16 @@ test('native authentication always restores a disabled owner window', async () =
   actions.length = 0;
   assert.equal(await runWithNativeAuthenticationWindow(window, async () => 'verified'), 'verified');
   assert.deepEqual(actions, ['focus']);
+
+  actions.length = 0;
+  enabled = false;
+  assert.equal(await runWithNativeAuthenticationWindow(window, async () => 'canceled'), 'canceled');
+  assert.equal(enabled, false);
+  assert.deepEqual(actions, [], 'a different native dialog must keep its owner disabled');
 });
 
 test('preempted native authentication restores its owner before approvals continue', async () => {
-  let enabled = false;
+  let enabled = true;
   const window: NativeAuthenticationWindow = {
     isDestroyed: () => false,
     isEnabled: () => enabled,
@@ -198,6 +205,7 @@ test('preempted native authentication restores its owner before approvals contin
       window,
       () =>
         new Promise<never>((_resolve, reject) => {
+          enabled = false;
           signal.addEventListener('abort', () => reject(new Error('canceled')), { once: true });
         }),
     ),
@@ -211,26 +219,32 @@ test('preempted native authentication restores its owner before approvals contin
 
 test('native authentication window recovery is safe during teardown', () => {
   const actions: string[] = [];
-  restoreNativeAuthenticationWindow({
-    isDestroyed: () => true,
-    isEnabled: () => {
-      actions.push('enabled');
-      return false;
+  restoreNativeAuthenticationWindow(
+    {
+      isDestroyed: () => true,
+      isEnabled: () => {
+        actions.push('enabled');
+        return false;
+      },
+      setEnabled: () => actions.push('set-enabled'),
+      focus: () => actions.push('focus'),
     },
-    setEnabled: () => actions.push('set-enabled'),
-    focus: () => actions.push('focus'),
-  });
+    true,
+  );
   assert.deepEqual(actions, []);
 
   assert.doesNotThrow(() =>
-    restoreNativeAuthenticationWindow({
-      isDestroyed: () => false,
-      isEnabled: () => false,
-      setEnabled: () => {
-        throw new Error('window closed');
+    restoreNativeAuthenticationWindow(
+      {
+        isDestroyed: () => false,
+        isEnabled: () => false,
+        setEnabled: () => {
+          throw new Error('window closed');
+        },
+        focus: () => actions.push('focus-after-error'),
       },
-      focus: () => actions.push('focus-after-error'),
-    }),
+      true,
+    ),
   );
   assert.deepEqual(actions, ['focus-after-error']);
 });
