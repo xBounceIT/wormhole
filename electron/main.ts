@@ -57,6 +57,7 @@ import {
 import {
   afterBitwardenPopupInputEvent,
   closeBitwardenPopupContents,
+  flushAndCloseBitwardenPopupContents,
 } from './bitwarden-popup-lifecycle.js';
 import {
   captureBitwardenExtensionStorage,
@@ -4887,6 +4888,15 @@ class WebSurfaceManager {
     record.owner.on('blur', dismiss);
     record.owner.webContents.on('before-mouse-event', onOwnerMouse);
     record.view.webContents.on('before-mouse-event', onPageMouse);
+    popup.webContents.once('destroyed', () => {
+      // Bitwarden can close its own popup after completing an extension action. Route that path
+      // through the ordinary cleanup so the background page gets a final storage flush and the
+      // renderer does not keep reporting a destroyed popup as open.
+      if (this.bitwardenPopups.get(sessionId) !== popup) return;
+      void this.closeBitwardenPopup(sessionId).catch((error) => {
+        console.warn('[Wormhole] Could not clean up the closed Bitwarden browser popup.', error);
+      });
+    });
     record.owner.contentView.addChildView(popup);
     popup.setVisible(false);
     this.bitwardenPopups.set(sessionId, popup);
@@ -4938,13 +4948,11 @@ class WebSurfaceManager {
     return { open: true };
   }
 
-  async closeBitwardenPopup(
-    sessionId: string,
-    waitForStorageFlush = false,
-  ): Promise<{ open: false }> {
+  async closeBitwardenPopup(sessionId: string): Promise<{ open: false }> {
     const popup = this.bitwardenPopups.get(sessionId);
     const record = this.surfaces.get(sessionId);
     const owner = record?.owner;
+    const bitwarden = record?.bitwarden;
     const dismissHandlers = this.bitwardenPopupDismissHandlers.get(sessionId);
     this.bitwardenPopupDismissHandlers.delete(sessionId);
     if (dismissHandlers) {
@@ -4985,7 +4993,6 @@ class WebSurfaceManager {
       } catch {
         // The owner can already be closing.
       }
-      closeBitwardenPopupContents(popup);
     }
     try {
       if (owner && !owner.isDestroyed() && !owner.webContents.isDestroyed()) {
@@ -4997,20 +5004,34 @@ class WebSurfaceManager {
     } catch {
       // Sending state to a renderer that is closing is unnecessary.
     }
-    const storageFlush =
-      popup && record?.bitwarden && !record.owner.isDestroyed()
-        ? this.synchronizeBitwardenStorageInBridge(
-            record.owner,
-            record.bitwarden.partition,
-            record.bitwarden.popupUrl,
-          ).catch((error) => {
-            console.warn(
-              '[Wormhole] Could not flush Bitwarden browser storage when its popup closed.',
-              error,
-            );
-          })
-        : undefined;
-    if (waitForStorageFlush) await storageFlush;
+    let flushedFromPopup = false;
+    if (popup && bitwarden && owner && !owner.isDestroyed()) {
+      try {
+        flushedFromPopup = await flushAndCloseBitwardenPopupContents(popup, async (contents) => {
+          await this.synchronizeBitwardenStorageInContents(bitwarden.partition, contents);
+        });
+      } catch (error) {
+        console.warn('[Wormhole] Could not flush Bitwarden browser storage from its popup.', error);
+      }
+    } else if (popup) {
+      closeBitwardenPopupContents(popup);
+    }
+    if (!flushedFromPopup && popup && bitwarden && owner && !owner.isDestroyed()) {
+      try {
+        // Bitwarden can close its own extension page after an autofill. In that case the persistent
+        // background page (or a temporary bridge) is the only remaining storage context.
+        await this.synchronizeBitwardenStorageInBridge(
+          owner,
+          bitwarden.partition,
+          bitwarden.popupUrl,
+        );
+      } catch (error) {
+        console.warn(
+          '[Wormhole] Could not flush Bitwarden browser storage when its popup closed.',
+          error,
+        );
+      }
+    }
     return { open: false };
   }
 
@@ -5026,9 +5047,9 @@ class WebSurfaceManager {
   private async synchronizeBitwardenStorageCore(
     partition: string,
     contents: Electron.WebContents,
-  ): Promise<void> {
-    await this.serializeBitwardenStorage(async () => {
-      if (contents.isDestroyed()) return;
+  ): Promise<boolean> {
+    return this.serializeBitwardenStorage(async () => {
+      if (contents.isDestroyed()) return false;
       const profilePath = electronSession.fromPartition(partition).storagePath;
       if (!profilePath)
         throw new Error('Bitwarden browser profile has no persistent storage path.');
@@ -5055,6 +5076,7 @@ class WebSurfaceManager {
           },
         ),
       );
+      return true;
     });
   }
 
@@ -5084,8 +5106,13 @@ class WebSurfaceManager {
         }
       });
       if (backgroundContents) {
-        await this.synchronizeBitwardenStorageCore(partition, backgroundContents);
-        return;
+        try {
+          if (await this.synchronizeBitwardenStorageCore(partition, backgroundContents)) return;
+        } catch (error) {
+          if (!backgroundContents.isDestroyed()) throw error;
+          // The MV2 background page can disappear while waiting behind another profile's storage
+          // transaction. Continue with a fresh extension page in the same persistent partition.
+        }
       }
 
       const bridge = new WebContentsView({
@@ -5100,23 +5127,36 @@ class WebSurfaceManager {
         },
       });
       bridge.webContents.setMaxListeners(bitwardenExtensionHostMaxListeners);
-      owner.contentView.addChildView(bridge);
-      bridge.setBounds({ x: 0, y: 0, width: 1, height: 1 });
-      bridge.setVisible(false);
       try {
+        owner.contentView.addChildView(bridge);
+        bridge.setBounds({ x: 0, y: 0, width: 1, height: 1 });
+        bridge.setVisible(false);
         await withBitwardenBrowserTimeout(
           bridge.webContents.loadURL(popupUrl),
           bitwardenBrowserNavigationTimeoutMs,
           'Bitwarden browser storage page navigation timed out.',
         );
-        await this.synchronizeBitwardenStorageCore(partition, bridge.webContents);
+        if (!(await this.synchronizeBitwardenStorageCore(partition, bridge.webContents))) {
+          throw new Error('Bitwarden browser storage page closed before synchronization.');
+        }
       } finally {
         try {
           owner.contentView.removeChildView(bridge);
         } catch {
           // The owner can already be closing.
         }
-        if (!bridge.webContents.isDestroyed()) bridge.webContents.close();
+        closeBitwardenPopupContents(bridge);
+      }
+    });
+  }
+
+  private synchronizeBitwardenStorageInContents(
+    partition: string,
+    contents: Electron.WebContents,
+  ): Promise<void> {
+    return this.bitwardenStorageTasks.run(partition, async () => {
+      if (!(await this.synchronizeBitwardenStorageCore(partition, contents))) {
+        throw new Error('Bitwarden browser popup closed before storage synchronization.');
       }
     });
   }
@@ -5706,7 +5746,7 @@ class WebSurfaceManager {
       ),
     );
     for (const sessionId of popupSessions) {
-      await this.closeBitwardenPopup(sessionId, true);
+      await this.closeBitwardenPopup(sessionId);
     }
     for (const [sessionId, record] of this.surfaces) {
       if (
@@ -5748,7 +5788,7 @@ class WebSurfaceManager {
     ]);
     const popupSessions = new Set(this.bitwardenPopups.keys());
     for (const sessionId of popupSessions) {
-      await this.closeBitwardenPopup(sessionId, true);
+      await this.closeBitwardenPopup(sessionId);
     }
     for (const [sessionId, record] of this.surfaces) {
       if (popupSessions.has(sessionId) || !record.bitwarden || record.owner.isDestroyed()) continue;

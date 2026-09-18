@@ -28,3 +28,25 @@ export function closeBitwardenPopupContents<TContents extends ClosableWebContent
     // Closing an already-destroyed browser popup is therefore an expected no-op.
   }
 }
+
+export async function flushAndCloseBitwardenPopupContents<TContents extends ClosableWebContents>(
+  popup: PopupContentsHost<TContents> | undefined,
+  flush: (contents: TContents) => Promise<void>,
+): Promise<boolean> {
+  let contents: TContents | undefined;
+  try {
+    contents = popup?.webContents;
+    if (!contents || contents.isDestroyed()) return false;
+  } catch {
+    return false;
+  }
+
+  try {
+    await flush(contents);
+    return true;
+  } finally {
+    // Bitwarden persists its authenticated state from the popup page. Keep that page alive until
+    // the storage transaction completes, then tear it down even when the transaction fails.
+    closeBitwardenPopupContents(popup);
+  }
+}
