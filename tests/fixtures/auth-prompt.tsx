@@ -899,10 +899,14 @@ async function runBitwardenPromptTests() {
       }
       const message =
         mode === 'login' ? 'Username or password is incorrect.' : 'Invalid master password.';
+      const visibleMessage =
+        mode === 'login'
+          ? 'Check your email, master password, and two-step login code, then try again.'
+          : "That master password didn't work. Check it and try again.";
       await React.act(async () => {
         attempt.reject(new Error(message));
       });
-      assertVisibleError(message);
+      assertVisibleError(visibleMessage);
       assert.equal(visibilityButton().disabled, false);
       assert.equal(
         dialog().querySelector<HTMLButtonElement>('button[type="submit"]').disabled,
@@ -917,7 +921,7 @@ async function runBitwardenPromptTests() {
       await React.act(async () => {
         attempt.reject('Bitwarden could not be reached. Please try again.');
       });
-      assertVisibleError('Bitwarden could not be reached. Please try again.');
+      assertVisibleError("Bitwarden couldn't be reached. Check your connection and try again.");
       if (mode === 'login') {
         assert.equal(
           (document.getElementById('bw-login-email') as HTMLInputElement).value,
@@ -1024,7 +1028,10 @@ async function runBitwardenPromptTests() {
         'errors must wrap without horizontal scrolling',
       );
       const alert = form.querySelector<HTMLElement>('[role="alert"]');
-      assert.equal(alert.textContent, message);
+      assert.equal(
+        alert.textContent,
+        "Bitwarden couldn't be reached. Check your connection and try again.",
+      );
       await fill(`bw-${mode}-password`, 'test-only-long-error-retry');
       assert.equal(form.querySelector<HTMLButtonElement>('button[type="submit"]').disabled, false);
       for (const element of [alert, form.querySelector<HTMLElement>('button[type="submit"]')]) {
@@ -1216,7 +1223,10 @@ async function runBitwardenStartupTests() {
   await React.act(async () =>
     rejectedLogin.reject(new Error('Invalid credentials or two-step code')),
   );
-  assert.match(dialog().querySelector('[role="alert"]').textContent, /Invalid credentials/);
+  assert.equal(
+    dialog().querySelector('[role="alert"]').textContent,
+    'Check your email, master password, and two-step login code, then try again.',
+  );
   assert.equal(document.getElementById('bw-login-email').value, 'alice@example.test');
   login = async () => {};
   const syncing = deferred();

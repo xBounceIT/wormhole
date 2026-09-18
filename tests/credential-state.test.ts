@@ -24,6 +24,7 @@ import { hasValidCredentialSecretLength } from '../electron/credential-secret-le
 import {
   bitwardenCliIsLoggedIn,
   bitwardenCliServerRegionCode,
+  formatBitwardenAuthenticationError,
   formatBitwardenCurrentServerLabel,
   formatBitwardenLoginStatus,
   formatBitwardenSyncResult,
@@ -304,6 +305,10 @@ test('credentials page wires the source menu to the tested list projection', () 
   assert.match(credentialsPage, /buildCredentialListProjection\(/);
   assert.match(credentialsPage, /credentialSelectionAfterSelectAll\(/);
   assert.match(credentialsPage, /resetKey=\{credentialListProjection\.resetKey\}/);
+  assert.match(
+    credentialsPage,
+    /catch \(error\) \{\s*if \(!bitwardenSearchAttempts\.current\.isCurrent\('credential-search', generation\)\) return;\s*setBitwardenSearchStatus\(formatBitwardenAuthenticationError\(error, 'unlock'\)\)/,
+  );
 });
 
 test('SSH keys are accepted only by SSH password-capable controls', () => {
@@ -436,6 +441,64 @@ test('Bitwarden current server location recognizes official US and EU hosts', ()
   assert.equal(bitwardenCliServerRegionCode('https://vault.example.com'), null);
   assert.equal(formatBitwardenCurrentServerLabel('US'), 'Current Server (US)');
   assert.equal(formatBitwardenCurrentServerLabel('EU'), 'Current Server (EU)');
+});
+
+test('Bitwarden authentication errors are concise and do not expose native details', () => {
+  const nativeDecryptionError = new Error(
+    "Error invoking remote method 'bitwarden:unlock': Error: ERROR bitwarden_crypto::keys::master_key: The decryption operation failed Cryptography error",
+  );
+  assert.equal(
+    formatBitwardenAuthenticationError(nativeDecryptionError, 'unlock'),
+    "That master password didn't work. Check it and try again.",
+  );
+  assert.equal(
+    formatBitwardenAuthenticationError('Invalid credentials or two-step code', 'login'),
+    'Check your email, master password, and two-step login code, then try again.',
+  );
+  assert.equal(
+    formatBitwardenAuthenticationError('Username or password is incorrect.', 'login'),
+    'Check your email, master password, and two-step login code, then try again.',
+  );
+  assert.equal(
+    formatBitwardenAuthenticationError('Network timeout', 'unlock'),
+    'Bitwarden took too long to respond. Check your connection and try again.',
+  );
+  assert.equal(
+    formatBitwardenAuthenticationError('Could not connect to the server', 'unlock'),
+    "Bitwarden couldn't be reached. Check your connection and try again.",
+  );
+  assert.equal(
+    formatBitwardenAuthenticationError(
+      'Two-step login is required. Please call login with --method and --code.',
+      'login',
+    ),
+    'Enter a valid two-step login code and try again.',
+  );
+  assert.equal(
+    formatBitwardenAuthenticationError(
+      'Bitwarden credential vault is disabled in Settings',
+      'unlock',
+    ),
+    'Bitwarden is disabled. Enable it in Settings and try again.',
+  );
+  assert.equal(
+    formatBitwardenAuthenticationError('The Bitwarden CLI is not installed.', 'login'),
+    "The Bitwarden CLI isn't installed. Install it from Settings and try again.",
+  );
+  for (const message of ['You are not logged in.', 'Unauthenticated']) {
+    assert.equal(
+      formatBitwardenAuthenticationError(message, 'unlock'),
+      'Bitwarden is logged out. Log in again from Settings.',
+    );
+  }
+  assert.equal(
+    formatBitwardenAuthenticationError('Unexpected native failure', 'unlock'),
+    "Bitwarden couldn't unlock the vault. Please try again.",
+  );
+  assert.equal(
+    formatBitwardenAuthenticationError('Unexpected native failure', 'login'),
+    "Bitwarden couldn't log in. Please try again.",
+  );
 });
 
 test('Bitwarden cached sync is presented as a warning instead of a success', () => {
