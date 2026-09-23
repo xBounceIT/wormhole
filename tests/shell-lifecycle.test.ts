@@ -68,6 +68,7 @@ import {
   shouldShowReleaseNotes,
   shouldOfferUpdate,
   unavailableInstallerMessage,
+  updateStatusMessage,
 } from '../src/update-state.ts';
 
 test('unsupported macOS on legacy Intel MacBook Air selects software rendering before ready', () => {
@@ -966,16 +967,14 @@ test('update availability uses the backend version decision from the same result
     latestVersion: '2.1.0',
     isUpdateAvailable: true,
   };
+  const releaseWithoutInstaller = {
+    latestVersion: '2.1.0',
+    isNewerRelease: true,
+    isUpdateAvailable: false,
+  };
   assert.equal(isUpdateInstallable(installable), true);
   assert.equal(shouldShowReleaseNotes({ ...installable, isNewerRelease: true }), true);
-  assert.equal(
-    shouldShowReleaseNotes({
-      latestVersion: '2.1.0',
-      isNewerRelease: true,
-      isUpdateAvailable: false,
-    }),
-    true,
-  );
+  assert.equal(shouldShowReleaseNotes(releaseWithoutInstaller), true);
   assert.equal(
     shouldShowReleaseNotes({
       latestVersion: '2.0.0',
@@ -985,14 +984,22 @@ test('update availability uses the backend version decision from the same result
     false,
   );
   assert.equal(
-    unavailableInstallerMessage({
-      latestVersion: '2.1.0',
-      isNewerRelease: true,
-      isUpdateAvailable: false,
-    }),
+    unavailableInstallerMessage(releaseWithoutInstaller),
     'Wormhole 2.1.0 is available, but no verified installer is published for this platform.',
   );
   assert.equal(unavailableInstallerMessage({ ...installable, isNewerRelease: true }), null);
+  assert.equal(
+    updateStatusMessage('', releaseWithoutInstaller),
+    'Wormhole 2.1.0 is available, but no verified installer is published for this platform.',
+  );
+  assert.equal(
+    updateStatusMessage(
+      "Couldn't reach the update server. Try again later.",
+      releaseWithoutInstaller,
+    ),
+    "Couldn't reach the update server. Try again later.",
+  );
+  assert.equal(updateStatusMessage('', null), '');
   assert.equal(shouldOfferUpdate(installable, null), true);
   assert.equal(shouldOfferUpdate(installable, '2.1.0'), false);
 });

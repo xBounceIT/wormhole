@@ -71,6 +71,7 @@ import {
   shouldShowReleaseNotes,
   shouldOfferUpdate,
   unavailableInstallerMessage,
+  updateStatusMessage,
 } from './update-state';
 import {
   clearTerminalSelectionIfUnchanged,
@@ -16201,11 +16202,7 @@ function SettingsPage({
     update.result && shouldOfferUpdate(update.result, update.skippedUpdateVersion),
   );
   const showReleaseNotes = Boolean(update.result && shouldShowReleaseNotes(update.result));
-  const unavailableInstallerWarning = update.result
-    ? unavailableInstallerMessage(update.result)
-    : null;
-  const updateMessage =
-    update.busy && update.status ? update.status : (unavailableInstallerWarning ?? update.status);
+  const updateMessage = updateStatusMessage(update.status, update.result);
   const backupExportPasswordValid = backupExportPasswordIsValid(
     backupExportPassword,
     backupExportConfirmation,

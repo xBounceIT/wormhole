@@ -31,6 +31,17 @@ export function unavailableInstallerMessage(result: {
     : null;
 }
 
+export function updateStatusMessage(
+  status: string,
+  result: {
+    latestVersion: string;
+    isNewerRelease: boolean;
+    isUpdateAvailable: boolean;
+  } | null,
+): string {
+  return status || (result ? (unavailableInstallerMessage(result) ?? '') : '');
+}
+
 export function shouldOfferUpdate(
   result: { latestVersion: string; isUpdateAvailable: boolean },
   skippedVersion: string | null,
