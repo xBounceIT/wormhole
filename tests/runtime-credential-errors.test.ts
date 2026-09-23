@@ -74,12 +74,12 @@ test('missing SSH account details and local secrets fall back to the credential 
   );
 });
 
-test('transport and saved-credential rejection errors do not open a fallback prompt', () => {
+test('transport and SSH authentication errors do not open a fallback prompt', () => {
   assert.equal(requiresSshCredentialPrompt('SSH connection timed out.'), false);
   assert.equal(requiresSshCredentialPrompt('SSH authentication failed.'), false);
   assert.equal(
     requiresSshCredentialPrompt(
-      'Bitwarden credential was rejected by the SSH server: Permission denied.',
+      'ssh: handshake failed: ssh: unable to authenticate, attempted methods [none], no supported methods remain',
     ),
     false,
   );

@@ -1908,7 +1908,6 @@ function App({
   const [bitwardenUnlockPrompt, setBitwardenUnlockPrompt] = useState<{
     reason: string;
   } | null>(null);
-  const [bitwardenUnlockPassword, setBitwardenUnlockPassword] = useState('');
   const [bitwardenUnlockBusy, setBitwardenUnlockBusy] = useState(false);
   const [bitwardenUnlockError, setBitwardenUnlockError] = useState('');
   const [bitwardenStartupPromptOpen, setBitwardenStartupPromptOpen] = useState(false);
@@ -3004,7 +3003,6 @@ function App({
     rdpSavedCredentialAttempts.current.clear();
     runtimeBitwardenRetries.clear();
     setBitwardenUnlockPrompt(null);
-    setBitwardenUnlockPassword('');
     setBitwardenUnlockError('');
     newFolderParentId.current = null;
     newFolderGeneration.current += 1;
@@ -3473,7 +3471,6 @@ function App({
   function requestRuntimeBitwardenUnlock(key: string, reason: string, retry: () => void) {
     const isFirst = runtimeBitwardenRetries.upsert(key, retry);
     if (isFirst) {
-      setBitwardenUnlockPassword('');
       setBitwardenUnlockError('');
     }
     setBitwardenUnlockPrompt((current) => current ?? { reason });
@@ -3482,18 +3479,14 @@ function App({
   function dismissRuntimeBitwardenUnlock() {
     runtimeBitwardenRetries.clear();
     setBitwardenUnlockPrompt(null);
-    setBitwardenUnlockPassword('');
     setBitwardenUnlockError('');
   }
 
-  async function submitRuntimeBitwardenUnlock(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  async function submitRuntimeBitwardenUnlock(masterPassword: string) {
     const prompt = bitwardenUnlockPrompt;
     if (!prompt || !window.wormhole || bitwardenUnlockBusy) return;
     setBitwardenUnlockBusy(true);
     setBitwardenUnlockError('');
-    const masterPassword = bitwardenUnlockPassword;
-    setBitwardenUnlockPassword('');
     try {
       await window.wormhole.unlockBitwardenCli(masterPassword);
       try {
@@ -8384,55 +8377,13 @@ function App({
           </DialogContent>
         </Dialog>
 
-        <Dialog
-          onOpenChange={(open) => {
-            if (!open && !bitwardenUnlockBusy) {
-              dismissRuntimeBitwardenUnlock();
-            }
-          }}
+        <RuntimeBitwardenUnlockDialog
+          busy={bitwardenUnlockBusy}
+          error={bitwardenUnlockError}
+          onClose={dismissRuntimeBitwardenUnlock}
+          onUnlock={(masterPassword) => void submitRuntimeBitwardenUnlock(masterPassword)}
           open={bitwardenUnlockPrompt !== null}
-        >
-          <DialogContent className="border-border/70 bg-card text-card-foreground sm:max-w-md">
-            <DialogHeader>
-              <DialogTitle>Unlock Bitwarden</DialogTitle>
-              <DialogDescription>
-                This connection uses a Bitwarden login. Unlock the vault to continue.
-              </DialogDescription>
-            </DialogHeader>
-            <form className="grid gap-4" onSubmit={submitRuntimeBitwardenUnlock}>
-              <div className="grid gap-2">
-                <Label htmlFor="runtime-bitwarden-password">Master password</Label>
-                <Input
-                  autoFocus
-                  autoComplete="current-password"
-                  id="runtime-bitwarden-password"
-                  onChange={(event) => setBitwardenUnlockPassword(event.target.value)}
-                  type="password"
-                  value={bitwardenUnlockPassword}
-                />
-              </div>
-              {bitwardenUnlockError ? (
-                <p className="text-[11px] text-destructive" role="alert">
-                  {bitwardenUnlockError}
-                </p>
-              ) : null}
-              <DialogFooter>
-                <Button
-                  disabled={bitwardenUnlockBusy}
-                  onClick={dismissRuntimeBitwardenUnlock}
-                  type="button"
-                  variant="ghost"
-                >
-                  Cancel
-                </Button>
-                <Button disabled={bitwardenUnlockBusy || !bitwardenUnlockPassword} type="submit">
-                  <KeyRound data-icon="inline-start" />
-                  {bitwardenUnlockBusy ? 'Unlocking…' : 'Unlock and connect'}
-                </Button>
-              </DialogFooter>
-            </form>
-          </DialogContent>
-        </Dialog>
+        />
 
         <Dialog
           onOpenChange={(open) => {
@@ -14185,6 +14136,109 @@ function LogLevelSetting({
       </p>
       {error ? <p className="text-[11px] text-destructive">{error}</p> : null}
     </SettingsSection>
+  );
+}
+
+function RuntimeBitwardenUnlockDialog({
+  busy,
+  error,
+  onClose,
+  onUnlock,
+  open,
+}: {
+  busy: boolean;
+  error: string;
+  onClose: () => void;
+  onUnlock: (masterPassword: string) => void;
+  open: boolean;
+}) {
+  const passwordInput = useRef<HTMLInputElement>(null);
+  const [hasPassword, setHasPassword] = useState(false);
+  const [passwordVisible, setPasswordVisible] = useState(false);
+  const passwordInputId = 'runtime-bitwarden-password';
+  const bindPasswordInput = useCallback((input: HTMLInputElement | null) => {
+    clearSecretInput(passwordInput.current);
+    passwordInput.current = input;
+  }, []);
+
+  useLayoutEffect(() => {
+    if (open) return;
+    clearSecretInput(passwordInput.current);
+    setHasPassword(false);
+    setPasswordVisible(false);
+  }, [open]);
+
+  function close() {
+    clearSecretInput(passwordInput.current);
+    setHasPassword(false);
+    setPasswordVisible(false);
+    onClose();
+  }
+
+  return (
+    <Dialog onOpenChange={(nextOpen) => !nextOpen && !busy && close()} open={open}>
+      <DialogContent className="border-border/70 bg-card text-card-foreground sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Unlock Bitwarden</DialogTitle>
+          <DialogDescription>
+            This connection uses a Bitwarden login. Unlock the vault to continue.
+          </DialogDescription>
+        </DialogHeader>
+        <form
+          className="grid gap-4"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (busy) return;
+            const masterPassword = takeOneShotSecret(passwordInput.current);
+            setHasPassword(false);
+            setPasswordVisible(false);
+            if (!masterPassword) return;
+            onUnlock(masterPassword);
+          }}
+        >
+          <div className="grid gap-2">
+            <Label htmlFor={passwordInputId}>Master password</Label>
+            <div className="relative">
+              <Input
+                autoFocus
+                autoComplete="current-password"
+                className="pr-9"
+                id={passwordInputId}
+                onChange={(event) => setHasPassword(event.target.value.length > 0)}
+                ref={bindPasswordInput}
+                spellCheck={false}
+                type={passwordVisible ? 'text' : 'password'}
+              />
+              <IconButton
+                aria-controls={passwordInputId}
+                aria-pressed={passwordVisible}
+                className="absolute inset-y-0 right-0.5 my-auto text-muted-foreground transition-colors active:not-aria-[haspopup]:translate-y-0"
+                disabled={busy}
+                label={passwordVisible ? 'Hide password' : 'Show password'}
+                onClick={() => setPasswordVisible((visible) => !visible)}
+                type="button"
+              >
+                {passwordVisible ? <EyeOff /> : <Eye />}
+              </IconButton>
+            </div>
+          </div>
+          {error ? (
+            <p className="text-[11px] text-destructive" role="alert">
+              {error}
+            </p>
+          ) : null}
+          <DialogFooter>
+            <Button disabled={busy} onClick={close} type="button" variant="ghost">
+              Cancel
+            </Button>
+            <Button disabled={busy || !hasPassword} type="submit">
+              <KeyRound data-icon="inline-start" />
+              {busy ? 'Unlocking…' : 'Unlock and connect'}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
   );
 }
 

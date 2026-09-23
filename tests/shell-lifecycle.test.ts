@@ -1116,10 +1116,10 @@ test('active-session app close uses the renderer shadcn confirmation contract', 
 
 test('log level selector stays mounted and interactive during persistence', () => {
   const appSource = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
-  const settingSource = appSource.slice(
-    appSource.indexOf('function LogLevelSetting'),
-    appSource.indexOf('function BitwardenCliDialog'),
-  );
+  const settingStart = appSource.indexOf('function LogLevelSetting(');
+  const nextFunction = appSource.indexOf('\nfunction ', settingStart + 1);
+  assert.ok(settingStart >= 0 && nextFunction > settingStart);
+  const settingSource = appSource.slice(settingStart, nextFunction);
   const settingsPageSource = appSource.slice(
     appSource.indexOf('function SettingsPage'),
     appSource.indexOf('function UtilityPage'),
