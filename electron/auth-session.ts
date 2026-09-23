@@ -42,12 +42,16 @@ export class AuthSession {
 
   markUnlocked(verificationEpoch = this.epoch): void {
     if (!this.initialized) throw new Error('Authentication state is not initialized.');
-    if (verificationEpoch !== this.epoch) {
-      throw new Error('Wormhole was locked during verification. Please unlock again.');
-    }
+    this.requireVerificationEpoch(verificationEpoch);
     const wasAccessAllowed = this.isAccessAllowed;
     this.unlocked = true;
     this.notifyUnlockIfNeeded(wasAccessAllowed);
+  }
+
+  requireVerificationEpoch(verificationEpoch: number): void {
+    if (verificationEpoch !== this.epoch) {
+      throw new Error('Wormhole was locked during verification. Please unlock again.');
+    }
   }
 
   lock(): void {

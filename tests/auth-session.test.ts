@@ -8,16 +8,30 @@ import { authenticationIdleSeconds } from '../src/auth-idle.ts';
 
 test('IPC verification handlers reject results invalidated by a concurrent idle lock', async () => {
   const source = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
+  const serializeSource = source.slice(
+    source.indexOf('function serializeAuthOperation'),
+    source.indexOf('function serializeAuthStateMutation'),
+  );
   for (const channel of ['startup:unlock', 'auth:verify', 'auth:hello-verify']) {
     for (const outcome of [
       'current',
       'failed',
       'lock',
       'relock',
+      'queued-lock',
+      'queued-relock',
       ...(channel === 'auth:hello-verify' ? ['abort'] : []),
     ]) {
       const session = new AuthSession();
-      session.remember({ configured: true }, outcome === 'lock');
+      session.remember({ configured: true }, outcome === 'lock' || outcome === 'queued-lock');
+      const queued = outcome.startsWith('queued-');
+      let releaseQueue!: () => void;
+      const initialQueue = queued
+        ? new Promise<void>((resolve) => {
+            releaseQueue = resolve;
+          })
+        : Promise.resolve();
+      let backendCalls = 0;
       const controller = new AbortController();
       let finish!: (value: { succeeded: boolean; workspace?: object }) => void;
       let started!: () => void;
@@ -28,39 +42,55 @@ test('IPC verification handlers reject results invalidated by a concurrent idle 
       const first = source.indexOf(`ipcMain.handle('${channel}'`);
       const last = source.indexOf('ipcMain.handle(', first + 1);
       assert.ok(first >= 0 && last > first);
-      runInNewContext(stripTypeScriptTypes(source.slice(first, last)), {
-        ipcMain: {
-          handle: (_channel: string, callback: typeof handler) => {
-            handler = callback;
+      runInNewContext(
+        stripTypeScriptTypes(
+          `let authOperationQueue = initialQueue;\n${serializeSource}\n${source.slice(first, last)}`,
+        ),
+        {
+          ipcMain: {
+            handle: (_channel: string, callback: typeof handler) => {
+              handler = callback;
+            },
+          },
+          process: { platform: 'win32' },
+          initialQueue,
+          ensureAuthSession: async () => {},
+          authSession: session,
+          currentAuthState: { configured: true, mode: 'windowsHello' },
+          BrowserWindow: {
+            fromWebContents: () => ({
+              isDestroyed: () => false,
+              isVisible: () => true,
+              focus: () => {},
+            }),
+          },
+          nativeWindowHandle: () => '123',
+          backendTimeoutMs: 30_000,
+          mcpApprovalWindowCoordinator: {
+            runPreemptibleOperation: (operation: (signal: AbortSignal) => unknown) =>
+              operation(controller.signal),
+          },
+          runWithNativeAuthenticationWindow: (_owner: unknown, operation: () => unknown) =>
+            operation(),
+          runBackend: () => {
+            backendCalls++;
+            if (queued) return Promise.resolve({ succeeded: true, workspace: {} });
+            return new Promise((resolve) => {
+              finish = resolve;
+              started();
+            });
           },
         },
-        process: { platform: 'win32' },
-        serializeAuthOperation: (operation: () => unknown) => operation(),
-        ensureAuthSession: async () => {},
-        authSession: session,
-        currentAuthState: { configured: true, mode: 'windowsHello' },
-        BrowserWindow: {
-          fromWebContents: () => ({
-            isDestroyed: () => false,
-            isVisible: () => true,
-            focus: () => {},
-          }),
-        },
-        nativeWindowHandle: () => '123',
-        backendTimeoutMs: 30_000,
-        mcpApprovalWindowCoordinator: {
-          runPreemptibleOperation: (operation: (signal: AbortSignal) => unknown) =>
-            operation(controller.signal),
-        },
-        runWithNativeAuthenticationWindow: (_owner: unknown, operation: () => unknown) =>
-          operation(),
-        runBackend: () =>
-          new Promise((resolve) => {
-            finish = resolve;
-            started();
-          }),
-      });
+      );
       const pending = handler({ sender: {} }, {});
+      if (queued) {
+        session.lock();
+        releaseQueue();
+        await assert.rejects(pending, /locked during verification/, `${channel}: ${outcome}`);
+        assert.equal(backendCalls, 0, 'a stale queued request must not start native verification');
+        assert.equal(session.isAccessAllowed, false);
+        continue;
+      }
       await ready;
       if (outcome === 'lock' || outcome === 'relock') session.lock();
       if (outcome === 'abort') controller.abort();
