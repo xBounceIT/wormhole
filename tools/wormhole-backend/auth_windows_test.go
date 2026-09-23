@@ -150,6 +150,7 @@ func TestAwaitWindowsHelloResultCoversAsyncStates(t *testing.T) {
 	previousStatus := windowsHelloStatus
 	previousResult := windowsHelloResult
 	previousRelease := windowsHelloRelease
+	previousCancel := windowsHelloCancel
 	previousNow := windowsHelloNow
 	previousSleep := windowsHelloSleep
 	t.Cleanup(func() {
@@ -157,11 +158,19 @@ func TestAwaitWindowsHelloResultCoversAsyncStates(t *testing.T) {
 		windowsHelloStatus = previousStatus
 		windowsHelloResult = previousResult
 		windowsHelloRelease = previousRelease
+		windowsHelloCancel = previousCancel
 		windowsHelloNow = previousNow
 		windowsHelloSleep = previousSleep
 	})
 
 	released := make(map[uintptr]int)
+	cancelled := 0
+	windowsHelloCancel = func(object uintptr) {
+		if object != 22 {
+			t.Fatalf("cancelled unexpected async object: %d", object)
+		}
+		cancelled++
+	}
 	windowsHelloRelease = func(object uintptr) { released[object]++ }
 	windowsHelloQuery = func(_ uintptr, _ *windowsGUID, output *uintptr) (uintptr, error) {
 		*output = 22
@@ -183,6 +192,9 @@ func TestAwaitWindowsHelloResultCoversAsyncStates(t *testing.T) {
 	}
 	if released[11] != 1 || released[22] != 1 {
 		t.Fatalf("released COM objects = %#v", released)
+	}
+	if cancelled != 0 {
+		t.Fatal("completed verification was cancelled")
 	}
 
 	for _, test := range []struct {
@@ -251,10 +263,14 @@ func TestAwaitWindowsHelloResultCoversAsyncStates(t *testing.T) {
 	if _, err := awaitWindowsHelloResult(11); err == nil {
 		t.Fatal("Hello timeout was ignored")
 	}
+	if cancelled != 3 {
+		t.Fatalf("expected cancellation on unknown status, status failure and timeout, got %d", cancelled)
+	}
 }
 
 func TestComCallsRejectInvalidObjects(t *testing.T) {
 	comRelease(0)
+	cancelWindowsHelloOperation(0)
 	var output uintptr
 	if _, err := comQueryInterface(0, &iidAsyncInfo, &output); err == nil {
 		t.Fatal("invalid query object was accepted")

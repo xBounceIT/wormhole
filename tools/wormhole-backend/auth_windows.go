@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -45,6 +46,7 @@ var (
 	windowsHelloStatus     = readWindowsHelloStatus
 	windowsHelloResult     = readWindowsHelloResult
 	windowsHelloRelease    = comRelease
+	windowsHelloCancel     = cancelWindowsHelloOperation
 	windowsHelloNow        = time.Now
 	windowsHelloSleep      = time.Sleep
 )
@@ -181,6 +183,10 @@ func parseOwnerWindow(value string) (uintptr, error) {
 }
 
 func callWindowsHelloOperation(verify bool, message string, ownerWindow uintptr) (uint32, error) {
+	// WinRT initialization and every COM call must stay on the same OS thread,
+	// including across the sleeps while waiting for biometric verification.
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	initialized := false
 	result, _, _ := roInitialize.Call(1) // RO_INIT_MULTITHREADED
 	if result == 0 || result == 1 {
@@ -262,6 +268,12 @@ func awaitWindowsHelloResult(operation uintptr) (uint32, error) {
 		return 0, errors.New("Windows Hello async operation is unavailable")
 	}
 	defer windowsHelloRelease(asyncInfo)
+	completed := false
+	defer func() {
+		if !completed {
+			windowsHelloCancel(asyncInfo)
+		}
+	}()
 
 	deadline := windowsHelloNow().Add(30 * time.Second)
 	for {
@@ -271,14 +283,17 @@ func awaitWindowsHelloResult(operation uintptr) (uint32, error) {
 		}
 		switch status {
 		case asyncCompleted:
+			completed = true
 			value, err := windowsHelloResult(operation)
 			if err != nil {
 				return 0, errors.New("Windows Hello result could not be read")
 			}
 			return value, nil
 		case asyncCanceled:
+			completed = true
 			return 6, nil
 		case asyncError:
+			completed = true
 			return 0, errors.New("Windows Hello verification failed")
 		case asyncStarted:
 			if windowsHelloNow().After(deadline) {
@@ -289,6 +304,11 @@ func awaitWindowsHelloResult(operation uintptr) (uint32, error) {
 			return 0, errors.New("Windows Hello returned an unknown status")
 		}
 	}
+}
+
+func cancelWindowsHelloOperation(asyncInfo uintptr) {
+	// IAsyncInfo.Cancel: release alone does not dismiss a pending native prompt.
+	_, _ = comCall(asyncInfo, 9)
 }
 
 func readWindowsHelloStatus(asyncInfo uintptr) (uint32, error) {

@@ -20,6 +20,7 @@ import {
   type ReactNode,
 } from 'react';
 import './index.css';
+import { authenticationIdleSeconds } from './auth-idle';
 import { McpApprovalDialog } from './components/McpApprovalDialog';
 import {
   applySessionMcpAccess,
@@ -1829,6 +1830,7 @@ function App({
   }, []);
   const idleCheckInFlight = useRef(false);
   const lastActivityAt = useLazyRef(Date.now);
+  const lastUnlockedAt = useLazyRef(Date.now);
   const quickConnectSubmitInFlight = useRef(false);
   const sshCredentialSubmitInFlight = useRef(false);
   const sshHostKeyTrustInFlight = useRef(new Set<string>());
@@ -2347,6 +2349,7 @@ function App({
         setAuthGate('unlocked');
         setLockReason('Unlock Wormhole to continue.');
         lastActivityAt.current = Date.now();
+        lastUnlockedAt.current = lastActivityAt.current;
       }
       return;
     }
@@ -2934,15 +2937,23 @@ function App({
       return;
     }
 
+    let active = true;
     const checkIdle = async () => {
       if (idleCheckInFlight.current || !window.wormhole) return;
       idleCheckInFlight.current = true;
       try {
         const systemIdle = await window.wormhole.getSystemIdleSeconds();
-        const localIdle = Math.max(0, (Date.now() - lastActivityAt.current) / 1000);
-        if (Math.max(systemIdle.seconds, localIdle) >= (timeoutMinutes ?? 0) * 60) {
+        if (!active) return;
+        const idle = authenticationIdleSeconds(
+          systemIdle.seconds,
+          lastActivityAt.current,
+          lastUnlockedAt.current,
+          Date.now(),
+        );
+        if (idle >= timeoutMinutes * 60) {
           try {
             await window.wormhole.lockAuthentication();
+            settleAuthConfirmation(false);
             setLockReason('Locked after inactivity.');
             setAuthGate('locked');
           } catch {
@@ -2958,8 +2969,11 @@ function App({
     };
 
     const timer = window.setInterval(() => void checkIdle(), 15_000);
-    return () => window.clearInterval(timer);
-  }, [authGate, authState, lastActivityAt]);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [authGate, authState, lastActivityAt, lastUnlockedAt, settleAuthConfirmation]);
 
   useEffect(() => {
     if (authGate === 'unlocked') return;

@@ -4,6 +4,10 @@ declare const React: typeof import('react');
 declare const createRoot: typeof import('react-dom/client').createRoot;
 declare const assert: typeof import('node:assert/strict');
 declare const retainedStateValues: string[];
+declare function IdleLockHarness(props: {
+  confirmation?: boolean;
+  onConfirmation?: (value: boolean) => void;
+}): import('react').ReactElement;
 declare function AuthPrompt(props: Record<string, unknown>): import('react').ReactElement;
 declare function AppCloseHarness(props: Record<string, unknown>): import('react').ReactElement;
 declare function BitwardenSettingsHarness(
@@ -1361,7 +1365,172 @@ async function runBitwardenStartupTests() {
   await React.act(async () => root.unmount());
 }
 
+async function runIdleLockTests() {
+  const root = createRoot(document.getElementById('root'));
+  const originalNow = Date.now;
+  const originalInterval = window.setInterval;
+  const originalClear = window.clearInterval;
+  let now = 600_000;
+  let tick: () => void;
+  let finishHello: (value: { succeeded: boolean }) => void;
+  let locks = 0;
+  let failIdle = true;
+  let failLock = true;
+  let sample = async () => {
+    if (failIdle) throw new Error('idle sample unavailable');
+    return { seconds: now / 1000 };
+  };
+  Date.now = () => now;
+  window.setInterval = ((callback: () => void) => {
+    tick = callback;
+    return 1;
+  }) as typeof window.setInterval;
+  window.clearInterval = () => {};
+  window.wormhole = {
+    getSystemIdleSeconds: () => sample(),
+    lockAuthentication: async () => {
+      if (failLock) throw new Error('lock failed');
+      locks++;
+    },
+    checkWindowsHello: async () => ({ available: true, message: '' }),
+    verifyWindowsHello: () =>
+      new Promise((resolve) => {
+        finishHello = resolve;
+      }),
+  } as unknown as typeof window.wormhole;
+  try {
+    await React.act(async () => {
+      root.render(<IdleLockHarness />);
+    });
+    now += 60_000;
+    await React.act(async () => {
+      tick();
+    });
+    assert.equal(locks, 0, 'failed samples must not lock');
+    failIdle = false;
+    await React.act(async () => {
+      tick();
+    });
+    assert.equal(
+      document.querySelector('dialog:modal'),
+      null,
+      'failed native locks must not show a lock screen',
+    );
+    failLock = false;
+    await React.act(async () => {
+      tick();
+    });
+    assert.equal(locks, 1);
+    assert.ok(document.querySelector('dialog:modal'));
+    assert.equal(document.getElementById('idle-workspace-action').parentElement.inert, true);
+    await React.act(async () => {
+      finishHello({ succeeded: true });
+    });
+    assert.equal(document.querySelector('dialog:modal'), null);
+    const action = document.getElementById('idle-workspace-action');
+    assert.equal(action.parentElement.inert, false);
+    const rect = action.getBoundingClientRect();
+    assert.equal(
+      document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2),
+      action,
+    );
+    now += 15_000;
+    await React.act(async () => {
+      tick();
+    });
+    assert.equal(locks, 1, 'Hello unlock must not immediately relock on stale Windows idle time');
+    now += 45_000;
+    await React.act(async () => {
+      tick();
+    });
+    assert.equal(locks, 2, 'the next full idle period must still lock');
+    await React.act(async () => {
+      finishHello({ succeeded: false });
+    });
+    assert.ok(document.querySelector('dialog:modal'), 'failed Hello must stay locked');
+    await React.act(async () => {
+      [...document.querySelectorAll('button')]
+        .find((button) => /Use Windows Hello/.test(button.textContent))
+        .click();
+    });
+    await React.act(async () => {
+      finishHello({ succeeded: true });
+    });
+    let finishSample: (value: { seconds: number }) => void;
+    sample = () =>
+      new Promise((resolve) => {
+        finishSample = resolve;
+      });
+    await React.act(async () => {
+      tick();
+      tick();
+    });
+    await React.act(async () => {
+      root.unmount();
+      finishSample({ seconds: 1000 });
+    });
+    assert.equal(locks, 2, 'an idle result arriving after unmount must be ignored');
+  } finally {
+    await React.act(async () => root.unmount());
+    Date.now = originalNow;
+    window.setInterval = originalInterval;
+    window.clearInterval = originalClear;
+  }
+}
+
+async function runIdleConfirmationTests() {
+  const root = createRoot(document.getElementById('root'));
+  const originalNow = Date.now,
+    originalInterval = window.setInterval,
+    originalClear = window.clearInterval;
+  let now = 0;
+  let tick: () => void;
+  const results: boolean[] = [];
+  const verifications: Array<(value: { succeeded: boolean }) => void> = [];
+  Date.now = () => now;
+  window.setInterval = ((callback: () => void) => {
+    tick = callback;
+    return 1;
+  }) as typeof window.setInterval;
+  window.clearInterval = () => {};
+  window.wormhole = {
+    getSystemIdleSeconds: async () => ({ seconds: now / 1000 }),
+    lockAuthentication: async () => {},
+    checkWindowsHello: async () => ({ available: true, message: '' }),
+    verifyWindowsHello: () => new Promise((resolve) => verifications.push(resolve)),
+  } as unknown as typeof window.wormhole;
+  try {
+    await React.act(async () => {
+      root.render(<IdleLockHarness confirmation onConfirmation={(value) => results.push(value)} />);
+    });
+    assert.equal(verifications.length, 1);
+    now = 60_000;
+    await React.act(async () => {
+      tick();
+    });
+    assert.deepEqual(results, [false], 'idle locking must cancel the old confirmation');
+    assert.equal(verifications.length, 2, 'the lock must request a fresh verification');
+    await React.act(async () => {
+      verifications[0]({ succeeded: true });
+    });
+    assert.equal(document.getElementById('idle-workspace-action').parentElement.inert, true);
+    assert.deepEqual(results, [false], 'late confirmation must not authorize the sensitive action');
+    await React.act(async () => {
+      verifications[1]({ succeeded: true });
+    });
+    assert.equal(document.querySelector('dialog:modal'), null);
+    assert.equal(document.getElementById('idle-workspace-action').parentElement.inert, false);
+  } finally {
+    await React.act(async () => root.unmount());
+    Date.now = originalNow;
+    window.setInterval = originalInterval;
+    window.clearInterval = originalClear;
+  }
+}
+
 runAuthPromptTests()
+  .then(runIdleLockTests)
+  .then(runIdleConfirmationTests)
   .then(runWindowCloseTests)
   .then(runStartupUnlockTests)
   .then(runBitwardenPromptTests)

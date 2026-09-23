@@ -45,6 +45,15 @@ protect the verifier document. Windows Hello remains Windows-only, uses the
 Electron window as the native verification dialog owner, and always falls back
 to the configured PIN or password elsewhere.
 
+Authentication regression tests simulate Hello results while exercising the real
+React modal, idle timer, and Chromium hit testing. Native owner recovery tests
+model Electron's cached enabled flag separately from the HWND state. Go tests
+cover async completion, cancellation, errors, and timeout cleanup. The WinRT
+activation boundary (including OS-thread affinity) requires manual testing with
+a configured Windows Hello device and is excluded from automated coverage.
+Check timeout unlock, cancellation, and PIN fallback, then confirm the workspace
+accepts clicks and stays unlocked for a full new idle period.
+
 The Credentials page supports creating, editing, and deleting password profiles
 for SSH, RDP, and VNC plus local SSH-key profiles. Passwords and optional key
 passphrases cross only the isolated preload bridge. For key imports the renderer
