@@ -49,5 +49,5 @@ test('connections menu opens the wired mRemoteNG dialog', async () => {
   const source = await readFile(new URL('../src/App.tsx', import.meta.url), 'utf8');
   assert.match(source, /DropdownMenuItem onClick=\{\(\) => setMremoteImportOpen\(true\)\}/);
   assert.match(source, /<MRemoteImportDialog/);
-  assert.match(source, /onImported=\{applyWorkspaceSnapshot\}/);
+  assert.match(source, /onImported=\{refreshWorkspace\}/);
 });

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { stripTypeScriptTypes } from 'node:module';
+import { WorkspaceRefreshCoordinator } from '../src/workspace-refresh.ts';
 
 import {
   canonicalizeConnectionTreeNodeIds,
@@ -422,7 +423,14 @@ test('tree drop commits before refreshing and leaves the tree intact on save fai
   const start = source.indexOf('  async function handleTreeDrop(');
   const end = source.indexOf('  function handleTreeDragEnd', start);
   assert.ok(start >= 0 && end > start);
-  const handler = stripTypeScriptTypes(source.slice(start, end));
+  const refreshStart = source.indexOf('  async function refreshWorkspace(');
+  const refreshEnd = source.indexOf(
+    '  async function saveRuntimeConnectionCredential(',
+    refreshStart,
+  );
+  const handler = stripTypeScriptTypes(
+    source.slice(start, end) + source.slice(refreshStart, refreshEnd),
+  );
   for (const scenario of [
     'saved',
     'local',
@@ -465,6 +473,7 @@ test('tree drop commits before refreshing and leaves the tree intact on save fai
       draggedNodeIds: ['source', 'other'],
       searchText: '',
       tree: nodes,
+      workspaceRefresh: new WorkspaceRefreshCoordinator(),
       treeMovePending: { current: false },
       treeRef: { current: nodes },
       window: { wormhole: scenario === 'unavailable' ? undefined : api },
@@ -535,6 +544,7 @@ test('a pending tree move blocks a second drop until its refresh completes', asy
     draggedNodeIds: ['source'],
     searchText: '',
     tree,
+    workspaceRefresh: new WorkspaceRefreshCoordinator(),
     treeMovePending: { current: false },
     treeRef: { current: tree },
     window: {
@@ -561,9 +571,14 @@ test('a pending tree move blocks a second drop until its refresh completes', asy
     setSelectedNodeId: () => {},
     toggleFolder: () => {},
   };
+  const refreshStart = source.indexOf('  async function refreshWorkspace(');
+  const refreshEnd = source.indexOf(
+    '  async function saveRuntimeConnectionCredential(',
+    refreshStart,
+  );
   const drop = new Function(
     ...Object.keys(bindings),
-    `${stripTypeScriptTypes(source.slice(start, end))}; return handleTreeDrop;`,
+    `${stripTypeScriptTypes(source.slice(start, end) + source.slice(refreshStart, refreshEnd))}; return handleTreeDrop;`,
   )(...Object.values(bindings));
   const first = drop({ preventDefault() {} }, { id: 'deep', persisted: true });
   await loadingStarted;
@@ -576,52 +591,160 @@ test('a pending tree move blocks a second drop until its refresh completes', asy
   assert.equal(saveCount, 2, 'a completed move must release the guard');
 });
 
-test('tree moves retry snapshots superseded by a concurrent tree change', async () => {
-  const source = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
-  const start = source.indexOf('  async function handleTreeDrop(');
-  const end = source.indexOf('  function handleTreeDragEnd', start);
-  const tree = [{ id: 'source', persisted: true }];
-  const treeRef = { current: tree };
-  let loads = 0;
-  const applied: unknown[] = [];
-  const bindings = {
-    draggedNodeIds: ['source'],
-    searchText: '',
-    treeRef,
-    treeMovePending: { current: false },
-    window: {
-      wormhole: {
-        async moveWorkspaceNodes() {
-          return { moved: true };
-        },
-        async loadWorkspace() {
-          loads++;
-          if (loads === 1) treeRef.current = [{ id: 'concurrent-change', persisted: true }];
-          return { revision: loads };
-        },
-      },
-    },
-    getTreeDropPlacement: () => 'inside',
-    canDropTreeNodes: () => true,
-    findTreeNode: () => tree[0],
-    applyWorkspaceSnapshot: (value: unknown) => applied.push(value),
-    setTreeMoveError: () => {},
-    setDraggedNodeIds: () => {},
-    setDropTarget: () => {},
-    setSelectedNodeId: () => {},
-    toggleFolder: () => {},
-  };
-  const drop = new Function(
-    ...Object.keys(bindings),
-    `${stripTypeScriptTypes(source.slice(start, end))}; return handleTreeDrop;`,
-  )(...Object.values(bindings));
-  await drop({ preventDefault() {} }, { id: 'deep', persisted: true });
-  assert.deepEqual(applied, [{ revision: 2 }]);
-});
-
 test('tree move errors are rendered in the visible connection sidebar', () => {
   const source = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
   const start = source.indexOf('<SidebarContent');
   const sidebar = source.slice(start, source.indexOf('</SidebarContent>', start));
   assert.match(sidebar, /role="alert"[\s\S]*?\{treeMoveError\}/);
+});
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+test('workspace refresh ignores an older success or failure even when it completes last', async () => {
+  for (const staleFails of [false, true]) {
+    const coordinator = new WorkspaceRefreshCoordinator();
+    const old = deferred<string>();
+    const applied: string[] = [];
+    const first = coordinator.refresh(
+      () => old.promise,
+      (value) => applied.push(value),
+    );
+    assert.equal(
+      await coordinator.refresh(
+        async () => 'after move',
+        (value) => applied.push(value),
+      ),
+      true,
+    );
+    if (staleFails) old.reject(new Error('stale failure'));
+    else old.resolve('before move');
+    assert.equal(await first, false);
+    assert.deepEqual(applied, ['after move']);
+  }
+});
+
+test('workspace invalidation and a failed newest refresh never resurrect an older snapshot', async () => {
+  for (const failNewest of [false, true]) {
+    const coordinator = new WorkspaceRefreshCoordinator();
+    const old = deferred<string>();
+    const applied: string[] = [];
+    const pending = coordinator.refresh(
+      () => old.promise,
+      (value) => applied.push(value),
+    );
+    if (failNewest) {
+      await assert.rejects(
+        coordinator.refresh(
+          async () => {
+            throw new Error('latest failed');
+          },
+          () => {},
+        ),
+        /latest failed/,
+      );
+    } else coordinator.invalidate();
+    old.resolve('stale');
+    assert.equal(await pending, false);
+    assert.deepEqual(applied, []);
+    assert.equal(
+      await coordinator.refresh(
+        async () => 'recovered',
+        (value) => applied.push(value),
+      ),
+      true,
+    );
+    assert.deepEqual(applied, ['recovered']);
+  }
+});
+
+test('a duplicate refresh completing after a committed move cannot revert the tree', async () => {
+  const source = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  const extract = (start: string, end: string) => {
+    const from = source.indexOf(start);
+    const to = source.indexOf(end, from);
+    assert.ok(from >= 0 && to > from);
+    return source.slice(from, to);
+  };
+  const code = stripTypeScriptTypes(
+    extract('  async function handleTreeDrop(', '  function handleTreeDragEnd') +
+      extract('  function duplicateConnection(', '  function openEditConnection') +
+      extract(
+        '  async function refreshWorkspace(',
+        '  async function saveRuntimeConnectionCredential',
+      ),
+  );
+  const old = deferred<{ revision: number }>();
+  const started = deferred<void>();
+  const node = { id: 'source', kind: 'connection', persisted: true };
+  const applied: number[] = [];
+  let loads = 0;
+  const bindings = {
+    workspaceRefresh: new WorkspaceRefreshCoordinator(),
+    treeMovePending: { current: false },
+    treeRef: { current: [node] },
+    draggedNodeIds: ['source'],
+    searchText: '',
+    window: {
+      wormhole: {
+        async duplicateWorkspaceNode() {
+          return { nodeId: 'copy', name: 'Copy' };
+        },
+        async moveWorkspaceNodes() {
+          return { moved: true };
+        },
+        async loadWorkspace() {
+          loads++;
+          if (loads === 1) {
+            started.resolve();
+            return old.promise;
+          }
+          return { revision: 2 };
+        },
+      },
+    },
+    canDropTreeNodes: () => true,
+    getTreeDropPlacement: () => 'inside',
+    findTreeNode: () => node,
+    applyWorkspaceSnapshot: (snapshot: { revision: number }) => applied.push(snapshot.revision),
+    setTreeMoveError: () => {},
+    setSelectedNodeId: () => {},
+    setSelectedTreeNodeIds: () => {},
+    setDraggedNodeIds: () => {},
+    setDropTarget: () => {},
+    toggleFolder: () => {},
+    setTree: () => assert.fail('stale refresh must not trigger local fallback'),
+    setEditorError: () => assert.fail('stale refresh must not report an error'),
+  };
+  const { drop, duplicate } = new Function(
+    ...Object.keys(bindings),
+    `${code};return {drop:handleTreeDrop,duplicate:duplicateConnection};`,
+  )(...Object.values(bindings));
+  duplicate(node);
+  await started.promise;
+  await drop({ preventDefault() {} }, { id: 'deep', persisted: true });
+  assert.deepEqual(applied, [2]);
+  old.resolve({ revision: 1 });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(applied, [2]);
+});
+
+test('all mounted-workspace snapshot loads use the shared refresh coordinator', () => {
+  const source = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  const importer = readFileSync(
+    new URL('../src/components/MRemoteImportDialog.tsx', import.meta.url),
+    'utf8',
+  );
+  assert.equal(source.match(/\.loadWorkspace\(/g)?.length, 1);
+  assert.doesNotMatch(importer, /\.loadWorkspace\(/);
+  assert.match(source, /onBackupImported=\{\(\) => refreshWorkspace\(true\)\}/);
+  assert.match(source, /onImported=\{refreshWorkspace\}/);
+  assert.match(importer, /await onImported\(\)/);
 });
