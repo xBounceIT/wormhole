@@ -65,6 +65,7 @@ import {
 import {
   hasNewerReleaseWithoutInstaller,
   isUpdateInstallable,
+  shouldShowReleaseNotes,
   shouldOfferUpdate,
 } from '../src/update-state.ts';
 
@@ -965,6 +966,23 @@ test('update availability uses the backend version decision from the same result
     isUpdateAvailable: true,
   };
   assert.equal(isUpdateInstallable(installable), true);
+  assert.equal(shouldShowReleaseNotes({ ...installable, isNewerRelease: true }), true);
+  assert.equal(
+    shouldShowReleaseNotes({
+      latestVersion: '2.1.0',
+      isNewerRelease: true,
+      isUpdateAvailable: false,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldShowReleaseNotes({
+      latestVersion: '2.0.0',
+      isNewerRelease: false,
+      isUpdateAvailable: false,
+    }),
+    false,
+  );
   assert.equal(shouldOfferUpdate(installable, null), true);
   assert.equal(shouldOfferUpdate(installable, '2.1.0'), false);
 });

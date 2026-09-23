@@ -13,6 +13,14 @@ export function isUpdateInstallable(result: {
   return Boolean(result.isUpdateAvailable && result.latestVersion);
 }
 
+export function shouldShowReleaseNotes(result: {
+  latestVersion: string;
+  isNewerRelease: boolean;
+  isUpdateAvailable: boolean;
+}): boolean {
+  return isUpdateInstallable(result) || hasNewerReleaseWithoutInstaller(result);
+}
+
 export function shouldOfferUpdate(
   result: { latestVersion: string; isUpdateAvailable: boolean },
   skippedVersion: string | null,

@@ -69,6 +69,7 @@ import { buildMcpConfig, type McpClient } from './mcp-config';
 import {
   hasNewerReleaseWithoutInstaller,
   isUpdateInstallable,
+  shouldShowReleaseNotes,
   shouldOfferUpdate,
 } from './update-state';
 import {
@@ -2317,14 +2318,6 @@ function App({
     setAutoCheckForUpdates(enabled);
     void window.wormhole?.setUpdatePreferences({ autoCheckForUpdates: enabled }).catch(() => {
       // A failed save leaves the local switch state; the next settings read re-syncs it.
-    });
-  }
-
-  function handleOpenReleaseNotes() {
-    const url = updateResult?.releaseUrl;
-    if (!url) return;
-    void window.wormhole?.openExternal(url).catch(() => {
-      // The release page is a convenience; a failure is not user-actionable here.
     });
   }
 
@@ -7038,7 +7031,6 @@ function App({
                   onCheckForUpdates={() => void handleCheckForUpdates()}
                   onDismissUpdate={handleDismissUpdate}
                   onInstallUpdate={() => void handleInstallUpdate()}
-                  onOpenReleaseNotes={handleOpenReleaseNotes}
                   onSetAutoCheckForUpdates={handleSetAutoCheckForUpdates}
                   settingsUpdatesRequest={settingsUpdatesRequest}
                   onWorkspaceCredentialsChanged={refreshWorkspaceCredentials}
@@ -14972,7 +14964,6 @@ function SettingsPage({
   onCheckForUpdates,
   onDismissUpdate,
   onInstallUpdate,
-  onOpenReleaseNotes,
   onSetAutoCheckForUpdates,
   settingsUpdatesRequest,
   update,
@@ -14996,7 +14987,6 @@ function SettingsPage({
   onCheckForUpdates: () => void;
   onDismissUpdate: () => void;
   onInstallUpdate: () => void;
-  onOpenReleaseNotes: () => void;
   onSetAutoCheckForUpdates: (enabled: boolean) => void;
   settingsUpdatesRequest: number;
   update: {
@@ -16215,6 +16205,7 @@ function SettingsPage({
   const newerReleaseWithoutInstaller = Boolean(
     update.result && hasNewerReleaseWithoutInstaller(update.result),
   );
+  const showReleaseNotes = Boolean(update.result && shouldShowReleaseNotes(update.result));
   const backupExportPasswordValid = backupExportPasswordIsValid(
     backupExportPassword,
     backupExportConfirmation,
@@ -16797,14 +16788,6 @@ function SettingsPage({
               >
                 {window.wormhole?.platform === 'linux' ? 'Download AppImage' : 'Install update'}
               </Button>
-              <Button
-                disabled={!update.result?.releaseUrl}
-                onClick={onOpenReleaseNotes}
-                size="sm"
-                variant="outline"
-              >
-                View release notes
-              </Button>
               {updateDismissible ? (
                 <Button disabled={update.busy} onClick={onDismissUpdate} size="sm" variant="ghost">
                   Not now
@@ -16815,7 +16798,7 @@ function SettingsPage({
 
           <SettingsSection title="Release notes">
             <Card className="border-border/70 bg-card/40 p-4 shadow-none">
-              {updateAvailable ? (
+              {showReleaseNotes ? (
                 <div className="text-[11px] leading-relaxed text-muted-foreground">
                   <ReleaseNotesMarkdown markdown={update.result?.releaseNotes ?? ''} />
                 </div>
