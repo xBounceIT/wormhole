@@ -1194,7 +1194,7 @@ func (server *sshServer) reconnectAttemptFailed(state *sshReconnectState, err er
 		return
 	}
 	message := safeSSHError(err)
-	logError("SSH automatic reconnect attempt failed: %v", message)
+	logWarn("SSH automatic reconnect attempt failed: %v", message)
 	server.scheduleReconnect(state, message)
 }
 

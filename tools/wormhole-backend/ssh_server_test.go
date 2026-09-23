@@ -2819,6 +2819,71 @@ func TestSSHNativeSessionSnapshotPublishesAFullFrame(t *testing.T) {
 	}
 }
 
+func TestSSHReconnectFailureLogSeverity(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		err       error
+		attempts  int
+		wantEvent string
+	}{
+		{"deadline", context.DeadlineExceeded, 1, "reconnecting"},
+		{"socket timeout", &net.OpError{Op: "dial", Net: "tcp", Err: os.ErrDeadlineExceeded}, 1, "reconnecting"},
+		{"network failure", errors.New("network unavailable"), 1, "reconnecting"},
+		{"exhausted", context.DeadlineExceeded, sshAutoReconnectMaxAttempts, "reconnect-failed"},
+		{"cancelled", context.Canceled, 1, ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+			logger, err := newAppLogger(databasePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			previous := appLog
+			appLog = logger
+			t.Cleanup(func() { logger.close(); appLog = previous })
+			var output synchronizedBuffer
+			delay := time.Hour
+			state := &sshReconnectState{command: sshWireCommand{SessionID: "session"}, attempts: test.attempts}
+			server := &sshServer{
+				output:                 &sshEventWriter{encoder: json.NewEncoder(&output)},
+				pending:                map[string]context.CancelFunc{"session": func() {}},
+				lifecycles:             map[string]*sshReconnectState{"session": state},
+				reconnectDelayOverride: &delay,
+			}
+			t.Cleanup(server.shutdown)
+			server.reconnectAttemptFailed(state, test.err)
+			contents, err := os.ReadFile(currentDayLogFilePath(databasePath))
+			if err != nil {
+				t.Fatal(err)
+			}
+			logs := string(contents)
+			if test.wantEvent == "" {
+				if logs != "" || output.String() != "" {
+					t.Fatalf("cancelled reconnect produced output: %s %s", logs, output.String())
+				}
+				return
+			}
+			if !strings.Contains(logs, "[WRN] SSH automatic reconnect attempt failed: "+safeSSHError(test.err)) {
+				t.Fatalf("missing reconnect warning: %s", logs)
+			}
+			exhausted := test.wantEvent == "reconnect-failed"
+			if strings.Contains(logs, "[ERR]") != exhausted || strings.Contains(logs, "traceback:") != exhausted {
+				t.Fatalf("unexpected error severity or traceback: %s", logs)
+			}
+			if exhausted && !strings.Contains(logs, "[ERR] SSH automatic reconnect exhausted") {
+				t.Fatalf("missing terminal failure error: %s", logs)
+			}
+			var event sshWireEvent
+			if err := json.Unmarshal(output.Bytes(), &event); err != nil {
+				t.Fatal(err)
+			}
+			if event.Type != test.wantEvent || event.Error != safeSSHError(test.err) {
+				t.Fatalf("unexpected reconnect event: %#v", event)
+			}
+		})
+	}
+}
+
 func TestSSHUnexpectedCloseRetriesThreeTimesBeforeTerminalFailure(t *testing.T) {
 	reconnectDelay := time.Duration(0)
 
