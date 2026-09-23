@@ -45,7 +45,7 @@ export function MRemoteImportDialog({
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onImported: (workspace: WormholeWorkspaceSnapshot) => void;
+  onImported: () => Promise<void>;
   // react-doctor-disable-next-line react-doctor/prefer-useReducer
 }) {
   const [inspection, setInspection] = useState<WormholeMRemoteImportInspection | null>(null);
@@ -173,7 +173,7 @@ export function MRemoteImportDialog({
       if (passwordInput.current) passwordInput.current.value = '';
       setPasswordProvided(false);
       try {
-        onImported(await api.loadWorkspace());
+        await onImported();
       } catch {
         setError(
           'Import completed, but the workspace could not refresh. Restart Wormhole to show the imported items.',

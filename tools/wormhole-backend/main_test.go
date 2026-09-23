@@ -60,6 +60,7 @@ func TestRunBackendCLIValidatesProcessContract(t *testing.T) {
 func TestRunBackendCLIRejectsMalformedRequestsForEveryInputOperation(t *testing.T) {
 	operations := []string{
 		"startup-unlock",
+		"workspace-move-nodes",
 		"workspace-duplicate-node",
 		"workspace-delete-node",
 		"workspace-delete-nodes",

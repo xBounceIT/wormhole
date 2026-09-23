@@ -321,6 +321,13 @@ func runBackendCLI(args []string, input io.Reader, output io.Writer, errorOutput
 		}
 	case "tunnel-list":
 		result, err = loadTunnelSummaries(*databasePath)
+	case "workspace-move-nodes":
+		var request workspaceMoveNodesRequest
+		err = decodeInputLimit(input, &request, workspaceDeleteNodesMaxRequestBytes)
+		if err == nil {
+			err = moveWorkspaceNodes(*databasePath, request)
+		}
+		result = map[string]bool{"moved": err == nil}
 	case "workspace-duplicate-node":
 		var request workspaceNodeRequest
 		err = decodeInput(&request)

@@ -74,6 +74,7 @@ import { readDarwinHardwareModel, shouldDisableHardwareAcceleration } from './gp
 import { KeyedSingleFlight } from './keyed-single-flight.js';
 import {
   parseWorkspaceNodesRequest,
+  parseWorkspaceMoveNodesRequest,
   workspaceDeleteNodesMaxRequestBytes,
 } from './workspace-delete-contract.js';
 import { KeyedTaskTracker } from './keyed-task-tracker.js';
@@ -257,6 +258,7 @@ type BackendOperation =
   | 'credential-create'
   | 'credential-update'
   | 'credential-delete'
+  | 'workspace-move-nodes'
   | 'workspace-duplicate-node'
   | 'workspace-delete-node'
   | 'workspace-delete-nodes'
@@ -3864,7 +3866,7 @@ async function runBackend<T>(
   if (request !== undefined) {
     requestPayload = JSON.stringify(request);
     const requestLimit =
-      operation === 'workspace-delete-nodes'
+      operation === 'workspace-delete-nodes' || operation === 'workspace-move-nodes'
         ? workspaceDeleteNodesMaxRequestBytes
         : operation === 'settings-set-connection-tree-expansion'
           ? connectionTreeExpansionMaxRequestBytes
@@ -7008,6 +7010,14 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
         `[Wormhole] Workspace loaded: ${workspace.tree.length} roots, ${workspace.credentials.length} credentials, ${workspace.tunnels.length} tunnels.`,
       );
       return workspace;
+    });
+  });
+
+  ipcMain.handle('workspace:move-nodes', async (_event, value: unknown) => {
+    const request = parseWorkspaceMoveNodesRequest(value);
+    return serializeAuthOperation(async () => {
+      await requireWorkspaceAuth();
+      return runBackend<{ moved: boolean }>('workspace-move-nodes', request);
     });
   });
 

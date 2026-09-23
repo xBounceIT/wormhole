@@ -271,6 +271,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { getTreeRowGeometry } from './tree-layout';
 import { findParentFolderId } from './tree-parent';
+import { WorkspaceRefreshCoordinator } from './workspace-refresh';
 import {
   canonicalizeConnectionTreeNodeIds,
   isEditableConnectionTreeShortcutTarget,
@@ -1791,6 +1792,7 @@ function App({
   const contextMenuOverlayOpen = useContextMenuOverlayOpen();
   const [tree, setTree] = useState<TreeNode[]>(initialWorkspace.tree);
   const connectionTreeIndex = useMemo(() => indexConnectionTree(tree), [tree]);
+  const [workspaceRefresh] = useState(() => new WorkspaceRefreshCoordinator());
   const treeRef = useRef(tree);
   useLayoutEffect(() => {
     treeRef.current = tree;
@@ -2005,6 +2007,8 @@ function App({
   const [updateStatus, setUpdateStatus] = useState('');
   const [updateDownloadProgress, setUpdateDownloadProgress] = useState<number | null>(null);
   const [settingsUpdatesRequest, setSettingsUpdatesRequest] = useState(0);
+  const treeMovePending = useRef(false);
+  const [treeMoveError, setTreeMoveError] = useState('');
   const [draggedNodeIds, setDraggedNodeIds] = useState<string[]>([]);
   const [dropTarget, setDropTarget] = useState<{
     id: string;
@@ -2977,6 +2981,7 @@ function App({
 
   useEffect(() => {
     if (authGate === 'unlocked') return;
+    workspaceRefresh.invalidate();
     credentialRevealRequest.current += 1;
     if (copiedCredentialTimer.current !== undefined) {
       window.clearTimeout(copiedCredentialTimer.current);
@@ -3021,7 +3026,7 @@ function App({
       return current.map((session) => ({ ...session, sftp: undefined }));
     });
     setMcpApprovals([]);
-  }, [authGate, runtimeBitwardenRetries]);
+  }, [authGate, runtimeBitwardenRetries, workspaceRefresh]);
 
   useEffect(
     () => () => {
@@ -3219,7 +3224,7 @@ function App({
   }
 
   function handleTreeDragStart(event: DragEvent<HTMLButtonElement>, node: TreeNode) {
-    if (searchText.trim()) {
+    if (treeMovePending.current || searchText.trim()) {
       event.preventDefault();
       return;
     }
@@ -3232,7 +3237,7 @@ function App({
   }
 
   function handleTreeDragOver(event: DragEvent<HTMLDivElement>, node: TreeNode) {
-    if (draggedNodeIds.length === 0 || searchText.trim()) return;
+    if (treeMovePending.current || draggedNodeIds.length === 0 || searchText.trim()) return;
 
     const placement = getTreeDropPlacement(event, node);
     if (!canDropTreeNodes(tree, draggedNodeIds, node.id, placement)) {
@@ -3253,18 +3258,62 @@ function App({
     setDropTarget((current) => (current?.id === node.id ? null : current));
   }
 
-  function handleTreeDrop(event: DragEvent<HTMLDivElement>, node: TreeNode) {
+  async function handleTreeDrop(event: DragEvent<HTMLDivElement>, node: TreeNode) {
     event.preventDefault();
+    if (treeMovePending.current) return;
     const sourceIds =
       draggedNodeIds.length > 0
         ? draggedNodeIds
         : parseDraggedNodeIds(event.dataTransfer.getData('text/plain'));
     if (sourceIds.length === 0 || searchText.trim()) return;
 
+    const currentTree = treeRef.current;
     const placement = getTreeDropPlacement(event, node);
-    if (!canDropTreeNodes(tree, sourceIds, node.id, placement)) return;
+    if (!canDropTreeNodes(currentTree, sourceIds, node.id, placement)) return;
 
-    setTree((current) => moveTreeNodes(current, sourceIds, node.id, placement));
+    treeMovePending.current = true;
+    setTreeMoveError('');
+    try {
+      if (sourceIds.some((id) => findTreeNode(currentTree, id)?.persisted)) {
+        if (
+          !window.wormhole ||
+          !node.persisted ||
+          sourceIds.some((id) => !findTreeNode(currentTree, id)?.persisted)
+        ) {
+          throw new Error('The workspace service cannot save this move.');
+        }
+        const result = await window.wormhole.moveWorkspaceNodes({
+          nodeIds: sourceIds,
+          targetId: node.id,
+          placement,
+        });
+        if (!result.moved) throw new Error('The workspace did not save the move.');
+        try {
+          await refreshWorkspace();
+        } catch (error: unknown) {
+          // Persistence succeeded: keep the committed move visible even if the refresh failed.
+          setTree((current) =>
+            current === currentTree
+              ? moveTreeNodes(current, sourceIds, node.id, placement)
+              : current,
+          );
+          setTreeMoveError(
+            `Move saved, but the workspace could not be refreshed: ${
+              error instanceof Error ? error.message : 'unknown error'
+            }`,
+          );
+        }
+      } else {
+        setTree((current) => moveTreeNodes(current, sourceIds, node.id, placement));
+      }
+    } catch (error: unknown) {
+      setTreeMoveError(error instanceof Error ? error.message : 'Could not move the nodes.');
+      setDraggedNodeIds([]);
+      setDropTarget(null);
+      return;
+    } finally {
+      treeMovePending.current = false;
+    }
     setSelectedNodeId(sourceIds[0]);
     if (placement === 'inside') toggleFolder(node.id, true);
     setDraggedNodeIds([]);
@@ -5382,6 +5431,7 @@ function App({
   }
 
   function applyDeletedTreeState(nextTree: TreeNode[]) {
+    workspaceRefresh.invalidate();
     setTree(nextTree);
     setExpanded((current) =>
       reconcileExpandedFolderIds(indexConnectionTree(nextTree).folderIds, current),
@@ -5539,10 +5589,11 @@ function App({
           nodeIds: persistedNodeIds,
         });
         if (!result.deleted) throw new Error('The workspace nodes were not deleted.');
+        workspaceRefresh.invalidate();
         await reconcileDeletedNodes();
         setPendingDeleteNodes([]);
         try {
-          applyWorkspaceSnapshot(await api.loadWorkspace());
+          await refreshWorkspace();
         } catch {
           // The delete is already committed. The local tree has been updated above, so a
           // transient refresh failure must not leave a deleted node visible or invite a retry.
@@ -5570,7 +5621,7 @@ function App({
         .duplicateWorkspaceNode({ nodeId: node.id })
         .then(async ({ nodeId, name }) => {
           try {
-            applyWorkspaceSnapshot(await api.loadWorkspace());
+            await refreshWorkspace();
           } catch (error: unknown) {
             const duplicate: TreeNode = {
               ...node,
@@ -5666,13 +5717,21 @@ function App({
     }
   }
 
-  async function reloadWorkspaceAfterNodeWrite(): Promise<void> {
-    if (!window.wormhole) throw new Error('The workspace service is unavailable.');
-    const workspace = await window.wormhole.loadWorkspace();
-    setTree(workspace.tree as TreeNode[]);
-    setCredentials(workspace.credentials as CredentialRecord[]);
-    setCredentialOptions(workspaceCredentialOptions(workspace));
-    setTunnels(workspace.tunnels as TunnelRecord[]);
+  async function refreshWorkspace(expandAll = false): Promise<void> {
+    await workspaceRefresh.refresh(
+      () => {
+        if (!window.wormhole) throw new Error('The workspace service is unavailable.');
+        return window.wormhole.loadWorkspace();
+      },
+      (workspace) => {
+        applyWorkspaceSnapshot(workspace);
+        if (expandAll) {
+          setExpanded(
+            (current) => new Set([...current, ...indexConnectionTree(workspace.tree).folderIds]),
+          );
+        }
+      },
+    );
   }
 
   async function saveRuntimeConnectionCredential(
@@ -5698,7 +5757,7 @@ function App({
         });
     if (!result.updated) throw new Error('The workspace did not save the connection credential.');
     try {
-      await reloadWorkspaceAfterNodeWrite();
+      await refreshWorkspace();
     } catch {
       // The Go transaction is already committed. A catalog refresh must not turn a successful
       // credential save into a duplicate write or prevent this connection attempt.
@@ -5960,7 +6019,7 @@ function App({
           (newConnectionForm.protocol === 'ssh' || newConnectionForm.protocol === 'serial')
             ? newSessionToken()
             : undefined;
-        await reloadWorkspaceAfterNodeWrite();
+        await refreshWorkspace();
         setSessions((current) =>
           current.map((session) =>
             session.id === editedSessionId
@@ -6048,7 +6107,7 @@ function App({
         }
       } else {
         const result = await window.wormhole.createWorkspaceNode(nodeWrite);
-        await reloadWorkspaceAfterNodeWrite();
+        await refreshWorkspace();
         setSelectedNodeId(result.nodeId);
       }
 
@@ -6105,7 +6164,7 @@ function App({
         serialFlowControl: 0,
       });
       if (!result.updated) throw new Error('The workspace did not save the folder.');
-      await reloadWorkspaceAfterNodeWrite();
+      await refreshWorkspace();
       if (editingFolderGeneration.current === dialogGeneration) {
         setFolderDetailsOpen(false);
         editingFolderId.current = null;
@@ -6154,7 +6213,7 @@ function App({
         serialParity: 0,
         serialFlowControl: 0,
       });
-      await reloadWorkspaceAfterNodeWrite();
+      await refreshWorkspace();
       setExpanded(
         (current) =>
           new Set([...current, result.nodeId, ...(parentFolderId ? [parentFolderId] : [])]),
@@ -6438,9 +6497,7 @@ function App({
 
   async function refreshWorkspaceCredentials(): Promise<void> {
     if (!window.wormhole) return;
-    const workspace = await window.wormhole.loadWorkspace();
-    setCredentials(workspace.credentials);
-    setCredentialOptions(workspaceCredentialOptions(workspace));
+    await refreshWorkspace();
   }
 
   const currentPage = navItems.find((item) => item.id === activePage)!;
@@ -6838,6 +6895,11 @@ function App({
                 </SidebarHeader>
 
                 <SidebarContent className="min-h-0 overflow-hidden px-2">
+                  {treeMoveError ? (
+                    <p role="alert" className="px-2 py-1 text-xs text-destructive">
+                      {treeMoveError}
+                    </p>
+                  ) : null}
                   <ContextMenu>
                     <ContextMenuTrigger asChild>
                       <div
@@ -6970,25 +7032,7 @@ function App({
                   onAutoCopyOnSelectChange={handleAutoCopyOnSelectChange}
                   onConfirmOnTabCloseChange={handleConfirmOnTabCloseChange}
                   onConfirmOnWindowCloseChange={handleConfirmOnWindowCloseChange}
-                  onBackupImported={(workspace) => {
-                    setTree(workspace.tree);
-                    setCredentials(workspace.credentials);
-                    setCredentialOptions(workspaceCredentialOptions(workspace));
-                    setTunnels(workspace.tunnels);
-                    setExpanded(
-                      (current) =>
-                        new Set([...current, ...indexConnectionTree(workspace.tree).folderIds]),
-                    );
-                    setSelectedNodeId((current) =>
-                      findTreeNode(workspace.tree, current)
-                        ? current
-                        : (findFirstConnection(workspace.tree)?.id ?? workspace.tree[0]?.id ?? ''),
-                    );
-                    setSelectedTreeNodeIds(
-                      (current) =>
-                        new Set([...current].filter((id) => findTreeNode(workspace.tree, id))),
-                    );
-                  }}
+                  onBackupImported={() => refreshWorkspace(true)}
                   onRequestAuthentication={requestAuthentication}
                   onThemeChange={handleThemeChange}
                   onCheckForUpdates={() => void handleCheckForUpdates()}
@@ -7050,7 +7094,7 @@ function App({
         {mremoteImportOpen ? (
           <Suspense fallback={null}>
             <MRemoteImportDialog
-              onImported={applyWorkspaceSnapshot}
+              onImported={refreshWorkspace}
               onOpenChange={setMremoteImportOpen}
               open
             />
@@ -14947,7 +14991,7 @@ function SettingsPage({
   onAutoCopyOnSelectChange: (enabled: boolean) => void;
   onConfirmOnTabCloseChange: (enabled: boolean) => void;
   onConfirmOnWindowCloseChange: (enabled: boolean) => void;
-  onBackupImported: (workspace: WormholeWorkspaceSnapshot) => void;
+  onBackupImported: () => Promise<void>;
   onRequestAuthentication: (reason: string) => Promise<boolean>;
   onCheckForUpdates: () => void;
   onDismissUpdate: () => void;
@@ -16124,7 +16168,7 @@ function SettingsPage({
       setBackupImportResult(result);
       setBackupImportPassword('');
       try {
-        onBackupImported(await window.wormhole.loadWorkspace());
+        await onBackupImported();
       } catch {
         setBackupImportError(
           'Import completed, but the workspace could not refresh. Restart Wormhole to show the imported items.',
@@ -16139,7 +16183,7 @@ function SettingsPage({
       );
       if (/cancel/i.test(message)) {
         try {
-          onBackupImported(await window.wormhole.loadWorkspace());
+          await onBackupImported();
         } catch {
           // The cancellation result remains accurate even if the refreshed tree cannot be loaded.
         }

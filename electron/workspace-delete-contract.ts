@@ -41,3 +41,20 @@ export function parseWorkspaceNodesRequest(value: unknown): WorkspaceNodesReques
   }
   return { nodeIds: [...new Set(nodeIDs)] };
 }
+
+export type WorkspaceMoveNodesRequest = WorkspaceNodesRequest & {
+  targetId: string;
+  placement: 'inside' | 'before' | 'after';
+};
+
+export function parseWorkspaceMoveNodesRequest(value: unknown): WorkspaceMoveNodesRequest {
+  const nodes = parseWorkspaceNodesRequest(value);
+  const { targetId, placement } = value as Record<string, unknown>;
+  if (
+    !isWorkspaceNodeID(targetId) ||
+    (placement !== 'inside' && placement !== 'before' && placement !== 'after')
+  ) {
+    throw new Error('Workspace move is invalid.');
+  }
+  return { ...nodes, targetId, placement };
+}
