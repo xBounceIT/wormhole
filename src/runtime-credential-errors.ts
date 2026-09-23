@@ -13,7 +13,6 @@ export function isBitwardenCredentialError(message: string): boolean {
 
 export function requiresSshCredentialPrompt(message: string): boolean {
   const value = message.toLowerCase();
-  if (value.includes('bitwarden credential was rejected by the ssh server')) return false;
   return (
     isBitwardenCredentialError(value) ||
     value.includes('ssh credential was not found') ||

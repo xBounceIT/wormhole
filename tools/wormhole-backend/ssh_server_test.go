@@ -2786,6 +2786,202 @@ func TestDialNativeSSHReportsStructuredHostKeyMismatch(t *testing.T) {
 	}
 }
 
+func TestSSHPasswordChallengeOnlyAnswersSingleHiddenPasswordPrompt(t *testing.T) {
+	tests := []struct {
+		name      string
+		questions []string
+		echos     []bool
+		accepted  bool
+	}{
+		{"password", []string{"Password: "}, []bool{false}, true},
+		{"case insensitive", []string{"PASSWORD"}, []bool{false}, true},
+		{"one-time code", []string{"OTP:"}, []bool{false}, false},
+		{"multiple prompts", []string{"Password:", "Code:"}, []bool{false, false}, false},
+		{"visible prompt", []string{"Password:"}, []bool{true}, false},
+		{"missing echo flag", []string{"Password:"}, nil, false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			answers, err := newSSHPasswordChallenge("secret")("", "", test.questions, test.echos)
+			if test.accepted {
+				if err != nil || len(answers) != 1 || answers[0] != "secret" {
+					t.Fatalf("password challenge answer = %q, %v", answers, err)
+				}
+			} else if err == nil || len(answers) != 0 {
+				t.Fatalf("unexpected password challenge answer = %q, %v", answers, err)
+			}
+		})
+	}
+}
+
+func TestSSHPasswordChallengeAcceptsEmptyRoundsButDoesNotRepeatPassword(t *testing.T) {
+	challenge := newSSHPasswordChallenge("secret")
+	for _, questions := range [][]string{nil, {"Password:"}, nil} {
+		answers, err := challenge("", "", questions, make([]bool, len(questions)))
+		if err != nil || len(answers) != len(questions) {
+			t.Fatalf("challenge answers = %q, %v", answers, err)
+		}
+	}
+	challenge = newSSHPasswordChallenge("secret")
+	if _, err := challenge("", "", []string{"Password:"}, []bool{false}); err != nil {
+		t.Fatal(err)
+	}
+	if answers, err := challenge("", "", []string{"Password:"}, []bool{false}); err == nil || len(answers) != 0 {
+		t.Fatalf("repeated password prompt was answered: %q, %v", answers, err)
+	}
+
+	challenge = newSSHPasswordChallenge("secret")
+	for range 3 {
+		if _, err := challenge("", "", nil, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := challenge("", "", nil, nil); err == nil {
+		t.Fatal("unbounded empty keyboard-interactive rounds were accepted")
+	}
+}
+
+func TestDialNativeSSHAuthenticatesWithKeyboardInteractivePassword(t *testing.T) {
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := ssh.NewSignerFromKey(privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	serverConfig := &ssh.ServerConfig{
+		KeyboardInteractiveCallback: func(connection ssh.ConnMetadata, challenge ssh.KeyboardInteractiveChallenge) (*ssh.Permissions, error) {
+			answers, challengeErr := challenge("", "", []string{"Password: "}, []bool{false})
+			if challengeErr != nil {
+				return nil, challengeErr
+			}
+			if connection.User() != "operator" || len(answers) != 1 || answers[0] != "secret" {
+				return nil, errors.New("invalid test credentials")
+			}
+			if _, challengeErr = challenge("", "", nil, nil); challengeErr != nil {
+				return nil, challengeErr
+			}
+			return nil, nil
+		},
+	}
+	serverConfig.AddHostKey(signer)
+	serverDone := make(chan error, 1)
+	go func() {
+		rawConnection, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			serverDone <- acceptErr
+			return
+		}
+		defer rawConnection.Close()
+		serverConnection, channels, requests, handshakeErr := ssh.NewServerConn(rawConnection, serverConfig)
+		if handshakeErr != nil {
+			serverDone <- handshakeErr
+			return
+		}
+		defer serverConnection.Close()
+		go ssh.DiscardRequests(requests)
+		for newChannel := range channels {
+			channel, channelRequests, channelErr := newChannel.Accept()
+			if channelErr != nil {
+				serverDone <- channelErr
+				return
+			}
+			go func() {
+				defer channel.Close()
+				for request := range channelRequests {
+					_ = request.Reply(request.Type == "pty-req" || request.Type == "shell", nil)
+				}
+			}()
+		}
+		serverDone <- nil
+	}()
+
+	native, fingerprint, err := dialNativeSSH(context.Background(), sshTarget{
+		host: "127.0.0.1", port: listener.Addr().(*net.TCPAddr).Port,
+		username: "operator", password: "secret",
+	}, 80, 24)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fingerprint != ssh.FingerprintSHA256(signer.PublicKey()) {
+		t.Fatalf("unexpected host fingerprint: %q", fingerprint)
+	}
+	native.close(false)
+	if serverErr := <-serverDone; serverErr != nil {
+		t.Fatal(serverErr)
+	}
+}
+
+func TestDialNativeSSHDoesNotAnswerKeyboardInteractiveOTP(t *testing.T) {
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := ssh.NewSignerFromKey(privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	challengeResult := make(chan error, 1)
+	serverConfig := &ssh.ServerConfig{
+		KeyboardInteractiveCallback: func(_ ssh.ConnMetadata, challenge ssh.KeyboardInteractiveChallenge) (*ssh.Permissions, error) {
+			_, challengeErr := challenge("", "", []string{"One-time code:"}, []bool{false})
+			challengeResult <- challengeErr
+			return nil, challengeErr
+		},
+	}
+	serverConfig.AddHostKey(signer)
+	serverDone := make(chan error, 1)
+	go func() {
+		rawConnection, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			serverDone <- acceptErr
+			return
+		}
+		defer rawConnection.Close()
+		_, _, _, handshakeErr := ssh.NewServerConn(rawConnection, serverConfig)
+		serverDone <- handshakeErr
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, _, err = dialNativeSSH(ctx, sshTarget{
+		host: "127.0.0.1", port: listener.Addr().(*net.TCPAddr).Port,
+		username: "operator", password: "secret",
+	}, 80, 24)
+	if err == nil {
+		t.Fatal("unexpected authentication with an OTP-only server")
+	}
+	select {
+	case challengeErr := <-challengeResult:
+		if challengeErr == nil {
+			t.Fatal("the client sent an answer to the OTP prompt")
+		}
+	case <-ctx.Done():
+		t.Fatal("the server did not issue an OTP challenge")
+	}
+	select {
+	case serverErr := <-serverDone:
+		if serverErr == nil {
+			t.Fatal("the OTP-only server unexpectedly accepted authentication")
+		}
+	case <-ctx.Done():
+		t.Fatal("the OTP-only server did not finish authentication")
+	}
+}
+
 func TestSSHNativeSessionSnapshotPublishesAFullFrame(t *testing.T) {
 	var output synchronizedBuffer
 	server := &sshServer{

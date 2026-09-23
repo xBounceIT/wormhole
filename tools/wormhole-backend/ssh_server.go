@@ -3297,7 +3297,10 @@ func dialNativeSSH(
 		config.Auth = append(config.Auth, ssh.PublicKeys(signer))
 	}
 	if target.password != "" {
-		config.Auth = append(config.Auth, ssh.Password(target.password))
+		config.Auth = append(config.Auth,
+			ssh.Password(target.password),
+			ssh.KeyboardInteractive(newSSHPasswordChallenge(target.password)),
+		)
 	}
 	if len(config.Auth) == 0 {
 		return nil, "", errors.New("the connection has no usable SSH credential")
@@ -3410,6 +3413,27 @@ func dialNativeSSH(
 	}
 	native.startInputPump()
 	return native, fingerprint, nil
+}
+
+func newSSHPasswordChallenge(password string) ssh.KeyboardInteractiveChallenge {
+	answered := false
+	rounds := 0
+	return func(_ string, _ string, questions []string, echos []bool) ([]string, error) {
+		rounds++
+		// Allow an empty preamble and completion round around one password prompt.
+		if rounds > 3 || len(questions) != len(echos) {
+			return nil, errors.New("SSH keyboard-interactive challenge is unsupported")
+		}
+		if len(questions) == 0 {
+			return []string{}, nil
+		}
+		if answered || len(questions) != 1 || echos[0] ||
+			!strings.EqualFold(strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(questions[0]), ":")), "password") {
+			return nil, errors.New("SSH keyboard-interactive challenge is not a password prompt")
+		}
+		answered = true
+		return []string{password}, nil
+	}
 }
 
 func normalizeSSHHost(host string) string {
