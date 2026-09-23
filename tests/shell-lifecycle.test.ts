@@ -67,6 +67,7 @@ import {
   isUpdateInstallable,
   shouldShowReleaseNotes,
   shouldOfferUpdate,
+  unavailableInstallerMessage,
 } from '../src/update-state.ts';
 
 test('unsupported macOS on legacy Intel MacBook Air selects software rendering before ready', () => {
@@ -983,6 +984,15 @@ test('update availability uses the backend version decision from the same result
     }),
     false,
   );
+  assert.equal(
+    unavailableInstallerMessage({
+      latestVersion: '2.1.0',
+      isNewerRelease: true,
+      isUpdateAvailable: false,
+    }),
+    'Wormhole 2.1.0 is available, but no verified installer is published for this platform.',
+  );
+  assert.equal(unavailableInstallerMessage({ ...installable, isNewerRelease: true }), null);
   assert.equal(shouldOfferUpdate(installable, null), true);
   assert.equal(shouldOfferUpdate(installable, '2.1.0'), false);
 });

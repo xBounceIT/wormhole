@@ -21,6 +21,16 @@ export function shouldShowReleaseNotes(result: {
   return isUpdateInstallable(result) || hasNewerReleaseWithoutInstaller(result);
 }
 
+export function unavailableInstallerMessage(result: {
+  latestVersion: string;
+  isNewerRelease: boolean;
+  isUpdateAvailable: boolean;
+}): string | null {
+  return hasNewerReleaseWithoutInstaller(result)
+    ? `Wormhole ${result.latestVersion} is available, but no verified installer is published for this platform.`
+    : null;
+}
+
 export function shouldOfferUpdate(
   result: { latestVersion: string; isUpdateAvailable: boolean },
   skippedVersion: string | null,

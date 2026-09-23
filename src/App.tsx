@@ -67,10 +67,10 @@ import { writeClipboardText } from './clipboard';
 import { isWormholeShortcutSuppressed, markWormholeShortcutSuppressed } from './app-shortcuts';
 import { buildMcpConfig, type McpClient } from './mcp-config';
 import {
-  hasNewerReleaseWithoutInstaller,
   isUpdateInstallable,
   shouldShowReleaseNotes,
   shouldOfferUpdate,
+  unavailableInstallerMessage,
 } from './update-state';
 import {
   clearTerminalSelectionIfUnchanged,
@@ -2239,9 +2239,7 @@ function App({
           ? "Couldn't reach the update server. Try again later."
           : result.isUpdateAvailable
             ? `Update available: ${result.latestVersion}`
-            : hasNewerReleaseWithoutInstaller(result)
-              ? `Wormhole ${result.latestVersion} is available, but no verified installer is published for this platform.`
-              : "You're on the latest version.",
+            : (unavailableInstallerMessage(result) ?? "You're on the latest version."),
       );
       const settings = await window.wormhole.readAppSettings();
       setLastUpdateCheck(settings.lastUpdateCheck);
@@ -16202,10 +16200,12 @@ function SettingsPage({
   const updateDismissible = Boolean(
     update.result && shouldOfferUpdate(update.result, update.skippedUpdateVersion),
   );
-  const newerReleaseWithoutInstaller = Boolean(
-    update.result && hasNewerReleaseWithoutInstaller(update.result),
-  );
   const showReleaseNotes = Boolean(update.result && shouldShowReleaseNotes(update.result));
+  const unavailableInstallerWarning = update.result
+    ? unavailableInstallerMessage(update.result)
+    : null;
+  const updateMessage =
+    update.busy && update.status ? update.status : (unavailableInstallerWarning ?? update.status);
   const backupExportPasswordValid = backupExportPasswordIsValid(
     backupExportPassword,
     backupExportConfirmation,
@@ -16762,8 +16762,8 @@ function SettingsPage({
               label="Automatically check for updates on startup"
               onCheckedChange={onSetAutoCheckForUpdates}
             />
-            {update.status ? (
-              <p className="text-[11px] text-muted-foreground">{update.status}</p>
+            {updateMessage ? (
+              <p className="text-[11px] text-muted-foreground">{updateMessage}</p>
             ) : null}
             {update.downloadProgress !== null ? (
               <div className="max-w-sm">
@@ -16806,11 +16806,9 @@ function SettingsPage({
                 <p className="text-[11px] leading-relaxed text-muted-foreground">
                   {update.result?.checkFailed
                     ? "Couldn't reach the update server. Try again later."
-                    : newerReleaseWithoutInstaller
-                      ? `Wormhole ${update.result?.latestVersion} is available, but no verified installer is published for this platform.`
-                      : update.result?.latestVersion
-                        ? "You're on the latest version."
-                        : 'Update information will appear here when a new release is available.'}
+                    : update.result?.latestVersion
+                      ? "You're on the latest version."
+                      : 'Update information will appear here when a new release is available.'}
                 </p>
               )}
             </Card>
