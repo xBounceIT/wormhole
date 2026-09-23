@@ -26,7 +26,12 @@ export function restoreNativeAuthenticationWindow(
   if (destroyed) return;
 
   attemptWindowAction(() => {
-    if (!window.isEnabled()) window.setEnabled(true);
+    if (!window.isEnabled()) {
+      // Hello changes the HWND directly, leaving Electron's cached enabled flag true.
+      // Force a transition so SetEnabled actually reaches the native window.
+      window.setEnabled(false);
+      window.setEnabled(true);
+    }
   });
   attemptWindowAction(() => window.focus());
 }

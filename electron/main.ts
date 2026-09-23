@@ -6986,12 +6986,14 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
   });
 
   ipcMain.handle('startup:unlock', async (_event, request: unknown) => {
+    const verificationEpoch = authSession.authorizationEpoch;
     return serializeAuthOperation(async () => {
       await ensureAuthSession();
+      authSession.requireVerificationEpoch(verificationEpoch);
       const result = await runBackend<StartupUnlockResponse>('startup-unlock', request);
       if (result.succeeded) {
         if (!result.workspace) throw new Error('Wormhole returned no workspace.');
-        authSession.markUnlocked();
+        authSession.markUnlocked(verificationEpoch);
       } else if (result.workspace) {
         throw new Error('Wormhole could not verify the workspace lock.');
       }
@@ -8180,10 +8182,12 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
   });
 
   ipcMain.handle('auth:verify', async (_event, request: unknown) => {
+    const verificationEpoch = authSession.authorizationEpoch;
     return serializeAuthOperation(async () => {
       await ensureAuthSession();
+      authSession.requireVerificationEpoch(verificationEpoch);
       const result = await runBackend<{ succeeded: boolean }>('auth-verify', request);
-      if (result.succeeded) authSession.markUnlocked();
+      if (result.succeeded) authSession.markUnlocked(verificationEpoch);
       return result;
     });
   });
@@ -8249,6 +8253,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
   });
 
   ipcMain.handle('auth:hello-verify', async (event) => {
+    const verificationEpoch = authSession.authorizationEpoch;
     if (process.platform !== 'win32') {
       return {
         succeeded: false,
@@ -8257,6 +8262,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     }
     return serializeAuthOperation(async () => {
       await ensureAuthSession();
+      authSession.requireVerificationEpoch(verificationEpoch);
       const state = currentAuthState;
       if (!state) throw new Error('Authentication state is not initialized.');
       if (state.mode !== 'windowsHello' || !state.configured) {
@@ -8280,10 +8286,12 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
             const result = await runBackend<{ succeeded: boolean }>(
               'auth-hello-verify',
               { ownerWindow: nativeWindowHandle(ownerWindow) },
-              backendTimeoutMs,
+              // Let the native 30-second deadline cancel Hello before killing its process.
+              backendTimeoutMs + 15_000,
               signal,
             );
-            if (result.succeeded) authSession.markUnlocked();
+            if (signal.aborted) return { succeeded: false, message: 'Windows Hello was canceled.' };
+            if (result.succeeded) authSession.markUnlocked(verificationEpoch);
             return result;
           } catch (error) {
             if (signal.aborted) {

@@ -72,6 +72,41 @@ test('authentication and window-close prompts keep errors and controls accessibl
       </>;
     }
   `;
+  const idleSource = readFileSync(new URL('../src/auth-idle.ts', import.meta.url), 'utf8').replace(
+    /^export /gm,
+    '',
+  );
+  const idleStart = source.lastIndexOf(
+    '  useEffect(() => {',
+    source.indexOf('    const timeoutMinutes = authState?.idleTimeoutMinutes;'),
+  );
+  const idleEnd = source.indexOf('\n  useEffect(', idleStart + 20);
+  const idleHarness = `
+    ${idleSource}
+    function IdleLockHarness({ confirmation = false, onConfirmation } = {}) {
+      const [authGate, setAuthGate] = useState('unlocked');
+      const [lockReason, setLockReason] = useState('');
+      const [authDialog, setAuthDialog] = useState(null);
+      const authState = React.useMemo(() => ({ configured: true, mode: 'windowsHello',
+        fallback: 'pin', idleTimeoutMinutes: 1, windowsHello: { available: true, message: '' } }), []);
+      const [authPrompt, setAuthPrompt] = useState(confirmation ? {
+        kind: 'confirmation', reason: 'Confirm sensitive action.', autoWindowsHello: true,
+      } : null);
+      const authPromptResolver = useRef(onConfirmation);
+      ${slice('  const settleAuthConfirmation =', '  const idleCheckInFlight =')}
+      const lastActivityAt = useRef(Date.now()), lastUnlockedAt = useRef(Date.now());
+      const idleCheckInFlight = useRef(false);
+      ${slice('  function handleAuthPromptResult(', '  async function resolveMcpApproval(')}
+      ${source.slice(idleStart, idleEnd)}
+      ${slice('  const visibleAuthPrompt =', '  const credentialResult =')}
+      return <>
+        ${source.slice(authMountStart, authMountEnd)}
+        ${source.slice(workspaceStart, workspaceEnd)}
+          <button id="idle-workspace-action">Workspace action</button>
+        </div>
+      </>;
+    }
+  `;
   const bitwardenControls = [
     ['input', 'function Input('],
     ['button', 'const buttonVariants ='],
@@ -174,6 +209,7 @@ test('authentication and window-close prompts keep errors and controls accessibl
       slice('function clearSecretInput(', 'function credentialSelectionFor(') +
       bitwardenHarness +
       bitwardenStartupHarness +
+      idleHarness +
       startupGateSource +
       startupSource.slice(cardStart, cardEnd) +
       startupSource.slice(unlockStart, unlockEnd),
@@ -271,7 +307,7 @@ test('authentication and window-close prompts keep errors and controls accessibl
           const coverage = await window.webContents.debugger.sendCommand('Profiler.takePreciseCoverage');
           const script = coverage.result.find(item => item.url === 'wormhole-auth-prompt.js');
           if (!script) throw new Error('Missing authentication renderer coverage.');
-          for (const name of ['AuthPrompt', 'showUnlock', 'AppCloseHarness', 'DialogContent', 'BitwardenCliDialog', 'BitwardenSettingsHarness', 'BitwardenStartupPrompt', 'BitwardenStartupHarness']) {
+          for (const name of ['AuthPrompt', 'IdleLockHarness', 'showUnlock', 'AppCloseHarness', 'DialogContent', 'BitwardenCliDialog', 'BitwardenSettingsHarness', 'BitwardenStartupPrompt', 'BitwardenStartupHarness']) {
             const parent = script.functions.find(item => item.functionName === name);
             if (!parent) throw new Error('Missing coverage for ' + name);
             const range = parent.ranges[0];

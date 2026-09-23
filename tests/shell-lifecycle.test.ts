@@ -158,10 +158,13 @@ test('unsupported macOS on legacy Intel MacBook Air selects software rendering b
 test('native authentication restores only an owner that it disabled', async () => {
   const actions: string[] = [];
   let enabled = true;
+  let electronEnabled = true;
   const window: NativeAuthenticationWindow = {
     isDestroyed: () => false,
     isEnabled: () => enabled,
     setEnabled: (value) => {
+      if (value === electronEnabled) return;
+      electronEnabled = value;
       enabled = value;
       actions.push(`enabled:${value}`);
     },
@@ -176,11 +179,22 @@ test('native authentication restores only an owner that it disabled', async () =
     /canceled/,
   );
   assert.equal(enabled, true);
-  assert.deepEqual(actions, ['enabled:true', 'focus']);
+  assert.deepEqual(actions, ['enabled:false', 'enabled:true', 'focus']);
 
   actions.length = 0;
   assert.equal(await runWithNativeAuthenticationWindow(window, async () => 'verified'), 'verified');
   assert.deepEqual(actions, ['focus']);
+
+  actions.length = 0;
+  assert.equal(
+    await runWithNativeAuthenticationWindow(window, async () => {
+      enabled = false;
+      return 'verified';
+    }),
+    'verified',
+  );
+  assert.equal(enabled, true);
+  assert.deepEqual(actions, ['enabled:false', 'enabled:true', 'focus']);
 
   actions.length = 0;
   enabled = false;
@@ -469,7 +483,10 @@ test('MCP approval restores and foregrounds the Wormhole window before notifying
     windowsHelloHandler,
     /runPreemptibleOperation\(\(signal\) =>[\s\S]*runWithNativeAuthenticationWindow\(ownerWindow/,
   );
-  assert.match(windowsHelloHandler, /'auth-hello-verify',[\s\S]*backendTimeoutMs,[\s\S]*signal/);
+  assert.match(
+    windowsHelloHandler,
+    /'auth-hello-verify',[\s\S]*backendTimeoutMs \+ 15_000,[\s\S]*signal/,
+  );
   assert.match(windowsHelloHandler, /if \(signal\.aborted\)/);
 
   const backendRunner = mainSource.slice(
