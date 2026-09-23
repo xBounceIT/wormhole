@@ -6069,7 +6069,6 @@ class NativeSshBackend {
       resolve: (response: SshConnectedResponse) => void;
       reject: (error: Error) => void;
       timeout: NodeJS.Timeout;
-      usedBitwarden: boolean;
     }
   >();
   private readonly controlWaiters = new Map<
@@ -6171,7 +6170,7 @@ class NativeSshBackend {
       throw error;
     }
 
-    return await this.waitForConnection(request.sessionId, bitwardenCredential.bitwarden, () => {
+    return await this.waitForConnection(request.sessionId, () => {
       this.write({
         type: 'open',
         session_id: request.sessionId,
@@ -6215,7 +6214,7 @@ class NativeSshBackend {
       throw new Error('SSH session is not waiting for host-key trust.');
     }
     this.ensureStarted();
-    return this.waitForConnection(request.sessionId, false, () => {
+    return this.waitForConnection(request.sessionId, () => {
       this.write({
         type: 'host-key-trust',
         session_id: request.sessionId,
@@ -6226,11 +6225,7 @@ class NativeSshBackend {
     });
   }
 
-  private waitForConnection(
-    sessionId: string,
-    usedBitwarden: boolean,
-    start: () => void,
-  ): Promise<SshConnectedResponse> {
+  private waitForConnection(sessionId: string, start: () => void): Promise<SshConnectedResponse> {
     return new Promise<SshConnectedResponse>((resolve, reject) => {
       const timeout = setTimeout(() => {
         const waiter = this.openWaiters.get(sessionId);
@@ -6248,7 +6243,6 @@ class NativeSshBackend {
         resolve,
         reject,
         timeout,
-        usedBitwarden,
       });
       try {
         start();
@@ -6706,15 +6700,7 @@ class NativeSshBackend {
         this.openWaiters.delete(event.sessionId);
         clearTimeout(waiter.timeout);
         const message = event.error || 'SSH connection failed.';
-        const credentialFailure =
-          /authenticat|password|permission denied|no usable ssh credential/i.test(message);
-        waiter.reject(
-          new Error(
-            waiter.usedBitwarden && credentialFailure
-              ? `Bitwarden credential was rejected by the SSH server: ${message}`
-              : message,
-          ),
-        );
+        waiter.reject(new Error(message));
       }
       if (event.retainTunnelLease) {
         this.retainedMismatchSessions.add(event.sessionId);
