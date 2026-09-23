@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
+import { stripTypeScriptTypes } from 'node:module';
 
 import {
   canonicalizeConnectionTreeNodeIds,
@@ -17,6 +18,7 @@ import {
 } from '../src/app-shortcuts.ts';
 import {
   parseWorkspaceNodesRequest,
+  parseWorkspaceMoveNodesRequest,
   workspaceDeleteNodesMaxRequestBytes,
 } from '../electron/workspace-delete-contract.ts';
 
@@ -386,4 +388,240 @@ test('maximum valid workspace batch fits its dedicated Electron backend wire lim
   assert.ok(payloadBytes > 64 * 1024);
   assert.ok(payloadBytes <= workspaceDeleteNodesMaxRequestBytes);
   assert.match(mainSource, /operation === 'workspace-delete-nodes'/);
+});
+
+test('workspace moves validate bounded source and target IDs and placement', () => {
+  for (const placement of ['inside', 'before', 'after'] as const) {
+    assert.deepEqual(
+      parseWorkspaceMoveNodesRequest({
+        nodeIds: ['one', 'one', 'two'],
+        targetId: 'folder',
+        placement,
+      }),
+      { nodeIds: ['one', 'two'], targetId: 'folder', placement },
+    );
+  }
+  for (const value of [
+    null,
+    {},
+    { nodeIds: [] },
+    { nodeIds: new Array(1) },
+    { nodeIds: ['one'], targetId: '', placement: 'inside' },
+    { nodeIds: ['one'], targetId: 'folder', placement: 'sideways' },
+    { nodeIds: ['one'], targetId: 'x'.repeat(129), placement: 'inside' },
+    { nodeIds: ['one'], targetId: 'folder\n', placement: 'inside' },
+  ]) {
+    assert.throws(() => parseWorkspaceMoveNodesRequest(value));
+  }
+});
+
+// Exercise the actual TSX event handler with a controlled bridge. The application
+// entrypoint is excluded from Node's loaded-module coverage by test-coverage.ts.
+test('tree drop commits before refreshing and leaves the tree intact on save failures', async () => {
+  const source = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  const start = source.indexOf('  async function handleTreeDrop(');
+  const end = source.indexOf('  function handleTreeDragEnd', start);
+  assert.ok(start >= 0 && end > start);
+  const handler = stripTypeScriptTypes(source.slice(start, end));
+  for (const scenario of [
+    'saved',
+    'local',
+    'unavailable',
+    'mixed',
+    'local-target',
+    'rejected',
+    'error',
+    'reload-error',
+  ]) {
+    const calls: string[] = [];
+    const persisted = scenario !== 'local';
+    const nodes = [
+      { id: 'source', persisted },
+      { id: 'other', persisted: scenario !== 'mixed' && persisted },
+    ];
+    let releaseSave: () => void = () => {};
+    const saving = new Promise<void>((resolve) => {
+      releaseSave = resolve;
+    });
+    const api = {
+      async moveWorkspaceNodes(request: unknown) {
+        assert.deepEqual(request, {
+          nodeIds: ['source', 'other'],
+          targetId: 'deep',
+          placement: 'inside',
+        });
+        calls.push('save');
+        await saving;
+        if (scenario === 'error') throw new Error('save failed');
+        return { moved: scenario !== 'rejected' };
+      },
+      async loadWorkspace() {
+        calls.push('load');
+        if (scenario === 'reload-error') throw new Error('reload failed');
+        return { tree: 'persisted tree' };
+      },
+    };
+    const bindings = {
+      draggedNodeIds: ['source', 'other'],
+      searchText: '',
+      tree: nodes,
+      treeMovePending: { current: false },
+      treeRef: { current: nodes },
+      window: { wormhole: scenario === 'unavailable' ? undefined : api },
+      getTreeDropPlacement: () => 'inside',
+      canDropTreeNodes: () => true,
+      findTreeNode: (_tree: unknown, id: string) => nodes.find((node) => node.id === id),
+      applyWorkspaceSnapshot: (snapshot: unknown) => {
+        assert.deepEqual(snapshot, { tree: 'persisted tree' });
+        calls.push('apply');
+      },
+      setTree: (update: (value: unknown) => unknown) => {
+        update(nodes);
+        calls.push('local');
+      },
+      moveTreeNodes: () => nodes,
+      setTreeMoveError: (message: string) => {
+        if (!message) return;
+        if (scenario === 'reload-error') assert.match(message, /^Move saved, but/);
+        calls.push('error');
+      },
+      setDraggedNodeIds: () => {},
+      setDropTarget: () => {},
+      setSelectedNodeId: () => {
+        calls.push('select');
+      },
+      toggleFolder: () => {},
+    };
+    const drop = new Function(...Object.keys(bindings), `${handler}; return handleTreeDrop;`)(
+      ...Object.values(bindings),
+    );
+    const pending = drop(
+      { preventDefault() {} },
+      { id: 'deep', persisted: scenario !== 'local-target' && persisted },
+    );
+    assert.ok(!calls.includes('load') && !calls.includes('apply'), 'must wait for persistence');
+    releaseSave();
+    await pending;
+    const expected =
+      scenario === 'saved'
+        ? ['save', 'load', 'apply', 'select']
+        : scenario === 'local'
+          ? ['local', 'select']
+          : scenario === 'rejected' || scenario === 'error'
+            ? ['save', 'error']
+            : scenario === 'reload-error'
+              ? ['save', 'load', 'local', 'error', 'select']
+              : ['error'];
+    assert.deepEqual(calls, expected, scenario);
+    assert.equal(bindings.treeMovePending.current, false, scenario);
+  }
+});
+
+test('a pending tree move blocks a second drop until its refresh completes', async () => {
+  const source = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  const start = source.indexOf('  async function handleTreeDrop(');
+  const end = source.indexOf('  function handleTreeDragEnd', start);
+  let saveCount = 0;
+  let signalLoading = () => {};
+  let finishLoading = () => {};
+  const loadingStarted = new Promise<void>((resolve) => {
+    signalLoading = resolve;
+  });
+  const loading = new Promise<void>((resolve) => {
+    finishLoading = resolve;
+  });
+  const tree = [{ id: 'source', persisted: true }];
+  const bindings = {
+    draggedNodeIds: ['source'],
+    searchText: '',
+    tree,
+    treeMovePending: { current: false },
+    treeRef: { current: tree },
+    window: {
+      wormhole: {
+        async moveWorkspaceNodes() {
+          saveCount++;
+          return { moved: true };
+        },
+        async loadWorkspace() {
+          signalLoading();
+          await loading;
+          return { tree };
+        },
+      },
+    },
+    getTreeDropPlacement: () => 'inside',
+    canDropTreeNodes: () => true,
+    findTreeNode: () => tree[0],
+    applyWorkspaceSnapshot: () => {},
+    setTreeMoveError: () => {},
+    setEditorError: () => {},
+    setDraggedNodeIds: () => {},
+    setDropTarget: () => {},
+    setSelectedNodeId: () => {},
+    toggleFolder: () => {},
+  };
+  const drop = new Function(
+    ...Object.keys(bindings),
+    `${stripTypeScriptTypes(source.slice(start, end))}; return handleTreeDrop;`,
+  )(...Object.values(bindings));
+  const first = drop({ preventDefault() {} }, { id: 'deep', persisted: true });
+  await loadingStarted;
+  const second = drop({ preventDefault() {} }, { id: 'deep', persisted: true });
+  finishLoading();
+  await Promise.all([first, second]);
+  assert.equal(saveCount, 1, 'the second drop must not start another save or stale refresh');
+  assert.equal(bindings.treeMovePending.current, false);
+  await drop({ preventDefault() {} }, { id: 'deep', persisted: true });
+  assert.equal(saveCount, 2, 'a completed move must release the guard');
+});
+
+test('tree moves retry snapshots superseded by a concurrent tree change', async () => {
+  const source = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  const start = source.indexOf('  async function handleTreeDrop(');
+  const end = source.indexOf('  function handleTreeDragEnd', start);
+  const tree = [{ id: 'source', persisted: true }];
+  const treeRef = { current: tree };
+  let loads = 0;
+  const applied: unknown[] = [];
+  const bindings = {
+    draggedNodeIds: ['source'],
+    searchText: '',
+    treeRef,
+    treeMovePending: { current: false },
+    window: {
+      wormhole: {
+        async moveWorkspaceNodes() {
+          return { moved: true };
+        },
+        async loadWorkspace() {
+          loads++;
+          if (loads === 1) treeRef.current = [{ id: 'concurrent-change', persisted: true }];
+          return { revision: loads };
+        },
+      },
+    },
+    getTreeDropPlacement: () => 'inside',
+    canDropTreeNodes: () => true,
+    findTreeNode: () => tree[0],
+    applyWorkspaceSnapshot: (value: unknown) => applied.push(value),
+    setTreeMoveError: () => {},
+    setDraggedNodeIds: () => {},
+    setDropTarget: () => {},
+    setSelectedNodeId: () => {},
+    toggleFolder: () => {},
+  };
+  const drop = new Function(
+    ...Object.keys(bindings),
+    `${stripTypeScriptTypes(source.slice(start, end))}; return handleTreeDrop;`,
+  )(...Object.values(bindings));
+  await drop({ preventDefault() {} }, { id: 'deep', persisted: true });
+  assert.deepEqual(applied, [{ revision: 2 }]);
+});
+
+test('tree move errors are rendered in the visible connection sidebar', () => {
+  const source = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  const start = source.indexOf('<SidebarContent');
+  const sidebar = source.slice(start, source.indexOf('</SidebarContent>', start));
+  assert.match(sidebar, /role="alert"[\s\S]*?\{treeMoveError\}/);
 });

@@ -74,6 +74,11 @@ const wormholeBridge = {
     ipcRenderer.invoke('mremote-import:commit', options),
   cancelMRemoteImportCommit: () => ipcRenderer.invoke('mremote-import:cancel-commit'),
   clearMRemoteImport: () => ipcRenderer.send('mremote-import:clear'),
+  moveWorkspaceNodes: (request: {
+    nodeIds: string[];
+    targetId: string;
+    placement: 'inside' | 'before' | 'after';
+  }) => ipcRenderer.invoke('workspace:move-nodes', request),
   duplicateWorkspaceNode: (request: { nodeId: string }) =>
     ipcRenderer.invoke('workspace:duplicate-node', request),
   deleteWorkspaceNode: (request: { nodeId: string }) =>

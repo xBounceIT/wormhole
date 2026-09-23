@@ -764,6 +764,11 @@ interface Window {
     }): Promise<WormholeMRemoteImportResult>;
     cancelMRemoteImportCommit(): Promise<boolean>;
     clearMRemoteImport(): void;
+    moveWorkspaceNodes(request: {
+      nodeIds: string[];
+      targetId: string;
+      placement: 'inside' | 'before' | 'after';
+    }): Promise<{ moved: boolean }>;
     duplicateWorkspaceNode(request: { nodeId: string }): Promise<{ nodeId: string; name: string }>;
     deleteWorkspaceNode(request: { nodeId: string }): Promise<{ deleted: boolean }>;
     deleteWorkspaceNodes(request: { nodeIds: string[] }): Promise<{ deleted: boolean }>;

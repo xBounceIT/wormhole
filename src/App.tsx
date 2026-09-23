@@ -2003,6 +2003,8 @@ function App({
   const [updateStatus, setUpdateStatus] = useState('');
   const [updateDownloadProgress, setUpdateDownloadProgress] = useState<number | null>(null);
   const [settingsUpdatesRequest, setSettingsUpdatesRequest] = useState(0);
+  const treeMovePending = useRef(false);
+  const [treeMoveError, setTreeMoveError] = useState('');
   const [draggedNodeIds, setDraggedNodeIds] = useState<string[]>([]);
   const [dropTarget, setDropTarget] = useState<{
     id: string;
@@ -3205,7 +3207,7 @@ function App({
   }
 
   function handleTreeDragStart(event: DragEvent<HTMLButtonElement>, node: TreeNode) {
-    if (searchText.trim()) {
+    if (treeMovePending.current || searchText.trim()) {
       event.preventDefault();
       return;
     }
@@ -3218,7 +3220,7 @@ function App({
   }
 
   function handleTreeDragOver(event: DragEvent<HTMLDivElement>, node: TreeNode) {
-    if (draggedNodeIds.length === 0 || searchText.trim()) return;
+    if (treeMovePending.current || draggedNodeIds.length === 0 || searchText.trim()) return;
 
     const placement = getTreeDropPlacement(event, node);
     if (!canDropTreeNodes(tree, draggedNodeIds, node.id, placement)) {
@@ -3239,18 +3241,68 @@ function App({
     setDropTarget((current) => (current?.id === node.id ? null : current));
   }
 
-  function handleTreeDrop(event: DragEvent<HTMLDivElement>, node: TreeNode) {
+  async function handleTreeDrop(event: DragEvent<HTMLDivElement>, node: TreeNode) {
     event.preventDefault();
+    if (treeMovePending.current) return;
     const sourceIds =
       draggedNodeIds.length > 0
         ? draggedNodeIds
         : parseDraggedNodeIds(event.dataTransfer.getData('text/plain'));
     if (sourceIds.length === 0 || searchText.trim()) return;
 
+    const currentTree = treeRef.current;
     const placement = getTreeDropPlacement(event, node);
-    if (!canDropTreeNodes(tree, sourceIds, node.id, placement)) return;
+    if (!canDropTreeNodes(currentTree, sourceIds, node.id, placement)) return;
 
-    setTree((current) => moveTreeNodes(current, sourceIds, node.id, placement));
+    treeMovePending.current = true;
+    setTreeMoveError('');
+    try {
+      if (sourceIds.some((id) => findTreeNode(currentTree, id)?.persisted)) {
+        if (
+          !window.wormhole ||
+          !node.persisted ||
+          sourceIds.some((id) => !findTreeNode(currentTree, id)?.persisted)
+        ) {
+          throw new Error('The workspace service cannot save this move.');
+        }
+        const result = await window.wormhole.moveWorkspaceNodes({
+          nodeIds: sourceIds,
+          targetId: node.id,
+          placement,
+        });
+        if (!result.moved) throw new Error('The workspace did not save the move.');
+        try {
+          let treeBeforeRefresh: TreeNode[];
+          let workspace: WormholeWorkspaceSnapshot;
+          do {
+            treeBeforeRefresh = treeRef.current;
+            workspace = await window.wormhole.loadWorkspace();
+          } while (treeRef.current !== treeBeforeRefresh);
+          applyWorkspaceSnapshot(workspace);
+        } catch (error: unknown) {
+          // Persistence succeeded: keep the committed move visible even if the refresh failed.
+          setTree((current) =>
+            current === currentTree
+              ? moveTreeNodes(current, sourceIds, node.id, placement)
+              : current,
+          );
+          setTreeMoveError(
+            `Move saved, but the workspace could not be refreshed: ${
+              error instanceof Error ? error.message : 'unknown error'
+            }`,
+          );
+        }
+      } else {
+        setTree((current) => moveTreeNodes(current, sourceIds, node.id, placement));
+      }
+    } catch (error: unknown) {
+      setTreeMoveError(error instanceof Error ? error.message : 'Could not move the nodes.');
+      setDraggedNodeIds([]);
+      setDropTarget(null);
+      return;
+    } finally {
+      treeMovePending.current = false;
+    }
     setSelectedNodeId(sourceIds[0]);
     if (placement === 'inside') toggleFolder(node.id, true);
     setDraggedNodeIds([]);
@@ -6824,6 +6876,11 @@ function App({
                 </SidebarHeader>
 
                 <SidebarContent className="min-h-0 overflow-hidden px-2">
+                  {treeMoveError ? (
+                    <p role="alert" className="px-2 py-1 text-xs text-destructive">
+                      {treeMoveError}
+                    </p>
+                  ) : null}
                   <ContextMenu>
                     <ContextMenuTrigger asChild>
                       <div
