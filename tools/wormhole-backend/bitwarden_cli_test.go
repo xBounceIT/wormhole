@@ -683,7 +683,7 @@ func TestBitwardenCliDisablePreservesIntegrationState(t *testing.T) {
 
 func TestBitwardenCliSetConfigPersistsPathAndRegion(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
-	state, changed, err := setBitwardenCliConfig(databasePath, "C:\\tools\\bw.exe", bitwardenCliServerEurope)
+	state, changed, err := (&vncManager{databasePath: databasePath}).setBitwardenCliConfig("C:\\tools\\bw.exe", bitwardenCliServerEurope)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -704,7 +704,7 @@ func TestBitwardenCliSetConfigPersistsPathAndRegion(t *testing.T) {
 
 func TestBitwardenCliSetConfigReportsUnchangedValues(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
-	if _, changed, err := setBitwardenCliConfig(databasePath, "bw", bitwardenCliServerUnitedStates); err != nil {
+	if _, changed, err := (&vncManager{databasePath: databasePath}).setBitwardenCliConfig("bw", bitwardenCliServerUnitedStates); err != nil {
 		t.Fatal(err)
 	} else if changed {
 		t.Fatal("default config was reported as changed")
@@ -725,7 +725,7 @@ func TestBitwardenCliProcessFailureReportsAuthenticationFromStdout(t *testing.T)
 
 func TestBitwardenCliSetConfigRejectsInvalidRegion(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
-	if _, _, err := setBitwardenCliConfig(databasePath, "bw", 99); err == nil {
+	if _, _, err := (&vncManager{databasePath: databasePath}).setBitwardenCliConfig("bw", 99); err == nil {
 		t.Fatal("invalid region was accepted")
 	}
 }
@@ -743,7 +743,7 @@ func TestBitwardenCliSetConfigNormalizesPathAndClearsInstallMetadata(t *testing.
 	if err := writeBitwardenCliSettings(databasePath, settings); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := setBitwardenCliConfig(databasePath, "  ", bitwardenCliServerCurrent); err != nil {
+	if _, _, err := (&vncManager{databasePath: databasePath}).setBitwardenCliConfig("  ", bitwardenCliServerCurrent); err != nil {
 		t.Fatal(err)
 	}
 	persisted, err := readBitwardenCliSettings(databasePath)

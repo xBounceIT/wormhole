@@ -8,7 +8,8 @@ import (
 	"time"
 )
 
-func setBitwardenCliConfig(databasePath, path string, serverRegion int) (bitwardenCliState, bool, error) {
+func (m *vncManager) setBitwardenCliConfig(path string, serverRegion int) (bitwardenCliState, bool, error) {
+	databasePath := m.databasePath
 	settings, err := readBitwardenCliSettings(databasePath)
 	if err != nil {
 		return bitwardenCliState{}, false, err
@@ -22,6 +23,11 @@ func setBitwardenCliConfig(databasePath, path string, serverRegion int) (bitward
 	}
 	pathChanged := !bitwardenCliPathsEqual(settings.Path, normalizedPath)
 	changed := pathChanged || settings.ServerRegion != serverRegion
+	if changed {
+		if err := m.resetBitwardenSession(); err != nil {
+			return bitwardenCliState{}, false, err
+		}
+	}
 	if pathChanged {
 		settings.Version = ""
 		settings.Sha256 = ""

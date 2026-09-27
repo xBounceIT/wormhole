@@ -664,3 +664,46 @@ func TestBitwardenSessionRebindReportsStorageFailures(t *testing.T) {
 		})
 	}
 }
+
+func TestBitwardenConfigRequiresSessionCleanupBeforeCommit(t *testing.T) {
+	for _, rollback := range []bool{false, true} {
+		m := sessionTestManager(t)
+		if err := m.setBitwardenSessionForGeneration("session-key", 0); err != nil {
+			t.Fatal(err)
+		}
+		settings, err := readBitwardenCliSettings(m.databasePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		target := "other-cli"
+		if rollback {
+			// Simulate a stale file left by an earlier failed configuration change.
+			settings.Path, target = target, settings.Path
+			if err := writeBitwardenCliSettings(m.databasePath, settings); err != nil {
+				t.Fatal(err)
+			}
+		}
+		previous := removeBitwardenSessionFile
+		removeBitwardenSessionFile = func(string) error { return errors.New("cannot remove session") }
+		_, _, err = m.setBitwardenCliConfig(target, settings.ServerRegion)
+		removeBitwardenSessionFile = previous
+		if err == nil {
+			t.Fatal("configuration accepted failed cleanup")
+		}
+		after, err := readBitwardenCliSettings(m.databasePath)
+		if err != nil || after.Path != settings.Path {
+			t.Fatal("failed cleanup changed configuration", err)
+		}
+		if _, _, err := m.setBitwardenCliConfig(target, settings.ServerRegion); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := m.setBitwardenCliConfig("cli", settings.ServerRegion); err != nil {
+			t.Fatal(err)
+		}
+		restarted := &vncManager{databasePath: m.databasePath}
+		restarted.restoreBitwardenSession(0)
+		if restarted.bitwardenSession() != "" {
+			t.Fatal("configuration rollback revived stale session")
+		}
+	}
+}

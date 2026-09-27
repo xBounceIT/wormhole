@@ -96,12 +96,8 @@ func (m *vncManager) handleBitwarden(command backendCommand, expectedGeneration 
 		}
 	case "bitwarden.set-config":
 		var state bitwardenCliState
-		var changed bool
-		state, changed, err = setBitwardenCliConfig(m.databasePath, command.Path, command.ServerRegion)
+		state, _, err = m.setBitwardenCliConfig(command.Path, command.ServerRegion)
 		result = state
-		if err == nil && changed {
-			err = m.resetBitwardenSession()
-		}
 	case "bitwarden.install":
 		result, err = m.installBitwardenCliForSession(false)
 	case "bitwarden.ensure-installed":
