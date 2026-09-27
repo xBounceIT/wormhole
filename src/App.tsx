@@ -1468,6 +1468,14 @@ function AuthPrompt({
   const authRequestKey = `${request.kind}\0${request.reason}\0${request.autoWindowsHello}\0${isHelloMode}\0${method}`;
 
   useLayoutEffect(() => {
+    // Invalidate the old request before a settled promise can reach the new callback.
+    activeAuthRequest.current = authRequestKey;
+    return () => {
+      if (activeAuthRequest.current === authRequestKey) activeAuthRequest.current = null;
+    };
+  }, [authRequestKey]);
+
+  useLayoutEffect(() => {
     onResultRef.current = onResult;
   }, [onResult]);
 
@@ -1523,7 +1531,6 @@ function AuthPrompt({
   );
 
   useEffect(() => {
-    activeAuthRequest.current = authRequestKey;
     setSecret('');
     setStatus('');
     setBusy(false);
@@ -1532,9 +1539,6 @@ function AuthPrompt({
     if (isHelloMode) {
       void tryWindowsHello(authRequestKey, request.autoWindowsHello);
     }
-    return () => {
-      if (activeAuthRequest.current === authRequestKey) activeAuthRequest.current = null;
-    };
   }, [authRequestKey, request.autoWindowsHello, isHelloMode, tryWindowsHello]);
 
   useLayoutEffect(() => {

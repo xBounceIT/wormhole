@@ -317,6 +317,50 @@ async function runAuthPromptTests() {
     }
   }
 
+  for (const mode of ['pin', 'windowsHello']) {
+    const pendingResult = deferred();
+    verifySecret = () => pendingResult.promise;
+    verifyHello = () => pendingResult.promise;
+    await mount({ mode }, { kind: 'confirmation', reason: 'Before idle lock.' });
+    if (mode === 'pin') await enterSecret();
+    const nextResult = deferred();
+    verifyHello = () => nextResult.promise;
+    const beforeCommit = results.length;
+    let committed: () => void;
+    const commit = new Promise<void>((resolve) => {
+      committed = resolve;
+    });
+    // Use the normal scheduler: act flushes passive effects before microtasks and
+    // would hide the commit-to-passive-effect race being tested here.
+    globalThis.IS_REACT_ACT_ENVIRONMENT = false;
+    try {
+      root.render(
+        <React.StrictMode>
+          <AuthPrompt
+            key={key}
+            state={{ ...state, mode }}
+            request={{ ...request, reason: 'Committed idle lock.' }}
+            onResult={(value: boolean) => results.push(value)}
+            onDialogElementChange={(dialog: HTMLDialogElement | null) => {
+              if (!dialog) return;
+              pendingResult.resolve({ succeeded: true });
+              committed();
+            }}
+          />
+        </React.StrictMode>,
+      );
+      await commit;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      assert.equal(
+        results.length,
+        beforeCommit,
+        'committed locks must reject old results before passive effects',
+      );
+    } finally {
+      globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+    }
+  }
+
   const stale = deferred();
   check = () => stale.promise;
   await mount();
