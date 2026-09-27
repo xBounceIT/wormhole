@@ -21,9 +21,10 @@ type bitwardenResolvedCredential struct {
 var errBitwardenSessionInvalidated = errors.New("Bitwarden session was cleared; unlock the vault and try again")
 
 var (
-	installBitwardenCliForService = installBitwardenCliLatestWrapped
-	ensureBitwardenCliForService  = ensureBitwardenCliInstalled
-	removeBitwardenSessionFile    = os.Remove
+	installBitwardenCliForService       = installBitwardenCliLatestWrapped
+	ensureBitwardenCliForService        = ensureBitwardenCliInstalled
+	removeBitwardenSessionFile          = os.Remove
+	deleteBitwardenSessionProtectionKey = deleteFileProtectionKey
 )
 
 func (m *vncManager) handleBitwarden(command backendCommand, expectedGeneration uint64) {
@@ -462,18 +463,29 @@ func (m *vncManager) clearBitwardenSession() {
 
 func (m *vncManager) discardBitwardenSession(sessionKey string, generation uint64) error {
 	m.bitwardenMu.Lock()
-	defer m.bitwardenMu.Unlock()
 	// A request completing after an app lock must not revoke the durable session.
 	if sessionKey == "" || m.bitwardenSessionKey != sessionKey || m.bitwardenSessionGeneration != generation {
+		m.bitwardenMu.Unlock()
 		return nil
 	}
-	return m.resetBitwardenSessionLocked()
+	err := m.resetBitwardenSessionLocked()
+	m.bitwardenMu.Unlock()
+	if err == nil && m.databasePath != "" {
+		deleteBitwardenSessionProtectionKey(bitwardenSessionPath(m.databasePath))
+	}
+	return err
 }
 
 func (m *vncManager) resetBitwardenSession() error {
 	m.bitwardenMu.Lock()
-	defer m.bitwardenMu.Unlock()
-	return m.resetBitwardenSessionLocked()
+	err := m.resetBitwardenSessionLocked()
+	m.bitwardenMu.Unlock()
+	// Keychain operations may block. Callers serialize session mutations with
+	// bitwardenOperationMu, while app locking must remain independent.
+	if err == nil && m.databasePath != "" {
+		deleteBitwardenSessionProtectionKey(bitwardenSessionPath(m.databasePath))
+	}
+	return err
 }
 
 func (m *vncManager) resetBitwardenSessionLocked() error {

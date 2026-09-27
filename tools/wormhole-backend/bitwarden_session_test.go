@@ -131,6 +131,10 @@ func TestBitwardenSessionRejectsInvalidSavedState(t *testing.T) {
 }
 
 func TestBitwardenSessionStorageFailureIsReported(t *testing.T) {
+	previousDelete := deleteBitwardenSessionProtectionKey
+	deleted := false
+	deleteBitwardenSessionProtectionKey = func(string) { deleted = true }
+	t.Cleanup(func() { deleteBitwardenSessionProtectionKey = previousDelete })
 	m := sessionTestManager(t)
 	path := bitwardenSessionPath(m.databasePath)
 	if err := os.Mkdir(path, 0700); err != nil {
@@ -147,6 +151,9 @@ func TestBitwardenSessionStorageFailureIsReported(t *testing.T) {
 	}
 	if err := m.resetBitwardenSession(); err == nil {
 		t.Fatal("removal failure hidden")
+	}
+	if deleted {
+		t.Fatal("failed ciphertext removal deleted its protection key")
 	}
 }
 
@@ -422,5 +429,54 @@ func TestBitwardenReenableDiscardsSessionLeftByFailedDisable(t *testing.T) {
 	responses := decodeBackendResponses(t, output.Bytes())
 	if len(responses) != 4 || responses[0].OK || responses[1].OK || !responses[2].OK || !responses[3].OK {
 		t.Fatal("enable/disable responses did not reflect cleanup failures")
+	}
+}
+
+func TestBitwardenSessionKeyDeletionDoesNotDelayLock(t *testing.T) {
+	for _, discard := range []bool{false, true} {
+		m := sessionTestManager(t)
+		if err := m.setBitwardenSessionForGeneration("session-key", 0); err != nil {
+			t.Fatal(err)
+		}
+		previous := deleteBitwardenSessionProtectionKey
+		entered, release, done := make(chan string, 1), make(chan struct{}), make(chan error, 1)
+		deleteBitwardenSessionProtectionKey = func(path string) { entered <- path; <-release; previous(path) }
+		t.Cleanup(func() { deleteBitwardenSessionProtectionKey = previous })
+		go func() {
+			if discard {
+				done <- m.discardBitwardenSession("session-key", 0)
+			} else {
+				done <- m.resetBitwardenSession()
+			}
+		}()
+		var path string
+		select {
+		case path = <-entered:
+		case err := <-done:
+			t.Fatal("reset skipped protection key deletion", err)
+		case <-time.After(5 * time.Second):
+			close(release)
+			<-done
+			t.Fatal("protection key deletion was not reached")
+		}
+		_, statErr := os.Stat(path)
+		locked := make(chan struct{})
+		go func() { m.clearBitwardenSession(); close(locked) }()
+		timely := false
+		select {
+		case <-locked:
+			timely = true
+		case <-time.After(time.Second):
+		}
+		close(release)
+		err := <-done
+		<-locked
+		deleteBitwardenSessionProtectionKey = previous
+		if err != nil || !timely {
+			t.Fatal("key deletion blocked lock or failed", err)
+		}
+		if path != bitwardenSessionPath(m.databasePath) || !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatal("protection key removed before ciphertext")
+		}
 	}
 }
