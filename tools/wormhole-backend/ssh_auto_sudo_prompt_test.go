@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -315,17 +316,19 @@ func TestSSHAutoSudoAnswersUbuntuPromptAfterControlString(t *testing.T) {
 }
 
 func TestSSHAutoSudoWaitsForDelayedUbuntuPrompt(t *testing.T) {
-	input := &recordingSSHInput{}
-	driver := newSSHAutoSudoDriver(&sshNativeSession{stdin: input}, "secret")
-	defer driver.dispose()
-	driver.start()
+	synctest.Test(t, func(t *testing.T) {
+		input := &recordingSSHInput{}
+		driver := newSSHAutoSudoDriver(&sshNativeSession{stdin: input}, "secret")
+		defer driver.dispose()
+		driver.start()
 
-	// The previous 10-second deadline started before the login shell was ready.
-	time.Sleep(11 * time.Second)
-	driver.observe([]byte("daniel@host:~$ sudo su\r\n[sudo: authenticate] Password: "))
-	if got := input.String(); got != "sudo su\rsecret\r" {
-		t.Fatalf("auto sudo abandoned a delayed password prompt: %q", got)
-	}
+		// Advance past the former 10-second deadline without waiting in real time.
+		time.Sleep(11 * time.Second)
+		driver.observe([]byte("daniel@host:~$ sudo su\r\n[sudo: authenticate] Password: "))
+		if got := input.String(); got != "sudo su\rsecret\r" {
+			t.Fatalf("auto sudo abandoned a delayed password prompt: %q", got)
+		}
+	})
 }
 
 func TestSSHAutoSudoAuthenticatePromptAfterStop(t *testing.T) {
