@@ -639,16 +639,12 @@ func TestSSHAutoSudoDriverStartsWithoutShellOutput(t *testing.T) {
 	initial := input.String()
 	requireAutoSudoCommand(t, initial)
 
-	if err := native.write([]byte("whoami\r")); err != nil {
-		t.Fatalf("buffering terminal input failed: %v", err)
-	}
-	if got := input.String(); got != initial {
-		t.Fatalf("user input reached sudo before its password prompt: %q", got)
-	}
-
 	driver.observe([]byte("[sudo] password for operator: "))
+	if err := native.write([]byte("whoami\r")); err != nil {
+		t.Fatalf("writing terminal input failed: %v", err)
+	}
 	if got := input.String(); got != initial+"secret\r"+"whoami\r" {
-		t.Fatalf("expected password before buffered user input, got %q", got)
+		t.Fatalf("expected password followed by user input, got %q", got)
 	}
 }
 
@@ -662,10 +658,10 @@ func TestSSHAutoSudoDriverUsesNonInteractiveSudoWithoutLoginPassword(t *testing.
 	native.autoSudo = driver
 	defer driver.dispose()
 
-	if err := native.write([]byte("whoami\r")); err != nil {
-		t.Fatalf("buffering terminal input failed: %v", err)
-	}
 	driver.start()
+	if err := native.write([]byte("whoami\r")); err != nil {
+		t.Fatalf("writing terminal input failed: %v", err)
+	}
 	if got := input.String(); got != "sudo -n su\rwhoami\r" {
 		t.Fatalf("passwordless auto sudo input = %q", got)
 	}
@@ -689,7 +685,7 @@ func TestSSHAutoSudoDriverStartIsIdempotent(t *testing.T) {
 	}
 }
 
-func TestSSHAutoSudoDriverBuffersUserInputUntilPrompt(t *testing.T) {
+func TestSSHAutoSudoDriverManualInputTakesOverBeforePrompt(t *testing.T) {
 	input := &recordingSSHInput{}
 	native := &sshNativeSession{stdin: input}
 	driver := newSSHAutoSudoDriver(native, "secret")
@@ -702,19 +698,19 @@ func TestSSHAutoSudoDriverBuffersUserInputUntilPrompt(t *testing.T) {
 	driver.observe([]byte("shell ready"))
 	initial := input.String()
 	if err := native.write([]byte("ls\r")); err != nil {
-		t.Fatalf("buffering terminal input failed: %v", err)
+		t.Fatalf("writing terminal input failed: %v", err)
 	}
-	if got := input.String(); got != initial {
-		t.Fatalf("user input reached sudo before its password prompt: %q", got)
+	if got := input.String(); got != initial+"ls\r" {
+		t.Fatal("manual input was delayed")
 	}
 
 	driver.observe([]byte("[sudo] password for operator: "))
-	if got := input.String(); got != initial+"secret\r"+"ls\r" {
-		t.Fatalf("expected password before buffered user input, got %q", got)
+	if got := input.String(); got != initial+"ls\r" {
+		t.Fatal("automatic password was sent after manual takeover")
 	}
 }
 
-func TestSSHAutoSudoDriverFlushesBufferedInputWhenCancelled(t *testing.T) {
+func TestSSHAutoSudoDriverCancellationDoesNotReplayManualInput(t *testing.T) {
 	input := &recordingSSHInput{}
 	native := &sshNativeSession{stdin: input}
 	driver := newSSHAutoSudoDriver(native, "secret")
@@ -726,11 +722,11 @@ func TestSSHAutoSudoDriverFlushesBufferedInputWhenCancelled(t *testing.T) {
 	driver.observe([]byte("shell ready"))
 	initial := input.String()
 	if err := native.write([]byte("pwd\r")); err != nil {
-		t.Fatalf("buffering terminal input failed: %v", err)
+		t.Fatalf("writing terminal input failed: %v", err)
 	}
 	driver.dispose()
 	if got := input.String(); got != initial+"pwd\r" {
-		t.Fatalf("expected buffered input after cancellation without a password, got %q", got)
+		t.Fatalf("cancellation changed previously delivered input: %q", got)
 	}
 }
 
