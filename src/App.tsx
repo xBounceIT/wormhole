@@ -1451,7 +1451,7 @@ function AuthPrompt({
   const [helloBusy, setHelloBusy] = useState(false);
   const [helloAvailable, setHelloAvailable] = useState(false);
   const [helloStatus, setHelloStatus] = useState<string | null>(null);
-  const activeHelloRequest = useRef<string | null>(null);
+  const activeAuthRequest = useRef<string | null>(null);
   const helloInFlight = useRef<string | null>(null);
   const dialogRef = useRef<HTMLDialogElement>(null);
   const secretInputRef = useRef<HTMLInputElement>(null);
@@ -1465,18 +1465,26 @@ function AuthPrompt({
   const fallbackName = method === 'pin' ? 'Wormhole PIN' : 'Wormhole password';
   const helloMessage =
     helloStatus ?? (state.windowsHello.available ? '' : state.windowsHello.message);
-  const helloRequestKey = `${request.kind}\0${request.reason}\0${request.autoWindowsHello}\0${isHelloMode}\0${method}`;
+  const authRequestKey = `${request.kind}\0${request.reason}\0${request.autoWindowsHello}\0${isHelloMode}\0${method}`;
+
+  useLayoutEffect(() => {
+    // Invalidate the old request before a settled promise can reach the new callback.
+    activeAuthRequest.current = authRequestKey;
+    return () => {
+      if (activeAuthRequest.current === authRequestKey) activeAuthRequest.current = null;
+    };
+  }, [authRequestKey]);
 
   useLayoutEffect(() => {
     onResultRef.current = onResult;
   }, [onResult]);
 
   const tryWindowsHello = useCallback(
-    (requestKey = helloRequestKey, verify = true) => {
+    (requestKey = authRequestKey, verify = true) => {
       if (helloInFlight.current === requestKey || !window.wormhole) return;
 
       const api = window.wormhole;
-      const isCurrent = () => activeHelloRequest.current === requestKey;
+      const isCurrent = () => activeAuthRequest.current === requestKey;
       helloInFlight.current = requestKey;
       setHelloBusy(true);
       setHelloStatus('');
@@ -1519,22 +1527,19 @@ function AuthPrompt({
           if (isCurrent()) setHelloBusy(false);
         });
     },
-    [fallbackName, helloRequestKey],
+    [fallbackName, authRequestKey],
   );
 
   useEffect(() => {
-    activeHelloRequest.current = helloRequestKey;
     setSecret('');
     setStatus('');
+    setBusy(false);
     setHelloAvailable(false);
     setHelloStatus(null);
     if (isHelloMode) {
-      void tryWindowsHello(helloRequestKey, request.autoWindowsHello);
+      void tryWindowsHello(authRequestKey, request.autoWindowsHello);
     }
-    return () => {
-      if (activeHelloRequest.current === helloRequestKey) activeHelloRequest.current = null;
-    };
-  }, [helloRequestKey, request.autoWindowsHello, isHelloMode, tryWindowsHello]);
+  }, [authRequestKey, request.autoWindowsHello, isHelloMode, tryWindowsHello]);
 
   useLayoutEffect(() => {
     const dialog = dialogRef.current;
@@ -1563,22 +1568,25 @@ function AuthPrompt({
     event.preventDefault();
     if (busy || !secret || !window.wormhole) return;
 
+    const isCurrent = () => activeAuthRequest.current === authRequestKey;
     setBusy(true);
     setStatus('Checking…');
     try {
       const result = await window.wormhole.verifyAuth({ method, secret });
+      if (!isCurrent()) return;
       if (result.succeeded) {
-        onResult(true);
+        onResultRef.current(true);
         return;
       }
       setSecret('');
       setStatus(result.message || (method === 'pin' ? 'Invalid PIN.' : 'Invalid password.'));
     } catch {
+      if (!isCurrent()) return;
       setStatus(
         `Wormhole couldn't check your ${method === 'pin' ? 'PIN' : 'password'}. Try again.`,
       );
     } finally {
-      setBusy(false);
+      if (isCurrent()) setBusy(false);
     }
   }
 
@@ -2321,6 +2329,8 @@ function App({
 
   const requestAuthentication = useCallback(
     (reason: string) => {
+      if (authGate !== 'unlocked') return Promise.resolve(false);
+      if (authPromptResolver.current) return Promise.resolve(false);
       if (!authState?.configured || authState.mode === 'disabled') return Promise.resolve(true);
 
       return new Promise<boolean>((resolve) => {
@@ -2328,18 +2338,14 @@ function App({
         setAuthPrompt({ kind: 'confirmation', reason, autoWindowsHello: true });
       });
     },
-    [authState],
+    [authGate, authState],
   );
 
   function handleAuthPromptResult(succeeded: boolean) {
-    const activePrompt =
-      authPrompt ??
-      (authGate === 'locked' && authState?.configured
-        ? { kind: 'lock' as const, reason: lockReason, autoWindowsHello: true }
-        : null);
-    if (!activePrompt) return;
-
-    if (activePrompt.kind === 'lock') {
+    if (authGate === 'locked') {
+      // An action started before locking can still enqueue a confirmation. The
+      // lock owns this result; unlocking must not authorize that older action.
+      settleAuthConfirmation(false);
       if (succeeded) {
         setAuthGate('unlocked');
         setLockReason('Unlock Wormhole to continue.');
@@ -2349,7 +2355,7 @@ function App({
       return;
     }
 
-    settleAuthConfirmation(succeeded);
+    if (authPrompt) settleAuthConfirmation(succeeded);
   }
 
   async function resolveMcpApproval(approved: boolean, approval = mcpApprovals[0]) {
@@ -6487,10 +6493,9 @@ function App({
 
   const currentPage = navItems.find((item) => item.id === activePage)!;
   const visibleAuthPrompt =
-    authPrompt ??
-    (authGate === 'locked' && authState?.configured
+    authGate === 'locked' && authState?.configured
       ? { kind: 'lock' as const, reason: lockReason, autoWindowsHello: true }
-      : null);
+      : authPrompt;
   const credentialResult =
     credentialDialog?.kind === 'credentials' ? credentialDialog.result : null;
   const pendingDeleteNode = pendingDeleteNodes[0];

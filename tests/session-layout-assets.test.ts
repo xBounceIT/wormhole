@@ -98,12 +98,12 @@ test('authentication prompt keeps the active Windows Hello request through Stric
     appSource.indexOf('function AuthPrompt'),
     appSource.indexOf('type WormholeAppProps'),
   );
-  assert.match(promptSource, /const activeHelloRequest = useRef<string \| null>\(null\)/);
+  assert.match(promptSource, /const activeAuthRequest = useRef<string \| null>\(null\)/);
   assert.match(promptSource, /helloInFlight\.current === requestKey/);
-  assert.match(promptSource, /activeHelloRequest\.current = helloRequestKey/);
+  assert.match(promptSource, /activeAuthRequest\.current = authRequestKey/);
   assert.match(
     promptSource,
-    /if \(activeHelloRequest\.current === helloRequestKey\) activeHelloRequest\.current = null/,
+    /if \(activeAuthRequest\.current === authRequestKey\) activeAuthRequest\.current = null/,
   );
   assert.doesNotMatch(promptSource, /let cancelled = false/);
 });
