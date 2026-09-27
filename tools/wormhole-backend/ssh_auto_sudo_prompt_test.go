@@ -5,6 +5,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
+	"time"
 )
 
 func TestSSHSudoPasswordPromptFormats(t *testing.T) {
@@ -19,10 +21,18 @@ func TestSSHSudoPasswordPromptFormats(t *testing.T) {
 		{"authenticate localized", "[sudo: authenticate] Mot de passe : ", true},
 		{"styled authenticate", "\x1b[1m[sudo: authenticate]\x1b[0m Password: \x1b[0m", true},
 		{"styled classic", "\x1b[33m[sudo] password for operator:\x1b[m ", true},
+		{"bash bracketed paste transition", "\x1b[?2004l[sudo: authenticate] Password: ", true},
+		{"cursor visibility transition", "\x1b[?25h[sudo: authenticate] Password: ", true},
+		{"cursor visibility after prompt", "[sudo: authenticate] Password: \x1b[?25h", true},
+		{"long SGR", "\x1b[38;2;255;255;255m[sudo: authenticate] Password: ", true},
 		{"incomplete styling", "[sudo: authenticate] Password: \x1b[0", false},
 		{"completed old prompt", "[sudo: authenticate] Password: \r\n", false},
 		{"hidden prompt", "\x1b]0;[sudo: authenticate] Password: ", false},
 		{"cursor movement", "\x1b[2C[sudo: authenticate] Password: ", false},
+		{"private mode inside prompt", "[sudo: authenticate] \x1b[?2004lPassword: ", true},
+		{"cursor movement after prompt", "[sudo: authenticate] Password: \x1b[2C", false},
+		{"unknown private mode", "\x1b[?2004h[sudo: authenticate] Password: ", false},
+		{"private parameter is not SGR", "\x1b[?2004m[sudo: authenticate] Password: ", false},
 		{"partial color parameter", "[sudo: authenticate] \x1b[38:", false},
 		{"hidden multiline prompt", "\x1b]0;title\n[sudo: authenticate] Password: ", false},
 		{"command echo before prompt", "operator@host:~$ sudo su\r\n[sudo: authenticate] Password: ", true},
@@ -51,7 +61,7 @@ func TestSSHSudoPromptControlStringsAcrossChunks(t *testing.T) {
 	for _, hidden := range []string{
 		"\x1b]title\n" + passwordPrompt + "\x07",
 		"\x1bP" + strings.Repeat("x", 1024) + "\n" + passwordPrompt + "\x1b\\",
-		"\x1b_title\x1b?\n" + passwordPrompt + "\x1b\x1b\x07",
+		"\x1b_title\x1b?\n" + passwordPrompt + "\x1b\x1b\x07\x1b\\",
 		"\x1b\x1b]title\n" + passwordPrompt + "\x1b\\",
 		"\x1b[38:\x1b]title\n" + passwordPrompt + "\x07",
 	} {
@@ -64,6 +74,60 @@ func TestSSHSudoPromptControlStringsAcrossChunks(t *testing.T) {
 				t.Fatalf("real prompt not recognized after control string at split %d", split)
 			}
 		}
+	}
+}
+
+func TestSSHSudoPromptAfterTerminatedControlStringOnSameLine(t *testing.T) {
+	const passwordPrompt = "[sudo: authenticate] Password:"
+	for _, control := range []string{
+		"\x1b]0;title\x07",
+		"\x1b]0;title\x1b\\",
+		"\x1b]0;" + passwordPrompt + "\x07",
+	} {
+		output := control + passwordPrompt
+		for split := 0; split <= len(output); split++ {
+			var prompt sshSudoPrompt
+			first := prompt.write([]byte(output[:split]))
+			second := prompt.write([]byte(output[split:]))
+			if first && split < len(output) || !first && !second {
+				t.Fatalf("visible prompt after a terminated control string was missed at split %d", split)
+			}
+		}
+	}
+}
+
+func TestSSHSudoPromptDoesNotTrustOtherControlStrings(t *testing.T) {
+	const passwordPrompt = "[sudo: authenticate] Password:"
+	for _, control := range []string{
+		"\x1bPmetadata\x1b\\",
+		"\x1bPmetadata\x07",
+		"\x1b_kmetadata\x1b\\",
+	} {
+		var prompt sshSudoPrompt
+		if prompt.write([]byte(control + passwordPrompt)) {
+			t.Fatal("unsupported control string caused a credential response")
+		}
+	}
+}
+
+func TestSSHAutoSudoRejectsBELAfterESCInOSC(t *testing.T) {
+	const promptText = "[sudo: authenticate] Password:"
+	malformed := "\x1b]0;x\x1b\x07" + promptText
+	for split := 0; split <= len(malformed); split++ {
+		input := &recordingSSHInput{}
+		driver := newSSHAutoSudoDriver(&sshNativeSession{stdin: input}, "secret")
+		driver.start()
+		driver.observe([]byte(malformed[:split]))
+		driver.observe([]byte(malformed[split:]))
+		if got := input.String(); got != "sudo su\r" {
+			t.Fatalf("split %d: malformed OSC released the password: %q", split, got)
+		}
+		// A later valid terminator and new line allow a genuine prompt.
+		driver.observe([]byte("\x1b\\\r\n" + promptText))
+		if got := input.String(); got != "sudo su\rsecret\r" {
+			t.Fatalf("split %d: valid prompt after recovery was missed: %q", split, got)
+		}
+		driver.dispose()
 	}
 }
 
@@ -214,6 +278,57 @@ func TestSSHAutoSudoAuthenticatePromptAcrossChunks(t *testing.T) {
 			t.Fatal("password retained after response")
 		}
 	}
+}
+
+func TestSSHAutoSudoAnswersUbuntuPromptAfterShellStartup(t *testing.T) {
+	input := &recordingSSHInput{}
+	driver := newSSHAutoSudoDriver(&sshNativeSession{stdin: input}, "secret")
+	defer driver.dispose()
+	driver.start()
+	requireAutoSudoCommand(t, input.String())
+
+	// The command is sent before Ubuntu's login banner and shell prompt. Bash can
+	// also disable bracketed paste on the line where sudo-rs writes its prompt.
+	driver.observe([]byte("sudo su\r\nEnable ESM Apps to receive additional security updates\r\n"))
+	driver.observe([]byte("Last login: Sun Sep 27 20:30:56 2026\r\n"))
+	driver.observe([]byte("daniel@k3s-cp-01:~$ sudo su\r\n\x1b[?2004"))
+	requireAutoSudoCommand(t, input.String())
+	driver.observe([]byte("l[sudo: authenticate] Password: "))
+	if got := input.String(); got != "sudo su\rsecret\r" {
+		t.Fatalf("auto sudo did not answer the Ubuntu prompt: %q", got)
+	}
+}
+
+func TestSSHAutoSudoAnswersUbuntuPromptAfterControlString(t *testing.T) {
+	const output = "\x1b]0;daniel@host: ~\x07[sudo: authenticate] Password: "
+	for split := 0; split <= len(output); split++ {
+		input := &recordingSSHInput{}
+		driver := newSSHAutoSudoDriver(&sshNativeSession{stdin: input}, "secret")
+		driver.start()
+		driver.observe([]byte("daniel@host:~$ sudo su\r\n"))
+		driver.observe([]byte(output[:split]))
+		driver.observe([]byte(output[split:]))
+		if got := input.String(); got != "sudo su\rsecret\r" {
+			t.Fatalf("split %d: visible sudo prompt did not get a password response: %q", split, got)
+		}
+		driver.dispose()
+	}
+}
+
+func TestSSHAutoSudoWaitsForDelayedUbuntuPrompt(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		input := &recordingSSHInput{}
+		driver := newSSHAutoSudoDriver(&sshNativeSession{stdin: input}, "secret")
+		defer driver.dispose()
+		driver.start()
+
+		// Advance past the former 10-second deadline without waiting in real time.
+		time.Sleep(11 * time.Second)
+		driver.observe([]byte("daniel@host:~$ sudo su\r\n[sudo: authenticate] Password: "))
+		if got := input.String(); got != "sudo su\rsecret\r" {
+			t.Fatalf("auto sudo abandoned a delayed password prompt: %q", got)
+		}
+	})
 }
 
 func TestSSHAutoSudoAuthenticatePromptAfterStop(t *testing.T) {

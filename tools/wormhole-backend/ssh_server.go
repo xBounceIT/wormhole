@@ -38,7 +38,7 @@ const (
 	sshMaxHostLength                   = 4096
 	sshMaxUsernameLength               = 512
 	sshMaxPasswordBytes                = 4096
-	sshAutoSudoTimeout                 = 10 * time.Second
+	sshAutoSudoTimeout                 = 2 * time.Minute // Includes remote shell startup and PAM.
 	sshAutoSudoTailBytes               = 512
 	sshAutoReconnectMaxAttempts        = 3
 	sshAutoReconnectDelay              = 10 * time.Second
@@ -1789,10 +1789,12 @@ func (driver *sshAutoSudoDriver) startLocked() {
 		return
 	}
 	if driver.password == "" {
+		logInfo("SSH auto sudo: starting passwordless command")
 		_ = driver.session.writeRaw([]byte("sudo -n su\r"))
 		driver.finishLocked(nil)
 		return
 	}
+	logInfo("SSH auto sudo: starting password prompt wait")
 	driver.state = sshAutoSudoWaitingForPassword
 	driver.timeout = time.AfterFunc(sshAutoSudoTimeout, driver.onTimeout)
 	if err := driver.session.writeRaw([]byte("sudo su\r")); err != nil {
@@ -1805,6 +1807,9 @@ func (driver *sshAutoSudoDriver) writeUserInput(data []byte) error {
 	defer driver.mu.Unlock()
 	// Manual input takes over immediately, including Ctrl-C and paste. Stop the
 	// automatic reply under the same lock so it cannot mix with a typed password.
+	if driver.state == sshAutoSudoWaitingForPassword {
+		logInfo("SSH auto sudo: cancelled by terminal input")
+	}
 	driver.finishLocked(nil)
 	return driver.session.writeRaw(data)
 }
@@ -1821,6 +1826,7 @@ func (driver *sshAutoSudoDriver) observe(data []byte) {
 		driver.startLocked()
 	case sshAutoSudoWaitingForPassword:
 		if driver.prompt.write(data) {
+			logInfo("SSH auto sudo: password prompt recognized")
 			passwordInput := append([]byte(driver.password), '\r')
 			driver.finishLocked(passwordInput)
 			clear(passwordInput)
@@ -1831,6 +1837,7 @@ func (driver *sshAutoSudoDriver) observe(data []byte) {
 func (driver *sshAutoSudoDriver) onTimeout() {
 	driver.mu.Lock()
 	if driver.state == sshAutoSudoWaitingForPassword {
+		logInfo("SSH auto sudo: prompt wait expired")
 		driver.finishLocked(nil)
 	}
 	driver.mu.Unlock()
@@ -1845,7 +1852,11 @@ func (driver *sshAutoSudoDriver) finishLocked(priorityInput []byte) {
 	driver.password = ""
 	driver.prompt = sshSudoPrompt{}
 	if len(priorityInput) > 0 {
-		_ = driver.session.writeRaw(priorityInput)
+		if err := driver.session.writeRaw(priorityInput); err != nil {
+			logWarn("SSH auto sudo: credential input could not be queued: %v", err)
+		} else {
+			logInfo("SSH auto sudo: credential input queued")
+		}
 	}
 }
 
