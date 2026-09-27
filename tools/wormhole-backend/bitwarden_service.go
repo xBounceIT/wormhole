@@ -23,6 +23,7 @@ var errBitwardenSessionInvalidated = errors.New("Bitwarden session was cleared; 
 var (
 	installBitwardenCliForService = installBitwardenCliLatestWrapped
 	ensureBitwardenCliForService  = ensureBitwardenCliInstalled
+	removeBitwardenSessionFile    = os.Remove
 )
 
 func (m *vncManager) handleBitwarden(command backendCommand, expectedGeneration uint64) {
@@ -58,6 +59,20 @@ func (m *vncManager) handleBitwarden(command backendCommand, expectedGeneration 
 	case "bitwarden.read":
 		result, err = readBitwardenCliState(m.databasePath)
 	case "bitwarden.set-enabled":
+		if *command.Enabled {
+			var settings bitwardenCliSettings
+			settings, err = readBitwardenCliSettings(m.databasePath)
+			if err != nil {
+				break
+			}
+			// A failed disable may have left a protected session file behind. Do not
+			// allow re-enabling to revive that key, even after a process restart.
+			if !settings.Enabled {
+				if err = m.resetBitwardenSession(); err != nil {
+					break
+				}
+			}
+		}
 		var state bitwardenCliState
 		state, err = setBitwardenCliEnabled(m.databasePath, *command.Enabled)
 		result = state
@@ -464,7 +479,7 @@ func (m *vncManager) resetBitwardenSession() error {
 func (m *vncManager) resetBitwardenSessionLocked() error {
 	m.bitwardenSessionKey = ""
 	if m.databasePath != "" {
-		if err := os.Remove(bitwardenSessionPath(m.databasePath)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := removeBitwardenSessionFile(bitwardenSessionPath(m.databasePath)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return errors.New("Could not remove the saved Bitwarden session")
 		}
 	}

@@ -374,3 +374,53 @@ func TestBitwardenSessionPathCaseFollowsPlatformConfigurationRules(t *testing.T)
 		t.Fatal("restart did not follow platform CLI path equality")
 	}
 }
+
+func TestBitwardenReenableDiscardsSessionLeftByFailedDisable(t *testing.T) {
+	m := sessionTestManager(t)
+	var output bytes.Buffer
+	m.output = newBackendLineWriter(&output)
+	if err := m.setBitwardenSessionForGeneration("old-session", 0); err != nil {
+		t.Fatal(err)
+	}
+	previousRemove, previousEnsure := removeBitwardenSessionFile, ensureBitwardenCliForService
+	t.Cleanup(func() { removeBitwardenSessionFile, ensureBitwardenCliForService = previousRemove, previousEnsure })
+	removeBitwardenSessionFile = func(string) error { return errors.New("temporary storage failure") }
+	ensureBitwardenCliForService = func(string) (any, error) { return nil, nil }
+	disabled, enabled := false, true
+	m.handleBitwarden(backendCommand{ID: "disable", Action: "bitwarden.set-enabled", Enabled: &disabled}, 0)
+	settings, err := readBitwardenCliSettings(m.databasePath)
+	if err != nil || settings.Enabled {
+		t.Fatal("failed disable did not remain disabled")
+	}
+	// Model a restart: no in-memory state may be needed to reject the stale key.
+	m = &vncManager{databasePath: m.databasePath, output: newBackendLineWriter(&output)}
+	m.handleBitwarden(backendCommand{ID: "enable-failed", Action: "bitwarden.set-enabled", Enabled: &enabled}, 0)
+	settings, err = readBitwardenCliSettings(m.databasePath)
+	if err != nil || settings.Enabled {
+		t.Fatal("enabled vault despite failed session cleanup")
+	}
+	removeBitwardenSessionFile = previousRemove
+	m.handleBitwarden(backendCommand{ID: "enable", Action: "bitwarden.set-enabled", Enabled: &enabled}, 0)
+	m.restoreBitwardenSession(0)
+	if m.bitwardenSession() != "" {
+		t.Fatal("re-enabling revived the session from before disable")
+	}
+	if _, err := os.Stat(bitwardenSessionPath(m.databasePath)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("re-enabling left the stale session on disk")
+	}
+	settings, err = readBitwardenCliSettings(m.databasePath)
+	if err != nil || !settings.Enabled {
+		t.Fatal("successful cleanup did not enable vault")
+	}
+	if err := m.setBitwardenSessionForGeneration("new-session", 0); err != nil {
+		t.Fatal(err)
+	}
+	m.handleBitwarden(backendCommand{ID: "enable-again", Action: "bitwarden.set-enabled", Enabled: &enabled}, 0)
+	if m.bitwardenSession() != "new-session" {
+		t.Fatal("idempotent enabling cleared a current session")
+	}
+	responses := decodeBackendResponses(t, output.Bytes())
+	if len(responses) != 4 || responses[0].OK || responses[1].OK || !responses[2].OK || !responses[3].OK {
+		t.Fatal("enable/disable responses did not reflect cleanup failures")
+	}
+}
