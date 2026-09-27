@@ -1754,9 +1754,10 @@ const (
 
 // sshAutoSudoDriver intentionally lives in the Go backend. The renderer must never receive the
 // saved login password. Password credentials first write `sudo su` and queue the password only
-// after sudo emits its standard `[sudo] ...:` prompt. Requiring sudo's prefix avoids treating a
-// login banner or unrelated password text as permission to send the secret. Key credentials have
-// no login password, so they use `sudo -n su` and can elevate only when sudo permits NOPASSWD.
+// after sudo emits a `[sudo] ...:` or `[sudo: authenticate] ...:` prompt. Requiring sudo's prefix
+// avoids treating a login banner or unrelated password text as permission to send the secret.
+// Key credentials have no login password, so they use `sudo -n su` and can elevate only when sudo
+// permits NOPASSWD.
 type sshAutoSudoDriver struct {
 	session  *sshNativeSession
 	password string
@@ -1845,7 +1846,7 @@ func hasSSHSudoPasswordPrompt(tail []byte) bool {
 	trimmed := strings.TrimRight(string(tail), " \t\r\n")
 	lineStart := strings.LastIndexAny(trimmed, "\r\n")
 	line := strings.TrimSpace(trimmed[lineStart+1:])
-	return strings.HasPrefix(line, "[sudo]") && strings.HasSuffix(line, ":")
+	return (strings.HasPrefix(line, "[sudo]") || strings.HasPrefix(line, "[sudo: authenticate]")) && strings.HasSuffix(line, ":")
 }
 
 func (driver *sshAutoSudoDriver) onTimeout() {
