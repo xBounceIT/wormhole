@@ -771,11 +771,12 @@ func (m *vncManager) emit(event backendEvent) {
 }
 
 type vncSession struct {
-	id      string
-	output  *backendLineWriter
-	manager *vncManager
-	stop    chan struct{}
-	done    chan struct{}
+	bitwardenGeneration uint64
+	id                  string
+	output              *backendLineWriter
+	manager             *vncManager
+	stop                chan struct{}
+	done                chan struct{}
 
 	stopOnce      sync.Once
 	stateMu       sync.Mutex
@@ -795,11 +796,16 @@ type vncSession struct {
 }
 
 func newVncSession(id string, output *backendLineWriter, manager *vncManager) *vncSession {
+	var generation uint64
+	if manager != nil {
+		generation = manager.bitwardenGeneration()
+	}
 	return &vncSession{
-		id:      id,
-		output:  output,
-		manager: manager,
-		stop:    make(chan struct{}),
+		bitwardenGeneration: generation,
+		id:                  id,
+		output:              output,
+		manager:             manager,
+		stop:                make(chan struct{}),
 	}
 }
 
@@ -819,6 +825,10 @@ func (s *vncSession) connect(command backendCommand, database *sql.DB, electronU
 		return
 	}
 	defer s.endConnect()
+	if s.manager != nil && !s.manager.bitwardenGenerationIs(s.bitwardenGeneration) {
+		s.fail(errBitwardenSessionInvalidated)
+		return
+	}
 
 	target, err := resolveVncTarget(database, command, electronUserDataPath...)
 	if err != nil {
@@ -833,11 +843,16 @@ func (s *vncSession) connect(command backendCommand, database *sql.DB, electronU
 			credentialID, err = resolveNodeCredentialID(database, command.NodeID, vncProtocolValue)
 		}
 		if err == nil && credentialID != "" {
-			generation := s.manager.bitwardenGeneration()
+			generation := s.bitwardenGeneration
 			s.manager.bitwardenOperationMu.Lock()
 			var resolved bitwardenResolvedCredential
 			if s.manager.bitwardenGenerationIs(generation) {
+				s.manager.restoreBitwardenSession(generation)
+				sessionKey := s.manager.bitwardenSession()
 				resolved, err = s.manager.resolveBitwardenCredential(credentialID, vncProtocolValue)
+				if isBitwardenCliAuthError(err) {
+					err = errors.Join(err, s.manager.discardBitwardenSession(sessionKey, generation))
+				}
 			} else {
 				err = errBitwardenSessionInvalidated
 			}

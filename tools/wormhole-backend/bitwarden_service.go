@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 )
@@ -20,8 +21,10 @@ type bitwardenResolvedCredential struct {
 var errBitwardenSessionInvalidated = errors.New("Bitwarden session was cleared; unlock the vault and try again")
 
 var (
-	installBitwardenCliForService = installBitwardenCliLatestWrapped
-	ensureBitwardenCliForService  = ensureBitwardenCliInstalled
+	installBitwardenCliForService       = installBitwardenCliLatestWrapped
+	ensureBitwardenCliForService        = ensureBitwardenCliInstalled
+	removeBitwardenSessionFile          = os.Remove
+	deleteBitwardenSessionProtectionKey = deleteFileProtectionKey
 )
 
 func (m *vncManager) handleBitwarden(command backendCommand, expectedGeneration uint64) {
@@ -45,23 +48,44 @@ func (m *vncManager) handleBitwarden(command backendCommand, expectedGeneration 
 			m.respondResult(command.ID, nil, errBitwardenSessionInvalidated)
 			return
 		}
+		// Electron gates these requests on Wormhole authorization. Work queued
+		// before a lock must not revive the session.
+		m.restoreBitwardenSession(expectedGeneration)
 	}
 
+	sessionKey := m.bitwardenSession()
 	var result any
 	var err error
 	switch command.Action {
 	case "bitwarden.read":
 		result, err = readBitwardenCliState(m.databasePath)
 	case "bitwarden.set-enabled":
+		if *command.Enabled {
+			var settings bitwardenCliSettings
+			settings, err = readBitwardenCliSettings(m.databasePath)
+			if err != nil {
+				break
+			}
+			// A failed disable may have left a protected session file behind. Do not
+			// allow re-enabling to revive that key, even after a process restart.
+			if !settings.Enabled {
+				if err = m.resetBitwardenSession(); err != nil {
+					break
+				}
+			}
+		}
 		var state bitwardenCliState
 		state, err = setBitwardenCliEnabled(m.databasePath, *command.Enabled)
 		result = state
 		if err == nil {
 			if !*command.Enabled {
-				m.resetBitwardenSession()
+				err = m.resetBitwardenSession()
 			} else {
 				if state.Installed == nil {
-					_, _ = ensureBitwardenCliForService(m.databasePath)
+					_, err = m.installBitwardenCliForSession(true)
+					if err != nil {
+						break
+					}
 					state, _ = readBitwardenCliState(m.databasePath)
 				}
 				if state.Installed != nil {
@@ -72,20 +96,19 @@ func (m *vncManager) handleBitwarden(command backendCommand, expectedGeneration 
 		}
 	case "bitwarden.set-config":
 		var state bitwardenCliState
-		var changed bool
-		state, changed, err = setBitwardenCliConfig(m.databasePath, command.Path, command.ServerRegion)
+		state, _, err = m.setBitwardenCliConfig(command.Path, command.ServerRegion)
 		result = state
-		if err == nil && changed {
-			m.resetBitwardenSession()
-		}
 	case "bitwarden.install":
-		result, err = installBitwardenCliForService(m.databasePath)
+		result, err = m.installBitwardenCliForSession(false)
 	case "bitwarden.ensure-installed":
-		result, err = ensureBitwardenCliForService(m.databasePath)
+		result, err = m.installBitwardenCliForSession(true)
 	case "bitwarden.status":
-		result, err = bitwardenCliStatusOperation(m.databasePath)
+		result, err = bitwardenCliStatusOperation(m.databasePath, m.bitwardenSession())
 		if err == nil {
 			if status, ok := result.(map[string]any); ok {
+				if status["status"] == "Unauthenticated" || status["status"] == "Locked" {
+					err = m.discardBitwardenSession(sessionKey, expectedGeneration)
+				}
 				status["hasSessionKey"] = m.bitwardenSession() != ""
 			}
 		}
@@ -99,7 +122,9 @@ func (m *vncManager) handleBitwarden(command backendCommand, expectedGeneration 
 			err = errors.New("Bitwarden credential vault is disabled in Settings")
 			break
 		}
-		m.resetBitwardenSession()
+		if err = m.resetBitwardenSession(); err != nil {
+			break
+		}
 		var sessionKey string
 		sessionKey, err = bitwardenCliLogin(
 			m.databasePath,
@@ -108,10 +133,11 @@ func (m *vncManager) handleBitwarden(command backendCommand, expectedGeneration 
 			command.MasterPassword,
 			command.AuthenticatorCode,
 		)
-		if err == nil && m.setBitwardenSessionForGeneration(sessionKey, expectedGeneration) {
+		if err == nil {
+			err = m.setBitwardenSessionForGeneration(sessionKey, expectedGeneration)
+		}
+		if err == nil {
 			result = map[string]any{"loggedIn": true}
-		} else if err == nil {
-			err = errBitwardenSessionInvalidated
 		}
 	case "bitwarden.unlock":
 		settings, readErr := readBitwardenCliSettings(m.databasePath)
@@ -124,15 +150,19 @@ func (m *vncManager) handleBitwarden(command backendCommand, expectedGeneration 
 			break
 		}
 		var sessionKey string
+		if err = m.resetBitwardenSession(); err != nil {
+			break
+		}
 		sessionKey, err = bitwardenCliUnlock(m.databasePath, settings, command.MasterPassword)
-		if err == nil && m.setBitwardenSessionForGeneration(sessionKey, expectedGeneration) {
+		if err == nil {
+			err = m.setBitwardenSessionForGeneration(sessionKey, expectedGeneration)
+		}
+		if err == nil {
 			result, err = m.syncBitwardenCredentials(sessionKey)
-		} else if err == nil {
-			err = errBitwardenSessionInvalidated
 		}
 	case "bitwarden.logout":
 		err = bitwardenCliLogoutOperation(m.databasePath, m.bitwardenSession())
-		m.resetBitwardenSession()
+		err = errors.Join(err, m.resetBitwardenSession())
 		if err == nil {
 			result = map[string]bool{"loggedOut": true}
 		}
@@ -205,7 +235,7 @@ func (m *vncManager) handleBitwarden(command backendCommand, expectedGeneration 
 		err = fmt.Errorf("unsupported Bitwarden action %q", command.Action)
 	}
 	if isBitwardenCliAuthError(err) {
-		m.clearBitwardenSession()
+		err = errors.Join(err, m.discardBitwardenSession(sessionKey, expectedGeneration))
 	}
 	if err == nil && command.Action != "bitwarden.browser-storage-read" &&
 		command.Action != "bitwarden.browser-storage-capture" &&
@@ -216,6 +246,39 @@ func (m *vncManager) handleBitwarden(command backendCommand, expectedGeneration 
 		err = errBitwardenSessionInvalidated
 	}
 	m.respondResult(command.ID, result, err)
+}
+
+// Only the trusted installer may carry a session across executable path changes.
+// User-selected configuration changes still reset the session.
+func (m *vncManager) installBitwardenCliForSession(ensure bool) (any, error) {
+	before, err := readBitwardenCliSettings(m.databasePath)
+	if err != nil {
+		return nil, err
+	}
+	// Explicit installation enables the vault too. Apply the same cleanup rule
+	// as the enable switch when a previous disable could not delete the session.
+	if !ensure && !before.Enabled {
+		if err := m.resetBitwardenSession(); err != nil {
+			return nil, err
+		}
+	}
+	sessionKey := m.bitwardenSession()
+	install := installBitwardenCliForService
+	if ensure {
+		install = ensureBitwardenCliForService
+	}
+	result, err := install(m.databasePath)
+	if err != nil || sessionKey == "" {
+		return result, err
+	}
+	after, err := readBitwardenCliSettings(m.databasePath)
+	if err != nil {
+		return nil, err
+	}
+	if !bitwardenCliPathsEqual(before.Path, after.Path) {
+		err = m.rebindSavedBitwardenSession(sessionKey)
+	}
+	return result, err
 }
 
 func (m *vncManager) readBitwardenBrowserStorage(profilePath string) (bitwardenBrowserStorageSnapshot, error) {
@@ -341,6 +404,7 @@ func (m *vncManager) bitwardenNodeReference(nodeID string, protocol int64) (map[
 }
 
 func (m *vncManager) syncBitwardenCredentials(sessionKey string) (any, error) {
+	generation := m.bitwardenGeneration()
 	settings, readErr := readBitwardenCliSettings(m.databasePath)
 	if readErr != nil {
 		return nil, readErr
@@ -351,6 +415,9 @@ func (m *vncManager) syncBitwardenCredentials(sessionKey string) (any, error) {
 	result, err := bitwardenCliSyncOperation(m.databasePath, sessionKey)
 	if err == nil {
 		return result, nil
+	}
+	if isBitwardenCliAuthError(err) {
+		err = errors.Join(err, m.discardBitwardenSession(sessionKey, generation))
 	}
 	settings, readErr = readBitwardenCliSettings(m.databasePath)
 	if readErr != nil {
@@ -389,14 +456,31 @@ func (m *vncManager) requireBitwardenEnabled() error {
 	return nil
 }
 
-func (m *vncManager) setBitwardenSessionForGeneration(sessionKey string, expectedGeneration uint64) bool {
+func (m *vncManager) setBitwardenSessionForGeneration(sessionKey string, expectedGeneration uint64) error {
+	if !m.bitwardenGenerationIs(expectedGeneration) {
+		return errBitwardenSessionInvalidated
+	}
+	key, err := bitwardenCliReadSessionKey(sessionKey)
+	if err != nil {
+		return err
+	}
+	// System keychains can wait for user interaction. Never hold the lock used
+	// to cancel in-flight work while encrypting or decrypting persisted secrets.
+	protected, err := protectSavedBitwardenSession(m.databasePath, key)
+	if err != nil {
+		return errors.New("Could not securely save the Bitwarden session")
+	}
+	defer clearBytes(protected)
 	m.bitwardenMu.Lock()
 	defer m.bitwardenMu.Unlock()
 	if m.bitwardenSessionGeneration != expectedGeneration {
-		return false
+		return errBitwardenSessionInvalidated
 	}
-	m.bitwardenSessionKey = strings.TrimSpace(sessionKey)
-	return true
+	if err := writePrivateFileAtomic(bitwardenSessionPath(m.databasePath), protected); err != nil {
+		return errors.New("Could not securely save the Bitwarden session")
+	}
+	m.bitwardenSessionKey = key
+	return nil
 }
 
 func (m *vncManager) bitwardenSession() string {
@@ -412,10 +496,41 @@ func (m *vncManager) clearBitwardenSession() {
 	m.bitwardenMu.Unlock()
 }
 
-func (m *vncManager) resetBitwardenSession() {
+func (m *vncManager) discardBitwardenSession(sessionKey string, generation uint64) error {
 	m.bitwardenMu.Lock()
-	m.bitwardenSessionKey = ""
+	// A request completing after an app lock must not revoke the durable session.
+	if sessionKey == "" || m.bitwardenSessionKey != sessionKey || m.bitwardenSessionGeneration != generation {
+		m.bitwardenMu.Unlock()
+		return nil
+	}
+	err := m.resetBitwardenSessionLocked()
 	m.bitwardenMu.Unlock()
+	if err == nil && m.databasePath != "" {
+		deleteBitwardenSessionProtectionKey(bitwardenSessionPath(m.databasePath))
+	}
+	return err
+}
+
+func (m *vncManager) resetBitwardenSession() error {
+	m.bitwardenMu.Lock()
+	err := m.resetBitwardenSessionLocked()
+	m.bitwardenMu.Unlock()
+	// Keychain operations may block. Callers serialize session mutations with
+	// bitwardenOperationMu, while app locking must remain independent.
+	if err == nil && m.databasePath != "" {
+		deleteBitwardenSessionProtectionKey(bitwardenSessionPath(m.databasePath))
+	}
+	return err
+}
+
+func (m *vncManager) resetBitwardenSessionLocked() error {
+	m.bitwardenSessionKey = ""
+	if m.databasePath != "" {
+		if err := removeBitwardenSessionFile(bitwardenSessionPath(m.databasePath)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return errors.New("Could not remove the saved Bitwarden session")
+		}
+	}
+	return nil
 }
 
 func (m *vncManager) bitwardenGeneration() uint64 {
