@@ -38,7 +38,7 @@ const (
 	sshMaxHostLength                   = 4096
 	sshMaxUsernameLength               = 512
 	sshMaxPasswordBytes                = 4096
-	sshAutoSudoTimeout                 = 10 * time.Second
+	sshAutoSudoTimeout                 = 2 * time.Minute // Includes remote shell startup and PAM.
 	sshAutoSudoTailBytes               = 512
 	sshAutoReconnectMaxAttempts        = 3
 	sshAutoReconnectDelay              = 10 * time.Second
