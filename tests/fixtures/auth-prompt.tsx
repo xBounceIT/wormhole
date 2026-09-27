@@ -7,6 +7,7 @@ declare const retainedStateValues: string[];
 declare function IdleLockHarness(props: {
   confirmation?: boolean;
   onConfirmation?: (value: boolean) => void;
+  onRequestReady?: (request: (reason: string) => Promise<boolean>) => void;
 }): import('react').ReactElement;
 declare function AuthPrompt(props: Record<string, unknown>): import('react').ReactElement;
 declare function AppCloseHarness(props: Record<string, unknown>): import('react').ReactElement;
@@ -62,12 +63,12 @@ async function runAuthPromptTests() {
   };
   const request = { kind: 'lock', reason: 'Locked after inactivity.', autoWindowsHello: true };
   let key = 0;
-  const mount = async (stateOverrides = {}, requestOverrides = {}) => {
+  const mount = async (stateOverrides = {}, requestOverrides = {}, remount = true) => {
     await React.act(async () => {
       root.render(
         <React.StrictMode>
           <AuthPrompt
-            key={++key}
+            key={remount ? ++key : key}
             state={{ ...state, ...stateOverrides }}
             request={{ ...request, ...requestOverrides }}
             onResult={(value: boolean) => results.push(value)}
@@ -276,6 +277,46 @@ async function runAuthPromptTests() {
     assert.equal(results.at(-1), true);
   }
 
+  for (const mode of ['pin', 'password']) {
+    for (const outcome of ['success', 'failure', 'error']) {
+      const pendingSecret = deferred();
+      verifySecret = () => pendingSecret.promise;
+      await mount({ mode }, { kind: 'confirmation', reason: 'Old confirmation.' });
+      await enterSecret();
+      const beforeReplacement = results.length;
+      await mount({ mode }, { reason: 'New idle lock.' }, false);
+      const currentSecret = deferred();
+      verifySecret = () => currentSecret.promise;
+      await enterSecret();
+      assert.equal(document.querySelector('[role="status"]').textContent, 'Checking…');
+      await React.act(async () => {
+        if (outcome === 'error') pendingSecret.resolve(Promise.reject(new Error('Old failure')));
+        else pendingSecret.resolve({ succeeded: outcome === 'success', message: 'Old result.' });
+      });
+      assert.equal(
+        results.length,
+        beforeReplacement,
+        'old secret results must not settle a new prompt',
+      );
+      assert.equal(
+        document.querySelector('[role="alert"]'),
+        null,
+        'old errors must not reach the new prompt',
+      );
+      assert.equal(
+        document.querySelector('[role="status"]').textContent,
+        'Checking…',
+        'old cleanup must not clear the current busy state',
+      );
+      await React.act(async () => currentSecret.resolve({ succeeded: true }));
+      assert.equal(
+        results.length,
+        beforeReplacement + 1,
+        'the new prompt must accept its own secret',
+      );
+    }
+  }
+
   const stale = deferred();
   check = () => stale.promise;
   await mount();
@@ -326,6 +367,17 @@ async function runAuthPromptTests() {
       resultsBeforeClose,
       'closed prompts must ignore verification results',
     );
+  }
+  for (const mode of ['pin', 'password']) {
+    root = createRoot(document.getElementById('root'));
+    const pendingSecret = deferred();
+    verifySecret = () => pendingSecret.promise;
+    await mount({ mode }, { kind: 'confirmation' });
+    await enterSecret();
+    const beforeClose = results.length;
+    await React.act(async () => root.unmount());
+    await React.act(async () => pendingSecret.resolve({ succeeded: true }));
+    assert.equal(results.length, beforeClose, 'closed prompts must ignore secret verification');
   }
 }
 
@@ -1400,7 +1452,11 @@ async function runIdleLockTests() {
   } as unknown as typeof window.wormhole;
   try {
     await React.act(async () => {
-      root.render(<IdleLockHarness />);
+      root.render(
+        <React.StrictMode>
+          <IdleLockHarness />
+        </React.StrictMode>,
+      );
     });
     now += 60_000;
     await React.act(async () => {
@@ -1486,6 +1542,7 @@ async function runIdleConfirmationTests() {
   let now = 0;
   let tick: () => void;
   const results: boolean[] = [];
+  let requestAuthentication: (reason: string) => Promise<boolean>;
   const verifications: Array<(value: { succeeded: boolean }) => void> = [];
   Date.now = () => now;
   window.setInterval = ((callback: () => void) => {
@@ -1501,8 +1558,17 @@ async function runIdleConfirmationTests() {
   } as unknown as typeof window.wormhole;
   try {
     await React.act(async () => {
-      root.render(<IdleLockHarness confirmation onConfirmation={(value) => results.push(value)} />);
+      root.render(
+        <IdleLockHarness
+          confirmation
+          onConfirmation={(value) => results.push(value)}
+          onRequestReady={(request) => {
+            requestAuthentication = request;
+          }}
+        />,
+      );
     });
+    const requestBeforeLock = requestAuthentication;
     assert.equal(verifications.length, 1);
     now = 60_000;
     await React.act(async () => {
@@ -1510,6 +1576,37 @@ async function runIdleConfirmationTests() {
     });
     assert.deepEqual(results, [false], 'idle locking must cancel the old confirmation');
     assert.equal(verifications.length, 2, 'the lock must request a fresh verification');
+    let lateConfirmation: Promise<boolean>;
+    await React.act(async () => {
+      // An action started before the timeout can retain the previous callback.
+      lateConfirmation = requestBeforeLock('Confirm delayed settings change.');
+    });
+    assert.equal(
+      document.getElementById('auth-prompt-title').textContent,
+      'Wormhole is locked',
+      'a late confirmation must not replace the idle unlock prompt',
+    );
+    assert.equal(
+      verifications.length,
+      2,
+      'the pending unlock must not be replaced by another Hello',
+    );
+    assert.equal(
+      await requestAuthentication('Confirm while locked.'),
+      false,
+      'new sensitive actions must be rejected while locked',
+    );
+    let duplicateResult: boolean | undefined;
+    await React.act(async () => {
+      void requestBeforeLock('Another delayed settings change.').then((result) => {
+        duplicateResult = result;
+      });
+    });
+    assert.equal(
+      duplicateResult,
+      false,
+      'another confirmation must not orphan the pending request',
+    );
     await React.act(async () => {
       verifications[0]({ succeeded: true });
     });
@@ -1520,6 +1617,11 @@ async function runIdleConfirmationTests() {
     });
     assert.equal(document.querySelector('dialog:modal'), null);
     assert.equal(document.getElementById('idle-workspace-action').parentElement.inert, false);
+    assert.equal(
+      await lateConfirmation,
+      false,
+      'unlock must not approve a delayed sensitive action',
+    );
   } finally {
     await React.act(async () => root.unmount());
     Date.now = originalNow;

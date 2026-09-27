@@ -83,7 +83,7 @@ test('authentication and window-close prompts keep errors and controls accessibl
   const idleEnd = source.indexOf('\n  useEffect(', idleStart + 20);
   const idleHarness = `
     ${idleSource}
-    function IdleLockHarness({ confirmation = false, onConfirmation } = {}) {
+    function IdleLockHarness({ confirmation = false, onConfirmation, onRequestReady } = {}) {
       const [authGate, setAuthGate] = useState('unlocked');
       const [lockReason, setLockReason] = useState('');
       const [authDialog, setAuthDialog] = useState(null);
@@ -96,7 +96,8 @@ test('authentication and window-close prompts keep errors and controls accessibl
       ${slice('  const settleAuthConfirmation =', '  const idleCheckInFlight =')}
       const lastActivityAt = useRef(Date.now()), lastUnlockedAt = useRef(Date.now());
       const idleCheckInFlight = useRef(false);
-      ${slice('  function handleAuthPromptResult(', '  async function resolveMcpApproval(')}
+      ${slice('  const requestAuthentication =', '  async function resolveMcpApproval(')}
+      useLayoutEffect(() => { onRequestReady?.(requestAuthentication); }, [onRequestReady, requestAuthentication]);
       ${source.slice(idleStart, idleEnd)}
       ${slice('  const visibleAuthPrompt =', '  const credentialResult =')}
       return <>
