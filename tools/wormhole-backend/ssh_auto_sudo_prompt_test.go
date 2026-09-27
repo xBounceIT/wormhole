@@ -19,10 +19,16 @@ func TestSSHSudoPasswordPromptFormats(t *testing.T) {
 		{"authenticate localized", "[sudo: authenticate] Mot de passe : ", true},
 		{"styled authenticate", "\x1b[1m[sudo: authenticate]\x1b[0m Password: \x1b[0m", true},
 		{"styled classic", "\x1b[33m[sudo] password for operator:\x1b[m ", true},
+		{"bash bracketed paste transition", "\x1b[?2004l[sudo: authenticate] Password: ", true},
+		{"cursor visibility transition", "\x1b[?25h[sudo: authenticate] Password: ", true},
+		{"long SGR", "\x1b[38;2;255;255;255m[sudo: authenticate] Password: ", true},
 		{"incomplete styling", "[sudo: authenticate] Password: \x1b[0", false},
 		{"completed old prompt", "[sudo: authenticate] Password: \r\n", false},
 		{"hidden prompt", "\x1b]0;[sudo: authenticate] Password: ", false},
 		{"cursor movement", "\x1b[2C[sudo: authenticate] Password: ", false},
+		{"private mode inside prompt", "[sudo: authenticate] \x1b[?2004lPassword: ", false},
+		{"unknown private mode", "\x1b[?2004h[sudo: authenticate] Password: ", false},
+		{"private parameter is not SGR", "\x1b[?2004m[sudo: authenticate] Password: ", false},
 		{"partial color parameter", "[sudo: authenticate] \x1b[38:", false},
 		{"hidden multiline prompt", "\x1b]0;title\n[sudo: authenticate] Password: ", false},
 		{"command echo before prompt", "operator@host:~$ sudo su\r\n[sudo: authenticate] Password: ", true},
@@ -213,6 +219,25 @@ func TestSSHAutoSudoAuthenticatePromptAcrossChunks(t *testing.T) {
 		if driver.password != "" {
 			t.Fatal("password retained after response")
 		}
+	}
+}
+
+func TestSSHAutoSudoAnswersUbuntuPromptAfterShellStartup(t *testing.T) {
+	input := &recordingSSHInput{}
+	driver := newSSHAutoSudoDriver(&sshNativeSession{stdin: input}, "secret")
+	defer driver.dispose()
+	driver.start()
+	requireAutoSudoCommand(t, input.String())
+
+	// The command is sent before Ubuntu's login banner and shell prompt. Bash can
+	// also disable bracketed paste on the line where sudo-rs writes its prompt.
+	driver.observe([]byte("sudo su\r\nEnable ESM Apps to receive additional security updates\r\n"))
+	driver.observe([]byte("Last login: Sun Sep 27 20:30:56 2026\r\n"))
+	driver.observe([]byte("daniel@k3s-cp-01:~$ sudo su\r\n\x1b[?2004"))
+	requireAutoSudoCommand(t, input.String())
+	driver.observe([]byte("l[sudo: authenticate] Password: "))
+	if got := input.String(); got != "sudo su\rsecret\r" {
+		t.Fatalf("auto sudo did not answer the Ubuntu prompt: %q", got)
 	}
 }
 
