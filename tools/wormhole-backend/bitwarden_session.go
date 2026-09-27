@@ -71,3 +71,18 @@ func (m *vncManager) restoreBitwardenSession(expectedGeneration uint64) {
 		m.bitwardenSessionKey = key
 	}
 }
+
+// Installation may finish after an app lock. Rebind only the existing durable
+// session; never install its key back into memory. The caller holds
+// bitwardenOperationMu, so login, logout and settings changes cannot race here.
+func (m *vncManager) rebindSavedBitwardenSession(sessionKey string) error {
+	protected, err := protectSavedBitwardenSession(m.databasePath, sessionKey)
+	if err != nil {
+		return errors.New("Could not securely update the saved Bitwarden session")
+	}
+	defer clearBytes(protected)
+	if err := writePrivateFileAtomic(bitwardenSessionPath(m.databasePath), protected); err != nil {
+		return errors.New("Could not securely update the saved Bitwarden session")
+	}
+	return nil
+}

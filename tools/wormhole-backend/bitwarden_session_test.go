@@ -565,7 +565,7 @@ func TestBitwardenInstallationHonorsFailureAndLock(t *testing.T) {
 	previous := installBitwardenCliForService
 	t.Cleanup(func() { installBitwardenCliForService = previous })
 	installBitwardenCliForService = func(string) (any, error) { return nil, errors.New("installation failed") }
-	if _, err := m.installBitwardenCliForSession(false, 0); err == nil {
+	if _, err := m.installBitwardenCliForSession(false); err == nil {
 		t.Fatal("installer failure hidden")
 	}
 	m.clearBitwardenSession()
@@ -582,11 +582,20 @@ func TestBitwardenInstallationHonorsFailureAndLock(t *testing.T) {
 		m.clearBitwardenSession()
 		return nil, writeBitwardenCliSettings(path, settings)
 	}
-	if _, err := m.installBitwardenCliForSession(false, 1); !errors.Is(err, errBitwardenSessionInvalidated) {
-		t.Fatal("late installation restored a session", err)
+	var output bytes.Buffer
+	m.output = newBackendLineWriter(&output)
+	m.handleBitwarden(backendCommand{ID: "late-install", Action: "bitwarden.install"}, 1)
+	responses := decodeBackendResponses(t, output.Bytes())
+	if len(responses) != 1 || responses[0].OK {
+		t.Fatal("installation request survived an app lock")
 	}
 	if m.bitwardenSession() != "" {
 		t.Fatal("late installation unlocked vault")
+	}
+	restarted := &vncManager{databasePath: m.databasePath}
+	restarted.restoreBitwardenSession(0)
+	if restarted.bitwardenSession() != "session-key" {
+		t.Fatal("installation across lock lost the durable session")
 	}
 }
 
@@ -603,11 +612,11 @@ func TestBitwardenInstallCannotBypassFailedDisableCleanup(t *testing.T) {
 	called := false
 	installBitwardenCliForService = func(path string) (any, error) { called = true; return setBitwardenCliEnabled(path, true) }
 	removeBitwardenSessionFile = func(string) error { return errors.New("removal failed") }
-	if _, err := m.installBitwardenCliForSession(false, 0); err == nil || called {
+	if _, err := m.installBitwardenCliForSession(false); err == nil || called {
 		t.Fatal("installation bypassed failed session cleanup")
 	}
 	removeBitwardenSessionFile = previousRemove
-	if _, err := m.installBitwardenCliForSession(false, 0); err != nil || !called {
+	if _, err := m.installBitwardenCliForSession(false); err != nil || !called {
 		t.Fatal("installation did not resume after cleanup", err)
 	}
 	m.restoreBitwardenSession(0)
@@ -628,5 +637,30 @@ func TestBitwardenEnableReportsAutomaticInstallationFailure(t *testing.T) {
 	responses := decodeBackendResponses(t, output.Bytes())
 	if len(responses) != 1 || responses[0].OK {
 		t.Fatal("automatic installation error was hidden")
+	}
+}
+
+func TestBitwardenSessionRebindReportsStorageFailures(t *testing.T) {
+	for _, failure := range []string{"protection", "write"} {
+		t.Run(failure, func(t *testing.T) {
+			m := sessionTestManager(t)
+			m.clearBitwardenSession()
+			if failure == "protection" {
+				previous := protectBitwardenSession
+				t.Cleanup(func() { protectBitwardenSession = previous })
+				protectBitwardenSession = func(string, []byte) ([]byte, error) {
+					return nil, errors.New("private error details")
+				}
+			} else if err := os.Mkdir(bitwardenSessionPath(m.databasePath), 0700); err != nil {
+				t.Fatal(err)
+			}
+			err := m.rebindSavedBitwardenSession("session-key")
+			if err == nil || strings.Contains(err.Error(), "private error details") {
+				t.Fatal("storage failure was hidden or leaked private details", err)
+			}
+			if m.bitwardenSession() != "" {
+				t.Fatal("failed metadata update unlocked vault")
+			}
+		})
 	}
 }

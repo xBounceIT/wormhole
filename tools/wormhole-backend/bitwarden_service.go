@@ -82,7 +82,7 @@ func (m *vncManager) handleBitwarden(command backendCommand, expectedGeneration 
 				err = m.resetBitwardenSession()
 			} else {
 				if state.Installed == nil {
-					_, err = m.installBitwardenCliForSession(true, expectedGeneration)
+					_, err = m.installBitwardenCliForSession(true)
 					if err != nil {
 						break
 					}
@@ -103,9 +103,9 @@ func (m *vncManager) handleBitwarden(command backendCommand, expectedGeneration 
 			err = m.resetBitwardenSession()
 		}
 	case "bitwarden.install":
-		result, err = m.installBitwardenCliForSession(false, expectedGeneration)
+		result, err = m.installBitwardenCliForSession(false)
 	case "bitwarden.ensure-installed":
-		result, err = m.installBitwardenCliForSession(true, expectedGeneration)
+		result, err = m.installBitwardenCliForSession(true)
 	case "bitwarden.status":
 		result, err = bitwardenCliStatusOperation(m.databasePath, m.bitwardenSession())
 		if err == nil {
@@ -251,7 +251,7 @@ func (m *vncManager) handleBitwarden(command backendCommand, expectedGeneration 
 
 // Only the trusted installer may carry a session across executable path changes.
 // User-selected configuration changes still reset the session.
-func (m *vncManager) installBitwardenCliForSession(ensure bool, generation uint64) (any, error) {
+func (m *vncManager) installBitwardenCliForSession(ensure bool) (any, error) {
 	before, err := readBitwardenCliSettings(m.databasePath)
 	if err != nil {
 		return nil, err
@@ -277,7 +277,7 @@ func (m *vncManager) installBitwardenCliForSession(ensure bool, generation uint6
 		return nil, err
 	}
 	if !bitwardenCliPathsEqual(before.Path, after.Path) {
-		err = m.setBitwardenSessionForGeneration(sessionKey, generation)
+		err = m.rebindSavedBitwardenSession(sessionKey)
 	}
 	return result, err
 }
