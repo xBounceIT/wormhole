@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestSSHSudoPasswordPromptFormats(t *testing.T) {
@@ -21,12 +22,14 @@ func TestSSHSudoPasswordPromptFormats(t *testing.T) {
 		{"styled classic", "\x1b[33m[sudo] password for operator:\x1b[m ", true},
 		{"bash bracketed paste transition", "\x1b[?2004l[sudo: authenticate] Password: ", true},
 		{"cursor visibility transition", "\x1b[?25h[sudo: authenticate] Password: ", true},
+		{"cursor visibility after prompt", "[sudo: authenticate] Password: \x1b[?25h", true},
 		{"long SGR", "\x1b[38;2;255;255;255m[sudo: authenticate] Password: ", true},
 		{"incomplete styling", "[sudo: authenticate] Password: \x1b[0", false},
 		{"completed old prompt", "[sudo: authenticate] Password: \r\n", false},
 		{"hidden prompt", "\x1b]0;[sudo: authenticate] Password: ", false},
 		{"cursor movement", "\x1b[2C[sudo: authenticate] Password: ", false},
-		{"private mode inside prompt", "[sudo: authenticate] \x1b[?2004lPassword: ", false},
+		{"private mode inside prompt", "[sudo: authenticate] \x1b[?2004lPassword: ", true},
+		{"cursor movement after prompt", "[sudo: authenticate] Password: \x1b[2C", false},
 		{"unknown private mode", "\x1b[?2004h[sudo: authenticate] Password: ", false},
 		{"private parameter is not SGR", "\x1b[?2004m[sudo: authenticate] Password: ", false},
 		{"partial color parameter", "[sudo: authenticate] \x1b[38:", false},
@@ -238,6 +241,20 @@ func TestSSHAutoSudoAnswersUbuntuPromptAfterShellStartup(t *testing.T) {
 	driver.observe([]byte("l[sudo: authenticate] Password: "))
 	if got := input.String(); got != "sudo su\rsecret\r" {
 		t.Fatalf("auto sudo did not answer the Ubuntu prompt: %q", got)
+	}
+}
+
+func TestSSHAutoSudoWaitsForDelayedUbuntuPrompt(t *testing.T) {
+	input := &recordingSSHInput{}
+	driver := newSSHAutoSudoDriver(&sshNativeSession{stdin: input}, "secret")
+	defer driver.dispose()
+	driver.start()
+
+	// The previous 10-second deadline started before the login shell was ready.
+	time.Sleep(11 * time.Second)
+	driver.observe([]byte("daniel@host:~$ sudo su\r\n[sudo: authenticate] Password: "))
+	if got := input.String(); got != "sudo su\rsecret\r" {
+		t.Fatalf("auto sudo abandoned a delayed password prompt: %q", got)
 	}
 }
 

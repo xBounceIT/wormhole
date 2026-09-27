@@ -41,10 +41,10 @@ func (prompt *sshSudoPrompt) write(data []byte) bool {
 				prompt.invalid = true
 				prompt.state = 'e'
 			case value >= 0x40 && value <= 0x7e:
-				// Bash may turn off bracketed paste or show the cursor immediately before
-				// sudo-rs prints its prompt. These modes do not alter visible text.
+				// Bash may change bracketed paste or cursor visibility while sudo-rs
+				// draws its prompt. These modes do not alter visible text.
 				allowed := value == 'm' && !prompt.csiPrivate
-				if !allowed && prompt.length == 0 && prompt.csiLen <= len(prompt.csi) {
+				if !allowed && prompt.csiLen <= len(prompt.csi) {
 					mode := string(prompt.csi[:prompt.csiLen]) + string(value)
 					allowed = mode == "?2004l" || mode == "?25h" || mode == "?25l"
 				}
