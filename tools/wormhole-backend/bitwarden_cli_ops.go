@@ -84,12 +84,12 @@ func ensureBitwardenCliInstalled(databasePath string) (any, error) {
 	return buildBitwardenCliState(databasePath, settings), nil
 }
 
-func bitwardenCliStatusOperation(databasePath string) (any, error) {
+func bitwardenCliStatusOperation(databasePath string, sessionKey ...string) (any, error) {
 	settings, err := readBitwardenCliSettings(databasePath)
 	if err != nil {
 		return nil, err
 	}
-	return bitwardenCliStatusState(databasePath, settings)
+	return bitwardenCliStatusState(databasePath, settings, sessionKey...)
 }
 
 func bitwardenCliLogoutOperation(databasePath, sessionKey string) error {

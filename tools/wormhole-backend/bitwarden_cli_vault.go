@@ -98,8 +98,12 @@ func bitwardenCliStatusLongName(status string) string {
 	}
 }
 
-func bitwardenCliStatusState(databasePath string, settings bitwardenCliSettings) (map[string]any, error) {
-	result, err := bitwardenCliRun(databasePath, settings, []string{"status"}, nil)
+func bitwardenCliStatusState(databasePath string, settings bitwardenCliSettings, sessionKey ...string) (map[string]any, error) {
+	var environment map[string]string
+	if len(sessionKey) > 0 {
+		environment = bitwardenCliSessionEnv(sessionKey[0])
+	}
+	result, err := bitwardenCliRun(databasePath, settings, []string{"status"}, environment)
 	if err != nil {
 		return nil, err
 	}

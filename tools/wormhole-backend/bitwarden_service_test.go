@@ -210,7 +210,7 @@ VALUES ('rdp-node', NULL, 'RDP', 1, 1, 'rdp.example', ?, 2, '2026-08-09T00:00:00
 
 	manager := newVncManager(database, newBackendLineWriter(&bytes.Buffer{}))
 	manager.databasePath = databasePath
-	if !manager.setBitwardenSessionForGeneration("session-key", manager.bitwardenGeneration()) {
+	if err := manager.setBitwardenSessionForGeneration("session-key", manager.bitwardenGeneration()); err != nil {
 		t.Fatal("could not seed the Bitwarden test session")
 	}
 	resolved, err := manager.resolveBitwardenCredential(profile.ID, 1)
@@ -274,6 +274,7 @@ func main() {
 	if len(os.Args) < 2 { os.Exit(1) }
 	switch os.Args[1] {
 	case "status":
+		if os.Getenv("BW_SESSION") != "session-key" { fmt.Print("{\"status\":\"locked\"}"); return }
 		fmt.Print("{\"status\":\"unlocked\",\"userEmail\":\"operator@example.com\",\"serverUrl\":\"https://vault.bitwarden.com\"}")
 	case "login", "unlock":
 		fmt.Print("session-key")
