@@ -60,7 +60,7 @@ func TestSSHSudoPromptControlStringsAcrossChunks(t *testing.T) {
 	for _, hidden := range []string{
 		"\x1b]title\n" + passwordPrompt + "\x07",
 		"\x1bP" + strings.Repeat("x", 1024) + "\n" + passwordPrompt + "\x1b\\",
-		"\x1b_title\x1b?\n" + passwordPrompt + "\x1b\x1b\x07",
+		"\x1b_title\x1b?\n" + passwordPrompt + "\x1b\x1b\x07\x1b\\",
 		"\x1b\x1b]title\n" + passwordPrompt + "\x1b\\",
 		"\x1b[38:\x1b]title\n" + passwordPrompt + "\x07",
 	} {
@@ -106,6 +106,27 @@ func TestSSHSudoPromptDoesNotTrustOtherControlStrings(t *testing.T) {
 		if prompt.write([]byte(control + passwordPrompt)) {
 			t.Fatal("unsupported control string caused a credential response")
 		}
+	}
+}
+
+func TestSSHAutoSudoRejectsBELAfterESCInOSC(t *testing.T) {
+	const promptText = "[sudo: authenticate] Password:"
+	malformed := "\x1b]0;x\x1b\x07" + promptText
+	for split := 0; split <= len(malformed); split++ {
+		input := &recordingSSHInput{}
+		driver := newSSHAutoSudoDriver(&sshNativeSession{stdin: input}, "secret")
+		driver.start()
+		driver.observe([]byte(malformed[:split]))
+		driver.observe([]byte(malformed[split:]))
+		if got := input.String(); got != "sudo su\r" {
+			t.Fatalf("split %d: malformed OSC released the password: %q", split, got)
+		}
+		// A later valid terminator and new line allow a genuine prompt.
+		driver.observe([]byte("\x1b\\\r\n" + promptText))
+		if got := input.String(); got != "sudo su\rsecret\r" {
+			t.Fatalf("split %d: valid prompt after recovery was missed: %q", split, got)
+		}
+		driver.dispose()
 	}
 }
 

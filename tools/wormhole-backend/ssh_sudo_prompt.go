@@ -74,9 +74,12 @@ func (prompt *sshSudoPrompt) write(data []byte) bool {
 				prompt.state = 't'
 			}
 		case 't':
-			if value == '\\' || value == 0x07 {
+			if value == '\\' {
 				prompt.state = 0
 			} else if value != 0x1b {
+				// BEL terminates OSC only when it follows the payload directly.
+				// After ESC, anything but ST is malformed; fail closed.
+				prompt.invalid = true
 				prompt.state = 's'
 			}
 		default:
