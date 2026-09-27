@@ -115,6 +115,7 @@
     "oxlint": "^1.77.0",
     "react-doctor": "0.9.11",
     "resedit": "^3.0.2",
+    "rimraf": "file:vendor/rimraf-legacy-compat",
     "semver": "^7.8.5",
     "tailwindcss": "^4.3.3",
     "typescript": "^7.0.2",
@@ -174,5 +175,11 @@
       "icon": "Assets/Wormhole.icns",
       "target": "dmg"
     }
+  },
+  "overrides": {
+    "@electron/asar": "4.3.1",
+    "@electron/universal": "3.0.6",
+    "global-agent": "4.1.3",
+    "rimraf": "$rimraf"
   }
 }
