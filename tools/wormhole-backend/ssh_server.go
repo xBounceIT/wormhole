@@ -1599,10 +1599,7 @@ func (native *sshNativeSession) write(data []byte) error {
 		return errSSHSessionClosed
 	}
 	if native.autoSudo != nil {
-		handled, err := native.autoSudo.queueUserInput(data)
-		if handled {
-			return err
-		}
+		return native.autoSudo.writeUserInput(data)
 	}
 	return native.writeRaw(data)
 }
@@ -1762,11 +1759,10 @@ type sshAutoSudoDriver struct {
 	session  *sshNativeSession
 	password string
 
-	mu           sync.Mutex
-	state        sshAutoSudoState
-	tail         []byte
-	pendingInput []byte
-	timeout      *time.Timer
+	mu      sync.Mutex
+	state   sshAutoSudoState
+	prompt  sshSudoPrompt
+	timeout *time.Timer
 }
 
 func newSSHAutoSudoDriver(session *sshNativeSession, password string) *sshAutoSudoDriver {
@@ -1779,7 +1775,6 @@ func newSSHAutoSudoDriver(session *sshNativeSession, password string) *sshAutoSu
 		session:  session,
 		password: password,
 		state:    sshAutoSudoWaitingForShell,
-		tail:     make([]byte, 0, sshAutoSudoTailBytes),
 	}
 }
 
@@ -1805,18 +1800,13 @@ func (driver *sshAutoSudoDriver) startLocked() {
 	}
 }
 
-func (driver *sshAutoSudoDriver) queueUserInput(data []byte) (bool, error) {
+func (driver *sshAutoSudoDriver) writeUserInput(data []byte) error {
 	driver.mu.Lock()
 	defer driver.mu.Unlock()
-	if driver.state == sshAutoSudoDone {
-		return false, nil
-	}
-	// Reserve the envelope as well as the maximum normalized clipboard text.
-	if len(driver.pendingInput)+len(data) > sshInputMaxBytes+sshTerminalPasteOverhead {
-		return true, errSSHInputFull
-	}
-	driver.pendingInput = append(driver.pendingInput, data...)
-	return true, nil
+	// Manual input takes over immediately, including Ctrl-C and paste. Stop the
+	// automatic reply under the same lock so it cannot mix with a typed password.
+	driver.finishLocked(nil)
+	return driver.session.writeRaw(data)
 }
 
 func (driver *sshAutoSudoDriver) observe(data []byte) {
@@ -1830,23 +1820,12 @@ func (driver *sshAutoSudoDriver) observe(data []byte) {
 	case sshAutoSudoWaitingForShell:
 		driver.startLocked()
 	case sshAutoSudoWaitingForPassword:
-		driver.tail = append(driver.tail, data...)
-		if len(driver.tail) > sshAutoSudoTailBytes {
-			driver.tail = driver.tail[len(driver.tail)-sshAutoSudoTailBytes:]
-		}
-		if hasSSHSudoPasswordPrompt(driver.tail) {
+		if driver.prompt.write(data) {
 			passwordInput := append([]byte(driver.password), '\r')
 			driver.finishLocked(passwordInput)
 			clear(passwordInput)
 		}
 	}
-}
-
-func hasSSHSudoPasswordPrompt(tail []byte) bool {
-	trimmed := strings.TrimRight(string(tail), " \t\r\n")
-	lineStart := strings.LastIndexAny(trimmed, "\r\n")
-	line := strings.TrimSpace(trimmed[lineStart+1:])
-	return (strings.HasPrefix(line, "[sudo]") || strings.HasPrefix(line, "[sudo: authenticate]")) && strings.HasSuffix(line, ":")
 }
 
 func (driver *sshAutoSudoDriver) onTimeout() {
@@ -1863,17 +1842,11 @@ func (driver *sshAutoSudoDriver) finishLocked(priorityInput []byte) {
 		driver.timeout.Stop()
 		driver.timeout = nil
 	}
-	pendingInput := driver.pendingInput
-	driver.pendingInput = nil
 	driver.password = ""
-	driver.tail = driver.tail[:0]
+	driver.prompt = sshSudoPrompt{}
 	if len(priorityInput) > 0 {
 		_ = driver.session.writeRaw(priorityInput)
 	}
-	if len(pendingInput) > 0 {
-		_ = driver.session.writeRaw(pendingInput)
-	}
-	clear(pendingInput)
 }
 
 func (driver *sshAutoSudoDriver) dispose() {
