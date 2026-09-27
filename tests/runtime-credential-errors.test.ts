@@ -13,6 +13,23 @@ test('locked Bitwarden errors preserve the vault unlock flow', () => {
   assert.equal(isBitwardenUnlockError('Bitwarden vault is locked or the session is invalid'), true);
   assert.equal(isBitwardenUnlockError('The linked Bitwarden item was not found'), false);
   assert.equal(isBitwardenUnlockError(undefined), false);
+  for (const message of [
+    'Bitwarden CLI is not logged in',
+    'Bitwarden is not authenticated',
+    'Bitwarden: unauthenticated',
+    'Log in to Bitwarden',
+  ]) {
+    assert.equal(isBitwardenUnlockError(message), true);
+  }
+  assert.equal(isBitwardenUnlockError('SSH session is not authenticated'), false);
+  assert.equal(isBitwardenUnlockError('You are not logged in.'), true);
+  assert.equal(
+    isBitwardenUnlockError(
+      "Error invoking remote method 'bitwarden:search': Error: You are not logged in.",
+    ),
+    true,
+  );
+  assert.equal(isBitwardenUnlockError('Bitwarden authentication is required.'), true);
 });
 
 test('encrypted SSH keys request a dedicated passphrase instead of account credentials', () => {

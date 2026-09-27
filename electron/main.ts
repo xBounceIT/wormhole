@@ -3350,6 +3350,7 @@ let skipQuitConfirmation = false;
 let bitwardenBackgroundTimer: NodeJS.Timeout | undefined;
 let bitwardenOnboardingPromise: Promise<void> | undefined;
 let bitwardenStartupMaintenancePromise: Promise<void> | undefined;
+let bitwardenVaultAccessed = false;
 
 function requireNativeResourcesRunning(): void {
   if (isQuitting) throw new Error('Wormhole service is stopping.');
@@ -3370,13 +3371,13 @@ async function runBitwardenCredentialMaintenance(): Promise<void> {
   // WinUI starts both Bitwarden services only after startup authentication. Keep the same native
   // trust boundary here: a locked or not-yet-initialized renderer cannot trigger vault/installer
   // work merely because the background timer fired.
-  if (isQuitting || !authSession.isAccessAllowed) return;
+  if (isQuitting || !authSession.isAccessAllowed || !bitwardenVaultAccessed) return;
   const authorizationEpoch = authSession.authorizationEpoch;
   try {
     const state = await runBitwardenBackend<BitwardenCliState>('bitwarden.read');
     if (!isAuthorizationEpochCurrent(authorizationEpoch)) return;
-    // The post-login startup-state request owns automatic CLI installation. Background
-    // maintenance must not retry the same failed download during this startup.
+    // Only an explicit vault action may install the CLI. Background maintenance must not
+    // install it or touch the vault before the user needs Bitwarden in this app session.
     if (state.enabled && state.installed) {
       await runBitwardenBackend('bitwarden.sync-if-stale');
     }
@@ -3489,6 +3490,13 @@ async function runBitwardenBackend<T>(
   values: Omit<NativeBackendCommand, 'action'> = {},
   timeoutMs = cliOperationTimeoutMs,
 ): Promise<T> {
+  if (
+    action === 'bitwarden.search' ||
+    action === 'bitwarden.login' ||
+    action === 'bitwarden.unlock'
+  ) {
+    bitwardenVaultAccessed = true;
+  }
   const response = await getNativeBackend().send({ action, ...values }, timeoutMs);
   if (!response.ok) throw new Error(response.error || 'Bitwarden operation failed.');
   return response.result as T;
@@ -7694,14 +7702,16 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
   });
 
   ipcMain.handle('bitwarden:startup-state', async () => {
-    return runAuthorizedOperation((authorizationEpoch) =>
-      readBitwardenStartupState({
+    return runAuthorizedOperation((authorizationEpoch) => {
+      // This compatibility IPC name now serves on-demand authentication only.
+      bitwardenVaultAccessed = true;
+      return readBitwardenStartupState({
         readState: () => runBitwardenBackend<BitwardenCliState>('bitwarden.read'),
         ensureInstalled: () => runBitwardenBackend<BitwardenCliState>('bitwarden.ensure-installed'),
         readStatus: () => runBitwardenBackend<BitwardenCliStatusResponse>('bitwarden.status'),
         requireAuthorization: () => requireAuthorizationEpoch(authorizationEpoch),
-      }),
-    );
+      });
+    });
   });
 
   ipcMain.handle('bitwarden:set-enabled', async (_event, value: unknown) => {

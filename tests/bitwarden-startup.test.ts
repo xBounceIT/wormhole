@@ -5,10 +5,112 @@ import { runInNewContext } from 'node:vm';
 import { transformWithOxc } from 'vite';
 import { readBitwardenStartupState } from '../electron/bitwarden-startup.ts';
 import { bitwardenCliAuthMode } from '../src/bitwarden-cli-view.ts';
-import { prepareWorkspaceStartup } from '../src/bitwarden-startup-gate.ts';
+import { KeyedRetryQueue } from '../src/keyed-retry-queue.ts';
 
 const enabled = { enabled: true, installed: {}, serverRegion: 'Europe' as const };
 const loggedOut = { status: 'Unauthenticated' as const, serverUrl: null, hasSessionKey: false };
+
+test('the real bootstrap mounts an authorized workspace without starting the optional vault', async () => {
+  const source = readFileSync(new URL('../src/main.tsx', import.meta.url), 'utf8');
+  const mount = source.slice(
+    source.indexOf('async function mountWorkspace('),
+    source.indexOf('function showUnlock('),
+  );
+  const bootstrap = source.slice(
+    source.indexOf('async function bootstrap()'),
+    source.lastIndexOf('void bootstrap();'),
+  );
+  const { code } = await transformWithOxc(
+    'let startupRequest;\n' + mount + bootstrap + '\nbootstrap;',
+    'bootstrap.ts',
+  );
+  const workspace = { tree: [] };
+  const snapshot = {
+    auth: { configured: false },
+    workspace,
+    settings: { theme: 'dark' },
+    themeMigration: { handled: false },
+  };
+  for (const scenario of ['ready', 'locked', 'missing', 'failure', 'no-bridge', 'module-failure']) {
+    const mounted: unknown[] = [],
+      errors: string[] = [],
+      unlocks: unknown[] = [];
+    const result =
+      scenario === 'locked'
+        ? { ...snapshot, auth: { configured: true }, workspace: undefined }
+        : scenario === 'missing'
+          ? { ...snapshot, workspace: undefined }
+          : snapshot;
+    const api = {
+      loadStartup: async () => {
+        if (scenario === 'failure') throw new Error('Startup unavailable');
+        return result;
+      },
+      readBitwardenStartupState: () => assert.fail('Startup touched the optional vault'),
+    };
+    const launch = runInNewContext(code, {
+      window: { wormhole: scenario === 'no-bridge' ? undefined : api, setTimeout: () => 0 },
+      root: {},
+      legacyTheme: undefined,
+      applyTheme: () => {},
+      clearLegacyTheme: () => {},
+      renderLoading: () => {},
+      showError: (message: string) => errors.push(message),
+      showUnlock: (value: unknown) => unlocks.push(value),
+      loadWorkspaceModule: async () => {
+        if (scenario === 'module-failure') throw new Error('Module unavailable');
+        return { mountWorkspaceApp: (_root: unknown, props: unknown) => mounted.push(props) };
+      },
+    }) as () => Promise<void>;
+    await launch();
+    if (scenario === 'ready') {
+      assert.equal(mounted.length, 1);
+      assert.equal((mounted[0] as { initialWorkspace: unknown }).initialWorkspace, workspace);
+      assert.equal(errors.length, 0);
+    } else if (scenario === 'locked') {
+      assert.equal(unlocks.length, 1);
+      assert.equal(mounted.length, 0);
+    } else {
+      assert.equal(errors.length, 1);
+      assert.equal(mounted.length, 0);
+    }
+  }
+});
+
+test('on-demand authentication resumes queued actions once and cancellation discards them', async () => {
+  const source = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  const start = source.indexOf('  function requestRuntimeBitwardenUnlock(');
+  const end = source.indexOf('  function startSerialSession(', start);
+  const { code } = await transformWithOxc(source.slice(start, end), 'vault-actions.ts');
+  const queue = new KeyedRetryQueue<string>();
+  let prompt: unknown = null;
+  let retried = 0;
+  const actions = runInNewContext(
+    code +
+      '\n({requestRuntimeBitwardenUnlock, dismissRuntimeBitwardenUnlock, resumeBitwardenActions});',
+    {
+      runtimeBitwardenRetries: queue,
+      setBitwardenUnlockPrompt: (value: unknown) => {
+        prompt = typeof value === 'function' ? value(prompt) : value;
+      },
+      refreshWorkspaceCredentials: async () => {
+        throw new Error('Catalog unavailable');
+      },
+    },
+  );
+  actions.requestRuntimeBitwardenUnlock('ssh:1', 'Vault locked', () => retried++);
+  actions.requestRuntimeBitwardenUnlock('ssh:1', 'Vault locked', () => retried++);
+  actions.requestRuntimeBitwardenUnlock('rdp:2', 'Vault locked', () => retried++);
+  assert.ok(prompt);
+  await actions.resumeBitwardenActions();
+  assert.equal(retried, 2, 'each live action resumes once even when the catalog refresh fails');
+  assert.equal(prompt, null);
+  assert.equal(queue.isEmpty, true);
+  actions.requestRuntimeBitwardenUnlock('ssh:3', 'Vault locked', () => retried++);
+  actions.dismissRuntimeBitwardenUnlock();
+  await actions.resumeBitwardenActions();
+  assert.equal(retried, 2);
+});
 
 function backend(): Parameters<typeof readBitwardenStartupState>[0] & { calls: string[] } {
   const calls: string[] = [];
@@ -106,82 +208,6 @@ test('startup selects login or unlock from the native vault session, not the HTT
   }
 });
 
-test('workspace startup waits for the Bitwarden decision before exposing the workspace', async () => {
-  let releaseBitwarden!: (state: typeof loggedOut) => void;
-  const bitwarden = new Promise<typeof loggedOut>((resolve) => {
-    releaseBitwarden = resolve;
-  });
-  const workspace = { tree: ['ready'] };
-  let settled = false;
-  const prepared = prepareWorkspaceStartup(
-    { readBitwardenStartupState: () => bitwarden.then((status) => ({ ...enabled, status })) },
-    workspace,
-  ).finally(() => {
-    settled = true;
-  });
-
-  await Promise.resolve();
-  assert.equal(settled, false, 'the workspace became interactive before Bitwarden was ready');
-
-  releaseBitwarden(loggedOut);
-  assert.deepEqual(await prepared, {
-    workspace,
-    bitwarden: { ...enabled, status: loggedOut },
-  });
-});
-
-test('workspace startup remains available when the optional Bitwarden check fails', async () => {
-  const workspace = { tree: ['ready'] };
-  assert.deepEqual(
-    await prepareWorkspaceStartup(
-      {
-        readBitwardenStartupState: async () => {
-          throw new Error('Vault unavailable');
-        },
-      },
-      workspace,
-    ),
-    { workspace, bitwarden: null },
-  );
-});
-
-test('workspace startup never swallows authorization loss as an optional Bitwarden failure', async () => {
-  await assert.rejects(
-    prepareWorkspaceStartup(
-      {
-        readBitwardenStartupState: async () => {
-          throw new Error(
-            "Error invoking remote method 'bitwarden:startup-state': Authentication is required before accessing the Wormhole workspace.",
-          );
-        },
-      },
-      { tree: ['private'] },
-    ),
-    /Authentication is required/,
-  );
-});
-
-test('all initial unlock paths preload Bitwarden before mounting the workspace', () => {
-  const startupSource = readFileSync(new URL('../src/main.tsx', import.meta.url), 'utf8');
-  const appSource = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
-  assert.equal(
-    startupSource.match(/prepareWorkspaceStartup\(/g)?.length,
-    3,
-    'Windows Hello, secret unlock, and disabled Wormhole auth must all use the startup gate',
-  );
-  assert.equal(
-    startupSource.match(
-      /await mountWorkspace\(startup, prepared\.workspace, prepared\.bitwarden\);/g,
-    )?.length,
-    3,
-  );
-  assert.match(
-    appSource,
-    /useState<BitwardenStartupPromptState \| null>\(\(\) =>\s*bitwardenStartupPromptState\(initialState\)/,
-    'the preloaded prompt must be open on the first workspace render',
-  );
-});
-
 test('the startup IPC handler authorizes access and calls only the credential backend', async () => {
   const source = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
   const start = source.indexOf("  ipcMain.handle('bitwarden:startup-state'");
@@ -192,6 +218,7 @@ test('the startup IPC handler authorizes access and calls only the credential ba
   let authorized = false;
   const calls: string[] = [];
   runInNewContext(code, {
+    bitwardenVaultAccessed: false,
     ipcMain: {
       handle: (channel: string, callback: typeof handler) => {
         assert.equal(channel, 'bitwarden:startup-state');
@@ -241,25 +268,37 @@ test('background maintenance syncs enabled vaults without repeating a failed sta
   );
   let installs = 0;
   let syncs = 0;
+  let reads = 0;
   const api = backend();
   api.readState = async () => ({ ...enabled, installed: null });
   api.ensureInstalled = async () => {
     installs++;
     throw new Error('Download unavailable');
   };
-  const maintenance = runInNewContext(code + '\nrunBitwardenStartupMaintenance;', {
+  const environment = {
+    bitwardenVaultAccessed: false,
     isQuitting: false,
     authSession: { isAccessAllowed: true, authorizationEpoch: 1 },
     isAuthorizationEpochCurrent: () => true,
     runBitwardenExtensionStartupMaintenance: async () => {},
     runBitwardenBackend: async (action: string) => {
-      if (action === 'bitwarden.read') return api.readState();
+      if (action === 'bitwarden.read') {
+        reads++;
+        return api.readState();
+      }
       if (action === 'bitwarden.ensure-installed') return api.ensureInstalled();
       if (action === 'bitwarden.sync-if-stale') return syncs++;
       assert.fail(`Unexpected maintenance action: ${action}`);
     },
     console: { warn: () => {} },
-  }) as () => Promise<void>;
+  };
+  const maintenance = runInNewContext(
+    code + '\nrunBitwardenStartupMaintenance;',
+    environment,
+  ) as () => Promise<void>;
+  await maintenance();
+  assert.equal(reads, 0, 'startup must leave the vault untouched until an explicit action');
+  environment.bitwardenVaultAccessed = true;
   await assert.rejects(readBitwardenStartupState(api), /Download unavailable/);
   await maintenance();
   assert.equal(installs, 1, 'startup and background work must not install the same CLI twice');

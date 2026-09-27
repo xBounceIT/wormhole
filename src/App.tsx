@@ -1699,7 +1699,6 @@ function AuthPrompt({
 
 type WormholeAppProps = {
   initialAuthState: WormholeAuthState;
-  initialBitwardenStartupState: WormholeBitwardenStartupState | null;
   initialWorkspace: WormholeWorkspaceSnapshot;
   initialSettings: WormholeAppSettings;
 };
@@ -1791,12 +1790,7 @@ function backupOperationErrorMessage(error: unknown): string {
 // updates). Folding those state machines into one reducer would couple unrelated transitions, and
 // splitting the coordinator would duplicate the native lifecycle boundary across components.
 // react-doctor-disable-next-line react-doctor/no-giant-component, react-doctor/prefer-useReducer
-function App({
-  initialAuthState,
-  initialBitwardenStartupState,
-  initialWorkspace,
-  initialSettings,
-}: WormholeAppProps) {
+function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAppProps) {
   const [theme, setTheme] = useState<Theme>(initialSettings.theme);
   const [systemTheme, setSystemTheme] = useState<ResolvedTheme>(getSystemTheme);
   const contextMenuOverlayOpen = useContextMenuOverlayOpen();
@@ -1916,15 +1910,9 @@ function App({
   const [bitwardenUnlockPrompt, setBitwardenUnlockPrompt] = useState<{
     reason: string;
   } | null>(null);
-  const [bitwardenUnlockBusy, setBitwardenUnlockBusy] = useState(false);
-  const [bitwardenUnlockError, setBitwardenUnlockError] = useState('');
-  const [bitwardenStartupPromptOpen, setBitwardenStartupPromptOpen] = useState(false);
-  const [bitwardenStartupInitialState, setBitwardenStartupInitialState] = useState<
-    WormholeBitwardenStartupState | null | undefined
-  >(initialBitwardenStartupState);
-  const handleBitwardenStartupPromptOpenChange = useCallback((open: boolean) => {
-    setBitwardenStartupInitialState(undefined);
-    setBitwardenStartupPromptOpen(open);
+  const [bitwardenAccessPromptOpen, setBitwardenAccessPromptOpen] = useState(false);
+  const handleBitwardenAccessPromptOpenChange = useCallback((open: boolean) => {
+    setBitwardenAccessPromptOpen(open);
   }, []);
   const [mremoteImportOpen, setMremoteImportOpen] = useState(false);
   const [newConnectionOpen, setNewConnectionOpen] = useState(false);
@@ -3009,7 +2997,6 @@ function App({
     rdpSavedCredentialAttempts.current.clear();
     runtimeBitwardenRetries.clear();
     setBitwardenUnlockPrompt(null);
-    setBitwardenUnlockError('');
     newFolderParentId.current = null;
     newFolderGeneration.current += 1;
     setEditorError('');
@@ -3475,39 +3462,23 @@ function App({
   }
 
   function requestRuntimeBitwardenUnlock(key: string, reason: string, retry: () => void) {
-    const isFirst = runtimeBitwardenRetries.upsert(key, retry);
-    if (isFirst) {
-      setBitwardenUnlockError('');
-    }
+    runtimeBitwardenRetries.upsert(key, retry);
     setBitwardenUnlockPrompt((current) => current ?? { reason });
   }
 
   function dismissRuntimeBitwardenUnlock() {
     runtimeBitwardenRetries.clear();
     setBitwardenUnlockPrompt(null);
-    setBitwardenUnlockError('');
   }
 
-  async function submitRuntimeBitwardenUnlock(masterPassword: string) {
-    const prompt = bitwardenUnlockPrompt;
-    if (!prompt || !window.wormhole || bitwardenUnlockBusy) return;
-    setBitwardenUnlockBusy(true);
-    setBitwardenUnlockError('');
+  async function resumeBitwardenActions() {
+    const retries = runtimeBitwardenRetries.drain();
+    setBitwardenUnlockPrompt(null);
+    for (const retry of retries) retry();
     try {
-      await window.wormhole.unlockBitwardenCli(masterPassword);
-      try {
-        await refreshWorkspaceCredentials();
-      } catch {
-        // The vault session is already valid. A transient catalog refresh failure must not keep
-        // live connections blocked; the next workspace refresh will reconcile the visible list.
-      }
-      const retries = runtimeBitwardenRetries.drain();
-      setBitwardenUnlockPrompt(null);
-      for (const retry of retries) retry();
-    } catch (error: unknown) {
-      setBitwardenUnlockError(formatBitwardenAuthenticationError(error, 'unlock'));
-    } finally {
-      setBitwardenUnlockBusy(false);
+      await refreshWorkspaceCredentials();
+    } catch {
+      // Authentication succeeded; a catalog refresh failure must not discard pending actions.
     }
   }
 
@@ -6506,11 +6477,11 @@ function App({
 
   return (
     <TooltipProvider delayDuration={300}>
-      {authGate === 'unlocked' ? (
-        <BitwardenStartupPrompt
-          initialState={bitwardenStartupInitialState}
-          onAuthenticated={refreshWorkspaceCredentials}
-          onOpenChange={handleBitwardenStartupPromptOpenChange}
+      {authGate === 'unlocked' && bitwardenUnlockPrompt ? (
+        <BitwardenAccessPrompt
+          onAuthenticated={resumeBitwardenActions}
+          onClose={dismissRuntimeBitwardenUnlock}
+          onOpenChange={handleBitwardenAccessPromptOpenChange}
         />
       ) : null}
       {visibleAuthPrompt && authState ? (
@@ -6994,7 +6965,7 @@ function App({
                   isAuthorized={authGate === 'unlocked'}
                   isWebSurfaceVisible={
                     mcpApprovals.length === 0 &&
-                    !bitwardenStartupPromptOpen &&
+                    !bitwardenAccessPromptOpen &&
                     !contextMenuOverlayOpen &&
                     !newConnectionOpen &&
                     !folderDetailsOpen &&
@@ -8381,14 +8352,6 @@ function App({
             </form>
           </DialogContent>
         </Dialog>
-
-        <RuntimeBitwardenUnlockDialog
-          busy={bitwardenUnlockBusy}
-          error={bitwardenUnlockError}
-          onClose={dismissRuntimeBitwardenUnlock}
-          onUnlock={(masterPassword) => void submitRuntimeBitwardenUnlock(masterPassword)}
-          open={bitwardenUnlockPrompt !== null}
-        />
 
         <Dialog
           onOpenChange={(open) => {
@@ -11330,7 +11293,7 @@ function CredentialsPage({
   const [operationError, setOperationError] = useState('');
   const [bitwardenQuery, setBitwardenQuery] = useState('');
   const [bitwardenItems, setBitwardenItems] = useState<WormholeBitwardenLoginItem[]>([]);
-  const [bitwardenUnlockPassword, setBitwardenUnlockPassword] = useState('');
+  const [bitwardenAccessRequested, setBitwardenAccessRequested] = useState(false);
   const [bitwardenSearchStatus, setBitwardenSearchStatus] = useState('');
   const [bitwardenSearching, setBitwardenSearching] = useState(false);
   const [privateKeySelecting, setPrivateKeySelecting] = useState(false);
@@ -11352,7 +11315,7 @@ function CredentialsPage({
     setOperationError(''); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
     setBitwardenQuery(''); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
     setBitwardenItems([]); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
-    setBitwardenUnlockPassword(''); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
+    setBitwardenAccessRequested(false); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
     setBitwardenSearchStatus(''); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
     setBitwardenSearching(false); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
     setPrivateKeySelecting(false); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
@@ -11486,7 +11449,7 @@ function CredentialsPage({
     bitwardenSearchAttempts.current.cancel('credential-search');
     setBitwardenQuery('');
     setBitwardenItems([]);
-    setBitwardenUnlockPassword('');
+    setBitwardenAccessRequested(false);
     setBitwardenSearchStatus('');
     setBitwardenSearching(false);
   }
@@ -11494,32 +11457,11 @@ function CredentialsPage({
   async function searchBitwarden() {
     if (bitwardenSearching || !window.wormhole) return;
     const generation = bitwardenSearchAttempts.current.begin('credential-search');
-    const masterPassword = bitwardenUnlockPassword;
-    // Treat an unlock value like every other renderer-held secret: consume it before the first
-    // native await so errors, editor closure, and stale responses cannot keep it in React state.
-    setBitwardenUnlockPassword('');
     setBitwardenSearching(true);
     setBitwardenSearchStatus('Searching Bitwarden…');
     setOperationError('');
     try {
-      let response: { items: WormholeBitwardenLoginItem[] };
-      try {
-        response = await window.wormhole.searchBitwardenItems(bitwardenQuery);
-      } catch (error) {
-        if (!bitwardenSearchAttempts.current.isCurrent('credential-search', generation)) return;
-        if (!masterPassword || !isBitwardenUnlockError(backendErrorMessage(error))) {
-          throw error;
-        }
-        try {
-          await window.wormhole.unlockBitwardenCli(masterPassword);
-        } catch (error) {
-          if (!bitwardenSearchAttempts.current.isCurrent('credential-search', generation)) return;
-          setBitwardenSearchStatus(formatBitwardenAuthenticationError(error, 'unlock'));
-          return;
-        }
-        if (!bitwardenSearchAttempts.current.isCurrent('credential-search', generation)) return;
-        response = await window.wormhole.searchBitwardenItems(bitwardenQuery);
-      }
+      const response = await window.wormhole.searchBitwardenItems(bitwardenQuery);
       if (!bitwardenSearchAttempts.current.isCurrent('credential-search', generation)) return;
       setBitwardenItems(response.items);
       setBitwardenSearchStatus(
@@ -11531,15 +11473,12 @@ function CredentialsPage({
     } catch (error) {
       if (!bitwardenSearchAttempts.current.isCurrent('credential-search', generation)) return;
       const message = backendErrorMessage(error);
-      const needsLogin = /log in|login|unauth/i.test(message);
-      const locked = isBitwardenUnlockError(message);
-      setBitwardenSearchStatus(
-        needsLogin
-          ? 'Bitwarden CLI is not logged in. Log in from Settings first.'
-          : locked
-            ? 'The vault is locked. Enter the master password and search again.'
-            : message,
-      );
+      if (isBitwardenUnlockError(message)) {
+        setBitwardenSearchStatus('Authenticate with Bitwarden to continue the search.');
+        setBitwardenAccessRequested(true);
+      } else {
+        setBitwardenSearchStatus(message);
+      }
     } finally {
       if (bitwardenSearchAttempts.current.isCurrent('credential-search', generation)) {
         setBitwardenSearching(false);
@@ -11703,6 +11642,15 @@ function CredentialsPage({
 
   return (
     <>
+      {isAuthorized && editorOpen && bitwardenAccessRequested ? (
+        <BitwardenAccessPrompt
+          onAuthenticated={async () => {
+            setBitwardenAccessRequested(false);
+            await searchBitwarden();
+          }}
+          onClose={() => setBitwardenAccessRequested(false)}
+        />
+      ) : null}
       <section className="flex h-full min-h-0 flex-col overflow-hidden px-6 py-5">
         <h2 className="shrink-0 text-xl font-semibold tracking-tight">Credentials</h2>
 
@@ -12180,18 +12128,6 @@ function CredentialsPage({
                   >
                     {bitwardenSearching ? 'Searching…' : 'Search'}
                   </Button>
-                </div>
-                <div className="grid gap-2">
-                  <Label htmlFor="credential-bitwarden-unlock">Bitwarden master password</Label>
-                  <Input
-                    autoComplete="current-password"
-                    id="credential-bitwarden-unlock"
-                    maxLength={4096}
-                    onChange={(event) => setBitwardenUnlockPassword(event.target.value)}
-                    placeholder="Required only when the vault is locked"
-                    type="password"
-                    value={bitwardenUnlockPassword}
-                  />
                 </div>
                 {bitwardenItems.length > 0 ? (
                   <div className="grid gap-2">
@@ -14186,7 +14122,7 @@ function RuntimeBitwardenUnlockDialog({
         <DialogHeader>
           <DialogTitle>Unlock Bitwarden</DialogTitle>
           <DialogDescription>
-            This connection uses a Bitwarden login. Unlock the vault to continue.
+            This action needs a Bitwarden login item. Unlock the vault to continue.
           </DialogDescription>
         </DialogHeader>
         <form
@@ -14238,7 +14174,7 @@ function RuntimeBitwardenUnlockDialog({
             </Button>
             <Button disabled={busy || !hasPassword} type="submit">
               <KeyRound data-icon="inline-start" />
-              {busy ? 'Unlocking…' : 'Unlock and connect'}
+              {busy ? 'Unlocking…' : 'Unlock and continue'}
             </Button>
           </DialogFooter>
         </form>
@@ -14453,15 +14389,15 @@ function BitwardenCliDialog({
   );
 }
 
-type BitwardenStartupPromptState = {
+type BitwardenAccessPromptState = {
   mode: 'login' | 'unlock';
   serverRegion: WormholeBitwardenCliState['serverRegion'];
   currentServerRegion: 'US' | 'EU' | null;
 };
 
-function bitwardenStartupPromptState(
+function bitwardenAccessPromptState(
   state: WormholeBitwardenStartupState | null | undefined,
-): BitwardenStartupPromptState | null {
+): BitwardenAccessPromptState | null {
   if (!state) return null;
   const mode = bitwardenCliAuthMode(state.status);
   return mode
@@ -14473,30 +14409,37 @@ function bitwardenStartupPromptState(
     : null;
 }
 
-function BitwardenStartupPrompt({
+function BitwardenAccessPrompt({
   initialState,
   onAuthenticated,
+  onClose,
   onOpenChange,
 }: {
-  initialState: WormholeBitwardenStartupState | null | undefined;
+  initialState?: WormholeBitwardenStartupState | null;
   onAuthenticated: () => Promise<void>;
-  onOpenChange: (open: boolean) => void;
+  onClose: () => void;
+  onOpenChange?: (open: boolean) => void;
 }) {
-  const [prompt, setPrompt] = useState<BitwardenStartupPromptState | null>(() =>
-    bitwardenStartupPromptState(initialState),
+  const onAuthenticatedRef = useRef(onAuthenticated);
+  useLayoutEffect(() => {
+    onAuthenticatedRef.current = onAuthenticated;
+  }, [onAuthenticated]);
+  const [prompt, setPrompt] = useState<BitwardenAccessPromptState | null>(() =>
+    bitwardenAccessPromptState(initialState),
   );
   const [busy, setBusy] = useState(false);
+  const [checking, setChecking] = useState(initialState === undefined);
   const [error, setError] = useState('');
   const active = useRef(false);
   const submitting = useRef(false);
   const startupRequest = useRef<Promise<WormholeBitwardenStartupState | null> | null>(
     initialState === undefined ? null : Promise.resolve(initialState),
   );
-  const open = prompt !== null;
+  const open = checking || prompt !== null || error !== '';
 
   useLayoutEffect(() => {
-    onOpenChange(open);
-    return () => onOpenChange(false);
+    onOpenChange?.(open);
+    return () => onOpenChange?.(false);
   }, [onOpenChange, open]);
 
   useEffect(() => {
@@ -14509,12 +14452,24 @@ function BitwardenStartupPrompt({
       startupRequest.current ??= api.readBitwardenStartupState();
       void startupRequest.current
         .then((state) => {
-          if (!current || !state) return;
-          setPrompt(bitwardenStartupPromptState(state));
+          if (!current || !active.current) return;
+          setChecking(false);
+          if (!state) {
+            setError('Bitwarden is unavailable. Enable the vault in Settings and try again.');
+            return;
+          }
+          const nextPrompt = bitwardenAccessPromptState(state);
+          setPrompt(nextPrompt);
+          if (!nextPrompt) {
+            if (state.status.hasSessionKey)
+              void onAuthenticatedRef.current().catch(() => undefined);
+            else setError('Could not determine the Bitwarden vault status. Try again.');
+          }
         })
         .catch(() => {
-          // An unavailable optional vault must not block entry to Wormhole. Its status
-          // and installation errors remain available in Settings.
+          if (!current || !active.current) return;
+          setChecking(false);
+          setError('Could not check Bitwarden. Check the vault settings and try again.');
         });
     }
     return () => {
@@ -14541,7 +14496,7 @@ function BitwardenStartupPrompt({
       if (mode === 'login') {
         await api.syncBitwardenCli().catch(() => undefined);
       }
-      if (active.current) await onAuthenticated().catch(() => undefined);
+      if (active.current) await onAuthenticatedRef.current().catch(() => undefined);
     } catch (error) {
       if (active.current) {
         setError(formatBitwardenAuthenticationError(error, mode));
@@ -14552,7 +14507,46 @@ function BitwardenStartupPrompt({
     }
   }
 
-  if (!prompt) return null;
+  function close() {
+    active.current = false;
+    setPrompt(null);
+    setChecking(false);
+    setError('');
+    onClose();
+  }
+
+  if (!prompt) {
+    return (
+      <Dialog onOpenChange={(nextOpen) => !nextOpen && close()} open={open}>
+        <DialogContent className="border-border/70 bg-card text-card-foreground sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Bitwarden</DialogTitle>
+            <DialogDescription>
+              {checking ? 'Checking the vault for this action…' : error}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button onClick={close} type="button" variant="ghost">
+              Cancel
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    );
+  }
+  if (prompt.mode === 'unlock') {
+    return (
+      <RuntimeBitwardenUnlockDialog
+        busy={busy}
+        error={error}
+        onClose={close}
+        onUnlock={(masterPassword) =>
+          void authenticate((api) => api.unlockBitwardenCli(masterPassword), 'unlock')
+        }
+        open
+      />
+    );
+  }
   return (
     <BitwardenCliDialog
       currentServerRegion={prompt.currentServerRegion}
@@ -14560,7 +14554,7 @@ function BitwardenStartupPrompt({
       error={error}
       loginBusy={busy}
       mode={prompt.mode}
-      onClose={() => setPrompt(null)}
+      onClose={close}
       onLogin={(email, masterPassword, authenticatorCode, serverRegion) =>
         void authenticate(
           (api) =>
