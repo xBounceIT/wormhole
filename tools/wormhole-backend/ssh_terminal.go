@@ -739,7 +739,9 @@ func sshTerminalScrollbackLineText(line sshTerminalScrollbackLine) string {
 
 func sshTerminalScrollbackLineFromText(text string) sshTerminalScrollbackLine {
 	if text == "" {
-		return sshTerminalScrollbackLine{}
+		// The wire contract requires an array even for blank lines. A nil slice
+		// encodes as null and makes Electron reject the entire delta frame.
+		return sshTerminalScrollbackLine{Runs: []sshTerminalScrollbackRun{}}
 	}
 	return sshTerminalScrollbackLine{Runs: []sshTerminalScrollbackRun{{
 		Text:       text,

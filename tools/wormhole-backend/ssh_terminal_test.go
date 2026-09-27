@@ -541,7 +541,7 @@ func TestSSHHistoryHelpersCoverColorsEscapesAndTextRows(t *testing.T) {
 		t.Fatalf("scrollback line = %#v / %q", line, text)
 	}
 	textLine := sshTerminalScrollbackLineFromText("hé")
-	if len(textLine.Runs) != 1 || textLine.Runs[0].Cells != 2 || sshTerminalScrollbackLineFromText("").Runs != nil {
+	if len(textLine.Runs) != 1 || textLine.Runs[0].Cells != 2 || len(sshTerminalScrollbackLineFromText("").Runs) != 0 {
 		t.Fatalf("text scrollback line = %#v", textLine)
 	}
 	if !sshTerminalScrollbackRowsMatch([]sshTerminalScrollbackLine{textLine}, []string{"hé"}) ||
