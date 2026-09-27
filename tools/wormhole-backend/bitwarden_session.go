@@ -61,7 +61,7 @@ func (m *vncManager) restoreBitwardenSession(expectedGeneration uint64) {
 	}
 	defer clearBytes(data)
 	var saved bitwardenSavedSession
-	if json.Unmarshal(data, &saved) != nil || saved.Path != settings.Path || saved.Region != settings.ServerRegion {
+	if json.Unmarshal(data, &saved) != nil || !bitwardenCliPathsEqual(saved.Path, settings.Path) || saved.Region != settings.ServerRegion {
 		return
 	}
 	key, err := bitwardenCliReadSessionKey(saved.Key)

@@ -352,3 +352,25 @@ func TestBitwardenStatusAfterConcurrentLockKeepsSavedSession(t *testing.T) {
 		t.Fatal("status completing after lock erased the saved key")
 	}
 }
+
+func TestBitwardenSessionPathCaseFollowsPlatformConfigurationRules(t *testing.T) {
+	m := sessionTestManager(t)
+	if err := m.setBitwardenSessionForGeneration("session-key", 0); err != nil {
+		t.Fatal(err)
+	}
+	m.handleBitwarden(backendCommand{ID: "config", Action: "bitwarden.set-config", Path: "CLI", ServerRegion: bitwardenCliServerCurrent}, 0)
+	m.clearBitwardenSession()
+	m.restoreBitwardenSession(m.bitwardenGeneration())
+	want := ""
+	if runtime.GOOS == "windows" {
+		want = "session-key"
+	}
+	if m.bitwardenSession() != want {
+		t.Fatal("app lock did not follow platform CLI path equality")
+	}
+	restarted := &vncManager{databasePath: m.databasePath}
+	restarted.restoreBitwardenSession(0)
+	if restarted.bitwardenSession() != want {
+		t.Fatal("restart did not follow platform CLI path equality")
+	}
+}
