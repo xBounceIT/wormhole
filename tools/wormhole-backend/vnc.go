@@ -848,7 +848,11 @@ func (s *vncSession) connect(command backendCommand, database *sql.DB, electronU
 			var resolved bitwardenResolvedCredential
 			if s.manager.bitwardenGenerationIs(generation) {
 				s.manager.restoreBitwardenSession(generation)
+				sessionKey := s.manager.bitwardenSession()
 				resolved, err = s.manager.resolveBitwardenCredential(credentialID, vncProtocolValue)
+				if isBitwardenCliAuthError(err) {
+					err = errors.Join(err, s.manager.discardBitwardenSession(sessionKey, generation))
+				}
 			} else {
 				err = errBitwardenSessionInvalidated
 			}

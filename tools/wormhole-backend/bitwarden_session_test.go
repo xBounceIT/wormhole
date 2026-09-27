@@ -480,3 +480,38 @@ func TestBitwardenSessionKeyDeletionDoesNotDelayLock(t *testing.T) {
 		}
 	}
 }
+
+func TestVncDiscardsInvalidRestoredBitwardenSession(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("CLI fixture is a Windows executable")
+	}
+	m := sessionTestManager(t)
+	if err := ensureElectronWorkspaceSchema(m.databasePath); err != nil {
+		t.Fatal(err)
+	}
+	db, err := openDatabase(m.databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	m.database = db
+	credential := seedLegacyBitwardenCredential(t, m.databasePath, credentialCreateRequest{Name: "VNC", Protocol: "vnc", Provider: "Bitwarden", BitwardenItemID: "item-1"})
+	helper := buildBitwardenServiceHelper(t)
+	if err := writeBitwardenCliSettings(m.databasePath, bitwardenCliSettings{Enabled: true, Path: helper, ServerRegion: bitwardenCliServerCurrent}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.setBitwardenSessionForGeneration("expired-session", 0); err != nil {
+		t.Fatal(err)
+	}
+	m.clearBitwardenSession()
+	for _, id := range []string{"first-attempt", "retry"} {
+		session := newVncSession(id, m.output, m)
+		session.connect(backendCommand{Host: "127.0.0.1", Port: 5900, CredentialID: credential.ID}, db)
+		if m.bitwardenSession() != "" {
+			t.Fatal("VNC retained a rejected session in memory")
+		}
+		if _, err := os.Stat(bitwardenSessionPath(m.databasePath)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("VNC retained a rejected session on disk")
+		}
+	}
+}

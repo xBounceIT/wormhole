@@ -283,6 +283,7 @@ func main() {
 	case "list":
 		fmt.Print("[{\"id\":\"item-1\",\"name\":\"Site\",\"login\":{\"username\":\"operator\",\"password\":\"secret\"}}]")
 	case "get":
+		if os.Getenv("BW_SESSION") != "session-key" { fmt.Fprint(os.Stderr, "Vault is locked."); os.Exit(1) }
 		fmt.Print("{\"id\":\"item-1\",\"name\":\"Site\",\"type\":1,\"login\":{\"username\":\"operator\",\"password\":\"secret\"}}")
 	default:
 		os.Exit(1)
