@@ -150,6 +150,9 @@ func (m *vncManager) handleBitwarden(command backendCommand, expectedGeneration 
 			break
 		}
 		var sessionKey string
+		if err = m.resetBitwardenSession(); err != nil {
+			break
+		}
 		sessionKey, err = bitwardenCliUnlock(m.databasePath, settings, command.MasterPassword)
 		if err == nil {
 			err = m.setBitwardenSessionForGeneration(sessionKey, expectedGeneration)

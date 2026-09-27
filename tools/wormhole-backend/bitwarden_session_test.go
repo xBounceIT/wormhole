@@ -707,3 +707,53 @@ func TestBitwardenConfigRequiresSessionCleanupBeforeCommit(t *testing.T) {
 		}
 	}
 }
+
+func TestBitwardenUnlockRepairsSessionProtection(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("CLI fixture is a Windows executable")
+	}
+	m := sessionTestManager(t)
+	if err := ensureElectronWorkspaceSchema(m.databasePath); err != nil {
+		t.Fatal(err)
+	}
+	db, err := openDatabase(m.databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	m.database = db
+	if err := writeBitwardenCliSettings(m.databasePath, bitwardenCliSettings{Enabled: true, Path: buildBitwardenServiceHelper(t), ServerRegion: bitwardenCliServerCurrent}); err != nil {
+		t.Fatal(err)
+	}
+	previousProtect, previousDelete, previousRemove := protectBitwardenSession, deleteBitwardenSessionProtectionKey, removeBitwardenSessionFile
+	t.Cleanup(func() {
+		protectBitwardenSession, deleteBitwardenSessionProtectionKey, removeBitwardenSessionFile = previousProtect, previousDelete, previousRemove
+	})
+	corrupt := true
+	protectBitwardenSession = func(path string, data []byte) ([]byte, error) {
+		if corrupt {
+			return nil, errors.New("corrupt protection key")
+		}
+		return previousProtect(path, data)
+	}
+	deleteBitwardenSessionProtectionKey = func(path string) { corrupt = false; previousDelete(path) }
+	removeBitwardenSessionFile = func(string) error { return errors.New("cannot remove") }
+	var output bytes.Buffer
+	m.output = newBackendLineWriter(&output)
+	command := backendCommand{ID: "unlock", Action: "bitwarden.unlock", MasterPassword: "master"}
+	m.handleBitwarden(command, 0)
+	if responses := decodeBackendResponses(t, output.Bytes()); len(responses) != 1 || responses[0].OK || !corrupt {
+		t.Fatal("unlock bypassed failed session cleanup")
+	}
+	removeBitwardenSessionFile = previousRemove
+	output.Reset()
+	m.handleBitwarden(command, 0)
+	if responses := decodeBackendResponses(t, output.Bytes()); len(responses) != 1 || !responses[0].OK {
+		t.Fatal("unlock failed to repair protection state")
+	}
+	m.clearBitwardenSession()
+	m.restoreBitwardenSession(m.bitwardenGeneration())
+	if m.bitwardenSession() != "session-key" {
+		t.Fatal("repaired unlock session did not survive lock")
+	}
+}
