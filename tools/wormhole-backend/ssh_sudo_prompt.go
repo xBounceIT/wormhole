@@ -28,7 +28,13 @@ func (prompt *sshSudoPrompt) write(data []byte) bool {
 				prompt.state = 'c'
 				prompt.csiLen = 0
 				prompt.csiPrivate = false
-			case ']', 'P', '^', '_', 'k':
+			case ']':
+				// OSC titles are not drawn by the terminal. Skip the payload,
+				// then keep scanning the visible line after BEL or ST.
+				prompt.state = 's'
+			case 'P', '^', '_', 'k':
+				// Other control strings may have different terminators. Keep
+				// the line invalid rather than interpreting hidden text as a prompt.
 				prompt.invalid = true
 				prompt.state = 's'
 			default:

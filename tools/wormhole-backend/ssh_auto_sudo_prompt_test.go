@@ -76,6 +76,39 @@ func TestSSHSudoPromptControlStringsAcrossChunks(t *testing.T) {
 	}
 }
 
+func TestSSHSudoPromptAfterTerminatedControlStringOnSameLine(t *testing.T) {
+	const passwordPrompt = "[sudo: authenticate] Password:"
+	for _, control := range []string{
+		"\x1b]0;title\x07",
+		"\x1b]0;title\x1b\\",
+		"\x1b]0;" + passwordPrompt + "\x07",
+	} {
+		output := control + passwordPrompt
+		for split := 0; split <= len(output); split++ {
+			var prompt sshSudoPrompt
+			first := prompt.write([]byte(output[:split]))
+			second := prompt.write([]byte(output[split:]))
+			if first && split < len(output) || !first && !second {
+				t.Fatalf("visible prompt after a terminated control string was missed at split %d", split)
+			}
+		}
+	}
+}
+
+func TestSSHSudoPromptDoesNotTrustOtherControlStrings(t *testing.T) {
+	const passwordPrompt = "[sudo: authenticate] Password:"
+	for _, control := range []string{
+		"\x1bPmetadata\x1b\\",
+		"\x1bPmetadata\x07",
+		"\x1b_kmetadata\x1b\\",
+	} {
+		var prompt sshSudoPrompt
+		if prompt.write([]byte(control + passwordPrompt)) {
+			t.Fatal("unsupported control string caused a credential response")
+		}
+	}
+}
+
 func TestSSHSudoPromptInvalidLineRecovery(t *testing.T) {
 	for _, invalid := range []string{
 		strings.Repeat("x", sshAutoSudoTailBytes+1),
@@ -241,6 +274,22 @@ func TestSSHAutoSudoAnswersUbuntuPromptAfterShellStartup(t *testing.T) {
 	driver.observe([]byte("l[sudo: authenticate] Password: "))
 	if got := input.String(); got != "sudo su\rsecret\r" {
 		t.Fatalf("auto sudo did not answer the Ubuntu prompt: %q", got)
+	}
+}
+
+func TestSSHAutoSudoAnswersUbuntuPromptAfterControlString(t *testing.T) {
+	const output = "\x1b]0;daniel@host: ~\x07[sudo: authenticate] Password: "
+	for split := 0; split <= len(output); split++ {
+		input := &recordingSSHInput{}
+		driver := newSSHAutoSudoDriver(&sshNativeSession{stdin: input}, "secret")
+		driver.start()
+		driver.observe([]byte("daniel@host:~$ sudo su\r\n"))
+		driver.observe([]byte(output[:split]))
+		driver.observe([]byte(output[split:]))
+		if got := input.String(); got != "sudo su\rsecret\r" {
+			t.Fatalf("split %d: visible sudo prompt did not get a password response: %q", split, got)
+		}
+		driver.dispose()
 	}
 }
 
