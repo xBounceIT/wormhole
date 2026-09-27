@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
+import { closeSync, existsSync } from 'node:fs';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
-import { relative } from 'node:path';
+import { tmpdir } from 'node:os';
+import { join, relative } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { prerelease, satisfies, valid } from 'semver';
@@ -68,6 +71,98 @@ test('dependency lock excludes the Nano ID zero-size generator vulnerability', (
       `nanoid ${version} is vulnerable`,
     );
   }
+});
+
+test('dependency lock does not install deprecated packages', () => {
+  const deprecated = Object.entries(packageLock.packages)
+    .filter(([, metadata]) => metadata.deprecated)
+    .map(([location]) => location);
+  assert.deepEqual(deprecated, []);
+});
+
+test('overridden ASAR dependency creates readable archives', async () => {
+  const { createPackage, extractFile } = await import('@electron/asar');
+  const workDir = await mkdtemp(join(tmpdir(), 'wormhole-asar-'));
+  const sourceDir = join(workDir, 'source');
+  const archivePath = join(workDir, 'test.asar');
+
+  try {
+    await mkdir(sourceDir);
+    await writeFile(join(sourceDir, 'entry.txt'), 'archive contents');
+    await createPackage(sourceDir, archivePath);
+    assert.equal(extractFile(archivePath, 'entry.txt').toString(), 'archive contents');
+  } finally {
+    await rm(workDir, { recursive: true, force: true });
+  }
+});
+
+test('macOS universal packager loads with the overridden ASAR dependency', async () => {
+  const { makeUniversalApp } = await import('@electron/universal');
+  assert.equal(typeof makeUniversalApp, 'function');
+});
+
+test('Electron downloader initializes the overridden proxy agent', () => {
+  const proxy = 'http://127.0.0.1:9';
+  const activeProxy = execFileSync(
+    process.execPath,
+    [
+      '-e',
+      'const { createRequire } = require("node:module"); ' +
+        'createRequire(require.resolve("app-builder-lib"))("@electron/get").initializeProxy(); ' +
+        'process.stdout.write(global.GLOBAL_AGENT?.HTTP_PROXY ?? "");',
+    ],
+    { cwd: projectDir, env: { ...process.env, GLOBAL_AGENT_HTTP_PROXY: proxy }, encoding: 'utf8' },
+  );
+
+  assert.equal(activeProxy, proxy);
+});
+
+test('Squirrel temporary directory cleanup works with overridden rimraf', () => {
+  const temp = require('temp').track();
+  const directory = temp.mkdirSync('wormhole-installer-');
+
+  try {
+    assert.ok(existsSync(directory));
+  } finally {
+    temp.cleanupSync();
+  }
+
+  assert.equal(existsSync(directory), false);
+});
+
+test('Squirrel asynchronous cleanup retains the legacy rimraf callback contract', async () => {
+  const temp = require('temp').track();
+  const directory = temp.mkdirSync('wormhole-installer-');
+  const file = temp.openSync('wormhole-installer-');
+  closeSync(file.fd);
+
+  try {
+    assert.deepEqual(await temp.cleanup(), { files: 1, dirs: 1 });
+    assert.equal(existsSync(directory), false);
+    assert.equal(existsSync(file.path), false);
+  } finally {
+    await Promise.all([
+      rm(directory, { recursive: true, force: true }),
+      rm(file.path, { force: true }),
+    ]);
+  }
+});
+
+test('legacy rimraf callback supports omitted options and reports deletion errors', async () => {
+  const rimraf = require('rimraf');
+  const directory = await mkdtemp(join(tmpdir(), 'wormhole-rimraf-'));
+
+  await new Promise((resolve, reject) => {
+    rimraf(directory, (error) => (error ? reject(error) : resolve()));
+  });
+  assert.equal(existsSync(directory), false);
+
+  await assert.rejects(
+    new Promise((resolve, reject) => {
+      rimraf(42, { maxBusyTries: 6 }, (error) => (error ? reject(error) : resolve()));
+    }),
+    TypeError,
+  );
 });
 
 test('electron-builder produces portable and installable Linux packages', () => {

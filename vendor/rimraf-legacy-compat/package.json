@@ -1,0 +1,9 @@
+{
+  "name": "rimraf",
+  "version": "6.1.3-compat.0",
+  "private": true,
+  "main": "index.cjs",
+  "dependencies": {
+    "rimraf-modern": "npm:rimraf@6.1.3"
+  }
+}
