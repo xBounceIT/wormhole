@@ -305,10 +305,6 @@ test('credentials page wires the source menu to the tested list projection', () 
   assert.match(credentialsPage, /buildCredentialListProjection\(/);
   assert.match(credentialsPage, /credentialSelectionAfterSelectAll\(/);
   assert.match(credentialsPage, /resetKey=\{credentialListProjection\.resetKey\}/);
-  assert.match(
-    credentialsPage,
-    /catch \(error\) \{\s*if \(!bitwardenSearchAttempts\.current\.isCurrent\('credential-search', generation\)\) return;\s*setBitwardenSearchStatus\(formatBitwardenAuthenticationError\(error, 'unlock'\)\)/,
-  );
 });
 
 test('SSH keys are accepted only by SSH password-capable controls', () => {

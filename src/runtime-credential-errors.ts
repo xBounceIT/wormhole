@@ -1,8 +1,17 @@
 export function isBitwardenUnlockError(message: string | undefined): boolean {
   const value = message?.toLowerCase() ?? '';
+  // Some official CLI versions return this sentence without a provider prefix.
+  if (/(?:^|error:\s*)you are not logged in\.?$/.test(value.trim())) return true;
   return (
     (value.includes('bitwarden') || value.includes('vault')) &&
-    (value.includes('locked') || value.includes('unlock') || value.includes('session'))
+    (value.includes('locked') ||
+      value.includes('unlock') ||
+      value.includes('session') ||
+      value.includes('not logged') ||
+      value.includes('not authenticated') ||
+      value.includes('unauthenticated') ||
+      value.includes('authentication is required') ||
+      value.includes('log in'))
   );
 }
 

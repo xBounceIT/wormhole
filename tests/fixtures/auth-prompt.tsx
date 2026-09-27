@@ -808,7 +808,7 @@ async function runStartupUnlockTests() {
   helloButton().click();
   await settle();
   assert.equal(mounts.length, 1);
-  assert.equal(startupBitwardenReads, 1);
+  assert.equal(startupBitwardenReads, 0, 'Hello must mount before the optional vault check');
 
   for (const mode of ['pin', 'password']) {
     const checksBeforeMount = checks;
@@ -818,6 +818,17 @@ async function runStartupUnlockTests() {
     assert.equal(checks, checksBeforeMount);
     await assertFallback(mode);
   }
+  window.wormhole.unlockStartup = async () => ({ succeeded: true, workspace: { connections: [] } });
+  for (const mode of ['pin', 'password']) {
+    mount({ mode });
+    const input = document.getElementById('startup-secret') as HTMLInputElement;
+    input.value = 'test-only-secret';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    root.querySelector('form').requestSubmit();
+    await settle();
+  }
+  assert.equal(mounts.length, 3, 'Hello, PIN, and password all mount without a Bitwarden check');
+  assert.equal(startupBitwardenReads, 0);
 }
 
 async function runBitwardenPromptTests() {
@@ -1196,7 +1207,7 @@ async function runBitwardenStartupTests() {
     },
   };
   let key = 0;
-  const render = async (authorized = true, initialState = undefined) => {
+  const render = async (authorized = true, initialState = undefined, requested = true) => {
     await React.act(async () => {
       root.render(
         <React.StrictMode>
@@ -1204,6 +1215,7 @@ async function runBitwardenStartupTests() {
             key={key}
             authorized={authorized}
             initialState={initialState}
+            requested={requested}
             onAuthenticated={async () => {
               refreshes++;
               await refresh();
@@ -1213,9 +1225,9 @@ async function runBitwardenStartupTests() {
       );
     });
   };
-  const mount = async (authorized = true, initialState = undefined) => {
+  const mount = async (authorized = true, initialState = undefined, requested = true) => {
     key++;
-    await render(authorized, initialState);
+    await render(authorized, initialState, requested);
   };
   const dialog = () => document.querySelector('[role="dialog"]');
   const input = async (id, value) => {
@@ -1243,6 +1255,10 @@ async function runBitwardenStartupTests() {
   };
   const escape = pressNativeEscape;
 
+  await mount(true, undefined, false);
+  assert.equal(reads, 0, 'opening Wormhole must not query or authenticate the optional vault');
+  assert.equal(dialog(), null);
+  assert.equal(document.getElementById('native-surface-probe').dataset.visible, 'true');
   await mount(true, loggedOut);
   assert.equal(reads, 0, 'a preloaded startup decision must not repeat the Bitwarden check');
   assert.match(dialog().textContent, /Log in to Bitwarden/);
@@ -1354,11 +1370,11 @@ async function runBitwardenStartupTests() {
 
   read = async () => ({ ...loggedOut, status: { ...loggedOut.status, status: 'Locked' } });
   await mount();
-  assert.match(dialog().textContent, /Unlock Bitwarden vault/);
+  assert.match(dialog().textContent, /Unlock Bitwarden/);
   assert.equal(document.getElementById('bw-login-email'), null);
-  assert.equal(document.activeElement.id, 'bw-unlock-password');
+  assert.equal(document.activeElement.id, 'runtime-bitwarden-password');
   const syncsBeforeUnlock = syncs;
-  await input('bw-unlock-password', password);
+  await input('runtime-bitwarden-password', password);
   await submit();
   assert.deepEqual(unlocks, [password]);
   assert.equal(syncs, syncsBeforeUnlock, 'native unlock already synchronizes the vault');
@@ -1372,17 +1388,31 @@ async function runBitwardenStartupTests() {
   ]) {
     read = async () => state;
     await mount();
-    assert.equal(dialog(), null, 'disabled, already unlocked or unknown vaults need no prompt');
+    if (state?.status.hasSessionKey) {
+      assert.equal(dialog(), null, 'an unlocked vault resumes the requested action');
+    } else {
+      assert.ok(
+        dialog(),
+        'an unavailable vault must explain why the requested action cannot continue',
+      );
+      await press('Cancel');
+    }
   }
   read = async () => {
     throw new Error('CLI is unavailable');
   };
   await mount();
-  assert.equal(dialog(), null, 'an optional extension failure must not block the workspace');
+  assert.match(dialog().textContent, /Could not check Bitwarden/);
+  await press('Cancel');
+  assert.equal(dialog(), null, 'an optional vault failure can be dismissed');
 
   const pendingRead = deferred();
   read = () => pendingRead.promise;
+  const readsBeforePending = reads;
   await mount();
+  assert.equal(reads, readsBeforePending + 1, 'StrictMode must share the pending vault check');
+  assert.match(dialog().textContent, /Checking the vault for this action/);
+  assert.equal(document.getElementById('native-surface-probe').dataset.visible, 'false');
   await render(false);
   await React.act(async () => pendingRead.resolve(loggedOut));
   assert.equal(dialog(), null, 'a late status result must not open over the lock screen');
@@ -1416,7 +1446,7 @@ async function runBitwardenStartupTests() {
   const pendingUnlock = deferred();
   unlock = () => pendingUnlock.promise;
   await render(true);
-  await input('bw-unlock-password', password);
+  await input('runtime-bitwarden-password', password);
   await submit();
   await render(false);
   await React.act(async () => pendingUnlock.reject(new Error('Workspace locked')));
@@ -1680,4 +1710,5 @@ runAuthPromptTests()
   .then(runWindowCloseTests)
   .then(runStartupUnlockTests)
   .then(runBitwardenPromptTests)
-  .then(runBitwardenStartupTests);
+  .then(runBitwardenStartupTests)
+  .then(runBitwardenDemandTests);

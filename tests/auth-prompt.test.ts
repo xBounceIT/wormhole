@@ -58,7 +58,7 @@ test('authentication and window-close prompts keep errors and controls accessibl
       ${source.slice(subscriptionStart, source.indexOf('  function reconnectSession', subscriptionStart))}
       ${slice('  const visibleAuthPrompt =', '  const credentialResult =')}
       const mcpApprovals = [];
-      const bitwardenStartupPromptOpen = false, contextMenuOverlayOpen = false;
+      const bitwardenAccessPromptOpen = false, contextMenuOverlayOpen = false;
       const newConnectionOpen = false, folderDetailsOpen = false, newFolderOpen = false;
       const rdpCredentialPrompt = null, sshCredentialPrompt = null;
       const sshKeyPassphrasePrompt = null, pendingSessionClose = null;
@@ -122,11 +122,11 @@ test('authentication and window-close prompts keep errors and controls accessibl
     })
     .join('\n');
   const bitwardenHarness = `
-    const { BitwardenCliDialog, BitwardenStartupPrompt, TooltipProvider } = (() => {
+    const { BitwardenCliDialog, BitwardenAccessPrompt, TooltipProvider } = (() => {
       ${bitwardenControls}
       ${slice('function IconButton(', 'function CredentialValueRow(')}
-      ${slice('function BitwardenCliDialog', 'type BitwardenOperationDialogState')}
-      return { BitwardenCliDialog, BitwardenStartupPrompt, TooltipProvider };
+      ${slice('function RuntimeBitwardenUnlockDialog', 'type BitwardenOperationDialogState')}
+      return { BitwardenCliDialog, BitwardenAccessPrompt, TooltipProvider };
     })();
     ${slice('function backendErrorMessage', 'function formatLocalDateTime')}
     function BitwardenSettingsHarness({ status, initialError, reload, credentialsChanged }) {
@@ -167,27 +167,29 @@ test('authentication and window-close prompts keep errors and controls accessibl
     'utf8',
   ).replace(/^export /gm, '');
   const startupSource = readFileSync(new URL('../src/main.tsx', import.meta.url), 'utf8');
-  const startupGateSource = readFileSync(
-    new URL('../src/bitwarden-startup-gate.ts', import.meta.url),
-    'utf8',
-  ).replace(/^export /gm, '');
   const cardStart = startupSource.indexOf('function renderCard');
   const cardEnd = startupSource.indexOf('function showError', cardStart);
   const unlockStart = startupSource.indexOf('function showUnlock');
   const unlockEnd = startupSource.indexOf('async function bootstrap', unlockStart);
   assert.ok(cardStart >= 0 && cardEnd > cardStart);
   assert.ok(unlockStart >= 0 && unlockEnd > unlockStart);
-  const fixture = readFileSync(new URL('./fixtures/auth-prompt.tsx', import.meta.url), 'utf8');
-  const bitwardenMount = slice("      {authGate === 'unlocked' ? (", '      {visibleAuthPrompt');
+  const fixture =
+    readFileSync(new URL('./fixtures/auth-prompt.tsx', import.meta.url), 'utf8') +
+    readFileSync(new URL('./fixtures/bitwarden-demand.tsx', import.meta.url), 'utf8');
+  const bitwardenMount = slice(
+    "      {authGate === 'unlocked' && bitwardenUnlockPrompt ? (",
+    '      {visibleAuthPrompt',
+  ).replace('<BitwardenAccessPrompt', '<BitwardenAccessPrompt initialState={initialState}');
   const bitwardenStartupHarness = `
-    function BitwardenStartupHarness({ authorized, initialState, onAuthenticated }) {
+    function BitwardenStartupHarness({ authorized, initialState, onAuthenticated, requested = true }) {
       const authGate = authorized ? 'unlocked' : 'locked';
-      const refreshWorkspaceCredentials = onAuthenticated;
-      const [bitwardenStartupPromptOpen, setBitwardenStartupPromptOpen] = useState(false);
-      const [bitwardenStartupInitialState, setBitwardenStartupInitialState] = useState(initialState);
-      const handleBitwardenStartupPromptOpenChange = useCallback((open) => {
-        setBitwardenStartupInitialState(undefined);
-        setBitwardenStartupPromptOpen(open);
+      const [dismissed, setDismissed] = useState(false);
+      const bitwardenUnlockPrompt = requested && !dismissed ? { reason: 'Vault action' } : null;
+      const dismissRuntimeBitwardenUnlock = () => setDismissed(true);
+      const resumeBitwardenActions = async () => { await onAuthenticated(); setDismissed(true); };
+      const [bitwardenAccessPromptOpen, setBitwardenAccessPromptOpen] = useState(false);
+      const handleBitwardenAccessPromptOpenChange = useCallback((open) => {
+        setBitwardenAccessPromptOpen(open);
       }, []);
       const mcpApprovals = [];
       const contextMenuOverlayOpen = false, newConnectionOpen = false, folderDetailsOpen = false;
@@ -210,8 +212,39 @@ test('authentication and window-close prompts keep errors and controls accessibl
       slice('function clearSecretInput(', 'function credentialSelectionFor(') +
       bitwardenHarness +
       bitwardenStartupHarness +
+      readFileSync(new URL('../electron/web-session-attempt.ts', import.meta.url), 'utf8').replace(
+        /^export /gm,
+        '',
+      ) +
+      readFileSync(new URL('../src/runtime-credential-errors.ts', import.meta.url), 'utf8').replace(
+        /^export /gm,
+        '',
+      ) +
+      `
+      function CredentialsSearchHarness({ isAuthorized = true }) {
+        const [editorOpen, setEditorOpen] = useState(true);
+        const [bitwardenQuery, setBitwardenQuery] = useState('router');
+        const [bitwardenItems, setBitwardenItems] = useState([]);
+        const [bitwardenAccessRequested, setBitwardenAccessRequested] = useState(false);
+        const [bitwardenSearchStatus, setBitwardenSearchStatus] = useState('');
+        const [bitwardenSearching, setBitwardenSearching] = useState(false);
+        const [, setOperationError] = useState('');
+        const [selectedItem, selectBitwardenItem] = useState(null);
+        const bitwardenSearchAttempts = useRef(new WebSessionAttemptTracker());
+        ${slice('  function resetBitwardenSearch()', '  function selectBitwardenItem(')}
+        useEffect(() => { if (!isAuthorized) resetBitwardenSearch(); }, [isAuthorized]);
+        return <TooltipProvider>
+          ${slice('      {isAuthorized && editorOpen && bitwardenAccessRequested ? (', '      <section className="flex h-full min-h-0 flex-col overflow-hidden px-6 py-5">')}
+          <button id="vault-search" onClick={() => void searchBitwarden()}>Search</button>
+          <input id="vault-query" value={bitwardenQuery} onChange={event => setBitwardenQuery(event.target.value)} />
+          <button id="vault-editor-close" onClick={() => { setEditorOpen(false); resetBitwardenSearch(); }}>Close</button>
+          <output id="vault-search-status">{bitwardenSearchStatus}</output>
+          <output id="vault-item-count">{bitwardenItems.length}</output>
+          <output id="vault-selected">{selectedItem?.id}</output>
+        </TooltipProvider>;
+      }
+      ` +
       idleHarness +
-      startupGateSource +
       startupSource.slice(cardStart, cardEnd) +
       startupSource.slice(unlockStart, unlockEnd),
     'auth-prompt.tsx',
@@ -308,7 +341,7 @@ test('authentication and window-close prompts keep errors and controls accessibl
           const coverage = await window.webContents.debugger.sendCommand('Profiler.takePreciseCoverage');
           const script = coverage.result.find(item => item.url === 'wormhole-auth-prompt.js');
           if (!script) throw new Error('Missing authentication renderer coverage.');
-          for (const name of ['AuthPrompt', 'IdleLockHarness', 'showUnlock', 'AppCloseHarness', 'DialogContent', 'BitwardenCliDialog', 'BitwardenSettingsHarness', 'BitwardenStartupPrompt', 'BitwardenStartupHarness']) {
+          for (const name of ['AuthPrompt', 'IdleLockHarness', 'showUnlock', 'AppCloseHarness', 'DialogContent', 'BitwardenCliDialog', 'BitwardenSettingsHarness', 'BitwardenAccessPrompt', 'BitwardenStartupHarness', 'CredentialsSearchHarness']) {
             const parent = script.functions.find(item => item.functionName === name);
             if (!parent) throw new Error('Missing coverage for ' + name);
             const range = parent.ranges[0];

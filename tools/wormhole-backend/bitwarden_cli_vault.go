@@ -318,6 +318,9 @@ func bitwardenCliTryRun(
 	args []string,
 	environment map[string]string,
 ) (bitwardenCliProcessResult, error) {
+	if err := requireBitwardenCliContentSession(args, environment); err != nil {
+		return bitwardenCliProcessResult{}, err
+	}
 	executable := resolveBitwardenCliExecutable(settings)
 	if executable == "" {
 		return bitwardenCliProcessResult{}, errors.New("The Bitwarden CLI is not installed. Install it first.")

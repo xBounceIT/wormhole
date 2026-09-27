@@ -1,5 +1,4 @@
 import startupLogo from '../Assets/wormhole-logo-transparent.png';
-import { prepareWorkspaceStartup } from './bitwarden-startup-gate';
 import { applyTheme, clearLegacyTheme, getInitialTheme, readLegacyTheme } from './theme';
 
 // Resolve the stored/system theme before React renders so the very first painted
@@ -76,14 +75,12 @@ function showError(message: string) {
 async function mountWorkspace(
   startup: WormholeStartupSnapshot,
   workspace: WormholeWorkspaceSnapshot,
-  bitwarden: WormholeBitwardenStartupState | null,
 ) {
   renderLoading();
   try {
     const { mountWorkspaceApp } = await loadWorkspaceModule();
     mountWorkspaceApp(root, {
       initialAuthState: startup.auth,
-      initialBitwardenStartupState: bitwarden,
       initialSettings: startup.settings,
       initialWorkspace: workspace,
     });
@@ -166,8 +163,7 @@ function showUnlock(startup: WormholeStartupSnapshot) {
       }
       try {
         const workspace = await api.loadWorkspace();
-        const prepared = await prepareWorkspaceStartup(api, workspace);
-        await mountWorkspace(startup, prepared.workspace, prepared.bitwarden);
+        await mountWorkspace(startup, workspace);
       } catch {
         status.textContent = "Wormhole couldn't load the workspace. Try again.";
       }
@@ -203,8 +199,7 @@ function showUnlock(startup: WormholeStartupSnapshot) {
           return;
         }
         input.value = '';
-        const prepared = await prepareWorkspaceStartup(api, result.workspace);
-        await mountWorkspace(startup, prepared.workspace, prepared.bitwarden);
+        await mountWorkspace(startup, result.workspace);
       })
       .catch(() => {
         status.textContent = "Wormhole couldn't unlock. Try again.";
@@ -241,8 +236,8 @@ async function bootstrap() {
       return;
     }
     if (!startup.workspace) throw new Error('Wormhole could not load the workspace.');
-    const prepared = await prepareWorkspaceStartup(window.wormhole, startup.workspace);
-    await mountWorkspace(startup, prepared.workspace, prepared.bitwarden);
+    // Optional vault authentication belongs to actions that need its contents, not startup.
+    await mountWorkspace(startup, startup.workspace);
   } catch (error) {
     startupRequest = undefined;
     showError(error instanceof Error ? error.message : "Wormhole couldn't start.");
