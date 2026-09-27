@@ -82,7 +82,10 @@ func (m *vncManager) handleBitwarden(command backendCommand, expectedGeneration 
 				err = m.resetBitwardenSession()
 			} else {
 				if state.Installed == nil {
-					_, _ = ensureBitwardenCliForService(m.databasePath)
+					_, err = m.installBitwardenCliForSession(true, expectedGeneration)
+					if err != nil {
+						break
+					}
 					state, _ = readBitwardenCliState(m.databasePath)
 				}
 				if state.Installed != nil {
@@ -100,9 +103,9 @@ func (m *vncManager) handleBitwarden(command backendCommand, expectedGeneration 
 			err = m.resetBitwardenSession()
 		}
 	case "bitwarden.install":
-		result, err = installBitwardenCliForService(m.databasePath)
+		result, err = m.installBitwardenCliForSession(false, expectedGeneration)
 	case "bitwarden.ensure-installed":
-		result, err = ensureBitwardenCliForService(m.databasePath)
+		result, err = m.installBitwardenCliForSession(true, expectedGeneration)
 	case "bitwarden.status":
 		result, err = bitwardenCliStatusOperation(m.databasePath, m.bitwardenSession())
 		if err == nil {
@@ -244,6 +247,39 @@ func (m *vncManager) handleBitwarden(command backendCommand, expectedGeneration 
 		err = errBitwardenSessionInvalidated
 	}
 	m.respondResult(command.ID, result, err)
+}
+
+// Only the trusted installer may carry a session across executable path changes.
+// User-selected configuration changes still reset the session.
+func (m *vncManager) installBitwardenCliForSession(ensure bool, generation uint64) (any, error) {
+	before, err := readBitwardenCliSettings(m.databasePath)
+	if err != nil {
+		return nil, err
+	}
+	// Explicit installation enables the vault too. Apply the same cleanup rule
+	// as the enable switch when a previous disable could not delete the session.
+	if !ensure && !before.Enabled {
+		if err := m.resetBitwardenSession(); err != nil {
+			return nil, err
+		}
+	}
+	sessionKey := m.bitwardenSession()
+	install := installBitwardenCliForService
+	if ensure {
+		install = ensureBitwardenCliForService
+	}
+	result, err := install(m.databasePath)
+	if err != nil || sessionKey == "" {
+		return result, err
+	}
+	after, err := readBitwardenCliSettings(m.databasePath)
+	if err != nil {
+		return nil, err
+	}
+	if !bitwardenCliPathsEqual(before.Path, after.Path) {
+		err = m.setBitwardenSessionForGeneration(sessionKey, generation)
+	}
+	return result, err
 }
 
 func (m *vncManager) readBitwardenBrowserStorage(profilePath string) (bitwardenBrowserStorageSnapshot, error) {

@@ -515,3 +515,118 @@ func TestVncDiscardsInvalidRestoredBitwardenSession(t *testing.T) {
 		}
 	}
 }
+
+func TestBitwardenInstallationRebindsSessionToManagedPath(t *testing.T) {
+	for _, action := range []string{"bitwarden.install", "bitwarden.ensure-installed", "bitwarden.set-enabled"} {
+		t.Run(action, func(t *testing.T) {
+			m := sessionTestManager(t)
+			if err := m.setBitwardenSessionForGeneration("session-key", 0); err != nil {
+				t.Fatal(err)
+			}
+			previousInstall, previousEnsure := installBitwardenCliForService, ensureBitwardenCliForService
+			t.Cleanup(func() { installBitwardenCliForService, ensureBitwardenCliForService = previousInstall, previousEnsure })
+			installer := func(path string) (any, error) {
+				settings, err := readBitwardenCliSettings(path)
+				if err != nil {
+					return nil, err
+				}
+				settings.Path = "new-managed-cli"
+				return nil, writeBitwardenCliSettings(path, settings)
+			}
+			installBitwardenCliForService, ensureBitwardenCliForService = installer, installer
+			enabled := true
+			m.handleBitwarden(backendCommand{ID: "install", Action: action, Enabled: &enabled}, 0)
+			m.clearBitwardenSession()
+			m.restoreBitwardenSession(m.bitwardenGeneration())
+			if m.bitwardenSession() != "session-key" {
+				t.Fatal("managed installation lost the saved session")
+			}
+			before, err := os.ReadFile(bitwardenSessionPath(m.databasePath))
+			if err != nil {
+				t.Fatal(err)
+			}
+			m.handleBitwarden(backendCommand{ID: "already-installed", Action: action, Enabled: &enabled}, m.bitwardenGeneration())
+			after, err := os.ReadFile(bitwardenSessionPath(m.databasePath))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(before, after) {
+				t.Fatal("unchanged installer path rewrote the session")
+			}
+		})
+	}
+}
+
+func TestBitwardenInstallationHonorsFailureAndLock(t *testing.T) {
+	m := sessionTestManager(t)
+	if err := m.setBitwardenSessionForGeneration("session-key", 0); err != nil {
+		t.Fatal(err)
+	}
+	previous := installBitwardenCliForService
+	t.Cleanup(func() { installBitwardenCliForService = previous })
+	installBitwardenCliForService = func(string) (any, error) { return nil, errors.New("installation failed") }
+	if _, err := m.installBitwardenCliForSession(false, 0); err == nil {
+		t.Fatal("installer failure hidden")
+	}
+	m.clearBitwardenSession()
+	m.restoreBitwardenSession(1)
+	if m.bitwardenSession() != "session-key" {
+		t.Fatal("failed installation lost session")
+	}
+	installBitwardenCliForService = func(path string) (any, error) {
+		settings, err := readBitwardenCliSettings(path)
+		if err != nil {
+			return nil, err
+		}
+		settings.Path = "new-managed-cli"
+		m.clearBitwardenSession()
+		return nil, writeBitwardenCliSettings(path, settings)
+	}
+	if _, err := m.installBitwardenCliForSession(false, 1); !errors.Is(err, errBitwardenSessionInvalidated) {
+		t.Fatal("late installation restored a session", err)
+	}
+	if m.bitwardenSession() != "" {
+		t.Fatal("late installation unlocked vault")
+	}
+}
+
+func TestBitwardenInstallCannotBypassFailedDisableCleanup(t *testing.T) {
+	m := sessionTestManager(t)
+	if err := m.setBitwardenSessionForGeneration("session-key", 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := setBitwardenCliEnabled(m.databasePath, false); err != nil {
+		t.Fatal(err)
+	}
+	previousRemove, previousInstall := removeBitwardenSessionFile, installBitwardenCliForService
+	t.Cleanup(func() { removeBitwardenSessionFile, installBitwardenCliForService = previousRemove, previousInstall })
+	called := false
+	installBitwardenCliForService = func(path string) (any, error) { called = true; return setBitwardenCliEnabled(path, true) }
+	removeBitwardenSessionFile = func(string) error { return errors.New("removal failed") }
+	if _, err := m.installBitwardenCliForSession(false, 0); err == nil || called {
+		t.Fatal("installation bypassed failed session cleanup")
+	}
+	removeBitwardenSessionFile = previousRemove
+	if _, err := m.installBitwardenCliForSession(false, 0); err != nil || !called {
+		t.Fatal("installation did not resume after cleanup", err)
+	}
+	m.restoreBitwardenSession(0)
+	if m.bitwardenSession() != "" {
+		t.Fatal("installation revived a disabled session")
+	}
+}
+
+func TestBitwardenEnableReportsAutomaticInstallationFailure(t *testing.T) {
+	m := sessionTestManager(t)
+	var output bytes.Buffer
+	m.output = newBackendLineWriter(&output)
+	previous := ensureBitwardenCliForService
+	t.Cleanup(func() { ensureBitwardenCliForService = previous })
+	ensureBitwardenCliForService = func(string) (any, error) { return nil, errors.New("installation failed") }
+	enabled := true
+	m.handleBitwarden(backendCommand{ID: "enable", Action: "bitwarden.set-enabled", Enabled: &enabled}, 0)
+	responses := decodeBackendResponses(t, output.Bytes())
+	if len(responses) != 1 || responses[0].OK {
+		t.Fatal("automatic installation error was hidden")
+	}
+}
