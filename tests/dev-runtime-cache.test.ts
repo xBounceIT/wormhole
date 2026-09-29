@@ -214,6 +214,8 @@ test('generated-path exclusions follow the host filesystem case rules', (t) => {
 test('external Go inputs bypass cache; invalid query results never enable stale reuse', () => {
   for (const GOWORK of ['', 'off'])
     assert.equal(devRuntimeCacheAllowed(JSON.stringify({ GOWORK, GOFLAGS: '-race' })), true);
+  for (const flag of ['-pgo=auto', '-pgo=off', '--pgo=auto', '"-pgo=off"', "'-pgo=auto'"])
+    assert.equal(devRuntimeCacheAllowed(JSON.stringify({ GOWORK: '', GOFLAGS: flag })), true);
   assert.equal(
     devRuntimeCacheAllowed(JSON.stringify({ GOWORK: '/external/go.work', GOFLAGS: '' })),
     false,
@@ -226,6 +228,21 @@ test('external Go inputs bypass cache; invalid query results never enable stale 
     '--overlay=external.json',
     '"-overlay=external.json"',
     "'-modfile=external.mod'",
+    '-pkgdir=/external/packages',
+    '--pkgdir=/external/packages',
+    '"-pkgdir=/external/packages"',
+    '-pkgdir /external/packages',
+    '-pgo=/external/profile.pprof',
+    '--pgo=/external/profile.pprof',
+    '"-pgo=/external/profile.pprof"',
+    "'-pgo=/external/profile.pprof'",
+    '-pgo=auto.pprof',
+    '-pgo=auto/profile.pprof',
+    '-pgo=off/profile.pprof',
+    '-pgo /external/profile.pprof',
+    '-pgo=',
+    '-pgo',
+    '-pgo=off -pgo=/external/profile.pprof',
     '-a',
   ]) {
     assert.equal(
@@ -235,6 +252,45 @@ test('external Go inputs bypass cache; invalid query results never enable stale 
   }
   for (const malformed of ['', '{broken', '{}', 'null', '{"GOWORK":"","GOFLAGS":42}'])
     assert.equal(devRuntimeCacheAllowed(malformed), false);
+});
+
+test('changed external PGO profiles and package directories cannot reuse stale builds', (t) => {
+  for (const flag of ['-pgo=external/profile.pprof', '-pkgdir=external/packages']) {
+    const f = fixture(t);
+    const environment = JSON.stringify({ GOWORK: '', GOFLAGS: flag });
+    const externalInput = flag.includes('pgo')
+      ? 'external/profile.pprof'
+      : 'external/packages/pkg.a';
+    f.write(externalInput, 'original external input');
+    const run = () =>
+      runCachedDevRuntimeBuild({
+        ...f.options,
+        context: { go: environment },
+        force: !devRuntimeCacheAllowed(environment),
+      });
+    run();
+    f.write(externalInput, 'changed external input');
+    run();
+    assert.equal(f.builds.length, 2);
+  }
+});
+
+test('automatic PGO reuses unchanged builds and tracks the main-package profile', (t) => {
+  const f = fixture(t);
+  const environment = JSON.stringify({ GOWORK: '', GOFLAGS: '-pgo=auto' });
+  f.write('source/default.pgo', 'original profile');
+  const run = () =>
+    runCachedDevRuntimeBuild({
+      ...f.options,
+      context: { go: environment },
+      force: !devRuntimeCacheAllowed(environment),
+    });
+  run();
+  run();
+  assert.equal(f.builds.length, 1);
+  f.write('source/default.pgo', 'changed profile');
+  run();
+  assert.equal(f.builds.length, 2);
 });
 
 test('bootstrap failures stop the build and cannot create a cache stamp', (t) => {

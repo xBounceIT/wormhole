@@ -130,9 +130,11 @@ timings are printed during startup. To force a native rebuild:
 
     npm run build:dev-backend -- --force
 
-Active Go workspaces and external overlay/modfile/tool-executor flags bypass the
-native cache, since those can depend on files outside this repository. Go's `-a`
-flag also bypasses reuse to honor its requested rebuild.
+Active Go workspaces and external overlay/modfile/tool-executor/package-directory
+flags bypass the native cache, since those can depend on files outside this
+repository. Explicit PGO profile paths also bypass reuse; `-pgo=auto` remains
+cacheable because the main-package profile is tracked, and `-pgo=off` needs no
+profile. Go's `-a` flag bypasses reuse to honor its requested rebuild.
 
 `npm run test:dev-runtime` covers cache invalidation and build planning. The
 compiler-launch entrypoint is excluded from Node loaded-module coverage because

@@ -70,7 +70,10 @@ export function devRuntimeCacheAllowed(goEnvironment: string): boolean {
       typeof GOWORK === 'string' &&
       (GOWORK === '' || GOWORK === 'off') &&
       typeof GOFLAGS === 'string' &&
-      !/(?:^|[\s'"])-{1,2}(?:overlay|modfile|toolexec|a)(?:=|[\s'"]|$)/.test(GOFLAGS)
+      !/(?:^|[\s'"])-{1,2}(?:overlay|modfile|toolexec|pkgdir|a)(?:=|[\s'"]|$)/.test(GOFLAGS) &&
+      // auto selects default.pgo inside the already hashed main-package directory;
+      // off uses no profile. Every other PGO value can refer to an external file.
+      !/(?:^|[\s'"])-{1,2}pgo(?:=(?!(?:auto|off)(?:[\s'"]|$))|(?=[\s'"]|$))/.test(GOFLAGS)
     );
   } catch {
     return false;
