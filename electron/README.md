@@ -44,11 +44,18 @@ Linux keep a per-workspace encryption key in the system keychain and use it to
 protect the verifier document. Windows Hello remains Windows-only, uses the
 Electron window as the native verification dialog owner, and always falls back
 to the configured PIN or password elsewhere.
+Interactive Hello verification has no app-imposed deadline: an idle lock may
+open it before the user returns. Availability checks retain their bounded wait.
+Reloading or closing the owning renderer cancels its pending verification.
+An app lock also cancels an earlier Hello confirmation before draining queued
+security changes, so the new unlock request can start normally.
 
 Authentication regression tests simulate Hello results while exercising the real
 React modal, idle timer, and Chromium hit testing. Native owner recovery tests
 model Electron's cached enabled flag separately from the HWND state. Go tests
-cover async completion, cancellation, errors, and timeout cleanup. The WinRT
+cover async completion, cancellation, errors, and timeout cleanup. Normal auth
+tests enforce V8 coverage of the changed IPC blocks; global Node coverage runs
+use their own profiler without restarting it. The WinRT
 activation boundary (including OS-thread affinity) requires manual testing with
 a configured Windows Hello device and is excluded from automated coverage.
 Check timeout unlock, cancellation, and PIN fallback, then confirm the workspace

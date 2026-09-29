@@ -255,10 +255,10 @@ func callWindowsHelloOperation(verify bool, message string, ownerWindow uintptr)
 		}
 		return 0, errors.New("Windows Hello did not return an async operation")
 	}
-	return awaitWindowsHelloResult(operation)
+	return awaitWindowsHelloResult(operation, verify)
 }
 
-func awaitWindowsHelloResult(operation uintptr) (uint32, error) {
+func awaitWindowsHelloResult(operation uintptr, verify bool) (uint32, error) {
 	defer windowsHelloRelease(operation)
 	var asyncInfo uintptr
 	if _, err := windowsHelloQuery(operation, &iidAsyncInfo, &asyncInfo); err != nil || asyncInfo == 0 {
@@ -296,7 +296,9 @@ func awaitWindowsHelloResult(operation uintptr) (uint32, error) {
 			completed = true
 			return 0, errors.New("Windows Hello verification failed")
 		case asyncStarted:
-			if windowsHelloNow().After(deadline) {
+			// Interactive verification can outlive the app's idle lock: the user may
+			// still be away. Only the noninteractive availability query has a deadline.
+			if !verify && windowsHelloNow().After(deadline) {
 				return 0, errors.New("Windows Hello timed out")
 			}
 			windowsHelloSleep(10 * time.Millisecond)

@@ -187,7 +187,7 @@ func TestAwaitWindowsHelloResultCoversAsyncStates(t *testing.T) {
 	windowsHelloResult = func(uintptr) (uint32, error) {
 		return 5, nil
 	}
-	if result, err := awaitWindowsHelloResult(11); err != nil || result != 5 {
+	if result, err := awaitWindowsHelloResult(11, false); err != nil || result != 5 {
 		t.Fatalf("completed result = %d, %v", result, err)
 	}
 	if released[11] != 1 || released[22] != 1 {
@@ -211,7 +211,7 @@ func TestAwaitWindowsHelloResultCoversAsyncStates(t *testing.T) {
 			windowsHelloStatus = func(uintptr) (uint32, error) {
 				return test.status, nil
 			}
-			result, err := awaitWindowsHelloResult(11)
+			result, err := awaitWindowsHelloResult(11, false)
 			if (err != nil) != test.failed || result != test.result {
 				t.Fatalf("result = %d, error = %v", result, err)
 			}
@@ -221,14 +221,14 @@ func TestAwaitWindowsHelloResultCoversAsyncStates(t *testing.T) {
 	windowsHelloQuery = func(uintptr, *windowsGUID, *uintptr) (uintptr, error) {
 		return 0, errors.New("query failed")
 	}
-	if _, err := awaitWindowsHelloResult(11); err == nil {
+	if _, err := awaitWindowsHelloResult(11, false); err == nil {
 		t.Fatal("query failure was ignored")
 	}
 	windowsHelloQuery = func(_ uintptr, _ *windowsGUID, output *uintptr) (uintptr, error) {
 		*output = 0
 		return 0, nil
 	}
-	if _, err := awaitWindowsHelloResult(11); err == nil {
+	if _, err := awaitWindowsHelloResult(11, false); err == nil {
 		t.Fatal("nil async interface was accepted")
 	}
 
@@ -239,7 +239,7 @@ func TestAwaitWindowsHelloResultCoversAsyncStates(t *testing.T) {
 	windowsHelloStatus = func(uintptr) (uint32, error) {
 		return 0, errors.New("call failed")
 	}
-	if _, err := awaitWindowsHelloResult(11); err == nil {
+	if _, err := awaitWindowsHelloResult(11, false); err == nil {
 		t.Fatal("status read failure was ignored")
 	}
 	windowsHelloStatus = func(uintptr) (uint32, error) {
@@ -248,7 +248,7 @@ func TestAwaitWindowsHelloResultCoversAsyncStates(t *testing.T) {
 	windowsHelloResult = func(uintptr) (uint32, error) {
 		return 0, errors.New("result failed")
 	}
-	if _, err := awaitWindowsHelloResult(11); err == nil {
+	if _, err := awaitWindowsHelloResult(11, false); err == nil {
 		t.Fatal("result read failure was ignored")
 	}
 
@@ -260,11 +260,36 @@ func TestAwaitWindowsHelloResultCoversAsyncStates(t *testing.T) {
 	windowsHelloStatus = func(uintptr) (uint32, error) {
 		return asyncStarted, nil
 	}
-	if _, err := awaitWindowsHelloResult(11); err == nil {
+	if _, err := awaitWindowsHelloResult(11, false); err == nil {
 		t.Fatal("Hello timeout was ignored")
 	}
 	if cancelled != 3 {
 		t.Fatalf("expected cancellation on unknown status, status failure and timeout, got %d", cancelled)
+	}
+
+	// An idle lock opens Hello before the user returns. Simulate minutes passing
+	// without sleeping: verification must still accept success or cancellation.
+	for _, finalStatus := range []uint32{asyncCompleted, asyncCanceled, asyncError} {
+		statuses = []uint32{asyncStarted, asyncStarted, asyncStarted, finalStatus}
+		windowsHelloStatus = func(uintptr) (uint32, error) {
+			status := statuses[0]
+			statuses = statuses[1:]
+			return status, nil
+		}
+		windowsHelloSleep = func(time.Duration) {
+			nowCalls += 10
+		}
+		windowsHelloResult = func(uintptr) (uint32, error) { return 0, nil }
+		result, err := awaitWindowsHelloResult(11, true)
+		if (err != nil) != (finalStatus == asyncError) {
+			t.Fatalf("delayed status %d: result = %d, error = %v", finalStatus, result, err)
+		}
+		if finalStatus == asyncCanceled && result != 6 {
+			t.Fatalf("delayed cancellation = %d", result)
+		}
+	}
+	if cancelled != 3 {
+		t.Fatal("interactive verification was cancelled by the availability deadline")
 	}
 }
 

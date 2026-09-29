@@ -484,12 +484,9 @@ test('MCP approval restores and foregrounds the Wormhole window before notifying
   );
   assert.match(
     windowsHelloHandler,
-    /runPreemptibleOperation\(\(signal\) =>[\s\S]*runWithNativeAuthenticationWindow\(ownerWindow/,
+    /runPreemptibleOperation\(\(approvalSignal\) =>[\s\S]*runWithNativeAuthenticationWindow\(ownerWindow/,
   );
-  assert.match(
-    windowsHelloHandler,
-    /'auth-hello-verify',[\s\S]*backendTimeoutMs \+ 15_000,[\s\S]*signal/,
-  );
+  assert.match(windowsHelloHandler, /'auth-hello-verify',[\s\S]*backendTimeoutMs,[\s\S]*signal/);
   assert.match(windowsHelloHandler, /if \(signal\.aborted\)/);
 
   const backendRunner = mainSource.slice(

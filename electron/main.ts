@@ -854,6 +854,7 @@ const mremoteImportSelections = new WeakMap<Electron.WebContents, MRemoteImportS
 const mremoteImportAnalysis = new WeakMap<Electron.WebContents, AbortController>();
 let authStateMutationQueue: Promise<void> = Promise.resolve();
 let authLockRequested = false;
+let activeHelloVerification: AbortController | undefined;
 let bitwardenExtensionOperationQueue: Promise<void> = Promise.resolve();
 
 type SshConnectedResponse = {
@@ -3917,10 +3918,15 @@ async function runBackend<T>(
       timeoutMs === backendTimeoutMs && operation.startsWith('backup-')
         ? backupTimeoutMs
         : timeoutMs;
-    const timeout = setTimeout(() => {
-      child.kill();
-      finishReject(new Error('Wormhole did not respond in time.'));
-    }, effectiveTimeoutMs);
+    // Hello is interactive and may open while the user is away after an idle lock.
+    // Keep it alive until Windows settles it or the owning operation is cancelled.
+    const timeout =
+      operation === 'auth-hello-verify'
+        ? undefined
+        : setTimeout(() => {
+            child.kill();
+            finishReject(new Error('Wormhole did not respond in time.'));
+          }, effectiveTimeoutMs);
     const abort = () => {
       if (settled) return;
       abortRequested = true;
@@ -8264,10 +8270,16 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
 
   ipcMain.handle('auth:lock', async (event) => {
     authLockRequested = true;
+    // A confirmation can still own Hello when idle locking starts. Cancel it
+    // before waiting for mutations queued behind that interactive operation.
+    activeHelloVerification?.abort();
     try {
       await authStateMutationQueue.catch(() => undefined);
       await ensureAuthSession();
       authSession.lock();
+      // Recheck after asynchronous state refresh: overlapping locks can let a
+      // verification start after the cancellation at the beginning of this request.
+      activeHelloVerification?.abort();
       cancelAllUserOperations();
       backupImportSelections.delete(event.sender);
       sshPrivateKeySelections.delete(event.sender);
@@ -8323,6 +8335,9 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
           message: 'Choose Windows Hello in Settings first.',
         };
       }
+      if (authLockRequested) {
+        return { succeeded: false, message: 'Windows Hello was canceled.' };
+      }
       const ownerWindow = BrowserWindow.fromWebContents(event.sender);
       if (!ownerWindow || ownerWindow.isDestroyed()) {
         return {
@@ -8332,27 +8347,39 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       }
       if (!ownerWindow.isVisible()) ownerWindow.show();
       ownerWindow.focus();
-      return mcpApprovalWindowCoordinator.runPreemptibleOperation((signal) =>
-        runWithNativeAuthenticationWindow(ownerWindow, async () => {
-          try {
-            const result = await runBackend<{ succeeded: boolean }>(
-              'auth-hello-verify',
-              { ownerWindow: nativeWindowHandle(ownerWindow) },
-              // Let the native 30-second deadline cancel Hello before killing its process.
-              backendTimeoutMs + 15_000,
-              signal,
-            );
-            if (signal.aborted) return { succeeded: false, message: 'Windows Hello was canceled.' };
-            if (result.succeeded) authSession.markUnlocked(verificationEpoch);
-            return result;
-          } catch (error) {
-            if (signal.aborted) {
-              return { succeeded: false, message: 'Windows Hello was canceled.' };
+      const ownerLifetime = new AbortController();
+      activeHelloVerification = ownerLifetime;
+      const cancelHello = () => ownerLifetime.abort();
+      event.sender.once('destroyed', cancelHello);
+      event.sender.once('did-start-loading', cancelHello);
+      try {
+        return await mcpApprovalWindowCoordinator.runPreemptibleOperation((approvalSignal) => {
+          const signal = AbortSignal.any([approvalSignal, ownerLifetime.signal]);
+          return runWithNativeAuthenticationWindow(ownerWindow, async () => {
+            try {
+              const result = await runBackend<{ succeeded: boolean }>(
+                'auth-hello-verify',
+                { ownerWindow: nativeWindowHandle(ownerWindow) },
+                backendTimeoutMs,
+                signal,
+              );
+              if (signal.aborted)
+                return { succeeded: false, message: 'Windows Hello was canceled.' };
+              if (result.succeeded) authSession.markUnlocked(verificationEpoch);
+              return result;
+            } catch (error) {
+              if (signal.aborted) {
+                return { succeeded: false, message: 'Windows Hello was canceled.' };
+              }
+              throw error;
             }
-            throw error;
-          }
-        }),
-      );
+          });
+        });
+      } finally {
+        activeHelloVerification = undefined;
+        event.sender.removeListener('destroyed', cancelHello);
+        event.sender.removeListener('did-start-loading', cancelHello);
+      }
     });
   });
 
