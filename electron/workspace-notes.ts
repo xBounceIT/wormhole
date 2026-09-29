@@ -5,7 +5,13 @@ export const workspaceNodeWriteMaxRequestBytes = 256 * 1024;
 // Undefined preserves existing notes when an older caller edits a connection.
 export function parseWorkspaceNotes(value: unknown): string | undefined {
   if (value === undefined) return undefined;
-  if (typeof value !== 'string' || value.length > workspaceNotesMaxLength || value.includes('\0')) {
+  if (
+    typeof value !== 'string' ||
+    value.length > workspaceNotesMaxLength ||
+    value.includes('\0') ||
+    // Unicode mode treats valid surrogate pairs as one code point, leaving only unpaired units.
+    /[\uD800-\uDFFF]/u.test(value)
+  ) {
     throw new Error('Connection notes are invalid.');
   }
   return value;

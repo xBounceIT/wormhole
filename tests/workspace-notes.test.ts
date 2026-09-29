@@ -38,6 +38,25 @@ test('connection notes reject invalid IPC types, oversized input and null bytes'
   }
 });
 
+test('connection notes reject unpaired UTF-16 surrogates before JSON serialization', () => {
+  for (const notes of [
+    '\uD800',
+    '\uDC00',
+    'before\uD800after',
+    'before\uDC00after',
+    '\uD800\uD800',
+    '\uDC00\uD800',
+    '\uD800\uDC00\uDC00',
+    '\uD800\uD800\uDC00',
+  ]) {
+    assert.throws(() => parseWorkspaceNotes(notes), /Connection notes are invalid/);
+  }
+  for (const notes of ['\uD800\uDC00', '\uDBFF\uDFFF', 'before 🛠️ after', '\uFFFD']) {
+    assert.equal(parseWorkspaceNotes(notes), notes);
+    assert.equal(JSON.parse(JSON.stringify(notes)), notes);
+  }
+});
+
 test('connection write limits allow maximum JSON-escaped notes while keeping process input bounded', () => {
   const notes = '\x01'.repeat(workspaceNotesMaxLength);
   assert.equal(parseWorkspaceNotes(notes), notes);
