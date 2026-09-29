@@ -27,7 +27,7 @@ func loadWorkspaceNodeNotes(databasePath string, request workspaceNodeRequest) (
 		return nil, err
 	}
 	var notes sql.NullString
-	if err := database.QueryRow("SELECT "+workspaceColumnExpression(columns, "Notes")+" FROM Nodes WHERE Id = ? AND Kind = ?", id, workspaceNodeConnection).Scan(&notes); err != nil {
+	if err := database.QueryRow("SELECT "+workspaceColumnExpression(columns, "Notes")+" FROM Nodes WHERE lower(Id) = ? AND Kind = ?", id, workspaceNodeConnection).Scan(&notes); err != nil {
 		return nil, errors.New("could not read workspace connection notes")
 	}
 	if err := validateWorkspaceNotes(&notes.String); err != nil {

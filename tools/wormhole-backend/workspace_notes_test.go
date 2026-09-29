@@ -405,6 +405,34 @@ func TestConnectionNotesReadErrorsAndLegacySchema(t *testing.T) {
 	}
 }
 
+func TestConnectionNotesReadMatchesLegacyMixedCaseIDs(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "workspace.db")
+	if err := ensureElectronWorkspaceSchema(path); err != nil {
+		t.Fatal(err)
+	}
+	notes := "Legacy ID notes\nUnicode: 日本語 🛠️"
+	id, err := createWorkspaceNode(path, workspaceNodeWriteRequest{Name: "Connection", Kind: "connection", Protocol: "ssh", Host: "example.test", Notes: &notes})
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := openDatabase(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, storedID := range []string{strings.ToUpper(id), strings.ToUpper(id[:8]) + id[8:]} {
+		if _, err := db.Exec("UPDATE Nodes SET Id = ? WHERE lower(Id) = ?", storedID, id); err != nil {
+			t.Fatal(err)
+		}
+		for _, requestedID := range []string{id, storedID, "  " + storedID + "  "} {
+			result, err := loadWorkspaceNodeNotes(path, workspaceNodeRequest{NodeID: requestedID})
+			if err != nil || result["notes"] != notes {
+				t.Fatalf("stored %q requested %q: %#v, %v", storedID, requestedID, result, err)
+			}
+		}
+	}
+}
+
 func TestConnectionNotesJSONPreservesValidEscapesAndRejectsLossyDecoding(t *testing.T) {
 	valid := map[string]string{
 		`""`: "", `"\ud800\udc00"`: "𐀀", `"\uDBFF\uDFFF"`: "\U0010FFFF",
