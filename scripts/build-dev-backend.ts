@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { createDevRuntimeBuildPlan, devRuntimeToolchainCommands } from './dev-runtime-plan.ts';
 import {
   devRuntimeCacheAllowed,
+  devRuntimeCacheEnvironmentAllowed,
   devRuntimeCompilerIdentity,
   devRuntimeEnvironment,
   devRuntimeGoEnvironment,
@@ -105,6 +106,7 @@ runCachedDevRuntimeBuild({
   },
   force:
     process.argv.includes('--force') ||
+    !devRuntimeCacheEnvironmentAllowed(environment) ||
     (process.platform === 'win32' && ovpnBuildContext?.Cacheable !== true) ||
     goContexts.some(
       ({ cwd, environment, module, compilers }) =>

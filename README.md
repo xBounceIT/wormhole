@@ -140,6 +140,9 @@ bypass reuse. Native compiler identities include the selected executable's
 contents and version, using OpenVPN's actual Windows PATH resolution and the
 macOS backend's effective Go compiler settings. Compound compiler/wrapper
 commands on macOS conservatively bypass reuse.
+Custom CMake dependency search roots and toolchain files also bypass reuse,
+including `CMAKE_PREFIX_PATH`, `CMAKE_INCLUDE_PATH`, `CMAKE_LIBRARY_PATH`, and
+package-specific roots such as `ASIO_ROOT`.
 
 `npm run test:dev-runtime` covers cache invalidation and build planning. The
 compiler-launch entrypoint is excluded from Node loaded-module coverage because

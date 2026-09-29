@@ -26,7 +26,7 @@ export function devRuntimeEnvironment(
   return Object.fromEntries(
     Object.entries(environment)
       .filter(([name]) =>
-        /^(PATH|GO.*|CGO.*|CC|CXX|CFLAGS|CPPFLAGS|CXXFLAGS|LDFLAGS|SDKROOT|MACOSX_DEPLOYMENT_TARGET|VCPKG.*|WORMHOLE_OVPN.*|DOTNET.*)$/i.test(
+        /^(PATH|GO.*|CGO.*|CC|CXX|CFLAGS|CPPFLAGS|CXXFLAGS|LDFLAGS|SDKROOT|MACOSX_DEPLOYMENT_TARGET|CMAKE.*|(?:ASIO|JSONCPP|LZ4|XXHASH)_(?:ROOT|DIR)|VCPKG.*|WORMHOLE_OVPN.*|DOTNET.*)$/i.test(
           name,
         ),
       )
@@ -46,6 +46,18 @@ export function devRuntimeEnvironment(
         });
         return [name.toUpperCase(), paths.join(separator)];
       }),
+  );
+}
+
+export function devRuntimeCacheEnvironmentAllowed(
+  environment: Record<string, string | undefined>,
+): boolean {
+  // Custom native search/toolchain roots can contain mutable files outside our
+  // source graph. Capture their settings and bypass rather than hashing arbitrary trees.
+  return !Object.entries(environment).some(
+    ([name, value]) =>
+      Boolean(value) &&
+      /^(?:CMAKE_.*(?:PATH|FILE|ROOT)|(?:ASIO|JSONCPP|LZ4|XXHASH)_(?:ROOT|DIR))$/i.test(name),
   );
 }
 

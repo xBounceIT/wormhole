@@ -15,6 +15,7 @@ import path from 'node:path';
 import test from 'node:test';
 import {
   devRuntimeCacheAllowed,
+  devRuntimeCacheEnvironmentAllowed,
   devRuntimeCompilerIdentity,
   devRuntimeEnvironment,
   devRuntimeGoEnvironment,
@@ -94,6 +95,56 @@ test('nested npm scripts share a stable cache without losing compiler search ord
       'darwin',
     ).SDKROOT,
     '/sdk',
+  );
+});
+
+test('CMake dependency inputs are captured and mutable external roots disable reuse', (t) => {
+  for (const name of [
+    'CMAKE_PREFIX_PATH',
+    'CMAKE_INCLUDE_PATH',
+    'CMAKE_LIBRARY_PATH',
+    'CMAKE_FIND_ROOT_PATH',
+    'CMAKE_TOOLCHAIN_FILE',
+    'ASIO_ROOT',
+    'jsoncpp_DIR',
+    'LZ4_ROOT',
+    'XXHASH_DIR',
+  ]) {
+    const environment = devRuntimeEnvironment(
+      { [name]: '/external/native-input' },
+      process.platform,
+    );
+    assert.equal(environment[name], '/external/native-input');
+    assert.equal(devRuntimeCacheEnvironmentAllowed(environment), false);
+  }
+  assert.equal(devRuntimeCacheEnvironmentAllowed({}), true);
+  assert.equal(
+    devRuntimeCacheEnvironmentAllowed({ CMAKE_PREFIX_PATH: '', ASIO_ROOT: undefined }),
+    true,
+  );
+  assert.equal(
+    devRuntimeCacheEnvironmentAllowed({ CMAKE_BUILD_PARALLEL_LEVEL: '4', PATH: '/bin' }),
+    true,
+  );
+  const f = fixture(t);
+  const environment = devRuntimeEnvironment(
+    { CMAKE_INCLUDE_PATH: 'external/include' },
+    process.platform,
+  );
+  f.write('external/include/library.h', 'original library');
+  const run = () =>
+    runCachedDevRuntimeBuild({
+      ...f.options,
+      context: { environment },
+      force: !devRuntimeCacheEnvironmentAllowed(environment),
+    });
+  run();
+  f.write('external/include/library.h', 'changed library under the same search path');
+  run();
+  assert.equal(f.builds.length, 2);
+  assert.notDeepEqual(
+    environment,
+    devRuntimeEnvironment({ CMAKE_INCLUDE_PATH: 'external/other' }, process.platform),
   );
 });
 
