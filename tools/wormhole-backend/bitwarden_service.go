@@ -611,7 +611,9 @@ func (m *vncManager) resolveBitwardenCredentialRaw(
 		return bitwardenResolvedCredential{}, errors.New("the linked Bitwarden item does not contain login.password")
 	}
 	username := reference.Username
-	if username == "" {
+	// A virtual credential's username is catalog metadata, not an override. Pair
+	// the live vault username with its password even when the catalog is stale.
+	if reference.Virtual || username == "" {
 		username = strings.TrimSpace(item.Username)
 	}
 	return bitwardenResolvedCredential{

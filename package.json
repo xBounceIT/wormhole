@@ -46,7 +46,7 @@
     "test:sidecars": "npm run test:wgproxy && npm run test:ovpnproxy && npm run test:fortiproxy && npm run test:ciscoproxy",
     "test:packaging": "node --test tests/patch-electron-exe.test.mjs tests/release-packaging.test.mjs",
     "test:dev-runtime": "node --experimental-strip-types --test tests/dev-runtime-plan.test.ts",
-    "test:auth-session": "node --experimental-strip-types --test tests/auth-session.test.ts tests/bitwarden-startup.test.ts",
+    "test:auth-session": "node --experimental-strip-types --test tests/auth-session.test.ts tests/bitwarden-startup.test.ts tests/ssh-open-credentials.test.ts",
     "test:crash-diagnostics": "node --experimental-strip-types --test tests/crash-diagnostics.test.ts",
     "pretest:shell-lifecycle": "node -e \"require('electron')\"",
     "test:shell-lifecycle": "node --experimental-strip-types --test tests/shell-lifecycle.test.ts tests/mcp-approval.test.ts tests/mcp-approval-modes.test.ts tests/mcp-approval-ui.test.ts",
