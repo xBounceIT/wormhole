@@ -2215,7 +2215,7 @@ FROM CredentialProfiles ORDER BY Name, Id;`)
 			username = row.Username.String
 		}
 		record := credentialRecord{
-			ID:       row.ID,
+			ID:       normalizeID(row.ID),
 			Name:     row.Name,
 			Protocol: protocolName(sql.NullInt64{Int64: row.Protocol, Valid: true}),
 			Kind:     credentialKindName(row.Kind),
