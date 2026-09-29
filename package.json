@@ -68,6 +68,7 @@
     "test:rdp-client": "node --experimental-strip-types --test tests/rdp-client.test.ts tests/rdp-tunnel-leases.test.ts",
     "test:rdp-contract": "node --experimental-strip-types --test tests/workspace-rdp-contract.test.ts",
     "test:serial-client": "node --experimental-strip-types --test tests/serial-client.test.ts",
+    "pretest:terminal-clipboard": "node -e \"require('electron')\"",
     "test:terminal-clipboard": "node --experimental-strip-types --test tests/terminal-clipboard.test.ts tests/terminal-selection.test.ts tests/terminal-frame.test.ts tests/ssh-terminal-stream.test.ts tests/xterm-terminal.test.ts",
     "test:web-session": "node --experimental-strip-types --test tests/web-session-attempt.test.ts tests/keyed-single-flight.test.ts tests/keyed-task-tracker.test.ts tests/keyed-retry-queue.test.ts tests/runtime-credential-errors.test.ts tests/runtime-bitwarden-unlock.test.ts tests/extension-reload-policy.test.ts tests/extension-mutation-guard.test.ts tests/bitwarden-active-tab-bridge.test.ts tests/bitwarden-browser-profile.test.ts tests/bitwarden-cookie-seed.test.ts tests/bitwarden-popup-layout.test.ts tests/bitwarden-operation-dialog.test.ts tests/bitwarden-popup-lifecycle.test.ts tests/bitwarden-storage.test.ts tests/web-new-window-navigation.test.ts",
     "pretest:coverage": "node -e \"require('electron')\"",
