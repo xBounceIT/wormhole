@@ -90,6 +90,15 @@ test('saved connection create and edit flows initialize, load and submit notes t
   assert.match(editing, /setConnectionEditorMode\('saved'\)/);
   assert.match(editing, /notes: node\.notes \?\? ''/);
   assert.match(
+    editing,
+    /setConnectionNotesReady\(!window\.wormhole \|\| node\.persisted === false\)/,
+  );
+  const submission = section(
+    'async function submitNewConnection(',
+    'async function submitFolderDetails(',
+  );
+  assert.match(submission, /if \(editorBusy \|\| !connectionNotesReady\) return/);
+  assert.match(
     section('async function submitNewConnection(', 'async function submitFolderDetails('),
     /notes: newConnectionForm\.notes/,
   );
@@ -100,4 +109,16 @@ test('saved connection create and edit flows initialize, load and submit notes t
   );
   assert.match(parsing, /const notes = parseWorkspaceNotes\(value\.notes\)/);
   assert.match(parsing, /return \{[\s\S]*\bnotes,/);
+  const reading = main.slice(
+    main.indexOf("ipcMain.handle('workspace:node-notes'"),
+    main.indexOf("ipcMain.handle('workspace:move-nodes'"),
+  );
+  assert.match(reading, /parseWorkspaceNodeRequest\(value\)/);
+  assert.match(reading, /runAuthorizedOperation/);
+  assert.match(reading, /'workspace-node-notes', request/);
+  const preload = readFileSync(new URL('../electron/preload.cts', import.meta.url), 'utf8');
+  assert.match(
+    preload,
+    /loadWorkspaceNodeNotes:[\s\S]*?ipcRenderer.invoke\('workspace:node-notes', request\)/,
+  );
 });

@@ -30,13 +30,29 @@ test('authentication and window-close prompts keep errors and controls accessibl
   const notesStart = source.lastIndexOf("{connectionEditorMode === 'saved' ? (", notesLabel);
   const notesEnd = source.indexOf(') : null}', notesLabel) + ') : null}'.length;
   assert.ok(notesStart >= 0 && notesEnd > notesLabel);
+  const notesEffectStart = source.indexOf(
+    '  useEffect(() => {',
+    source.indexOf('const editingConnectionNotesId'),
+  );
+  const notesEffectEnd = source.lastIndexOf(
+    '  useEffect(() => {',
+    source.indexOf('const requestId = ++rdpExternalClientRequirementRequest.current;'),
+  );
+  assert.ok(notesEffectStart >= 0 && notesEffectEnd > notesEffectStart);
   const notesHarness = `
-    function ConnectionNotesHarness({ mode = 'saved', initialNotes = '' }) {
+    function ConnectionNotesHarness({ mode = 'saved', initialNotes = '', nodeId = null, open = true }) {
       const connectionEditorMode = mode;
       const [newConnectionForm, setNewConnectionForm] = useState({ notes: initialNotes });
+      const [connectionNotesReady, setConnectionNotesReady] = useState(!nodeId);
+      const [editorError, setEditorError] = useState('');
+      const editingConnectionNotesId = nodeId;
+      const newConnectionOpen = open;
+      ${source.slice(notesEffectStart, notesEffectEnd)}
       return <>
         ${source.slice(notesStart, notesEnd)}
         <output id="connection-notes-state">{newConnectionForm.notes}</output>
+        <output id="connection-notes-error">{editorError}</output>
+        <button id="notes-save" disabled={!connectionNotesReady}>Save</button>
       </>;
     }
   `;

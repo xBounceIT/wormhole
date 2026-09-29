@@ -1322,11 +1322,7 @@ func importBackupContext(
 			return result, err
 		}
 		if raw, present := (*node)["notes"]; present {
-			var notes *string
-			if err := json.Unmarshal(raw, &notes); err != nil {
-				return result, errors.New("Backup contains invalid connection notes.")
-			}
-			if err := validateWorkspaceNotes(notes); err != nil {
+			if _, err := parseWorkspaceNotesJSON(raw); err != nil {
 				return result, errors.New("Backup contains invalid connection notes.")
 			}
 		}

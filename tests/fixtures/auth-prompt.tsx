@@ -13,6 +13,8 @@ declare function AuthPrompt(props: Record<string, unknown>): import('react').Rea
 declare function ConnectionNotesHarness(props: {
   mode?: 'saved' | 'quick';
   initialNotes?: string;
+  nodeId?: string;
+  open?: boolean;
 }): import('react').ReactElement;
 declare function AppCloseHarness(props: Record<string, unknown>): import('react').ReactElement;
 declare function BitwardenSettingsHarness(
@@ -1738,6 +1740,59 @@ async function runConnectionNotesTests() {
     assert.equal(document.getElementById('connection-notes-state').textContent, '');
     await React.act(async () => root.render(<ConnectionNotesHarness key="quick" mode="quick" />));
     assert.equal(document.getElementById('connection-notes'), null);
+    const deferred = () => {
+      let resolve;
+      let reject;
+      const promise = new Promise((done, fail) => {
+        resolve = done;
+        reject = fail;
+      });
+      return { promise, resolve, reject };
+    };
+    let pending = deferred();
+    window.wormhole = {
+      loadWorkspaceNodeNotes: ({ nodeId }) => {
+        assert.ok(nodeId);
+        return pending.promise;
+      },
+    };
+    const mountEdit = async (nodeId: string, open = true) => {
+      await React.act(async () =>
+        root.render(<ConnectionNotesHarness key="async" nodeId={nodeId} open={open} />),
+      );
+    };
+    await mountEdit('first');
+    assert.equal(document.getElementById('notes-save').disabled, true);
+    assert.equal(document.getElementById('connection-notes').disabled, true);
+    await React.act(async () => pending.resolve({ notes }));
+    assert.equal(document.getElementById('connection-notes').value, notes);
+    assert.equal(document.getElementById('notes-save').disabled, false);
+    pending = deferred();
+    await mountEdit('failed');
+    await React.act(async () => pending.reject(new Error('Read failed')));
+    assert.equal(document.getElementById('connection-notes-error').textContent, 'Read failed');
+    assert.equal(document.getElementById('notes-save').disabled, true);
+    pending = deferred();
+    await mountEdit('generic');
+    await React.act(async () => pending.reject('failure'));
+    assert.equal(
+      document.getElementById('connection-notes-error').textContent,
+      'Could not load connection notes.',
+    );
+    pending = deferred();
+    await mountEdit('stale');
+    const stale = pending;
+    pending = deferred();
+    await mountEdit('latest');
+    await React.act(async () => stale.resolve({ notes: 'stale notes' }));
+    assert.notEqual(document.getElementById('connection-notes').value, 'stale notes');
+    await React.act(async () => pending.resolve({ notes: 'latest notes' }));
+    assert.equal(document.getElementById('connection-notes').value, 'latest notes');
+    pending = deferred();
+    await mountEdit('closed');
+    await mountEdit('closed', false);
+    await React.act(async () => pending.reject(new Error('stale error')));
+    assert.notEqual(document.getElementById('connection-notes-error').textContent, 'stale error');
   } finally {
     await React.act(async () => root.unmount());
   }

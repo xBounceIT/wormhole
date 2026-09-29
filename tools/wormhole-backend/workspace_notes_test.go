@@ -28,24 +28,13 @@ func TestConnectionNotesPersistAcrossProtocolsAndDuplication(t *testing.T) {
 			}
 			assertNotes := func(nodeID, want string) {
 				t.Helper()
-				db, err := openDatabase(path, true)
+				response, err := loadWorkspaceNodeNotes(path, workspaceNodeRequest{NodeID: nodeID})
 				if err != nil {
 					t.Fatal(err)
 				}
-				defer db.Close()
-				tree, err := loadTree(db)
-				if err != nil {
-					t.Fatal(err)
+				if response["notes"] != want {
+					t.Fatalf("notes = %q, want %q", response["notes"], want)
 				}
-				for _, node := range tree {
-					if node.ID == nodeID {
-						if node.Notes != want {
-							t.Fatalf("notes = %q, want %q", node.Notes, want)
-						}
-						return
-					}
-				}
-				t.Fatalf("node %s missing from reloaded tree", nodeID)
 			}
 			assertNotes(id, notes)
 			duplicate, err := duplicateWorkspaceNode(path, workspaceNodeRequest{NodeID: id})
@@ -210,7 +199,7 @@ func TestConnectionNotesBackupPreservesLegacyMissingAndNullValues(t *testing.T) 
 			}
 			defer db.Close()
 			tree, err := loadTree(db)
-			if err != nil || len(tree) != 1 || tree[0].Notes != "" {
+			if err != nil || len(tree) != 1 {
 				t.Fatalf("legacy notes = %#v, %v", tree, err)
 			}
 		})
@@ -261,7 +250,7 @@ VALUES ('legacy', 'Legacy', 1, 0, 0, 'example.test', 'now', 'now');`)
 		t.Fatal(err)
 	}
 	legacy, err := loadTree(db)
-	if err != nil || len(legacy) != 1 || legacy[0].Notes != "" {
+	if err != nil || len(legacy) != 1 {
 		t.Fatalf("legacy tree = %#v, %v", legacy, err)
 	}
 	db.Close()
@@ -314,5 +303,181 @@ func TestConnectionNotesBackupRoundTrip(t *testing.T) {
 	}
 	if restored != notes {
 		t.Fatalf("restored notes = %q", restored)
+	}
+}
+
+func TestConnectionNotesDoNotInflateAggregateResponses(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "workspace.db")
+	if err := ensureElectronWorkspaceSchema(path); err != nil {
+		t.Fatal(err)
+	}
+	db, err := openDatabase(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	notes := strings.Repeat("\x01", workspaceNotesMaxLength)
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range 180 {
+		_, err := tx.Exec(`INSERT INTO Nodes (Id, Name, Kind, SortOrder, Protocol, Host, Notes, CreatedAt, UpdatedAt)
+VALUES (?, 'Connection', 1, ?, 0, 'example.test', ?, 'now', 'now')`, fmt.Sprintf("connection-%d", i), i, notes)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	for _, operation := range []string{"workspace", "startup", "workspace-node-notes"} {
+		var output, errorOutput bytes.Buffer
+		input := strings.NewReader(`{"nodeId":"connection-179"}`)
+		if code := runBackendCLI([]string{"--operation", operation, "--database", path}, input, &output, &errorOutput); code != 0 {
+			t.Fatalf("%s failed: %s", operation, errorOutput.String())
+		}
+		if output.Len() >= 16*1024*1024 {
+			t.Fatalf("%s exceeded Electron's response limit", operation)
+		}
+		if operation == "workspace-node-notes" {
+			var result map[string]string
+			if err := json.Unmarshal(output.Bytes(), &result); err != nil {
+				t.Fatal(err)
+			}
+			if result["notes"] != notes {
+				t.Fatal("on-demand read changed maximum note text")
+			}
+		} else if bytes.Contains(output.Bytes(), []byte(`"notes"`)) {
+			t.Fatalf("%s still includes aggregate note text", operation)
+		}
+	}
+}
+
+func TestConnectionNotesReadErrorsAndLegacySchema(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing.db")
+	if _, err := loadWorkspaceNodeNotes(missing, workspaceNodeRequest{NodeID: ""}); err == nil {
+		t.Fatal("invalid id accepted")
+	}
+	if _, err := loadWorkspaceNodeNotes(missing, workspaceNodeRequest{NodeID: "missing"}); err == nil {
+		t.Fatal("missing database accepted")
+	}
+	if _, err := loadWorkspaceNodeNotes(t.TempDir(), workspaceNodeRequest{NodeID: "missing"}); err == nil {
+		t.Fatal("invalid database accepted")
+	}
+	path := filepath.Join(t.TempDir(), "workspace.db")
+	if err := ensureElectronWorkspaceSchema(path); err != nil {
+		t.Fatal(err)
+	}
+	id, err := createWorkspaceNode(path, workspaceNodeWriteRequest{Name: "Connection", Kind: "connection", Protocol: "ssh", Host: "example.test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, nodeID := range []string{"missing", ""} {
+		if _, err := loadWorkspaceNodeNotes(path, workspaceNodeRequest{NodeID: nodeID}); err == nil {
+			t.Fatal("invalid/missing connection accepted")
+		}
+	}
+	folderID, err := createWorkspaceNode(path, workspaceNodeWriteRequest{Name: "Folder", Kind: "folder"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadWorkspaceNodeNotes(path, workspaceNodeRequest{NodeID: folderID}); err == nil {
+		t.Fatal("folder accepted")
+	}
+	db, err := openDatabase(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("UPDATE Nodes SET Notes = ? WHERE Id = ?", strings.Repeat("a", workspaceNotesMaxLength+1), id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadWorkspaceNodeNotes(path, workspaceNodeRequest{NodeID: id}); err == nil {
+		t.Fatal("invalid stored note accepted")
+	}
+	if _, err := db.Exec("ALTER TABLE Nodes DROP COLUMN Notes"); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	result, err := loadWorkspaceNodeNotes(path, workspaceNodeRequest{NodeID: id})
+	if err != nil || result["notes"] != "" {
+		t.Fatalf("legacy notes = %#v, %v", result, err)
+	}
+}
+
+func TestConnectionNotesJSONPreservesValidEscapesAndRejectsLossyDecoding(t *testing.T) {
+	valid := map[string]string{
+		`""`: "", `"\ud800\udc00"`: "𐀀", `"\uDBFF\uDFFF"`: "\U0010FFFF",
+		`"\ufffd"`: "�", `"literal \\ud800"`: `literal \ud800`, `"\/\n\t\u0061"`: "/\n\ta", `"🛠️"`: "🛠️",
+	}
+	for raw, want := range valid {
+		notes, err := parseWorkspaceNotesJSON(json.RawMessage(raw))
+		if err != nil || notes == nil || *notes != want {
+			t.Fatalf("%s -> %v, %v; want %q", raw, notes, err, want)
+		}
+		var request workspaceNodeWriteRequest
+		if err := json.Unmarshal([]byte(`{"name":"Connection","notes":`+raw+`}`), &request); err != nil || request.Notes == nil || *request.Notes != want || request.Name != "Connection" {
+			t.Fatalf("valid request failed: %#v, %v", request, err)
+		}
+	}
+	for _, raw := range []string{`"\ud800"`, `"\udc00"`, `"\ud800x"`, `"\ud800\u0061"`, `"\ud800\ud800\udc00"`, `"\ud800\udc00\udc00"`, `42`, `"\uZZZZ"`, `"before\u0000after"`, "\"" + string([]byte{0xff}) + "\""} {
+		if _, err := parseWorkspaceNotesJSON(json.RawMessage(raw)); err == nil {
+			t.Fatalf("accepted %s", raw)
+		}
+		var request workspaceNodeWriteRequest
+		if err := json.Unmarshal([]byte(`{"notes":`+raw+`}`), &request); err == nil {
+			t.Fatalf("request accepted %s", raw)
+		}
+	}
+	for _, raw := range []string{`{}`, `{"notes":null}`} {
+		var request workspaceNodeWriteRequest
+		if err := json.Unmarshal([]byte(raw), &request); err != nil || request.Notes != nil {
+			t.Fatalf("legacy request failed: %v", err)
+		}
+	}
+}
+
+func TestConnectionNotesBackupRejectsLoneSurrogatesBeforeWrites(t *testing.T) {
+	for _, encrypted := range []bool{false, true} {
+		for _, raw := range []string{`"\ud800"`, `"\udc00"`, `"\ud800\u0061"`} {
+			t.Run(fmt.Sprintf("%t-%s", encrypted, raw), func(t *testing.T) {
+				directory := t.TempDir()
+				node := backupTestObject(map[string]any{"id": backupTestNodeID, "name": "Connection", "kind": 1, "protocol": 0, "host": "example.test"})
+				node["notes"] = json.RawMessage(raw)
+				payload := newBackupPayload()
+				payload.Nodes = []*backupObject{&node}
+				document := backupDocument{SchemaVersion: 2, Encryption: backupEncryptionNone, Payload: payload}
+				password := ""
+				if encrypted {
+					plaintext, err := json.Marshal(payload)
+					if err != nil {
+						t.Fatal(err)
+					}
+					password = "test-only-password"
+					sealed, err := sealBackupPayload(plaintext, password)
+					if err != nil {
+						t.Fatal(err)
+					}
+					document.Encryption = backupEncryptionAESGCM
+					document.Payload = nil
+					document.EncryptedPayload = &sealed
+				}
+				contents, err := json.Marshal(document)
+				if err != nil {
+					t.Fatal(err)
+				}
+				backup := filepath.Join(directory, "backup.json")
+				if err := os.WriteFile(backup, contents, 0600); err != nil {
+					t.Fatal(err)
+				}
+				destination := filepath.Join(directory, "destination.db")
+				if _, err := importBackup(destination, backupRequest{Path: backup, Password: password}); err == nil || !strings.Contains(err.Error(), "invalid connection notes") {
+					t.Fatalf("lossy import accepted: %v", err)
+				}
+				if _, err := os.Stat(destination); !os.IsNotExist(err) {
+					t.Fatalf("rejected backup wrote database: %v", err)
+				}
+			})
+		}
 	}
 }

@@ -272,6 +272,7 @@ type BackendOperation =
   | 'workspace-update-node-inline-credential'
   | 'workspace-node-create'
   | 'workspace-node-update'
+  | 'workspace-node-notes'
   | 'tunnel-create'
   | 'tunnel-list'
   | 'tunnel-read'
@@ -7011,6 +7012,13 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       );
       return workspace;
     });
+  });
+
+  ipcMain.handle('workspace:node-notes', async (_event, value: unknown) => {
+    const request = parseWorkspaceNodeRequest(value);
+    return runAuthorizedOperation(() =>
+      runBackend<{ notes: string }>('workspace-node-notes', request),
+    );
   });
 
   ipcMain.handle('workspace:move-nodes', async (_event, value: unknown) => {

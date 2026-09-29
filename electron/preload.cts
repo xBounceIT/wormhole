@@ -66,6 +66,8 @@ const wormholeBridge = {
     ipcRenderer.invoke('startup:unlock', request),
   markStartupReady: () => ipcRenderer.send('startup:ready'),
   loadWorkspace: () => ipcRenderer.invoke('workspace:load'),
+  loadWorkspaceNodeNotes: (request: { nodeId: string }) =>
+    ipcRenderer.invoke('workspace:node-notes', request),
   selectMRemoteImport: () => ipcRenderer.invoke('mremote-import:select'),
   analyzeMRemoteImport: (options: { password: string; structureOnly: boolean }) =>
     ipcRenderer.invoke('mremote-import:analyze', options),

@@ -753,6 +753,7 @@ interface Window {
     unlockStartup(request: WormholeAuthVerificationRequest): Promise<WormholeStartupUnlock>;
     markStartupReady(): void;
     loadWorkspace(): Promise<WormholeWorkspaceSnapshot>;
+    loadWorkspaceNodeNotes(request: { nodeId: string }): Promise<{ notes: string }>;
     selectMRemoteImport(): Promise<WormholeMRemoteImportInspection | null>;
     analyzeMRemoteImport(options: {
       password: string;
