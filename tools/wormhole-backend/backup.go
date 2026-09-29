@@ -216,6 +216,7 @@ type backupColumn struct {
 }
 
 var backupNodeColumns = []backupColumn{
+	{DB: "Notes", JSON: "notes", Kind: backupString, SQLType: "TEXT NULL"},
 	{DB: "Id", JSON: "id", Kind: backupString, Required: true, Default: "", SQLType: "TEXT PRIMARY KEY NOT NULL"},
 	{DB: "ParentId", JSON: "parentId", Kind: backupString, SQLType: "TEXT NULL REFERENCES Nodes(Id) ON DELETE CASCADE"},
 	{DB: "Name", JSON: "name", Kind: backupString, Required: true, Default: "", SQLType: "TEXT NOT NULL"},
@@ -1315,6 +1316,16 @@ func importBackupContext(
 	if nullDrops > 0 {
 		addBackupWarning(&result,
 			fmt.Sprintf("Dropped %d null entries from the backup payload (malformed or hand-edited file).", nullDrops))
+	}
+	for _, node := range payload.Nodes {
+		if err := ctx.Err(); err != nil {
+			return result, err
+		}
+		if raw, present := (*node)["notes"]; present {
+			if _, err := parseWorkspaceNotesJSON(raw); err != nil {
+				return result, errors.New("Backup contains invalid connection notes.")
+			}
+		}
 	}
 	if len(payload.PrivateKeys) > 0 || len(payload.Passwords) > 0 || len(payload.InlinePasswords) > 0 {
 		release, err := acquireRecoveredCredentialPrivateKeyLock(databasePath)

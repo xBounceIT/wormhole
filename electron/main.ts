@@ -25,6 +25,7 @@ import { createInterface, type Interface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import type { ElectronChromeExtensions } from 'electron-chrome-extensions';
 import { AuthSession } from './auth-session.js';
+import { parseWorkspaceNotes, workspaceNodeWriteMaxRequestBytes } from './workspace-notes.js';
 import { hasValidCredentialSecretLength } from './credential-secret-length.js';
 import {
   bringMcpApprovalWindowToFront,
@@ -95,6 +96,7 @@ import {
 } from './sftp-contract.js';
 import { RdpBackendClient, stopChildProcess } from './rdp.js';
 import { drainSshBackendSessionIds } from './ssh-backend-lifecycle.js';
+import { sshOpenCredentialFields } from './ssh-open-credentials.js';
 import { settleTunnelCleanup, TunnelLeaseRegistry } from './tunnel-lease-registry.js';
 import {
   isTunnelIdentifier,
@@ -276,6 +278,7 @@ type BackendOperation =
   | 'workspace-update-node-inline-credential'
   | 'workspace-node-create'
   | 'workspace-node-update'
+  | 'workspace-node-notes'
   | 'tunnel-create'
   | 'tunnel-list'
   | 'tunnel-read'
@@ -660,6 +663,7 @@ type WorkspaceNodeWriteRequest = {
   id?: string;
   parentId: string;
   name: string;
+  notes?: string;
   kind: 'folder' | 'connection';
   protocol: '' | 'ssh' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial';
   host: string;
@@ -1635,6 +1639,7 @@ function parseWorkspaceNodeWriteRequest(
   const id = typeof value.id === 'string' ? value.id.trim() : '';
   const parentId = typeof value.parentId === 'string' ? value.parentId.trim() : '';
   const name = typeof value.name === 'string' ? value.name.trim() : '';
+  const notes = parseWorkspaceNotes(value.notes);
   const kind = value.kind;
   const protocol = value.protocol;
   const host = typeof value.host === 'string' ? value.host.trim() : '';
@@ -1711,6 +1716,7 @@ function parseWorkspaceNodeWriteRequest(
     ...(updating ? { id } : {}),
     parentId,
     name,
+    notes,
     kind,
     protocol,
     host,
@@ -3885,9 +3891,11 @@ async function runBackend<T>(
         ? workspaceDeleteNodesMaxRequestBytes
         : operation === 'settings-set-connection-tree-expansion'
           ? connectionTreeExpansionMaxRequestBytes
-          : operation.startsWith('tunnel-')
-            ? backendMaxTunnelRequestBytes
-            : backendMaxRequestBytes;
+          : operation === 'workspace-node-create' || operation === 'workspace-node-update'
+            ? workspaceNodeWriteMaxRequestBytes
+            : operation.startsWith('tunnel-')
+              ? backendMaxTunnelRequestBytes
+              : backendMaxRequestBytes;
     if (requestPayload === undefined || Buffer.byteLength(requestPayload, 'utf8') > requestLimit) {
       throw new Error('The Wormhole request is too large.');
     }
@@ -6158,10 +6166,8 @@ class NativeSshBackend {
         const message = error instanceof Error ? error.message : 'The vault could not be read.';
         throw new Error(`Bitwarden credential is unavailable: ${message}`);
       }
-      if (bitwardenCredential.bitwarden && !bitwardenCredential.username?.trim()) {
-        throw new Error('Bitwarden credential is unavailable: the SSH username is missing.');
-      }
     }
+    const credentialFields = sshOpenCredentialFields(request, bitwardenCredential);
     if (!this.connectionAttempts.isCurrent(request.sessionId, generation)) {
       throw new Error('SSH connection closed before opening its VPN tunnel.');
     }
@@ -6217,29 +6223,13 @@ class NativeSshBackend {
         terminal_stream: true,
         session_id: request.sessionId,
         node_id: request.nodeId,
-        credential_id:
-          request.credentialId && !bitwardenCredential.bitwarden ? request.credentialId : undefined,
+        ...credentialFields,
         auto_sudo: request.autoSudo,
         host: request.host,
         port: request.port,
-        username: request.nodeId ? undefined : request.username,
-        password: request.nodeId ? undefined : request.password,
         tunnel_config_id: request.tunnelConfigId,
         socks_endpoint: socksEndpoint,
         tunnel_enabled: request.nodeId && !socksEndpoint ? false : undefined,
-        username_override: request.manualCredentials
-          ? request.username?.trim()
-          : bitwardenCredential.bitwarden
-            ? bitwardenCredential.username
-            : undefined,
-        username_override_authoritative:
-          request.manualCredentials === true || request.credentialId !== undefined,
-        password_override: request.manualCredentials
-          ? request.password
-          : bitwardenCredential.bitwarden
-            ? bitwardenCredential.password
-            : undefined,
-        credential_override: request.manualCredentials === true || bitwardenCredential.bitwarden,
         key_passphrase_override: request.manualKeyPassphrase ? request.keyPassphrase : undefined,
         columns: request.columns,
         rows: request.rows,
@@ -7054,6 +7044,13 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       );
       return workspace;
     });
+  });
+
+  ipcMain.handle('workspace:node-notes', async (_event, value: unknown) => {
+    const request = parseWorkspaceNodeRequest(value);
+    return runAuthorizedOperation(() =>
+      runBackend<{ notes: string }>('workspace-node-notes', request),
+    );
   });
 
   ipcMain.handle('workspace:move-nodes', async (_event, value: unknown) => {

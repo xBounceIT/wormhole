@@ -258,6 +258,114 @@ VALUES ('rdp-node', NULL, 'RDP', 1, 1, 'rdp.example', ?, 2, '2026-08-09T00:00:00
 	}
 }
 
+func TestBitwardenVirtualSSHCredentialUsesLiveVaultIdentity(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	if err := ensureElectronWorkspaceSchema(databasePath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := replaceBitwardenCredentialCache(databasePath, []bitwardenCliLoginItem{
+		{ID: "item-1", Name: "SSH", Username: "old-account"},
+		{ID: "item-no-username", Name: "SSH without username", Username: "old-account"},
+		{ID: "item-no-password", Name: "SSH without password", Username: "old-account"},
+		{ID: "item-missing", Name: "Deleted SSH item", Username: "old-account"},
+	}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	settings := bitwardenCliSettings{
+		Enabled: true, Path: buildBitwardenServiceHelper(t), ServerRegion: bitwardenCliServerCurrent,
+	}
+	if err := writeBitwardenCliSettings(databasePath, settings); err != nil {
+		t.Fatal(err)
+	}
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	manager := newVncManager(database, newBackendLineWriter(&bytes.Buffer{}))
+	manager.databasePath = databasePath
+	// This test exercises credential resolution, not session persistence or OS keychains.
+	manager.bitwardenSessionKey = "session-key"
+	// Both the saved connection and the explicit credential picker must pair the live
+	// username with the live password, rather than reuse the catalog's old username.
+	for itemID, username := range map[string]string{"item-1": "operator", "item-no-username": ""} {
+		t.Run(itemID, func(t *testing.T) {
+			credentialID := bitwardenVirtualCredentialID(itemID, 0)
+			_, err := database.Exec(`
+INSERT INTO Nodes (Id, Name, Kind, Protocol, Host, CredentialId, CredentialMode, CreatedAt, UpdatedAt)
+VALUES (?, 'SSH', 1, 0, 'ssh.example', ?, 2, 'now', 'now');`, itemID, credentialID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for name, resolve := range map[string]func() (bitwardenResolvedCredential, error){
+				"saved": func() (bitwardenResolvedCredential, error) {
+					return manager.resolveBitwardenNodeCredential(itemID, 0)
+				},
+				"picker": func() (bitwardenResolvedCredential, error) {
+					return manager.resolveBitwardenCredential(credentialID, 0)
+				},
+			} {
+				t.Run(name, func(t *testing.T) {
+					resolved, err := resolve()
+					if err != nil || !resolved.Bitwarden || resolved.Username != username || resolved.Password != "secret" {
+						t.Fatalf("virtual SSH identity did not match the live vault item (error: %v)", err)
+					}
+					target, err := loadSSHTargetWithOverrides(databasePath, itemID, resolved.Username, resolved.Password, true, false)
+					if username == "" {
+						if err == nil || err.Error() != "SSH connection has no username" {
+							t.Fatal("a missing live username reused the stale catalog account")
+						}
+					} else if err != nil || target.username != username || target.password != "secret" {
+						t.Fatalf("saved SSH target did not preserve the resolved vault identity (error: %v)", err)
+					}
+				})
+			}
+		})
+	}
+	for itemID, message := range map[string]string{
+		"item-no-password": "the linked Bitwarden item does not contain login.password",
+		"item-missing":     "the linked Bitwarden item was not found",
+	} {
+		t.Run(itemID, func(t *testing.T) {
+			resolved, err := manager.resolveBitwardenCredential(bitwardenVirtualCredentialID(itemID, 0), 0)
+			if err == nil || err.Error() != message || resolved.Username != "" || resolved.Password != "" {
+				t.Fatalf("unavailable live vault item did not fail closed (error: %v)", err)
+			}
+		})
+	}
+	t.Run("saved username overrides an empty vault username", func(t *testing.T) {
+		_, err := database.Exec(`
+INSERT INTO Nodes (Id, Name, Kind, Protocol, Host, Username, CredentialId, CredentialMode, CreatedAt, UpdatedAt)
+VALUES ('explicit-user', 'SSH', 1, 0, 'ssh.example', 'connection-user', ?, 2, 'now', 'now');`,
+			bitwardenVirtualCredentialID("item-no-username", 0))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resolved, err := manager.resolveBitwardenNodeCredential("explicit-user", 0)
+		if err != nil || resolved.Username != "" {
+			t.Fatal("expected the vault to have no username")
+		}
+		target, err := loadSSHTargetWithOverrides(databasePath, "explicit-user", resolved.Username, resolved.Password, true, false)
+		if err != nil || target.username != "connection-user" || target.password != "secret" {
+			t.Fatalf("explicit node username was not preserved (error: %v)", err)
+		}
+	})
+	for _, protocol := range []int64{1, 6} {
+		resolved, err := manager.resolveBitwardenCredential(bitwardenVirtualCredentialID("item-1", protocol), protocol)
+		if err != nil || resolved.Username != "operator" || resolved.Password != "secret" {
+			t.Fatalf("protocol %d did not use the live vault identity (error: %v)", protocol, err)
+		}
+	}
+	legacy := seedLegacyBitwardenCredential(t, databasePath, credentialCreateRequest{
+		Name: "SSH override", Protocol: "ssh", Username: "custom-user",
+		Provider: "Bitwarden", BitwardenItemID: "item-1",
+	})
+	resolved, err := manager.resolveBitwardenCredential(legacy.ID, 0)
+	if err != nil || resolved.Username != "custom-user" || resolved.Password != "secret" {
+		t.Fatalf("legacy explicit username was not preserved (error: %v)", err)
+	}
+}
+
 func buildBitwardenServiceHelper(t *testing.T) string {
 	t.Helper()
 	directory := t.TempDir()
@@ -284,6 +392,18 @@ func main() {
 		fmt.Print("[{\"id\":\"item-1\",\"name\":\"Site\",\"login\":{\"username\":\"operator\",\"password\":\"secret\"}}]")
 	case "get":
 		if os.Getenv("BW_SESSION") != "session-key" { fmt.Fprint(os.Stderr, "Vault is locked."); os.Exit(1) }
+		if os.Args[len(os.Args)-1] == "item-missing" {
+			fmt.Fprint(os.Stderr, "Not found.")
+			os.Exit(1)
+		}
+		if os.Args[len(os.Args)-1] == "item-no-password" {
+			fmt.Print("{\"id\":\"item-no-password\",\"name\":\"Site\",\"type\":1,\"login\":{\"username\":\"operator\",\"password\":\"\"}}")
+			return
+		}
+		if os.Args[len(os.Args)-1] == "item-no-username" {
+			fmt.Print("{\"id\":\"item-no-username\",\"name\":\"Site\",\"type\":1,\"login\":{\"username\":\"\",\"password\":\"secret\"}}")
+			return
+		}
 		fmt.Print("{\"id\":\"item-1\",\"name\":\"Site\",\"type\":1,\"login\":{\"username\":\"operator\",\"password\":\"secret\"}}")
 	default:
 		os.Exit(1)

@@ -43,6 +43,11 @@ func installLinuxCredentialStoreMock(t *testing.T) map[string]string {
 	return stored
 }
 
+func TestLinuxVncSavedCredentialIDCase(t *testing.T) {
+	installLinuxCredentialStoreMock(t)
+	testVncSavedCredentialIDCase(t)
+}
+
 func TestLinuxCredentialSecretRoundTripUsesDBusKeyring(t *testing.T) {
 	stored := installLinuxCredentialStoreMock(t)
 

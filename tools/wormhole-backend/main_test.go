@@ -761,6 +761,72 @@ VALUES ('33333333-3333-4333-8333-333333333333', 'Unexpected HTTP credential', 0,
 	}
 }
 
+func TestWorkspaceSavedCredentialSelectionMatchesStoredProfile(t *testing.T) {
+	for _, protocol := range []struct {
+		name  string
+		value int
+	}{{"ssh", 0}, {"rdp", 1}, {"vnc", 6}} {
+		for _, storedID := range []string{
+			"ABCDEF12-3456-4789-ABCD-0123456789AB",
+			"AbCdEf12-3456-4789-aBcD-0123456789aB",
+			"abcdef12-3456-4789-abcd-0123456789ab",
+		} {
+			t.Run(protocol.name+"/"+storedID, func(t *testing.T) {
+				databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+				if err := ensureElectronWorkspaceSchema(databasePath); err != nil {
+					t.Fatal(err)
+				}
+				database, err := openDatabase(databasePath, false)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer database.Close()
+				if err := ensureCredentialWriteSchema(database); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := database.Exec(`
+INSERT INTO CredentialProfiles (Id, Name, Kind, Protocol, SecretProvider, CreatedAt)
+VALUES (?, 'Saved account', 0, ?, 0, 'now');`, storedID, protocol.value); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := database.Exec(`
+INSERT INTO Nodes (Id, Name, Kind, Protocol, Host, CredentialMode, CredentialId, CreatedAt, UpdatedAt)
+VALUES ('folder', 'Folder', 0, NULL, NULL, 2, ?, 'now', 'now'),
+       ('connection', 'Connection', 1, ?, 'server.example', 2, ?, 'now', 'now');`,
+					storedID, protocol.value, storedID); err != nil {
+					t.Fatal(err)
+				}
+
+				workspace, err := loadWorkspace(databasePath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				options := workspace.CredentialOptions[protocol.name]
+				if len(workspace.Credentials) != 1 || len(options) != 1 || len(workspace.Tree) != 2 {
+					t.Fatalf("unexpected workspace: %#v", workspace)
+				}
+				for _, node := range workspace.Tree {
+					// The editor selects options by exact ID equality, including folder defaults.
+					if options[0].ID != node.CredentialID || workspace.Credentials[0].ID != node.CredentialID {
+						t.Fatalf("%s selection %q does not match credential %q / option %q",
+							node.Kind, node.CredentialID, workspace.Credentials[0].ID, options[0].ID)
+					}
+					if options[0].Name != "Saved account" {
+						t.Fatalf("selected credential label = %q", options[0].Name)
+					}
+				}
+				var persistedID string
+				if err := database.QueryRow("SELECT Id FROM CredentialProfiles;").Scan(&persistedID); err != nil {
+					t.Fatal(err)
+				}
+				if persistedID != storedID {
+					t.Fatalf("loading workspace changed stored ID: %q", persistedID)
+				}
+			})
+		}
+	}
+}
+
 func TestWorkspaceProjectsCredentialKindsAndFiltersKeysFromPasswordOnlyProtocols(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
 	database, err := openDatabase(databasePath, false)

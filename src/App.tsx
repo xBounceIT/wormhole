@@ -493,6 +493,7 @@ type AuthPromptRequest = {
 type TreeNode = {
   id: string;
   name: string;
+  notes?: string;
   kind: 'folder' | 'connection';
   protocol?: Protocol;
   host?: string;
@@ -1919,6 +1920,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   const [newConnectionOpen, setNewConnectionOpen] = useState(false);
   const [connectionEditorMode, setConnectionEditorMode] = useState<'saved' | 'quick'>('saved');
   const [editingConnectionId, setEditingConnectionId] = useState<string | null>(null);
+  const [connectionNotesReady, setConnectionNotesReady] = useState(true);
   const [folderDetailsOpen, setFolderDetailsOpen] = useState(false);
   const editingFolderId = useRef<string | null>(null);
   const editingFolderGeneration = useRef(0);
@@ -1937,6 +1939,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   const [deleteNodeError, setDeleteNodeError] = useState('');
   const [newConnectionForm, setNewConnectionForm] = useState({
     name: '',
+    notes: '',
     host: '',
     port: '',
     username: '',
@@ -2063,6 +2066,31 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   useEffect(() => {
     if (authGate === 'unlocked') void connectionTreeExpansionWriter.flush().catch(() => undefined);
   }, [authGate, connectionTreeExpansionWriter]);
+  const editingConnectionNotesId =
+    editingConnectionId && findTreeNode(tree, editingConnectionId)?.persisted !== false
+      ? editingConnectionId
+      : null;
+  useEffect(() => {
+    const api = window.wormhole;
+    if (!newConnectionOpen || !editingConnectionNotesId || !api) return;
+    let canceled = false;
+    setConnectionNotesReady(false);
+    void api
+      .loadWorkspaceNodeNotes({ nodeId: editingConnectionNotesId })
+      .then(({ notes }) => {
+        if (canceled) return;
+        setNewConnectionForm((form) => ({ ...form, notes }));
+        setConnectionNotesReady(true);
+      })
+      .catch((error: unknown) => {
+        if (canceled) return;
+        setEditorError(error instanceof Error ? error.message : 'Could not load connection notes.');
+      });
+    return () => {
+      canceled = true;
+    };
+  }, [newConnectionOpen, editingConnectionNotesId]);
+
   useEffect(() => {
     const requestId = ++rdpExternalClientRequirementRequest.current;
     if (!newConnectionOpen || newConnectionForm.protocol !== 'rdp' || !window.wormhole) {
@@ -5357,12 +5385,14 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   }
 
   function openQuickConnect() {
+    setConnectionNotesReady(true);
     quickConnectSubmitInFlight.current = false;
     setEditingConnectionId(null);
     setConnectionEditorMode('quick');
     setEditorError('');
     setNewConnectionForm({
       name: '',
+      notes: '',
       host: '',
       port: '',
       username: '',
@@ -5421,11 +5451,13 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   }
 
   function openNewConnection(folderId?: string | null) {
+    setConnectionNotesReady(true);
     setEditingConnectionId(null);
     setConnectionEditorMode('saved');
     setEditorError('');
     setNewConnectionForm({
       name: '',
+      notes: '',
       host: '',
       port: '',
       username: '',
@@ -5639,11 +5671,14 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   function openEditConnection(node: TreeNode) {
     if (node.kind !== 'connection' || !node.protocol) return;
 
+    setConnectionNotesReady(!window.wormhole || node.persisted === false);
+    setConnectionEditorMode('saved');
     setSelectedNodeId(node.id);
     setEditingConnectionId(node.id);
     setEditorError('');
     setNewConnectionForm({
       name: node.name,
+      notes: node.notes ?? '',
       host: savedConnectionAddressForEditor(node.protocol, node.host ?? '', node.httpPath),
       port: node.port === undefined ? '' : String(node.port),
       username: node.username ?? '',
@@ -5881,7 +5916,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   }
   async function submitNewConnection(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (editorBusy) return;
+    if (editorBusy || !connectionNotesReady) return;
     if (!connectionEditorCredentialSelectionComplete) {
       setEditorError(connectionCredentialSelectionError);
       return;
@@ -5932,6 +5967,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       const nodeWrite = {
         parentId: newConnectionForm.folder,
         name,
+        notes: newConnectionForm.notes,
         kind: 'connection' as const,
         protocol: newConnectionForm.protocol,
         host,
@@ -7338,6 +7374,26 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                       />
                     </div>
 
+                    {connectionEditorMode === 'saved' ? (
+                      <div className="grid gap-2">
+                        <Label htmlFor="connection-notes">Notes (optional)</Label>
+                        <Textarea
+                          disabled={!connectionNotesReady}
+                          id="connection-notes"
+                          maxLength={16_384}
+                          onChange={(event) =>
+                            setNewConnectionForm((form) => ({
+                              ...form,
+                              notes: event.target.value,
+                            }))
+                          }
+                          placeholder="Additional information about this connection"
+                          rows={3}
+                          value={newConnectionForm.notes}
+                        />
+                      </div>
+                    ) : null}
+
                     <div
                       className={cn(
                         'grid gap-3',
@@ -8259,7 +8315,11 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                   Cancel
                 </Button>
                 <Button
-                  disabled={editorBusy || !connectionEditorCredentialSelectionComplete}
+                  disabled={
+                    editorBusy ||
+                    !connectionNotesReady ||
+                    !connectionEditorCredentialSelectionComplete
+                  }
                   type="submit"
                 >
                   {connectionEditorMode !== 'quick' &&
@@ -12768,12 +12828,6 @@ function tunnelEditorFields(kind: number): TunnelField[] {
           placeholder: 'https://sts.windows.net/{tenant}/',
         },
         {
-          key: 'ServerSecretHex',
-          label: 'Server secret (tls-auth key, 512 hex chars, optional)',
-          section: 'Advanced',
-          type: 'textarea',
-        },
-        {
           key: 'CaPem',
           label: 'CA certificate override (PEM, optional)',
           section: 'Advanced',
@@ -13297,8 +13351,8 @@ function TunnelEditorDialog({
           {value.kind === 5 ? (
             <div className="flex items-center justify-between gap-3 rounded-lg border border-border/70 bg-muted/20 px-3 py-2">
               <p className="text-[11px] text-muted-foreground">
-                Import <span className="font-mono">azurevpnconfig.xml</span> from the Azure portal;
-                Microsoft Entra tokens are cached separately in protected storage.
+                Import an Azure VPN XML profile. Its server key is stored securely and retained when
+                you edit this VPN; import another profile to replace it.
               </p>
               <Button
                 disabled={busy}

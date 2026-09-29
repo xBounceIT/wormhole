@@ -66,6 +66,8 @@ const wormholeBridge = {
     ipcRenderer.invoke('startup:unlock', request),
   markStartupReady: () => ipcRenderer.send('startup:ready'),
   loadWorkspace: () => ipcRenderer.invoke('workspace:load'),
+  loadWorkspaceNodeNotes: (request: { nodeId: string }) =>
+    ipcRenderer.invoke('workspace:node-notes', request),
   selectMRemoteImport: () => ipcRenderer.invoke('mremote-import:select'),
   analyzeMRemoteImport: (options: { password: string; structureOnly: boolean }) =>
     ipcRenderer.invoke('mremote-import:analyze', options),
@@ -96,6 +98,7 @@ const wormholeBridge = {
   createWorkspaceNode: (request: {
     parentId: string;
     name: string;
+    notes?: string;
     kind: 'folder' | 'connection';
     protocol: '' | 'ssh' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial';
     host: string;
@@ -120,6 +123,7 @@ const wormholeBridge = {
     id: string;
     parentId: string;
     name: string;
+    notes?: string;
     kind: 'folder' | 'connection';
     protocol: '' | 'ssh' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial';
     host: string;

@@ -1276,6 +1276,104 @@ VALUES ('cycle-a', 'cycle-b', 'Cycle A', 0, NULL, 'vnc.example', 5900),
 	}
 }
 
+// Called by platform tests with real DPAPI or the existing Linux keyring mock.
+func testVncSavedCredentialIDCase(t *testing.T) {
+	for _, storedID := range []string{
+		"ABCDEF12-3456-4789-ABCD-0123456789AB",
+		"AbCdEf12-3456-4789-aBcD-0123456789aB",
+		"abcdef12-3456-4789-abcd-0123456789ab",
+	} {
+		t.Run(storedID, func(t *testing.T) {
+			databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+			if err := ensureElectronWorkspaceSchema(databasePath); err != nil {
+				t.Fatal(err)
+			}
+			database, err := openDatabase(databasePath, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer database.Close()
+			const password = "vnc-test-password"
+			id := normalizeID(storedID)
+			encoded, encoding, err := storeCredentialSecret(id, "", password)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := deleteStoredCredentialSecret(id, encoded, encoding); err != nil {
+					t.Error(err)
+				}
+			})
+			if _, err := database.Exec(`
+INSERT INTO CredentialProfiles (Id, Name, Kind, Protocol, SecretProvider, CreatedAt)
+VALUES (?, 'VNC account', 0, 6, 0, 'now');`, storedID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := database.Exec(`
+INSERT INTO CredentialSecrets (Id, Secret, Encoding, UpdatedAt)
+VALUES (?, ?, ?, 'now');`, storedID, encoded, encoding); err != nil {
+				t.Fatal(err)
+			}
+			workspace, err := loadWorkspace(databasePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			options := workspace.CredentialOptions["vnc"]
+			if len(options) != 1 || options[0].ID != id {
+				t.Fatalf("unexpected VNC options: %#v", options)
+			}
+			target, err := readVncTargetFromDatabase(database, "", options[0].ID, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if target.password != password {
+				t.Fatal("quick connection did not resolve its saved VNC password")
+			}
+		})
+	}
+}
+
+func TestVncCredentialLookupPreservesCompatibilityChecks(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		provider int
+		protocol int
+		kind     int
+	}{
+		{"Bitwarden", 1, 6, 0},
+		{"SSH password", 0, 0, 0},
+		{"SSH key", 0, 6, 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			database, err := openDatabase(filepath.Join(t.TempDir(), "wormhole.db"), false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer database.Close()
+			if err := ensureCredentialWriteSchema(database); err != nil {
+				t.Fatal(err)
+			}
+			const storedID = "ABCDEF12-3456-4789-ABCD-0123456789AB"
+			if _, err := database.Exec(`
+INSERT INTO CredentialProfiles (Id, Name, Kind, Protocol, SecretProvider, CreatedAt)
+VALUES (?, 'Incompatible credential', ?, ?, ?, 'now');`,
+				storedID, test.kind, test.protocol, test.provider); err != nil {
+				t.Fatal(err)
+			}
+			// An attempted secret read would fail; incompatible profiles must stop before it.
+			if _, err := database.Exec(`
+INSERT INTO CredentialSecrets (Id, Secret, Encoding, UpdatedAt)
+VALUES (?, 'invalid-ciphertext', 'unsupported-test-encoding', 'now');`, storedID); err != nil {
+				t.Fatal(err)
+			}
+			secret, found, err := readVncCredentialSecret(database, normalizeID(storedID))
+			if err != nil || found || secret != "" {
+				t.Fatalf("incompatible credential was resolved: found=%v err=%v", found, err)
+			}
+		})
+	}
+}
+
 func TestStoredVncSecretSizeIsBounded(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
 	database, err := openDatabase(databasePath, false)
