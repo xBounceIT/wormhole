@@ -545,6 +545,7 @@ test(
     f.write('overlay/gcc.cmd', '@echo ignored compiler\r\n');
     f.write('selected/gcc.cmd', '@echo selected compiler\r\n');
     f.write('selected/g++.cmd', '@echo selected C++ compiler\r\n');
+    f.write('vcpkg/scripts/buildsystems/vcpkg.cmake');
     const probe = () => {
       const result = spawnSync(
         'powershell.exe',
@@ -563,6 +564,7 @@ test(
           windowsHide: true,
           env: {
             ...process.env,
+            VCPKG_ROOT: path.join(f.root, 'vcpkg'),
             PATH: [
               path.join(f.root, 'overlay'),
               path.join(f.root, 'selected'),
@@ -575,9 +577,14 @@ test(
       return JSON.parse(result.stdout);
     };
     const original = probe();
+    assert.equal(original.Cacheable, true);
     assert.equal(original.Tools[0].Path, path.join(f.root, 'selected/gcc.cmd'));
     f.write('selected/gcc.cmd', '@echo selected compiler upgraded\r\n');
     assert.notEqual(probe().Tools[0].Sha256, original.Tools[0].Sha256);
+    f.remove('vcpkg/scripts/buildsystems/vcpkg.cmake');
+    assert.equal(probe().Cacheable, false);
+    f.remove('vcpkg');
+    assert.equal(probe().Cacheable, false);
   },
 );
 

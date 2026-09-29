@@ -195,7 +195,11 @@ if ($PrintBuildContext) {
         }
     })
     [PSCustomObject]@{
-        Cacheable = ($compilerPair.Available -and $null -ne $goTool -and $null -ne $cmakeTool)
+        # The no-vcpkg fallback resolves mutable system libraries outside our
+        # tracked inputs. Cache only the fingerprinted vcpkg dependency path.
+        Cacheable = ($compilerPair.Available -and $null -ne $goTool -and $null -ne $cmakeTool -and
+                     $env:VCPKG_ROOT -and
+                     (Test-Path -LiteralPath (Join-Path $env:VCPKG_ROOT 'scripts\buildsystems\vcpkg.cmake') -PathType Leaf))
         VcpkgRoot = $env:VCPKG_ROOT
         Tools = $tools
     } | ConvertTo-Json -Depth 4 -Compress

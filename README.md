@@ -146,6 +146,8 @@ package-specific roots such as `ASIO_ROOT`.
 The resolved vcpkg checkout's build scripts, ports, versions, triplets and
 executable, plus manifest-installed dependencies, are fingerprinted by content
 so updating vcpkg at the same path invalidates reuse.
+Windows builds without a usable vcpkg toolchain bypass reuse because their
+system-resolved dependency libraries are outside the tracked source graph.
 
 `npm run test:dev-runtime` covers cache invalidation and build planning. The
 compiler-launch entrypoint is excluded from Node loaded-module coverage because
