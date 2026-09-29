@@ -9,6 +9,7 @@ import {
   devRuntimeGoEnvironment,
   devRuntimeGoModuleDirectories,
   devRuntimeReplacementsAllowed,
+  devRuntimeVcpkgInputs,
   runCachedDevRuntimeBuild,
 } from './dev-runtime-cache.ts';
 
@@ -46,7 +47,7 @@ const registryEnvironment =
         { encoding: 'utf8', windowsHide: true },
       ).stdout
     : '';
-let ovpnBuildContext: { Cacheable?: boolean } | null = null;
+let ovpnBuildContext: { Cacheable?: boolean; VcpkgRoot?: string } | null = null;
 if (process.platform === 'win32') {
   try {
     ovpnBuildContext = JSON.parse(
@@ -57,6 +58,11 @@ if (process.platform === 'win32') {
     );
   } catch {
     // A failed native probe must not enable cache reuse.
+  }
+  if (typeof ovpnBuildContext?.VcpkgRoot === 'string' && ovpnBuildContext.VcpkgRoot) {
+    buildPlan[0].inputs.push(
+      ...devRuntimeVcpkgInputs(root, ovpnBuildContext.VcpkgRoot, process.arch),
+    );
   }
 }
 const goContexts = devRuntimeGoModuleDirectories(root, buildPlan).map((cwd) => {

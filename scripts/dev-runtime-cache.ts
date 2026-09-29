@@ -61,6 +61,25 @@ export function devRuntimeCacheEnvironmentAllowed(
   );
 }
 
+export function devRuntimeVcpkgInputs(
+  root: string,
+  vcpkgRoot: string,
+  architecture: string,
+): string[] {
+  return [
+    ...[
+      'scripts',
+      'ports',
+      'versions',
+      'triplets',
+      'vcpkg.exe',
+      '.vcpkg-root',
+      'vcpkg-configuration.json',
+    ].map((input) => path.relative(root, path.resolve(vcpkgRoot, input))),
+    `tools/wormhole-ovpnproxy/ovpn_shim/build/${architecture}/vcpkg_installed`,
+  ];
+}
+
 export function devRuntimeGoEnvironment(contents: string): string {
   try {
     const environment = JSON.parse(contents);

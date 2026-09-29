@@ -21,6 +21,7 @@ import {
   devRuntimeGoEnvironment,
   devRuntimeGoModuleDirectories,
   devRuntimeReplacementsAllowed,
+  devRuntimeVcpkgInputs,
   runCachedDevRuntimeBuild,
 } from '../scripts/dev-runtime-cache.ts';
 import type { DevRuntimeBuildStep } from '../scripts/dev-runtime-plan.ts';
@@ -146,6 +147,41 @@ test('CMake dependency inputs are captured and mutable external roots disable re
     environment,
     devRuntimeEnvironment({ CMAKE_INCLUDE_PATH: 'external/other' }, process.platform),
   );
+});
+
+test('vcpkg checkout and manifest-installed dependency contents invalidate native reuse', (t) => {
+  const f = fixture(t);
+  const vcpkgRoot = path.join(f.root, 'external/vcpkg');
+  f.step.inputs.push(...devRuntimeVcpkgInputs(f.root, vcpkgRoot, 'x64'));
+  f.step.excludedInputs = ['tools/wormhole-ovpnproxy/ovpn_shim/build'];
+  const inputs = [
+    'external/vcpkg/scripts/buildsystems/vcpkg.cmake',
+    'external/vcpkg/ports/asio/portfile.cmake',
+    'external/vcpkg/versions/baseline.json',
+    'external/vcpkg/triplets/x64-mingw-static.cmake',
+    'external/vcpkg/vcpkg.exe',
+    'external/vcpkg/.vcpkg-root',
+    'external/vcpkg/vcpkg-configuration.json',
+    'tools/wormhole-ovpnproxy/ovpn_shim/build/x64/vcpkg_installed/include/asio.hpp',
+    'tools/wormhole-ovpnproxy/ovpn_shim/build/x64/vcpkg_installed/lib/jsoncpp.a',
+  ];
+  for (const input of inputs) f.write(input);
+  runCachedDevRuntimeBuild(f.options);
+  runCachedDevRuntimeBuild(f.options);
+  assert.equal(f.builds.length, 1);
+  for (const input of inputs) {
+    const before: number = f.builds.length;
+    f.write(input, 'upgraded dependency at the same path');
+    runCachedDevRuntimeBuild(f.options);
+    assert.equal(f.builds.length, before + 1, input);
+  }
+  f.write('external/vcpkg/downloads/archive.zip');
+  f.write('external/vcpkg/buildtrees/intermediate.obj');
+  const before = f.builds.length;
+  runCachedDevRuntimeBuild(f.options);
+  assert.equal(f.builds.length, before);
+  f.step.inputs = devRuntimeVcpkgInputs(f.root, vcpkgRoot, 'arm64');
+  assert.ok(f.step.inputs.some((input) => input.includes('/arm64/vcpkg_installed')));
 });
 
 test('a fresh native source bootstrap is cached on the first successful build', (t) => {
@@ -578,15 +614,24 @@ test(
       return JSON.parse(result.stdout);
     };
     const selected = [`-DCMAKE_C_COMPILER=${cc}`, `-DCMAKE_CXX_COMPILER=${cxx}`];
+    f.write('CMakeFiles/compiler-check.txt');
+    f.write('vcpkg_installed/include/asio.hpp');
+    f.write('libovpn_shim.a');
     assert.deepEqual(probe(), selected);
     f.write(
       'CMakeCache.txt',
       `CMAKE_C_COMPILER:FILEPATH=${cc.toUpperCase()}\nCMAKE_CXX_COMPILER:STRING=${cxx}\n`,
     );
     assert.deepEqual(probe(), selected);
+    assert.ok(existsSync(path.join(f.root, 'CMakeFiles/compiler-check.txt')));
     for (const kind of ['FILEPATH', 'STRING', 'UNINITIALIZED']) {
       f.write('CMakeCache.txt', `CMAKE_CXX_COMPILER:${kind}=${path.join(f.root, 'old-g++.exe')}\n`);
-      assert.deepEqual(probe(), [...selected, '--fresh']);
+      f.write('CMakeFiles/compiler-check.txt');
+      assert.deepEqual(probe(), selected);
+      assert.equal(existsSync(path.join(f.root, 'CMakeCache.txt')), false);
+      assert.equal(existsSync(path.join(f.root, 'CMakeFiles')), false);
+      assert.ok(existsSync(path.join(f.root, 'vcpkg_installed/include/asio.hpp')));
+      assert.ok(existsSync(path.join(f.root, 'libovpn_shim.a')));
     }
   },
 );

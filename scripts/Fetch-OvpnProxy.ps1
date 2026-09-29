@@ -158,8 +158,18 @@ function Get-OvpnCmakeCompilerArguments([string]$cachePath, [string]$cCompilerPa
                 $selected = if ($Matches[1] -eq 'C') { $cCompilerPath } else { $cppCompilerPath }
                 if ([IO.Path]::GetFullPath($Matches[3]) -ne [IO.Path]::GetFullPath($selected)) {
                     # CMake's automatic cache reset loses command-line toolchain settings.
-                    # Start fresh with all of our arguments when the compiler changes.
-                    $arguments += '--fresh'
+                    # Remove only CMake's generated configuration, preserving installed
+                    # dependencies. This also works with supported CMake 3.20-3.23,
+                    # which do not have the --fresh option.
+                    $buildDirectory = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($cachePath))
+                    $cmakeFiles = [IO.Path]::GetFullPath((Join-Path $buildDirectory 'CMakeFiles'))
+                    if ([IO.Path]::GetDirectoryName($cmakeFiles) -ne $buildDirectory) {
+                        throw 'CMake configuration directory escapes the build directory.'
+                    }
+                    Remove-Item -LiteralPath $cachePath -Force
+                    if (Test-Path -LiteralPath $cmakeFiles) {
+                        Remove-Item -LiteralPath $cmakeFiles -Recurse -Force
+                    }
                     break
                 }
             }
