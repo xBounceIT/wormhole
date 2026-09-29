@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -368,34 +369,25 @@ func importAzureVPNFile(request azureImportRequest) (azureImportResult, error) {
 
 func parseAzureVPNProfile(contents []byte) (azureImportResult, error) {
 	type serverEntry struct {
-		FQDN string `xml:"fqdn"`
+		XMLName xml.Name
+		FQDN    string `xml:"fqdn"`
+	}
+	type sslConfig struct {
+		Transport string `xml:"transportprotocol"`
 	}
 	var document struct {
-		XMLName xml.Name `xml:"AzVpnProfile"`
-		Name    string   `xml:"name"`
+		XMLName xml.Name
+		Version string `xml:"version"`
+		Name    string `xml:"name"`
 		Servers struct {
-			Entries []serverEntry `xml:"ServerEntry"`
+			Entries []serverEntry `xml:",any"`
 		} `xml:"serverlist"`
-		Protocol struct {
-			SSL struct {
-				Transport string `xml:"transportprotocol"`
-			} `xml:"sslprotocolConfig"`
+		Protocol []struct {
+			SSL sslConfig `xml:"sslprotocolConfig"`
 		} `xml:"protocolconfig"`
-		ClientAuth struct {
-			Type string `xml:"type"`
-			AAD  struct {
-				Tenant, Audience, Issuer, ApplicationID, AppID string
-			} `xml:"aad"`
-		} `xml:"clientauth"`
-		Validation struct {
-			ServerSecret string `xml:"serversecret"`
-		} `xml:"servervalidation"`
-	}
-	if xml.Unmarshal(contents, &document) != nil || !strings.EqualFold(document.XMLName.Local, "AzVpnProfile") {
-		return azureImportResult{}, errors.New("file is not a valid Azure VPN profile")
-	}
-	// encoding/xml cannot attach tags to grouped fields; extract the AAD block namespace-agnostically.
-	var raw struct {
+		ExportProtocol []struct {
+			SSL sslConfig `xml:"sslprotoconfig"`
+		} `xml:"protoconfig"`
 		ClientAuth struct {
 			Type string `xml:"type"`
 			AAD  struct {
@@ -406,36 +398,99 @@ func parseAzureVPNProfile(contents []byte) (azureImportResult, error) {
 				AppID         string `xml:"appid"`
 			} `xml:"aad"`
 		} `xml:"clientauth"`
+		Validation struct {
+			ServerSecret string `xml:"serversecret"`
+		} `xml:"servervalidation"`
 	}
-	_ = xml.Unmarshal(contents, &raw)
-	if !strings.EqualFold(strings.TrimSpace(raw.ClientAuth.Type), "aad") {
+	decoder := xml.NewDecoder(bytes.NewReader(contents))
+	decoded := false
+	// Consume the whole document so leading text, extra roots and malformed tails
+	// cannot be ignored by encoding/xml's single-element decode.
+	for {
+		token, err := decoder.Token()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return azureImportResult{}, errors.New("file is not a valid Azure VPN profile")
+		}
+		switch value := token.(type) {
+		case xml.StartElement:
+			if decoded || decoder.DecodeElement(&document, &value) != nil {
+				return azureImportResult{}, errors.New("file is not a valid Azure VPN profile")
+			}
+			decoded = true
+		case xml.Comment:
+		case xml.ProcInst:
+			if decoded && value.Target == "xml" {
+				return azureImportResult{}, errors.New("file is not a valid Azure VPN profile")
+			}
+		case xml.CharData:
+			text := string(value)
+			if !decoded {
+				text = strings.TrimPrefix(text, "\ufeff")
+			}
+			if strings.TrimSpace(text) != "" {
+				return azureImportResult{}, errors.New("file is not a valid Azure VPN profile")
+			}
+		default:
+			return azureImportResult{}, errors.New("file is not a valid Azure VPN profile")
+		}
+	}
+	if !decoded {
+		return azureImportResult{}, errors.New("file is not a valid Azure VPN profile")
+	}
+	// Azure VPN Client exports use the profile name as the root and abbreviated
+	// protocol tags. Recognize that shape without accepting arbitrary XML roots.
+	if !strings.EqualFold(document.XMLName.Local, "AzVpnProfile") &&
+		(strings.TrimSpace(document.Version) == "" || strings.TrimSpace(document.Name) == "" || len(document.ExportProtocol) == 0) {
+		return azureImportResult{}, errors.New("file is not a valid Azure VPN profile")
+	}
+	if !strings.EqualFold(strings.TrimSpace(document.ClientAuth.Type), "aad") {
 		return azureImportResult{}, errors.New("Azure VPN profile does not use Microsoft Entra ID authentication")
 	}
 	servers := make([]string, 0, len(document.Servers.Entries))
 	for _, entry := range document.Servers.Entries {
+		if entry.XMLName.Local != "ServerEntry" && entry.XMLName.Local != "serverentry" {
+			continue
+		}
 		if value := strings.TrimSpace(entry.FQDN); value != "" {
 			servers = append(servers, value)
 		}
 	}
-	if len(servers) == 0 || strings.TrimSpace(raw.ClientAuth.AAD.Audience) == "" {
+	if len(servers) == 0 || strings.TrimSpace(document.ClientAuth.AAD.Audience) == "" {
 		return azureImportResult{}, errors.New("Azure VPN profile is missing gateway or audience settings")
 	}
-	tenant := strings.TrimSpace(raw.ClientAuth.AAD.Tenant)
+	tenant := strings.TrimSpace(document.ClientAuth.AAD.Tenant)
 	if parsed, err := url.Parse(tenant); err == nil && parsed.Host != "" {
 		tenant = strings.Trim(strings.TrimSpace(parsed.Path), "/")
 	}
-	applicationID := strings.TrimSpace(raw.ClientAuth.AAD.ApplicationID)
+	applicationID := strings.TrimSpace(document.ClientAuth.AAD.ApplicationID)
 	if applicationID == "" {
-		applicationID = strings.TrimSpace(raw.ClientAuth.AAD.AppID)
+		applicationID = strings.TrimSpace(document.ClientAuth.AAD.AppID)
+	}
+	transport := ""
+	if len(document.Protocol)+len(document.ExportProtocol) > 1 {
+		return azureImportResult{}, errors.New("Azure VPN profile has conflicting protocol settings")
+	}
+	if len(document.Protocol) == 1 {
+		transport = document.Protocol[0].SSL.Transport
+	}
+	if len(document.ExportProtocol) == 1 {
+		transport = document.ExportProtocol[0].SSL.Transport
+	}
+	transport = strings.ToLower(strings.TrimSpace(transport))
+	if (transport == "" && len(document.ExportProtocol) == 1) || (transport != "" && transport != "tcp" && transport != "udp") {
+		return azureImportResult{}, errors.New("Azure VPN profile transport must be tcp or udp")
 	}
 	protocol := 0
-	if strings.EqualFold(strings.TrimSpace(document.Protocol.SSL.Transport), "udp") {
+	if transport == "udp" {
 		protocol = 1
 	}
 	return azureImportResult{Name: strings.TrimSpace(document.Name), Settings: map[string]any{
 		"Servers": servers, "Protocol": protocol, "TenantId": tenant,
-		"Audience": strings.TrimSpace(raw.ClientAuth.AAD.Audience),
-		"Issuer":   strings.TrimSpace(raw.ClientAuth.AAD.Issuer), "ApplicationId": applicationID,
+		"Audience": strings.TrimSpace(document.ClientAuth.AAD.Audience),
+		"Issuer":   strings.TrimSpace(document.ClientAuth.AAD.Issuer), "ApplicationId": applicationID,
 		"ServerSecretHex": strings.TrimSpace(document.Validation.ServerSecret),
 	}}, nil
 }
