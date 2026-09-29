@@ -92,6 +92,8 @@ func (err *sshHostKeyMismatchError) Error() string {
 }
 
 type sshWireCommand struct {
+	TerminalStream                bool                  `json:"terminal_stream"`
+	Sequence                      uint64                `json:"sequence"`
 	Type                          string                `json:"type"`
 	SessionID                     string                `json:"session_id"`
 	NodeID                        string                `json:"node_id"`
@@ -132,6 +134,11 @@ type sshWireCommand struct {
 }
 
 type sshWireEvent struct {
+	Data                string               `json:"data,omitempty"`
+	Sequence            uint64               `json:"sequence,omitempty"`
+	Reset               bool                 `json:"reset,omitempty"`
+	Columns             int                  `json:"columns,omitempty"`
+	Rows                int                  `json:"rows,omitempty"`
 	Type                string               `json:"type"`
 	RequestID           string               `json:"request_id,omitempty"`
 	SessionID           string               `json:"session_id"`
@@ -259,6 +266,7 @@ type sshCredentialRow struct {
 }
 
 type sshNativeSession struct {
+	terminalStream   *sshTerminalStream
 	id               string
 	client           *ssh.Client
 	session          *ssh.Session
@@ -480,6 +488,10 @@ func (server *sshServer) handle(command sshWireCommand) {
 		server.input(command)
 	case "resize":
 		server.resize(command)
+	case "terminal-ack":
+		if native := server.session(command.SessionID); native != nil && native.terminalStream != nil {
+			native.terminalStream.acknowledge(command.Sequence)
+		}
 	case "snapshot":
 		server.snapshot(command)
 	case "sftp-open":
@@ -666,6 +678,12 @@ func (server *sshServer) connectSSH(ctx context.Context, state *sshReconnectStat
 
 	native.id = command.SessionID
 	native.server = server
+	if command.TerminalStream {
+		native.terminalStream = newSSHTerminalStream(func(event sshWireEvent) {
+			event.SessionID = native.id
+			server.output.write(event)
+		})
+	}
 	native.mcpSession = mcpSessionInfo{
 		ID: command.SessionID, Host: target.host, Port: target.port, Username: target.username,
 		Title: target.title, Status: "connected",
@@ -684,6 +702,9 @@ func (server *sshServer) connectSSH(ctx context.Context, state *sshReconnectStat
 	logInfo("SSH session connected: %s@%s:%d", target.username, target.host, target.port)
 	if server.mcp != nil {
 		server.mcp.sessionConnected(native)
+	}
+	if native.terminalStream != nil {
+		native.terminalStream.send(sshTerminalPacket{reset: true, columns: native.terminal.columns, rows: native.terminal.rows})
 	}
 	native.publishTerminalFrame(native.terminal.initialFrame())
 	native.start()
@@ -1344,6 +1365,9 @@ func (native *sshNativeSession) waitForOutputDrain() {
 	}()
 	select {
 	case <-drained:
+		if native.terminalStream != nil {
+			native.terminalStream.drain(sshOutputDrainTimeout)
+		}
 	case <-time.After(sshOutputDrainTimeout):
 	}
 }
@@ -1353,7 +1377,19 @@ func (native *sshNativeSession) readOutput(reader io.Reader) {
 	for {
 		count, err := reader.Read(buffer)
 		if count > 0 {
-			native.publishTerminalData(buffer[:count])
+			if native.terminalStream == nil {
+				native.publishTerminalData(buffer[:count])
+			} else {
+				native.terminalStream.readerMu.Lock()
+				ready := native.terminalStream.waitForRoom()
+				if ready {
+					native.publishTerminalData(buffer[:count])
+				}
+				native.terminalStream.readerMu.Unlock()
+				if !ready {
+					return
+				}
+			}
 		}
 		if err != nil {
 			return
@@ -1386,6 +1422,17 @@ func (native *sshNativeSession) publishTerminalData(data []byte) {
 
 func (native *sshNativeSession) publishVisibleTerminalDataLocked(data []byte) {
 	native.mcpReplay.append(data)
+	if native.terminalStream != nil {
+		if !native.terminalStream.write(data) {
+			select {
+			case <-native.terminalStream.done:
+			default:
+				native.server.writeError(native.id, "SSH terminal output queue is full")
+				go native.close(true)
+			}
+		}
+		return
+	}
 	frame, changed, recovered, err := writeTerminalResilient(&native.terminal, data)
 	if err != nil {
 		native.server.writeError(native.id, "SSH terminal emulation failed")
@@ -1572,6 +1619,9 @@ func (native *sshNativeSession) publishTerminalFrame(frame *sshTerminalFrame) {
 }
 
 func (native *sshNativeSession) publishTerminalFrameLocked(frame *sshTerminalFrame) {
+	if native.terminalStream != nil {
+		return
+	}
 	native.server.output.write(sshWireEvent{
 		Type:      "screen",
 		SessionID: native.id,
@@ -1580,7 +1630,7 @@ func (native *sshNativeSession) publishTerminalFrameLocked(frame *sshTerminalFra
 }
 
 func (native *sshNativeSession) snapshot() {
-	if native.server == nil || native.terminal == nil {
+	if native.server == nil || native.terminal == nil || native.terminalStream != nil {
 		return
 	}
 	native.terminalOutputMu.Lock()
@@ -1654,7 +1704,9 @@ func (native *sshNativeSession) resize(columns, rows uint32) error {
 	if native.mcpPresentation != nil && !native.mcpPresentation.wrapperWriteStarted {
 		native.mcpPresentation.terminalColumns = int(columns)
 	}
-	if native.terminal != nil {
+	if native.terminalStream != nil {
+		native.terminal.columns, native.terminal.rows = int(columns), int(rows)
+	} else if native.terminal != nil {
 		frame := native.terminal.resize(columns, rows)
 		if native.server != nil {
 			native.publishTerminalFrameLocked(frame)
@@ -1665,6 +1717,9 @@ func (native *sshNativeSession) resize(columns, rows uint32) error {
 
 func (native *sshNativeSession) close(notify bool) {
 	native.closeOnce.Do(func() {
+		if native.terminalStream != nil {
+			native.terminalStream.stop()
+		}
 		native.terminalOutputMu.Lock()
 		native.clearAllMcpCommandPresentationsLocked()
 		native.lifecycleMu.Lock()

@@ -334,6 +334,15 @@ interface WormholeSftpQuickPath {
 }
 
 type WormholeSshEvent =
+  | {
+      type: 'terminal-output';
+      sessionId: string;
+      data: string;
+      sequence: number;
+      reset: boolean;
+      columns: number;
+      rows: number;
+    }
   | { type: 'mcp.access'; sessionId: string; accessible: boolean }
   | ({ type: 'connected' } & WormholeSshConnected)
   | { type: 'screen'; sessionId: string; frame: WormholeSshTerminalFrame }
@@ -1141,6 +1150,7 @@ interface Window {
     cancelSftpTransfer(sessionId: string, transferId: string, itemId?: string): Promise<void>;
     closeSftpBrowser(sessionId: string): Promise<void>;
     closeSshSession(sessionId: string): Promise<void>;
+    acknowledgeSshTerminal(sessionId: string, sequence: number): void;
     onSshEvent(listener: (event: WormholeSshEvent) => void): () => void;
     openSerialSession(request: {
       sessionId: string;

@@ -1,4 +1,9 @@
 import {
+  parseSshTerminalOutput,
+  SshTerminalDelivery,
+  type SshTerminalOutput,
+} from './ssh-terminal-stream.js';
+import {
   app,
   BrowserWindow,
   clipboard,
@@ -938,6 +943,7 @@ type SshSftpTransferItem = {
 };
 
 type SshBackendEvent =
+  | SshTerminalOutput
   | { type: 'mcp.access'; sessionId: string; accessible: boolean }
   | {
       type: 'connected';
@@ -2125,6 +2131,7 @@ function parseSshBackendEvent(line: string): SshBackendEvent | undefined {
       fingerprint: value.fingerprint,
     };
   }
+  if (value.type === 'terminal-output') return parseSshTerminalOutput(value);
   if (value.type === 'screen') {
     const frame = parseSshTerminalFrame(value.frame);
     return frame ? { type: 'screen', sessionId: value.session_id, frame } : undefined;
@@ -6061,6 +6068,27 @@ function describeWebLoadFailure(errorCode: number, description: string): string 
 const webSurfaces = new WebSurfaceManager();
 
 class NativeSshBackend {
+  private terminalDelivery = new SshTerminalDelivery();
+  private terminalOwners = new Map<string, Electron.WebContents>();
+
+  acknowledgeTerminal(owner: Electron.WebContents, sessionId: string, sequence: number): void {
+    if (!authSession.isAccessAllowed || this.terminalOwners.get(sessionId) !== owner) return;
+    if (this.terminalDelivery.acknowledge(sessionId, sequence)) {
+      try {
+        this.write({ type: 'terminal-ack', session_id: sessionId, sequence });
+      } catch {
+        // A late parse callback can race with backend shutdown; its lifecycle owns the error.
+      }
+    }
+  }
+
+  private deliverTerminal(packet: SshTerminalOutput): void {
+    const owner = this.terminalOwners.get(packet.sessionId);
+    if (owner && !owner.isDestroyed() && authSession.isAccessAllowed) {
+      owner.send('ssh:event', packet);
+    }
+  }
+
   private child: ChildProcessWithoutNullStreams | undefined;
   private lineReader: Interface | undefined;
   private controlSequence = 0;
@@ -6088,7 +6116,11 @@ class NativeSshBackend {
     }
   >();
 
-  async open(request: SshOpenRequest, authorizationEpoch: number): Promise<SshConnectedResponse> {
+  async open(
+    request: SshOpenRequest,
+    authorizationEpoch: number,
+    owner: Electron.WebContents,
+  ): Promise<SshConnectedResponse> {
     if (
       this.pendingConnections.has(request.sessionId) ||
       this.openWaiters.has(request.sessionId) ||
@@ -6096,6 +6128,7 @@ class NativeSshBackend {
     ) {
       throw new Error('SSH session id is already in use.');
     }
+    this.terminalOwners.set(request.sessionId, owner);
     const generation = this.connectionAttempts.begin(request.sessionId);
     this.pendingConnections.set(request.sessionId, generation);
     try {
@@ -6181,6 +6214,7 @@ class NativeSshBackend {
     return await this.waitForConnection(request.sessionId, () => {
       this.write({
         type: 'open',
+        terminal_stream: true,
         session_id: request.sessionId,
         node_id: request.nodeId,
         credential_id:
@@ -6376,6 +6410,8 @@ class NativeSshBackend {
   }
 
   async close(sessionId: string): Promise<void> {
+    this.terminalDelivery.remove(sessionId);
+    this.terminalOwners.delete(sessionId);
     this.connectionAttempts.cancel(sessionId);
     const waiter = this.openWaiters.get(sessionId);
     if (waiter) {
@@ -6408,9 +6444,11 @@ class NativeSshBackend {
 
   requestSnapshots(): void {
     if (!authSession.isAccessAllowed || !this.child || this.child.killed) return;
+    for (const packet of this.terminalDelivery.pending()) this.deliverTerminal(packet);
     for (const sessionId of this.activeSessions) {
       try {
-        this.write({ type: 'snapshot', session_id: sessionId });
+        if (!this.terminalOwners.has(sessionId))
+          this.write({ type: 'snapshot', session_id: sessionId });
       } catch {
         return;
       }
@@ -6510,6 +6548,8 @@ class NativeSshBackend {
   }
 
   async dispose(): Promise<void> {
+    this.terminalDelivery.clear();
+    this.terminalOwners.clear();
     mcpApprovalWindowCoordinator.reset();
     for (const sessionId of this.pendingConnections.keys()) {
       this.connectionAttempts.cancel(sessionId);
@@ -6590,6 +6630,8 @@ class NativeSshBackend {
         this.activeSessions,
         this.retainedMismatchSessions,
       );
+      this.terminalDelivery.clear();
+      this.terminalOwners.clear();
       for (const sessionId of closedSessions) {
         this.broadcast({ type: 'closed', sessionId });
       }
@@ -6691,7 +6733,12 @@ class NativeSshBackend {
     const event = parseSshBackendEvent(line);
     if (!event) return;
 
+    if (event.type === 'terminal-output') {
+      if (this.terminalDelivery.receive(event)) this.deliverTerminal(event);
+      return;
+    }
     if (event.type === 'connected') {
+      this.terminalDelivery.remove(event.sessionId);
       this.activeSessions.add(event.sessionId);
       this.retainedMismatchSessions.delete(event.sessionId);
       const waiter = this.openWaiters.get(event.sessionId);
@@ -6723,6 +6770,8 @@ class NativeSshBackend {
         clearTimeout(waiter.timeout);
         waiter.reject(new Error('SSH connection closed while connecting.'));
       }
+      this.terminalDelivery.remove(event.sessionId);
+      this.terminalOwners.delete(event.sessionId);
       this.activeSessions.delete(event.sessionId);
       this.retainedMismatchSessions.delete(event.sessionId);
       void this.releaseTunnel(event.sessionId).catch(() => undefined);
@@ -8441,13 +8490,23 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     if (!ownerWindow || ownerWindow.isDestroyed()) return;
     webSurfaces.closeForOwner(ownerWindow, sessionId);
   });
-  ipcMain.handle('ssh:open', async (_event, request: unknown) => {
+  ipcMain.on('ssh:terminal-ack', (event, sessionId: unknown, sequence: unknown) => {
+    if (
+      !isSshSessionId(sessionId) ||
+      typeof sequence !== 'number' ||
+      !Number.isSafeInteger(sequence) ||
+      sequence < 1
+    )
+      return;
+    sshBackend.acknowledgeTerminal(event.sender, sessionId, sequence);
+  });
+  ipcMain.handle('ssh:open', async (event, request: unknown) => {
     requireNativeResourcesRunning();
     if (!isSshOpenRequest(request)) throw new Error('SSH open request is invalid.');
     return runAuthorizedOperation(
       (authorizationEpoch) => {
         requireNativeResourcesRunning();
-        return sshBackend.open(request, authorizationEpoch);
+        return sshBackend.open(request, authorizationEpoch, event.sender);
       },
       () => sshBackend.close(request.sessionId),
     );

@@ -1,3 +1,4 @@
+import { sshTerminal, retainSshTerminals } from './xterm-terminal';
 import {
   lazy,
   memo,
@@ -2418,7 +2419,22 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   }, [lastActivityAt]);
 
   useEffect(() => {
+    retainSshTerminals(
+      new Set(
+        sessions
+          .filter((session) => session.protocol === 'ssh')
+          .flatMap((session) => (session.backendSessionId ? [session.backendSessionId] : [])),
+      ),
+    );
+  }, [sessions]);
+  useEffect(() => () => retainSshTerminals(new Set()), []);
+
+  useEffect(() => {
     const unsubscribe = window.wormhole?.onSshEvent((event) => {
+      if (event.type === 'terminal-output') {
+        sshTerminal(event.sessionId).receive(event);
+        return;
+      }
       if (event.type === 'mcp.access') {
         setSessions((current) => applySessionMcpAccess(current, event));
         return;
@@ -2467,13 +2483,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
               error: undefined,
             };
           }
-          if (event.type === 'screen') {
-            if (session.status !== 'connected') return session;
-            return {
-              ...session,
-              terminalFrame: applySshTerminalFrame(session.terminalFrame, event.frame),
-            };
-          }
+          if (event.type === 'screen') return session;
           if (event.type === 'reconnecting') {
             return { ...session, ...reconnectingSshState(event) };
           }
@@ -9068,6 +9078,83 @@ function SshTerminalConnectionState({
   );
 }
 
+function SshXtermSurface({
+  session,
+  isActive,
+  isAuthorized,
+  autoCopyOnSelect,
+  onInput,
+  onReconnect,
+  onTrustHostKey,
+}: {
+  session: Session;
+  isActive: boolean;
+  isAuthorized: boolean;
+  autoCopyOnSelect: boolean;
+  onInput: (sessionId: string, value: string, paste?: boolean) => void;
+  onReconnect: (sessionId: string) => void;
+  onTrustHostKey: (sessionId: string, mismatch: NonNullable<Session['hostKeyMismatch']>) => void;
+}) {
+  const surfaceRef = useRef<HTMLDivElement>(null);
+  const backendId = session.backendSessionId;
+  useEffect(() => {
+    const surface = surfaceRef.current;
+    if (!surface || !backendId || session.status !== 'connected') return;
+    const runtime = sshTerminal(backendId);
+    runtime.attach(surface);
+    const observer = new ResizeObserver(() => runtime.fit());
+    observer.observe(surface);
+    return () => {
+      observer.disconnect();
+      runtime.detach();
+    };
+  }, [backendId, session.status]);
+  useEffect(() => {
+    if (!backendId || session.status !== 'connected') return;
+    const runtime = sshTerminal(backendId);
+    runtime.configure({
+      active: isActive && isAuthorized,
+      autoCopy: autoCopyOnSelect,
+      input: (data, paste) => {
+        if (isAuthorized) onInput(session.id, data, paste);
+      },
+      resize: (columns, rows) => {
+        void window.wormhole?.resizeSshSession(backendId, columns, rows).catch(() => undefined);
+      },
+      copy: (text) => {
+        void copyTextToClipboard(text).catch(() => undefined);
+      },
+      paste: async () => (await window.wormhole?.pasteClipboardToSsh(backendId))?.pasted ?? false,
+    });
+    runtime.fit();
+  }, [backendId, session.id, session.status, isActive, isAuthorized, autoCopyOnSelect, onInput]);
+  useEffect(() => {
+    if (backendId && session.status === 'connected' && isActive && isAuthorized)
+      sshTerminal(backendId).focus();
+  }, [backendId, session.status, isActive, isAuthorized]);
+  if (session.status !== 'connected')
+    return (
+      <div
+        aria-label="SSH connection state"
+        className="flex h-full min-h-0 min-w-0 flex-1 items-center justify-center overflow-auto bg-[#090909] px-6 py-10 text-zinc-100"
+      >
+        <SshTerminalConnectionState
+          session={session}
+          isSerial={false}
+          onReconnect={onReconnect}
+          onTrustHostKey={onTrustHostKey}
+        />
+      </div>
+    );
+  return (
+    <div
+      aria-label="Live SSH terminal"
+      className="h-full min-h-0 min-w-0 flex-1 overflow-hidden bg-[#090909]"
+      ref={surfaceRef}
+    />
+  );
+}
+
 function SshTerminalSurface({
   session,
   isActive,
@@ -11120,7 +11207,8 @@ function SessionSurface({
   if (session.protocol === 'ssh') {
     return (
       <>
-        <SshTerminalSurface
+        <SshXtermSurface
+          isAuthorized={isAuthorized}
           autoCopyOnSelect={autoCopyOnSelect}
           isActive={isActive}
           onInput={onSshInput}

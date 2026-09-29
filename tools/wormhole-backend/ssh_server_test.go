@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -3727,143 +3728,164 @@ func TestLoadSSHCredentialWaitsForReplacementBeforeReadingProfile(t *testing.T) 
 }
 
 func TestDialNativeSSHUsesGoSSHClientForPasswordAndPTY(t *testing.T) {
-	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	signer, err := ssh.NewSignerFromKey(privateKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Close()
-
-	serverConfig := &ssh.ServerConfig{
-		PasswordCallback: func(connection ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
-			if connection.User() != "operator" || string(password) != "secret" {
-				return nil, errors.New("invalid test credentials")
+	for _, streamOutput := range []bool{false, true} {
+		t.Run(fmt.Sprint("stream=", streamOutput), func(t *testing.T) {
+			_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+			if err != nil {
+				t.Fatal(err)
 			}
-			return nil, nil
-		},
-	}
-	serverConfig.AddHostKey(signer)
+			signer, err := ssh.NewSignerFromKey(privateKey)
+			if err != nil {
+				t.Fatal(err)
+			}
 
-	serverDone := make(chan error, 1)
-	go func() {
-		rawConnection, acceptErr := listener.Accept()
-		if acceptErr != nil {
-			serverDone <- acceptErr
-			return
-		}
-		serverConnection, channels, requests, handshakeErr := ssh.NewServerConn(rawConnection, serverConfig)
-		if handshakeErr != nil {
-			serverDone <- handshakeErr
-			return
-		}
-		defer serverConnection.Close()
-		go ssh.DiscardRequests(requests)
-		for newChannel := range channels {
-			if newChannel.ChannelType() != "session" {
-				_ = newChannel.Reject(ssh.UnknownChannelType, "test only accepts sessions")
-				continue
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
 			}
-			channel, channelRequests, channelErr := newChannel.Accept()
-			if channelErr != nil {
-				serverDone <- channelErr
-				return
-			}
-			go func() {
-				defer channel.Close()
-				for request := range channelRequests {
-					switch request.Type {
-					case "pty-req":
-						_ = request.Reply(true, nil)
-					case "window-change":
-						_ = request.Reply(true, nil)
-					case "shell":
-						_ = request.Reply(true, nil)
-						_, _ = channel.Write([]byte("native ready\r\n"))
-						go func() {
-							buffer := make([]byte, 128)
-							count, readErr := channel.Read(buffer)
-							if readErr == nil && strings.Contains(string(buffer[:count]), "echo test") {
-								_, _ = channel.Write([]byte("native response\r\n"))
-							}
-							_ = channel.Close()
-						}()
-					default:
-						_ = request.Reply(false, nil)
+			defer listener.Close()
+
+			serverConfig := &ssh.ServerConfig{
+				PasswordCallback: func(connection ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
+					if connection.User() != "operator" || string(password) != "secret" {
+						return nil, errors.New("invalid test credentials")
 					}
-				}
-			}()
-		}
-		serverDone <- nil
-	}()
+					return nil, nil
+				},
+			}
+			serverConfig.AddHostKey(signer)
 
-	target := sshTarget{
-		host:     "127.0.0.1",
-		port:     listener.Addr().(*net.TCPAddr).Port,
-		username: "operator",
-		password: "secret",
-	}
-	native, fingerprint, err := dialNativeSSH(context.Background(), target, 80, 24)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fingerprint != ssh.FingerprintSHA256(signer.PublicKey()) {
-		t.Fatalf("unexpected host fingerprint: %q", fingerprint)
-	}
-	var output synchronizedBuffer
-	server := &sshServer{
-		output: &sshEventWriter{encoder: json.NewEncoder(&output)},
-		sessions: map[string]*sshNativeSession{
-			"native": native,
-		},
-	}
-	native.id = "native"
-	native.server = server
-	native.start()
-	native.start()
-	if err := native.resize(100, 30); err != nil {
-		t.Fatalf("native resize failed: %v", err)
-	}
-	native.snapshot()
-	if err := native.write([]byte("echo test\r")); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case <-native.done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("native SSH lifecycle did not finish")
-	}
-	native.waitForOutputDrain()
-	native.close(true)
-	if replay := string(native.mcpReplay.snapshotTail(4096)); !strings.Contains(replay, "native ready") || !strings.Contains(replay, "native response") {
-		t.Fatalf("unexpected terminal replay: %q", replay)
-	}
-	events := decodeSSHEvents(t, output.Bytes())
-	var screens, closed int
-	for _, event := range events {
-		switch event.Type {
-		case "screen":
-			screens++
-		case "closed":
-			closed++
-		}
-	}
-	if screens == 0 || closed != 1 {
-		t.Fatalf("native lifecycle events = %#v", events)
-	}
-	select {
-	case err := <-serverDone:
-		if err != nil {
-			t.Fatal(err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("SSH test server did not stop")
+			serverDone := make(chan error, 1)
+			go func() {
+				rawConnection, acceptErr := listener.Accept()
+				if acceptErr != nil {
+					serverDone <- acceptErr
+					return
+				}
+				serverConnection, channels, requests, handshakeErr := ssh.NewServerConn(rawConnection, serverConfig)
+				if handshakeErr != nil {
+					serverDone <- handshakeErr
+					return
+				}
+				defer serverConnection.Close()
+				go ssh.DiscardRequests(requests)
+				for newChannel := range channels {
+					if newChannel.ChannelType() != "session" {
+						_ = newChannel.Reject(ssh.UnknownChannelType, "test only accepts sessions")
+						continue
+					}
+					channel, channelRequests, channelErr := newChannel.Accept()
+					if channelErr != nil {
+						serverDone <- channelErr
+						return
+					}
+					go func() {
+						defer channel.Close()
+						for request := range channelRequests {
+							switch request.Type {
+							case "pty-req":
+								_ = request.Reply(true, nil)
+							case "window-change":
+								_ = request.Reply(true, nil)
+							case "shell":
+								_ = request.Reply(true, nil)
+								_, _ = channel.Write([]byte("native ready\r\n"))
+								go func() {
+									buffer := make([]byte, 128)
+									count, readErr := channel.Read(buffer)
+									if readErr == nil && strings.Contains(string(buffer[:count]), "echo test") {
+										_, _ = channel.Write([]byte("native response\r\n"))
+									}
+									_ = channel.Close()
+								}()
+							default:
+								_ = request.Reply(false, nil)
+							}
+						}
+					}()
+				}
+				serverDone <- nil
+			}()
+
+			target := sshTarget{
+				host:     "127.0.0.1",
+				port:     listener.Addr().(*net.TCPAddr).Port,
+				username: "operator",
+				password: "secret",
+			}
+			native, fingerprint, err := dialNativeSSH(context.Background(), target, 80, 24)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if fingerprint != ssh.FingerprintSHA256(signer.PublicKey()) {
+				t.Fatalf("unexpected host fingerprint: %q", fingerprint)
+			}
+			var output synchronizedBuffer
+			server := &sshServer{
+				output: &sshEventWriter{encoder: json.NewEncoder(&output)},
+				sessions: map[string]*sshNativeSession{
+					"native": native,
+				},
+			}
+			native.id = "native"
+			native.server = server
+			if streamOutput {
+				native.terminalStream = newSSHTerminalStream(func(event sshWireEvent) {
+					event.SessionID = native.id
+					server.output.write(event)
+					server.handle(sshWireCommand{Type: "terminal-ack", SessionID: native.id, Sequence: event.Sequence})
+				})
+				native.terminalStream.send(sshTerminalPacket{reset: true, columns: 80, rows: 24})
+			}
+			native.start()
+			native.start()
+			if err := native.resize(100, 30); err != nil {
+				t.Fatalf("native resize failed: %v", err)
+			}
+			native.snapshot()
+			if err := native.write([]byte("echo test\r")); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-native.done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("native SSH lifecycle did not finish")
+			}
+			native.waitForOutputDrain()
+			native.close(true)
+			if replay := string(native.mcpReplay.snapshotTail(4096)); !strings.Contains(replay, "native ready") || !strings.Contains(replay, "native response") {
+				t.Fatalf("unexpected terminal replay: %q", replay)
+			}
+			events := decodeSSHEvents(t, output.Bytes())
+			var screens, closed, packets int
+			var raw bytes.Buffer
+			for _, event := range events {
+				switch event.Type {
+				case "terminal-output":
+					packets++
+					decoded, decodeErr := base64.StdEncoding.DecodeString(event.Data)
+					if decodeErr != nil {
+						t.Fatal(decodeErr)
+					}
+					raw.Write(decoded)
+				case "screen":
+					screens++
+				case "closed":
+					closed++
+				}
+			}
+			if (streamOutput && (screens != 0 || packets < 2 || !strings.Contains(raw.String(), "native ready") || !strings.Contains(raw.String(), "native response"))) || (!streamOutput && screens == 0) || closed != 1 {
+				t.Fatalf("native lifecycle events = %#v", events)
+			}
+			select {
+			case err := <-serverDone:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("SSH test server did not stop")
+			}
+
+		})
 	}
 }
