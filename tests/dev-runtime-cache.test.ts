@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
@@ -14,9 +15,11 @@ import path from 'node:path';
 import test from 'node:test';
 import {
   devRuntimeCacheAllowed,
+  devRuntimeCompilerIdentity,
   devRuntimeEnvironment,
   devRuntimeGoEnvironment,
   devRuntimeGoModuleDirectories,
+  devRuntimeReplacementsAllowed,
   runCachedDevRuntimeBuild,
 } from '../scripts/dev-runtime-cache.ts';
 import type { DevRuntimeBuildStep } from '../scripts/dev-runtime-plan.ts';
@@ -292,6 +295,250 @@ test('automatic PGO reuses unchanged builds and tracks the main-package profile'
   run();
   assert.equal(f.builds.length, 2);
 });
+
+test('local Go replacements are reusable only within each consumer tracked inputs', (t) => {
+  const f = fixture(t);
+  const cwd = path.join(f.root, 'source');
+  const module = (target: string, version?: string) =>
+    JSON.stringify({
+      Module: { Path: 'example.test/main' },
+      Replace: [{ New: { Path: target, Version: version } }],
+    });
+  f.write('tools/internal/dep/main.go');
+  f.step.inputs.push('tools/internal');
+  assert.equal(
+    devRuntimeReplacementsAllowed(f.root, cwd, module('../tools/internal/dep'), f.options.plan),
+    true,
+  );
+  assert.equal(
+    devRuntimeReplacementsAllowed(
+      f.root,
+      cwd,
+      module('example.test/dep', 'v1.0.0'),
+      f.options.plan,
+    ),
+    true,
+  );
+  f.write('external/dep/main.go');
+  assert.equal(
+    devRuntimeReplacementsAllowed(f.root, cwd, module('../external/dep'), f.options.plan),
+    false,
+  );
+  assert.equal(
+    devRuntimeReplacementsAllowed(
+      f.root,
+      cwd,
+      module(path.join(f.root, 'external/dep')),
+      f.options.plan,
+    ),
+    false,
+  );
+  const other = { ...f.step, inputs: ['external/dep'], outputs: ['dist/other'] };
+  assert.equal(
+    devRuntimeReplacementsAllowed(f.root, cwd, module('../external/dep'), [f.step, other]),
+    false,
+  );
+  f.write('source/obj/dep/main.go');
+  f.step.excludedInputs = ['source/obj'];
+  assert.equal(
+    devRuntimeReplacementsAllowed(f.root, cwd, module('obj/dep'), f.options.plan),
+    false,
+  );
+  f.write('source/node_modules/dep/main.go');
+  assert.equal(
+    devRuntimeReplacementsAllowed(f.root, cwd, module('node_modules/dep'), f.options.plan),
+    false,
+  );
+  f.write('source-other/dep/main.go');
+  assert.equal(
+    devRuntimeReplacementsAllowed(f.root, cwd, module('../source-other/dep'), f.options.plan),
+    false,
+  );
+  assert.equal(
+    devRuntimeReplacementsAllowed(f.root, cwd, module('../missing'), f.options.plan),
+    false,
+  );
+  assert.equal(devRuntimeReplacementsAllowed(f.root, cwd, module('.'), []), false);
+  for (const malformed of [
+    '',
+    '{}',
+    'null',
+    '{broken',
+    '{"Module":{"Path":"x"},"Replace":42}',
+    '{"Module":{"Path":"x"},"Replace":[{}]}',
+  ])
+    assert.equal(devRuntimeReplacementsAllowed(f.root, cwd, malformed, f.options.plan), false);
+  assert.equal(
+    devRuntimeReplacementsAllowed(f.root, cwd, '{"Module":{"Path":"x"}}', f.options.plan),
+    true,
+  );
+  assert.equal(
+    devRuntimeReplacementsAllowed(
+      f.root,
+      cwd,
+      '{"Module":{"Path":"x"},"Replace":null}',
+      f.options.plan,
+    ),
+    true,
+  );
+});
+
+test('external replacements force rebuilding after edits; tracked replacements invalidate normally', (t) => {
+  const f = fixture(t);
+  const cwd = path.join(f.root, 'source');
+  f.write('external/dep/main.go');
+  const module = JSON.stringify({
+    Module: { Path: 'main' },
+    Replace: [{ New: { Path: '../external/dep' } }],
+  });
+  const run = () =>
+    runCachedDevRuntimeBuild({
+      ...f.options,
+      context: { module },
+      force: !devRuntimeReplacementsAllowed(f.root, cwd, module, f.options.plan),
+    });
+  run();
+  f.write('external/dep/main.go', 'edited external replacement');
+  run();
+  assert.equal(f.builds.length, 2);
+  f.step.inputs.push('external/dep');
+  run();
+  run();
+  assert.equal(f.builds.length, 3);
+  f.write('external/dep/main.go', 'edited tracked replacement');
+  run();
+  assert.equal(f.builds.length, 4);
+});
+
+test('selected compiler identities detect same-path upgrades and preserve PATH search order', (t) => {
+  const f = fixture(t);
+  f.write('first/clang', 'compiler one');
+  f.write('second/clang', 'compiler two');
+  chmodSync(path.join(f.root, 'first/clang'), 0o755);
+  chmodSync(path.join(f.root, 'second/clang'), 0o755);
+  const identity = () =>
+    devRuntimeCompilerIdentity('clang', f.root, { PATH: 'missing:first:second' }, 'darwin');
+  assert.equal(identity()?.executable, path.join(f.root, 'first/clang'));
+  const run = () => runCachedDevRuntimeBuild({ ...f.options, context: identity() });
+  run();
+  run();
+  assert.equal(f.builds.length, 1);
+  f.write('first/clang', 'upgraded compiler at same path');
+  run();
+  assert.equal(f.builds.length, 2);
+  f.write('compiler with spaces', 'custom compiler');
+  chmodSync(path.join(f.root, 'compiler with spaces'), 0o755);
+  assert.ok(
+    devRuntimeCompilerIdentity(
+      `"${path.join(f.root, 'compiler with spaces')}"`,
+      f.root,
+      {},
+      'darwin',
+    ),
+  );
+  for (const unsupported of [
+    '',
+    'ccache clang',
+    'clang -arch arm64',
+    '"unterminated',
+    'unavailable',
+  ])
+    assert.equal(devRuntimeCompilerIdentity(unsupported, f.root, {}), null);
+  f.write('windows/gcc.exe', 'Windows compiler');
+  assert.ok(devRuntimeCompilerIdentity('gcc', f.root, { Path: 'missing;windows' }, 'win32'));
+  assert.equal(devRuntimeCompilerIdentity('first', f.root, { PATH: '.' }, 'darwin'), null);
+});
+
+test(
+  'OpenVPN context probes the compiler selected after PATH filtering without building',
+  { skip: process.platform !== 'win32' },
+  (t) => {
+    const f = fixture(t);
+    f.write('overlay/msys-2.0.dll');
+    f.write('overlay/gcc.cmd', '@echo ignored compiler\r\n');
+    f.write('selected/gcc.cmd', '@echo selected compiler\r\n');
+    f.write('selected/g++.cmd', '@echo selected C++ compiler\r\n');
+    const probe = () => {
+      const result = spawnSync(
+        'powershell.exe',
+        [
+          '-NoProfile',
+          '-ExecutionPolicy',
+          'Bypass',
+          '-File',
+          path.resolve('scripts/Fetch-OvpnProxy.ps1'),
+          '-Arch',
+          'x64',
+          '-PrintBuildContext',
+        ],
+        {
+          encoding: 'utf8',
+          windowsHide: true,
+          env: {
+            ...process.env,
+            PATH: [
+              path.join(f.root, 'overlay'),
+              path.join(f.root, 'selected'),
+              process.env.PATH,
+            ].join(';'),
+          },
+        },
+      );
+      assert.equal(result.status, 0, result.stderr);
+      return JSON.parse(result.stdout);
+    };
+    const original = probe();
+    assert.equal(original.Tools[0].Path, path.join(f.root, 'selected/gcc.cmd'));
+    f.write('selected/gcc.cmd', '@echo selected compiler upgraded\r\n');
+    assert.notEqual(probe().Tools[0].Sha256, original.Tools[0].Sha256);
+  },
+);
+
+test(
+  'OpenVPN compiler migrations reset CMake with the complete toolchain arguments',
+  { skip: process.platform !== 'win32' },
+  (t) => {
+    const f = fixture(t);
+    const cc = path.join(f.root, 'gcc.exe');
+    const cxx = path.join(f.root, 'g++.exe');
+    const probe = () => {
+      const result = spawnSync(
+        'powershell.exe',
+        [
+          '-NoProfile',
+          '-ExecutionPolicy',
+          'Bypass',
+          '-Command',
+          '. $env:WORMHOLE_TEST_SCRIPT -PrintBuildContext | Out-Null; $actual = Get-OvpnCmakeCompilerArguments $env:WORMHOLE_TEST_CACHE $env:WORMHOLE_TEST_CC $env:WORMHOLE_TEST_CXX; ConvertTo-Json -InputObject @($actual) -Compress',
+        ],
+        {
+          encoding: 'utf8',
+          windowsHide: true,
+          env: {
+            ...process.env,
+            WORMHOLE_TEST_SCRIPT: path.resolve('scripts/Fetch-OvpnProxy.ps1'),
+            WORMHOLE_TEST_CACHE: path.join(f.root, 'CMakeCache.txt'),
+            WORMHOLE_TEST_CC: cc,
+            WORMHOLE_TEST_CXX: cxx,
+          },
+        },
+      );
+      assert.equal(result.status, 0, result.stderr);
+      return JSON.parse(result.stdout);
+    };
+    const selected = [`-DCMAKE_C_COMPILER=${cc}`, `-DCMAKE_CXX_COMPILER=${cxx}`];
+    assert.deepEqual(probe(), selected);
+    f.write(
+      'CMakeCache.txt',
+      `CMAKE_C_COMPILER:FILEPATH=${cc.toUpperCase()}\nCMAKE_CXX_COMPILER:STRING=${cxx}\n`,
+    );
+    assert.deepEqual(probe(), selected);
+    for (const kind of ['FILEPATH', 'STRING', 'UNINITIALIZED']) {
+      f.write('CMakeCache.txt', `CMAKE_CXX_COMPILER:${kind}=${path.join(f.root, 'old-g++.exe')}\n`);
+      assert.deepEqual(probe(), [...selected, '--fresh']);
+    }
+  },
+);
 
 test('bootstrap failures stop the build and cannot create a cache stamp', (t) => {
   const f = fixture(t);

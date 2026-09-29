@@ -254,14 +254,15 @@ func TestMRemoteImportCancellationAndFailureRollbackAtomically(t *testing.T) {
 
 func TestMRemoteImportPlanRejectsFileOrWorkspaceDrift(t *testing.T) {
 	databasePath := newMRemoteTestDatabase(t)
-	path := writeMRemoteFixture(t, validMRemoteFixture(t))
+	contents := validMRemoteFixture(t)
+	path := writeMRemoteFixture(t, contents)
 	request := mremoteImportRequest{Path: path, Password: mremoteTestPassword, PlanNonce: "88888888-8888-4888-8888-888888888888"}
 	plan, err := analyzeMRemoteImport(databasePath, request)
 	if err != nil {
 		t.Fatal(err)
 	}
 	request.PlanToken = plan.PlanToken
-	if err := os.WriteFile(path, []byte(strings.Replace(validMRemoteFixture(t), "Top", "Changed", 1)), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(strings.Replace(contents, `Name="Top"`, `Name="Changed"`, 1)), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := commitMRemoteImport(databasePath, request); err == nil || !strings.Contains(err.Error(), "changed") {

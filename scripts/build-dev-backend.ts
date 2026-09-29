@@ -3,9 +3,11 @@ import { fileURLToPath } from 'node:url';
 import { createDevRuntimeBuildPlan, devRuntimeToolchainCommands } from './dev-runtime-plan.ts';
 import {
   devRuntimeCacheAllowed,
+  devRuntimeCompilerIdentity,
   devRuntimeEnvironment,
   devRuntimeGoEnvironment,
   devRuntimeGoModuleDirectories,
+  devRuntimeReplacementsAllowed,
   runCachedDevRuntimeBuild,
 } from './dev-runtime-cache.ts';
 
@@ -43,11 +45,51 @@ const registryEnvironment =
         { encoding: 'utf8', windowsHide: true },
       ).stdout
     : '';
-const goEnvironments = devRuntimeGoModuleDirectories(root, buildPlan).map((cwd) =>
-  devRuntimeGoEnvironment(
+let ovpnBuildContext: { Cacheable?: boolean } | null = null;
+if (process.platform === 'win32') {
+  try {
+    ovpnBuildContext = JSON.parse(
+      spawnSync(buildPlan[0].command, [...buildPlan[0].args, '-PrintBuildContext'], {
+        encoding: 'utf8',
+        windowsHide: true,
+      }).stdout,
+    );
+  } catch {
+    // A failed native probe must not enable cache reuse.
+  }
+}
+const goContexts = devRuntimeGoModuleDirectories(root, buildPlan).map((cwd) => {
+  const environment = devRuntimeGoEnvironment(
     spawnSync('go', ['env', '-json'], { cwd, encoding: 'utf8', windowsHide: true }).stdout,
-  ),
-);
+  );
+  const module = spawnSync('go', ['mod', 'edit', '-json'], {
+    cwd,
+    encoding: 'utf8',
+    windowsHide: true,
+  }).stdout;
+  let compilers: unknown[] = [];
+  if (
+    process.platform === 'darwin' &&
+    cwd === fileURLToPath(new URL('../tools/wormhole-backend', import.meta.url))
+  ) {
+    try {
+      const { CC, CXX } = JSON.parse(environment);
+      compilers = [CC, CXX].map((command) => {
+        const identity = devRuntimeCompilerIdentity(command ?? '', cwd, process.env);
+        return (
+          identity && {
+            ...identity,
+            version: spawnSync(identity.executable, ['--version'], { cwd, encoding: 'utf8' })
+              .stdout,
+          }
+        );
+      });
+    } catch {
+      compilers = [null];
+    }
+  }
+  return { cwd, environment, module, compilers };
+});
 
 runCachedDevRuntimeBuild({
   root,
@@ -58,11 +100,18 @@ runCachedDevRuntimeBuild({
     environment,
     toolchains,
     registryEnvironment,
-    goEnvironments,
+    ovpnBuildContext,
+    goContexts,
   },
   force:
     process.argv.includes('--force') ||
-    goEnvironments.some((environment) => !devRuntimeCacheAllowed(environment)),
+    (process.platform === 'win32' && ovpnBuildContext?.Cacheable !== true) ||
+    goContexts.some(
+      ({ cwd, environment, module, compilers }) =>
+        !devRuntimeCacheAllowed(environment) ||
+        !devRuntimeReplacementsAllowed(root, cwd, module, buildPlan) ||
+        compilers.some((compiler) => !compiler),
+    ),
   execute(step) {
     const result = spawnSync(step.command, step.args, { stdio: 'inherit', windowsHide: true });
     if (result.error) {

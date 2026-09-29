@@ -135,11 +135,17 @@ flags bypass the native cache, since those can depend on files outside this
 repository. Explicit PGO profile paths also bypass reuse; `-pgo=auto` remains
 cacheable because the main-package profile is tracked, and `-pgo=off` needs no
 profile. Go's `-a` flag bypasses reuse to honor its requested rebuild.
+Local Go replacements outside the component's tracked source directories also
+bypass reuse. Native compiler identities include the selected executable's
+contents and version, using OpenVPN's actual Windows PATH resolution and the
+macOS backend's effective Go compiler settings. Compound compiler/wrapper
+commands on macOS conservatively bypass reuse.
 
 `npm run test:dev-runtime` covers cache invalidation and build planning. The
 compiler-launch entrypoint is excluded from Node loaded-module coverage because
 it invokes external Go/.NET/CMake toolchains; verify it with an actual development
-startup as well.
+startup as well. The PowerShell compiler-context probe is likewise outside Node
+coverage and is verified by a real process test of PATH filtering and upgrades.
 
 Build the renderer, Electron process, and current-host Go backend:
 

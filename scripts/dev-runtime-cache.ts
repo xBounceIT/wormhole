@@ -6,6 +6,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -84,6 +85,104 @@ export function devRuntimeGoModuleDirectories(root: string, plan: DevRuntimeBuil
   return [...new Set(plan.flatMap((step) => step.inputs))]
     .map((input) => path.join(root, input))
     .filter((directory) => existsSync(path.join(directory, 'go.mod')));
+}
+
+export function devRuntimeReplacementsAllowed(
+  root: string,
+  moduleDirectory: string,
+  contents: string,
+  plan: DevRuntimeBuildStep[],
+): boolean {
+  try {
+    const module = JSON.parse(contents);
+    if (!module?.Module?.Path || (module.Replace != null && !Array.isArray(module.Replace)))
+      return false;
+    const normalize = (value: string) =>
+      process.platform === 'win32' ? value.toLowerCase() : value;
+    const contains = (directory: string, target: string) => {
+      const relative = path.relative(normalize(directory), normalize(target));
+      return (
+        relative === '' ||
+        (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative))
+      );
+    };
+    const steps = plan.filter((step) =>
+      step.inputs.some(
+        (input) => normalize(path.resolve(root, input)) === normalize(moduleDirectory),
+      ),
+    );
+    return (
+      steps.length > 0 &&
+      (module.Replace ?? []).every(
+        ({ New: replacement }: { New: { Path: string; Version?: string } }) => {
+          if (!replacement?.Path) return false;
+          if (replacement.Version) return true;
+          const target = realpathSync(path.resolve(moduleDirectory, replacement.Path));
+          return steps.every((step) =>
+            step.inputs.some((input) => {
+              const directory = path.resolve(root, input);
+              if (!existsSync(directory) || !statSync(directory).isDirectory()) return false;
+              const resolved = realpathSync(directory);
+              if (!contains(resolved, target)) return false;
+              if (
+                path
+                  .relative(resolved, target)
+                  .split(path.sep)
+                  .some((part) => metadataDirectories.has(normalize(part)))
+              )
+                return false;
+              return !(step.excludedInputs ?? []).some((excluded) =>
+                contains(
+                  existsSync(path.resolve(root, excluded))
+                    ? realpathSync(path.resolve(root, excluded))
+                    : path.resolve(root, excluded),
+                  target,
+                ),
+              );
+            }),
+          );
+        },
+      )
+    );
+  } catch {
+    return false;
+  }
+}
+
+export function devRuntimeCompilerIdentity(
+  command: string,
+  cwd: string,
+  environment: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform = process.platform,
+): { executable: string; sha256: string } | null {
+  // Compound compiler/wrapper commands can depend on arbitrary arguments and
+  // helper programs. Conservatively rebuild instead of parsing shell syntax.
+  const quoted = command.match(/^(['"])([^'"\r\n]+)\1$/);
+  const executable = quoted?.[2] ?? command;
+  if (!executable || (!quoted && /[\s'"]/.test(executable))) return null;
+  const searchPath =
+    Object.entries(environment).find(([name]) => name.toUpperCase() === 'PATH')?.[1] ?? '';
+  const directories = /[/\\]/.test(executable)
+    ? ['']
+    : searchPath.split(platform === 'win32' ? ';' : ':');
+  const suffixes =
+    platform === 'win32' && !path.extname(executable) ? ['.exe', '.com', '.cmd', '.bat'] : [''];
+  for (const directory of directories) {
+    for (const suffix of suffixes) {
+      const candidate = path.resolve(cwd, directory, executable + suffix);
+      try {
+        if (!statSync(candidate).isFile()) continue;
+        if (platform !== 'win32') accessSync(candidate, constants.X_OK);
+        return {
+          executable: realpathSync(candidate),
+          sha256: createHash('sha256').update(readFileSync(candidate)).digest('hex'),
+        };
+      } catch {
+        // Keep searching PATH; an unresolved compiler disables reuse.
+      }
+    }
+  }
+  return null;
 }
 
 function fingerprint(root: string, inputs: string[], excludedInputs: string[] = []): string {
