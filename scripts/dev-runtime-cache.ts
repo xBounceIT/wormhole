@@ -57,7 +57,9 @@ export function devRuntimeCacheEnvironmentAllowed(
   return !Object.entries(environment).some(
     ([name, value]) =>
       Boolean(value) &&
-      /^(?:CMAKE_.*(?:PATH|FILE|ROOT)|(?:ASIO|JSONCPP|LZ4|XXHASH)_(?:ROOT|DIR))$/i.test(name),
+      /^(?:CMAKE_.*(?:PATH|FILE|ROOT)|(?:ASIO|JSONCPP|LZ4|XXHASH)_(?:ROOT|DIR)|VCPKG_OVERLAY_(?:PORTS|TRIPLETS))$/i.test(
+        name,
+      ),
   );
 }
 

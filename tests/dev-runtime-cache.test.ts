@@ -110,6 +110,8 @@ test('CMake dependency inputs are captured and mutable external roots disable re
     'jsoncpp_DIR',
     'LZ4_ROOT',
     'XXHASH_DIR',
+    'VCPKG_OVERLAY_PORTS',
+    'VCPKG_OVERLAY_TRIPLETS',
   ]) {
     const environment = devRuntimeEnvironment(
       { [name]: '/external/native-input' },
@@ -120,7 +122,12 @@ test('CMake dependency inputs are captured and mutable external roots disable re
   }
   assert.equal(devRuntimeCacheEnvironmentAllowed({}), true);
   assert.equal(
-    devRuntimeCacheEnvironmentAllowed({ CMAKE_PREFIX_PATH: '', ASIO_ROOT: undefined }),
+    devRuntimeCacheEnvironmentAllowed({
+      CMAKE_PREFIX_PATH: '',
+      ASIO_ROOT: undefined,
+      VCPKG_OVERLAY_PORTS: '',
+      VCPKG_OVERLAY_TRIPLETS: undefined,
+    }),
     true,
   );
   assert.equal(
@@ -147,6 +154,20 @@ test('CMake dependency inputs are captured and mutable external roots disable re
     environment,
     devRuntimeEnvironment({ CMAKE_INCLUDE_PATH: 'external/other' }, process.platform),
   );
+  for (const name of ['VCPKG_OVERLAY_PORTS', 'VCPKG_OVERLAY_TRIPLETS']) {
+    const environment = devRuntimeEnvironment({ [name]: 'external/overlay' }, process.platform);
+    const run = () =>
+      runCachedDevRuntimeBuild({
+        ...f.options,
+        context: { environment },
+        force: !devRuntimeCacheEnvironmentAllowed(environment),
+      });
+    const before: number = f.builds.length;
+    run();
+    f.write('external/overlay/portfile.cmake', 'changed overlay at the same path');
+    run();
+    assert.equal(f.builds.length, before + 2);
+  }
 });
 
 test('vcpkg checkout and manifest-installed dependency contents invalidate native reuse', (t) => {
