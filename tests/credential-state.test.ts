@@ -147,7 +147,7 @@ test('saved connection form blocks missing credential selections before workspac
   );
   assert.match(
     appSource,
-    /disabled=\{editorBusy \|\| !connectionEditorCredentialSelectionComplete\}/,
+    /disabled=\{\s*editorBusy\s*\|\|[^}]*!connectionEditorCredentialSelectionComplete\s*\}/,
   );
   assert.match(
     credentialFieldSource,

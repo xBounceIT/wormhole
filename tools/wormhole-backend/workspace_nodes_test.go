@@ -20,6 +20,7 @@ CREATE TABLE Nodes (
     Id TEXT PRIMARY KEY NOT NULL,
     ParentId TEXT NULL,
     Name TEXT NOT NULL,
+    Notes TEXT NULL,
     Kind INTEGER NOT NULL,
     SortOrder INTEGER NOT NULL DEFAULT 0,
     Protocol INTEGER NULL,

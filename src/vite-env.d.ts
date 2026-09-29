@@ -117,6 +117,7 @@ interface WormholeRdpBackendEvent {
 interface WormholeWorkspaceNode {
   id: string;
   name: string;
+  notes?: string;
   kind: 'folder' | 'connection';
   protocol?: WormholeProtocol;
   host?: string;
@@ -752,6 +753,7 @@ interface Window {
     unlockStartup(request: WormholeAuthVerificationRequest): Promise<WormholeStartupUnlock>;
     markStartupReady(): void;
     loadWorkspace(): Promise<WormholeWorkspaceSnapshot>;
+    loadWorkspaceNodeNotes(request: { nodeId: string }): Promise<{ notes: string }>;
     selectMRemoteImport(): Promise<WormholeMRemoteImportInspection | null>;
     analyzeMRemoteImport(options: {
       password: string;
@@ -785,6 +787,7 @@ interface Window {
     createWorkspaceNode(request: {
       parentId: string;
       name: string;
+      notes?: string;
       kind: 'folder' | 'connection';
       protocol: '' | WormholeProtocol;
       host: string;
@@ -809,6 +812,7 @@ interface Window {
       id: string;
       parentId: string;
       name: string;
+      notes?: string;
       kind: 'folder' | 'connection';
       protocol: '' | WormholeProtocol;
       host: string;

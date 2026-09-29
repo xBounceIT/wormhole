@@ -7,18 +7,22 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf16"
 	"unicode/utf8"
 )
 
 const (
-	workspaceNodeFolder     = int64(0)
-	workspaceNodeConnection = int64(1)
+	workspaceNodeFolder               = int64(0)
+	workspaceNodeConnection           = int64(1)
+	workspaceNotesMaxLength           = 16384
+	workspaceNodeWriteMaxRequestBytes = 256 * 1024
 )
 
 type workspaceNodeWriteRequest struct {
 	ID                   string                `json:"id"`
 	ParentID             string                `json:"parentId"`
 	Name                 string                `json:"name"`
+	Notes                *string               `json:"notes"`
 	Kind                 string                `json:"kind"`
 	Protocol             string                `json:"protocol"`
 	Host                 string                `json:"host"`
@@ -44,6 +48,7 @@ type normalizedWorkspaceNode struct {
 	id                   string
 	parentID             string
 	name                 string
+	notes                *string
 	kind                 int64
 	protocol             sql.NullInt64
 	host                 sql.NullString
@@ -118,7 +123,7 @@ func createWorkspaceNode(databasePath string, request workspaceNodeWriteRequest)
 		node.serialBaudRate, node.serialDataBits, node.serialStopBits, node.serialParity, node.serialFlowControl,
 	}
 	insertArgs = append(insertArgs, workspaceRdpDatabaseValues(node.rdp)...)
-	insertArgs = append(insertArgs, now, now)
+	insertArgs = append(insertArgs, node.notes, now, now)
 	_, err = tx.Exec(`
 INSERT INTO Nodes (
     Id, ParentId, Name, Kind, SortOrder, Protocol, Host, Port,
@@ -132,8 +137,8 @@ INSERT INTO Nodes (
     RdpDesktopComposition, RdpWindowDrag, RdpMenuAnimation, RdpVisualStyles,
     RdpBitmapCaching, RdpAutoReconnect, RdpServerAuthentication, RdpGatewayUsageMethod,
     RdpGatewayHostname, RdpGatewayCredentialId, RdpGatewayBypassLocal,
-    RdpGatewayUseSameCreds, RdpUseExternalClient, CreatedAt, UpdatedAt)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`, insertArgs...)
+    RdpGatewayUseSameCreds, RdpUseExternalClient, Notes, CreatedAt, UpdatedAt)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`, insertArgs...)
 	if err != nil {
 		return "", fmt.Errorf("could not create workspace node: %w", err)
 	}
@@ -201,7 +206,7 @@ WHERE lower(Id) = ? AND Kind = ?;`,
 				node.serialBaudRate, node.serialDataBits, node.serialStopBits, node.serialParity, node.serialFlowControl,
 			}
 			updateArgs = append(updateArgs, workspaceRdpDatabaseValues(node.rdp)...)
-			updateArgs = append(updateArgs, time.Now().UTC().Format(time.RFC3339Nano), node.id, node.kind)
+			updateArgs = append(updateArgs, node.notes, time.Now().UTC().Format(time.RFC3339Nano), node.id, node.kind)
 			result, err = tx.Exec(`
 UPDATE Nodes SET
     ParentId = ?, Name = ?, Protocol = ?, Host = ?, Port = ?,
@@ -217,7 +222,7 @@ UPDATE Nodes SET
     RdpBitmapCaching = ?, RdpAutoReconnect = ?, RdpServerAuthentication = ?, RdpGatewayUsageMethod = ?,
     RdpGatewayHostname = ?, RdpGatewayCredentialId = ?, RdpGatewayBypassLocal = ?,
     RdpGatewayUseSameCreds = ?, RdpUseExternalClient = ?,
-    UpdatedAt = ?
+    Notes = COALESCE(?, Notes), UpdatedAt = ?
 WHERE lower(Id) = ? AND Kind = ?;`, updateArgs...)
 		} else {
 			// Protocol-specific values that are not visible remain untouched when a connection is
@@ -228,14 +233,14 @@ UPDATE Nodes SET
     CredentialId = ?, CredentialMode = ?, UseInlinePassword = ?, SshAutoSudo = ?,
     HttpIgnoreCertErrors = ?, HttpPath = ?, TunnelEnabled = ?, TunnelConfigId = ?,
     SerialBaudRate = ?, SerialDataBits = ?, SerialStopBits = ?, SerialParity = ?, SerialFlowControl = ?,
-    UpdatedAt = ?
+    Notes = COALESCE(?, Notes), UpdatedAt = ?
 WHERE lower(Id) = ? AND Kind = ?;`,
 				nullableWorkspaceNodeString(node.parentID), node.name,
 				nullableWorkspaceNodeInt(node.protocol), nullableWorkspaceNodeSQLString(node.host), nullableWorkspaceNodeInt(node.port),
 				node.username, node.credentialID, node.credentialMode, node.useInlinePassword,
 				node.sshAutoSudo, node.httpIgnoreCertErrors, node.httpPath, node.tunnelEnabled, node.tunnelConfigID,
 				node.serialBaudRate, node.serialDataBits, node.serialStopBits, node.serialParity, node.serialFlowControl,
-				time.Now().UTC().Format(time.RFC3339Nano), node.id, node.kind,
+				node.notes, time.Now().UTC().Format(time.RFC3339Nano), node.id, node.kind,
 			)
 		}
 	}
@@ -274,6 +279,9 @@ func normalizeWorkspaceNodeWrite(
 	if name == "" || utf8.RuneCountInString(name) > 256 || strings.ContainsFunc(name, unicode.IsControl) {
 		return normalizedWorkspaceNode{}, errors.New("workspace node name is invalid")
 	}
+	if err := validateWorkspaceNotes(request.Notes); err != nil {
+		return normalizedWorkspaceNode{}, err
+	}
 	if request.CredentialMode < 0 || request.CredentialMode > 2 {
 		return normalizedWorkspaceNode{}, errors.New("workspace credential setting is invalid")
 	}
@@ -294,6 +302,7 @@ func normalizeWorkspaceNodeWrite(
 		id:                   id,
 		parentID:             parentID,
 		name:                 name,
+		notes:                request.Notes,
 		sshAutoSudo:          workspaceNodeBoolean(request.SshAutoSudo),
 		httpIgnoreCertErrors: workspaceNodeBoolean(request.HTTPIgnoreCertErrors),
 		tunnelEnabled:        workspaceNodeBoolean(request.TunnelEnabled),
@@ -459,6 +468,15 @@ func normalizeWorkspaceNodeWrite(
 	return node, nil
 }
 
+func validateWorkspaceNotes(notes *string) error {
+	// Match the textarea and IPC limits, which count UTF-16 code units.
+	if notes != nil && (!utf8.ValidString(*notes) || len(*notes) > workspaceNotesMaxLength*4 ||
+		strings.ContainsRune(*notes, '\x00') || len(utf16.Encode([]rune(*notes))) > workspaceNotesMaxLength) {
+		return errors.New("workspace connection notes are invalid")
+	}
+	return nil
+}
+
 func requireWorkspaceNodeWriteSchema(database *sql.DB) error {
 	exists, err := tableExists(database, "Nodes")
 	if err != nil {
@@ -472,7 +490,7 @@ func requireWorkspaceNodeWriteSchema(database *sql.DB) error {
 		return err
 	}
 	for _, required := range []string{
-		"Id", "ParentId", "Name", "Kind", "SortOrder", "Protocol", "Host", "Port",
+		"Id", "ParentId", "Name", "Notes", "Kind", "SortOrder", "Protocol", "Host", "Port",
 		"Username", "CredentialId", "CredentialMode", "UseInlinePassword", "SshAutoSudo", "HttpIgnoreCertErrors", "HttpPath",
 		"TunnelEnabled", "TunnelConfigId", "SerialBaudRate", "SerialDataBits", "SerialStopBits",
 		"SerialParity", "SerialFlowControl", "RdpDomain", "RdpScreenSize", "RdpFullScreen",

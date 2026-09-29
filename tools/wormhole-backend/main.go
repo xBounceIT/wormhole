@@ -319,6 +319,12 @@ func runBackendCLI(args []string, input io.Reader, output io.Writer, errorOutput
 				logInfo("workspace loaded: %d roots, %d credentials, %d tunnels", len(workspace.Tree), len(workspace.Credentials), len(workspace.Tunnels))
 			}
 		}
+	case "workspace-node-notes":
+		var request workspaceNodeRequest
+		err = decodeInput(&request)
+		if err == nil {
+			result, err = loadWorkspaceNodeNotes(*databasePath, request)
+		}
 	case "tunnel-list":
 		result, err = loadTunnelSummaries(*databasePath)
 	case "workspace-move-nodes":
@@ -498,7 +504,7 @@ func runBackendCLI(args []string, input io.Reader, output io.Writer, errorOutput
 		}
 	case "workspace-node-create":
 		var request workspaceNodeWriteRequest
-		err = decodeInput(&request)
+		err = decodeInputLimit(input, &request, workspaceNodeWriteMaxRequestBytes)
 		if err == nil {
 			var nodeID string
 			nodeID, err = createWorkspaceNode(*databasePath, request)
@@ -508,7 +514,7 @@ func runBackendCLI(args []string, input io.Reader, output io.Writer, errorOutput
 		}
 	case "workspace-node-update":
 		var request workspaceNodeWriteRequest
-		err = decodeInput(&request)
+		err = decodeInputLimit(input, &request, workspaceNodeWriteMaxRequestBytes)
 		if err == nil {
 			err = updateWorkspaceNode(*databasePath, request)
 			if err == nil {
