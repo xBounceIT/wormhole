@@ -156,10 +156,11 @@ func TestImportAzureVPNClientExport(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			profile := strings.Replace(azureVPNClientExportFixture(), ">tcp<", ">"+test.transport+"<", 1)
 			path := filepath.Join(t.TempDir(), "Example_Profile.AzureVpnProfile.xml")
+			databasePath := filepath.Join(filepath.Dir(path), "wormhole.db")
 			if err := os.WriteFile(path, []byte(profile), 0600); err != nil {
 				t.Fatal(err)
 			}
-			result, err := importAzureVPNFile(azureImportRequest{Path: path})
+			result, err := importAzureVPNFile(databasePath, azureImportRequest{Path: path})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -167,12 +168,20 @@ func TestImportAzureVPNClientExport(t *testing.T) {
 				"Servers":  []string{"primary.vpn.azure.com", "backup.vpn.azure.com"},
 				"Protocol": test.protocol, "TenantId": "tenant-id", "Audience": "audience-id",
 				"Issuer": "https://sts.windows.net/tenant-id/", "ApplicationId": "",
-				"ServerSecretHex": strings.Repeat("ab", 256),
+				"ServerSecretRef": result.Settings["ServerSecretRef"],
 			}
 			if result.Name != "Example_Profile" || !reflect.DeepEqual(result.Settings, want) {
 				t.Fatal("exported profile settings were not preserved")
 			}
+			ref, _ := result.Settings["ServerSecretRef"].(string)
+			if !strings.HasPrefix(ref, "import:") || normalizeTunnelID(strings.TrimPrefix(ref, "import:")) == "" {
+				t.Fatal("import did not return an opaque key reference")
+			}
 			encoded, err := json.Marshal(result.Settings)
+			if err != nil {
+				t.Fatal(err)
+			}
+			encoded, _, err = resolveAzureVPNServerSecret(nil, databasePath, encoded)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -272,7 +281,7 @@ func TestImportAzureVPNFileRejectsInvalidFiles(t *testing.T) {
 		t.Fatal("could not create oversized test profile")
 	}
 	for _, path := range []string{"", "relative.xml", filepath.Join(directory, "missing.xml"), directory, emptyPath, largePath} {
-		if result, err := importAzureVPNFile(azureImportRequest{Path: path}); err == nil || result.Settings != nil {
+		if result, err := importAzureVPNFile(filepath.Join(directory, "wormhole.db"), azureImportRequest{Path: path}); err == nil || result.Settings != nil {
 			t.Fatal("invalid import produced settings instead of an error")
 		}
 	}

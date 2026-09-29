@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import {
   appendTunnelTestLog,
@@ -18,6 +19,26 @@ import {
 } from '../src/tunnel-state.ts';
 
 const tunnelId = 'b2a0a6b0-69c8-4f3e-a4cb-f3395aa0a9f7';
+
+test('Azure VPN edits retain opaque server key references without a raw key control', () => {
+  const settings = {
+    Servers: 'gateway.vpn.azure.com',
+    TenantId: 'tenant-id',
+    Audience: 'audience-id',
+    ServerSecretRef: `tunnel:${tunnelId}`,
+  };
+  const edited = updateTunnelEditorSetting(5, settings, 'Servers', 'changed.vpn.azure.com');
+  const normalized = normalizeTunnelEditorSettings(5, edited);
+  assert.equal(normalized.ServerSecretRef, settings.ServerSecretRef);
+  assert.deepEqual(normalized.Servers, ['changed.vpn.azure.com']);
+  assert.deepEqual(missingTunnelFields({ name: 'Azure', kind: 5, settings: normalized }), []);
+  assert.equal(Object.hasOwn(normalized, 'ServerSecretHex'), false);
+
+  // TSX surfaces are excluded from the project's native loaded-module coverage.
+  // Pin the shared form contract as well as the executable editor-state behavior.
+  const app = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  assert.doesNotMatch(app, /key:\s*['"]ServerSecretHex['"]/);
+});
 
 test('VPN route state only exposes inherit, off, or an explicit tunnel', () => {
   const states = [

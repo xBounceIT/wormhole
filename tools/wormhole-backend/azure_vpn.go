@@ -346,7 +346,7 @@ func writeAzureRefreshToken(snapshot tunnelConfigSnapshot, settingsHash, token s
 	return protectFile(azureRefreshPath(snapshot), plaintext)
 }
 
-func importAzureVPNFile(request azureImportRequest) (azureImportResult, error) {
+func importAzureVPNFile(databasePath string, request azureImportRequest) (azureImportResult, error) {
 	path := strings.TrimSpace(request.Path)
 	if path == "" || !filepath.IsAbs(path) {
 		return azureImportResult{}, errors.New("Azure VPN import path is invalid")
@@ -361,10 +361,25 @@ func importAzureVPNFile(request azureImportRequest) (azureImportResult, error) {
 	}
 	defer file.Close()
 	contents, err := io.ReadAll(io.LimitReader(file, azureProfileMaxBytes+1))
+	defer clearBytes(contents)
 	if err != nil || len(contents) > azureProfileMaxBytes {
 		return azureImportResult{}, errors.New("Azure VPN profile exceeded the safety limit")
 	}
-	return parseAzureVPNProfile(contents)
+	result, err := parseAzureVPNProfile(contents)
+	if err != nil {
+		return azureImportResult{}, err
+	}
+	secret, _ := result.Settings["ServerSecretHex"].(string)
+	delete(result.Settings, "ServerSecretHex")
+	ref := ""
+	if strings.TrimSpace(secret) != "" {
+		ref, err = storeAzureImportKey(databasePath, secret)
+		if err != nil {
+			return azureImportResult{}, err
+		}
+	}
+	result.Settings["ServerSecretRef"] = ref
+	return result, nil
 }
 
 func parseAzureVPNProfile(contents []byte) (azureImportResult, error) {

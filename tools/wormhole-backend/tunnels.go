@@ -165,6 +165,18 @@ func writeTunnel(databasePath string, request tunnelWriteRequest, create bool) (
 	} else if !exists {
 		return tunnelDetails{}, errors.New("the Wormhole database schema does not support VPN tunnels")
 	}
+	importedAzureKey := ""
+	if request.Kind == 5 {
+		request.Settings, importedAzureKey, err = resolveAzureVPNServerSecret(database, databasePath, request.Settings)
+		if err != nil {
+			return tunnelDetails{}, err
+		}
+		defer clearBytes(request.Settings)
+	}
+	editorSettings, err := azureVPNEditorSettings(request.Kind, request.ID, request.Settings)
+	if err != nil {
+		return tunnelDetails{}, err
+	}
 
 	secretPath := legacyTunnelSecretPath(databasePath, request.ID)
 	previousKind := int64(-1)
@@ -270,16 +282,25 @@ func writeTunnel(databasePath string, request tunnelWriteRequest, create bool) (
 	if !create && cacheIdentityChanged {
 		clearTunnelProviderCaches(databasePath, request.ID, previousKind, request.Kind)
 	}
+	if importedAzureKey != "" {
+		removeAzureImportKey(databasePath, importedAzureKey)
+	}
 	return tunnelDetails{
 		ID: request.ID, Name: request.Name, Kind: request.Kind,
-		Endpoint: tunnelEndpointSummary(request.Kind, request.Settings), Settings: request.Settings,
+		Endpoint: tunnelEndpointSummary(request.Kind, request.Settings), Settings: editorSettings,
 	}, nil
 }
 
 func readTunnel(databasePath string, request tunnelReadRequest) (tunnelDetails, error) {
 	tunnelMutationMu.RLock()
 	defer tunnelMutationMu.RUnlock()
-	return readTunnelUnlocked(databasePath, request)
+	details, err := readTunnelUnlocked(databasePath, request)
+	if err != nil || details.Kind != 5 {
+		return details, err
+	}
+	defer clearBytes(details.Settings)
+	details.Settings, err = azureVPNEditorSettings(details.Kind, details.ID, details.Settings)
+	return details, err
 }
 
 func readTunnelUnlocked(databasePath string, request tunnelReadRequest) (tunnelDetails, error) {
