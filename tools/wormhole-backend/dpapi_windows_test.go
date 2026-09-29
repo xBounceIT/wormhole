@@ -12,6 +12,10 @@ import (
 	"testing"
 )
 
+func TestWindowsVncSavedCredentialIDCase(t *testing.T) {
+	testVncSavedCredentialIDCase(t)
+}
+
 func TestDecryptElectronSafeStoragePayload(t *testing.T) {
 	const expected = "legacy-safe-storage-secret"
 	key := []byte("01234567890123456789012345678901")
