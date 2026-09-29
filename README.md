@@ -122,6 +122,23 @@ Run the development app:
 
     npm run dev
 
+Native development builds are incremental: unchanged Go, VPN, credential-reader,
+and RDP-host binaries are reused. Source changes, missing or changed binaries,
+architecture changes, and toolchain changes trigger a rebuild. The first Windows
+run still initializes and builds the real OpenVPN3 dependencies. Per-component
+timings are printed during startup. To force a native rebuild:
+
+    npm run build:dev-backend -- --force
+
+Active Go workspaces and external overlay/modfile/tool-executor flags bypass the
+native cache, since those can depend on files outside this repository. Go's `-a`
+flag also bypasses reuse to honor its requested rebuild.
+
+`npm run test:dev-runtime` covers cache invalidation and build planning. The
+compiler-launch entrypoint is excluded from Node loaded-module coverage because
+it invokes external Go/.NET/CMake toolchains; verify it with an actual development
+startup as well.
+
 Build the renderer, Electron process, and current-host Go backend:
 
     npm run build
