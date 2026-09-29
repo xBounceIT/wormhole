@@ -404,7 +404,7 @@ func runBackendCLI(args []string, input io.Reader, output io.Writer, errorOutput
 		var request azureImportRequest
 		err = decodeInput(&request)
 		if err == nil {
-			result, err = importAzureVPNFile(request)
+			result, err = importAzureVPNFile(*databasePath, request)
 		}
 	case "rdp-external-client-requirement":
 		var request rdpExternalClientRequirementRequest

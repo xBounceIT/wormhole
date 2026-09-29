@@ -12680,12 +12680,6 @@ function tunnelEditorFields(kind: number): TunnelField[] {
           placeholder: 'https://sts.windows.net/{tenant}/',
         },
         {
-          key: 'ServerSecretHex',
-          label: 'Server secret (tls-auth key, 512 hex chars, optional)',
-          section: 'Advanced',
-          type: 'textarea',
-        },
-        {
           key: 'CaPem',
           label: 'CA certificate override (PEM, optional)',
           section: 'Advanced',
@@ -13209,8 +13203,8 @@ function TunnelEditorDialog({
           {value.kind === 5 ? (
             <div className="flex items-center justify-between gap-3 rounded-lg border border-border/70 bg-muted/20 px-3 py-2">
               <p className="text-[11px] text-muted-foreground">
-                Import <span className="font-mono">azurevpnconfig.xml</span> from the Azure portal;
-                Microsoft Entra tokens are cached separately in protected storage.
+                Import an Azure VPN XML profile. Its server key is stored securely and retained when
+                you edit this VPN; import another profile to replace it.
               </p>
               <Button
                 disabled={busy}
