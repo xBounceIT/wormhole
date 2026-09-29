@@ -612,9 +612,13 @@ const wormholeBridge = {
     ipcRenderer.on('serial:event', handler);
     return () => ipcRenderer.removeListener('serial:event', handler);
   },
+  acknowledgeSshTerminal: (sessionId: string, sequence: number) => {
+    ipcRenderer.send('ssh:terminal-ack', sessionId, sequence);
+  },
   onSshEvent: (
     listener: (event: {
       type:
+        | 'terminal-output'
         | 'mcp.access'
         | 'connected'
         | 'screen'
@@ -631,6 +635,11 @@ const wormholeBridge = {
         | 'sftp.conflict'
         | 'sftp.transfer'
         | 'sftp.closed';
+      data?: string;
+      sequence?: number;
+      reset?: boolean;
+      columns?: number;
+      rows?: number;
       accessible?: boolean;
       sessionId: string;
       host?: string;
