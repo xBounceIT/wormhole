@@ -96,6 +96,7 @@ const wormholeBridge = {
   createWorkspaceNode: (request: {
     parentId: string;
     name: string;
+    notes?: string;
     kind: 'folder' | 'connection';
     protocol: '' | 'ssh' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial';
     host: string;
@@ -120,6 +121,7 @@ const wormholeBridge = {
     id: string;
     parentId: string;
     name: string;
+    notes?: string;
     kind: 'folder' | 'connection';
     protocol: '' | 'ssh' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial';
     host: string;

@@ -328,8 +328,15 @@ WHERE HttpPath IS NOT NULL
 				return err
 			},
 		},
+		{
+			id: "0020_connection_notes",
+			ensure: func(ctx context.Context, connection *sql.Conn) error {
+				return ensureWorkspaceColumns(ctx, connection, "Nodes", []workspaceColumn{
+					{"Notes", "TEXT NULL"},
+				})
+			},
+		},
 	}
-
 	for _, migration := range migrations {
 		if err := applyWorkspaceMigration(ctx, connection, migration); err != nil {
 			return err

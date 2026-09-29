@@ -10,6 +10,10 @@ declare function IdleLockHarness(props: {
   onRequestReady?: (request: (reason: string) => Promise<boolean>) => void;
 }): import('react').ReactElement;
 declare function AuthPrompt(props: Record<string, unknown>): import('react').ReactElement;
+declare function ConnectionNotesHarness(props: {
+  mode?: 'saved' | 'quick';
+  initialNotes?: string;
+}): import('react').ReactElement;
 declare function AppCloseHarness(props: Record<string, unknown>): import('react').ReactElement;
 declare function BitwardenSettingsHarness(
   props: Record<string, unknown>,
@@ -1704,7 +1708,43 @@ async function runIdleConfirmationTests() {
   }
 }
 
-runAuthPromptTests()
+async function runConnectionNotesTests() {
+  const root = createRoot(document.getElementById('root'));
+  try {
+    await React.act(async () => root.render(<ConnectionNotesHarness />));
+    const textarea = document.getElementById('connection-notes') as HTMLTextAreaElement;
+    assert.equal(textarea.value, '');
+    assert.equal(textarea.maxLength, 16_384);
+    assert.equal(textarea.required, false);
+    assert.equal(textarea.labels[0].textContent, 'Notes (optional)');
+    const notes = '  First line\nUnicode: 日本語 🛠️\n<script>literal</script>  ';
+    await React.act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
+      setter.call(textarea, notes);
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    assert.equal(document.getElementById('connection-notes-state').textContent, notes);
+    assert.equal(textarea.value, notes);
+    assert.equal(document.querySelector('script'), null);
+    await React.act(async () => {
+      root.render(<ConnectionNotesHarness key="edit" initialNotes={notes} />);
+    });
+    assert.equal((document.getElementById('connection-notes') as HTMLTextAreaElement).value, notes);
+    await React.act(async () => {
+      const field = document.getElementById('connection-notes');
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(field, '');
+      field.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    assert.equal(document.getElementById('connection-notes-state').textContent, '');
+    await React.act(async () => root.render(<ConnectionNotesHarness key="quick" mode="quick" />));
+    assert.equal(document.getElementById('connection-notes'), null);
+  } finally {
+    await React.act(async () => root.unmount());
+  }
+}
+
+runConnectionNotesTests()
+  .then(runAuthPromptTests)
   .then(runIdleLockTests)
   .then(runIdleConfirmationTests)
   .then(runWindowCloseTests)

@@ -20,6 +20,7 @@ import { createInterface, type Interface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import type { ElectronChromeExtensions } from 'electron-chrome-extensions';
 import { AuthSession } from './auth-session.js';
+import { parseWorkspaceNotes, workspaceNodeWriteMaxRequestBytes } from './workspace-notes.js';
 import { hasValidCredentialSecretLength } from './credential-secret-length.js';
 import {
   bringMcpApprovalWindowToFront,
@@ -655,6 +656,7 @@ type WorkspaceNodeWriteRequest = {
   id?: string;
   parentId: string;
   name: string;
+  notes?: string;
   kind: 'folder' | 'connection';
   protocol: '' | 'ssh' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial';
   host: string;
@@ -1629,6 +1631,7 @@ function parseWorkspaceNodeWriteRequest(
   const id = typeof value.id === 'string' ? value.id.trim() : '';
   const parentId = typeof value.parentId === 'string' ? value.parentId.trim() : '';
   const name = typeof value.name === 'string' ? value.name.trim() : '';
+  const notes = parseWorkspaceNotes(value.notes);
   const kind = value.kind;
   const protocol = value.protocol;
   const host = typeof value.host === 'string' ? value.host.trim() : '';
@@ -1705,6 +1708,7 @@ function parseWorkspaceNodeWriteRequest(
     ...(updating ? { id } : {}),
     parentId,
     name,
+    notes,
     kind,
     protocol,
     host,
@@ -3878,9 +3882,11 @@ async function runBackend<T>(
         ? workspaceDeleteNodesMaxRequestBytes
         : operation === 'settings-set-connection-tree-expansion'
           ? connectionTreeExpansionMaxRequestBytes
-          : operation.startsWith('tunnel-')
-            ? backendMaxTunnelRequestBytes
-            : backendMaxRequestBytes;
+          : operation === 'workspace-node-create' || operation === 'workspace-node-update'
+            ? workspaceNodeWriteMaxRequestBytes
+            : operation.startsWith('tunnel-')
+              ? backendMaxTunnelRequestBytes
+              : backendMaxRequestBytes;
     if (requestPayload === undefined || Buffer.byteLength(requestPayload, 'utf8') > requestLimit) {
       throw new Error('The Wormhole request is too large.');
     }

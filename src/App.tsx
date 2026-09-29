@@ -492,6 +492,7 @@ type AuthPromptRequest = {
 type TreeNode = {
   id: string;
   name: string;
+  notes?: string;
   kind: 'folder' | 'connection';
   protocol?: Protocol;
   host?: string;
@@ -1936,6 +1937,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   const [deleteNodeError, setDeleteNodeError] = useState('');
   const [newConnectionForm, setNewConnectionForm] = useState({
     name: '',
+    notes: '',
     host: '',
     port: '',
     username: '',
@@ -5353,6 +5355,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     setEditorError('');
     setNewConnectionForm({
       name: '',
+      notes: '',
       host: '',
       port: '',
       username: '',
@@ -5416,6 +5419,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     setEditorError('');
     setNewConnectionForm({
       name: '',
+      notes: '',
       host: '',
       port: '',
       username: '',
@@ -5629,11 +5633,13 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   function openEditConnection(node: TreeNode) {
     if (node.kind !== 'connection' || !node.protocol) return;
 
+    setConnectionEditorMode('saved');
     setSelectedNodeId(node.id);
     setEditingConnectionId(node.id);
     setEditorError('');
     setNewConnectionForm({
       name: node.name,
+      notes: node.notes ?? '',
       host: savedConnectionAddressForEditor(node.protocol, node.host ?? '', node.httpPath),
       port: node.port === undefined ? '' : String(node.port),
       username: node.username ?? '',
@@ -5922,6 +5928,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       const nodeWrite = {
         parentId: newConnectionForm.folder,
         name,
+        notes: newConnectionForm.notes,
         kind: 'connection' as const,
         protocol: newConnectionForm.protocol,
         host,
@@ -7327,6 +7334,25 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                         value={newConnectionForm.name}
                       />
                     </div>
+
+                    {connectionEditorMode === 'saved' ? (
+                      <div className="grid gap-2">
+                        <Label htmlFor="connection-notes">Notes (optional)</Label>
+                        <Textarea
+                          id="connection-notes"
+                          maxLength={16_384}
+                          onChange={(event) =>
+                            setNewConnectionForm((form) => ({
+                              ...form,
+                              notes: event.target.value,
+                            }))
+                          }
+                          placeholder="Additional information about this connection"
+                          rows={3}
+                          value={newConnectionForm.notes}
+                        />
+                      </div>
+                    ) : null}
 
                     <div
                       className={cn(

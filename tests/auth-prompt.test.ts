@@ -26,6 +26,20 @@ test('authentication and window-close prompts keep errors and controls accessibl
     assert.ok(first >= 0 && last > first, `Missing app section: ${from}`);
     return source.slice(first, last);
   };
+  const notesLabel = source.indexOf('<Label htmlFor="connection-notes">');
+  const notesStart = source.lastIndexOf("{connectionEditorMode === 'saved' ? (", notesLabel);
+  const notesEnd = source.indexOf(') : null}', notesLabel) + ') : null}'.length;
+  assert.ok(notesStart >= 0 && notesEnd > notesLabel);
+  const notesHarness = `
+    function ConnectionNotesHarness({ mode = 'saved', initialNotes = '' }) {
+      const connectionEditorMode = mode;
+      const [newConnectionForm, setNewConnectionForm] = useState({ notes: initialNotes });
+      return <>
+        ${source.slice(notesStart, notesEnd)}
+        <output id="connection-notes-state">{newConnectionForm.notes}</output>
+      </>;
+    }
+  `;
   const closeOpen = source.indexOf('open={pendingWindowClose !== null}');
   const closeStart = source.lastIndexOf('<Dialog', closeOpen);
   const closeEnd = source.indexOf('</Dialog>', closeOpen) + '</Dialog>'.length;
@@ -211,6 +225,7 @@ test('authentication and window-close prompts keep errors and controls accessibl
       selectSource +
       slice('function clearSecretInput(', 'function credentialSelectionFor(') +
       bitwardenHarness +
+      notesHarness +
       bitwardenStartupHarness +
       readFileSync(new URL('../electron/web-session-attempt.ts', import.meta.url), 'utf8').replace(
         /^export /gm,
@@ -287,7 +302,7 @@ test('authentication and window-close prompts keep errors and controls accessibl
     const { twMerge } = require(${JSON.stringify(require.resolve('tailwind-merge'))});
     const cn = (...inputs) => twMerge(clsx(inputs));
     const Card = 'div', CardHeader = 'div', CardTitle = 'h2', CardDescription = 'p';
-    const CardContent = 'div', Button = 'button', Input = 'input', Label = 'label';
+    const CardContent = 'div', Button = 'button', Input = 'input', Label = 'label', Textarea = 'textarea';
     const KeyRound = 'span', LoaderCircle = 'span', XIcon = 'span', TriangleAlert = 'span', Power = 'span', Badge = 'span';
     const ChevronDownIcon = 'span', ChevronUpIcon = 'span', CheckIcon = 'span';
     const { Eye, EyeOff } = require(${JSON.stringify(require.resolve('lucide-react'))});
@@ -341,7 +356,7 @@ test('authentication and window-close prompts keep errors and controls accessibl
           const coverage = await window.webContents.debugger.sendCommand('Profiler.takePreciseCoverage');
           const script = coverage.result.find(item => item.url === 'wormhole-auth-prompt.js');
           if (!script) throw new Error('Missing authentication renderer coverage.');
-          for (const name of ['AuthPrompt', 'IdleLockHarness', 'showUnlock', 'AppCloseHarness', 'DialogContent', 'BitwardenCliDialog', 'BitwardenSettingsHarness', 'BitwardenAccessPrompt', 'BitwardenStartupHarness', 'CredentialsSearchHarness']) {
+          for (const name of ['AuthPrompt', 'IdleLockHarness', 'showUnlock', 'AppCloseHarness', 'DialogContent', 'BitwardenCliDialog', 'BitwardenSettingsHarness', 'BitwardenAccessPrompt', 'BitwardenStartupHarness', 'CredentialsSearchHarness', 'ConnectionNotesHarness']) {
             const parent = script.functions.find(item => item.functionName === name);
             if (!parent) throw new Error('Missing coverage for ' + name);
             const range = parent.ranges[0];

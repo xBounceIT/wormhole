@@ -117,6 +117,7 @@ interface WormholeRdpBackendEvent {
 interface WormholeWorkspaceNode {
   id: string;
   name: string;
+  notes?: string;
   kind: 'folder' | 'connection';
   protocol?: WormholeProtocol;
   host?: string;
@@ -785,6 +786,7 @@ interface Window {
     createWorkspaceNode(request: {
       parentId: string;
       name: string;
+      notes?: string;
       kind: 'folder' | 'connection';
       protocol: '' | WormholeProtocol;
       host: string;
@@ -809,6 +811,7 @@ interface Window {
       id: string;
       parentId: string;
       name: string;
+      notes?: string;
       kind: 'folder' | 'connection';
       protocol: '' | WormholeProtocol;
       host: string;
