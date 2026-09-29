@@ -2057,7 +2057,7 @@ func readVncCredentialSecret(
 	}
 	var provider, protocol, kind sql.NullInt64
 	if err := database.QueryRow(
-		"SELECT "+providerExpression+", "+protocolExpression+", "+kindExpression+" FROM CredentialProfiles WHERE Id = ?;",
+		"SELECT "+providerExpression+", "+protocolExpression+", "+kindExpression+" FROM CredentialProfiles WHERE lower(Id) = ?;",
 		normalizeID(credentialID),
 	).Scan(&provider, &protocol, &kind); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
