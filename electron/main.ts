@@ -90,6 +90,7 @@ import {
 } from './sftp-contract.js';
 import { RdpBackendClient, stopChildProcess } from './rdp.js';
 import { drainSshBackendSessionIds } from './ssh-backend-lifecycle.js';
+import { sshOpenCredentialFields } from './ssh-open-credentials.js';
 import { settleTunnelCleanup, TunnelLeaseRegistry } from './tunnel-lease-registry.js';
 import {
   isTunnelIdentifier,
@@ -6125,10 +6126,8 @@ class NativeSshBackend {
         const message = error instanceof Error ? error.message : 'The vault could not be read.';
         throw new Error(`Bitwarden credential is unavailable: ${message}`);
       }
-      if (bitwardenCredential.bitwarden && !bitwardenCredential.username?.trim()) {
-        throw new Error('Bitwarden credential is unavailable: the SSH username is missing.');
-      }
     }
+    const credentialFields = sshOpenCredentialFields(request, bitwardenCredential);
     if (!this.connectionAttempts.isCurrent(request.sessionId, generation)) {
       throw new Error('SSH connection closed before opening its VPN tunnel.');
     }
@@ -6183,29 +6182,13 @@ class NativeSshBackend {
         type: 'open',
         session_id: request.sessionId,
         node_id: request.nodeId,
-        credential_id:
-          request.credentialId && !bitwardenCredential.bitwarden ? request.credentialId : undefined,
+        ...credentialFields,
         auto_sudo: request.autoSudo,
         host: request.host,
         port: request.port,
-        username: request.nodeId ? undefined : request.username,
-        password: request.nodeId ? undefined : request.password,
         tunnel_config_id: request.tunnelConfigId,
         socks_endpoint: socksEndpoint,
         tunnel_enabled: request.nodeId && !socksEndpoint ? false : undefined,
-        username_override: request.manualCredentials
-          ? request.username?.trim()
-          : bitwardenCredential.bitwarden
-            ? bitwardenCredential.username
-            : undefined,
-        username_override_authoritative:
-          request.manualCredentials === true || request.credentialId !== undefined,
-        password_override: request.manualCredentials
-          ? request.password
-          : bitwardenCredential.bitwarden
-            ? bitwardenCredential.password
-            : undefined,
-        credential_override: request.manualCredentials === true || bitwardenCredential.bitwarden,
         key_passphrase_override: request.manualKeyPassphrase ? request.keyPassphrase : undefined,
         columns: request.columns,
         rows: request.rows,
