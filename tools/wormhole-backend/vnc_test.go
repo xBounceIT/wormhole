@@ -22,6 +22,38 @@ import (
 	"github.com/kward/go-vnc/encodings"
 )
 
+func TestTunnelProgressWireIncludesDefaultDetails(t *testing.T) {
+	for _, tc := range []struct{ phase, detail, want string }{
+		{"preparing", "", "Preparing the VPN tunnel"},
+		{"authenticating", "", "Authenticating with the VPN gateway"},
+		{"downloading", "", "Downloading the VPN profile"},
+		{"starting", "", "Starting the VPN tunnel"},
+		{"ready", "", "VPN tunnel ready"},
+		{"authenticating", "Waiting for Microsoft sign-in", "Waiting for Microsoft sign-in"},
+		{"provider-phase", "Provider detail", "Provider detail"},
+		{"provider-phase", "", ""},
+	} {
+		t.Run(tc.phase+"/"+tc.detail, func(t *testing.T) {
+			var output bytes.Buffer
+			manager := newVncManager(nil, newBackendLineWriter(&output))
+			defer manager.close()
+			if err := manager.progressTunnel("test-lease")(context.Background(), tc.phase, tc.detail); err != nil {
+				t.Fatal(err)
+			}
+			var event backendEvent
+			if err := json.Unmarshal(bytes.TrimSpace(output.Bytes()), &event); err != nil {
+				t.Fatal(err)
+			}
+			if event.Type != "tunnel.progress" || event.SessionID != "test-lease" || event.Phase != tc.phase || event.Detail != tc.want {
+				t.Fatalf("unexpected progress event: %#v", event)
+			}
+			if tc.want != "" && !bytes.Contains(output.Bytes(), []byte(`"detail":`)) {
+				t.Fatal("detail was omitted from the progress wire event")
+			}
+		})
+	}
+}
+
 func TestServeBackendIOProcessesBoundedCommandStream(t *testing.T) {
 	input := strings.Join([]string{
 		"not-json",

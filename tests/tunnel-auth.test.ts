@@ -12,6 +12,20 @@ import {
 const redirect = 'http://localhost:2023/';
 const mainSource = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
 
+// BrowserWindow options live in the Electron entrypoint, which the project's
+// loaded-module coverage excludes. Protect this declarative native UI setting
+// with the same scoped source contract used for the authentication lifecycle.
+test('VPN authentication popup uses the Wormhole application icon', () => {
+  const options = mainSource.slice(
+    mainSource.indexOf('const authWindow = new BrowserWindow({'),
+    mainSource.indexOf(
+      'let candidate = 0;',
+      mainSource.indexOf('const authWindow = new BrowserWindow({'),
+    ),
+  );
+  assert.match(options, /\bicon:\s*applicationIconPath\s*,/);
+});
+
 test('OAuth callback matching accepts only the configured loopback endpoint', () => {
   assert.equal(isMatchingOAuthRedirect(new URL('http://localhost:2023/?code=ok'), redirect), true);
   assert.equal(

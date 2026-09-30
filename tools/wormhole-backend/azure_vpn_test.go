@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -54,6 +56,7 @@ func TestPrepareAzureVPNUsesInteractiveCodeThenSilentRefresh(t *testing.T) {
 		id:           "11111111-2222-3333-4444-555555555555",
 	}
 	prompts := 0
+	var progress []string
 	ctx := withTunnelPromptHandler(context.Background(), func(_ context.Context, prompt tunnelPrompt) (string, error) {
 		prompts++
 		if !prompt.Browser || prompt.Completion != "oauth-code" || prompt.ExpectedState == "" {
@@ -61,6 +64,13 @@ func TestPrepareAzureVPNUsesInteractiveCodeThenSilentRefresh(t *testing.T) {
 		}
 		encoded, _ := json.Marshal(azureBrowserResult{Code: "auth-code", State: prompt.ExpectedState})
 		return string(encoded), nil
+	})
+	ctx = withTunnelProgressHandler(ctx, func(_ context.Context, phase, detail string) error {
+		if phase != "authenticating" {
+			t.Fatalf("unexpected Azure progress phase: %s", phase)
+		}
+		progress = append(progress, detail)
+		return nil
 	})
 	prepared, err := prepareAzureVPN(ctx, raw, snapshot)
 	if err != nil {
@@ -95,6 +105,67 @@ func TestPrepareAzureVPNUsesInteractiveCodeThenSilentRefresh(t *testing.T) {
 	if json.Unmarshal(secondCacheBytes, &secondCache) != nil || secondCache.RefreshToken != "refresh-one" ||
 		!secondCache.CreatedAt.After(firstCache.CreatedAt) {
 		t.Fatalf("silent refresh did not rotate the existing cache record: before=%#v after=%#v", firstCache, secondCache)
+	}
+	if !reflect.DeepEqual(progress, []string{"Waiting for Microsoft sign-in", "Completing Microsoft sign-in", "Refreshing Microsoft sign-in"}) {
+		t.Fatalf("Azure authentication stages were hidden: %v", progress)
+	}
+}
+
+func TestAzureAuthenticationStopsWhenProgressConsumerFails(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		writer.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	previousAuthority := azureOAuthAuthority
+	azureOAuthAuthority = server.URL
+	t.Cleanup(func() { azureOAuthAuthority = previousAuthority })
+	for _, stage := range []string{"Waiting for Microsoft sign-in", "Completing Microsoft sign-in", "Refreshing Microsoft sign-in"} {
+		t.Run(stage, func(t *testing.T) {
+			settings := map[string]json.RawMessage{
+				"Servers":  json.RawMessage(`["gateway.vpn.azure.test"]`),
+				"TenantId": json.RawMessage(`"tenant"`),
+				"Audience": json.RawMessage(`"audience"`),
+			}
+			raw, err := json.Marshal(settings)
+			if err != nil {
+				t.Fatal(err)
+			}
+			snapshot := tunnelConfigSnapshot{databasePath: filepath.Join(t.TempDir(), "wormhole.db"), id: "11111111-2222-3333-4444-555555555555"}
+			if stage == "Refreshing Microsoft sign-in" {
+				if err := writeAzureRefreshToken(snapshot, providerCacheIdentity(5, settings), "synthetic-refresh"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			failure := errors.New("progress consumer stopped")
+			prompts := 0
+			ctx := withTunnelProgressHandler(context.Background(), func(_ context.Context, _, detail string) error {
+				if detail == stage {
+					return failure
+				}
+				return nil
+			})
+			ctx = withTunnelPromptHandler(ctx, func(_ context.Context, prompt tunnelPrompt) (string, error) {
+				prompts++
+				encoded, err := json.Marshal(azureBrowserResult{Code: "synthetic-code", State: prompt.ExpectedState})
+				return string(encoded), err
+			})
+			prepared, err := prepareAzureVPN(ctx, raw, snapshot)
+			if requests.Load() != 0 {
+				t.Fatal("a token request was sent after a failed progress callback")
+			}
+			if !errors.Is(err, failure) || prepared != nil {
+				t.Fatal("Azure preparation continued after a failed progress callback")
+			}
+			wantPrompts := 0
+			if stage == "Completing Microsoft sign-in" {
+				wantPrompts = 1
+			}
+			if prompts != wantPrompts {
+				t.Fatalf("prompts = %d, want %d", prompts, wantPrompts)
+			}
+		})
 	}
 }
 

@@ -2779,6 +2779,7 @@ async function runTunnelBrowserAuth(
     minWidth: 640,
     minHeight: 480,
     title: event.title,
+    icon: applicationIconPath,
     parent: parent && !parent.isDestroyed() ? parent : undefined,
     show: false,
     autoHideMenuBar: true,

@@ -106,6 +106,9 @@ func prepareAzureVPN(
 	accessToken := ""
 	if snapshot.id != "" {
 		if refresh := readAzureRefreshToken(snapshot, settingsHash); refresh != "" {
+			if err := reportTunnelProgress(ctx, "authenticating", "Refreshing Microsoft sign-in"); err != nil {
+				return nil, err
+			}
 			if token, refreshErr := requestAzureToken(ctx, settings, url.Values{
 				"client_id": {azureClientID(settings)}, "grant_type": {"refresh_token"},
 				"refresh_token": {refresh}, "scope": {azureScope(settings)},
@@ -137,6 +140,9 @@ func prepareAzureVPN(
 		if err != nil {
 			return nil, err
 		}
+		if err := reportTunnelProgress(ctx, "authenticating", "Waiting for Microsoft sign-in"); err != nil {
+			return nil, err
+		}
 		encoded, err := requestTunnelPrompt(ctx, tunnelPrompt{
 			Title: "Sign in to Microsoft", Browser: true, URLs: []string{authorizeURL},
 			Completion: "oauth-code", RedirectPrefix: azureRedirectURI, ExpectedState: state,
@@ -153,6 +159,9 @@ func prepareAzureVPN(
 		}
 		if browser.Code == "" || len(browser.Code) > 16*1024 {
 			return nil, errors.New("Microsoft sign-in returned no authorization code")
+		}
+		if err := reportTunnelProgress(ctx, "authenticating", "Completing Microsoft sign-in"); err != nil {
+			return nil, err
 		}
 		token, err := requestAzureToken(ctx, settings, url.Values{
 			"client_id": {azureClientID(settings)}, "grant_type": {"authorization_code"},

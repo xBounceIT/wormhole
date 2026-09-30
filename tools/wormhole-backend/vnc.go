@@ -615,6 +615,23 @@ func (m *vncManager) respondTunnelRoute(command backendCommand) {
 
 func (m *vncManager) progressTunnel(progressSessionID string) tunnelProgressHandler {
 	return func(_ context.Context, phase, detail string) error {
+		// Electron requires a non-empty detail to display progress. Most runtime
+		// transitions carry only a phase; without a label, omitempty also drops
+		// the detail field from the wire and hides the actual startup stage.
+		if detail == "" {
+			switch phase {
+			case "preparing":
+				detail = "Preparing the VPN tunnel"
+			case "authenticating":
+				detail = "Authenticating with the VPN gateway"
+			case "downloading":
+				detail = "Downloading the VPN profile"
+			case "starting":
+				detail = "Starting the VPN tunnel"
+			case "ready":
+				detail = "VPN tunnel ready"
+			}
+		}
 		m.emit(backendEvent{
 			Type: "tunnel.progress", SessionID: progressSessionID, Phase: phase, Detail: detail,
 		})
