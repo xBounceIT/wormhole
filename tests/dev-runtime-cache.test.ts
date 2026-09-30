@@ -294,6 +294,26 @@ test('vcpkg checkout and manifest-installed dependency contents invalidate nativ
   assert.equal(f.builds.length, before + 1);
 });
 
+test('absolute external source inputs are resolved and invalidated by content', (t) => {
+  const f = fixture(t);
+  const external = fixture(t);
+  f.step.inputs.push(external.root);
+  runCachedDevRuntimeBuild(f.options);
+  runCachedDevRuntimeBuild(f.options);
+  assert.equal(f.builds.length, 1);
+  external.write('source/main.go', 'updated external source');
+  runCachedDevRuntimeBuild(f.options);
+  assert.equal(f.builds.length, 2);
+  external.remove('source/main.go');
+  runCachedDevRuntimeBuild(f.options);
+  assert.equal(f.builds.length, 3);
+  external.write('go.mod', 'module external');
+  assert.ok(devRuntimeGoModuleDirectories(f.root, [f.step]).includes(external.root));
+  if (process.platform === 'win32') {
+    assert.equal(devRuntimeVcpkgInputs('C:\\repo', 'D:\\vcpkg')[0], 'D:\\vcpkg\\scripts');
+  }
+});
+
 test('the first successful dependency restore is cached while real source races remain invalid', (t) => {
   const f = fixture(t);
   f.step.generatedInputs = ['generated/dependencies'];

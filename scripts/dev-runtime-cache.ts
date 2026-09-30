@@ -125,7 +125,7 @@ export function devRuntimeCacheAllowed(goEnvironment: string): boolean {
 
 export function devRuntimeGoModuleDirectories(root: string, plan: DevRuntimeBuildStep[]): string[] {
   return [...new Set(plan.flatMap((step) => step.inputs))]
-    .map((input) => path.join(root, input))
+    .map((input) => path.resolve(root, input))
     .filter((directory) => existsSync(path.join(directory, 'go.mod')));
 }
 
@@ -236,7 +236,7 @@ function fingerprint(root: string, inputs: string[], excludedInputs: string[] = 
   const excluded = new Set(excludedInputs.map(normalize));
   function visit(relative: string): void {
     if (excluded.has(normalize(relative))) return;
-    const absolute = path.join(root, relative);
+    const absolute = path.resolve(root, relative);
     hash.update(JSON.stringify(relative));
     let stats;
     try {

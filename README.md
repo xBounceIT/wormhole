@@ -155,6 +155,7 @@ Compiler search roots such as `CPATH`, `C_INCLUDE_PATH`, `CPLUS_INCLUDE_PATH`,
 The resolved vcpkg checkout's build scripts, ports, versions, triplets and
 executable, plus manifest-installed dependencies, are fingerprinted by content
 so updating vcpkg at the same path invalidates reuse.
+The vcpkg checkout may reside on a different Windows drive from the repository.
 Restored dependency files are recorded after a successful build, allowing the
 first restore to be reused while source changes during compilation still prevent
 cache stamping.
