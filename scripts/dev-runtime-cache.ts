@@ -63,11 +63,7 @@ export function devRuntimeCacheEnvironmentAllowed(
   );
 }
 
-export function devRuntimeVcpkgInputs(
-  root: string,
-  vcpkgRoot: string,
-  architecture: string,
-): string[] {
+export function devRuntimeVcpkgInputs(root: string, vcpkgRoot: string): string[] {
   return [
     ...[
       'scripts',
@@ -78,7 +74,6 @@ export function devRuntimeVcpkgInputs(
       '.vcpkg-root',
       'vcpkg-configuration.json',
     ].map((input) => path.relative(root, path.resolve(vcpkgRoot, input))),
-    `tools/wormhole-ovpnproxy/ovpn_shim/build/${architecture}/vcpkg_installed`,
   ];
 }
 
@@ -305,7 +300,11 @@ export function runCachedDevRuntimeBuild({
     if (!force) {
       try {
         const stamp = JSON.parse(readFileSync(stampPath, 'utf8'));
-        if (stamp.inputs === inputs && stamp.outputs === outputFingerprint(root, step.outputs)) {
+        if (
+          stamp.inputs === inputs &&
+          stamp.generatedInputs === fingerprint(root, step.generatedInputs ?? []) &&
+          stamp.outputs === outputFingerprint(root, step.outputs)
+        ) {
           log(
             `[Wormhole] Reuse ${step.name} (${((performance.now() - started) / 1000).toFixed(2)}s).`,
           );
@@ -321,7 +320,14 @@ export function runCachedDevRuntimeBuild({
     const outputs = outputFingerprint(root, step.outputs);
     const currentInputs = fingerprint(root, sourcePaths, step.excludedInputs);
     if (currentInputs === inputs) {
-      writeFileSync(stampPath, JSON.stringify({ inputs, outputs }));
+      writeFileSync(
+        stampPath,
+        JSON.stringify({
+          inputs,
+          outputs,
+          generatedInputs: fingerprint(root, step.generatedInputs ?? []),
+        }),
+      );
     }
     log(`[Wormhole] Ready ${step.name} (${((performance.now() - started) / 1000).toFixed(2)}s).`);
   }

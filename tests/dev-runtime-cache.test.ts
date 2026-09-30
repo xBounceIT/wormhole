@@ -173,7 +173,8 @@ test('CMake dependency inputs are captured and mutable external roots disable re
 test('vcpkg checkout and manifest-installed dependency contents invalidate native reuse', (t) => {
   const f = fixture(t);
   const vcpkgRoot = path.join(f.root, 'external/vcpkg');
-  f.step.inputs.push(...devRuntimeVcpkgInputs(f.root, vcpkgRoot, 'x64'));
+  f.step.inputs.push(...devRuntimeVcpkgInputs(f.root, vcpkgRoot));
+  f.step.generatedInputs = ['tools/wormhole-ovpnproxy/ovpn_shim/build/x64/vcpkg_installed'];
   f.step.excludedInputs = ['tools/wormhole-ovpnproxy/ovpn_shim/build'];
   const inputs = [
     'external/vcpkg/scripts/buildsystems/vcpkg.cmake',
@@ -201,8 +202,38 @@ test('vcpkg checkout and manifest-installed dependency contents invalidate nativ
   const before = f.builds.length;
   runCachedDevRuntimeBuild(f.options);
   assert.equal(f.builds.length, before);
-  f.step.inputs = devRuntimeVcpkgInputs(f.root, vcpkgRoot, 'arm64');
-  assert.ok(f.step.inputs.some((input) => input.includes('/arm64/vcpkg_installed')));
+  f.remove('tools/wormhole-ovpnproxy/ovpn_shim/build/x64/vcpkg_installed');
+  runCachedDevRuntimeBuild(f.options);
+  assert.equal(f.builds.length, before + 1);
+});
+
+test('the first successful dependency restore is cached while real source races remain invalid', (t) => {
+  const f = fixture(t);
+  f.step.generatedInputs = ['generated/dependencies'];
+  const options = {
+    ...f.options,
+    execute(step: DevRuntimeBuildStep) {
+      f.options.execute(step);
+      f.write('generated/dependencies/lib.a', 'restored dependency');
+    },
+  };
+  runCachedDevRuntimeBuild(options);
+  runCachedDevRuntimeBuild(options);
+  assert.equal(f.builds.length, 1);
+  f.write('generated/dependencies/lib.a', 'updated dependency');
+  runCachedDevRuntimeBuild(options);
+  assert.equal(f.builds.length, 2);
+  f.write('source/main.go', 'new source');
+  runCachedDevRuntimeBuild({
+    ...options,
+    execute(step) {
+      options.execute(step);
+      f.write('source/main.go', 'source changed concurrently during restore');
+      f.write('generated/dependencies/lib.a', 'new restore');
+    },
+  });
+  runCachedDevRuntimeBuild(options);
+  assert.equal(f.builds.length, 4);
 });
 
 test('a fresh native source bootstrap is cached on the first successful build', (t) => {

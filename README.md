@@ -149,6 +149,9 @@ External vcpkg port/triplet overlays also bypass reuse.
 The resolved vcpkg checkout's build scripts, ports, versions, triplets and
 executable, plus manifest-installed dependencies, are fingerprinted by content
 so updating vcpkg at the same path invalidates reuse.
+Restored dependency files are recorded after a successful build, allowing the
+first restore to be reused while source changes during compilation still prevent
+cache stamping.
 Windows builds without a usable vcpkg toolchain bypass reuse because their
 system-resolved dependency libraries are outside the tracked source graph.
 

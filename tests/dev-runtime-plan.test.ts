@@ -119,6 +119,9 @@ test('cache dependencies cover native sources and architecture-specific outputs'
         const ovpn = `obj/ovpnproxy/${architecture}/wormhole-ovpnproxy.exe`;
         assert.ok(backend.inputs.includes(ovpn));
         assert.deepEqual(plan[0].outputs, [ovpn]);
+        assert.deepEqual(plan[0].generatedInputs, [
+          `tools/wormhole-ovpnproxy/ovpn_shim/build/${architecture}/vcpkg_installed`,
+        ]);
         assert.ok(plan[0].inputs.includes('tools/wormhole-ovpnproxy'));
         assert.ok(plan[0].inputs.includes('tools/internal'));
         assert.ok(plan[2].inputs.includes('tools/wormhole-credential-reader'));

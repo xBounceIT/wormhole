@@ -64,9 +64,7 @@ if (process.platform === 'win32') {
     // A failed native probe must not enable cache reuse.
   }
   if (typeof ovpnBuildContext?.VcpkgRoot === 'string' && ovpnBuildContext.VcpkgRoot) {
-    buildPlan[0].inputs.push(
-      ...devRuntimeVcpkgInputs(root, ovpnBuildContext.VcpkgRoot, process.arch),
-    );
+    buildPlan[0].inputs.push(...devRuntimeVcpkgInputs(root, ovpnBuildContext.VcpkgRoot));
   }
 }
 const goContexts = devRuntimeGoModuleDirectories(root, buildPlan).map((cwd) => {

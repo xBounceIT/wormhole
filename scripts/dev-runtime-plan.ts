@@ -7,6 +7,7 @@ export type DevRuntimeBuildStep = {
   inputs: string[];
   outputs: string[];
   excludedInputs?: string[];
+  generatedInputs?: string[];
   bootstrap?: { command: string; args: string[]; outputs: string[] };
 };
 
@@ -99,6 +100,7 @@ export function createDevRuntimeBuildPlan({
         [`obj/ovpnproxy/${architecture}/wormhole-ovpnproxy.exe`],
         ['tools/wormhole-ovpnproxy/ovpn_shim/build', 'tools/wormhole-ovpnproxy/shim_buildinfo.go'],
       ),
+      generatedInputs: [`tools/wormhole-ovpnproxy/ovpn_shim/build/${architecture}/vcpkg_installed`],
       bootstrap: {
         command: 'git',
         args: [
