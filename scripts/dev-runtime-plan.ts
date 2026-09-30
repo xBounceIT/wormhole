@@ -170,3 +170,22 @@ export function devRuntimeToolchainCommands(architecture: NodeJS.Architecture): 
       : []),
   ];
 }
+
+export function devRuntimeGoBuildEnvironment(
+  platform: NodeJS.Platform,
+  architecture: NodeJS.Architecture,
+  moduleDirectory: string,
+  environment: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv {
+  const moduleName = path.basename(moduleDirectory);
+  return {
+    ...environment,
+    GOOS: platform === 'win32' ? 'windows' : platform,
+    GOARCH: architecture === 'arm64' ? 'arm64' : 'amd64',
+    CGO_ENABLED:
+      (platform === 'darwin' && moduleName === 'wormhole-backend') ||
+      (platform === 'win32' && moduleName === 'wormhole-ovpnproxy')
+        ? '1'
+        : '0',
+  };
+}

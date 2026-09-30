@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import test from 'node:test';
 import {
   createDevRuntimeBuildPlan,
+  devRuntimeGoBuildEnvironment,
   devRuntimeToolchainCommands,
 } from '../scripts/dev-runtime-plan.ts';
 
@@ -11,6 +13,62 @@ const planOptions = {
   scriptDirectory: path.join('repo', 'scripts'),
   nodeExecutable: 'node',
 };
+
+test('Go probes override inherited cross-compilation targets exactly as each native build', () => {
+  const inherited = {
+    GOOS: 'freebsd',
+    GOARCH: 'riscv64',
+    CGO_ENABLED: '0',
+    CC: 'custom-cc',
+    GOFLAGS: '-trimpath',
+  };
+  for (const platform of ['win32', 'darwin', 'linux'] as const) {
+    for (const architecture of ['x64', 'arm64'] as const) {
+      for (const module of [
+        'backend',
+        'ovpnproxy',
+        'wgproxy',
+        'fortiproxy',
+        'ciscoproxy',
+        'credential-reader',
+      ]) {
+        const environment = devRuntimeGoBuildEnvironment(
+          platform,
+          architecture,
+          path.join('tools', `wormhole-${module}`),
+          inherited,
+        );
+        assert.equal(environment.GOOS, platform === 'win32' ? 'windows' : platform);
+        assert.equal(environment.GOARCH, architecture === 'arm64' ? 'arm64' : 'amd64');
+        assert.equal(
+          environment.CGO_ENABLED,
+          (platform === 'darwin' && module === 'backend') ||
+            (platform === 'win32' && module === 'ovpnproxy')
+            ? '1'
+            : '0',
+        );
+        assert.equal(environment.CC, 'custom-cc');
+        assert.equal(environment.GOFLAGS, '-trimpath');
+      }
+    }
+  }
+  assert.equal(inherited.GOOS, 'freebsd');
+  const probe = spawnSync('go', ['env', '-json', 'GOOS', 'GOARCH', 'CGO_ENABLED', 'CC'], {
+    encoding: 'utf8',
+    windowsHide: true,
+    env: devRuntimeGoBuildEnvironment('darwin', 'arm64', path.join('tools', 'wormhole-backend'), {
+      ...process.env,
+      ...inherited,
+    }),
+  });
+  assert.equal(probe.status, 0, probe.stderr);
+  assert.deepEqual(JSON.parse(probe.stdout), {
+    GOOS: 'darwin',
+    GOARCH: 'arm64',
+    CGO_ENABLED: '1',
+    CC: 'custom-cc',
+  });
+});
 
 test('non-Windows development builds only the portable runtime', () => {
   for (const platform of ['linux', 'darwin'] as const) {

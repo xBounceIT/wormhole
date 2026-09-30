@@ -140,6 +140,8 @@ bypass reuse. Native compiler identities include the selected executable's
 contents and version, using OpenVPN's actual Windows PATH resolution and the
 macOS backend's effective Go compiler settings. Compound compiler/wrapper
 commands on macOS conservatively bypass reuse.
+Go probes use each build's platform, architecture and CGO overrides even when
+the calling shell is configured for cross-compilation.
 Custom CMake dependency search roots and toolchain files also bypass reuse,
 including `CMAKE_PREFIX_PATH`, `CMAKE_INCLUDE_PATH`, `CMAKE_LIBRARY_PATH`, and
 package-specific roots such as `ASIO_ROOT`.

@@ -1,6 +1,10 @@
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { createDevRuntimeBuildPlan, devRuntimeToolchainCommands } from './dev-runtime-plan.ts';
+import {
+  createDevRuntimeBuildPlan,
+  devRuntimeGoBuildEnvironment,
+  devRuntimeToolchainCommands,
+} from './dev-runtime-plan.ts';
 import {
   devRuntimeCacheAllowed,
   devRuntimeCacheEnvironmentAllowed,
@@ -66,11 +70,23 @@ if (process.platform === 'win32') {
   }
 }
 const goContexts = devRuntimeGoModuleDirectories(root, buildPlan).map((cwd) => {
+  const buildEnvironment = devRuntimeGoBuildEnvironment(
+    process.platform,
+    process.arch,
+    cwd,
+    process.env,
+  );
   const environment = devRuntimeGoEnvironment(
-    spawnSync('go', ['env', '-json'], { cwd, encoding: 'utf8', windowsHide: true }).stdout,
+    spawnSync('go', ['env', '-json'], {
+      cwd,
+      env: buildEnvironment,
+      encoding: 'utf8',
+      windowsHide: true,
+    }).stdout,
   );
   const module = spawnSync('go', ['mod', 'edit', '-json'], {
     cwd,
+    env: buildEnvironment,
     encoding: 'utf8',
     windowsHide: true,
   }).stdout;
@@ -82,12 +98,15 @@ const goContexts = devRuntimeGoModuleDirectories(root, buildPlan).map((cwd) => {
     try {
       const { CC, CXX } = JSON.parse(environment);
       compilers = [CC, CXX].map((command) => {
-        const identity = devRuntimeCompilerIdentity(command ?? '', cwd, process.env);
+        const identity = devRuntimeCompilerIdentity(command ?? '', cwd, buildEnvironment);
         return (
           identity && {
             ...identity,
-            version: spawnSync(identity.executable, ['--version'], { cwd, encoding: 'utf8' })
-              .stdout,
+            version: spawnSync(identity.executable, ['--version'], {
+              cwd,
+              env: buildEnvironment,
+              encoding: 'utf8',
+            }).stdout,
           }
         );
       });
