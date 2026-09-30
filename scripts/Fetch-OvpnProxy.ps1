@@ -3,7 +3,8 @@ param(
     [string]$Arch = "x64",
     [switch]$Force,
     [switch]$Quiet,
-    [switch]$RequireReal
+    [switch]$RequireReal,
+    [switch]$PrintBuildContext
 )
 
 Set-StrictMode -Version Latest
@@ -101,6 +102,108 @@ function Get-FileSha256($path) {
     }
     finally { $sha.Dispose() }
     return -join ($hash | ForEach-Object { $_.ToString("x2") })
+}
+
+function Get-OvpnCompilerPair {
+    $cCompilerNames = if ($Arch -eq "arm64") {
+        # llvm-mingw provides GCC-compatible aliases for clang. Prefer the aliases to
+        # preserve existing CMake caches while ovpn_cgo.go links its libc++ explicitly.
+        @("aarch64-w64-mingw32-gcc", "aarch64-w64-mingw32-clang")
+    } else {
+        @("gcc")
+    }
+    $cppCompilerNames = if ($Arch -eq "arm64") {
+        @("aarch64-w64-mingw32-g++", "aarch64-w64-mingw32-clang++")
+    } else {
+        @("g++")
+    }
+    $cCompiler = $cCompilerNames |
+        ForEach-Object { Get-Command $_ -ErrorAction SilentlyContinue } |
+        Select-Object -First 1
+    $cppCompiler = $cppCompilerNames |
+        ForEach-Object { Get-Command $_ -ErrorAction SilentlyContinue } |
+        Select-Object -First 1
+    $arm64CompilerIsLlvm = $true
+    if ($Arch -eq "arm64" -and $cCompiler -and $cppCompiler) {
+        $cCompilerBanner = (& $cCompiler.Source --version 2>&1 | Out-String)
+        $cCompilerVersionExitCode = $LASTEXITCODE
+        $cppCompilerBanner = (& $cppCompiler.Source --version 2>&1 | Out-String)
+        $cppCompilerVersionExitCode = $LASTEXITCODE
+        $arm64CompilerIsLlvm =
+            $cCompilerVersionExitCode -eq 0 -and
+            $cppCompilerVersionExitCode -eq 0 -and
+            $cCompilerBanner -match "(?i)clang" -and
+            $cppCompilerBanner -match "(?i)clang"
+        if (-not $arm64CompilerIsLlvm) {
+            # A genuine GCC cross-toolchain uses libstdc++, while the pinned ARM64
+            # build links libc++. Prefer explicit clang executables if both toolchains
+            # are on PATH; otherwise reject this incompatible compiler pair early.
+            $cCompiler = Get-Command "aarch64-w64-mingw32-clang" -ErrorAction SilentlyContinue
+            $cppCompiler = Get-Command "aarch64-w64-mingw32-clang++" -ErrorAction SilentlyContinue
+            $arm64CompilerIsLlvm = $null -ne $cCompiler -and $null -ne $cppCompiler
+        }
+    }
+    $haveCompiler =
+        $null -ne $cCompiler -and
+        $null -ne $cppCompiler -and
+        $arm64CompilerIsLlvm
+    return [PSCustomObject]@{ CCompiler = $cCompiler; CppCompiler = $cppCompiler; Available = $haveCompiler }
+}
+
+function Get-OvpnCmakeCompilerArguments([string]$cachePath, [string]$cCompilerPath, [string]$cppCompilerPath) {
+    $arguments = @("-DCMAKE_C_COMPILER=$cCompilerPath", "-DCMAKE_CXX_COMPILER=$cppCompilerPath")
+    if (Test-Path -LiteralPath $cachePath) {
+        foreach ($line in Get-Content -LiteralPath $cachePath) {
+            if ($line -match '^CMAKE_(C|CXX)_COMPILER:(FILEPATH|STRING|UNINITIALIZED)=(.+)$') {
+                $selected = if ($Matches[1] -eq 'C') { $cCompilerPath } else { $cppCompilerPath }
+                if ([IO.Path]::GetFullPath($Matches[3]) -ne [IO.Path]::GetFullPath($selected)) {
+                    # CMake's automatic cache reset loses command-line toolchain settings.
+                    # Remove only CMake's generated configuration, preserving installed
+                    # dependencies. This also works with supported CMake 3.20-3.23,
+                    # which do not have the --fresh option.
+                    $buildDirectory = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($cachePath))
+                    $cmakeFiles = [IO.Path]::GetFullPath((Join-Path $buildDirectory 'CMakeFiles'))
+                    if ([IO.Path]::GetDirectoryName($cmakeFiles) -ne $buildDirectory) {
+                        throw 'CMake configuration directory escapes the build directory.'
+                    }
+                    Remove-Item -LiteralPath $cachePath -Force
+                    if (Test-Path -LiteralPath $cmakeFiles) {
+                        Remove-Item -LiteralPath $cmakeFiles -Recurse -Force
+                    }
+                    break
+                }
+            }
+        }
+    }
+    return $arguments
+}
+
+if ($PrintBuildContext) {
+    $compilerPair = Get-OvpnCompilerPair
+    $goTool = Get-Command go -ErrorAction SilentlyContinue
+    $cmakeTool = Get-Command cmake -ErrorAction SilentlyContinue
+    $tools = @(foreach ($tool in @($compilerPair.CCompiler, $compilerPair.CppCompiler, $goTool, $cmakeTool)) {
+        if ($null -eq $tool) { continue }
+        $versionArgument = if ($tool.Name -match '^go(\.exe)?$') { 'version' } else { '--version' }
+        $LASTEXITCODE = 0
+        $version = (& $tool.Source $versionArgument 2>&1 | Out-String)
+        [PSCustomObject]@{
+            Path = $tool.Source
+            Sha256 = Get-FileSha256 $tool.Source
+            Version = $version.Trim()
+            ExitCode = $LASTEXITCODE
+        }
+    })
+    [PSCustomObject]@{
+        # The no-vcpkg fallback resolves mutable system libraries outside our
+        # tracked inputs. Cache only the fingerprinted vcpkg dependency path.
+        Cacheable = ($compilerPair.Available -and $null -ne $goTool -and $null -ne $cmakeTool -and
+                     $env:VCPKG_ROOT -and
+                     (Test-Path -LiteralPath (Join-Path $env:VCPKG_ROOT 'scripts\buildsystems\vcpkg.cmake') -PathType Leaf))
+        VcpkgRoot = $env:VCPKG_ROOT
+        Tools = $tools
+    } | ConvertTo-Json -Depth 4 -Compress
+    return
 }
 
 if (-not (Test-Path $stagingDir)) {
@@ -239,48 +342,10 @@ if ($RequireReal -and -not $haveOvpn3Src) {
         $haveOvpn3Src = (Test-Path $openvpn3) -and (Test-Path $mbedtls)
     }
 }
-$cCompilerNames = if ($Arch -eq "arm64") {
-    # llvm-mingw provides GCC-compatible aliases for clang. Prefer the aliases to
-    # preserve existing CMake caches while ovpn_cgo.go links its libc++ explicitly.
-    @("aarch64-w64-mingw32-gcc", "aarch64-w64-mingw32-clang")
-} else {
-    @("gcc")
-}
-$cppCompilerNames = if ($Arch -eq "arm64") {
-    @("aarch64-w64-mingw32-g++", "aarch64-w64-mingw32-clang++")
-} else {
-    @("g++")
-}
-$cCompiler = $cCompilerNames |
-    ForEach-Object { Get-Command $_ -ErrorAction SilentlyContinue } |
-    Select-Object -First 1
-$cppCompiler = $cppCompilerNames |
-    ForEach-Object { Get-Command $_ -ErrorAction SilentlyContinue } |
-    Select-Object -First 1
-$arm64CompilerIsLlvm = $true
-if ($Arch -eq "arm64" -and $cCompiler -and $cppCompiler) {
-    $cCompilerBanner = (& $cCompiler.Source --version 2>&1 | Out-String)
-    $cCompilerVersionExitCode = $LASTEXITCODE
-    $cppCompilerBanner = (& $cppCompiler.Source --version 2>&1 | Out-String)
-    $cppCompilerVersionExitCode = $LASTEXITCODE
-    $arm64CompilerIsLlvm =
-        $cCompilerVersionExitCode -eq 0 -and
-        $cppCompilerVersionExitCode -eq 0 -and
-        $cCompilerBanner -match "(?i)clang" -and
-        $cppCompilerBanner -match "(?i)clang"
-    if (-not $arm64CompilerIsLlvm) {
-        # A genuine GCC cross-toolchain uses libstdc++, while the pinned ARM64
-        # build links libc++. Prefer explicit clang executables if both toolchains
-        # are on PATH; otherwise reject this incompatible compiler pair early.
-        $cCompiler = Get-Command "aarch64-w64-mingw32-clang" -ErrorAction SilentlyContinue
-        $cppCompiler = Get-Command "aarch64-w64-mingw32-clang++" -ErrorAction SilentlyContinue
-        $arm64CompilerIsLlvm = $null -ne $cCompiler -and $null -ne $cppCompiler
-    }
-}
-$haveCompiler =
-    $null -ne $cCompiler -and
-    $null -ne $cppCompiler -and
-    $arm64CompilerIsLlvm
+$compilerPair = Get-OvpnCompilerPair
+$cCompiler = $compilerPair.CCompiler
+$cppCompiler = $compilerPair.CppCompiler
+$haveCompiler = $compilerPair.Available
 $buildTag = ""
 if ($cmake -and $haveOvpn3Src -and $haveCompiler) {
     $buildTag = "ovpn3"
@@ -377,10 +442,8 @@ if ($buildTag -eq "ovpn3") {
         "-S", $shimDir,
         "-G", $generator
     )
-    if ($Arch -eq "arm64") {
-        $cmakeArgs += "-DCMAKE_C_COMPILER=$($cCompiler.Source)"
-        $cmakeArgs += "-DCMAKE_CXX_COMPILER=$($cppCompiler.Source)"
-    }
+    # Keep CMake and CGO on the same selected compiler pair on both architectures.
+    $cmakeArgs += Get-OvpnCmakeCompilerArguments (Join-Path $shimBuild 'CMakeCache.txt') $cCompiler.Source $cppCompiler.Source
     if ($env:VCPKG_ROOT -and (Test-Path "$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake")) {
         $cmakeArgs += "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake"
         $triplet = if ($Arch -eq "arm64") { "arm64-mingw-static" } else { "x64-mingw-static" }

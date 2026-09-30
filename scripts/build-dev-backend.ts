@@ -1,8 +1,26 @@
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { createDevRuntimeBuildPlan } from './dev-runtime-plan.ts';
+import {
+  createDevRuntimeBuildPlan,
+  devRuntimeGoBuildEnvironment,
+  devRuntimeToolchainCommands,
+} from './dev-runtime-plan.ts';
+import {
+  devRuntimeCacheAllowed,
+  devRuntimeCacheEnvironmentAllowed,
+  devRuntimeCompilerIdentity,
+  devRuntimeEnvironment,
+  devRuntimeGitContext,
+  devRuntimeMsbuildContext,
+  devRuntimeGoEnvironment,
+  devRuntimeGoModuleDirectories,
+  devRuntimeReplacementsAllowed,
+  devRuntimeVcpkgInputs,
+  runCachedDevRuntimeBuild,
+} from './dev-runtime-cache.ts';
 
 const scriptDirectory = fileURLToPath(new URL('.', import.meta.url));
+const root = fileURLToPath(new URL('..', import.meta.url));
 const buildPlan = createDevRuntimeBuildPlan({
   platform: process.platform,
   architecture: process.arch,
@@ -12,13 +30,135 @@ const buildPlan = createDevRuntimeBuildPlan({
 
 console.info(`[Wormhole] Preparing development runtime for ${process.platform}/${process.arch}.`);
 
-for (const step of buildPlan) {
-  const result = spawnSync(step.command, step.args, { stdio: 'inherit', windowsHide: true });
-  if (result.error) {
-    console.error(`[Wormhole] Failed to start ${step.name}: ${result.error.message}`);
-    process.exit(1);
+const environment = devRuntimeEnvironment(process.env, process.platform);
+const gitContext = devRuntimeGitContext(root);
+const msbuildContext =
+  process.platform === 'win32'
+    ? devRuntimeMsbuildContext(
+        root,
+        fileURLToPath(new URL('../tools/wormhole-rdp-host', import.meta.url)),
+      )
+    : null;
+if (msbuildContext) buildPlan.at(-1)!.inputs.push(...msbuildContext.inputs);
+const toolchains = devRuntimeToolchainCommands(process.arch).map((command) => {
+  const result = spawnSync(command, [command === 'go' ? 'version' : '--version'], {
+    encoding: 'utf8',
+    windowsHide: true,
+  });
+  return [command, result.status, result.stdout, result.error?.message];
+});
+
+// Fetch-OvpnProxy hydrates these values from the registry. Include them in the
+// cache key too, so installing/replacing a native toolchain invalidates reuse.
+const registryEnvironment =
+  process.platform === 'win32'
+    ? spawnSync(
+        'powershell.exe',
+        [
+          '-NoProfile',
+          '-Command',
+          "@('User', 'Machine') | ForEach-Object { [Environment]::GetEnvironmentVariable('PATH', $_); [Environment]::GetEnvironmentVariable('VCPKG_ROOT', $_) }",
+        ],
+        { encoding: 'utf8', windowsHide: true },
+      ).stdout
+    : '';
+let ovpnBuildContext: { Cacheable?: boolean; VcpkgRoot?: string } | null = null;
+if (process.platform === 'win32') {
+  try {
+    ovpnBuildContext = JSON.parse(
+      spawnSync(buildPlan[0].command, [...buildPlan[0].args, '-PrintBuildContext'], {
+        encoding: 'utf8',
+        windowsHide: true,
+      }).stdout,
+    );
+  } catch {
+    // A failed native probe must not enable cache reuse.
   }
-  if (result.status !== 0) {
-    process.exit(result.status ?? 1);
+  if (typeof ovpnBuildContext?.VcpkgRoot === 'string' && ovpnBuildContext.VcpkgRoot) {
+    buildPlan[0].inputs.push(...devRuntimeVcpkgInputs(root, ovpnBuildContext.VcpkgRoot));
   }
 }
+const goContexts = devRuntimeGoModuleDirectories(root, buildPlan).map((cwd) => {
+  const buildEnvironment = devRuntimeGoBuildEnvironment(
+    process.platform,
+    process.arch,
+    cwd,
+    process.env,
+  );
+  const environment = devRuntimeGoEnvironment(
+    spawnSync('go', ['env', '-json'], {
+      cwd,
+      env: buildEnvironment,
+      encoding: 'utf8',
+      windowsHide: true,
+    }).stdout,
+  );
+  const module = spawnSync('go', ['mod', 'edit', '-json'], {
+    cwd,
+    env: buildEnvironment,
+    encoding: 'utf8',
+    windowsHide: true,
+  }).stdout;
+  let compilers: unknown[] = [];
+  if (
+    process.platform === 'darwin' &&
+    cwd === fileURLToPath(new URL('../tools/wormhole-backend', import.meta.url))
+  ) {
+    try {
+      const { CC, CXX } = JSON.parse(environment);
+      compilers = [CC, CXX].map((command) => {
+        const identity = devRuntimeCompilerIdentity(command ?? '', cwd, buildEnvironment);
+        return (
+          identity && {
+            ...identity,
+            version: spawnSync(identity.executable, ['--version'], {
+              cwd,
+              env: buildEnvironment,
+              encoding: 'utf8',
+            }).stdout,
+          }
+        );
+      });
+    } catch {
+      compilers = [null];
+    }
+  }
+  return { cwd, environment, module, compilers };
+});
+
+runCachedDevRuntimeBuild({
+  root,
+  plan: buildPlan,
+  context: {
+    platform: process.platform,
+    architecture: process.arch,
+    environment,
+    gitContext,
+    msbuildContext,
+    toolchains,
+    registryEnvironment,
+    ovpnBuildContext,
+    goContexts,
+  },
+  force:
+    process.argv.includes('--force') ||
+    !gitContext ||
+    (process.platform === 'win32' && !msbuildContext?.cacheable) ||
+    !devRuntimeCacheEnvironmentAllowed(environment) ||
+    (process.platform === 'win32' && ovpnBuildContext?.Cacheable !== true) ||
+    goContexts.some(
+      ({ cwd, environment, module, compilers }) =>
+        !devRuntimeCacheAllowed(environment) ||
+        !devRuntimeReplacementsAllowed(root, cwd, module, buildPlan) ||
+        compilers.some((compiler) => !compiler),
+    ),
+  execute(step) {
+    const result = spawnSync(step.command, step.args, { stdio: 'inherit', windowsHide: true });
+    if (result.error) {
+      throw new Error(`Failed to start ${step.name}: ${result.error.message}`);
+    }
+    if (result.status !== 0) {
+      throw new Error(`${step.name} exited with status ${result.status ?? 'unknown'}.`);
+    }
+  },
+});

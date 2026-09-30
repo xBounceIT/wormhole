@@ -122,6 +122,54 @@ Run the development app:
 
     npm run dev
 
+Native development builds are incremental: unchanged Go, VPN, credential-reader,
+and RDP-host binaries are reused. Source changes, missing or changed binaries,
+architecture changes, and toolchain changes trigger a rebuild. The first Windows
+run still initializes and builds the real OpenVPN3 dependencies. Per-component
+timings are printed during startup. To force a native rebuild:
+
+    npm run build:dev-backend -- --force
+
+Active Go workspaces and external overlay/modfile/tool-executor/package-directory
+flags bypass the native cache, since those can depend on files outside this
+repository. Explicit PGO profile paths also bypass reuse; `-pgo=auto` remains
+cacheable because the main-package profile is tracked, and `-pgo=off` needs no
+profile. Go's `-a` flag bypasses reuse to honor its requested rebuild.
+Local Go replacements outside the component's tracked source directories also
+bypass reuse. Native compiler identities include the selected executable's
+contents and version, using OpenVPN's actual Windows PATH resolution and the
+macOS backend's effective Go compiler settings. Compound compiler/wrapper
+commands on macOS conservatively bypass reuse.
+Go probes use each build's platform, architecture and CGO overrides even when
+the calling shell is configured for cross-compilation.
+Git revision and working-tree dirty state are part of the context so cached Go
+binaries retain accurate VCS build metadata, including after an empty commit.
+RDP builds track repository ancestor MSBuild configurations and bypass reuse
+when an external ancestor supplies MSBuild, SDK or NuGet configuration.
+Custom CMake dependency search roots and toolchain files also bypass reuse,
+including `CMAKE_PREFIX_PATH`, `CMAKE_INCLUDE_PATH`, `CMAKE_LIBRARY_PATH`, and
+package-specific roots such as `ASIO_ROOT`.
+External vcpkg port/triplet overlays also bypass reuse.
+Custom C/C++ and CGO compiler/linker flags bypass reuse, including settings
+persisted through `go env -w`; empty flags and Go's `-O2 -g` defaults remain cacheable.
+Compiler search roots such as `CPATH`, `C_INCLUDE_PATH`, `CPLUS_INCLUDE_PATH`,
+`LIBRARY_PATH`, and custom `SDKROOT` also bypass reuse.
+The resolved vcpkg checkout's build scripts, ports, versions, triplets and
+executable, plus manifest-installed dependencies, are fingerprinted by content
+so updating vcpkg at the same path invalidates reuse.
+The vcpkg checkout may reside on a different Windows drive from the repository.
+Restored dependency files are recorded after a successful build, allowing the
+first restore to be reused while source changes during compilation still prevent
+cache stamping.
+Windows builds without a usable vcpkg toolchain bypass reuse because their
+system-resolved dependency libraries are outside the tracked source graph.
+
+`npm run test:dev-runtime` covers cache invalidation and build planning. The
+compiler-launch entrypoint is excluded from Node loaded-module coverage because
+it invokes external Go/.NET/CMake toolchains; verify it with an actual development
+startup as well. The PowerShell compiler-context probe is likewise outside Node
+coverage and is verified by a real process test of PATH filtering and upgrades.
+
 Build the renderer, Electron process, and current-host Go backend:
 
     npm run build
