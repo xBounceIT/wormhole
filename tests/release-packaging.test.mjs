@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { closeSync, existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
-import { join, relative } from 'node:path';
+import { join, relative, resolve } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { createHash } from 'node:crypto';
 import { prerelease, satisfies, valid } from 'semver';
 import { parse } from 'yaml';
 
@@ -168,6 +169,9 @@ test('legacy rimraf callback supports omitted options and reports deletion error
 test('electron-builder produces portable and installable Linux packages', () => {
   assert.equal(packageJson.build.artifactName, 'Wormhole-${version}-${os}-${arch}-setup.${ext}');
   assert.equal(packageJson.build.linux.artifactName, 'Wormhole-${version}-${os}-${arch}.${ext}');
+  assert.equal(packageJson.build.appImage.artifactName, 'Wormhole-${version}-${arch}.${ext}');
+  assert.equal(packageJson.build.toolsets.appimage, '1.0.3');
+  assert.equal(packageJson.build.artifactBuildCompleted, './scripts/appimage-update-info.mjs');
   assert.deepEqual(packageJson.build.linux.target, ['AppImage', 'deb', 'rpm']);
   assert.equal(packageJson.build.linux.icon, 'Assets/LinuxIcons');
   assert.ok(packageJson.build.files.includes('!Assets/LinuxIcons/**/*'));
@@ -326,14 +330,24 @@ test('release matrices build and upload every supported platform and package for
       {
         target: 'linux/arm64/arm64',
         runnerPlatform: 'ubuntu',
-        artifacts: ['release/*.AppImage', 'release/*.deb', 'release/*.rpm'],
-        updater: 'release/Wormhole-*-linux-arm64.AppImage',
+        artifacts: [
+          'release/*.AppImage',
+          'release/*.AppImage.zsync',
+          'release/*.deb',
+          'release/*.rpm',
+        ],
+        updater: 'release/Wormhole-*-arm64.AppImage',
       },
       {
         target: 'linux/x64/x64',
         runnerPlatform: 'ubuntu',
-        artifacts: ['release/*.AppImage', 'release/*.deb', 'release/*.rpm'],
-        updater: 'release/Wormhole-*-linux-x86_64.AppImage',
+        artifacts: [
+          'release/*.AppImage',
+          'release/*.AppImage.zsync',
+          'release/*.deb',
+          'release/*.rpm',
+        ],
+        updater: 'release/Wormhole-*-x86_64.AppImage',
       },
       {
         target: 'mac/universal/universal',
@@ -360,7 +374,9 @@ test('release verifies the Linux package outputs and their installed desktop ass
     'aarch64.rpm',
   ]) {
     assert.ok(
-      verify.run.includes(`release/Wormhole-*-linux-${suffix}`),
+      verify.run.includes(
+        `release/Wormhole-*-${suffix.endsWith('.AppImage') ? '' : 'linux-'}${suffix}`,
+      ),
       `${suffix} must be verified`,
     );
   }
@@ -369,6 +385,83 @@ test('release verifies the Linux package outputs and their installed desktop ass
   assert.match(verify.run, /PNG image data, \$icon_width x \$icon_height,/);
   assert.match(verify.run, /cmp -s "Assets\/LinuxIcons\/\$size\.png" "\$icon_path"/);
   assert.match(verify.run, /grep -Fxq 'Icon=wormhole' "\$desktop_entry"/);
+  assert.match(verify.run, /readelf --program-headers "\$appimage"/);
+  assert.match(verify.run, /readelf --string-dump=\.upd_info "\$appimage"/);
+  assert.match(verify.run, /sha1sum "\$appimage"/);
+  assert.match(verify.run, /grep -aFxq "SHA-1: \$appimage_sha1" "\$appimage\.zsync"/);
+  const tooling = releaseJobs.packages.steps.find((step) => step.run?.includes('--yes zsync'));
+  assert.equal(tooling?.if, "matrix.builder_platform == 'linux'");
+});
+
+test('release AppImage validation rejects inspection errors and corrupt delta files', async () => {
+  const verify = releaseJobs.packages.steps.find((step) =>
+    step.run?.includes('dpkg-deb --extract'),
+  );
+  const source = verify.run.slice(
+    verify.run.indexOf('appimages=('),
+    verify.run.indexOf('deb_packages=('),
+  );
+  const script = `set -euo pipefail
+shopt -s nullglob
+readelf() {
+  if [[ "$1" == '--program-headers' ]]; then
+    printf '%s\\n' "$MOCK_PROGRAM_HEADERS"
+    return "$MOCK_PROGRAM_STATUS"
+  fi
+  printf '%s\\n' 'gh-releases-zsync|xBounceIT|wormhole|latest|Wormhole-*-x86_64.AppImage.zsync'
+  return "$MOCK_SECTION_STATUS"
+}
+${source}`;
+  const bash =
+    process.platform === 'win32'
+      ? resolve(
+          execFileSync('git', ['--exec-path'], { encoding: 'utf8' }).trim(),
+          '../../../bin/bash.exe',
+        )
+      : 'bash';
+  const directory = await mkdtemp(join(tmpdir(), 'wormhole-release-appimage-'));
+  const image = join(directory, 'release', 'Wormhole-2.1.0-x86_64.AppImage');
+  const content = Buffer.from('AppImage fixture');
+  const sha1 = createHash('sha1').update(content).digest('hex');
+  try {
+    await mkdir(join(directory, 'release'));
+    await writeFile(image, content);
+    for (const {
+      headers = 'LOAD',
+      programStatus = '0',
+      sectionStatus = '0',
+      sidecar = `SHA-1: ${sha1}\n`,
+      success,
+    } of [
+      { success: true },
+      { programStatus: '9', success: false },
+      { headers: 'INTERP', success: false },
+      { headers: 'DYNAMIC', success: false },
+      { sectionStatus: '9', success: false },
+      { sidecar: 'SHA-1: wrong\n', success: false },
+      { sidecar: '', success: false },
+    ]) {
+      await writeFile(`${image}.zsync`, sidecar);
+      const result = spawnSync(bash, ['-c', script], {
+        cwd: directory,
+        env: {
+          ...process.env,
+          MOCK_PROGRAM_HEADERS: headers,
+          MOCK_PROGRAM_STATUS: programStatus,
+          MOCK_SECTION_STATUS: sectionStatus,
+        },
+        encoding: 'utf8',
+      });
+      assert.ifError(result.error);
+      assert.equal(
+        result.status === 0,
+        success,
+        `${headers}/${programStatus}/${sectionStatus}: ${result.stderr}`,
+      );
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test('release packages generate and upload the installer checksums required by the updater', () => {

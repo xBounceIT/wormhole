@@ -203,6 +203,17 @@ a portable AppImage plus installable DEB and RPM packages for x86-64 and ARM64.
 Windows releases publish the installer and portable ZIP, while macOS releases
 publish the DMG.
 
+AppImages are named `Wormhole-<version>-x86_64.AppImage` or
+`Wormhole-<version>-arm64.AppImage`. They use electron-builder's static runtime,
+which does not require the system's libfuse2, and contain AppImageUpdate metadata.
+Each release includes a matching `.zsync` file for delta updates and a `.sha256`
+file for Wormhole's built-in updater. Building AppImages locally requires
+`zsyncmake` (on Debian/Ubuntu, install the `zsync` package). The Electron payload
+still requires a compatible glibc-based Linux distribution.
+When migrating from releases that used `-linux-` in the AppImage filename,
+download the renamed AppImage manually once; its updater recognizes both naming
+formats for subsequent updates.
+
 ## macOS Gatekeeper notice
 
 The macOS release is not currently signed with an Apple Developer ID or

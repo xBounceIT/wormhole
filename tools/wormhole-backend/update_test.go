@@ -103,6 +103,21 @@ func TestFindInstallerAsset(t *testing.T) {
 	if asset := findInstallerAsset(release, "linux", "x86"); asset != nil {
 		t.Fatalf("x86 asset should not match: %+v", asset)
 	}
+	for _, arch := range []string{"x86_64", "arm64"} {
+		name := "Wormhole-2.1.0-" + arch + ".AppImage"
+		canonical := githubRelease{Assets: []githubReleaseAsset{
+			{Name: name + ".zsync"},
+			{Name: name + ".sha256"},
+			{Name: "Other-2.1.0-" + arch + ".AppImage"},
+			{Name: name},
+		}}
+		if asset := findInstallerAsset(canonical, "linux", arch); asset == nil || asset.Name != name {
+			t.Fatalf("canonical Linux/%s asset = %+v, want %q", arch, asset, name)
+		}
+	}
+	if asset := findInstallerAsset(githubRelease{}, "linux", "x64"); asset != nil {
+		t.Fatalf("empty release should not match: %+v", asset)
+	}
 }
 
 func TestParseShaSidecar(t *testing.T) {
@@ -502,6 +517,9 @@ func TestUpdateCacheMaintenanceRemovesOnlyStaleAndSupersededFiles(t *testing.T) 
 	removeNames := []string{
 		"Wormhole-1.0.0-win-x64-setup.exe",
 		"Wormhole-1.0.0-linux-x86_64.AppImage",
+		"Wormhole-1.0.0-x86_64.AppImage",
+		"Wormhole-1.0.0-arm64.AppImage",
+		"Wormhole-1.0.0-linux-arm64.AppImage",
 		"Wormhole-1.0.0-mac-universal-setup.dmg",
 	}
 	for _, name := range append([]string{keepName}, removeNames...) {
