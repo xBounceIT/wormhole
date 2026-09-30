@@ -11,6 +11,7 @@ import {
   devRuntimeCompilerIdentity,
   devRuntimeEnvironment,
   devRuntimeGitContext,
+  devRuntimeMsbuildContext,
   devRuntimeGoEnvironment,
   devRuntimeGoModuleDirectories,
   devRuntimeReplacementsAllowed,
@@ -31,6 +32,14 @@ console.info(`[Wormhole] Preparing development runtime for ${process.platform}/$
 
 const environment = devRuntimeEnvironment(process.env, process.platform);
 const gitContext = devRuntimeGitContext(root);
+const msbuildContext =
+  process.platform === 'win32'
+    ? devRuntimeMsbuildContext(
+        root,
+        fileURLToPath(new URL('../tools/wormhole-rdp-host', import.meta.url)),
+      )
+    : null;
+if (msbuildContext) buildPlan.at(-1)!.inputs.push(...msbuildContext.inputs);
 const toolchains = devRuntimeToolchainCommands(process.arch).map((command) => {
   const result = spawnSync(command, [command === 'go' ? 'version' : '--version'], {
     encoding: 'utf8',
@@ -125,6 +134,7 @@ runCachedDevRuntimeBuild({
     architecture: process.arch,
     environment,
     gitContext,
+    msbuildContext,
     toolchains,
     registryEnvironment,
     ovpnBuildContext,
@@ -133,6 +143,7 @@ runCachedDevRuntimeBuild({
   force:
     process.argv.includes('--force') ||
     !gitContext ||
+    (process.platform === 'win32' && !msbuildContext?.cacheable) ||
     !devRuntimeCacheEnvironmentAllowed(environment) ||
     (process.platform === 'win32' && ovpnBuildContext?.Cacheable !== true) ||
     goContexts.some(

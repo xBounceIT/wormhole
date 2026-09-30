@@ -19,6 +19,7 @@ import {
   devRuntimeCompilerIdentity,
   devRuntimeEnvironment,
   devRuntimeGitContext,
+  devRuntimeMsbuildContext,
   devRuntimeGoEnvironment,
   devRuntimeGoModuleDirectories,
   devRuntimeReplacementsAllowed,
@@ -142,6 +143,48 @@ test('Go VCS revision and dirty-state changes invalidate cached native binaries'
   assert.equal(devRuntimeGitContext(f.root)?.modified, false);
   run();
   assert.equal(f.builds.length, 4);
+});
+
+test('MSBuild tracks internal ancestor configuration and bypasses external parent imports', (t) => {
+  const f = fixture(t);
+  const project = path.join(f.root, 'tools/rdp-host');
+  const original = devRuntimeMsbuildContext(f.root, project);
+  assert.ok(original.inputs.includes(path.join('tools', 'Directory.Build.props')));
+  assert.ok(original.inputs.includes('Directory.Build.targets'));
+  assert.ok(original.inputs.includes(path.join('tools', 'rdp-host', 'Directory.Packages.props')));
+  f.step.inputs.push(...original.inputs);
+  runCachedDevRuntimeBuild(f.options);
+  f.write(
+    'tools/Directory.Build.props',
+    '<Project><PropertyGroup><Version>2</Version></PropertyGroup></Project>',
+  );
+  runCachedDevRuntimeBuild(f.options);
+  assert.equal(f.builds.length, 2);
+  f.remove('tools/Directory.Build.props');
+  runCachedDevRuntimeBuild(f.options);
+  assert.equal(f.builds.length, 3);
+  const checkout = path.join(f.root, 'checkout');
+  for (const name of [
+    'Directory.Build.props',
+    'Directory.Build.targets',
+    'Directory.Packages.props',
+    'global.json',
+    'NuGet.Config',
+  ]) {
+    f.write(name, 'external parent configuration');
+    const context = devRuntimeMsbuildContext(checkout, path.join(checkout, 'tools/rdp-host'));
+    assert.equal(context.cacheable, false, name);
+    assert.ok(!context.inputs.includes(path.join('..', name)));
+    const before: number = f.builds.length;
+    const run = () =>
+      runCachedDevRuntimeBuild({ ...f.options, context, force: !context.cacheable });
+    run();
+    f.write(name, 'changed external config at the same path');
+    run();
+    assert.equal(f.builds.length, before + 2);
+    f.remove(name);
+  }
+  assert.equal(devRuntimeMsbuildContext(path.parse(f.root).root, project).cacheable, true);
 });
 
 test('native dependency inputs are captured and mutable external roots disable reuse', (t) => {

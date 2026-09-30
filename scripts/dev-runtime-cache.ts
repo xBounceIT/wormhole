@@ -29,6 +29,32 @@ export function devRuntimeGitContext(root: string): { revision: string; modified
   return { revision: revision.stdout.trim(), modified: status.stdout.length > 0 };
 }
 
+export function devRuntimeMsbuildContext(
+  root: string,
+  projectDirectory: string,
+): { inputs: string[]; cacheable: boolean } {
+  const inputs: string[] = [];
+  let cacheable = true;
+  for (let directory = path.resolve(projectDirectory); ; directory = path.dirname(directory)) {
+    const relative = path.relative(root, directory);
+    const internal =
+      relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+    for (const name of [
+      'Directory.Build.props',
+      'Directory.Build.targets',
+      'Directory.Packages.props',
+      'global.json',
+      'NuGet.Config',
+    ]) {
+      const input = path.join(directory, name);
+      if (internal) inputs.push(path.relative(root, input));
+      else if (existsSync(input)) cacheable = false;
+    }
+    if (path.dirname(directory) === directory) break;
+  }
+  return { inputs, cacheable };
+}
+
 export function devRuntimeEnvironment(
   environment: NodeJS.ProcessEnv,
   platform: NodeJS.Platform,
