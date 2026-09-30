@@ -99,7 +99,7 @@ test('nested npm scripts share a stable cache without losing compiler search ord
   );
 });
 
-test('CMake dependency inputs are captured and mutable external roots disable reuse', (t) => {
+test('native dependency inputs are captured and mutable external roots disable reuse', (t) => {
   for (const name of [
     'CMAKE_PREFIX_PATH',
     'CMAKE_INCLUDE_PATH',
@@ -121,6 +121,14 @@ test('CMake dependency inputs are captured and mutable external roots disable re
     'CPPFLAGS',
     'CXXFLAGS',
     'LDFLAGS',
+    'CPATH',
+    'C_INCLUDE_PATH',
+    'CPLUS_INCLUDE_PATH',
+    'OBJC_INCLUDE_PATH',
+    'LIBRARY_PATH',
+    'COMPILER_PATH',
+    'GCC_EXEC_PREFIX',
+    'SDKROOT',
   ]) {
     const environment = devRuntimeEnvironment(
       { [name]: '/external/native-input' },
@@ -184,6 +192,10 @@ test('CMake dependency inputs are captured and mutable external roots disable re
     'CGO_CFLAGS',
     'CGO_CPPFLAGS',
     'CGO_LDFLAGS',
+    'CPATH',
+    'C_INCLUDE_PATH',
+    'CPLUS_INCLUDE_PATH',
+    'LIBRARY_PATH',
   ]) {
     const environment = devRuntimeEnvironment({ [name]: 'external/overlay' }, process.platform);
     const run = () =>

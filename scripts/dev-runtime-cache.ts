@@ -26,7 +26,7 @@ export function devRuntimeEnvironment(
   return Object.fromEntries(
     Object.entries(environment)
       .filter(([name]) =>
-        /^(PATH|GO.*|CGO.*|CC|CXX|CFLAGS|CPPFLAGS|CXXFLAGS|LDFLAGS|SDKROOT|MACOSX_DEPLOYMENT_TARGET|CMAKE.*|(?:ASIO|JSONCPP|LZ4|XXHASH)_(?:ROOT|DIR)|VCPKG.*|WORMHOLE_OVPN.*|DOTNET.*)$/i.test(
+        /^(PATH|GO.*|CGO.*|CC|CXX|CFLAGS|CPPFLAGS|CXXFLAGS|LDFLAGS|CPATH|(?:C|CPLUS|OBJC)_INCLUDE_PATH|LIBRARY_PATH|COMPILER_PATH|GCC_EXEC_PREFIX|SDKROOT|MACOSX_DEPLOYMENT_TARGET|CMAKE.*|(?:ASIO|JSONCPP|LZ4|XXHASH)_(?:ROOT|DIR)|VCPKG.*|WORMHOLE_OVPN.*|DOTNET.*)$/i.test(
           name,
         ),
       )
@@ -59,7 +59,7 @@ export function devRuntimeCacheEnvironmentAllowed(
     // Defaults contain no file inputs; custom flags can name external headers,
     // libraries, response files or compiler plugins, so fail closed.
     if (/^(?:CGO_)?(?:C|CPP|CXX|F|LD)FLAGS$/i.test(name)) return value.trim() !== '-O2 -g';
-    return /^(?:CMAKE_.*(?:PATH|FILE|ROOT)|(?:ASIO|JSONCPP|LZ4|XXHASH)_(?:ROOT|DIR)|VCPKG_OVERLAY_(?:PORTS|TRIPLETS))$/i.test(
+    return /^(?:CMAKE_.*(?:PATH|FILE|ROOT)|(?:ASIO|JSONCPP|LZ4|XXHASH)_(?:ROOT|DIR)|VCPKG_OVERLAY_(?:PORTS|TRIPLETS)|CPATH|(?:C|CPLUS|OBJC)_INCLUDE_PATH|LIBRARY_PATH|COMPILER_PATH|GCC_EXEC_PREFIX|SDKROOT)$/i.test(
       name,
     );
   });
