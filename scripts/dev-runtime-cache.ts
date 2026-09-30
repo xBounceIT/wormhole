@@ -54,13 +54,15 @@ export function devRuntimeCacheEnvironmentAllowed(
 ): boolean {
   // Custom native search/toolchain roots can contain mutable files outside our
   // source graph. Capture their settings and bypass rather than hashing arbitrary trees.
-  return !Object.entries(environment).some(
-    ([name, value]) =>
-      Boolean(value) &&
-      /^(?:CMAKE_.*(?:PATH|FILE|ROOT)|(?:ASIO|JSONCPP|LZ4|XXHASH)_(?:ROOT|DIR)|VCPKG_OVERLAY_(?:PORTS|TRIPLETS))$/i.test(
-        name,
-      ),
-  );
+  return !Object.entries(environment).some(([name, value]) => {
+    if (!value) return false;
+    // Defaults contain no file inputs; custom flags can name external headers,
+    // libraries, response files or compiler plugins, so fail closed.
+    if (/^(?:CGO_)?(?:C|CPP|CXX|F|LD)FLAGS$/i.test(name)) return value.trim() !== '-O2 -g';
+    return /^(?:CMAKE_.*(?:PATH|FILE|ROOT)|(?:ASIO|JSONCPP|LZ4|XXHASH)_(?:ROOT|DIR)|VCPKG_OVERLAY_(?:PORTS|TRIPLETS))$/i.test(
+      name,
+    );
+  });
 }
 
 export function devRuntimeVcpkgInputs(root: string, vcpkgRoot: string): string[] {
@@ -92,13 +94,15 @@ export function devRuntimeGoEnvironment(contents: string): string {
 
 export function devRuntimeCacheAllowed(goEnvironment: string): boolean {
   try {
-    const { GOWORK, GOFLAGS } = JSON.parse(goEnvironment);
+    const environment = JSON.parse(goEnvironment);
+    const { GOWORK, GOFLAGS } = environment;
     // Workspaces and these flags can introduce build inputs outside the repository.
     // Keep those workflows fresh rather than pretending their paths are content hashes.
     return (
       typeof GOWORK === 'string' &&
       (GOWORK === '' || GOWORK === 'off') &&
       typeof GOFLAGS === 'string' &&
+      devRuntimeCacheEnvironmentAllowed(environment) &&
       !/(?:^|[\s'"])-{1,2}(?:overlay|modfile|toolexec|pkgdir|a)(?:=|[\s'"]|$)/.test(GOFLAGS) &&
       // auto selects default.pgo inside the already hashed main-package directory;
       // off uses no profile. Every other PGO value can refer to an external file.

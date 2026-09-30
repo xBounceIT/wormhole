@@ -146,6 +146,8 @@ Custom CMake dependency search roots and toolchain files also bypass reuse,
 including `CMAKE_PREFIX_PATH`, `CMAKE_INCLUDE_PATH`, `CMAKE_LIBRARY_PATH`, and
 package-specific roots such as `ASIO_ROOT`.
 External vcpkg port/triplet overlays also bypass reuse.
+Custom C/C++ and CGO compiler/linker flags bypass reuse, including settings
+persisted through `go env -w`; empty flags and Go's `-O2 -g` defaults remain cacheable.
 The resolved vcpkg checkout's build scripts, ports, versions, triplets and
 executable, plus manifest-installed dependencies, are fingerprinted by content
 so updating vcpkg at the same path invalidates reuse.

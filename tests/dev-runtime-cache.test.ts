@@ -112,6 +112,15 @@ test('CMake dependency inputs are captured and mutable external roots disable re
     'XXHASH_DIR',
     'VCPKG_OVERLAY_PORTS',
     'VCPKG_OVERLAY_TRIPLETS',
+    'CGO_CFLAGS',
+    'CGO_CPPFLAGS',
+    'CGO_CXXFLAGS',
+    'CGO_FFLAGS',
+    'CGO_LDFLAGS',
+    'CFLAGS',
+    'CPPFLAGS',
+    'CXXFLAGS',
+    'LDFLAGS',
   ]) {
     const environment = devRuntimeEnvironment(
       { [name]: '/external/native-input' },
@@ -134,6 +143,21 @@ test('CMake dependency inputs are captured and mutable external roots disable re
     devRuntimeCacheEnvironmentAllowed({ CMAKE_BUILD_PARALLEL_LEVEL: '4', PATH: '/bin' }),
     true,
   );
+  assert.equal(devRuntimeCacheEnvironmentAllowed({ CGO_CFLAGS: '-O2 -g', CGO_CPPFLAGS: '' }), true);
+  for (const flag of ['CGO_CFLAGS', 'CGO_CPPFLAGS', 'CGO_LDFLAGS']) {
+    assert.equal(
+      devRuntimeCacheAllowed(
+        JSON.stringify({ GOWORK: '', GOFLAGS: '', [flag]: '-I/external/include -L/external/lib' }),
+      ),
+      false,
+    );
+  }
+  assert.equal(
+    devRuntimeCacheAllowed(
+      JSON.stringify({ GOWORK: '', GOFLAGS: '', CGO_CFLAGS: '-O2 -g', CGO_LDFLAGS: '-O2 -g' }),
+    ),
+    true,
+  );
   const f = fixture(t);
   const environment = devRuntimeEnvironment(
     { CMAKE_INCLUDE_PATH: 'external/include' },
@@ -154,7 +178,13 @@ test('CMake dependency inputs are captured and mutable external roots disable re
     environment,
     devRuntimeEnvironment({ CMAKE_INCLUDE_PATH: 'external/other' }, process.platform),
   );
-  for (const name of ['VCPKG_OVERLAY_PORTS', 'VCPKG_OVERLAY_TRIPLETS']) {
+  for (const name of [
+    'VCPKG_OVERLAY_PORTS',
+    'VCPKG_OVERLAY_TRIPLETS',
+    'CGO_CFLAGS',
+    'CGO_CPPFLAGS',
+    'CGO_LDFLAGS',
+  ]) {
     const environment = devRuntimeEnvironment({ [name]: 'external/overlay' }, process.platform);
     const run = () =>
       runCachedDevRuntimeBuild({
@@ -730,7 +760,7 @@ test('Go contexts are queried in every actual build module, including nested wor
 
 test('volatile Go work directories do not invalidate cache; actual compiler settings still do', (t) => {
   const f = fixture(t);
-  const context = (temporary: string, flags = '-O2') => ({
+  const context = (temporary: string, flags = '-O2 -g') => ({
     go: devRuntimeGoEnvironment(
       JSON.stringify({
         GOWORK: '',
