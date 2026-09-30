@@ -18,6 +18,7 @@ import {
   devRuntimeCacheEnvironmentAllowed,
   devRuntimeCompilerIdentity,
   devRuntimeEnvironment,
+  devRuntimeGitContext,
   devRuntimeGoEnvironment,
   devRuntimeGoModuleDirectories,
   devRuntimeReplacementsAllowed,
@@ -97,6 +98,50 @@ test('nested npm scripts share a stable cache without losing compiler search ord
     ).SDKROOT,
     '/sdk',
   );
+});
+
+test('Go VCS revision and dirty-state changes invalidate cached native binaries', (t) => {
+  const f = fixture(t);
+  assert.equal(devRuntimeGitContext(f.root), null);
+  const git = (...args: string[]) => {
+    const result = spawnSync('git', args, { cwd: f.root, encoding: 'utf8', windowsHide: true });
+    assert.equal(result.status, 0, result.stderr);
+  };
+  const commit = () =>
+    git(
+      '-c',
+      'user.name=Runtime Cache Test',
+      '-c',
+      'user.email=cache-test@example.invalid',
+      'commit',
+      '--allow-empty',
+      '-m',
+      'Fixture commit',
+    );
+  git('init');
+  assert.equal(devRuntimeGitContext(f.root), null);
+  f.write('.gitignore', 'obj/\ndist/\n');
+  git('add', '.');
+  commit();
+  const original = devRuntimeGitContext(f.root);
+  assert.equal(original?.modified, false);
+  const run = () =>
+    runCachedDevRuntimeBuild({ ...f.options, context: devRuntimeGitContext(f.root) });
+  run();
+  run();
+  assert.equal(f.builds.length, 1);
+  commit();
+  assert.notEqual(devRuntimeGitContext(f.root)?.revision, original?.revision);
+  run();
+  assert.equal(f.builds.length, 2);
+  f.write('source/main.go', 'dirty source');
+  assert.equal(devRuntimeGitContext(f.root)?.modified, true);
+  run();
+  git('add', 'source/main.go');
+  commit();
+  assert.equal(devRuntimeGitContext(f.root)?.modified, false);
+  run();
+  assert.equal(f.builds.length, 4);
 });
 
 test('native dependency inputs are captured and mutable external roots disable reuse', (t) => {

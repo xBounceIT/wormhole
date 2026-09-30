@@ -10,6 +10,7 @@ import {
   devRuntimeCacheEnvironmentAllowed,
   devRuntimeCompilerIdentity,
   devRuntimeEnvironment,
+  devRuntimeGitContext,
   devRuntimeGoEnvironment,
   devRuntimeGoModuleDirectories,
   devRuntimeReplacementsAllowed,
@@ -29,6 +30,7 @@ const buildPlan = createDevRuntimeBuildPlan({
 console.info(`[Wormhole] Preparing development runtime for ${process.platform}/${process.arch}.`);
 
 const environment = devRuntimeEnvironment(process.env, process.platform);
+const gitContext = devRuntimeGitContext(root);
 const toolchains = devRuntimeToolchainCommands(process.arch).map((command) => {
   const result = spawnSync(command, [command === 'go' ? 'version' : '--version'], {
     encoding: 'utf8',
@@ -122,6 +124,7 @@ runCachedDevRuntimeBuild({
     platform: process.platform,
     architecture: process.arch,
     environment,
+    gitContext,
     toolchains,
     registryEnvironment,
     ovpnBuildContext,
@@ -129,6 +132,7 @@ runCachedDevRuntimeBuild({
   },
   force:
     process.argv.includes('--force') ||
+    !gitContext ||
     !devRuntimeCacheEnvironmentAllowed(environment) ||
     (process.platform === 'win32' && ovpnBuildContext?.Cacheable !== true) ||
     goContexts.some(

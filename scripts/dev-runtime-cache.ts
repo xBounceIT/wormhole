@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import {
   accessSync,
   constants,
@@ -18,6 +19,15 @@ import type { DevRuntimeBuildStep } from './dev-runtime-plan.ts';
 // Hash file contents so edits, deletions and branch switches invalidate the cache even
 // when a checkout restores old timestamps. Only build hashes are persisted here.
 const metadataDirectories = new Set(['.git', 'node_modules']);
+
+export function devRuntimeGitContext(root: string): { revision: string; modified: boolean } | null {
+  const options = { cwd: root, encoding: 'utf8' as const, windowsHide: true };
+  const revision = spawnSync('git', ['rev-parse', 'HEAD'], options);
+  if (revision.status !== 0 || !revision.stdout.trim()) return null;
+  const status = spawnSync('git', ['status', '--porcelain', '--untracked-files=normal'], options);
+  if (status.status !== 0) return null;
+  return { revision: revision.stdout.trim(), modified: status.stdout.length > 0 };
+}
 
 export function devRuntimeEnvironment(
   environment: NodeJS.ProcessEnv,
