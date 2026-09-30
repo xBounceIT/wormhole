@@ -222,9 +222,10 @@ jobs:
             builder_platform: linux
             builder_arch: x64
             backend_arch: x64
-            updater_artifact: release/Wormhole-*-linux-x86_64.AppImage
+            updater_artifact: release/Wormhole-*-x86_64.AppImage
             artifacts: |
               release/*.AppImage
+              release/*.AppImage.zsync
               release/*.deb
               release/*.rpm
           - platform: linux-arm64
@@ -232,9 +233,10 @@ jobs:
             builder_platform: linux
             builder_arch: arm64
             backend_arch: arm64
-            updater_artifact: release/Wormhole-*-linux-arm64.AppImage
+            updater_artifact: release/Wormhole-*-arm64.AppImage
             artifacts: |
               release/*.AppImage
+              release/*.AppImage.zsync
               release/*.deb
               release/*.rpm
           - platform: macos
@@ -276,7 +278,12 @@ jobs:
         if: matrix.backend_arch == 'universal'
         run: npm run build:backend:universal
 
+      - name: Install AppImage delta tooling
+        if: matrix.builder_platform == 'linux'
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends --yes zsync
+
       - name: Build ${{ matrix.platform }} packages
+        # The artifactBuildCompleted hook embeds update metadata and generates the delta file.
         run: npm run package -- --${{ matrix.builder_platform }} --${{ matrix.builder_arch }}
 
       - name: Verify Linux package outputs
@@ -291,14 +298,14 @@ jobs:
           case "$BUILDER_ARCH" in
             x64)
               expected=(
-                'release/Wormhole-*-linux-x86_64.AppImage'
+                'release/Wormhole-*-x86_64.AppImage'
                 'release/Wormhole-*-linux-amd64.deb'
                 'release/Wormhole-*-linux-x86_64.rpm'
               )
               ;;
             arm64)
               expected=(
-                'release/Wormhole-*-linux-arm64.AppImage'
+                'release/Wormhole-*-arm64.AppImage'
                 'release/Wormhole-*-linux-arm64.deb'
                 'release/Wormhole-*-linux-aarch64.rpm'
               )
@@ -316,6 +323,25 @@ jobs:
               exit 1
             fi
           done
+
+          appimages=( release/*.AppImage )
+          if [[ ${#appimages[@]} -ne 1 ]]; then
+            echo "Expected exactly one AppImage." >&2
+            exit 1
+          fi
+          appimage="${appimages[0]}"
+          appimage_arch="${appimage##*-}"
+          appimage_arch="${appimage_arch%.AppImage}"
+          program_headers="$(readelf --program-headers "$appimage")"
+          if grep -Eq 'INTERP|DYNAMIC' <<<"$program_headers"; then
+            echo "AppImage runtime must be statically linked." >&2
+            exit 1
+          fi
+          readelf --string-dump=.upd_info "$appimage" | grep -Fq \
+            "gh-releases-zsync|xBounceIT|wormhole|latest|Wormhole-*-$appimage_arch.AppImage.zsync"
+          test -s "$appimage.zsync"
+          appimage_sha1="$(sha1sum "$appimage" | cut -d ' ' -f1)"
+          grep -aFxq "SHA-1: $appimage_sha1" "$appimage.zsync"
 
           deb_packages=( release/Wormhole-*-linux-*.deb )
           if [[ ${#deb_packages[@]} -ne 1 ]]; then

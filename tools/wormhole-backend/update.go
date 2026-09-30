@@ -30,7 +30,8 @@ const (
 
 var updateInstallerCachePatterns = []string{
 	"Wormhole-*-win-*-setup.exe",
-	"Wormhole-*-linux-*.AppImage",
+	"Wormhole-*-x86_64.AppImage",
+	"Wormhole-*-arm64.AppImage",
 	"Wormhole-*-mac-*-setup.dmg",
 }
 
@@ -169,7 +170,8 @@ func updateInstallerAssetSuffix(operatingSystem, arch string) string {
 			arch = "x86_64"
 		}
 		if arch == "x86_64" || arch == "arm64" {
-			return "-linux-" + arch + ".AppImage"
+			// The suffix also accepts legacy names containing "-linux-".
+			return "-" + arch + ".AppImage"
 		}
 	case "darwin":
 		if arch == "x64" || arch == "arm64" {
