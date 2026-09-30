@@ -562,6 +562,9 @@ INSERT INTO TunnelConfigs VALUES ('11111111-2222-3333-4444-555555555555', 'Share
 		raw := readTunnelLine(t, responses)
 		var event backendEvent
 		if json.Unmarshal(raw, &event) == nil && event.Type == "tunnel.progress" {
+			if event.Detail == "" {
+				t.Fatalf("progress would be discarded by Electron: %s", raw)
+			}
 			phases = append(phases, event.Phase)
 			continue
 		}
