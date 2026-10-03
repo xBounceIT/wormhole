@@ -96,24 +96,6 @@ export function RdpSurface({
       data-rdp-session-id={sessionId}
       className="relative flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-black"
     >
-      {isConnected && !external ? (
-        <div
-          className="flex shrink-0 items-center justify-end gap-2 border-b border-white/10 bg-black px-3 py-2"
-          data-rdp-system-client-toolbar
-        >
-          <span className="pointer-events-none rounded-full border border-white/10 bg-black/70 px-3 py-1 text-[10px] text-white/70">
-            Embedded remote desktop
-          </span>
-          {canOpenSystemClient ? (
-            <Button onClick={onOpenSystemClient} size="sm" variant="secondary">
-              <ExternalLink data-icon="inline-start" />
-              Open in System Remote Desktop
-            </Button>
-          ) : null}
-        </div>
-      ) : null}
-      {/* A native HWND is always above Chromium. Measure only this sibling region so the toolbar
-          remains visible and interactive instead of being covered by the remote desktop surface. */}
       <div
         className="relative flex min-h-0 min-w-0 flex-1 items-center justify-center overflow-hidden"
         data-rdp-native-surface-region

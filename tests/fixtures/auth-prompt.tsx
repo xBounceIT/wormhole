@@ -3,6 +3,7 @@
 declare const React: typeof import('react');
 declare const createRoot: typeof import('react-dom/client').createRoot;
 declare const assert: typeof import('node:assert/strict');
+declare const RdpSurface: typeof import('../../src/components/RdpSurface').RdpSurface;
 declare const retainedStateValues: string[];
 declare function IdleLockHarness(props: {
   confirmation?: boolean;
@@ -1798,6 +1799,157 @@ async function runConnectionNotesTests() {
   }
 }
 
+async function runRdpSurfaceTests() {
+  const container = document.getElementById('root');
+  const originalStyle = container.style.cssText;
+  const originalApi = window.wormhole;
+  container.style.cssText = 'position:fixed;left:32px;top:64px;width:800px;height:500px';
+  const root = createRoot(container);
+  const commands: Array<{ operation: string; bounds?: unknown }> = [];
+  const sizes: unknown[] = [];
+  const actions: string[] = [];
+  let rejectCommands = false;
+  const api = {
+    commandRdpSession: async (request) => {
+      commands.push(request);
+      if (rejectCommands) throw new Error('Native host unavailable');
+    },
+    resizeRdpSession: async ({ bounds }) => {
+      sizes.push(bounds);
+      if (rejectCommands) throw new Error('Native host unavailable');
+    },
+  } as typeof window.wormhole;
+  window.wormhole = api;
+  const mount = async (props: Partial<Parameters<typeof RdpSurface>[0]> = {}) => {
+    await React.act(async () =>
+      root.render(
+        <RdpSurface
+          sessionId="rdp-layout"
+          isActive
+          isAuthorized
+          status="connected"
+          canOpenSystemClient={false}
+          onConnect={() => actions.push('connect')}
+          onRetry={() => actions.push('retry')}
+          onOpenSystemClient={() => actions.push('system')}
+          {...props}
+        />,
+      ),
+    );
+  };
+  const settleLayout = async () => {
+    await React.act(async () => {
+      await new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      );
+    });
+  };
+  const assertFullBounds = () => {
+    const surface = container.querySelector('[data-rdp-native-surface-region]');
+    const rect = surface.getBoundingClientRect();
+    const parent = container.getBoundingClientRect();
+    const expected = { x: parent.x, y: parent.y, width: parent.width, height: parent.height };
+    assert.deepEqual({ x: rect.x, y: rect.y, width: rect.width, height: rect.height }, expected);
+    assert.deepEqual(sizes.at(-1), expected);
+    assert.equal(surface.parentElement.children.length, 1, 'no strip may reserve desktop space');
+    assert.equal(surface.children.length, 0, 'embedded desktop must have no overlay controls');
+    assert.doesNotMatch(container.textContent, /Embedded remote desktop/);
+    return expected;
+  };
+  const press = async (label: string) => {
+    const button = [...container.querySelectorAll('button')].find(
+      (candidate) => candidate.textContent === label,
+    );
+    assert.ok(button, `missing ${label}`);
+    await React.act(async () => button.click());
+  };
+  try {
+    await mount();
+    await settleLayout();
+    assert.deepEqual(commands.at(-1), {
+      sessionId: 'rdp-layout',
+      operation: 'show',
+      bounds: assertFullBounds(),
+    });
+    await mount({ canOpenSystemClient: true });
+    assertFullBounds();
+    assert.equal(container.querySelector('button'), null);
+    const beforeResize = commands.length;
+    container.style.width = '640px';
+    container.style.height = '360px';
+    await settleLayout();
+    assertFullBounds();
+    assert.equal(commands.length, beforeResize, 'resizing must not show the surface twice');
+    const beforeDuplicate = sizes.length;
+    window.dispatchEvent(new Event('resize'));
+    assert.equal(sizes.length, beforeDuplicate, 'unchanged bounds must be deduplicated');
+    for (const props of [{ isActive: false }, { isAuthorized: false }]) {
+      await mount(props);
+      assert.equal(commands.at(-1).operation, 'hide');
+      const beforeInactive = sizes.length;
+      window.dispatchEvent(new Event('resize'));
+      assert.equal(sizes.length, beforeInactive);
+      await mount();
+      assert.equal(commands.at(-1).operation, 'show');
+    }
+    await mount({ external: true });
+    assert.equal(commands.at(-1).operation, 'hide');
+    assert.match(container.textContent, /System Remote Desktop is running/);
+    assert.equal(container.querySelector('button'), null);
+    const beforeExternal = commands.length;
+    window.dispatchEvent(new Event('resize'));
+    assert.equal(
+      commands.length,
+      beforeExternal,
+      'external clients must never show a native surface',
+    );
+    for (const status of ['idle', 'disconnected'] as const) {
+      await mount({ status, canOpenSystemClient: true });
+      assert.match(container.textContent, /RDP session is disconnected/);
+      await press('Connect');
+      await press('Open in System Remote Desktop');
+    }
+    await mount({ status: 'failed', error: 'Connection refused' });
+    assert.match(container.textContent, /Connection refused/);
+    await press('Retry connection');
+    assert.deepEqual(actions, ['connect', 'system', 'connect', 'system', 'retry']);
+    await mount({ status: 'starting' });
+    assert.match(container.textContent, /Starting RDP/);
+    assert.equal(container.querySelector('button'), null);
+    await mount({ status: 'starting', tunnelProgress: { phase: 'preparing' } });
+    assert.match(container.textContent, /Preparing VPN configuration/);
+    assert.equal(container.querySelector('button'), null);
+    const beforeZero = commands.length;
+    container.style.height = '0px';
+    await mount();
+    await settleLayout();
+    window.dispatchEvent(new Event('resize'));
+    assert.equal(commands.length, beforeZero, 'zero-size surfaces must not be shown');
+    container.style.height = '360px';
+    rejectCommands = true;
+    await settleLayout();
+    assertFullBounds();
+    await mount({ isAuthorized: false });
+    window.wormhole = undefined;
+    const beforeMissingApi = commands.length;
+    await mount();
+    window.dispatchEvent(new Event('resize'));
+    assert.equal(commands.length, beforeMissingApi);
+    window.wormhole = api;
+    await mount({ sessionId: 'rdp-restored' });
+    assert.equal(commands.at(-1).operation, 'show');
+  } finally {
+    await React.act(async () => root.unmount());
+    assert.equal(commands.at(-1).operation, 'hide');
+    const afterUnmount = sizes.length;
+    window.dispatchEvent(new Event('resize'));
+    await settleLayout();
+    assert.equal(sizes.length, afterUnmount, 'unmount must remove resize subscriptions');
+    container.style.cssText = originalStyle;
+    window.wormhole = originalApi;
+  }
+}
+
 runConnectionNotesTests()
   .then(runAuthPromptTests)
   .then(runIdleLockTests)
@@ -1806,4 +1958,5 @@ runConnectionNotesTests()
   .then(runStartupUnlockTests)
   .then(runBitwardenPromptTests)
   .then(runBitwardenStartupTests)
-  .then(runBitwardenDemandTests);
+  .then(runBitwardenDemandTests)
+  .then(runRdpSurfaceTests);

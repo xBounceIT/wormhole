@@ -194,18 +194,21 @@ test('RDP bounds updates avoid renderer-frame latency and are deduplicated', () 
   assert.match(appSource, /waitForRdpSurfaceBounds\(sessionId\)[\s\S]*bounds,/);
 });
 
-test('RDP system-client controls stay outside native surface bounds', () => {
+// Runtime bounds and TSX coverage are verified in auth-prompt.test.ts using Chromium.
+test('embedded RDP fills the session without a toolbar and keeps the system client in the tab menu', () => {
   const rdpSource = readFileSync(
     new URL('../src/components/RdpSurface.tsx', import.meta.url),
     'utf8',
   );
-  const toolbarIndex = rdpSource.indexOf('data-rdp-system-client-toolbar');
-  const nativeRegionIndex = rdpSource.indexOf('data-rdp-native-surface-region');
-  assert.ok(toolbarIndex >= 0 && toolbarIndex < nativeRegionIndex);
+  assert.doesNotMatch(rdpSource, /data-rdp-system-client-toolbar|Embedded remote desktop/);
+  assert.match(rdpSource, /className="[^"]*flex-1[^"]*"\s+data-rdp-native-surface-region/);
   assert.match(rdpSource, /data-rdp-native-surface-region[\s\S]*?ref=\{surfaceRef\}/);
   assert.match(rdpSource, /status === 'connected' && !external/);
   assert.match(rdpSource, /System Remote Desktop is running/);
   assert.match(appSource, /external=\{session\.rdpExternal\}/);
+  const tabMenu = sourceBetween(appSource, 'function SessionTabContextMenu', 'function ');
+  assert.match(tabMenu, /Open in System Remote Desktop/);
+  assert.match(tabMenu, /onOpenSystemRdp/);
 });
 
 test('RDP overlays track owner-window moves in screen coordinates', () => {
