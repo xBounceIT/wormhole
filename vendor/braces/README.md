@@ -11,6 +11,9 @@ AST walkers cap nesting at 100 (including parentheses), honor stricter
 
 Local hardening also removes an upstream debug print from compilation of
 caller-supplied closing AST nodes, so pattern contents never reach stdout.
+Stringification preserves the containing AST node for `escapeInvalid`, and the
+invalid-brace predicate counts commas and ranges independently so valid ranges
+are not escaped.
 
 The root npm override replaces all transitive `braces` installations with this
 package. Remove the override and this directory once a reviewed upstream release
@@ -21,8 +24,8 @@ Coverage uses Node's native test/V8 tooling. Unchanged upstream runtime code is
 excluded from the changed-code coverage requirement; the backported executable
 lines must have at least 80% coverage.
 
-Validation: all 37 security regression tests pass. Node's native LCOV report
+Validation: all 39 security regression tests pass. Node's native LCOV report
 (`node --experimental-test-coverage --test-coverage-include=vendor/**/*.js
 --test-reporter=lcov --test tests/dependency-security.test.mjs`) covers all
-44 executable lines added by this backport (100%), compared with the original
+45 executable lines added by this backport (100%), compared with the original
 npm runtime sources; blank lines, comments, and standalone delimiters are excluded.

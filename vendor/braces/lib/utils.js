@@ -62,7 +62,7 @@ exports.encloseBrace = node => {
 exports.isInvalidBrace = block => {
   if (block.type !== 'brace') return false;
   if (block.invalid === true || block.dollar) return true;
-  if ((block.commas >> 0 + block.ranges >> 0) === 0) {
+  if ((block.commas >> 0) + (block.ranges >> 0) === 0) {
     block.invalid = true;
     return true;
   }

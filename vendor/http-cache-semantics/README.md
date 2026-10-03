@@ -15,7 +15,8 @@ cookie opt-ins retain their existing behavior.
 Local hardening applies the same restrictions to stale-if-error and direct
 stale-while-revalidate checks, verifies URL/method/host/Vary before error fallback,
 and honors shared `s-maxage` revalidation requirements without changing fresh
-response lifetimes. Cache directives are normalized case-insensitively, including
+response lifetimes. `must-revalidate` and shared `proxy-revalidate` block stale
+reuse while allowing fresh hits. Cache directives are normalized case-insensitively, including
 previously serialized policies; empty or duplicate directive values cannot clear
 reuse prohibitions. Regression tests include an actual `cacheable-request` flow
 against a local HTTP server returning a 500 after caching a user cookie.
@@ -33,8 +34,8 @@ Coverage uses Node's native test/V8 tooling. Unchanged upstream runtime code is
 excluded from the changed-code coverage requirement; the backported executable
 lines must have at least 80% coverage.
 
-Validation: all 37 security regression tests pass. Node's native LCOV report
+Validation: all 39 security regression tests pass. Node's native LCOV report
 (`node --experimental-test-coverage --test-coverage-include=vendor/**/*.js
 --test-reporter=lcov --test tests/dependency-security.test.mjs`) covers all
-42 executable lines added by this backport (100%), compared with the original
+41 executable lines added by this backport (100%), compared with the original
 npm runtime sources; blank lines, comments, and standalone delimiters are excluded.

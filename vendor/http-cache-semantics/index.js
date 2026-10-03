@@ -410,7 +410,7 @@ module.exports = class CachePolicy {
         this._assertRequestHasHeaders(req);
 
         // Request directives cannot override restrictions on reusing the response.
-        if (this._rescc['must-revalidate'] || this._requiresRevalidation()) {
+        if (this._requiresRevalidation()) {
             return this._evaluateRequestMissResult(req);
         }
 
@@ -617,17 +617,16 @@ module.exports = class CachePolicy {
             this._rescc['no-cache'] ||
             (this._resHeaders.vary && this._varyFields().includes('*')) ||
             (this._isShared &&
-                (this._rescc['proxy-revalidate'] ||
-                    // Sharing responses with cookies requires an explicit opt-in.
-                    (this._resHeaders['set-cookie'] &&
-                        !this._rescc.public &&
-                        !this._rescc.immutable)))
+                // Sharing responses with cookies requires an explicit opt-in.
+                (this._resHeaders['set-cookie'] &&
+                    !this._rescc.public &&
+                    !this._rescc.immutable))
         );
     }
 
     _allowsStaleReuse() {
         return !this._rescc['must-revalidate'] &&
-            !(this._isShared && 's-maxage' in this._rescc) &&
+            !(this._isShared && (this._rescc['proxy-revalidate'] || 's-maxage' in this._rescc)) &&
             !this._requiresRevalidation();
     }
 

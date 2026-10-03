@@ -27,7 +27,7 @@ module.exports = (ast, options = {}) => {
 
     if (node.nodes) {
       for (const child of node.nodes) {
-        output += stringify(child, undefined, child.nodes ? depth + 1 : depth);
+        output += stringify(child, node, child.nodes ? depth + 1 : depth);
       }
     }
     return output;

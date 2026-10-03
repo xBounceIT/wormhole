@@ -105,11 +105,30 @@ test('brace backport preserves ordinary glob and expansion behavior', () => {
   assert.deepEqual(braces.expand('file-{1..3}'), ['file-1', 'file-2', 'file-3']);
   assert.deepEqual(braces.expand('foo/({a,b})'), ['foo/(a)', 'foo/(b)']);
   assert.deepEqual(require('micromatch')(['a.ts', 'b.ts', 'c.js'], '{a,b}.ts'), ['a.ts', 'b.ts']);
-  for (const pattern of ['{{a}}', '{a,{b}}', '{{x}y}', '{a,{b,{c}}', '{}{a}']) {
-    assert.equal(braces.stringify(braces.parse(pattern), { escapeInvalid: true }), pattern);
-  }
   assert.throws(() => braces(nested(3500)), /exceeds max depth/);
   assert.throws(() => braces(nested(3500), { expand: true }), /exceeds max depth/);
+});
+
+test('bounded brace stringification honors escapeInvalid on containing and nested braces', () => {
+  for (const [pattern, escaped] of [
+    ['{a}', '\\{a\\}'],
+    ['{{a}}', '\\{\\{a\\}\\}'],
+    ['{a,{b}}', '{a,\\{b\\}}'],
+    ['{{x}y}', '\\{\\{x\\}y\\}'],
+    ['{a,{b,{c}}', '{a,{b,\\{c\\}}'],
+    ['{}{a}', '\\{\\}\\{a\\}'],
+    ['{a,b}', '{a,b}'],
+    ['file-{1..3}', 'file-{1..3}'],
+    ['{1..3,a}', '{1..3,a}'],
+  ]) {
+    assert.equal(braces.stringify(braces.parse(pattern)), pattern);
+    assert.equal(braces.stringify(braces.parse(pattern), { escapeInvalid: true }), escaped);
+    assert.equal(braces.stringify(pattern, { escapeInvalid: true }), escaped);
+  }
+  assert.throws(
+    () => braces.stringify(braces.parse(nested(2)), { escapeInvalid: true, maxDepth: 1 }),
+    /exceeds max depth/,
+  );
 });
 
 test('brace compilation never writes AST contents to stdout', () => {
@@ -194,6 +213,50 @@ test('ordinary expired responses retain max-stale support', () => {
       }),
       true,
     );
+  }
+});
+
+test('revalidation directives allow fresh hits and prohibit stale reuse in their cache scope', () => {
+  for (const directive of [
+    'must-revalidate',
+    'proxy-revalidate',
+    'MUST-REVALIDATE',
+    'PROXY-REVALIDATE',
+  ]) {
+    for (const shared of [true, false]) {
+      const policy = cachePolicy(
+        {
+          'cache-control': `max-age=60, ${directive}, stale-while-revalidate=3600, stale-if-error=3600`,
+        },
+        { shared },
+      );
+      for (const candidate of [policy, CachePolicy.fromObject(policy.toObject())]) {
+        const storedAt = candidate.toObject().t;
+        candidate.now = () => storedAt + 59000;
+        assert.equal(candidate.maxAge(), 60);
+        assert.equal(candidate.stale(), false);
+        for (const cacheControl of ['', 'max-stale=999999']) {
+          const incoming = {
+            ...request,
+            headers: { ...request.headers, 'cache-control': cacheControl },
+          };
+          assert.equal(candidate.satisfiesWithoutRevalidation(incoming), true);
+          const result = candidate.evaluateRequest(incoming);
+          assert.ok(result.response);
+          assert.equal(result.revalidation, undefined);
+        }
+        candidate.now = () => storedAt + 60000;
+        assert.equal(candidate.stale(), true);
+        const restricted = shared || directive.toLowerCase() === 'must-revalidate';
+        if (restricted) assertCacheMiss(candidate, 'max-stale=999999');
+        else assert.ok(candidate.evaluateRequest(request).response);
+        assert.equal(candidate.useStaleWhileRevalidate(), !restricted);
+        assert.equal(
+          candidate.revalidatedPolicy(request, { status: 500, headers: {} }).modified,
+          restricted,
+        );
+      }
+    }
   }
 });
 
