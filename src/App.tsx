@@ -232,6 +232,7 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
+  useDialogOpen,
 } from '@/components/ui/dialog';
 import {
   DropdownMenu,
@@ -8490,9 +8491,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                   </div>
                   <div className="grid gap-2">
                     <Label htmlFor="ssh-password">Password</Label>
-                    <Input
+                    <RuntimeCredentialPasswordInput
                       autoComplete="current-password"
                       id="ssh-password"
+                      key={sshCredentialPrompt?.backendSessionId ?? sshCredentialPrompt?.sessionId}
                       onChange={(event) =>
                         setSshCredentialForm((form) => ({
                           ...form,
@@ -8500,7 +8502,6 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                         }))
                       }
                       required={sshCredentialSave}
-                      type="password"
                       value={sshCredentialForm.password}
                     />
                   </div>
@@ -8608,8 +8609,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                   </div>
                   <div className="grid gap-2">
                     <Label htmlFor="rdp-password">Password</Label>
-                    <Input
+                    <RuntimeCredentialPasswordInput
                       id="rdp-password"
+                      key={rdpCredentialPrompt}
                       onChange={(event) =>
                         setRdpCredentialForm((form) => ({
                           ...form,
@@ -8617,7 +8619,6 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                         }))
                       }
                       required={rdpCredentialSave}
-                      type="password"
                       value={rdpCredentialForm.password}
                     />
                   </div>
@@ -14235,6 +14236,39 @@ function LogLevelSetting({
       </p>
       {error ? <p className="text-[11px] text-destructive">{error}</p> : null}
     </SettingsSection>
+  );
+}
+
+function RuntimeCredentialPasswordInput({
+  id,
+  ...props
+}: Omit<ComponentProps<typeof Input>, 'type'> & { id: string }) {
+  const [visible, setVisible] = useState(false);
+  const open = useDialogOpen();
+  useLayoutEffect(() => {
+    if (open === false) setVisible(false);
+  }, [open]);
+
+  return (
+    <div className="relative">
+      <Input
+        {...props}
+        className="pr-9"
+        id={id}
+        spellCheck={false}
+        type={visible ? 'text' : 'password'}
+      />
+      <IconButton
+        aria-controls={id}
+        aria-pressed={visible}
+        className="absolute inset-y-0 right-0.5 my-auto text-muted-foreground transition-colors active:not-aria-[haspopup]:translate-y-0"
+        label={visible ? 'Hide password' : 'Show password'}
+        onClick={() => setVisible((current) => !current)}
+        type="button"
+      >
+        {visible ? <EyeOff /> : <Eye />}
+      </IconButton>
+    </div>
   );
 }
 

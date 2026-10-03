@@ -8,6 +8,10 @@ import { selectDialogVisuals } from '@/dialog-lifecycle';
 
 const DialogOpenContext = React.createContext<boolean | undefined>(undefined);
 
+function useDialogOpen() {
+  return React.useContext(DialogOpenContext);
+}
+
 function Dialog({
   defaultOpen,
   onOpenChange,
@@ -177,4 +181,5 @@ export {
   DialogPortal,
   DialogTitle,
   DialogTrigger,
+  useDialogOpen,
 };
