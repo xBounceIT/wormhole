@@ -1,0 +1,16 @@
+{
+  "name": "@wormhole/braces",
+  "version": "3.0.3-wormhole.1",
+  "private": true,
+  "description": "Local security backport of braces 3.0.3",
+  "author": "Jon Schlinkert (https://github.com/jonschlinkert)",
+  "license": "MIT",
+  "main": "index.js",
+  "files": ["index.js", "lib", "LICENSE", "README.md"],
+  "dependencies": {
+    "fill-range": "^7.1.1"
+  },
+  "engines": {
+    "node": ">=8"
+  }
+}
