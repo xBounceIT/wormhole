@@ -1958,6 +1958,8 @@ async function runRdpSurfaceTests() {
 
 async function runRuntimeCredentialPasswordTests() {
   const root = createRoot(document.getElementById('root'));
+  const originalSpellcheck = document.body.getAttribute('spellcheck');
+  document.body.spellcheck = true;
   const fill = async (id: string, value: string) => {
     await React.act(async () => {
       const input = document.getElementById(id) as HTMLInputElement;
@@ -1995,6 +1997,7 @@ async function runRuntimeCredentialPasswordTests() {
             /Connect/.test(button.textContent),
           );
         assert.equal(input().type, 'password');
+        assert.equal(input().getAttribute('spellcheck'), 'false');
         assert.equal(input().required, false);
         assert.equal(input().labels[0].textContent, 'Password');
         assert.equal(toggle().getAttribute('aria-label'), 'Show password');
@@ -2019,6 +2022,7 @@ async function runRuntimeCredentialPasswordTests() {
           await clicked;
         });
         assert.equal(input().type, 'text');
+        assert.equal(input().getAttribute('spellcheck'), 'false');
         assert.equal(
           input().spellcheck,
           false,
@@ -2115,6 +2119,8 @@ async function runRuntimeCredentialPasswordTests() {
     }
   } finally {
     await React.act(async () => root.unmount());
+    if (originalSpellcheck === null) document.body.removeAttribute('spellcheck');
+    else document.body.setAttribute('spellcheck', originalSpellcheck);
   }
 }
 

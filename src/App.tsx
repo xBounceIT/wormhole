@@ -14251,7 +14251,13 @@ function RuntimeCredentialPasswordInput({
 
   return (
     <div className="relative">
-      <Input {...props} className="pr-9" id={id} type={visible ? 'text' : 'password'} />
+      <Input
+        {...props}
+        className="pr-9"
+        id={id}
+        spellCheck={false}
+        type={visible ? 'text' : 'password'}
+      />
       <IconButton
         aria-controls={id}
         aria-pressed={visible}
