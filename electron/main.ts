@@ -4939,17 +4939,22 @@ class WebSurfaceManager {
       ownerMouse: onOwnerMouse,
       pageMouse: onPageMouse,
     });
-    // Restore shared vault state through the MV2 background page while the popup loads. This must
-    // never delay showing the UI; direct profiles already have their local state and routed
-    // profiles receive chrome.storage change events when the asynchronous restore completes.
-    void this.synchronizeBitwardenStorageInBridge(
-      record.owner,
-      record.bitwarden.partition,
-      popupUrl,
-    ).catch((error) => {
-      console.warn('[Wormhole] Could not prepare Bitwarden browser storage for its popup.', error);
-    });
     try {
+      // The MV2 vault session lives in background memory. Restore it before the popup initializes
+      // its account services so an older profile cannot initialize the UI as logged out.
+      await this.synchronizeBitwardenStorageInBridge(
+        record.owner,
+        record.bitwarden.partition,
+        popupUrl,
+      ).catch((error) => {
+        console.warn(
+          '[Wormhole] Could not prepare Bitwarden browser storage for its popup.',
+          error,
+        );
+      });
+      if (this.bitwardenPopups.get(sessionId) !== popup || record.disposed) {
+        return { open: false };
+      }
       await withBitwardenBrowserTimeout(
         popup.webContents.loadURL(popupUrl),
         bitwardenBrowserNavigationTimeoutMs,
@@ -5139,7 +5144,16 @@ class WebSurfaceManager {
       });
       if (backgroundContents) {
         try {
-          if (await this.synchronizeBitwardenStorageCore(partition, backgroundContents)) return;
+          const memoryReady = await withBitwardenBrowserTimeout(
+            backgroundContents.executeJavaScript(
+              'Boolean(chrome.storage.session || globalThis.bitwardenMain?.memoryStorageForStateProviders?.store)',
+            ),
+            bitwardenExtensionReadyTimeoutMs,
+            'Bitwarden background storage readiness timed out.',
+          );
+          if (memoryReady) {
+            if (await this.synchronizeBitwardenStorageCore(partition, backgroundContents)) return;
+          }
         } catch (error) {
           if (!backgroundContents.isDestroyed()) throw error;
           // The MV2 background page can disappear while waiting behind another profile's storage

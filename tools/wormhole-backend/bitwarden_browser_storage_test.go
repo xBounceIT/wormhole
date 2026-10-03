@@ -1,12 +1,42 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestBitwardenBrowserStorageWireFitsLineBudgetWithHTMLCharacters(t *testing.T) {
+	value := `{"value":"` + strings.Repeat("<>&", 2*1024*1024) + `"}`
+	snapshot := bitwardenBrowserStorageSnapshot{
+		Revision: 1, LocalJSON: value, SessionJSON: value,
+	}
+	if _, err := normalizeBitwardenBrowserStorageJSON(value); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if err := newBackendLineWriter(&output).write(backendResponse{
+		ID: "snapshot", OK: true, Result: snapshot,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if output.Len() >= backendLineLimit {
+		t.Fatalf("valid storage response exceeds native line budget: %d bytes", output.Len())
+	}
+	var decoded struct {
+		ID     string                          `json:"id"`
+		Result bitwardenBrowserStorageSnapshot `json:"result"`
+	}
+	if err := json.Unmarshal(output.Bytes(), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.ID != "snapshot" || decoded.Result != snapshot {
+		t.Fatal("storage response changed in transit")
+	}
+}
 
 func TestNormalizeBitwardenBrowserStorageJSONRequiresBoundedObject(t *testing.T) {
 	normalized, err := normalizeBitwardenBrowserStorageJSON(`{"answer":42}`)
@@ -151,6 +181,204 @@ func TestBitwardenBrowserStorageRecordIsWinUICompatible(t *testing.T) {
 	}
 	if _, err := os.Stat(bitwardenBrowserStoragePath(databasePath) + ".bak"); err != nil {
 		t.Fatalf("recovery copy missing: %v", err)
+	}
+}
+
+func TestBitwardenBrowserStorageRoundTripsBoundedEncodedRecords(t *testing.T) {
+	for _, tc := range []struct{ name, local string }{
+		{"html", `{"value":"` + strings.Repeat("<>&", 1024*1024) + `"}`},
+		{"escape-boundary", `{"value":"` + strings.Repeat(`\\`, (bitwardenBrowserStorageMaxJSON-12)/2) + `"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := normalizeBitwardenBrowserStorageJSON(tc.local); err != nil {
+				t.Fatal(err)
+			}
+			database := filepath.Join(t.TempDir(), "wormhole.db")
+			snapshot := bitwardenBrowserStorageSnapshot{Revision: 9, LocalJSON: tc.local, SessionJSON: "{}"}
+			if _, err := persistBitwardenBrowserStorage(database, snapshot); err != nil {
+				t.Fatal(err)
+			}
+			actual, state := readBitwardenBrowserStorageCandidate(bitwardenBrowserStoragePath(database))
+			if state != bitwardenBrowserStorageReadable || actual.LocalJSON != snapshot.LocalJSON || actual.Revision != snapshot.Revision {
+				t.Fatalf("valid bounded snapshot was lost after protected encoding: state=%d revision=%d", state, actual.Revision)
+			}
+		})
+	}
+}
+
+func TestBitwardenBrowserStorageReadsLegacyExpandedRecord(t *testing.T) {
+	database := filepath.Join(t.TempDir(), "wormhole.db")
+	local := `{"value":"` + strings.Repeat("<>&", 1024*1024) + `"}`
+	legacy, err := json.Marshal(bitwardenBrowserStorageRecord{SchemaVersion: bitwardenBrowserStorageSchema, Revision: 4, LocalJson: local})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(legacy) <= 16*1024*1024 {
+		t.Fatal("fixture does not exercise legacy expansion")
+	}
+	if err := protectBitwardenBrowserStorage(bitwardenBrowserStoragePath(database), legacy); err != nil {
+		t.Fatal(err)
+	}
+	actual, state := readBitwardenBrowserStorageCandidate(bitwardenBrowserStoragePath(database))
+	if state != bitwardenBrowserStorageReadable || actual.LocalJSON != local || actual.Revision != 4 {
+		t.Fatal("valid legacy expanded record was lost")
+	}
+}
+
+func TestBitwardenBrowserStorageRecoversTemporaryPersistenceFailures(t *testing.T) {
+	for _, blocked := range []string{"primary", "backup"} {
+		t.Run(blocked, func(t *testing.T) {
+			root := t.TempDir()
+			database, profile := filepath.Join(root, "wormhole.db"), filepath.Join(root, "profile")
+			manager := &vncManager{databasePath: database}
+			first, err := manager.captureBitwardenBrowserStorage(`{"account":"first"}`, `{"key":"old"}`, 0, profile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			blockedPath := bitwardenBrowserStoragePath(database)
+			if blocked == "backup" {
+				blockedPath += ".bak"
+			}
+			if err := os.Remove(blockedPath); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(blockedPath, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			latest, err := manager.captureBitwardenBrowserStorage(`{"account":"new"}`, `{"key":"live"}`, first.Revision, profile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if latest.Restore || latest.ProfileRevision != latest.Revision || latest.Durable != (blocked == "backup") {
+				t.Fatal("persistence failure invalidated accepted live state or misreported durability")
+			}
+			if err := os.Remove(blockedPath); err != nil {
+				t.Fatal(err)
+			}
+			repaired, err := manager.captureBitwardenBrowserStorage(latest.LocalJSON, latest.SessionJSON, latest.Revision, profile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !repaired.Durable || repaired.Restore || repaired.Revision != latest.Revision {
+				t.Fatal("unchanged live state could not repair persistence without changing its revision")
+			}
+			for _, file := range []string{bitwardenBrowserStoragePath(database), bitwardenBrowserStoragePath(database) + ".bak"} {
+				stored, state := readBitwardenBrowserStorageCandidate(file)
+				if state != bitwardenBrowserStorageReadable || stored.Revision != latest.Revision || stored.LocalJSON != latest.LocalJSON {
+					t.Fatal("persistence recovery lost accepted state")
+				}
+			}
+		})
+	}
+}
+
+func TestBitwardenBrowserStorageTracksAcceptedProfileWithoutWritableMarker(t *testing.T) {
+	for _, unreadable := range []bool{false, true} {
+		t.Run(map[bool]string{false: "blocked-marker", true: "unreadable-store"}[unreadable], func(t *testing.T) {
+			root := t.TempDir()
+			database := filepath.Join(root, "wormhole.db")
+			profile := filepath.Join(root, "profile")
+			if err := os.MkdirAll(filepath.Join(profile, bitwardenBrowserProfileRevisionFile), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if unreadable {
+				if err := os.WriteFile(bitwardenBrowserStoragePath(database), []byte("unreadable"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			manager := &vncManager{databasePath: database}
+			first, err := manager.captureBitwardenBrowserStorage(`{"account":"first"}`, `{"key":"live"}`, 0, profile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			read, err := manager.readBitwardenBrowserStorage(profile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if read.Restore || read.ProfileRevision != first.Revision {
+				t.Fatal("accepted live profile was treated as stale when its marker could not be written")
+			}
+			second, err := manager.captureBitwardenBrowserStorage(`{"account":"new-login"}`, `{"key":"new"}`, read.ProfileRevision, profile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if second.LocalJSON != `{"account":"new-login"}` || second.Restore {
+				t.Fatal("new login was discarded despite originating from the accepted profile")
+			}
+		})
+	}
+}
+
+func TestBitwardenBrowserStorageRejectsStaleVolatileWriter(t *testing.T) {
+	root := t.TempDir()
+	database := filepath.Join(root, "wormhole.db")
+	if err := os.WriteFile(bitwardenBrowserStoragePath(database), []byte("unreadable"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manager := &vncManager{databasePath: database}
+	profileA, profileB := filepath.Join(root, "a"), filepath.Join(root, "b")
+	first, err := manager.captureBitwardenBrowserStorage(`{"account":"first"}`, `{"key":"old"}`, 0, profileA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	latest, err := manager.captureBitwardenBrowserStorage(`{}`, `{}`, first.Revision, profileB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale, err := manager.captureBitwardenBrowserStorage(first.LocalJSON, first.SessionJSON, first.Revision, profileA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stale.LocalJSON != latest.LocalJSON || stale.SessionJSON != latest.SessionJSON || !stale.Restore {
+		t.Fatal("stale volatile writer revived the session after logout")
+	}
+}
+
+func TestBitwardenBrowserStorageVolatileRevisionExceedsExistingProfile(t *testing.T) {
+	root := t.TempDir()
+	database, profile := filepath.Join(root, "wormhole.db"), filepath.Join(root, "a")
+	if err := os.WriteFile(bitwardenBrowserStoragePath(database), []byte("unreadable"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeBitwardenBrowserProfileRevision(profile, 20)
+	manager := &vncManager{databasePath: database}
+	current, err := manager.captureBitwardenBrowserStorage(`{}`, `{}`, 20, profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Revision <= 20 || current.ProfileRevision != current.Revision {
+		t.Fatal("volatile revision moved behind an acknowledged persisted profile")
+	}
+	stale, err := manager.captureBitwardenBrowserStorage(`{"account":"stale"}`, `{"key":"old"}`, 19, filepath.Join(root, "b"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stale.Revision != current.Revision || stale.LocalJSON != current.LocalJSON || !stale.Restore {
+		t.Fatal("lower persisted profile revision revived a logged-out session")
+	}
+}
+
+func TestBitwardenBrowserStorageRecoveryRevisionExceedsExistingProfile(t *testing.T) {
+	root := t.TempDir()
+	database, profile := filepath.Join(root, "wormhole.db"), filepath.Join(root, "a")
+	if _, err := persistBitwardenBrowserStorage(database, bitwardenBrowserStorageSnapshot{Revision: 2, LocalJSON: "{}", SessionJSON: "{}"}); err != nil {
+		t.Fatal(err)
+	}
+	writeBitwardenBrowserProfileRevision(profile, 20)
+	manager := &vncManager{databasePath: database}
+	current, err := manager.captureBitwardenBrowserStorage(`{}`, `{}`, 20, profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Revision <= 20 || current.ProfileRevision != current.Revision {
+		t.Fatal("recovered snapshot revision moved behind an acknowledged profile")
+	}
+	stale, err := manager.captureBitwardenBrowserStorage(`{"account":"stale"}`, `{"key":"old"}`, 19, filepath.Join(root, "b"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stale.Revision != current.Revision || stale.LocalJSON != current.LocalJSON || !stale.Restore {
+		t.Fatal("lower profile revision revived a logged-out recovery snapshot")
 	}
 }
 

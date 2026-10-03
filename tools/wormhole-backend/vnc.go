@@ -142,17 +142,18 @@ func (w *backendLineWriter) write(value any) error {
 		// individual protocol or asynchronous handler from accidentally omitting diagnostics.
 		logError("backend request failed: %s", message)
 	}
-	encoded, err := json.Marshal(value)
-	if err != nil {
+	var encoded bytes.Buffer
+	encoder := json.NewEncoder(&encoded)
+	// This is a native JSON-line stream, not HTML. Escaping vault text can expand two bounded
+	// browser storage areas beyond the channel's line limit without changing their decoded size.
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(value); err != nil {
 		return err
 	}
 
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if _, err := w.writer.Write(encoded); err != nil {
-		return err
-	}
-	if err := w.writer.WriteByte('\n'); err != nil {
+	if _, err := w.writer.Write(encoded.Bytes()); err != nil {
 		return err
 	}
 	return w.writer.Flush()
@@ -217,6 +218,7 @@ type vncManager struct {
 	bitwardenBrowserLoaded             bool
 	bitwardenBrowserPrimaryNeedsRepair bool
 	bitwardenBrowserStorage            bitwardenBrowserStorageSnapshot
+	bitwardenBrowserProfileRevisions   map[string]int64
 }
 
 type pendingTunnelPrompt struct {

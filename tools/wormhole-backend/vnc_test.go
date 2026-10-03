@@ -15,12 +15,51 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	vnc "github.com/kward/go-vnc"
 	"github.com/kward/go-vnc/encodings"
 )
+
+func TestBackendLineWriterPreservesAtomicFramesAndErrors(t *testing.T) {
+	var output bytes.Buffer
+	writer := newBackendLineWriter(&output)
+	if err := writer.write(make(chan int)); err == nil || output.Len() != 0 {
+		t.Fatalf("encoding failure wrote a partial frame: %v", err)
+	}
+	var workers sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			if err := writer.write(map[string]string{"text": "<vault>&\n\u2028\u2029"}); err != nil {
+				t.Errorf("concurrent protocol write failed: %v", err)
+			}
+		}()
+	}
+	workers.Wait()
+	lines := bytes.Split(bytes.TrimSuffix(output.Bytes(), []byte{'\n'}), []byte{'\n'})
+	if len(lines) != 16 {
+		t.Fatalf("protocol framing changed: %d lines", len(lines))
+	}
+	for _, line := range lines {
+		var decoded map[string]string
+		if err := json.Unmarshal(line, &decoded); err != nil || decoded["text"] != "<vault>&\n\u2028\u2029" {
+			t.Fatalf("protocol frame was interleaved or changed: %v", err)
+		}
+	}
+	for _, size := range []int{1, 8192} {
+		if err := newBackendLineWriter(backendProtocolFailingWriter{}).write(strings.Repeat("x", size)); !errors.Is(err, io.ErrClosedPipe) {
+			t.Fatalf("write/flush failure was lost for %d-byte payload: %v", size, err)
+		}
+	}
+}
+
+type backendProtocolFailingWriter struct{}
+
+func (backendProtocolFailingWriter) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
 
 func TestTunnelProgressWireIncludesDefaultDetails(t *testing.T) {
 	for _, tc := range []struct{ phase, detail, want string }{
