@@ -1,0 +1,11 @@
+{
+  "name": "@wormhole/http-cache-semantics",
+  "version": "4.2.0-wormhole.1",
+  "private": true,
+  "description": "Local security backport of http-cache-semantics 4.2.0",
+  "author": "Kornel Lesiński <npms2@geekhood.net> (https://kornel.ski/)",
+  "license": "BSD-2-Clause",
+  "main": "index.js",
+  "types": "index.js",
+  "files": ["index.js", "LICENSE", "README.md"]
+}
