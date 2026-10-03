@@ -131,15 +131,13 @@ function parseCacheControl(header) {
     const cc = {};
     if (!header) return cc;
 
-    // TODO: When there is more than one value present for a given directive (e.g., two Expires header fields, multiple Cache-Control: max-age directives),
-    // the directive's value is considered invalid. Caches are encouraged to consider responses that have invalid freshness information to be stale
     const parts = header.trim().split(/,/);
     for (const part of parts) {
         const [k, v] = part.split(/=/, 2);
-        cc[k.trim()] = v === undefined ? true : v.trim().replace(/^"|"$/g, '');
+        assignCacheControlDirective(cc, k.trim(), v === undefined ? true : v.trim().replace(/^"|"$/g, ''));
     }
 
-    return normalizeCacheControl(cc);
+    return cc;
 }
 
 /**
@@ -159,13 +157,22 @@ function formatCacheControl(cc) {
     return parts.join(', ');
 }
 
+function assignCacheControlDirective(cc, key, value) {
+    const name = key.toLowerCase();
+    // Duplicate freshness information is invalid; do not fall back to a longer lifetime.
+    if ((name === 'max-age' || name === 's-maxage') && Object.hasOwn(cc, name)) {
+        cc[name] = '0';
+    } else {
+        // Empty arguments cannot clear a reuse prohibition.
+        cc[name] = restrictiveCacheDirectives.has(name) ? value || true : value;
+    }
+}
+
 // Cached policies written by older versions may still contain mixed-case directives.
 function normalizeCacheControl(cc) {
     const normalized = {};
     for (const key of Object.keys(cc)) {
-        const name = key.toLowerCase();
-        // Empty arguments or duplicate directives cannot clear a reuse prohibition.
-        normalized[name] = restrictiveCacheDirectives.has(name) ? cc[key] || true : cc[key];
+        assignCacheControlDirective(normalized, key, cc[key]);
     }
     return normalized;
 }
@@ -427,7 +434,7 @@ module.exports = class CachePolicy {
             return this._evaluateRequestMissResult(req);
         }
 
-        if (requestCC['max-age'] && this.age() > toNumberOrZero(requestCC['max-age'])) {
+        if ('max-age' in requestCC && this.age() > toNumberOrZero(requestCC['max-age'])) {
             return this._evaluateRequestMissResult(req);
         }
 
@@ -646,13 +653,13 @@ module.exports = class CachePolicy {
 
         if (this._isShared) {
             // if a response includes the s-maxage directive, a shared cache recipient MUST ignore the Expires field.
-            if (this._rescc['s-maxage']) {
+            if ('s-maxage' in this._rescc) {
                 return toNumberOrZero(this._rescc['s-maxage']);
             }
         }
 
         // If a response includes a Cache-Control field with the max-age directive, a recipient MUST ignore the Expires field.
-        if (this._rescc['max-age']) {
+        if ('max-age' in this._rescc) {
             return toNumberOrZero(this._rescc['max-age']);
         }
 

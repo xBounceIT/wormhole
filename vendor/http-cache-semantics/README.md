@@ -20,6 +20,9 @@ reuse while allowing fresh hits. Cache directives are normalized case-insensitiv
 previously serialized policies; empty or duplicate directive values cannot clear
 reuse prohibitions. Regression tests include an actual `cacheable-request` flow
 against a local HTTP server returning a 500 after caching a user cookie.
+Duplicate freshness directives are normalized to zero, and explicit empty or zero
+limits cannot fall back to a longer `Expires` or `max-age` lifetime. Raw headers
+and previously serialized directives use the same normalization helper.
 Comma-separated `Connection` and `Vary` fields use linear splitting and trimming
 instead of a regex that can backtrack quadratically on long whitespace sequences.
 `Vary` wildcard fields prohibit every stale reuse method, including padded values
@@ -34,8 +37,8 @@ Coverage uses Node's native test/V8 tooling. Unchanged upstream runtime code is
 excluded from the changed-code coverage requirement; the backported executable
 lines must have at least 80% coverage.
 
-Validation: all 39 security regression tests pass. Node's native LCOV report
+Validation: all 40 security regression tests pass. Node's native LCOV report
 (`node --experimental-test-coverage --test-coverage-include=vendor/**/*.js
 --test-reporter=lcov --test tests/dependency-security.test.mjs`) covers all
-41 executable lines added by this backport (100%), compared with the original
+49 executable lines added by this backport (100%), compared with the original
 npm runtime sources; blank lines, comments, and standalone delimiters are excluded.

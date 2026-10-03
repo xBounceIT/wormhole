@@ -445,6 +445,52 @@ test('empty or duplicate directives cannot clear a cache reuse restriction', () 
   );
 });
 
+test('empty and duplicate freshness limits never fall back to a longer lifetime', () => {
+  const expires = new Date(Date.now() + 86400000).toUTCString();
+  for (const directive of ['max-age', 's-maxage']) {
+    for (const values of [
+      '0, MAX-AGE=""',
+      '3600, MAX-AGE=0',
+      '0, max-age=3600',
+      '3600, max-age=60',
+      '""',
+      '0',
+      '',
+    ]) {
+      const limit = values
+        .replaceAll('MAX-AGE', directive.toUpperCase())
+        .replaceAll('max-age', directive);
+      const headers = { expires, 'cache-control': `${directive}=${limit}` };
+      if (directive === 's-maxage') headers['cache-control'] += ', max-age=3600';
+      const policy = cachePolicy(headers);
+      for (const candidate of [policy, CachePolicy.fromObject(policy.toObject())]) {
+        candidate.now = policy.now;
+        assert.equal(candidate.maxAge(), 0, headers['cache-control']);
+        assert.equal(candidate.stale(), true);
+        assertCacheMiss(candidate, '');
+      }
+      const snapshot = policy.toObject();
+      snapshot.rescc = { [directive]: '0', [directive.toUpperCase()]: '' };
+      if (directive === 's-maxage') snapshot.rescc['max-age'] = '3600';
+      const legacy = CachePolicy.fromObject(snapshot);
+      legacy.now = policy.now;
+      assert.equal(legacy.maxAge(), 0);
+      assertCacheMiss(legacy, '');
+    }
+  }
+  const privatePolicy = cachePolicy(
+    { 'cache-control': 's-maxage=0, S-MAXAGE="", max-age=3600' },
+    { shared: false },
+  );
+  assert.equal(privatePolicy.maxAge(), 3600);
+  assert.equal(privatePolicy.satisfiesWithoutRevalidation(request), true);
+  const ordinary = cachePolicy({ 'cache-control': 'max-age=3600', expires });
+  assert.equal(ordinary.maxAge(), 3600);
+  for (const maxAge of ['max-age=""', 'max-age=0, MAX-AGE=""', 'max-age=3600, max-age=0']) {
+    assertCacheMiss(ordinary, maxAge);
+  }
+});
+
 test('stale error fallback validates Vary and preserves explicit cookie opt-ins', () => {
   const varying = cachePolicy(
     {
