@@ -287,6 +287,7 @@ import {
   quickConnectTunnelId,
   type QuickConnectProtocol,
 } from './quick-connect-state';
+import { connectionEditRequiresReconnect } from './connection-edit-state';
 import { KeyedRetryQueue } from './keyed-retry-queue';
 import {
   isBitwardenUnlockError,
@@ -1956,6 +1957,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     rdp: { ...defaultRdpSettings },
   });
   const [rdpExternalClientRequired, setRdpExternalClientRequired] = useState(false);
+  const initialConnectionEditForm = useRef<typeof newConnectionForm | null>(null);
   const rdpExternalClientRequirementRequest = useRef(0);
   const [newFolderOpen, setNewFolderOpen] = useState(false);
   const [newFolderForm, setNewFolderForm] = useState<FolderForm>(blankFolderForm);
@@ -5676,7 +5678,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     setSelectedNodeId(node.id);
     setEditingConnectionId(node.id);
     setEditorError('');
-    setNewConnectionForm({
+    const form: typeof newConnectionForm = {
       name: node.name,
       notes: node.notes ?? '',
       host: savedConnectionAddressForEditor(node.protocol, node.host ?? '', node.httpPath),
@@ -5696,7 +5698,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       credential: credentialSelectionFor(node),
       serial: serialSettingsFromNode(node),
       rdp: { ...defaultRdpSettings, ...(node.rdp ?? {}) },
-    });
+    };
+    initialConnectionEditForm.current = form;
+    setNewConnectionForm(form);
     setNewConnectionOpen(true);
   }
 
@@ -5993,12 +5997,24 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         serialFlowControl: newConnectionForm.serial.flowControl,
         rdp: newConnectionForm.protocol === 'rdp' ? newConnectionForm.rdp : undefined,
       };
+      const reconnectEditedSession =
+        editingId &&
+        connectionEditRequiresReconnect(initialConnectionEditForm.current, newConnectionForm);
       if (editingId) {
         const result = await window.wormhole.updateWorkspaceNode({
           id: editingId,
           ...nodeWrite,
         });
         if (!result.updated) throw new Error('The workspace did not save the connection.');
+      }
+      if (editingId && !reconnectEditedSession) {
+        setSessions((current) =>
+          current.map((session) =>
+            session.nodeId === editingId ? { ...session, title: name } : session,
+          ),
+        );
+        await refreshWorkspace();
+      } else if (editingId) {
         const editedSessionId = `session-${editingId}`;
         const editedSession = sessions.find((session) => session.id === editedSessionId);
         if (editedSession) {
