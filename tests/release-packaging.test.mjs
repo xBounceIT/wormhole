@@ -365,6 +365,7 @@ test('release verifies the Linux package outputs and their installed desktop ass
   );
   assert.ok(verify, 'Linux package validation is missing');
   assert.equal(verify.if, "matrix.builder_platform == 'linux'");
+  assert.equal(verify.env.LC_ALL, 'C');
   for (const suffix of [
     'x86_64.AppImage',
     'amd64.deb',
@@ -386,6 +387,7 @@ test('release verifies the Linux package outputs and their installed desktop ass
   assert.match(verify.run, /cmp -s "Assets\/LinuxIcons\/\$size\.png" "\$icon_path"/);
   assert.match(verify.run, /grep -Fxq 'Icon=wormhole' "\$desktop_entry"/);
   assert.match(verify.run, /readelf --program-headers "\$appimage"/);
+  assert.match(verify.run, /readelf --dynamic "\$appimage"/);
   assert.match(verify.run, /readelf --string-dump=\.upd_info "\$appimage"/);
   assert.match(verify.run, /sha1sum "\$appimage"/);
   assert.match(verify.run, /grep -aFxq "SHA-1: \$appimage_sha1" "\$appimage\.zsync"/);
@@ -393,7 +395,9 @@ test('release verifies the Linux package outputs and their installed desktop ass
   assert.equal(tooling?.if, "matrix.builder_platform == 'linux'");
 });
 
-test('release AppImage validation rejects inspection errors and corrupt delta files', async () => {
+test('release AppImage validation accepts static PIE and rejects external dependencies and inspection errors', async () => {
+  // Workflow Bash is outside the Node/Go coverage tooling. Execute its actual validation
+  // with both architectures, covering static PIE, external dependencies and command failures.
   const verify = releaseJobs.packages.steps.find((step) =>
     step.run?.includes('dpkg-deb --extract'),
   );
@@ -408,7 +412,11 @@ readelf() {
     printf '%s\\n' "$MOCK_PROGRAM_HEADERS"
     return "$MOCK_PROGRAM_STATUS"
   fi
-  printf '%s\\n' 'gh-releases-zsync|xBounceIT|wormhole|latest|Wormhole-*-x86_64.AppImage.zsync'
+  if [[ "$1" == '--dynamic' ]]; then
+    printf '%s\\n' "$MOCK_DYNAMIC_ENTRIES"
+    return "$MOCK_DYNAMIC_STATUS"
+  fi
+  printf '%s\\n' "gh-releases-zsync|xBounceIT|wormhole|latest|Wormhole-*-$MOCK_ARCH.AppImage.zsync"
   return "$MOCK_SECTION_STATUS"
 }
 ${source}`;
@@ -420,44 +428,64 @@ ${source}`;
         )
       : 'bash';
   const directory = await mkdtemp(join(tmpdir(), 'wormhole-release-appimage-'));
-  const image = join(directory, 'release', 'Wormhole-2.1.0-x86_64.AppImage');
   const content = Buffer.from('AppImage fixture');
   const sha1 = createHash('sha1').update(content).digest('hex');
   try {
     await mkdir(join(directory, 'release'));
-    await writeFile(image, content);
-    for (const {
-      headers = 'LOAD',
-      programStatus = '0',
-      sectionStatus = '0',
-      sidecar = `SHA-1: ${sha1}\n`,
-      success,
-    } of [
-      { success: true },
-      { programStatus: '9', success: false },
-      { headers: 'INTERP', success: false },
-      { headers: 'DYNAMIC', success: false },
-      { sectionStatus: '9', success: false },
-      { sidecar: 'SHA-1: wrong\n', success: false },
-      { sidecar: '', success: false },
-    ]) {
-      await writeFile(`${image}.zsync`, sidecar);
-      const result = spawnSync(bash, ['-c', script], {
-        cwd: directory,
-        env: {
-          ...process.env,
-          MOCK_PROGRAM_HEADERS: headers,
-          MOCK_PROGRAM_STATUS: programStatus,
-          MOCK_SECTION_STATUS: sectionStatus,
-        },
-        encoding: 'utf8',
-      });
-      assert.ifError(result.error);
-      assert.equal(
-        result.status === 0,
+    for (const arch of ['x86_64', 'arm64']) {
+      const image = join(directory, 'release', `Wormhole-2.1.0-${arch}.AppImage`);
+      await writeFile(image, content);
+      for (const {
+        headers = 'LOAD',
+        programStatus = '0',
+        dynamicEntries = 'There is no dynamic section in this file.',
+        dynamicStatus = '0',
+        sectionStatus = '0',
+        sidecar = `SHA-1: ${sha1}\n`,
         success,
-        `${headers}/${programStatus}/${sectionStatus}: ${result.stderr}`,
-      );
+      } of [
+        { success: true },
+        {
+          headers: 'LOAD\nDYNAMIC',
+          dynamicEntries: '0x0000000000000007 (RELA) 0x1200\n0x0000000000000000 (NULL) 0x0',
+          success: true,
+        },
+        { programStatus: '9', success: false },
+        { headers: '  INTERP 0x000040 0x0000000000000040', success: false },
+        {
+          headers: 'LOAD\nDYNAMIC',
+          dynamicEntries: '0x0000000000000001 (NEEDED) Shared library: [libfuse.so.2]',
+          success: false,
+        },
+        { dynamicStatus: '9', success: false },
+        { sectionStatus: '9', success: false },
+        { sidecar: 'SHA-1: wrong\n', success: false },
+        { sidecar: '', success: false },
+      ]) {
+        await writeFile(`${image}.zsync`, sidecar);
+        const result = spawnSync(bash, ['-c', script], {
+          cwd: directory,
+          env: {
+            ...process.env,
+            LC_ALL: verify.env.LC_ALL,
+            MOCK_PROGRAM_HEADERS: headers,
+            MOCK_PROGRAM_STATUS: programStatus,
+            MOCK_DYNAMIC_ENTRIES: dynamicEntries,
+            MOCK_DYNAMIC_STATUS: dynamicStatus,
+            MOCK_ARCH: arch,
+            MOCK_SECTION_STATUS: sectionStatus,
+          },
+          encoding: 'utf8',
+        });
+        assert.ifError(result.error);
+        assert.equal(
+          result.status === 0,
+          success,
+          `${arch}/${headers}/${programStatus}/${dynamicStatus}/${sectionStatus}: ${result.stderr}`,
+        );
+      }
+      await rm(image);
+      await rm(`${image}.zsync`);
     }
   } finally {
     await rm(directory, { recursive: true, force: true });
