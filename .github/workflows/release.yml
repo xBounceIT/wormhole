@@ -291,6 +291,7 @@ jobs:
         shell: bash
         env:
           BUILDER_ARCH: ${{ matrix.builder_arch }}
+          LC_ALL: C
         run: |
           set -euo pipefail
           shopt -s nullglob
@@ -333,7 +334,10 @@ jobs:
           appimage_arch="${appimage##*-}"
           appimage_arch="${appimage_arch%.AppImage}"
           program_headers="$(readelf --program-headers "$appimage")"
-          if grep -Eq 'INTERP|DYNAMIC' <<<"$program_headers"; then
+          # Static PIE runtimes have DYNAMIC relocation metadata, but no loader or shared libraries.
+          dynamic_entries="$(readelf --dynamic "$appimage")"
+          if grep -Eq '^[[:space:]]*INTERP([[:space:]]|$)' <<<"$program_headers" || \
+             grep -Fq '(NEEDED)' <<<"$dynamic_entries"; then
             echo "AppImage runtime must be statically linked." >&2
             exit 1
           fi
