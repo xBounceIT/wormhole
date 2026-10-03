@@ -451,6 +451,25 @@ test('comma header parsing preserves whitespace and matching semantics', () => {
   }
 });
 
+test('Vary wildcards prohibit every stale reuse path, including direct methods', () => {
+  for (const vary of ['*', ' * ', 'accept-language, *', '*, accept-language']) {
+    const policy = cachePolicy({
+      vary,
+      'cache-control': 'max-age=0, stale-while-revalidate=3600, stale-if-error=3600',
+    });
+    for (const candidate of [policy, CachePolicy.fromObject(policy.toObject())]) {
+      candidate.now = () => policy.toObject().t + 1000;
+      assert.equal(candidate.maxAge(), 0);
+      assert.equal(candidate.useStaleWhileRevalidate(), false);
+      assertCacheMiss(candidate, 'max-stale=999999');
+      const result = candidate.revalidatedPolicy(request, { status: 500, headers: {} });
+      assert.notEqual(result.policy, candidate);
+      assert.equal(result.modified, true);
+      assert.equal(result.matches, false);
+    }
+  }
+});
+
 test('comma header parsing bounds work on long whitespace without a separator', () => {
   const token = `x-first${'\t'.repeat(80000)}x-last`;
   const policy = cachePolicy({

@@ -489,6 +489,14 @@ module.exports = class CachePolicy {
         );
     }
 
+    _varyFields() {
+        return this._resHeaders.vary ? this._resHeaders.vary
+            .trim()
+            .toLowerCase()
+            .split(',')
+            .map(field => field.trim()) : [];
+    }
+
     /**
      * Checks whether the Vary header in the response matches the new request.
      * @param {HttpRequest} req - incoming HTTP request
@@ -499,16 +507,12 @@ module.exports = class CachePolicy {
             return true;
         }
 
-        // A Vary header field-value of "*" always fails to match
-        if (this._resHeaders.vary === '*') {
+        const fields = this._varyFields();
+        // A Vary wildcard always fails to match, including inside a field list.
+        if (fields.includes('*')) {
             return false;
         }
 
-        const fields = this._resHeaders.vary
-            .trim()
-            .toLowerCase()
-            .split(',')
-            .map(field => field.trim());
         for (const name of fields) {
             if (req.headers[name] !== this._reqHeaders[name]) return false;
         }
@@ -611,6 +615,7 @@ module.exports = class CachePolicy {
         return !!(
             !this.storable() ||
             this._rescc['no-cache'] ||
+            (this._resHeaders.vary && this._varyFields().includes('*')) ||
             (this._isShared &&
                 (this._rescc['proxy-revalidate'] ||
                     // Sharing responses with cookies requires an explicit opt-in.
@@ -637,10 +642,6 @@ module.exports = class CachePolicy {
      */
     maxAge() {
         if (this._requiresRevalidation()) {
-            return 0;
-        }
-
-        if (this._resHeaders.vary === '*') {
             return 0;
         }
 
