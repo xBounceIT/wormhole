@@ -13,9 +13,11 @@ import (
 )
 
 const (
-	bitwardenBrowserStorageSchema       = 1
-	bitwardenBrowserStorageMaxJSON      = 8 * 1024 * 1024
-	bitwardenBrowserStorageMaxProtected = 16 * 1024 * 1024
+	bitwardenBrowserStorageSchema  = 1
+	bitwardenBrowserStorageMaxJSON = 8 * 1024 * 1024
+	// Legacy json.Marshal records expand HTML characters to six-byte escapes. Leave room for
+	// that bounded representation and native protection overhead when recovering existing files.
+	bitwardenBrowserStorageMaxProtected = 6*bitwardenBrowserStorageMaxJSON + 1024*1024
 	bitwardenBrowserProfileRevisionFile = "wormhole-bitwarden-shared-storage-v1.txt"
 )
 
@@ -74,11 +76,11 @@ func writeBitwardenBrowserProfileRevision(profilePath string, revision int64) {
 	)
 }
 
-func bitwardenBrowserStorageForProfile(
+func (m *vncManager) bitwardenBrowserStorageForProfile(
 	snapshot bitwardenBrowserStorageSnapshot,
 	profilePath string,
 ) bitwardenBrowserStorageSnapshot {
-	profileRevision := bitwardenBrowserProfileRevision(profilePath)
+	profileRevision := max(bitwardenBrowserProfileRevision(profilePath), m.bitwardenBrowserProfileRevisions[profilePath])
 	snapshot.ProfileRevision = profileRevision
 	snapshot.Restore = snapshot.Revision > profileRevision
 	return snapshot
@@ -167,12 +169,14 @@ func persistBitwardenBrowserStorage(
 		Revision:      snapshot.Revision,
 		LocalJson:     snapshot.LocalJSON,
 	}
-	plaintext, err := json.Marshal(record)
-	if err != nil {
+	var plaintext bytes.Buffer
+	encoder := json.NewEncoder(&plaintext)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(record); err != nil {
 		return false, fmt.Errorf("could not encode shared Bitwarden browser storage: %w", err)
 	}
 	path := bitwardenBrowserStoragePath(databasePath)
-	if err := protectBitwardenBrowserStorage(path, plaintext); err != nil {
+	if err := protectBitwardenBrowserStorage(path, plaintext.Bytes()); err != nil {
 		return false, fmt.Errorf("could not protect shared Bitwarden browser storage: %w", err)
 	}
 	protected, err := os.ReadFile(path)

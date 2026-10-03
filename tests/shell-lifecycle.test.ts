@@ -567,6 +567,10 @@ test('MCP approval restores and foregrounds the Wormhole window before notifying
   );
   const popupShow = openBitwardenPopupFlow.indexOf('popup.setVisible(true)');
   assert.ok(popupLoad < popupApprovalGuard && popupApprovalGuard < popupShow);
+  const popupRestore = openBitwardenPopupFlow.indexOf(
+    'await this.synchronizeBitwardenStorageInBridge',
+  );
+  assert.ok(popupRestore >= 0 && popupRestore < popupLoad);
   assert.match(openBitwardenPopupFlow, /popup\.webContents\.once\('destroyed'/);
   assert.match(
     openBitwardenPopupFlow,
@@ -585,6 +589,7 @@ test('MCP approval restores and foregrounds the Wormhole window before notifying
     bitwardenStorageBridgeFlow,
     /if \(await this\.synchronizeBitwardenStorageCore\(partition, backgroundContents\)\) return;/,
   );
+  assert.match(bitwardenStorageBridgeFlow, /memoryReady = await withBitwardenBrowserTimeout\(/);
   const bridgeTry = bitwardenStorageBridgeFlow.indexOf(
     'try {',
     bitwardenStorageBridgeFlow.indexOf('const bridge = new WebContentsView'),
