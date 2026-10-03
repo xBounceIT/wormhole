@@ -507,7 +507,8 @@ module.exports = class CachePolicy {
         const fields = this._resHeaders.vary
             .trim()
             .toLowerCase()
-            .split(/\s*,\s*/);
+            .split(',')
+            .map(field => field.trim());
         for (const name of fields) {
             if (req.headers[name] !== this._reqHeaders[name]) return false;
         }
@@ -528,7 +529,7 @@ module.exports = class CachePolicy {
         }
         // 9.1.  Connection
         if (inHeaders.connection) {
-            const tokens = inHeaders.connection.trim().split(/\s*,\s*/);
+            const tokens = inHeaders.connection.trim().split(',').map(token => token.trim());
             for (const name of tokens) {
                 delete headers[name];
             }

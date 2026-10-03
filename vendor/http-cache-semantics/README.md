@@ -19,6 +19,8 @@ response lifetimes. Cache directives are normalized case-insensitively, includin
 previously serialized policies; empty or duplicate directive values cannot clear
 reuse prohibitions. Regression tests include an actual `cacheable-request` flow
 against a local HTTP server returning a 500 after caching a user cookie.
+Comma-separated `Connection` and `Vary` fields use linear splitting and trimming
+instead of a regex that can backtrack quadratically on long whitespace sequences.
 
 The root npm override replaces all transitive installations with this package.
 Remove the override and this directory once a reviewed upstream release includes
@@ -29,8 +31,8 @@ Coverage uses Node's native test/V8 tooling. Unchanged upstream runtime code is
 excluded from the changed-code coverage requirement; the backported executable
 lines must have at least 80% coverage.
 
-Validation: all 34 security regression tests pass. Node's native LCOV report
+Validation: all 36 security regression tests pass. Node's native LCOV report
 (`node --experimental-test-coverage --test-coverage-include=vendor/**/*.js
 --test-reporter=lcov --test tests/dependency-security.test.mjs`) covers all
-32 executable lines added by this backport (100%), compared with the original
+35 executable lines added by this backport (100%), compared with the original
 npm runtime sources; blank lines, comments, and standalone delimiters are excluded.

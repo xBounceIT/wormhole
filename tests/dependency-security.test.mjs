@@ -418,6 +418,61 @@ test('stale error fallback validates Vary and preserves explicit cookie opt-ins'
   }
 });
 
+test('comma header parsing preserves whitespace and matching semantics', () => {
+  const policy = cachePolicy(
+    {
+      connection: ' x-remove \t, \t x-other ',
+      'x-remove': 'hop-by-hop',
+      'x-other': 'hop-by-hop',
+      'x-keep': 'end-to-end',
+      vary: ' Accept-Language \t, \t Accept-Encoding ',
+      'cache-control': 'max-age=3600',
+    },
+    {},
+    { 'accept-language': 'it', 'accept-encoding': 'gzip' },
+  );
+  const headers = policy.responseHeaders();
+  assert.equal(headers.connection, undefined);
+  assert.equal(headers['x-remove'], undefined);
+  assert.equal(headers['x-other'], undefined);
+  assert.equal(headers['x-keep'], 'end-to-end');
+  for (const [language, encoding, matches] of [
+    ['it', 'gzip', true],
+    ['en', 'gzip', false],
+    ['it', 'br', false],
+  ]) {
+    assert.equal(
+      policy.satisfiesWithoutRevalidation({
+        ...request,
+        headers: { ...request.headers, 'accept-language': language, 'accept-encoding': encoding },
+      }),
+      matches,
+    );
+  }
+});
+
+test('comma header parsing bounds work on long whitespace without a separator', () => {
+  const token = `x-first${'\t'.repeat(80000)}x-last`;
+  const policy = cachePolicy({
+    connection: `${token}, x-remove`,
+    'x-remove': 'hop-by-hop',
+    'x-keep': 'end-to-end',
+    vary: token,
+    'cache-control': 'max-age=3600',
+  });
+  const headers = runInNewContext('policy.responseHeaders()', { policy }, { timeout: 1000 });
+  assert.equal(headers['x-remove'], undefined);
+  assert.equal(headers['x-keep'], 'end-to-end');
+  assert.equal(
+    runInNewContext(
+      'policy.satisfiesWithoutRevalidation(request)',
+      { policy, request },
+      { timeout: 1000 },
+    ),
+    true,
+  );
+});
+
 test(
   'cacheable-request never serves another user cookie after origin failure',
   { timeout: 10000 },
