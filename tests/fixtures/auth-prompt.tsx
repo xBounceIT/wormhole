@@ -17,6 +17,12 @@ declare function ConnectionNotesHarness(props: {
   nodeId?: string;
   open?: boolean;
 }): import('react').ReactElement;
+declare function RuntimeCredentialsHarness(props: {
+  protocol: 'ssh' | 'rdp';
+  kind: 'saved' | 'quick';
+  busy?: boolean;
+  onSubmit: (credentials: { username: string; password: string }, save: boolean) => void;
+}): import('react').ReactElement;
 declare function AppCloseHarness(props: Record<string, unknown>): import('react').ReactElement;
 declare function BitwardenSettingsHarness(
   props: Record<string, unknown>,
@@ -1950,7 +1956,170 @@ async function runRdpSurfaceTests() {
   }
 }
 
-runConnectionNotesTests()
+async function runRuntimeCredentialPasswordTests() {
+  const root = createRoot(document.getElementById('root'));
+  const fill = async (id: string, value: string) => {
+    await React.act(async () => {
+      const input = document.getElementById(id) as HTMLInputElement;
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, value);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+  };
+  let mountKey = 0;
+  try {
+    for (const protocol of ['ssh', 'rdp'] as const) {
+      for (const kind of ['saved', 'quick'] as const) {
+        const submissions: Array<{ username: string; password: string; save: boolean }> = [];
+        const mount = async (busy = false, remount = true) => {
+          if (remount) mountKey += 1;
+          await React.act(async () => {
+            root.render(
+              <RuntimeCredentialsHarness
+                key={mountKey}
+                protocol={protocol}
+                kind={kind}
+                busy={busy}
+                onSubmit={(credentials, save) => submissions.push({ ...credentials, save })}
+              />,
+            );
+          });
+        };
+        await mount();
+        const passwordId = `${protocol}-password`;
+        const input = () => document.getElementById(passwordId) as HTMLInputElement;
+        const toggle = () =>
+          document.querySelector<HTMLButtonElement>(`button[aria-controls="${passwordId}"]`);
+        const dialog = () => document.querySelector<HTMLElement>('[role="dialog"]');
+        const connect = () =>
+          [...dialog().querySelectorAll('button')].find((button) =>
+            /Connect/.test(button.textContent),
+          );
+        assert.equal(input().type, 'password');
+        assert.equal(input().required, false);
+        assert.equal(input().labels[0].textContent, 'Password');
+        assert.equal(toggle().getAttribute('aria-label'), 'Show password');
+        assert.equal(toggle().getAttribute('aria-pressed'), 'false');
+        assert.equal(toggle().type, 'button');
+        assert.equal(connect().disabled, true);
+        await fill(`${protocol}-username`, 'runtime-user');
+        await fill(passwordId, 'runtime-test-secret');
+        assert.equal(connect().disabled, false);
+        await React.act(async () => {
+          toggle().focus();
+          assert.equal(document.activeElement, toggle());
+          const bounds = toggle().getBoundingClientRect();
+          const x = Math.round(bounds.x + bounds.width / 2);
+          const y = Math.round(bounds.y + bounds.height / 2);
+          assert.ok(toggle().contains(document.elementFromPoint(x, y)));
+          const clicked = new Promise<void>((resolve) =>
+            toggle().addEventListener('click', () => resolve(), { once: true }),
+          );
+          await require('electron').ipcRenderer.invoke('test:mouse', 'mouseDown', x, y);
+          await require('electron').ipcRenderer.invoke('test:mouse', 'mouseUp', x, y);
+          await clicked;
+        });
+        assert.equal(input().type, 'text');
+        assert.equal(
+          input().spellcheck,
+          false,
+          'revealed passwords must not enable spell checking',
+        );
+        assert.equal(input().value, 'runtime-test-secret');
+        assert.equal(toggle().getAttribute('aria-label'), 'Hide password');
+        assert.equal(toggle().getAttribute('aria-pressed'), 'true');
+        assert.equal(submissions.length, 0, 'showing a password must not submit the form');
+        const buttonBounds = toggle().getBoundingClientRect();
+        const fieldBounds = input().getBoundingClientRect();
+        assert.ok(buttonBounds.width > 0 && buttonBounds.height > 0);
+        assert.ok(buttonBounds.left >= fieldBounds.left && buttonBounds.right <= fieldBounds.right);
+        await React.act(async () => {
+          toggle().focus();
+          const released = new Promise<void>((resolve) =>
+            window.addEventListener('keyup', () => resolve(), { once: true }),
+          );
+          await require('electron').ipcRenderer.invoke('test:enter');
+          await released;
+        });
+        assert.equal(input().type, 'password', 'Enter must activate the focused visibility button');
+        assert.equal(input().value, 'runtime-test-secret');
+        assert.equal(submissions.length, 0, 'keyboard toggling must not submit the form');
+        const save = dialog().querySelector<HTMLInputElement>('input[type="checkbox"]');
+        assert.equal(Boolean(save), kind === 'saved');
+        if (save) {
+          await React.act(async () => save.click());
+          assert.equal(input().required, true);
+          await fill(passwordId, '');
+          assert.equal(connect().disabled, true);
+          assert.equal(input().checkValidity(), false);
+          await fill(passwordId, 'runtime-test-secret');
+        }
+        await React.act(async () => {
+          toggle().click();
+          dialog().querySelector('form').requestSubmit();
+        });
+        assert.deepEqual(submissions, [
+          {
+            username: 'runtime-user',
+            password: 'runtime-test-secret',
+            ...(protocol === 'rdp' ? { domain: '' } : {}),
+            save: kind === 'saved',
+          },
+        ]);
+        await mount(true, false);
+        assert.equal(connect().disabled, true);
+        assert.equal(connect().textContent, 'Connecting…');
+        await mount(false, false);
+        const selection = document.getElementById(`${protocol}-runtime-credential`);
+        await React.act(async () => {
+          Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(
+            selection,
+            'saved',
+          );
+          selection.dispatchEvent(new Event('change', { bubbles: true }));
+        });
+        assert.equal(input(), null);
+        assert.equal(toggle(), null);
+        await React.act(async () => {
+          Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(
+            selection,
+            'manual',
+          );
+          selection.dispatchEvent(new Event('change', { bubbles: true }));
+        });
+        assert.equal(input().type, 'password', 'returning to manual entry must hide the password');
+        assert.equal(input().value, 'runtime-test-secret');
+        await React.act(async () => {
+          toggle().click();
+          [...dialog().querySelectorAll('button')]
+            .find((button) => button.textContent === 'Cancel')
+            .click();
+        });
+        assert.notEqual(
+          input()?.type,
+          'text',
+          'closing must mask a password retained for animation',
+        );
+        await React.act(async () => document.getElementById('runtime-reopen').click());
+        assert.equal(input().type, 'password', 'new prompts must start with a hidden password');
+        assert.equal(input().value, '');
+        await fill(passwordId, '🔐 日本語 p@ss"<>&');
+        await React.act(async () => toggle().click());
+        assert.equal(input().value, '🔐 日本語 p@ss"<>&');
+        assert.equal(input().type, 'text');
+        await pressNativeEscape();
+        assert.notEqual(input()?.type, 'text');
+        await React.act(async () => document.getElementById('runtime-reopen').click());
+        assert.equal(input().type, 'password');
+        assert.equal(input().value, '');
+      }
+    }
+  } finally {
+    await React.act(async () => root.unmount());
+  }
+}
+
+runRuntimeCredentialPasswordTests()
+  .then(runConnectionNotesTests)
   .then(runAuthPromptTests)
   .then(runIdleLockTests)
   .then(runIdleConfirmationTests)

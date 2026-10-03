@@ -152,11 +152,11 @@ test('authentication prompts, window-close controls, and RDP surface layout work
     })
     .join('\n');
   const bitwardenHarness = `
-    const { BitwardenCliDialog, BitwardenAccessPrompt, TooltipProvider } = (() => {
+    const { BitwardenCliDialog, BitwardenAccessPrompt, TooltipProvider, RuntimeCredentialPasswordInput } = (() => {
       ${bitwardenControls}
       ${slice('function IconButton(', 'function CredentialValueRow(')}
-      ${slice('function RuntimeBitwardenUnlockDialog', 'type BitwardenOperationDialogState')}
-      return { BitwardenCliDialog, BitwardenAccessPrompt, TooltipProvider };
+      ${slice('function RuntimeCredentialPasswordInput', 'type BitwardenOperationDialogState')}
+      return { BitwardenCliDialog, BitwardenAccessPrompt, TooltipProvider, RuntimeCredentialPasswordInput };
     })();
     ${slice('function backendErrorMessage', 'function formatLocalDateTime')}
     function BitwardenSettingsHarness({ status, initialError, reload, credentialsChanged }) {
@@ -179,6 +179,49 @@ test('authentication prompts, window-close controls, and RDP surface layout work
         </div>
         ${slice('{bitwardenCliDialog ? (', '<BitwardenOperationDialog')}
       </>;
+    }
+  `;
+  const runtimeDialogs = ['ssh', 'rdp'].map((protocol) => {
+    const anchor = source.indexOf(`open={${protocol}CredentialPrompt !== null}`);
+    const first = source.lastIndexOf('<Dialog', anchor);
+    const last = source.indexOf('</Dialog>', anchor) + '</Dialog>'.length;
+    assert.ok(first >= 0 && last > anchor);
+    return source.slice(first, last);
+  });
+  const runtimeCredentialHarness = `
+    function SearchableCombobox({ id, value, onValueChange }) {
+      return <select id={id} value={value} onChange={event => onValueChange(event.target.value)}>
+        <option value="manual">Enter manually</option><option value="saved">Saved credential</option>
+      </select>;
+    }
+    function Checkbox({ checked, onCheckedChange }) {
+      return <input type="checkbox" checked={checked} onChange={event => onCheckedChange(event.target.checked)} />;
+    }
+    function RuntimeCredentialsHarness({ protocol, kind, busy = false, onSubmit }) {
+      const manualCredentialSelectionValue = 'manual';
+      const runtimeCredentialSelectionOptions = { ssh: [], rdp: [] };
+      const sessionsRef = useRef([{ id: 'rdp-session', nodeId: kind === 'saved' ? 'node' : null }]);
+      const sshPrompt = kind === 'saved'
+        ? { kind, backendSessionId: 'ssh-backend-session', nodeId: 'node' }
+        : { kind, sessionId: 'ssh-session' };
+      const [sshCredentialPrompt, setSshCredentialPrompt] = useState(protocol === 'ssh' ? sshPrompt : null);
+      const [rdpCredentialPrompt, setRdpCredentialPrompt] = useState(protocol === 'rdp' ? 'rdp-session' : null);
+      const [sshCredentialForm, setSshCredentialForm] = useState({ username: '', password: '' });
+      const [rdpCredentialForm, setRdpCredentialForm] = useState({ username: '', domain: '', password: '' });
+      const [sshCredentialSelection, setSshCredentialSelection] = useState('manual');
+      const [rdpCredentialSelection, setRdpCredentialSelection] = useState('manual');
+      const [sshCredentialSave, setSshCredentialSave] = useState(false);
+      const [rdpCredentialSave, setRdpCredentialSave] = useState(false);
+      const sshCredentialPromptBusy = busy, rdpCredentialPromptBusy = busy;
+      const submitSshCredentials = event => { event.preventDefault(); onSubmit(sshCredentialForm, sshCredentialSave); };
+      const submitRdpCredentials = event => { event.preventDefault(); onSubmit(rdpCredentialForm, rdpCredentialSave); };
+      return <TooltipProvider>
+        ${runtimeDialogs.join('\n')}
+        <button id="runtime-reopen" onClick={() => {
+          if (protocol === 'ssh') setSshCredentialPrompt(sshPrompt);
+          else setRdpCredentialPrompt('rdp-session');
+        }}>Open credentials</button>
+      </TooltipProvider>;
     }
   `;
   const bitwardenHelpers = readFileSync(
@@ -241,6 +284,7 @@ test('authentication prompts, window-close controls, and RDP surface layout work
       selectSource +
       slice('function clearSecretInput(', 'function credentialSelectionFor(') +
       bitwardenHarness +
+      runtimeCredentialHarness +
       notesHarness +
       bitwardenStartupHarness +
       readFileSync(new URL('../electron/web-session-attempt.ts', import.meta.url), 'utf8').replace(
@@ -368,6 +412,11 @@ test('authentication prompts, window-close controls, and RDP surface layout work
           window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' });
           window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Escape' });
         });
+        ipcMain.handle('test:enter', () => {
+          window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Enter' });
+          window.webContents.sendInputEvent({ type: 'char', keyCode: '\\r' });
+          window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Enter' });
+        });
         ipcMain.handle('test:viewport', (_event, width, height) => {
           window.setContentSize(width, height);
         });
@@ -391,7 +440,7 @@ test('authentication prompts, window-close controls, and RDP surface layout work
           const coverage = await window.webContents.debugger.sendCommand('Profiler.takePreciseCoverage');
           const script = coverage.result.find(item => item.url === 'wormhole-auth-prompt.js');
           if (!script) throw new Error('Missing authentication renderer coverage.');
-          for (const name of ['AuthPrompt', 'IdleLockHarness', 'showUnlock', 'AppCloseHarness', 'DialogContent', 'BitwardenCliDialog', 'BitwardenSettingsHarness', 'BitwardenAccessPrompt', 'BitwardenStartupHarness', 'CredentialsSearchHarness', 'ConnectionNotesHarness', 'RdpSurface']) {
+          for (const name of ['AuthPrompt', 'IdleLockHarness', 'showUnlock', 'AppCloseHarness', 'DialogContent', 'useDialogOpen', 'BitwardenCliDialog', 'BitwardenSettingsHarness', 'BitwardenAccessPrompt', 'BitwardenStartupHarness', 'CredentialsSearchHarness', 'ConnectionNotesHarness', 'RuntimeCredentialPasswordInput', 'RuntimeCredentialsHarness', 'RdpSurface']) {
             const parent = script.functions.find(item => item.functionName === name);
             if (!parent) throw new Error('Missing coverage for ' + name);
             const range = parent.ranges[0];
