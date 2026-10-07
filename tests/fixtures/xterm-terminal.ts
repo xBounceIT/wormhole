@@ -475,13 +475,14 @@ async function run() {
     await sleep(100);
   });
   assert.ok(dialog()!.textContent!.includes('Open terminal link?'));
-  assert.ok(dialog()!.textContent!.includes(destination));
+  assert.equal(dialog()!.querySelector('p.font-mono')!.textContent, destination);
   assert.equal(document.querySelector('#native-overlay-probe')!.textContent, 'true');
   assert.equal(document.activeElement, button('Cancel'), 'Cancel must be the initial focus');
   assert.equal(openedLinks.length, 0, 'link opened without confirmation');
   await requestLink('https://example.com/replacement');
-  assert.ok(
-    dialog()!.textContent!.includes(destination),
+  assert.equal(
+    dialog()!.querySelector('p.font-mono')!.textContent,
+    destination,
     'second link replaced a pending confirmation',
   );
   await click('Cancel');
@@ -565,7 +566,7 @@ async function run() {
   await React.act(async () => {
     finishStaleOpen!();
   });
-  assert.ok(dialog()!.textContent!.includes('https://example.com/new'));
+  assert.equal(dialog()!.querySelector('p.font-mono')!.textContent, 'https://example.com/new');
   await click('Cancel');
   finishOpen = undefined;
   await requestLink();
