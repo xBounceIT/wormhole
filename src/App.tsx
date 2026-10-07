@@ -23,6 +23,7 @@ import {
 import './index.css';
 import { authenticationIdleSeconds } from './auth-idle';
 import { McpApprovalDialog } from './components/McpApprovalDialog';
+import { TerminalLinkDialog } from './components/TerminalLinkDialog';
 import {
   applySessionMcpAccess,
   canDisconnectSessionAiAgent,
@@ -9174,6 +9175,10 @@ function SshXtermSurface({
 }) {
   const surfaceRef = useRef<HTMLDivElement>(null);
   const backendId = session.backendSessionId;
+  const [terminalLink, setTerminalLink] = useState<string | null>(null);
+  useEffect(() => {
+    setTerminalLink(null);
+  }, [backendId, session.status, isActive, isAuthorized]);
   useEffect(() => {
     const surface = surfaceRef.current;
     if (!surface || !backendId || session.status !== 'connected') return;
@@ -9202,6 +9207,7 @@ function SshXtermSurface({
         void copyTextToClipboard(text).catch(() => undefined);
       },
       paste: async () => (await window.wormhole?.pasteClipboardToSsh(backendId))?.pasted ?? false,
+      openLink: (url) => setTerminalLink((current) => current ?? url),
     });
     runtime.fit();
   }, [backendId, session.id, session.status, isActive, isAuthorized, autoCopyOnSelect, onInput]);
@@ -9224,11 +9230,23 @@ function SshXtermSurface({
       </div>
     );
   return (
-    <div
-      aria-label="Live SSH terminal"
-      className="h-full min-h-0 min-w-0 flex-1 overflow-hidden bg-[#090909]"
-      ref={surfaceRef}
-    />
+    <>
+      <div
+        aria-label="Live SSH terminal"
+        className="h-full min-h-0 min-w-0 flex-1 overflow-hidden bg-[#090909]"
+        ref={surfaceRef}
+      />
+      {terminalLink && backendId && isActive && isAuthorized ? (
+        <TerminalLinkDialog
+          key={terminalLink}
+          url={terminalLink}
+          onClose={() => setTerminalLink(null)}
+          onRestoreFocus={() => {
+            if (surfaceRef.current) sshTerminal(backendId).focus();
+          }}
+        />
+      ) : null}
+    </>
   );
 }
 

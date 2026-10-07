@@ -8,6 +8,7 @@ import test from 'node:test';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { build } from 'vite';
+import tailwindcss from '@tailwindcss/vite';
 
 const require = createRequire(import.meta.url);
 
@@ -22,7 +23,9 @@ test('xterm SSH presentation works in Chromium with WebGL and software fallback'
     configFile: false,
     logLevel: 'silent',
     define: { 'process.env.NODE_ENV': '"development"' },
+    resolve: { alias: { '@': fileURLToPath(new URL('../src', import.meta.url)) } },
     plugins: [
+      tailwindcss(),
       {
         name: 'terminal-component-harness',
         resolveId(id) {
@@ -30,7 +33,9 @@ test('xterm SSH presentation works in Chromium with WebGL and software fallback'
         },
         load(id) {
           if (id !== '\0ssh-surface') return;
-          return `import { useRef, useEffect } from 'react';
+          return `import { useRef, useEffect, useState } from 'react';
+        import ${JSON.stringify(fileURLToPath(new URL('../src/index.css', import.meta.url)).replaceAll('\\', '/'))};
+        import { TerminalLinkDialog } from ${JSON.stringify(fileURLToPath(new URL('../src/components/TerminalLinkDialog.tsx', import.meta.url)).replaceAll('\\', '/'))};
         import { sshTerminal } from ${JSON.stringify(fileURLToPath(new URL('../src/xterm-terminal.ts', import.meta.url)).replaceAll('\\', '/'))};
         const copyTextToClipboard = async text => window.copyTerminalTest(text);
         const SshTerminalConnectionState = ({session}) => <div>state {session.status}</div>;
@@ -99,6 +104,15 @@ test('xterm SSH presentation works in Chromium with WebGL and software fallback'
         }
         console.log('XtermSession V8 block coverage: ' + covered + '/' + total + ' (' + (100*covered/total).toFixed(2) + '%)');
         if (100*covered/total < 80) throw new Error('XtermSession coverage below 80%');
+        for (const name of ['TerminalLinkDialog', 'useNativeSurfaceOverlay']) {
+          const parent = script.functions.find(item => item.functionName === name);
+          if (!parent) throw new Error('Missing coverage: ' + name);
+          const range = parent.ranges[0];
+          const ranges = script.functions.filter(item => item.ranges[0].startOffset >= range.startOffset && item.ranges[0].endOffset <= range.endOffset).flatMap(item => item.ranges);
+          const hits = ranges.filter(item => item.count > 0).length;
+          console.log(name + ' V8 block coverage: ' + hits + '/' + ranges.length + ' (' + (100*hits/ranges.length).toFixed(2) + '%)');
+          if (100*hits/ranges.length < 80) throw new Error(name + ' coverage below 80%');
+        }
       } finally {window.destroy()}
       app.quit();
     }).catch(error => { console.error(error); app.exit(1); });
