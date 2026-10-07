@@ -144,7 +144,7 @@ func TestSSHTerminalStreamBackpressureKeepsPasteAndShutdownResponsive(t *testing
 	server := newSSHTestServer(&output)
 	native := &sshNativeSession{id: "stream", server: server, terminal: terminal, terminalStream: stream,
 		mcpReplay: newMcpReplayBuffer(4096), mcpCommandReplay: newMcpReplayBuffer(4096),
-		inputQueue: make(chan []byte, 16), done: make(chan struct{})}
+		inputQueue: newSSHInputQueue(sshInputQueueMaxBytes), done: make(chan struct{})}
 	server.sessions[native.id] = native
 	reading := make(chan struct{})
 	go func() { native.readOutput(strings.NewReader(strings.Repeat("output\r\n", 100000))); close(reading) }()
@@ -162,7 +162,7 @@ func TestSSHTerminalStreamBackpressureKeepsPasteAndShutdownResponsive(t *testing
 	case <-time.After(time.Second):
 		t.Fatal("paste blocked ACK processing behind terminal output")
 	}
-	if input := <-native.inputQueue; string(input) != "pasted" {
+	if input := native.inputQueue.take(); string(input) != "pasted" {
 		t.Fatalf("input changed: %q", input)
 	}
 	native.close(false)

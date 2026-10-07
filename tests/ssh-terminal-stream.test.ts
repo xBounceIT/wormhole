@@ -6,6 +6,43 @@ import { parseSshTerminalOutput, SshTerminalDelivery } from '../electron/ssh-ter
 
 const wire = { session_id: 'session-1', data: 'eA==', sequence: 1 };
 
+test('fatal input cleanup releases terminal ownership before forwarding the final error', () => {
+  const source = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
+  const methodStart = source.indexOf('  private handleLine(line: string): void {');
+  const bodyStart = source.indexOf('    const event = parseSshBackendEvent(line);', methodStart);
+  const bodyEnd = source.indexOf('  private broadcast(event: SshBackendEvent): void {', bodyStart);
+  assert.ok(methodStart > 0 && bodyStart > methodStart && bodyEnd > bodyStart);
+  const Harness = new Function(
+    'SshTerminalDelivery',
+    'parseSshBackendEvent',
+    stripTypeScriptTypes(`class Harness {
+      terminalDelivery = new SshTerminalDelivery();
+      terminalOwners = new Map([['session-1', {}]]);
+      activeSessions = new Set(['session-1']);
+      retainedMismatchSessions = new Set();
+      openWaiters = new Map();
+      events = []; releases = [];
+      releaseTunnel(id) { this.releases.push(id); return Promise.resolve(); }
+      broadcast(event) { this.events.push(event); }
+      handleLine(line) { ${source.slice(bodyStart, bodyEnd)}
+    }`) + '; return Harness;',
+  )(SshTerminalDelivery, JSON.parse);
+  const backend = new Harness();
+  backend.terminalDelivery.receive(parseSshTerminalOutput(wire)!);
+  backend.handleLine(JSON.stringify({ type: 'closed', sessionId: 'session-1' }));
+  backend.handleLine(
+    JSON.stringify({ type: 'error', sessionId: 'session-1', error: 'SSH input queue is full' }),
+  );
+  assert.equal(backend.activeSessions.has('session-1'), false);
+  assert.equal(backend.terminalOwners.has('session-1'), false);
+  assert.deepEqual(backend.terminalDelivery.pending(), []);
+  assert.deepEqual(backend.releases, ['session-1', 'session-1']);
+  assert.deepEqual(backend.events, [
+    { type: 'closed', sessionId: 'session-1' },
+    { type: 'error', sessionId: 'session-1', error: 'SSH input queue is full' },
+  ]);
+});
+
 test('terminal stream validates bounded bytes, sequence, reset geometry and optional fields', () => {
   const output = parseSshTerminalOutput(wire)!;
   assert.equal(output.reset, false);

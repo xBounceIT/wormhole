@@ -31,7 +31,6 @@ const (
 	sshOutputDrainTimeout              = 2 * time.Second
 	sshInputMaxBytes                   = 1024 * 1024
 	sshPasteMaxBytes                   = 2 * sshInputMaxBytes
-	sshInputQueueCapacity              = 16
 	sshOutputChunk                     = 16 * 1024
 	sshMaxColumns                      = 500
 	sshMaxRows                         = 500
@@ -292,7 +291,7 @@ type sshNativeSession struct {
 	sftpGeneration uint64
 	sftpListSeq    uint64
 
-	inputQueue              chan []byte
+	inputQueue              *sshInputQueue
 	done                    chan struct{}
 	outputWG                sync.WaitGroup
 	lifecycleMu             sync.Mutex
@@ -829,13 +828,48 @@ func (server *sshServer) input(command sshWireCommand) {
 		}
 	}
 	if err := native.write(data); err != nil {
-		if server.isActive(native) {
-			message := "SSH input failed"
-			if errors.Is(err, errSSHInputFull) {
-				message = "SSH input queue is full"
-			}
-			server.writeError(command.SessionID, message)
+		// Shutdown owns its reconnect decision. Input arriving during close must
+		// not replace that lifecycle with a fatal input error.
+		if errors.Is(err, errSSHSessionClosed) {
+			return
 		}
+		message := "SSH input failed"
+		if errors.Is(err, errSSHInputFull) {
+			message = "SSH input queue is full"
+		}
+		server.failInput(native, message, len(data))
+	}
+}
+
+func (server *sshServer) failInput(native *sshNativeSession, message string, inputBytes int) {
+	server.mu.Lock()
+	if server.sessions[native.id] != native {
+		server.mu.Unlock()
+		return
+	}
+	delete(server.sessions, native.id)
+	state := server.lifecycles[native.id]
+	delete(server.lifecycles, native.id)
+	server.mu.Unlock()
+
+	queuedBytes := 0
+	if native.inputQueue != nil {
+		queuedBytes = native.inputQueue.size()
+	}
+	logError("%s (session=%q, input_bytes=%d, queued_bytes=%d)", message, native.id, inputBytes, queuedBytes)
+	if state != nil {
+		state.clearSecrets()
+	}
+	server.cancelTransfersForSession(native.id)
+	native.close(false)
+
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	// Ignore a late failure if this ID was reused during teardown. Close first so
+	// Electron clears terminal ownership and leases; error remains the final UI state.
+	if server.sessions[native.id] == nil && server.lifecycles[native.id] == nil && server.pending[native.id] == nil {
+		server.output.write(sshWireEvent{Type: "closed", SessionID: native.id})
+		server.writeError(native.id, message)
 	}
 }
 
@@ -1664,20 +1698,12 @@ func (native *sshNativeSession) writeRaw(data []byte) error {
 	if native.inputQueue == nil || native.done == nil {
 		return native.writeRemoteInput(data)
 	}
-	copyOfData := append([]byte(nil), data...)
 	select {
 	case <-native.done:
 		return errSSHSessionClosed
 	default:
 	}
-	select {
-	case native.inputQueue <- copyOfData:
-		return nil
-	case <-native.done:
-		return errSSHSessionClosed
-	default:
-		return errSSHInputFull
-	}
+	return native.inputQueue.write(data)
 }
 
 func (native *sshNativeSession) writeRemoteInput(data []byte) error {
@@ -1728,6 +1754,9 @@ func (native *sshNativeSession) close(notify bool) {
 		native.terminalOutputMu.Unlock()
 		if native.done != nil {
 			close(native.done)
+		}
+		if native.inputQueue != nil {
+			native.inputQueue.stop()
 		}
 		native.closeSftp(false)
 		native.terminalOutputMu.Lock()
@@ -1781,11 +1810,18 @@ func (native *sshNativeSession) startInputPump() {
 	go func() {
 		for {
 			select {
-			case data := <-native.inputQueue:
+			case <-native.inputQueue.ready:
 				if native.isClosed() {
 					return
 				}
+				data := native.inputQueue.take()
+				if len(data) == 0 {
+					continue
+				}
 				if err := native.writeRemoteInput(data); err != nil {
+					if !native.isClosed() {
+						logError("SSH input write failed (session=%q, input_bytes=%d)", native.id, len(data))
+					}
 					native.close(native.server != nil)
 					return
 				}
@@ -3445,7 +3481,7 @@ func dialNativeSSH(
 		terminal:         terminal,
 		mcpReplay:        newMcpReplayBuffer(mcpReplayCapacity),
 		mcpCommandReplay: newMcpReplayBuffer(mcpReplayCapacity),
-		inputQueue:       make(chan []byte, sshInputQueueCapacity),
+		inputQueue:       newSSHInputQueue(sshInputQueueMaxBytes),
 		done:             make(chan struct{}),
 	}
 	if target.autoSudo {
