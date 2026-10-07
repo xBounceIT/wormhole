@@ -1076,7 +1076,7 @@ func TestMcpRunCommandInterruptRetiresTimedOutPresentation(t *testing.T) {
 		terminal:         terminal,
 		mcpReplay:        newMcpReplayBuffer(mcpReplayCapacity),
 		mcpCommandReplay: newMcpReplayBuffer(mcpReplayCapacity),
-		inputQueue:       make(chan []byte, sshInputQueueCapacity),
+		inputQueue:       newSSHInputQueue(sshInputQueueMaxBytes),
 		done:             make(chan struct{}),
 	}
 	defer native.close(false)
@@ -1090,7 +1090,8 @@ func TestMcpRunCommandInterruptRetiresTimedOutPresentation(t *testing.T) {
 	wrapperWrites := 0
 	firstToken := ""
 	native.stdin = callbackWriteCloser{write: func(data []byte) (int, error) {
-		if bytes.Equal(data, []byte{'\x03'}) {
+		// SSH input is a byte stream; adjacent text and Ctrl-C can share a write.
+		if bytes.Equal(data, []byte{'\x03'}) || bytes.Equal(data, []byte("still running\x03")) {
 			close(interruptStarted)
 			<-releaseInterrupt
 			native.publishTerminalData([]byte("^C\r\nroot@example:/home/user# "))

@@ -241,7 +241,7 @@ func TestSSHAutoSudoManualTakeover(t *testing.T) {
 }
 
 func TestSSHAutoSudoManualTakeoverReportsInputError(t *testing.T) {
-	native := &sshNativeSession{inputQueue: make(chan []byte, 1), done: make(chan struct{})}
+	native := &sshNativeSession{inputQueue: newSSHInputQueue(len("sudo su\r")), done: make(chan struct{})}
 	driver := newSSHAutoSudoDriver(native, "secret")
 	native.autoSudo = driver
 	driver.start() // Fill the queue with the sudo command.

@@ -34,6 +34,17 @@ hidden and authorized. Locked surfaces do not forward replies through the UI's
 input failure handler. Native menu and Linux primary-selection paste also pass
 through Go's paste validation and escape sanitization. Ctrl+C copies a selection
 and otherwise reaches SSH as an interrupt.
+
+Go coalesces pending SSH input in order, bounded to 4 MiB of queued bytes plus
+one in-flight write. Bursts of small terminal-query replies do not consume a
+separate queue slot per reply. Enqueueing remains nonblocking if the remote peer
+stops reading. Queue overflow and remote input write failures are logged at Error
+level with a session identifier and byte counts; input contents are never logged.
+Input queue overflow closes the affected session, discards pending input and
+clears its automatic-reconnect state. Electron receives cleanup before the final
+error so terminal ownership and VPN leases are released while Reconnect remains
+available to the user.
+
 Ctrl/Cmd+V and right-click use native clipboard paste through Go. Copy-on-select
 preserves the selection, and unrelated React updates do not steal focus.
 

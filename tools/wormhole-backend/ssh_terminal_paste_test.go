@@ -50,20 +50,20 @@ func TestSSHServerPasteNormalizedSizeLimit(t *testing.T) {
 			t.Run(tc.name+fmt.Sprint(bracketed), func(t *testing.T) {
 				var output bytes.Buffer
 				server := newSSHTestServer(&output)
-				native := &sshNativeSession{inputQueue: make(chan []byte, 1), done: make(chan struct{})}
+				native := &sshNativeSession{inputQueue: newSSHInputQueue(sshInputQueueMaxBytes), done: make(chan struct{})}
 				native.pasteMode.enabled = bracketed
 				server.sessions["paste"] = native
 				server.input(sshWireCommand{SessionID: "paste", Data: base64.StdEncoding.EncodeToString([]byte(tc.text)), Paste: tc.paste})
 				if !tc.accepted {
-					if len(native.inputQueue) != 0 || output.Len() == 0 {
+					if native.inputQueue.size() != 0 || output.Len() == 0 {
 						t.Fatal("oversized input was not rejected")
 					}
 					return
 				}
-				if len(native.inputQueue) != 1 || output.Len() != 0 {
+				if native.inputQueue.size() == 0 || output.Len() != 0 {
 					t.Fatal("valid normalized input was rejected")
 				}
-				data := <-native.inputQueue
+				data := native.inputQueue.take()
 				if bracketed {
 					if !bytes.HasPrefix(data, []byte("\x1b[200~")) || !bytes.HasSuffix(data, []byte("\x1b[201~")) {
 						t.Fatal("missing paste envelope")
@@ -195,16 +195,16 @@ func TestSSHServerMultilinePaste(t *testing.T) {
 				t.Fatal(err)
 			}
 			server := newSSHTestServer(io.Discard)
-			native := &sshNativeSession{server: server, terminal: terminal, inputQueue: make(chan []byte, 16), done: make(chan struct{})}
+			native := &sshNativeSession{server: server, terminal: terminal, inputQueue: newSSHInputQueue(sshInputQueueMaxBytes), done: make(chan struct{})}
 			server.sessions["paste"] = native
 			for _, value := range []byte(mode) {
 				native.publishTerminalData([]byte{value})
 			}
 			server.handle(sshWireCommand{Type: "input", SessionID: "paste", Data: base64.StdEncoding.EncodeToString([]byte(commands)), Paste: paste})
-			if len(native.inputQueue) != 1 {
-				t.Fatal("paste must be queued as one block")
+			if native.inputQueue.size() == 0 {
+				t.Fatal("paste must be queued")
 			}
-			got := string(<-native.inputQueue)
+			got := string(native.inputQueue.take())
 			want := commands
 			if paste {
 				want = strings.ReplaceAll(want, "\r\n", "\r")
@@ -216,10 +216,10 @@ func TestSSHServerMultilinePaste(t *testing.T) {
 				t.Fatalf("paste=%v mode=%q: got %q, want %q", paste, mode, got, want)
 			}
 			server.handle(sshWireCommand{Type: "input", SessionID: "paste", Data: "DQ=="})
-			if len(native.inputQueue) != 1 {
+			if native.inputQueue.size() != 1 {
 				t.Fatal("Enter must be queued once")
 			}
-			if got := string(<-native.inputQueue); got != "\r" {
+			if got := string(native.inputQueue.take()); got != "\r" {
 				t.Fatalf("Enter was changed: %q", got)
 			}
 		}
@@ -233,7 +233,7 @@ func TestSSHMultilinePasteSurvivesTerminalRecovery(t *testing.T) {
 	}
 	server := newSSHTestServer(io.Discard)
 	native := &sshNativeSession{id: "paste", server: server, terminal: terminal,
-		inputQueue: make(chan []byte, 16), done: make(chan struct{})}
+		inputQueue: newSSHInputQueue(sshInputQueueMaxBytes), done: make(chan struct{})}
 	server.sessions[native.id] = native
 	native.publishTerminalData([]byte("\x1b[?2004h"))
 	terminal.vt = nil // Force the existing recoverable emulator failure boundary.
@@ -242,12 +242,8 @@ func TestSSHMultilinePasteSurvivesTerminalRecovery(t *testing.T) {
 		t.Fatal("emulator was not recovered")
 	}
 	server.input(sshWireCommand{SessionID: native.id, Data: "b25lCnR3bw==", Paste: true})
-	select {
-	case data := <-native.inputQueue:
-		if string(data) != "\x1b[200~one\rtwo\x1b[201~" {
-			t.Fatalf("paste lost its envelope after recovery: %q", data)
-		}
-	default:
-		t.Fatal("paste was not queued")
+	data := native.inputQueue.take()
+	if string(data) != "\x1b[200~one\rtwo\x1b[201~" {
+		t.Fatalf("paste lost its envelope after recovery: %q", data)
 	}
 }

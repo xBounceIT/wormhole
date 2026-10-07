@@ -1066,7 +1066,7 @@ func TestSSHServerOpensFakeNativeSessionAndDispatchesConnectedCommands(t *testin
 		terminal:         terminal,
 		mcpReplay:        newMcpReplayBuffer(mcpReplayCapacity),
 		mcpCommandReplay: newMcpReplayBuffer(mcpReplayCapacity),
-		inputQueue:       make(chan []byte, sshInputQueueCapacity),
+		inputQueue:       newSSHInputQueue(sshInputQueueMaxBytes),
 		done:             make(chan struct{}),
 		started:          true,
 	}
@@ -1091,8 +1091,8 @@ func TestSSHServerOpensFakeNativeSessionAndDispatchesConnectedCommands(t *testin
 		t.Fatal("connected SSH session was not active")
 	}
 	server.handle(sshWireCommand{Type: "input", SessionID: "session", Data: "aGVsbG8="})
-	if len(native.inputQueue) != 1 {
-		t.Fatalf("input queue length = %d", len(native.inputQueue))
+	if native.inputQueue.size() != len("hello") {
+		t.Fatalf("queued input bytes = %d", native.inputQueue.size())
 	}
 	server.handle(sshWireCommand{Type: "snapshot", SessionID: "session"})
 	server.handle(sshWireCommand{Type: "auto-sudo-cancel", SessionID: "session"})
@@ -1131,7 +1131,7 @@ func newSSHTestNativeSession(t *testing.T) *sshNativeSession {
 		terminal:         terminal,
 		mcpReplay:        newMcpReplayBuffer(mcpReplayCapacity),
 		mcpCommandReplay: newMcpReplayBuffer(mcpReplayCapacity),
-		inputQueue:       make(chan []byte, sshInputQueueCapacity),
+		inputQueue:       newSSHInputQueue(sshInputQueueMaxBytes),
 		done:             make(chan struct{}),
 		started:          true,
 	}
@@ -2560,7 +2560,7 @@ func TestSSHInputQueueDoesNotBlockWhenRemoteStopsReading(t *testing.T) {
 	input := &blockingSSHInput{started: make(chan struct{}), release: make(chan struct{})}
 	native := &sshNativeSession{
 		stdin:      input,
-		inputQueue: make(chan []byte, 1),
+		inputQueue: newSSHInputQueue(len("second")),
 		done:       make(chan struct{}),
 	}
 	native.startInputPump()
