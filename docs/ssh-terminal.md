@@ -48,15 +48,26 @@ available to the user.
 Ctrl/Cmd+V and right-click use native clipboard paste through Go. Copy-on-select
 preserves the selection, and unrelated React updates do not steal focus.
 
+OSC 8 hyperlinks use Wormhole's custom confirmation dialog, showing the normalized
+destination before opening the system browser. Unicode hostnames use ASCII IDN
+encoding and paths use URL encoding, so the displayed URL matches the browser
+request. Only HTTP(S) destinations of at most 8,192 characters before and after
+normalization are accepted; embedded credentials and control characters are
+rejected before confirmation and validated again by Electron. Locked or inactive
+terminals cannot request link navigation. Cancellation, tab switches and
+disconnects dismiss the request; browser failures leave the dialog open with a
+retry option. A pending browser launch neither blocks workspace locking nor traps
+the dialog. Closing its dialog cannot undo a launch already dispatched to the OS.
+
 ## Verification
 
 `npm run test:terminal-clipboard` includes stream validation/ownership tests and a
 real Chromium harness for xterm and the production React SSH surface. The harness
 checks ANSI styles/true color, split UTF-8, CJK widths, alternate screens, keyboard
 and binary mouse input, clipboard behavior, history bounds, hidden tabs, resets,
-focus, WebGL context loss and software fallback. It measures the application
-terminal code with V8 block coverage and enforces 80%. Third-party xterm code is
-excluded from that percentage.
+focus, hyperlink confirmation/cancellation/errors, WebGL context loss and software
+fallback. It measures the application terminal code with V8 block coverage and
+enforces 80%. Third-party xterm code is excluded from that percentage.
 
 Go tests cover byte fidelity, credits, bounded queues, blocked readers, MCP replay,
 initial reset ordering, shutdown, and an actual local SSH server in both legacy and

@@ -3,6 +3,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
 import '@xterm/xterm/css/xterm.css';
+import { parseTerminalLink } from '../electron/terminal-link';
 
 export type TerminalOutput = Extract<WormholeSshEvent, { type: 'terminal-output' }>;
 
@@ -11,6 +12,7 @@ export interface TerminalActions {
   resize: (columns: number, rows: number) => void;
   copy: (text: string) => void;
   paste: () => Promise<boolean>;
+  openLink: (url: string) => void;
   active: boolean;
   autoCopy: boolean;
 }
@@ -86,6 +88,19 @@ export class XtermSession {
     private createWebgl = () => new WebglAddon(),
   ) {
     this.host.style.cssText = 'width:100%;height:100%;overflow:hidden';
+    this.terminal.options.linkHandler = {
+      activate: (event, url) => {
+        event.preventDefault();
+        if (!this.actions?.active) return;
+        let destination: string;
+        try {
+          destination = parseTerminalLink(url);
+        } catch {
+          return;
+        }
+        this.actions.openLink(destination);
+      },
+    };
     this.terminal.loadAddon(this.fitAddon);
     this.terminal.loadAddon(new Unicode11Addon());
     this.terminal.unicode.activeVersion = '11';

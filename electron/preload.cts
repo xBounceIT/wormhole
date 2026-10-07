@@ -404,6 +404,7 @@ const wormholeBridge = {
       appWillQuit: boolean;
     }>,
   openExternal: (url: string) => ipcRenderer.invoke('update:open-release', url) as Promise<void>,
+  openTerminalLink: (url: string) => ipcRenderer.invoke('ssh:open-link', url) as Promise<void>,
   onUpdateResult: (listener: (result: WormholeUpdateCheckResult) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, value: unknown) => {
       listener(value as WormholeUpdateCheckResult);

@@ -35,6 +35,16 @@ function useContextMenuOverlayOpen(): boolean {
   return React.useContext(ContextMenuOverlayContext).open;
 }
 
+// Custom session dialogs also need to hide Chromium/native surfaces in split panes.
+function useNativeSurfaceOverlay(open: boolean): void {
+  const overlayId = React.useId();
+  const { report } = React.useContext(ContextMenuOverlayContext);
+  React.useEffect(() => {
+    report(overlayId, open);
+    return () => report(overlayId, false);
+  }, [overlayId, open, report]);
+}
+
 function ContextMenu({
   onOpenChange,
   ...props
@@ -285,6 +295,7 @@ export {
   ContextMenu,
   ContextMenuOverlayProvider,
   useContextMenuOverlayOpen,
+  useNativeSurfaceOverlay,
   ContextMenuTrigger,
   ContextMenuContent,
   ContextMenuItem,

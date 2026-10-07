@@ -3,6 +3,10 @@ import { XtermSession, sshTerminal, retainSshTerminals } from '../../src/xterm-t
 import { WebglAddon } from '@xterm/addon-webgl';
 import * as React from 'react';
 import { createRoot } from 'react-dom/client';
+import {
+  ContextMenuOverlayProvider,
+  useContextMenuOverlayOpen,
+} from '../../src/components/ui/context-menu';
 // Compiled from the production App component by the Chromium harness.
 import { SshXtermSurface } from 'virtual:ssh-surface';
 
@@ -15,6 +19,20 @@ async function assertPainted(runtime: XtermSession, text: string): Promise<void>
 }
 
 async function run() {
+  window.confirm = () => {
+    throw new Error('Native confirmation must not be used');
+  };
+  window.open = () => {
+    throw new Error('Renderer navigation must not be used');
+  };
+  const activateLink = (runtime: XtermSession, url: string) => {
+    const event = new MouseEvent('click', { cancelable: true });
+    runtime.terminal.options.linkHandler!.activate(event, url, {
+      start: { x: 1, y: 1 },
+      end: { x: 1, y: 1 },
+    });
+    assert.ok(event.defaultPrevented);
+  };
   const acknowledgments: number[] = [];
   const startupReplies: string[] = [];
   window.wormhole = {
@@ -49,12 +67,14 @@ async function run() {
   let pasteResult = true;
   let pasteCount = 0;
   let completePaste: ((result: boolean) => void) | undefined;
+  const links: string[] = [];
   const actions = {
     active: true,
     autoCopy: true,
     input: (data: string) => inputs.push(data),
     resize: (cols: number, rows: number) => sizes.push([cols, rows]),
     copy: (text: string) => copied.push(text),
+    openLink: (url: string) => links.push(url),
     paste: async () => {
       pasteCount++;
       return completePaste
@@ -65,6 +85,8 @@ async function run() {
     },
   };
   const runtime = sshTerminal('test');
+  activateLink(runtime, 'https://example.com');
+  assert.equal(links.length, 0, 'unmounted terminal opened a link');
   assert.equal(sshTerminal('test'), runtime);
   await send(runtime, '', true);
   await send(runtime, '\x1b[6n');
@@ -73,6 +95,9 @@ async function run() {
   runtime.attach(surface);
   runtime.attach(surface);
   runtime.focus();
+  activateLink(runtime, 'https://example.com');
+  activateLink(runtime, 'https://example.com/' + 'a'.repeat(8192));
+  assert.deepEqual(links, ['https://example.com/']);
   assert.equal(document.activeElement, runtime.terminal.textarea);
   assert.ok(surface.querySelector('.xterm'));
   assert.ok(sizes.length > 0);
@@ -172,6 +197,8 @@ async function run() {
   await sleep();
 
   runtime.configure({ ...actions, active: false, autoCopy: false });
+  activateLink(runtime, 'https://example.com/hidden');
+  assert.equal(links.length, 1, 'inactive terminal opened a link');
   runtime.focus();
   runtime.fit();
   key('v', { ctrlKey: true });
@@ -321,9 +348,23 @@ async function run() {
   };
   const render = async () => {
     await React.act(async () => {
-      root.render(React.createElement(SshXtermSurface, props));
+      root.render(
+        React.createElement(
+          ContextMenuOverlayProvider,
+          null,
+          React.createElement(OverlayProbe),
+          React.createElement(SshXtermSurface, props),
+        ),
+      );
     });
   };
+  function OverlayProbe() {
+    return React.createElement(
+      'output',
+      { id: 'native-overlay-probe' },
+      String(useContextMenuOverlayOpen()),
+    );
+  }
   await render();
   const componentRuntime = sshTerminal('component');
   assert.ok(mounted.querySelector('.xterm'));
@@ -364,6 +405,178 @@ async function run() {
   props = { ...props, isActive: true, isAuthorized: true };
   await render();
   assert.equal(document.activeElement, componentRuntime.terminal.textarea);
+
+  const destination = 'https://auth.openai.com/codex/device';
+  const openedLinks: string[] = [];
+  let browserFailure = false;
+  let finishOpen: (() => void) | undefined;
+  window.wormhole!.openTerminalLink = async (url: string) => {
+    openedLinks.push(url);
+    if (browserFailure) throw new Error('Sensitive diagnostic must not appear');
+    if (finishOpen)
+      await new Promise<void>((resolve) => {
+        finishOpen = resolve;
+      });
+  };
+  const requestLink = async (url = destination) => {
+    await React.act(async () => {
+      activateLink(componentRuntime, url);
+    });
+    await React.act(async () => {
+      await sleep(100);
+    });
+  };
+  const dialog = () => document.querySelector<HTMLElement>('[role="dialog"]');
+  const button = (label: string) => {
+    const element = [...dialog()!.querySelectorAll('button')].find(
+      (item) => item.textContent === label,
+    );
+    assert.ok(element, 'Missing terminal link button: ' + label);
+    return element;
+  };
+  const click = async (label: string) => {
+    await React.act(async () => {
+      button(label).click();
+    });
+    await React.act(async () => {
+      await sleep(100);
+    });
+  };
+  const escape = async () => {
+    await React.act(async () => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    });
+    await React.act(async () => {
+      await sleep(100);
+    });
+  };
+  // Exercise OSC 8 parsing and xterm's real mouse link provider rather than
+  // relying solely on calls to the options callback used by boundary tests.
+  componentRuntime.terminal.clearSelection();
+  await send(componentRuntime, `\x1b[2J\x1b[H\x1b]8;;${destination}\x07Open link\x1b]8;;\x07`);
+  mounted.scrollIntoView();
+  const linkScreen = componentRuntime.terminal.element!.querySelector('.xterm-screen')!;
+  const linkRect = linkScreen.getBoundingClientRect();
+  const linkPoint = {
+    bubbles: true,
+    cancelable: true,
+    clientX: linkRect.left + (1.5 * linkRect.width) / componentRuntime.terminal.cols,
+    clientY: linkRect.top + (0.5 * linkRect.height) / componentRuntime.terminal.rows,
+    button: 0,
+  };
+  linkScreen.dispatchEvent(new MouseEvent('mousemove', linkPoint));
+  await sleep();
+  assert.ok(linkScreen.classList.contains('xterm-cursor-pointer'), 'OSC 8 link was not detected');
+  await React.act(async () => {
+    linkScreen.dispatchEvent(new MouseEvent('mousedown', { ...linkPoint, buttons: 1 }));
+    linkScreen.dispatchEvent(new MouseEvent('mouseup', linkPoint));
+  });
+  await React.act(async () => {
+    await sleep(100);
+  });
+  assert.ok(dialog()!.textContent!.includes('Open terminal link?'));
+  assert.equal(dialog()!.querySelector('p.font-mono')!.textContent, destination);
+  assert.equal(document.querySelector('#native-overlay-probe')!.textContent, 'true');
+  assert.equal(document.activeElement, button('Cancel'), 'Cancel must be the initial focus');
+  assert.equal(openedLinks.length, 0, 'link opened without confirmation');
+  await requestLink('https://example.com/replacement');
+  assert.equal(
+    dialog()!.querySelector('p.font-mono')!.textContent,
+    destination,
+    'second link replaced a pending confirmation',
+  );
+  await click('Cancel');
+  assert.equal(dialog(), null);
+  assert.equal(document.querySelector('#native-overlay-probe')!.textContent, 'false');
+  assert.equal(document.activeElement, componentRuntime.terminal.textarea);
+  const unicodeDestination = 'https://例え.テスト/\u202elogin';
+  await requestLink(unicodeDestination);
+  assert.equal(
+    dialog()!.querySelector('p.font-mono')!.textContent,
+    new URL(unicodeDestination).href,
+  );
+  await click('Cancel');
+  for (const rejected of [
+    'javascript:alert(1)',
+    'https://user:password@example.com',
+    'https://example.com/' + 'é'.repeat(1500),
+  ]) {
+    await requestLink(rejected);
+    assert.equal(dialog(), null, 'invalid or credential-bearing destination entered dialog state');
+  }
+  await requestLink();
+  await escape();
+  assert.equal(dialog(), null);
+  await requestLink();
+  await click('Close');
+  assert.equal(dialog(), null);
+
+  browserFailure = true;
+  await requestLink();
+  await click('Open in browser');
+  assert.ok(
+    dialog()!.querySelector('[role="alert"]')!.textContent!.includes("couldn't open this link"),
+  );
+  assert.equal(dialog()!.textContent!.includes('Sensitive diagnostic'), false);
+  assert.equal(button('Open in browser').disabled, false);
+  browserFailure = false;
+  await click('Open in browser');
+  assert.equal(dialog(), null);
+  assert.deepEqual(openedLinks, [destination, destination]);
+
+  await requestLink();
+  const bridge = window.wormhole;
+  window.wormhole = undefined;
+  await click('Open in browser');
+  assert.ok(dialog()!.querySelector('[role="alert"]'));
+  window.wormhole = bridge;
+  await click('Cancel');
+
+  finishOpen = () => {};
+  await requestLink();
+  await click('Open in browser');
+  assert.ok(button('Opening…').disabled);
+  assert.equal(button('Close').disabled, false);
+  await click('Opening…');
+  await escape();
+  assert.equal(dialog(), null, 'pending browser launch trapped the user in its dialog');
+  assert.equal(openedLinks.length, 3, 'busy activation opened a second browser');
+  await React.act(async () => {
+    finishOpen!();
+  });
+  await sleep();
+  assert.equal(dialog(), null);
+
+  // Locking/switching tabs dismisses the request and prevents stale completion
+  // from closing a newer confirmation after returning to this terminal.
+  finishOpen = () => {};
+  await requestLink();
+  await click('Open in browser');
+  const finishStaleOpen = finishOpen;
+  props = { ...props, isAuthorized: false };
+  await render();
+  assert.equal(dialog(), null);
+  assert.equal(document.querySelector('#native-overlay-probe')!.textContent, 'false');
+  await requestLink();
+  assert.equal(dialog(), null, 'locked terminal showed a link request');
+  props = { ...props, isAuthorized: true };
+  await render();
+  assert.equal(dialog(), null, 'old request reappeared on unlock');
+  await requestLink('https://example.com/new');
+  await React.act(async () => {
+    finishStaleOpen!();
+  });
+  assert.equal(dialog()!.querySelector('p.font-mono')!.textContent, 'https://example.com/new');
+  await click('Cancel');
+  finishOpen = undefined;
+  await requestLink();
+  props = { ...props, isActive: false };
+  await render();
+  assert.equal(dialog(), null);
+  props = { ...props, isActive: true };
+  await render();
+  assert.equal(dialog(), null);
+  await requestLink();
   for (const status of ['connecting', 'failed', 'disconnected']) {
     props = { ...props, session: { ...props.session, status } };
     await render();

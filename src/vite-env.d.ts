@@ -1040,6 +1040,7 @@ interface Window {
     }): Promise<string>;
     installUpdate(installerPath: string): Promise<{ appWillQuit: boolean }>;
     openExternal(url: string): Promise<void>;
+    openTerminalLink(url: string): Promise<void>;
     onUpdateResult(listener: (result: WormholeUpdateCheckResult) => void): () => void;
     onUpdateProgress(
       listener: (progress: { downloaded: number; total: number }) => void,

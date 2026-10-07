@@ -87,6 +87,7 @@ import { KeyedTaskTracker } from './keyed-task-tracker.js';
 import { runWithNativeAuthenticationWindow } from './native-auth-window.js';
 import { shouldDeferExtensionReload } from './extension-reload-policy.js';
 import { encodeTerminalClipboardText, isEncodedSshInput } from './terminal-clipboard.js';
+import { parseTerminalLink } from './terminal-link.js';
 import {
   isLocalSftpPath,
   isSftpName,
@@ -8584,6 +8585,10 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       sshBackend.sendInput(sessionId, data, true);
       return { pasted: true };
     });
+  });
+  ipcMain.handle('ssh:open-link', async (_event, value: unknown) => {
+    const url = parseTerminalLink(value);
+    return runAuthorizedOperation(() => shell.openExternal(url));
   });
   ipcMain.handle(
     'ssh:resize',
