@@ -1,7 +1,7 @@
 {
   "name": "wormhole-electron",
   "productName": "Wormhole",
-  "version": "2.1.1",
+  "version": "2.1.2",
   "private": true,
   "description": "Wormhole desktop application",
   "author": {
