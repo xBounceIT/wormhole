@@ -112,6 +112,23 @@ function showUnlock(startup: WormholeStartupSnapshot) {
   input.placeholder = `Enter your ${method === 'pin' ? 'Wormhole PIN' : 'password'}`;
   input.type = 'password';
   if (method === 'pin') input.inputMode = 'numeric';
+  const passwordField = document.createElement('div');
+  passwordField.className = 'startup-password-field';
+  const visibility = document.createElement('button');
+  visibility.className = 'startup-password-toggle';
+  visibility.type = 'button';
+  visibility.setAttribute('aria-controls', input.id);
+  function setPasswordVisible(visible: boolean) {
+    input.type = visible ? 'text' : 'password';
+    visibility.textContent = visible ? 'Hide password' : 'Show password';
+    visibility.setAttribute('aria-label', visibility.textContent);
+    visibility.setAttribute('aria-pressed', String(visible));
+  }
+  setPasswordVisible(false);
+  visibility.addEventListener('click', () => {
+    if (!busy) setPasswordVisible(input.type === 'password');
+  });
+  passwordField.append(input, visibility);
   const status = document.createElement('p');
   status.className = 'startup-status';
   const submit = document.createElement('button');
@@ -122,7 +139,7 @@ function showUnlock(startup: WormholeStartupSnapshot) {
   input.addEventListener('input', () => {
     submit.disabled = busy || input.value.length === 0;
   });
-  form.append(label, input, status, submit);
+  form.append(label, passwordField, status, submit);
 
   const hello = document.createElement('button');
   hello.className = 'startup-button startup-button-secondary';
@@ -135,6 +152,8 @@ function showUnlock(startup: WormholeStartupSnapshot) {
     const api = window.wormhole;
     busy = true;
     input.disabled = true;
+    visibility.disabled = true;
+    setPasswordVisible(false);
     submit.disabled = true;
     status.textContent = 'Waiting for Windows Hello…';
     const checkAvailability = async () => {
@@ -172,6 +191,7 @@ function showUnlock(startup: WormholeStartupSnapshot) {
     } finally {
       busy = false;
       input.disabled = false;
+      visibility.disabled = false;
       submit.disabled = input.value.length === 0;
       if (!hello.isConnected) input.focus();
     }
@@ -186,6 +206,8 @@ function showUnlock(startup: WormholeStartupSnapshot) {
     if (busy || !input.value || !api) return;
     busy = true;
     input.disabled = true;
+    visibility.disabled = true;
+    setPasswordVisible(false);
     submit.disabled = true;
     submit.textContent = 'Checking…';
     status.textContent = 'Checking…';
@@ -207,6 +229,7 @@ function showUnlock(startup: WormholeStartupSnapshot) {
       .finally(() => {
         busy = false;
         input.disabled = false;
+        visibility.disabled = false;
         submit.disabled = input.value.length === 0;
         submit.textContent = 'Unlock';
         input.focus();

@@ -35,6 +35,8 @@ declare function TooltipProvider(props: Record<string, unknown>): import('react'
 declare function DialogContent(props: Record<string, unknown>): import('react').ReactElement;
 declare function DialogTitle(props: Record<string, unknown>): import('react').ReactElement;
 declare function showUnlock(startup: Record<string, unknown>): void;
+declare const PasswordInput: typeof import('../../src/components/ui/password-input').PasswordInput;
+declare function TunnelFieldRow(props: Record<string, unknown>): import('react').ReactElement;
 
 async function pressNativeEscape() {
   await React.act(async () => {
@@ -288,6 +290,21 @@ async function runAuthPromptTests() {
     });
     assert.equal(results.length, beforeSecret + 1);
     assert.equal(results.at(-1), true);
+  }
+
+  for (const mode of ['pin', 'password']) {
+    await mount({ mode }, { kind: 'confirmation', reason: 'Visible confirmation.' });
+    await React.act(async () => {
+      document.querySelector<HTMLButtonElement>('button[aria-controls="auth-secret"]').click();
+    });
+    assert.equal(document.querySelector<HTMLInputElement>('#auth-secret').type, 'text');
+    await mount({ mode }, { kind: 'lock', reason: 'New lock challenge.' }, false);
+    assert.equal(
+      document.querySelector<HTMLInputElement>('#auth-secret').type,
+      'password',
+      'a new authentication challenge must reset password visibility even when AuthPrompt is reused',
+    );
+    assert.equal(document.querySelector<HTMLInputElement>('#auth-secret').value, '');
   }
 
   for (const mode of ['pin', 'password']) {
@@ -698,9 +715,24 @@ async function runStartupUnlockTests() {
     assert.equal(document.activeElement, input);
     input.value = 'test-only-secret';
     input.dispatchEvent(new Event('input', { bubbles: true }));
+    const toggle = root.querySelector<HTMLButtonElement>('button[aria-controls="startup-secret"]');
+    assert.equal(input.type, 'password');
+    assert.equal(toggle.getAttribute('aria-label'), 'Show password');
+    toggle.click();
+    assert.equal(input.type, 'text');
+    assert.equal(input.spellcheck, false, 'revealed startup secrets must bypass spellcheck');
+    assert.equal(input.value, 'test-only-secret');
+    assert.equal(toggle.getAttribute('aria-pressed'), 'true');
+    toggle.click();
+    assert.equal(input.type, 'password');
+    toggle.click();
     assert.equal(root.querySelector<HTMLButtonElement>('button[type="submit"]').disabled, false);
     root.querySelector('form').requestSubmit();
+    assert.equal(toggle.disabled, true);
+    assert.equal(input.type, 'password', 'verification must mask the field immediately');
     await settle();
+    assert.equal(toggle.disabled, false);
+    assert.equal(toggle.getAttribute('aria-pressed'), 'false');
     assert.deepEqual(secrets.at(-1), { method: fallback, secret: 'test-only-secret' });
     assert.equal(
       root.querySelector('.startup-status').textContent,
@@ -2124,7 +2156,136 @@ async function runRuntimeCredentialPasswordTests() {
   }
 }
 
-runRuntimeCredentialPasswordTests()
+async function runSharedPasswordInputTests() {
+  const root = createRoot(document.getElementById('root'));
+  const reference = React.createRef<HTMLInputElement>();
+  const container = document.getElementById('root');
+  let submits = 0;
+  let changes = 0;
+  const mount = async (props = {}) => {
+    await React.act(async () => {
+      root.render(
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            submits++;
+          }}
+        >
+          <PasswordInput
+            autoComplete="new-password"
+            className="font-mono"
+            defaultValue={'🔐 日本語 p@ss"<>&'}
+            maxLength={4096}
+            name="password"
+            onChange={() => changes++}
+            placeholder="Replacement password"
+            ref={reference}
+            required
+            {...props}
+          />
+          <PasswordInput id="confirmation" />
+        </form>,
+      );
+    });
+  };
+  const toggle = () =>
+    container.querySelector<HTMLButtonElement>(`button[aria-controls="${reference.current.id}"]`);
+  try {
+    await mount();
+    const field = reference.current;
+    const value = field.value;
+    assert.equal(field.type, 'password');
+    assert.ok(field.id);
+    assert.equal(field.name, 'password');
+    assert.equal(field.maxLength, 4096);
+    assert.equal(field.autocomplete, 'new-password');
+    assert.equal(field.required, true);
+    assert.equal(field.spellcheck, false);
+    assert.equal(field.placeholder, 'Replacement password');
+    assert.ok(field.classList.contains('font-mono'));
+    assert.ok(field.classList.contains('pr-9'));
+    await React.act(async () => toggle().click());
+    assert.equal(reference.current, field, 'visibility must preserve the DOM ref and value');
+    assert.equal(field.value, value);
+    assert.equal(field.type, 'text');
+    assert.equal(toggle().getAttribute('aria-pressed'), 'true');
+    assert.equal(container.querySelector<HTMLInputElement>('#confirmation').type, 'password');
+    assert.equal(submits, 0);
+    assert.equal(changes, 0);
+    await mount({ disabled: true });
+    assert.equal(field.type, 'password');
+    assert.equal(toggle().disabled, true);
+    await mount({ readOnly: true });
+    assert.equal(field.type, 'password');
+    assert.equal(field.readOnly, true);
+    await React.act(async () => toggle().click());
+    assert.equal(field.type, 'text', 'read-only fields can still be revealed');
+    await mount({ toggleDisabled: true });
+    assert.equal(toggle().disabled, true);
+    await React.act(async () => container.querySelector('form').requestSubmit());
+    assert.equal(submits, 1);
+    await React.act(async () => root.unmount());
+
+    const dialogRoot = createRoot(container);
+    let vpnChanges: [string, unknown][] = [];
+    const renderVpn = async (open: boolean, disabled = false) => {
+      await React.act(async () => {
+        dialogRoot.render(
+          <Dialog open={open}>
+            <TunnelFieldRow
+              field={{ key: 'Password', label: 'Password', type: 'password' }}
+              value={{ Password: 'vpn-test-secret' }}
+              disabled={disabled}
+              onChange={(key: string, value: unknown) => vpnChanges.push([key, value])}
+            />
+            <TunnelFieldRow
+              field={{ key: 'Host', label: 'Host' }}
+              value={{ Host: 'vpn.example.test' }}
+              onChange={() => {}}
+            />
+            <TunnelFieldRow
+              field={{ key: 'Port', label: 'Port', type: 'number' }}
+              value={{ Port: 443 }}
+              onChange={() => {}}
+            />
+          </Dialog>,
+        );
+      });
+    };
+    await renderVpn(true);
+    const vpnField = () => container.querySelector<HTMLInputElement>('#tunnel-Password');
+    const vpnToggle = () =>
+      container.querySelector<HTMLButtonElement>('button[aria-controls="tunnel-Password"]');
+    assert.equal(vpnField().type, 'password');
+    assert.equal(container.querySelector<HTMLInputElement>('#tunnel-Host').type, 'text');
+    assert.equal(container.querySelector<HTMLInputElement>('#tunnel-Port').type, 'number');
+    assert.equal(container.querySelectorAll('button[aria-controls]').length, 1);
+    await React.act(async () => vpnToggle().click());
+    assert.equal(vpnField().type, 'text');
+    assert.equal(vpnField().value, 'vpn-test-secret');
+    assert.equal(vpnChanges.length, 0);
+    await React.act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(
+        vpnField(),
+        'replacement',
+      );
+      vpnField().dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    assert.deepEqual(vpnChanges, [['Password', 'replacement']]);
+    await renderVpn(false);
+    assert.equal(vpnField().type, 'password', 'closed dialogs must mask retained fields');
+    await renderVpn(true);
+    assert.equal(vpnField().type, 'password');
+    await renderVpn(true, true);
+    assert.equal(vpnToggle().disabled, true);
+    await React.act(async () => dialogRoot.unmount());
+  } finally {
+    container.replaceChildren();
+  }
+}
+
+runSharedPasswordInputTests()
+  .then(runRuntimeCredentialPasswordTests)
   .then(runConnectionNotesTests)
   .then(runAuthPromptTests)
   .then(runIdleLockTests)

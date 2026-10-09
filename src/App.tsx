@@ -171,8 +171,6 @@ import {
   Copy,
   Database,
   Download,
-  Eye,
-  EyeOff,
   File,
   FilePlus2,
   FlaskConical,
@@ -233,7 +231,6 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-  useDialogOpen,
 } from '@/components/ui/dialog';
 import {
   DropdownMenu,
@@ -245,6 +242,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { Input } from '@/components/ui/input';
+import { PasswordInput } from '@/components/ui/password-input';
 import { Kbd } from '@/components/ui/kbd';
 import { Label } from '@/components/ui/label';
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable';
@@ -1663,7 +1661,7 @@ function AuthPrompt({
                   Use the PIN you created in Wormhole, not your Windows PIN.
                 </p>
               ) : null}
-              <Input
+              <PasswordInput
                 ref={secretInputRef}
                 autoFocus={
                   !isHelloMode || !request.autoWindowsHello || !state.windowsHello.available
@@ -1671,9 +1669,9 @@ function AuthPrompt({
                 autoComplete="current-password"
                 id="auth-secret"
                 inputMode={method === 'pin' ? 'numeric' : undefined}
+                key={authRequestKey}
                 onChange={(event) => setSecret(event.target.value)}
                 placeholder={`Enter your ${method === 'pin' ? 'Wormhole PIN' : 'password'}`}
-                type="password"
                 value={secret}
               />
             </div>
@@ -1819,6 +1817,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   const [authDialog, setAuthDialog] = useState<HTMLDialogElement | null>(null);
   const [mcpApprovals, setMcpApprovals] = useState<WormholeMcpApproval[]>([]);
   const [tunnelPrompts, setTunnelPrompts] = useState<WormholeTunnelPrompt[]>([]);
+  const TunnelPromptInput = tunnelPrompts[0]?.secret ? PasswordInput : Input;
   const [tunnelPromptValue, setTunnelPromptValue] = useState('');
   const [routePrompts, setRoutePrompts] = useState<
     Array<{
@@ -6722,11 +6721,11 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
               </DialogDescription>
             </DialogHeader>
             {!tunnelPrompts[0]?.confirmation ? (
-              <Input
+              <TunnelPromptInput
                 autoComplete="one-time-code"
                 autoFocus
+                key={tunnelPrompts[0]?.promptId}
                 onChange={(event) => setTunnelPromptValue(event.target.value)}
-                type={tunnelPrompts[0]?.secret ? 'password' : 'text'}
                 value={tunnelPromptValue}
               />
             ) : null}
@@ -7213,14 +7212,13 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
             <form className="grid gap-4" onSubmit={submitSshKeyPassphrase}>
               <div className="grid gap-2">
                 <Label htmlFor="ssh-key-passphrase">Passphrase</Label>
-                <Input
+                <PasswordInput
                   autoFocus
                   autoComplete="off"
                   id="ssh-key-passphrase"
                   name="ssh-key-passphrase"
                   ref={sshKeyPassphraseInput}
                   required
-                  type="password"
                 />
               </div>
               <DialogFooter>
@@ -7618,7 +7616,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                               </Button>
                             ) : null}
                           </div>
-                          <Input
+                          <PasswordInput
                             autoComplete="new-password"
                             disabled={newConnectionForm.removeInlinePassword}
                             id="connection-inline-password"
@@ -7635,7 +7633,6 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                                     editingConnectionHasInlineCredential,
                                   )
                             }
-                            type="password"
                             value={newConnectionForm.inlinePassword}
                           />
                         </div>
@@ -12230,14 +12227,13 @@ function CredentialsPage({
                       ? 'Replacement passphrase (leave blank to keep current)'
                       : 'Key passphrase (optional)'}
                   </Label>
-                  <Input
+                  <PasswordInput
                     autoComplete="off"
                     disabled={credentialForm.clearPassphrase}
                     id="credential-key-passphrase"
                     maxLength={8192}
                     name="credential-key-passphrase"
                     ref={credentialKeyPassphraseInput}
-                    type="password"
                   />
                   {editingCredential && !credentialForm.privateKeySelectionId ? (
                     <label className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -12275,7 +12271,7 @@ function CredentialsPage({
                     ? 'Replacement password (leave blank to keep current)'
                     : 'Password'}
                 </Label>
-                <Input
+                <PasswordInput
                   autoComplete="new-password"
                   id="credential-password"
                   maxLength={4096}
@@ -12286,7 +12282,6 @@ function CredentialsPage({
                     }))
                   }
                   required={!editingCredential || editingCredential.provider !== 'Local'}
-                  type="password"
                   value={credentialForm.password}
                 />
               </div>
@@ -12993,6 +12988,8 @@ function TunnelFieldRow({
   labelAction?: ReactNode;
   onChange: (key: string, next: unknown) => void;
 }) {
+  const FieldInput = field.type === 'password' ? PasswordInput : Input;
+
   return (
     <div
       className={cn(
@@ -13053,14 +13050,12 @@ function TunnelFieldRow({
           value={tunnelSettingText(value, field.key)}
         />
       ) : (
-        <Input
+        <FieldInput
           disabled={disabled}
           id={`tunnel-${field.key}`}
           onChange={(event) => onChange(field.key, event.target.value)}
           placeholder={field.placeholder}
-          type={
-            field.type === 'password' ? 'password' : field.type === 'number' ? 'number' : 'text'
-          }
+          type={field.type === 'number' ? 'number' : undefined}
           value={tunnelSettingText(value, field.key)}
         />
       )}
@@ -14261,33 +14256,7 @@ function RuntimeCredentialPasswordInput({
   id,
   ...props
 }: Omit<ComponentProps<typeof Input>, 'type'> & { id: string }) {
-  const [visible, setVisible] = useState(false);
-  const open = useDialogOpen();
-  useLayoutEffect(() => {
-    if (open === false) setVisible(false);
-  }, [open]);
-
-  return (
-    <div className="relative">
-      <Input
-        {...props}
-        className="pr-9"
-        id={id}
-        spellCheck={false}
-        type={visible ? 'text' : 'password'}
-      />
-      <IconButton
-        aria-controls={id}
-        aria-pressed={visible}
-        className="absolute inset-y-0 right-0.5 my-auto text-muted-foreground transition-colors active:not-aria-[haspopup]:translate-y-0"
-        label={visible ? 'Hide password' : 'Show password'}
-        onClick={() => setVisible((current) => !current)}
-        type="button"
-      >
-        {visible ? <EyeOff /> : <Eye />}
-      </IconButton>
-    </div>
-  );
+  return <PasswordInput {...props} id={id} />;
 }
 
 function RuntimeBitwardenUnlockDialog({
@@ -14349,29 +14318,17 @@ function RuntimeBitwardenUnlockDialog({
         >
           <div className="grid gap-2">
             <Label htmlFor={passwordInputId}>Master password</Label>
-            <div className="relative">
-              <Input
-                autoFocus
-                autoComplete="current-password"
-                className="pr-9"
-                id={passwordInputId}
-                onChange={(event) => setHasPassword(event.target.value.length > 0)}
-                ref={bindPasswordInput}
-                spellCheck={false}
-                type={passwordVisible ? 'text' : 'password'}
-              />
-              <IconButton
-                aria-controls={passwordInputId}
-                aria-pressed={passwordVisible}
-                className="absolute inset-y-0 right-0.5 my-auto text-muted-foreground transition-colors active:not-aria-[haspopup]:translate-y-0"
-                disabled={busy}
-                label={passwordVisible ? 'Hide password' : 'Show password'}
-                onClick={() => setPasswordVisible((visible) => !visible)}
-                type="button"
-              >
-                {passwordVisible ? <EyeOff /> : <Eye />}
-              </IconButton>
-            </div>
+            <PasswordInput
+              autoFocus
+              autoComplete="current-password"
+              id={passwordInputId}
+              onChange={(event) => setHasPassword(event.target.value.length > 0)}
+              ref={bindPasswordInput}
+              spellCheck={false}
+              visible={passwordVisible}
+              onVisibilityChange={setPasswordVisible}
+              toggleDisabled={busy}
+            />
           </div>
           {error ? (
             <p className="text-[11px] text-destructive" role="alert">
@@ -14447,30 +14404,18 @@ function BitwardenCliDialog({
   const passwordField = (
     <div className="grid gap-2">
       <Label htmlFor={passwordInputId}>Master password</Label>
-      <div className="relative">
-        <Input
-          autoComplete="current-password"
-          autoFocus={!isLogin}
-          className="pr-9"
-          id={passwordInputId}
-          onChange={(event) => setHasMasterPassword(event.target.value.length > 0)}
-          ref={bindMasterPasswordInput}
-          required
-          spellCheck={false}
-          type={masterPasswordVisible ? 'text' : 'password'}
-        />
-        <IconButton
-          aria-controls={passwordInputId}
-          aria-pressed={masterPasswordVisible}
-          className="absolute inset-y-0 right-0.5 my-auto text-muted-foreground transition-colors active:not-aria-[haspopup]:translate-y-0"
-          disabled={loginBusy}
-          label={masterPasswordVisible ? 'Hide password' : 'Show password'}
-          onClick={() => setMasterPasswordVisible((visible) => !visible)}
-          type="button"
-        >
-          {masterPasswordVisible ? <EyeOff /> : <Eye />}
-        </IconButton>
-      </div>
+      <PasswordInput
+        autoComplete="current-password"
+        autoFocus={!isLogin}
+        id={passwordInputId}
+        onChange={(event) => setHasMasterPassword(event.target.value.length > 0)}
+        ref={bindMasterPasswordInput}
+        required
+        spellCheck={false}
+        visible={masterPasswordVisible}
+        onVisibilityChange={setMasterPasswordVisible}
+        toggleDisabled={loginBusy}
+      />
     </div>
   );
   return (
@@ -14977,25 +14922,23 @@ function AuthSecretDialog({
         <form className="grid gap-4" onSubmit={submit}>
           <div className="grid gap-2">
             <Label htmlFor="auth-new-secret">{secretLabel}</Label>
-            <Input
+            <PasswordInput
               autoFocus
               autoComplete="new-password"
               id="auth-new-secret"
               inputMode={method === 'pin' ? 'numeric' : undefined}
               onChange={(event) => setSecret(event.target.value)}
               placeholder={method === 'pin' ? '4–12 digits' : 'At least 8 characters'}
-              type="password"
               value={secret}
             />
           </div>
           <div className="grid gap-2">
             <Label htmlFor="auth-confirm-secret">Confirm {secretLabel}</Label>
-            <Input
+            <PasswordInput
               autoComplete="new-password"
               id="auth-confirm-secret"
               inputMode={method === 'pin' ? 'numeric' : undefined}
               onChange={(event) => setConfirmation(event.target.value)}
-              type="password"
               value={confirmation}
             />
           </div>
@@ -17423,7 +17366,7 @@ function SettingsPage({
                     ? 'Encryption password'
                     : 'Encryption password (optional)'}
                 </Label>
-                <Input
+                <PasswordInput
                   autoComplete="new-password"
                   autoFocus
                   disabled={backupExportBusy}
@@ -17439,18 +17382,16 @@ function SettingsPage({
                       : 'Leave blank for a plaintext backup'
                   }
                   required={backupEncryptionRequired}
-                  type="password"
                   value={backupExportPassword}
                 />
               </div>
               <div className="grid gap-2">
                 <Label htmlFor="backup-export-confirmation">Confirm password</Label>
-                <Input
+                <PasswordInput
                   autoComplete="new-password"
                   disabled={backupExportBusy || backupExportPassword.length === 0}
                   id="backup-export-confirmation"
                   onChange={(event) => setBackupExportConfirmation(event.target.value)}
-                  type="password"
                   value={backupExportConfirmation}
                 />
               </div>
@@ -17601,13 +17542,12 @@ function SettingsPage({
                   {backupImportSelection.encrypted ? (
                     <div className="grid gap-2">
                       <Label htmlFor="backup-import-password">Backup password</Label>
-                      <Input
+                      <PasswordInput
                         autoComplete="current-password"
                         autoFocus
                         disabled={backupImportBusy}
                         id="backup-import-password"
                         onChange={(event) => setBackupImportPassword(event.target.value)}
-                        type="password"
                         value={backupImportPassword}
                       />
                       <p className="text-[10px] leading-relaxed text-muted-foreground">

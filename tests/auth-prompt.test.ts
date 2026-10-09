@@ -278,6 +278,23 @@ test('authentication prompts, window-close controls, and RDP surface layout work
   const transformed = await transformWithOxc(
     dialogLifecycle +
       dialogSource +
+      ['input', 'button', 'password-input']
+        .map((name) => {
+          const ui = readFileSync(
+            new URL(`../src/components/ui/${name}.tsx`, import.meta.url),
+            'utf8',
+          );
+          const first = ui.indexOf(
+            name === 'button'
+              ? 'const buttonVariants ='
+              : name === 'input'
+                ? 'function Input('
+                : 'function PasswordInput(',
+          );
+          return ui.slice(first, ui.indexOf('export {', first));
+        })
+        .join('\n') +
+      slice('function tunnelSettingText(', 'function TunnelSection(') +
       source.slice(start, end) +
       closeHarness +
       bitwardenHelpers +
@@ -380,7 +397,7 @@ test('authentication prompts, window-close controls, and RDP surface layout work
     const { twMerge } = require(${JSON.stringify(require.resolve('tailwind-merge'))});
     const cn = (...inputs) => twMerge(clsx(inputs));
     const Card = 'div', CardHeader = 'div', CardTitle = 'h2', CardDescription = 'p';
-    const CardContent = 'div', Button = 'button', Input = 'input', Label = 'label', Textarea = 'textarea';
+    const CardContent = 'div', Label = 'label', Textarea = 'textarea';
     const KeyRound = 'span', LoaderCircle = 'span', XIcon = 'span', TriangleAlert = 'span', Power = 'span', Badge = 'span';
     const ChevronDownIcon = 'span', ChevronUpIcon = 'span', CheckIcon = 'span';
     const { Eye, EyeOff, Check, ExternalLink, Monitor, RefreshCcw, ShieldAlert, Wifi } = require(${JSON.stringify(require.resolve('lucide-react'))});
@@ -440,7 +457,7 @@ test('authentication prompts, window-close controls, and RDP surface layout work
           const coverage = await window.webContents.debugger.sendCommand('Profiler.takePreciseCoverage');
           const script = coverage.result.find(item => item.url === 'wormhole-auth-prompt.js');
           if (!script) throw new Error('Missing authentication renderer coverage.');
-          for (const name of ['AuthPrompt', 'IdleLockHarness', 'showUnlock', 'AppCloseHarness', 'DialogContent', 'useDialogOpen', 'BitwardenCliDialog', 'BitwardenSettingsHarness', 'BitwardenAccessPrompt', 'BitwardenStartupHarness', 'CredentialsSearchHarness', 'ConnectionNotesHarness', 'RuntimeCredentialPasswordInput', 'RuntimeCredentialsHarness', 'RdpSurface']) {
+          for (const name of ['AuthPrompt', 'IdleLockHarness', 'showUnlock', 'AppCloseHarness', 'DialogContent', 'useDialogOpen', 'PasswordInput', 'BitwardenCliDialog', 'BitwardenSettingsHarness', 'BitwardenAccessPrompt', 'BitwardenStartupHarness', 'CredentialsSearchHarness', 'ConnectionNotesHarness', 'RuntimeCredentialPasswordInput', 'RuntimeCredentialsHarness', 'RdpSurface']) {
             const parent = script.functions.find(item => item.functionName === name);
             if (!parent) throw new Error('Missing coverage for ' + name);
             const range = parent.ranges[0];

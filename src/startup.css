@@ -216,6 +216,35 @@ input {
   box-shadow: 0 0 0 3px rgb(161 161 170 / 16%);
 }
 
+.startup-password-field {
+  position: relative;
+}
+
+.startup-password-field input {
+  padding-right: 116px;
+}
+
+.startup-password-toggle {
+  position: absolute;
+  inset: 4px 4px 4px auto;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.startup-password-toggle:focus-visible {
+  outline: 2px solid #a1a1aa;
+}
+
+.startup-password-toggle:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
 :root:not(.dark) .startup-form input {
   border-color: #d1d5db;
   background: #ffffff;
