@@ -151,6 +151,13 @@ func readConfig() (config, error) {
 // through the virtual network plus a cleanup function. Address/peer config is provided via
 // the UAPI ipcSet contract.
 func startWireGuard(ctx context.Context, cfg config) (sockstun.Dialer, func(), error) {
+	return startWireGuardWithBind(ctx, cfg, conn.NewDefaultBind)
+}
+
+// Defer bind creation until device creation, preserving validation without network I/O.
+// Tests supply an in-memory bind so bringing up the device does not open host UDP
+// sockets (and trigger Windows Firewall for each temporary go test executable).
+func startWireGuardWithBind(ctx context.Context, cfg config, newBind func() conn.Bind) (sockstun.Dialer, func(), error) {
 	if cfg.InterfacePrivateKey == "" {
 		return nil, nil, errors.New("interface_private_key is required")
 	}
@@ -188,7 +195,7 @@ func startWireGuard(ctx context.Context, cfg config) (sockstun.Dialer, func(), e
 		return nil, nil, fmt.Errorf("netstack: %w", err)
 	}
 
-	dev := device.NewDevice(tun, conn.NewDefaultBind(), device.NewLogger(device.LogLevelError, "wg "))
+	dev := device.NewDevice(tun, newBind(), device.NewLogger(device.LogLevelError, "wg "))
 
 	endpointHostPort, err := resolveEndpoint(ctx, cfg.PeerEndpoint)
 	if err != nil {
