@@ -105,6 +105,56 @@ func normalizeBitwardenBrowserStorageJSON(value string) (string, error) {
 	return normalized.String(), nil
 }
 
+// Apply only a profile's edits since its last capture. A background refresh in another
+// profile must not turn an unchanged, older account list into a new logout snapshot.
+// Conflicting updates keep the latest shared value; deletions remain deletions, including
+// when a stale profile refreshes a token that has since been removed by logout.
+func mergeBitwardenBrowserStorageJSON(base, incoming, current string) (string, error) {
+	var before, after, latest map[string]json.RawMessage
+	for _, entry := range []struct {
+		value string
+		out   *map[string]json.RawMessage
+	}{{base, &before}, {incoming, &after}, {current, &latest}} {
+		if err := json.Unmarshal([]byte(entry.value), entry.out); err != nil || *entry.out == nil {
+			return "", errors.New("Bitwarden browser storage merge requires JSON objects")
+		}
+	}
+	for key, value := range after {
+		if !bytes.Equal(value, before[key]) && bytes.Equal(latest[key], before[key]) {
+			latest[key] = value
+		}
+	}
+	for key := range before {
+		if _, exists := after[key]; !exists {
+			// A real logout must remove even a token concurrently refreshed by another profile.
+			delete(latest, key)
+		}
+	}
+	var encoded bytes.Buffer
+	encoder := json.NewEncoder(&encoded)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(latest); err != nil {
+		return "", errors.New("Bitwarden browser storage merge could not be encoded")
+	}
+	return normalizeBitwardenBrowserStorageJSON(strings.TrimSpace(encoded.String()))
+}
+
+func equalBitwardenBrowserStorageJSON(left, right string) bool {
+	if left == right {
+		return true
+	}
+	var a, b map[string]json.RawMessage
+	if json.Unmarshal([]byte(left), &a) != nil || json.Unmarshal([]byte(right), &b) != nil || len(a) != len(b) {
+		return false
+	}
+	for key, value := range a {
+		if !bytes.Equal(value, b[key]) {
+			return false
+		}
+	}
+	return true
+}
+
 func readBitwardenBrowserStorageCandidate(path string) (
 	bitwardenBrowserStorageSnapshot,
 	bitwardenBrowserStorageReadState,
@@ -141,14 +191,14 @@ func readPersistedBitwardenBrowserStorage(databasePath string) (
 ) {
 	path := bitwardenBrowserStoragePath(databasePath)
 	primary, primaryState := readBitwardenBrowserStorageCandidate(path)
-	if primaryState == bitwardenBrowserStorageReadable {
-		backup, backupState := readBitwardenBrowserStorageCandidate(path + ".bak")
-		return primary, true,
-			backupState != bitwardenBrowserStorageReadable || backup.Revision != primary.Revision
-	}
 	backup, backupState := readBitwardenBrowserStorageCandidate(path + ".bak")
-	if backupState == bitwardenBrowserStorageReadable {
+	if backupState == bitwardenBrowserStorageReadable &&
+		(primaryState != bitwardenBrowserStorageReadable || backup.Revision > primary.Revision) {
 		return backup, true, true
+	}
+	if primaryState == bitwardenBrowserStorageReadable {
+		return primary, true,
+			backupState != bitwardenBrowserStorageReadable || backup.Revision != primary.Revision || backup.LocalJSON != primary.LocalJSON
 	}
 	if primaryState == bitwardenBrowserStorageMissing && backupState == bitwardenBrowserStorageMissing {
 		return bitwardenBrowserStorageSnapshot{
