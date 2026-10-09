@@ -263,6 +263,82 @@ func TestSftpRenameCannotReplaceAliasOfSource(t *testing.T) {
 	}
 }
 
+func TestSftpLocalRenamePreservesCaseOnlyChanges(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "report.txt")
+	if err := os.WriteFile(source, []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !sameLocalRenameEntry(source, source) {
+		t.Fatal("identical path was not recognized as the same entry")
+	}
+	destination := filepath.Join(root, "Report.txt")
+	if err := (&sshNativeSession{}).runSftpOperation(sshWireCommand{Pane: "local", Operation: "rename", Path: source, DestinationPath: destination}); err != nil {
+		t.Fatalf("case-only rename: %v", err)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil || len(entries) != 1 || entries[0].Name() != "Report.txt" {
+		t.Fatalf("renamed entries = %v, %v", entries, err)
+	}
+	contents, err := os.ReadFile(destination)
+	if err != nil || string(contents) != "keep" {
+		t.Fatalf("case-only rename damaged contents: %q, %v", contents, err)
+	}
+}
+
+func TestSftpLocalRenameRecognizesSameEntryThroughParentAlias(t *testing.T) {
+	root := t.TempDir()
+	parent, alias := filepath.Join(root, "parent"), filepath.Join(root, "alias")
+	if err := os.Mkdir(parent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(parent, alias); err != nil {
+		t.Skipf("directory symlinks unavailable: %v", err)
+	}
+	source := filepath.Join(parent, "report.txt")
+	if err := os.WriteFile(source, []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	name := "Report.txt"
+	if _, err := os.Lstat(filepath.Join(parent, name)); os.IsNotExist(err) {
+		name = "report.txt" // Case-sensitive volumes still expose the same entry via the parent alias.
+	}
+	destination := filepath.Join(alias, name)
+	if err := (&sshNativeSession{}).runSftpOperation(sshWireCommand{Pane: "local", Operation: "rename", Path: source, DestinationPath: destination}); err != nil {
+		t.Fatalf("same-entry rename through directory alias: %v", err)
+	}
+	contents, err := os.ReadFile(destination)
+	if err != nil || string(contents) != "keep" {
+		t.Fatalf("same-entry rename damaged contents: %q, %v", contents, err)
+	}
+}
+
+func TestSftpLocalRenameRejectsSameNamedHardLinkInDifferentParent(t *testing.T) {
+	root := t.TempDir()
+	parent, other := filepath.Join(root, "parent"), filepath.Join(root, "other")
+	for _, directory := range []string{parent, other} {
+		if err := os.Mkdir(directory, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	source, destination := filepath.Join(parent, "report.txt"), filepath.Join(other, "report.txt")
+	if err := os.WriteFile(source, []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(source, destination); err != nil {
+		t.Skipf("hard links unavailable: %v", err)
+	}
+	if err := (&sshNativeSession{}).runSftpOperation(sshWireCommand{Pane: "local", Operation: "rename", Path: source, DestinationPath: destination}); err == nil {
+		t.Fatal("same-named hard link was mistaken for the same directory entry")
+	}
+	for _, path := range []string{source, destination} {
+		contents, err := os.ReadFile(path)
+		if err != nil || string(contents) != "keep" {
+			t.Fatalf("refused rename changed %s: %q, %v", path, contents, err)
+		}
+	}
+}
+
 type sftpReviewReader func(*sftp.Request) (io.ReaderAt, error)
 
 func (reader sftpReviewReader) Fileread(request *sftp.Request) (io.ReaderAt, error) {

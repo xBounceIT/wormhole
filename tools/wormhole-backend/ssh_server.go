@@ -2269,7 +2269,7 @@ func (native *sshNativeSession) runSftpOperationForGeneration(command sshWireCom
 			if isLocalPathRoot(destination) {
 				return errors.New("cannot rename to the local filesystem root")
 			}
-			if path != destination && !(runtime.GOOS == "windows" && strings.EqualFold(path, destination)) {
+			if !sameLocalRenameEntry(path, destination) {
 				if err := checkSftpRenameDestination(nil, "local-to-local", destination); err != nil {
 					return err
 				}
@@ -2343,6 +2343,42 @@ func (native *sshNativeSession) runSftpOperationForGeneration(command sshWireCom
 func isLocalPathRoot(path string) bool {
 	clean := filepath.Clean(path)
 	return filepath.Dir(clean) == clean
+}
+
+func sameLocalRenameEntry(source, destination string) bool {
+	if source == destination {
+		return true
+	}
+	name := filepath.Base(source)
+	if !strings.EqualFold(name, filepath.Base(destination)) {
+		return false
+	}
+	sourceInfo, sourceErr := os.Lstat(source)
+	destinationInfo, destinationErr := os.Lstat(destination)
+	if sourceErr != nil || destinationErr != nil || !os.SameFile(sourceInfo, destinationInfo) {
+		return false
+	}
+	parent := filepath.Dir(source)
+	if parent != filepath.Dir(destination) {
+		sourceParent, sourceParentErr := os.Stat(parent)
+		destinationParent, destinationParentErr := os.Stat(filepath.Dir(destination))
+		if sourceParentErr != nil || destinationParentErr != nil || !os.SameFile(sourceParent, destinationParent) {
+			return false
+		}
+	}
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		return false
+	}
+	// Inode equality alone also matches distinct hard links. Permit a case-only
+	// change only when both spellings refer to the sole matching directory entry.
+	matches := 0
+	for _, entry := range entries {
+		if strings.EqualFold(entry.Name(), name) {
+			matches++
+		}
+	}
+	return matches == 1
 }
 
 func checkSftpRenameDestination(client *sftp.Client, direction, destination string) error {
