@@ -10399,11 +10399,9 @@ function SftpConflictOverlay({
       aria-label={`File conflict for ${conflict.displayName}`}
       className="absolute inset-0 z-40 m-0 h-full max-h-none w-full max-w-none place-items-center border-0 bg-background/80 p-6 backdrop-blur-sm open:grid"
       onKeyDown={(event) => {
-        if (event.key === 'Enter') {
+        if (event.key === 'Escape') {
           event.preventDefault();
-          onDecision('skip', applyToAll);
-        } else if (event.key === 'Escape') {
-          event.preventDefault();
+          event.stopPropagation();
           onCancel();
         }
       }}
@@ -10413,6 +10411,10 @@ function SftpConflictOverlay({
           File exists
         </p>
         <h3 className="mt-2 text-base font-semibold">Replace or skip this item?</h3>
+        <p className="mt-2 text-sm text-muted-foreground">
+          A {conflict.direction === 'local-to-remote' ? 'remote' : 'local'} item with the same name
+          already exists. Overwriting will replace its contents.
+        </p>
         <p className="mt-2 break-words text-sm text-foreground">{conflict.displayName}</p>
         <p className="mt-1 break-all text-xs text-muted-foreground">{conflict.path}</p>
         <div className="mt-4 grid grid-cols-2 gap-2 text-xs text-muted-foreground">
@@ -11317,6 +11319,9 @@ function SessionSurface({
           >
             <DialogContent
               className="flex h-[88vh] max-h-[900px] min-h-[560px] w-[92vw] max-w-[1720px] flex-col overflow-hidden border-border/80 bg-background p-5 sm:max-w-none"
+              onEscapeKeyDown={(event) => {
+                if (session.sftp?.conflict) event.preventDefault();
+              }}
               showCloseButton={false}
             >
               <SftpBrowserSurface

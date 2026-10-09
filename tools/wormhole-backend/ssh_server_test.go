@@ -2486,6 +2486,297 @@ func TestRemoteSftpHelpersHandleMissingAndExistingDestinations(t *testing.T) {
 	}
 }
 
+func waitSftpTestEvent(t *testing.T, output *synchronizedBuffer, matches func(sshWireEvent) bool) sshWireEvent {
+	t.Helper()
+	deadline := time.After(3 * time.Second)
+	for {
+		for _, event := range decodeSSHEvents(t, output.Bytes()) {
+			if matches(event) {
+				return event
+			}
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for SFTP event")
+		case <-time.After(time.Millisecond):
+		}
+	}
+}
+
+func TestSftpConflictWireRefreshAndReopen(t *testing.T) {
+	for _, direction := range []string{"local-to-remote", "remote-to-local", "local-to-local"} {
+		for _, decision := range []string{"overwrite", "skip", "close"} {
+			for _, contents := range []string{"", "replacement"} {
+				t.Run(fmt.Sprintf("%s/%s/size-%d", direction, decision, len(contents)), func(t *testing.T) {
+					client := newSftpTestClient(t)
+					server, native, output := newLocalTransferTestServer()
+					native.sftpClient = client
+					native.sftpGeneration = 1
+					t.Cleanup(func() {
+						server.cancelTransfersForSession(native.id)
+						server.transferWG.Wait()
+					})
+					sourceRoot, destinationRoot := t.TempDir(), t.TempDir()
+					source := filepath.Join(sourceRoot, "report.txt")
+					destination := filepath.Join(destinationRoot, "report.txt")
+					if err := os.WriteFile(source, []byte(contents), 0o644); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(destination, nil, 0o644); err != nil {
+						t.Fatal(err)
+					}
+					command := sshWireCommand{
+						SessionID: native.id, TransferID: "first", Direction: direction,
+						DestinationPath: destinationRoot,
+						Items:           []sshSftpTransferItem{{SourcePath: source, Name: "report.txt"}},
+					}
+					if direction == "local-to-remote" {
+						command.DestinationPath = sftpTestPath(destinationRoot)
+					} else if direction == "remote-to-local" {
+						command.Items[0].SourcePath = sftpTestPath(source)
+					}
+					server.sftpTransfer(command)
+					conflict := waitSftpTestEvent(t, output, func(event sshWireEvent) bool {
+						return event.Type == "sftp.conflict" && event.TransferID == command.TransferID
+					})
+					// Decode the actual emitted JSON, not the Go struct: omitempty used to
+					// hide false/zero fields and Electron silently rejected the prompt.
+					decoder := json.NewDecoder(bytes.NewReader(output.Bytes()))
+					for {
+						var wire map[string]any
+						if err := decoder.Decode(&wire); err != nil {
+							t.Fatal(err)
+						}
+						if wire["type"] != "sftp.conflict" {
+							continue
+						}
+						if wire["existing_is_directory"] != false || wire["existing_size"] != float64(0) || wire["incoming_size"] != float64(len(contents)) {
+							t.Fatalf("incomplete conflict JSON: %#v", wire)
+						}
+						break
+					}
+					actual, err := os.ReadFile(destination)
+					if err != nil || len(actual) != 0 {
+						t.Fatalf("destination changed before confirmation: %q, %v", actual, err)
+					}
+					// Refresh must finish even while the overwrite decision is pending.
+					native.startSftpList(sftpTestPath(destinationRoot), 0, "during-conflict")
+					waitSftpTestEvent(t, output, func(event sshWireEvent) bool {
+						return event.Type == "sftp.ready" && event.RequestID == "during-conflict"
+					})
+					if decision == "close" {
+						server.sftpClose(sshWireCommand{SessionID: native.id})
+					} else {
+						server.sftpTransferDecision(sshWireCommand{
+							SessionID: native.id, TransferID: command.TransferID,
+							ItemID: conflict.ItemID, Decision: decision,
+						})
+					}
+					terminal := waitSftpTestEvent(t, output, func(event sshWireEvent) bool {
+						return event.TransferID == command.TransferID && strings.HasPrefix(event.TransferState, "batch-")
+					})
+					wantState := "batch-completed"
+					if decision == "close" {
+						wantState = "batch-cancelled"
+					}
+					if terminal.TransferState != wantState {
+						t.Fatalf("terminal event = %#v", terminal)
+					}
+					actual, err = os.ReadFile(destination)
+					want := ""
+					if decision == "overwrite" {
+						want = contents
+					}
+					if err != nil || string(actual) != want {
+						t.Fatalf("destination = %q, %v; want %q", actual, err, want)
+					}
+					if decision != "close" {
+						server.sftpClose(sshWireCommand{SessionID: native.id})
+					}
+					// Supply a new protocol client as openSftp would, then use the real
+					// open/list/transfer paths on the same SSH session after reopening.
+					native.sftpMu.Lock()
+					native.sftpClient = newSftpTestClient(t)
+					native.sftpMu.Unlock()
+					native.startSftpOpen("reopen")
+					waitSftpTestEvent(t, output, func(event sshWireEvent) bool {
+						return event.Type == "sftp.ready" && event.RequestID == "reopen"
+					})
+					command.TransferID = "second"
+					command.Items[0].Name = "another.txt"
+					server.sftpTransfer(command)
+					terminal = waitSftpTestEvent(t, output, func(event sshWireEvent) bool {
+						return event.TransferID == "second" && strings.HasPrefix(event.TransferState, "batch-")
+					})
+					if terminal.TransferState != "batch-completed" {
+						t.Fatalf("reopened transfer = %#v", terminal)
+					}
+					actual, err = os.ReadFile(filepath.Join(destinationRoot, "another.txt"))
+					if err != nil || string(actual) != contents {
+						t.Fatalf("reopened transfer contents = %q, %v", actual, err)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestSftpQueuedMutationDoesNotBlockRemoteRefresh(t *testing.T) {
+	server, native, output := newLocalTransferTestServer()
+	native.sftpClient = newSftpTestClient(t)
+	root := t.TempDir()
+	source := filepath.Join(root, "source.txt")
+	if err := os.WriteFile(source, []byte("incoming"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	destination := t.TempDir()
+	if err := os.WriteFile(filepath.Join(destination, "report.txt"), []byte("existing"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	command := sshWireCommand{
+		SessionID: native.id, TransferID: "local-conflict", Direction: "local-to-local",
+		DestinationPath: destination,
+		Items:           []sshSftpTransferItem{{SourcePath: source, Name: "report.txt"}},
+	}
+	server.sftpTransfer(command)
+	t.Cleanup(func() {
+		server.cancelTransfersForSession(native.id)
+		server.transferWG.Wait()
+	})
+	conflict := waitSftpTestEvent(t, output, func(event sshWireEvent) bool { return event.Type == "sftp.conflict" })
+	operationDone := make(chan error, 1)
+	go func() {
+		operationDone <- native.runSftpOperation(sshWireCommand{
+			Pane: "remote", Operation: "file", Path: sftpTestPath(filepath.Join(root, "created.txt")),
+		})
+	}()
+	command.TransferID = "remote-conflict"
+	command.Direction = "local-to-remote"
+	command.DestinationPath = sftpTestPath(destination)
+	server.sftpTransfer(command)
+	native.startSftpList(sftpTestPath(root), 0, "queued-mutation-refresh")
+	waitSftpTestEvent(t, output, func(event sshWireEvent) bool {
+		return event.Type == "sftp.ready" && event.RequestID == "queued-mutation-refresh"
+	})
+	for _, event := range decodeSSHEvents(t, output.Bytes()) {
+		if event.Type == "sftp.conflict" && event.TransferID != "local-conflict" {
+			t.Fatal("queued batch must not replace the pending conflict prompt")
+		}
+	}
+	server.sftpTransferDecision(sshWireCommand{
+		SessionID: native.id, TransferID: "local-conflict", ItemID: conflict.ItemID, Decision: "skip",
+	})
+	waitSftpTestEvent(t, output, func(event sshWireEvent) bool {
+		return event.Type == "sftp.conflict" && event.TransferID == "remote-conflict"
+	})
+	server.sftpTransferDecision(sshWireCommand{
+		SessionID: native.id, TransferID: "remote-conflict", ItemID: "item-0", Decision: "skip",
+	})
+	select {
+	case err := <-operationDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("queued operation did not resume after conflicts settled")
+	}
+}
+
+func TestSftpTransferPlanningFailuresSettleBatch(t *testing.T) {
+	for _, cancelled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("cancelled-%v", cancelled), func(t *testing.T) {
+			server, native, output := newLocalTransferTestServer()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if cancelled {
+				cancel()
+			}
+			command := sshWireCommand{
+				SessionID: native.id, TransferID: "invalid-source", Direction: "local-to-local",
+				DestinationPath: t.TempDir(),
+				Items:           []sshSftpTransferItem{{SourcePath: filepath.Join(t.TempDir(), "missing"), Name: "missing"}},
+			}
+			if cancelled {
+				command.Items[0].SourcePath = t.TempDir()
+			}
+			server.runSftpTransfer(native, command, newSftpTransferForTest(command), ctx)
+			events := decodeSSHEvents(t, output.Bytes())
+			want := "batch-failed"
+			if cancelled {
+				want = "batch-cancelled"
+			}
+			if len(events) != 1 || events[0].TransferState != want {
+				t.Fatalf("planning failure = %#v, want %q", events, want)
+			}
+		})
+	}
+}
+
+func TestSftpOverwriteCannotReplaceDirectoryWithFile(t *testing.T) {
+	client := newSftpTestClient(t)
+	server, native, output := newLocalTransferTestServer()
+	native.sftpClient = client
+	root := t.TempDir()
+	source := filepath.Join(root, "report.txt")
+	if err := os.WriteFile(source, []byte("replacement"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	destinationRoot := t.TempDir()
+	if err := os.Mkdir(filepath.Join(destinationRoot, "report.txt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	command := sshWireCommand{
+		SessionID: native.id, TransferID: "directory-conflict", Direction: "remote-to-local",
+		DestinationPath: destinationRoot,
+		Items:           []sshSftpTransferItem{{SourcePath: sftpTestPath(source), Name: "report.txt"}},
+	}
+	server.sftpTransfer(command)
+	t.Cleanup(func() {
+		server.cancelTransfersForSession(native.id)
+		server.transferWG.Wait()
+	})
+	conflict := waitSftpTestEvent(t, output, func(event sshWireEvent) bool { return event.Type == "sftp.conflict" })
+	if !conflict.ExistingIsDirectory {
+		t.Fatal("directory collision must be identified in the warning")
+	}
+	server.sftpTransferDecision(sshWireCommand{
+		SessionID: native.id, TransferID: command.TransferID, ItemID: conflict.ItemID, Decision: "overwrite",
+	})
+	failed := waitSftpTestEvent(t, output, func(event sshWireEvent) bool { return event.TransferState == "failed" })
+	if failed.Error == "" {
+		t.Fatal("failed overwrite must include an error")
+	}
+	waitSftpTestEvent(t, output, func(event sshWireEvent) bool { return event.TransferState == "batch-completed" })
+	info, err := os.Stat(filepath.Join(destinationRoot, "report.txt"))
+	if err != nil || !info.IsDir() {
+		t.Fatalf("directory was damaged by failed overwrite: %v", err)
+	}
+}
+
+func TestSftpCreateFileNeverTruncatesAnExistingFile(t *testing.T) {
+	for _, pane := range []string{"local", "remote"} {
+		t.Run(pane, func(t *testing.T) {
+			client := newSftpTestClient(t)
+			native := &sshNativeSession{sftpClient: client}
+			file := filepath.Join(t.TempDir(), "existing.txt")
+			if err := os.WriteFile(file, []byte("keep these contents"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			command := sshWireCommand{Pane: pane, Operation: "file", Path: file}
+			if pane == "remote" {
+				command.Path = sftpTestPath(file)
+			}
+			if err := native.runSftpOperation(command); err == nil {
+				t.Fatal("creating an existing file must fail without truncation")
+			}
+			actual, err := os.ReadFile(file)
+			if err != nil || string(actual) != "keep these contents" {
+				t.Fatalf("existing file = %q, %v", actual, err)
+			}
+		})
+	}
+}
+
 func newSftpTransferForTest(command sshWireCommand) *sshSftpTransfer {
 	return &sshSftpTransfer{
 		id: command.TransferID, sessionID: command.SessionID,

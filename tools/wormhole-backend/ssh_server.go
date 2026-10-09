@@ -176,9 +176,9 @@ type sshWireEvent struct {
 	DisplayName         string               `json:"display_name,omitempty"`
 	ExpectedBytes       int64                `json:"expected_bytes,omitempty"`
 	BytesTransferred    int64                `json:"bytes_transferred,omitempty"`
-	IncomingSize        int64                `json:"incoming_size,omitempty"`
-	ExistingSize        int64                `json:"existing_size,omitempty"`
-	ExistingIsDirectory bool                 `json:"existing_is_directory,omitempty"`
+	IncomingSize        int64                `json:"incoming_size"`
+	ExistingSize        int64                `json:"existing_size"`
+	ExistingIsDirectory bool                 `json:"existing_is_directory"`
 	Attempt             int                  `json:"attempt,omitempty"`
 	MaxAttempts         int                  `json:"max_attempts,omitempty"`
 	DelaySeconds        int                  `json:"delay_seconds,omitempty"`
@@ -285,6 +285,7 @@ type sshNativeSession struct {
 
 	sftpMu         sync.Mutex
 	sftpListMu     sync.Mutex
+	sftpTransferMu sync.Mutex
 	sftpClient     *sftp.Client
 	sftpOpening    bool
 	sftpClosed     bool
@@ -412,6 +413,7 @@ func (transfer *sshSftpTransfer) cancelItem(itemID string) {
 }
 
 type sshSftpTransferPlan struct {
+	overwrite       bool
 	sourcePath      string
 	destinationPath string
 	displayName     string
@@ -2200,8 +2202,9 @@ func (native *sshNativeSession) writeLocalSftpError(requestID, path string, err 
 }
 
 func (native *sshNativeSession) startSftpOperation(command sshWireCommand) {
+	generation := native.sftpGenerationSnapshot()
 	go func() {
-		err := native.runSftpOperation(command)
+		err := native.runSftpOperationForGeneration(command, generation)
 		if native.server == nil || native.isClosed() {
 			return
 		}
@@ -2221,6 +2224,25 @@ func (native *sshNativeSession) startSftpOperation(command sshWireCommand) {
 }
 
 func (native *sshNativeSession) runSftpOperation(command sshWireCommand) error {
+	return native.runSftpOperationForGeneration(command, native.sftpGenerationSnapshot())
+}
+
+func (native *sshNativeSession) sftpGenerationSnapshot() uint64 {
+	native.sftpMu.Lock()
+	defer native.sftpMu.Unlock()
+	return native.sftpGeneration
+}
+
+func (native *sshNativeSession) runSftpOperationForGeneration(command sshWireCommand, generation uint64) error {
+	native.sftpTransferMu.Lock()
+	defer native.sftpTransferMu.Unlock()
+	native.sftpMu.Lock()
+	client := native.sftpClient
+	current := generation == native.sftpGeneration && !native.sftpClosed
+	native.sftpMu.Unlock()
+	if !current || native.isClosed() {
+		return errSSHSftpClosed
+	}
 	if command.Pane != "local" && command.Pane != "remote" {
 		return errors.New("SFTP pane is invalid")
 	}
@@ -2246,6 +2268,11 @@ func (native *sshNativeSession) runSftpOperation(command sshWireCommand) error {
 			}
 			if isLocalPathRoot(destination) {
 				return errors.New("cannot rename to the local filesystem root")
+			}
+			if !sameLocalRenameEntry(path, destination) {
+				if err := checkSftpRenameDestination(nil, "local-to-local", destination); err != nil {
+					return err
+				}
 			}
 			return os.Rename(path, destination)
 		}
@@ -2277,34 +2304,40 @@ func (native *sshNativeSession) runSftpOperation(command sshWireCommand) error {
 	if path == "/" && (command.Operation == "delete" || command.Operation == "rename") {
 		return errors.New("cannot modify the remote filesystem root")
 	}
-	return native.withSftpClient(func(client *sftp.Client) error {
-		switch command.Operation {
-		case "mkdir":
-			return client.MkdirAll(path)
-		case "file":
-			file, err := client.Create(path)
+	if client == nil {
+		return errSSHSftpClosed
+	}
+	switch command.Operation {
+	case "mkdir":
+		return client.MkdirAll(path)
+	case "file":
+		file, err := client.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL)
+		if err != nil {
+			return err
+		}
+		return file.Close()
+	case "delete":
+		return removeRemotePath(client, path)
+	case "rename":
+		destination, err := normalizeSftpPath(command.DestinationPath)
+		if err != nil || destination == "" {
 			if err != nil {
 				return err
 			}
-			return file.Close()
-		case "delete":
-			return removeRemotePath(client, path)
-		case "rename":
-			destination, err := normalizeSftpPath(command.DestinationPath)
-			if err != nil || destination == "" {
-				if err != nil {
-					return err
-				}
-				return errors.New("SFTP destination path is required")
-			}
-			if destination == "/" {
-				return errors.New("cannot rename to the remote filesystem root")
-			}
-			return client.Rename(path, destination)
-		default:
-			return errors.New("SFTP operation is invalid")
+			return errors.New("SFTP destination path is required")
 		}
-	})
+		if destination == "/" {
+			return errors.New("cannot rename to the remote filesystem root")
+		}
+		if !sameRemoteRenameEntry(client, path, destination) {
+			if err := checkSftpRenameDestination(client, "local-to-remote", destination); err != nil {
+				return err
+			}
+		}
+		return client.Rename(path, destination)
+	default:
+		return errors.New("SFTP operation is invalid")
+	}
 }
 
 func isLocalPathRoot(path string) bool {
@@ -2312,17 +2345,74 @@ func isLocalPathRoot(path string) bool {
 	return filepath.Dir(clean) == clean
 }
 
-func (native *sshNativeSession) withSftpClient(action func(*sftp.Client) error) error {
-	native.sftpListMu.Lock()
-	defer native.sftpListMu.Unlock()
-	native.sftpMu.Lock()
-	client := native.sftpClient
-	closed := native.sftpClosed || native.isClosed()
-	native.sftpMu.Unlock()
-	if client == nil || closed {
-		return errSSHSftpClosed
+func sameLocalRenameEntry(source, destination string) bool {
+	if source == destination {
+		return true
 	}
-	return action(client)
+	name := filepath.Base(source)
+	if !strings.EqualFold(name, filepath.Base(destination)) {
+		return false
+	}
+	sourceInfo, sourceErr := os.Lstat(source)
+	destinationInfo, destinationErr := os.Lstat(destination)
+	if sourceErr != nil || destinationErr != nil || !os.SameFile(sourceInfo, destinationInfo) {
+		return false
+	}
+	parent := filepath.Dir(source)
+	if parent != filepath.Dir(destination) {
+		sourceParent, sourceParentErr := os.Stat(parent)
+		destinationParent, destinationParentErr := os.Stat(filepath.Dir(destination))
+		if sourceParentErr != nil || destinationParentErr != nil || !os.SameFile(sourceParent, destinationParent) {
+			return false
+		}
+	}
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		return false
+	}
+	// Inode equality alone also matches distinct hard links. Permit a case-only
+	// change only when both spellings refer to the sole matching directory entry.
+	matches := 0
+	for _, entry := range entries {
+		if strings.EqualFold(entry.Name(), name) {
+			matches++
+		}
+	}
+	return matches == 1
+}
+
+func sameRemoteRenameEntry(client *sftp.Client, source, destination string) bool {
+	if source == destination {
+		return true
+	}
+	parent, name := pathpkg.Dir(source), pathpkg.Base(source)
+	if parent != pathpkg.Dir(destination) || !strings.EqualFold(name, pathpkg.Base(destination)) {
+		return false
+	}
+	entries, err := client.ReadDir(parent)
+	if err != nil {
+		return false
+	}
+	// A single case-folded name can be the same entry on a case-insensitive
+	// server. Multiple matches identify occupied names on a case-sensitive server.
+	matches := 0
+	for _, entry := range entries {
+		if strings.EqualFold(entry.Name(), name) {
+			matches++
+		}
+	}
+	return matches == 1
+}
+
+func checkSftpRenameDestination(client *sftp.Client, direction, destination string) error {
+	exists, _, _, err := transferDestinationInfo(client, direction, destination)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return errors.New("SFTP destination already exists; choose a different name")
+	}
+	return nil
 }
 
 func normalizeLocalPath(value string) (string, error) {
@@ -2525,11 +2615,19 @@ func (server *sshServer) writeTransferEvent(command sshWireCommand, itemID, stat
 }
 
 func (server *sshServer) runSftpTransfer(native *sshNativeSession, command sshWireCommand, transfer *sshSftpTransfer, ctx context.Context) {
+	// Only one batch owns this browser's conflict prompt. Serialize mutations,
+	// but keep the directory-read lock free while awaiting a user decision.
+	// pkg/sftp supports concurrent reads on the same client.
+	native.sftpTransferMu.Lock()
+	defer native.sftpTransferMu.Unlock()
+	if ctx.Err() != nil {
+		server.writeTransferBatchTerminal(command, "batch-cancelled")
+		return
+	}
+
 	var client *sftp.Client
 	remote := command.Direction != "local-to-local"
 	if remote {
-		native.sftpListMu.Lock()
-		defer native.sftpListMu.Unlock()
 		native.sftpMu.Lock()
 		client = native.sftpClient
 		closed := native.sftpClosed || native.isClosed()
@@ -2551,11 +2649,16 @@ func (server *sshServer) runSftpTransfer(native *sshNativeSession, command sshWi
 	}
 
 	var sticky *sshSftpTransferDecision
+	skippedDirectory := ""
 	for index, plan := range plans {
 		if err := ctx.Err(); err != nil {
 			server.writeTransferBatchTerminal(command, "batch-cancelled")
 			return
 		}
+		if skippedDirectory != "" && strings.HasPrefix(plan.displayName, skippedDirectory+"/") {
+			continue
+		}
+		skippedDirectory = ""
 		itemID := sftpTransferItemID(index)
 		itemContext := transfer.startItem(ctx, itemID)
 		err := func() error {
@@ -2568,19 +2671,12 @@ func (server *sshServer) runSftpTransfer(native *sshNativeSession, command sshWi
 					return err
 				}
 			}
-			if plan.isDirectory {
-				if err := removeTransferDestinationSymlink(client, command.Direction, plan.destinationPath); err != nil {
-					return err
-				}
-				return ensureTransferDirectory(client, command.Direction, plan.destinationPath)
-			}
-
 			exists, isDirectory, existingSize, err := transferDestinationInfo(client, command.Direction, plan.destinationPath)
 			if err != nil {
 				return err
 			}
 			decision := "overwrite"
-			if exists {
+			if exists && !(plan.isDirectory && isDirectory) {
 				if sticky != nil {
 					decision = sticky.decision
 				} else {
@@ -2614,15 +2710,29 @@ func (server *sshServer) runSftpTransfer(native *sshNativeSession, command sshWi
 					}
 				}
 			}
+			if decision == "skip" && plan.isDirectory {
+				skippedDirectory = plan.displayName
+			}
 			if decision == "skip" || itemContext.Err() != nil {
 				return itemContext.Err()
 			}
+			if plan.isDirectory {
+				if exists {
+					if err := removeTransferDestinationSymlink(client, command.Direction, plan.destinationPath); err != nil {
+						return err
+					}
+				}
+				return ensureTransferDirectory(client, command.Direction, plan.destinationPath)
+			}
+			plan.overwrite = exists
 
 			if err := ensureTransferParent(client, command.Direction, plan.destinationPath); err != nil {
 				return err
 			}
-			if err := removeTransferDestinationSymlink(client, command.Direction, plan.destinationPath); err != nil {
-				return err
+			if exists {
+				if err := removeTransferDestinationSymlink(client, command.Direction, plan.destinationPath); err != nil {
+					return err
+				}
 			}
 			if err := itemContext.Err(); err != nil {
 				return err
@@ -2677,11 +2787,19 @@ func buildSftpTransferPlans(client *sftp.Client, command sshWireCommand, ctx con
 				return nil, err
 			}
 		}
-		if len(plans) > sshSftpMaxTransferPlanCount {
-			return nil, errors.New("SFTP transfer contains too many files")
-		}
 	}
 	return plans, nil
+}
+
+func appendSftpTransferPlan(plans *[]sshSftpTransferPlan, plan sshSftpTransferPlan) error {
+	if len(*plans) >= sshSftpMaxTransferPlanCount {
+		return errors.New("SFTP transfer contains too many files")
+	}
+	if len([]byte(plan.sourcePath)) > sshSftpMaxPathBytes || len([]byte(plan.destinationPath)) > sshSftpMaxPathBytes || len([]byte(plan.displayName)) > sshSftpMaxNameBytes*2 {
+		return errors.New("SFTP transfer path is too long")
+	}
+	*plans = append(*plans, plan)
+	return nil
 }
 
 func appendLocalTransferPlans(direction, destination string, item sshSftpTransferItem, plans *[]sshSftpTransferPlan, ctx context.Context) error {
@@ -2701,22 +2819,23 @@ func appendLocalTransferPlans(direction, destination string, item sshSftpTransfe
 		}
 	}
 	if !isDirectory {
-		*plans = append(*plans, sshSftpTransferPlan{
+		return appendSftpTransferPlan(plans, sshSftpTransferPlan{
 			sourcePath:      source,
 			destinationPath: joinTransferDestination(direction, destination, item.Name),
 			displayName:     item.Name,
 			incomingSize:    safeTransferSize(info.Size()),
 		})
-		return nil
 	}
 
 	rootDestination := joinTransferDestination(direction, destination, item.Name)
-	*plans = append(*plans, sshSftpTransferPlan{
+	if err := appendSftpTransferPlan(plans, sshSftpTransferPlan{
 		sourcePath:      source,
 		destinationPath: rootDestination,
 		displayName:     item.Name,
 		isDirectory:     true,
-	})
+	}); err != nil {
+		return err
+	}
 	return filepath.WalkDir(source, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -2727,9 +2846,6 @@ func appendLocalTransferPlans(direction, destination string, item sshSftpTransfe
 		if path == source {
 			return nil
 		}
-		if len(*plans) >= sshSftpMaxTransferPlanCount {
-			return errors.New("SFTP transfer contains too many files")
-		}
 		relative, err := filepath.Rel(source, path)
 		if err != nil {
 			return err
@@ -2739,14 +2855,13 @@ func appendLocalTransferPlans(direction, destination string, item sshSftpTransfe
 			return fmt.Errorf("local transfer path is unsafe: %s", relative)
 		}
 		displayName := item.Name + "/" + relative
-		*plans = append(*plans, sshSftpTransferPlan{
+		return appendSftpTransferPlan(plans, sshSftpTransferPlan{
 			sourcePath:      path,
 			destinationPath: joinTransferDestination(direction, destination, displayName),
 			displayName:     displayName,
 			incomingSize:    localEntrySize(entry),
 			isDirectory:     entry.IsDir(),
 		})
-		return nil
 	})
 }
 
@@ -2769,8 +2884,8 @@ func sameLocalPath(left, right string) bool {
 	if left == right {
 		return true
 	}
-	if runtime.GOOS == "windows" {
-		return strings.EqualFold(left, right)
+	if runtime.GOOS == "windows" && strings.EqualFold(left, right) {
+		return true
 	}
 	leftInfo, leftErr := os.Stat(left)
 	rightInfo, rightErr := os.Stat(right)
@@ -2816,7 +2931,7 @@ func validateLocalTransferDestinationParents(path string) error {
 		}
 
 		parent := filepath.Dir(current)
-		if sameLocalPath(parent, current) {
+		if parent == current {
 			return nil
 		}
 		current = parent
@@ -2836,21 +2951,22 @@ func appendRemoteTransferPlans(client *sftp.Client, destination string, item ssh
 		return err
 	}
 	if !isSftpTransferDirectory(info) {
-		*plans = append(*plans, sshSftpTransferPlan{
+		return appendSftpTransferPlan(plans, sshSftpTransferPlan{
 			sourcePath:      source,
 			destinationPath: joinTransferDestination("remote-to-local", destination, item.Name),
 			displayName:     item.Name,
 			incomingSize:    safeTransferSize(info.Size()),
 		})
-		return nil
 	}
 
-	*plans = append(*plans, sshSftpTransferPlan{
+	if err := appendSftpTransferPlan(plans, sshSftpTransferPlan{
 		sourcePath:      source,
 		destinationPath: joinTransferDestination("remote-to-local", destination, item.Name),
 		displayName:     item.Name,
 		isDirectory:     true,
-	})
+	}); err != nil {
+		return err
+	}
 	return walkRemoteTransferPlans(client, source, destination, item.Name, plans, ctx)
 }
 
@@ -2870,18 +2986,17 @@ func walkRemoteTransferPlans(client *sftp.Client, source, destination, relativeR
 		if !isSafeSftpName(entry.Name()) || !isSafeTransferName("remote-to-local", entry.Name()) {
 			continue
 		}
-		if len(*plans) >= sshSftpMaxTransferPlanCount {
-			return errors.New("SFTP transfer contains too many files")
-		}
 		relative := relativeRoot + "/" + entry.Name()
 		fullPath := pathpkg.Join(source, entry.Name())
-		*plans = append(*plans, sshSftpTransferPlan{
+		if err := appendSftpTransferPlan(plans, sshSftpTransferPlan{
 			sourcePath:      fullPath,
 			destinationPath: joinTransferDestination("remote-to-local", destination, relative),
 			displayName:     relative,
 			incomingSize:    safeTransferSize(entry.Size()),
 			isDirectory:     entry.IsDir() && entry.Mode()&os.ModeSymlink == 0,
-		})
+		}); err != nil {
+			return err
+		}
 		if entry.IsDir() && entry.Mode()&os.ModeSymlink == 0 {
 			if err := walkRemoteTransferPlans(client, fullPath, destination, relative, plans, ctx); err != nil {
 				return err
@@ -2995,43 +3110,49 @@ func removeTransferDestinationSymlink(client *sftp.Client, direction, path strin
 	return nil
 }
 
-func copyTransferFile(ctx context.Context, client *sftp.Client, direction string, plan sshSftpTransferPlan, report func(int64)) error {
+func copyTransferFile(ctx context.Context, client *sftp.Client, direction string, plan sshSftpTransferPlan, report func(int64)) (err error) {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if direction == "local-to-local" && sameLocalPath(plan.sourcePath, plan.destinationPath) {
 		return errors.New("SFTP source and destination are the same file")
 	}
 	var source io.ReadCloser
 	var destination io.WriteCloser
-	var err error
 	switch direction {
-	case "local-to-remote":
+	case "local-to-remote", "local-to-local":
 		source, err = os.Open(plan.sourcePath)
-		if err != nil {
-			return err
-		}
-		destination, err = client.OpenFile(plan.destinationPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
 	case "remote-to-local":
 		source, err = client.Open(plan.sourcePath)
-		if err != nil {
-			return err
-		}
-		destination, err = os.OpenFile(plan.destinationPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
-	case "local-to-local":
-		source, err = os.Open(plan.sourcePath)
-		if err != nil {
-			return err
-		}
-		destination, err = os.OpenFile(plan.destinationPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
 	default:
 		return errors.New("SFTP transfer direction is invalid")
 	}
 	if err != nil {
-		if source != nil {
-			_ = source.Close()
-		}
 		return err
 	}
 	defer source.Close()
-	defer destination.Close()
+	// Opening a remote source can block. Check cancellation again before touching
+	// the destination, and require approval before enabling truncation.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	flags := os.O_WRONLY | os.O_CREATE | os.O_EXCL
+	if plan.overwrite {
+		flags = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
+	}
+	if direction == "local-to-remote" {
+		destination, err = client.OpenFile(plan.destinationPath, flags)
+	} else {
+		destination, err = os.OpenFile(plan.destinationPath, flags, 0o644)
+	}
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if closeErr := destination.Close(); err == nil {
+			err = closeErr
+		}
+	}()
 
 	buffer := make([]byte, sshSftpTransferBuffer)
 	var transferred int64
