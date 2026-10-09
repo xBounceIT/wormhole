@@ -425,3 +425,184 @@ func TestBitwardenBrowserStorageDoesNotOverwriteUnreadablePersistentState(t *tes
 		t.Fatalf("volatile capture was not persisted after recovery: %+v", recovered)
 	}
 }
+
+func TestBitwardenBrowserStorageMergesLiveEditsFromStaleProfile(t *testing.T) {
+	root := t.TempDir()
+	m := &vncManager{databasePath: filepath.Join(root, "wormhole.db")}
+	a, b := filepath.Join(root, "a"), filepath.Join(root, "b")
+	first, err := m.captureBitwardenBrowserStorage(`{"account":"signed-in","theme":"light"}`, `{"token":"first"}`, 0, a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = m.captureBitwardenBrowserStorage(first.LocalJSON, first.SessionJSON, first.Revision, b); err != nil {
+		t.Fatal(err)
+	}
+	newer, err := m.captureBitwardenBrowserStorage(first.LocalJSON, `{"token":"refreshed"}`, first.Revision, a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	merged, err := m.captureBitwardenBrowserStorage(`{"account":"signed-in","theme":"dark"}`, first.SessionJSON, first.Revision, b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if merged.LocalJSON != `{"account":"signed-in","theme":"dark"}` || merged.SessionJSON != newer.SessionJSON || !merged.Restore {
+		t.Fatal("stale profile edits or newer session were discarded")
+	}
+	// The page changes again while the merged snapshot is being restored. The submitted
+	// baseline must remain distinct from the shared state until the page acknowledges it.
+	next, err := m.captureBitwardenBrowserStorage(`{"account":"signed-in","theme":"blue"}`, first.SessionJSON, merged.Revision, b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next.LocalJSON != `{"account":"signed-in","theme":"blue"}` || next.SessionJSON != newer.SessionJSON {
+		t.Fatal("mutation during restore lost a newer edit or revived an old token")
+	}
+}
+
+func TestBitwardenBrowserStorageStaleUnchangedProfileCannotLogOutNewLogin(t *testing.T) {
+	root := t.TempDir()
+	m := &vncManager{databasePath: filepath.Join(root, "wormhole.db")}
+	a, b := filepath.Join(root, "a"), filepath.Join(root, "b")
+	first, err := m.captureBitwardenBrowserStorage(`{"theme":"light"}`, `{}`, 0, a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = m.captureBitwardenBrowserStorage(first.LocalJSON, first.SessionJSON, first.Revision, b); err != nil {
+		t.Fatal(err)
+	}
+	login, err := m.captureBitwardenBrowserStorage(`{"theme":"light","account":"signed-in"}`, `{"token":"live"}`, first.Revision, a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale, err := m.captureBitwardenBrowserStorage(`{"theme":"dark"}`, `{}`, first.Revision, b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stale.LocalJSON != `{"account":"signed-in","theme":"dark"}` || stale.SessionJSON != login.SessionJSON {
+		t.Fatal("stale background cleared the new login")
+	}
+}
+
+func TestBitwardenBrowserStorageStaleTokenRefreshCannotUndoLogout(t *testing.T) {
+	root := t.TempDir()
+	m := &vncManager{databasePath: filepath.Join(root, "wormhole.db")}
+	a, b := filepath.Join(root, "a"), filepath.Join(root, "b")
+	first, err := m.captureBitwardenBrowserStorage(`{"account":"signed-in"}`, `{"token":"live"}`, 0, a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = m.captureBitwardenBrowserStorage(first.LocalJSON, first.SessionJSON, first.Revision, b); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = m.captureBitwardenBrowserStorage(`{}`, `{}`, first.Revision, a); err != nil {
+		t.Fatal(err)
+	}
+	stale, err := m.captureBitwardenBrowserStorage(first.LocalJSON, `{"token":"refreshed"}`, first.Revision, b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stale.LocalJSON != `{}` || stale.SessionJSON != `{}` || !stale.Restore {
+		t.Fatal("stale refresh revived a logged-out account")
+	}
+}
+
+func TestBitwardenBrowserStorageLogoutRemovesConcurrentlyRefreshedTokens(t *testing.T) {
+	root := t.TempDir()
+	m := &vncManager{databasePath: filepath.Join(root, "wormhole.db")}
+	a, b := filepath.Join(root, "a"), filepath.Join(root, "b")
+	first, err := m.captureBitwardenBrowserStorage(`{"account":"signed-in","token":"first"}`, `{"token":"live"}`, 0, a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = m.captureBitwardenBrowserStorage(first.LocalJSON, first.SessionJSON, first.Revision, b); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = m.captureBitwardenBrowserStorage(`{"account":"signed-in","token":"second"}`, `{"token":"refreshed"}`, first.Revision, a); err != nil {
+		t.Fatal(err)
+	}
+	logout, err := m.captureBitwardenBrowserStorage(`{}`, `{}`, first.Revision, b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if logout.LocalJSON != `{}` || logout.SessionJSON != `{}` || logout.Restore {
+		t.Fatal("concurrent refresh prevented an explicit logout")
+	}
+}
+
+func TestBitwardenBrowserStorageRecoversNewestProtectedCopy(t *testing.T) {
+	for _, primary := range []string{"missing", "corrupt", "older"} {
+		t.Run(primary, func(t *testing.T) {
+			database := filepath.Join(t.TempDir(), "wormhole.db")
+			latest := bitwardenBrowserStorageSnapshot{Revision: 8, LocalJSON: `{"account":"new"}`, SessionJSON: `{}`}
+			if _, err := persistBitwardenBrowserStorage(database, latest); err != nil {
+				t.Fatal(err)
+			}
+			path := bitwardenBrowserStoragePath(database)
+			switch primary {
+			case "missing":
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+			case "corrupt":
+				if err := os.WriteFile(path, []byte("damaged"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "older":
+				old, _ := json.Marshal(bitwardenBrowserStorageRecord{SchemaVersion: 1, Revision: 3, LocalJson: `{}`})
+				if err := protectBitwardenBrowserStorage(path, old); err != nil {
+					t.Fatal(err)
+				}
+			}
+			recovered, ready, repair := readPersistedBitwardenBrowserStorage(database)
+			if !ready || !repair || recovered.Revision != latest.Revision || recovered.LocalJSON != latest.LocalJSON {
+				t.Fatal("recovery copy did not preserve the latest account state")
+			}
+		})
+	}
+}
+
+func TestBitwardenBrowserStorageAcknowledgesReorderedKeysAfterMerge(t *testing.T) {
+	root := t.TempDir()
+	m := &vncManager{databasePath: filepath.Join(root, "wormhole.db")}
+	profile := filepath.Join(root, "profile")
+	first, err := m.captureBitwardenBrowserStorage(`{"z":1,"a":2}`, `{"z":1,"a":2}`, 0, profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, err := m.captureBitwardenBrowserStorage(`{"a":2,"z":1}`, `{"a":2,"z":1}`, first.Revision, profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next.Restore || next.Revision != first.Revision {
+		t.Fatal("key order triggered an endless restore loop")
+	}
+	changed, err := m.captureBitwardenBrowserStorage(`{"z":2,"a":2}`, `{"a":2,"z":1}`, next.Revision, profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed.Restore || !equalBitwardenBrowserStorageJSON(changed.LocalJSON, `{"z":2,"a":2}`) {
+		t.Fatal("merged key order could not acknowledge a live change")
+	}
+}
+
+func TestBitwardenBrowserStorageJSONMergeBoundaries(t *testing.T) {
+	for _, invalid := range []string{"[]", "null", "broken"} {
+		if _, err := mergeBitwardenBrowserStorageJSON(invalid, `{}`, `{}`); err == nil {
+			t.Fatal("invalid baseline accepted")
+		}
+	}
+	if equalBitwardenBrowserStorageJSON("broken", `{}`) {
+		t.Fatal("invalid snapshots compared equal")
+	}
+	if equalBitwardenBrowserStorageJSON(`{"a":1}`, `{"b":1}`) {
+		t.Fatal("distinct keys compared equal")
+	}
+	merged, err := mergeBitwardenBrowserStorageJSON(`{"remove":true,"keep":1}`, `{"keep":1}`, `{"remove":true,"keep":2}`)
+	if err != nil || merged != `{"keep":2}` {
+		t.Fatal("removal did not preserve concurrent edits")
+	}
+	large := `{"html":"` + strings.Repeat("<>&", 1024*1024) + `"}`
+	if merged, err := mergeBitwardenBrowserStorageJSON(`{}`, large, `{}`); err != nil || merged != large {
+		t.Fatal("HTML escaping rejected a bounded valid snapshot")
+	}
+}

@@ -218,6 +218,7 @@ type vncManager struct {
 	bitwardenBrowserLoaded             bool
 	bitwardenBrowserPrimaryNeedsRepair bool
 	bitwardenBrowserStorage            bitwardenBrowserStorageSnapshot
+	bitwardenBrowserProfileSnapshots   map[string]bitwardenBrowserStorageSnapshot
 	bitwardenBrowserProfileRevisions   map[string]int64
 }
 

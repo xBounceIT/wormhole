@@ -302,17 +302,27 @@ func (m *vncManager) readBitwardenBrowserStorage(profilePath string) (bitwardenB
 	return m.bitwardenBrowserStorageForProfile(m.bitwardenBrowserStorage, profilePath), nil
 }
 
-func (m *vncManager) acknowledgeBitwardenBrowserProfile(snapshot bitwardenBrowserStorageSnapshot, profilePath string) bitwardenBrowserStorageSnapshot {
+func (m *vncManager) acknowledgeBitwardenBrowserProfile(snapshot bitwardenBrowserStorageSnapshot, profilePath, localJSON, sessionJSON string) bitwardenBrowserStorageSnapshot {
 	if m.bitwardenBrowserProfileRevisions == nil {
 		m.bitwardenBrowserProfileRevisions = make(map[string]int64)
+	}
+	if m.bitwardenBrowserProfileSnapshots == nil {
+		m.bitwardenBrowserProfileSnapshots = make(map[string]bitwardenBrowserStorageSnapshot)
 	}
 	// The file marker is best effort. A failed write must not make the next synchronization
 	// restore an older snapshot over changes in a profile that already supplied this revision.
 	m.bitwardenBrowserProfileRevisions[profilePath] = snapshot.Revision
-	if snapshot.Durable {
+	// Remember what the profile actually supplied, not the merged result it has yet to apply.
+	m.bitwardenBrowserProfileSnapshots[profilePath] = bitwardenBrowserStorageSnapshot{
+		Revision: snapshot.Revision, LocalJSON: localJSON, SessionJSON: sessionJSON,
+	}
+	restore := !equalBitwardenBrowserStorageJSON(snapshot.LocalJSON, localJSON) || !equalBitwardenBrowserStorageJSON(snapshot.SessionJSON, sessionJSON)
+	if snapshot.Durable && !restore {
 		writeBitwardenBrowserProfileRevision(profilePath, snapshot.Revision)
 	}
-	return m.bitwardenBrowserStorageForProfile(snapshot, profilePath)
+	response := m.bitwardenBrowserStorageForProfile(snapshot, profilePath)
+	response.Restore = restore
+	return response
 }
 
 func (m *vncManager) captureBitwardenBrowserStorage(
@@ -334,23 +344,38 @@ func (m *vncManager) captureBitwardenBrowserStorage(
 	if err != nil {
 		return bitwardenBrowserStorageSnapshot{}, err
 	}
-	if sourceRevision < current.Revision &&
-		(localJSON != current.LocalJSON || sessionJSON != current.SessionJSON) {
-		return currentResponse, nil
+	submittedLocal, submittedSession := localJSON, sessionJSON
+	acknowledge := func(snapshot bitwardenBrowserStorageSnapshot) bitwardenBrowserStorageSnapshot {
+		return m.acknowledgeBitwardenBrowserProfile(snapshot, profilePath, submittedLocal, submittedSession)
+	}
+	base, known := m.bitwardenBrowserProfileSnapshots[profilePath]
+	if (sourceRevision < current.Revision || known && base.Revision == sourceRevision) &&
+		(!equalBitwardenBrowserStorageJSON(localJSON, current.LocalJSON) || !equalBitwardenBrowserStorageJSON(sessionJSON, current.SessionJSON)) {
+		if !known || base.Revision != sourceRevision {
+			return currentResponse, nil
+		}
+		localJSON, err = mergeBitwardenBrowserStorageJSON(base.LocalJSON, localJSON, current.LocalJSON)
+		if err != nil {
+			return bitwardenBrowserStorageSnapshot{}, err
+		}
+		sessionJSON, err = mergeBitwardenBrowserStorageJSON(base.SessionJSON, sessionJSON, current.SessionJSON)
+		if err != nil {
+			return bitwardenBrowserStorageSnapshot{}, err
+		}
 	}
 	if !m.bitwardenBrowserLoaded {
 		if current.Revision == 0 || sourceRevision > current.Revision ||
-			current.LocalJSON != localJSON || current.SessionJSON != sessionJSON {
+			!equalBitwardenBrowserStorageJSON(current.LocalJSON, localJSON) || !equalBitwardenBrowserStorageJSON(current.SessionJSON, sessionJSON) {
 			m.bitwardenBrowserStorage = bitwardenBrowserStorageSnapshot{
 				Revision:    max(current.Revision, sourceRevision) + 1,
 				LocalJSON:   localJSON,
 				SessionJSON: sessionJSON,
 			}
 		}
-		return m.acknowledgeBitwardenBrowserProfile(m.bitwardenBrowserStorage, profilePath), nil
+		return acknowledge(m.bitwardenBrowserStorage), nil
 	}
 	if current.Revision > 0 && sourceRevision <= current.Revision &&
-		localJSON == current.LocalJSON && sessionJSON == current.SessionJSON {
+		equalBitwardenBrowserStorageJSON(localJSON, current.LocalJSON) && equalBitwardenBrowserStorageJSON(sessionJSON, current.SessionJSON) {
 		if !current.Durable || m.bitwardenBrowserPrimaryNeedsRepair {
 			recoveryReady, persistErr := persistBitwardenBrowserStorage(m.databasePath, current)
 			if persistErr == nil {
@@ -359,7 +384,7 @@ func (m *vncManager) captureBitwardenBrowserStorage(
 				m.bitwardenBrowserPrimaryNeedsRepair = !recoveryReady
 			}
 		}
-		return m.acknowledgeBitwardenBrowserProfile(current, profilePath), nil
+		return acknowledge(current), nil
 	}
 	next := bitwardenBrowserStorageSnapshot{
 		Revision:    max(current.Revision, sourceRevision) + 1,
@@ -369,12 +394,12 @@ func (m *vncManager) captureBitwardenBrowserStorage(
 	m.bitwardenBrowserStorage = next
 	recoveryReady, persistErr := persistBitwardenBrowserStorage(m.databasePath, next)
 	if persistErr != nil {
-		return m.acknowledgeBitwardenBrowserProfile(next, profilePath), nil
+		return acknowledge(next), nil
 	}
 	next.Durable = true
 	m.bitwardenBrowserStorage = next
 	m.bitwardenBrowserPrimaryNeedsRepair = !recoveryReady
-	return m.acknowledgeBitwardenBrowserProfile(next, profilePath), nil
+	return acknowledge(next), nil
 }
 
 func (m *vncManager) syncBitwardenCredentialsIfStale() (any, error) {
