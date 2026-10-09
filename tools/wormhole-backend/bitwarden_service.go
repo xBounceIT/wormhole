@@ -285,7 +285,9 @@ func (m *vncManager) readBitwardenBrowserStorage(profilePath string) (bitwardenB
 	if !m.bitwardenBrowserLoaded {
 		snapshot, ready, primaryNeedsRepair := readPersistedBitwardenBrowserStorage(m.databasePath)
 		if ready {
-			if m.bitwardenBrowserStorage.LocalJSON != "" && !m.bitwardenBrowserStorage.Durable {
+			// Revision zero is an unreadable placeholder, not a captured browser state.
+			// Only real volatile captures may supersede data recovered from protected storage.
+			if m.bitwardenBrowserStorage.Revision > 0 && !m.bitwardenBrowserStorage.Durable {
 				m.bitwardenBrowserStorage.Revision = max(
 					m.bitwardenBrowserStorage.Revision,
 					snapshot.Revision+1,

@@ -426,6 +426,73 @@ func TestBitwardenBrowserStorageDoesNotOverwriteUnreadablePersistentState(t *tes
 	}
 }
 
+func TestBitwardenBrowserStorageDistinguishesUnreadablePlaceholderFromCapturedState(t *testing.T) {
+	for _, recoveryCopy := range []string{"primary", "backup"} {
+		for _, capturedLocal := range []string{"", `{"account":"live"}`, `{}`} {
+			name := map[string]string{"": "placeholder", `{"account":"live"}`: "login", `{}`: "logout"}[capturedLocal]
+			t.Run(recoveryCopy+"/"+name, func(t *testing.T) {
+				root := t.TempDir()
+				database, profile := filepath.Join(root, "wormhole.db"), filepath.Join(root, "profile")
+				saved := bitwardenBrowserStorageSnapshot{Revision: 7, LocalJSON: `{"account":"remembered"}`, SessionJSON: `{}`}
+				if _, err := persistBitwardenBrowserStorage(database, saved); err != nil {
+					t.Fatal(err)
+				}
+				path := bitwardenBrowserStoragePath(database)
+				protected, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, copyPath := range []string{path, path + ".bak"} {
+					if err := os.WriteFile(copyPath, []byte("temporarily unreadable"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				manager := &vncManager{databasePath: database}
+				for range 2 {
+					unreadable, err := manager.readBitwardenBrowserStorage(profile)
+					if err != nil || unreadable.Durable || unreadable.Revision != 0 || manager.bitwardenBrowserLoaded {
+						t.Fatal("unreadable protected data must remain an uninitialized placeholder")
+					}
+				}
+				if capturedLocal != "" {
+					volatile, err := manager.captureBitwardenBrowserStorage(capturedLocal, `{}`, 0, profile)
+					if err != nil || volatile.Durable || volatile.Revision == 0 {
+						t.Fatal("a real volatile capture must have its own revision")
+					}
+				}
+				recoveryPath := path
+				if recoveryCopy == "backup" {
+					recoveryPath += ".bak"
+				}
+				if err := os.WriteFile(recoveryPath, protected, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				recovered, err := manager.readBitwardenBrowserStorage(profile)
+				if err != nil || !manager.bitwardenBrowserLoaded {
+					t.Fatal("protected storage did not recover")
+				}
+				if capturedLocal == "" {
+					if !recovered.Durable || recovered.Revision != saved.Revision || recovered.LocalJSON != saved.LocalJSON {
+						t.Fatal("cached unreadable placeholder replaced the recovered remembered account")
+					}
+				} else if recovered.Durable || recovered.Revision <= saved.Revision || recovered.LocalJSON != capturedLocal {
+					t.Fatal("recovery discarded an actual captured login or logout")
+				}
+				committed, err := manager.captureBitwardenBrowserStorage(recovered.LocalJSON, recovered.SessionJSON, recovered.Revision, profile)
+				if err != nil || !committed.Durable || committed.Restore {
+					t.Fatal("recovered state could not be committed")
+				}
+				for _, copyPath := range []string{path, path + ".bak"} {
+					stored, state := readBitwardenBrowserStorageCandidate(copyPath)
+					if state != bitwardenBrowserStorageReadable || stored.LocalJSON != recovered.LocalJSON || stored.Revision != recovered.Revision {
+						t.Fatal("recovery did not retain the correct account in both protected copies")
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestBitwardenBrowserStorageMergesLiveEditsFromStaleProfile(t *testing.T) {
 	root := t.TempDir()
 	m := &vncManager{databasePath: filepath.Join(root, "wormhole.db")}
