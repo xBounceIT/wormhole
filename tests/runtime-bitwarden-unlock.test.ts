@@ -20,8 +20,16 @@ test('runtime Bitwarden unlock shows and hides the password, then resets it', as
     source.indexOf('function clearSecretInput('),
     source.indexOf('function credentialSelectionFor('),
   );
+  const passwordInput = readFileSync(
+    new URL('../src/components/ui/password-input.tsx', import.meta.url),
+    'utf8',
+  );
+  const passwordComponent = passwordInput.slice(
+    passwordInput.indexOf('function PasswordInput('),
+    passwordInput.indexOf('export {'),
+  );
   const transformed = await transformWithOxc(
-    secretHelpers + source.slice(start, end),
+    passwordComponent + secretHelpers + source.slice(start, end),
     'runtime-bitwarden-unlock.tsx',
     {
       jsx: { runtime: 'classic' },
@@ -46,8 +54,8 @@ test('runtime Bitwarden unlock shows and hides the password, then resets it', as
     const Label = props => React.createElement('label', props);
     const Input = props => React.createElement('input', props);
     const Button = props => React.createElement('button', props);
-    const IconButton = ({ label, children, ...props }) =>
-      React.createElement('button', { ...props, 'aria-label': label }, children);
+    const cn = (...classes) => classes.filter(Boolean).join(' ');
+    const useDialogOpen = () => undefined;
     const Eye = () => React.createElement('span', { 'data-icon': 'eye' });
     const EyeOff = () => React.createElement('span', { 'data-icon': 'eye-off' });
     const KeyRound = () => React.createElement('span');

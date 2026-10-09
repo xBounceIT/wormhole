@@ -9,7 +9,7 @@ import {
 } from 'react';
 import { AlertCircle, KeyRound, LoaderCircle, Monitor, RefreshCcw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
+import { PasswordInput } from '@/components/ui/password-input';
 import { formatBitwardenAuthenticationError } from '@/bitwarden-cli-view';
 import { isBitwardenUnlockError } from '@/runtime-credential-errors';
 import { ConnectionStepper, type TunnelProgress } from './ConnectionStepper';
@@ -609,14 +609,14 @@ export function VncSurface({
                   {bitwardenUnlockRequired ? 'Bitwarden master password' : 'VNC password'}
                 </label>
                 <div className="flex gap-2">
-                  <Input
+                  <PasswordInput
                     autoFocus
+                    key={bitwardenUnlockRequired ? 'bitwarden' : session.id}
                     id={`vnc-password-${session.id}`}
                     onChange={(event) => setPassword(event.target.value)}
                     placeholder={
                       bitwardenUnlockRequired ? 'Unlock the Bitwarden vault' : 'Enter password'
                     }
-                    type="password"
                     value={password}
                   />
                   <Button disabled={bitwardenUnlockRequired && !password} type="submit">

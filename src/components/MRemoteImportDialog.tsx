@@ -11,7 +11,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import { Input } from '@/components/ui/input';
+import { PasswordInput } from '@/components/ui/password-input';
 import { Label } from '@/components/ui/label';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import {
@@ -268,7 +268,7 @@ export function MRemoteImportDialog({
           {inspection?.passwordRequired ? (
             <div className="grid gap-2">
               <Label htmlFor="mremote-import-password">mRemoteNG encryption password</Label>
-              <Input
+              <PasswordInput
                 autoComplete="off"
                 disabled={busy || structureOnly}
                 id="mremote-import-password"
@@ -277,7 +277,6 @@ export function MRemoteImportDialog({
                   changeOptions();
                 }}
                 placeholder="The default is mR3m"
-                type="password"
                 ref={passwordInput}
               />
               <label className="flex items-start gap-2 text-xs text-muted-foreground">

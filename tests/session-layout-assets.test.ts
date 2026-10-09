@@ -3,6 +3,64 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 const appSource = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+
+// JSX call sites are covered by these scoped contracts. The shared behavior and
+// callbacks are executed in Chromium with the >=80% V8 coverage gate in auth-prompt.test.ts.
+test('password forms use the shared visibility control across every editor and prompt', () => {
+  for (const file of [
+    'App.tsx',
+    'components/VncSurface.tsx',
+    'components/MRemoteImportDialog.tsx',
+  ]) {
+    const source = readFileSync(new URL(`../src/${file}`, import.meta.url), 'utf8');
+    assert.match(source, /import \{ PasswordInput \} from '@\/components\/ui\/password-input'/);
+    assert.doesNotMatch(source, /type="password"/, `${file} must use PasswordInput`);
+  }
+  const fields = [...appSource.matchAll(/<PasswordInput\b[\s\S]*?\/>/g)].map(([field]) => field);
+  for (const id of [
+    'auth-secret',
+    'ssh-key-passphrase',
+    'connection-inline-password',
+    'credential-key-passphrase',
+    'credential-password',
+    'auth-new-secret',
+    'auth-confirm-secret',
+    'backup-export-password',
+    'backup-export-confirmation',
+    'backup-import-password',
+  ]) {
+    assert.ok(
+      fields.some((field) => field.includes(`id="${id}"`)),
+      `${id} needs visibility control`,
+    );
+  }
+  const tunnelRow = sourceBetween(appSource, 'function TunnelFieldRow(', 'function TunnelSection(');
+  assert.match(tunnelRow, /const FieldInput = field\.type === 'password' \? PasswordInput : Input/);
+  assert.match(tunnelRow, /<FieldInput\b/);
+  assert.match(
+    appSource,
+    /const TunnelPromptInput = tunnelPrompts\[0\]\?\.secret \? PasswordInput : Input/,
+  );
+  assert.match(appSource, /<TunnelPromptInput[\s\S]*?key=\{tunnelPrompts\[0\]\?\.promptId\}/);
+  const runtime = sourceBetween(
+    appSource,
+    'function RuntimeCredentialPasswordInput(',
+    'function RuntimeBitwardenUnlockDialog(',
+  );
+  assert.match(runtime, /<PasswordInput/);
+  const bitwarden = sourceBetween(
+    appSource,
+    'function RuntimeBitwardenUnlockDialog(',
+    'type BitwardenOperationDialogState',
+  );
+  assert.doesNotMatch(
+    bitwarden,
+    /<Eye(?:Off)?\b/,
+    'Bitwarden delegates the toggle to PasswordInput',
+  );
+  assert.match(bitwarden, /onVisibilityChange=\{setPasswordVisible\}/);
+  assert.match(bitwarden, /onVisibilityChange=\{setMasterPasswordVisible\}/);
+});
 const vncSource = readFileSync(
   new URL('../src/components/VncSurface.tsx', import.meta.url),
   'utf8',
