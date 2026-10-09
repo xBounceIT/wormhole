@@ -178,6 +178,10 @@ Run the complete Electron, Go, and helper test suite:
 
     npm run test:electron
 
+WireGuard tests use an in-memory transport while exercising device startup and
+cleanup. They do not open host UDP listeners, so Windows Firewall does not prompt
+for each temporary Go test executable. No firewall exceptions are required.
+
 Useful focused checks:
 
     npm run typecheck
