@@ -36,9 +36,22 @@ test('SFTP panes keep drag feedback stable and draw unclipped borders in Chromiu
     )
     .join('\n');
   const fixture = readFileSync(new URL('./fixtures/sftp-pane.tsx', import.meta.url), 'utf8');
-  const transformed = await transformWithOxc(helpers + source.slice(start, end), 'sftp-pane.tsx', {
-    jsx: { runtime: 'classic' },
-  });
+  const conflictStart = source.indexOf('function SftpConflictOverlay');
+  const conflictEnd = source.indexOf('function SftpBrowserSurface', conflictStart);
+  assert.ok(conflictStart > end && conflictEnd > conflictStart);
+  const modalStart = source.indexOf('<Dialog', source.indexOf('{session.sftp && isActive ? ('));
+  const modalEnd = source.indexOf('<SftpBrowserSurface', modalStart);
+  assert.ok(modalStart > conflictEnd && modalEnd > modalStart);
+  const modal = `function SftpTestDialog({ session, onCloseSftpBrowser, children }) {
+    return (${source.slice(modalStart, modalEnd)}{children}</DialogContent></Dialog>);
+  }`;
+  const transformed = await transformWithOxc(
+    helpers + source.slice(start, end) + source.slice(conflictStart, conflictEnd) + modal,
+    'sftp-pane.tsx',
+    {
+      jsx: { runtime: 'classic' },
+    },
+  );
   const transformedFixture = await transformWithOxc(fixture, 'sftp-pane-fixture.tsx', {
     jsx: { runtime: 'classic' },
   });
@@ -62,7 +75,17 @@ test('SFTP panes keep drag feedback stable and draw unclipped borders in Chromiu
     const React = require(${JSON.stringify(require.resolve('react'))});
     const { createRoot } = require(${JSON.stringify(require.resolve('react-dom/client'))});
     const { useState, useRef, useMemo, useCallback, useEffect, useLayoutEffect } = React;
+    const DialogPrimitive = require(${JSON.stringify(require.resolve('radix-ui'))}).Dialog;
+    const Dialog = DialogPrimitive.Root;
+    const DialogContent = ({ showCloseButton, ...props }) => React.createElement(DialogPrimitive.Content, props);
+    const pressSftpTestKey = async (key) => {
+      await require('electron').ipcRenderer.invoke('sftp-test-key', key);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    };
     const Input = 'input', Button = 'button';
+    const Checkbox = ({ checked, onCheckedChange }) => React.createElement('input', {
+      type: 'checkbox', checked, onChange: (event) => onCheckedChange(event.target.checked),
+    });
     const IconButton = ({ label, children, ...props }) => React.createElement('button', { ...props, 'aria-label': label }, children);
     const Wrapper = ({ children }) => children;
     const Hidden = () => null;
@@ -85,11 +108,23 @@ test('SFTP panes keep drag feedback stable and draw unclipped borders in Chromiu
     writeFileSync(
       harnessPath,
       `
-      const { app, BrowserWindow } = require('electron');
+      const { app, BrowserWindow, ipcMain } = require('electron');
       app.whenReady().then(async () => {
         const window = new BrowserWindow({ show: false, width: 1200, height: 800, webPreferences: {
           nodeIntegration: true, contextIsolation: false,
         } });
+        window.webContents.debugger.attach('1.3');
+        ipcMain.handle('sftp-test-key', async (_event, keyCode) => {
+          const key = keyCode === 'Return' ? 'Enter' : keyCode;
+          const windowsVirtualKeyCode = key === 'Enter' ? 13 : 27;
+          await window.webContents.debugger.sendCommand('Input.dispatchKeyEvent', {
+            type: 'keyDown', key, code: key, windowsVirtualKeyCode,
+            ...(key === 'Enter' ? { text: '\\r' } : {}),
+          });
+          await window.webContents.debugger.sendCommand('Input.dispatchKeyEvent', {
+            type: 'keyUp', key, code: key, windowsVirtualKeyCode,
+          });
+        });
         try {
           await window.loadURL('data:text/html,<html class="dark"><div id="root"></div></html>');
           await window.webContents.executeJavaScript(${JSON.stringify(renderer)});

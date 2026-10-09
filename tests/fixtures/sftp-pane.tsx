@@ -3,6 +3,10 @@ declare const React: typeof import('react');
 declare const createRoot: typeof import('react-dom/client').createRoot;
 declare const assert: typeof import('node:assert/strict');
 declare function SftpFilePane(props: Record<string, unknown>): import('react').ReactElement;
+declare function SftpConflictOverlay(props: Record<string, unknown>): import('react').ReactElement;
+declare function pressSftpTestKey(key: string): Promise<void>;
+declare function SftpTestDialog(props: Record<string, unknown>): import('react').ReactElement;
+declare const DialogPrimitive: typeof import('radix-ui').Dialog;
 declare const sftpDragDataType: string;
 
 async function runSftpPaneTests() {
@@ -151,6 +155,113 @@ async function runSftpPaneTests() {
   await drag(panes[1], 'drop', null, malformed);
   assert.equal(transfers.length, count);
   assert.equal(overlay(panes[1]), null);
+  // The pane remounts when its dialog closes and reopens. A new drag must still
+  // deliver the new remote file to the local pane rather than retain old handlers.
+  await React.act(async () => root.render(null));
+  await React.act(async () =>
+    root.render(
+      <div>
+        {(['local', 'remote'] as const).map((pane) => (
+          <SftpFilePane
+            key={pane}
+            pane={pane}
+            state={state(`/${pane}-reopened`)}
+            onNavigate={() => {}}
+            onRefresh={() => {}}
+            onOperation={() => {}}
+            onTransfer={(payload, destination) => transfers.push({ pane, payload, destination })}
+          />
+        ))}
+      </div>,
+    ),
+  );
+  const reopened = [...document.querySelectorAll('section')];
+  const freshDrag = new DataTransfer();
+  await drag(reopened[1].querySelectorAll('[role="option"]')[1], 'dragstart', null, freshDrag);
+  await drag(reopened[0], 'dragenter', null, freshDrag);
+  await drag(reopened[0], 'drop', null, freshDrag);
+  assert.equal(transfers.at(-1).destination, '/local-reopened');
+  assert.equal(transfers.at(-1).payload.sourcePane, 'remote');
+  assert.equal(transfers.at(-1).payload.items[0].sourcePath, '/remote-reopened/file.txt');
+
+  for (const direction of ['local-to-remote', 'remote-to-local', 'local-to-local']) {
+    const decisions = [];
+    let cancels = 0;
+    let browserCloses = 0;
+    await React.act(async () =>
+      root.render(
+        <SftpTestDialog
+          key={direction}
+          session={{ id: 'session', sftp: { conflict: {} } }}
+          onCloseSftpBrowser={() => browserCloses++}
+        >
+          <DialogPrimitive.Title>Files</DialogPrimitive.Title>
+          <DialogPrimitive.Description>Transfer conflict</DialogPrimitive.Description>
+          <SftpConflictOverlay
+            key={direction}
+            conflict={{
+              transferId: 'transfer',
+              itemId: 'item-0',
+              direction,
+              displayName: 'file.txt',
+              path: '/destination/file.txt',
+              incomingSize: 0,
+              existingSize: 0,
+              existingIsDirectory: false,
+            }}
+            onDecision={(...args) => decisions.push(args)}
+            onCancel={() => cancels++}
+          />
+        </SftpTestDialog>,
+      ),
+    );
+    const dialog = document.querySelector('dialog');
+    assert.ok(
+      dialog.textContent.includes(
+        `A ${direction === 'local-to-remote' ? 'remote' : 'local'} item with the same name`,
+      ),
+    );
+    assert.ok(dialog.textContent.includes('Overwriting will replace its contents.'));
+    assert.equal(decisions.length, 0, 'rendering a warning must not approve replacement');
+    const buttons = [...dialog.querySelectorAll('button')];
+    assert.equal(document.activeElement.textContent, 'Skip', 'default focus must be safe');
+    await React.act(async () => pressSftpTestKey('Return'));
+    assert.deepEqual(decisions.pop(), ['skip', false]);
+    buttons.find((button) => button.textContent === 'Overwrite').focus();
+    await React.act(async () => pressSftpTestKey('Return'));
+    assert.deepEqual(
+      decisions.pop(),
+      ['overwrite', false],
+      'Enter must activate the focused button',
+    );
+    await React.act(async () => pressSftpTestKey('Escape'));
+    assert.equal(cancels, 1, 'Escape dismisses the warning');
+    assert.equal(browserCloses, 0, 'Escape must not also close the SFTP browser');
+    await React.act(async () => buttons.find((button) => button.textContent === 'Skip').click());
+    assert.deepEqual(decisions.pop(), ['skip', false]);
+    await React.act(async () => dialog.querySelector('input[type="checkbox"]').click());
+    await React.act(async () =>
+      buttons.find((button) => button.textContent === 'Overwrite').click(),
+    );
+    assert.deepEqual(decisions.pop(), ['overwrite', true]);
+    await React.act(async () => buttons.find((button) => button.textContent === 'Cancel').click());
+    assert.equal(cancels, 2);
+  }
+  let browserCloses = 0;
+  await React.act(async () =>
+    root.render(
+      <SftpTestDialog
+        session={{ id: 'session', sftp: {} }}
+        onCloseSftpBrowser={() => browserCloses++}
+      >
+        <DialogPrimitive.Title>Files</DialogPrimitive.Title>
+        <DialogPrimitive.Description>Browser without conflict</DialogPrimitive.Description>
+        <button autoFocus>Close</button>
+      </SftpTestDialog>,
+    ),
+  );
+  await React.act(async () => pressSftpTestKey('Escape'));
+  assert.equal(browserCloses, 1, 'Escape still closes a browser without conflicts');
   await React.act(async () => root.unmount());
 }
 
