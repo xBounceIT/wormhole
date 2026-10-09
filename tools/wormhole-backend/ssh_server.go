@@ -294,6 +294,8 @@ type sshNativeSession struct {
 
 	inputQueue              *sshInputQueue
 	done                    chan struct{}
+	shellWaitDone           chan struct{}
+	shellWaitErr            error // Read only after shellWaitDone closes.
 	outputWG                sync.WaitGroup
 	lifecycleMu             sync.Mutex
 	terminalOutputMu        sync.Mutex
@@ -1202,6 +1204,22 @@ func (server *sshServer) nativeClosed(native *sshNativeSession) {
 	server.scheduleReconnect(state, "SSH connection closed unexpectedly")
 }
 
+func (server *sshServer) shellExited(native *sshNativeSession, err error) {
+	var exitError *ssh.ExitError
+	if err != nil && !errors.As(err, &exitError) {
+		return
+	}
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	if server.sessions[native.id] != native {
+		return
+	}
+	if state := server.lifecycles[native.id]; state != nil {
+		state.reconnectDisabled = true
+		state.clearSecrets()
+	}
+}
+
 func (server *sshServer) scheduleReconnect(state *sshReconnectState, lastError string) {
 	reconnectDelay := sshAutoReconnectDelay
 	if server.reconnectDelayOverride != nil {
@@ -1364,13 +1382,24 @@ func (native *sshNativeSession) start() {
 	}()
 	go native.keepAlive()
 	go func() {
-		_ = native.session.Wait()
+		// Retire retries before draining output, which can delay close.
+		native.finishShellExit()
 		native.waitForOutputDrain()
 		native.close(true)
 	}()
 	native.lifecycleMu.Unlock()
 	if native.autoSudo != nil {
 		native.autoSudo.start()
+	}
+}
+
+func (native *sshNativeSession) finishShellExit() {
+	if native.shellWaitDone == nil {
+		return
+	}
+	<-native.shellWaitDone
+	if native.server != nil {
+		native.server.shellExited(native, native.shellWaitErr)
 	}
 }
 
@@ -1776,6 +1805,12 @@ func (native *sshNativeSession) close(notify bool) {
 		}
 		if native.client != nil {
 			_ = native.client.Close()
+		}
+		if notify {
+			// Input or keepalive failure can overtake the output waiter. Closing
+			// the transport first unblocks Wait; use its cached result before
+			// deciding whether this shutdown should reconnect.
+			native.finishShellExit()
 		}
 		if native.tunnel != nil {
 			native.tunnel.close()
@@ -3604,7 +3639,14 @@ func dialNativeSSH(
 		mcpCommandReplay: newMcpReplayBuffer(mcpReplayCapacity),
 		inputQueue:       newSSHInputQueue(sshInputQueueMaxBytes),
 		done:             make(chan struct{}),
+		shellWaitDone:    make(chan struct{}),
 	}
+	// Wait has one consumer. Cache its result before publishing the native
+	// session so every shutdown path can distinguish shell exit from failure.
+	go func() {
+		native.shellWaitErr = session.Wait()
+		close(native.shellWaitDone)
+	}()
 	if target.autoSudo {
 		native.autoSudo = newSSHAutoSudoDriver(native, target.password)
 	}
