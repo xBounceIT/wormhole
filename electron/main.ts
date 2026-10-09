@@ -25,6 +25,7 @@ import { createInterface, type Interface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import type { ElectronChromeExtensions } from 'electron-chrome-extensions';
 import { AuthSession } from './auth-session.js';
+import { TreeTooltipManager, type TreeTooltipRequest } from './tree-tooltip.js';
 import { parseWorkspaceNotes, workspaceNodeWriteMaxRequestBytes } from './workspace-notes.js';
 import { hasValidCredentialSecretLength } from './credential-secret-length.js';
 import {
@@ -795,11 +796,6 @@ type WebBoundsRequest = {
 type WebCommandRequest = {
   sessionId: string;
   operation: 'back' | 'forward' | 'reload' | 'stop';
-};
-type TreeTooltipRequest = {
-  text: string;
-  anchor: { x: number; y: number; width: number; height: number };
-  width: number;
 };
 type BitwardenPopupOpenRequest = {
   sessionId: string;
@@ -3283,7 +3279,7 @@ class NativeBackendProcess {
         }
         if (!authSession.isAccessAllowed) continue;
         for (const window of BrowserWindow.getAllWindows()) {
-          if (window.isDestroyed()) continue;
+          if (window.isDestroyed() || !windowCloseCoordinators.has(window)) continue;
           try {
             window.webContents.send('backend:event', message as BackendEvent);
           } catch {
@@ -4016,7 +4012,9 @@ function performUpdateCheck(): Promise<UpdateCheckResult> {
 
 function broadcastUpdateResult(result: UpdateCheckResult): void {
   for (const window of BrowserWindow.getAllWindows()) {
-    if (!window.isDestroyed()) window.webContents.send('update:result', result);
+    if (!window.isDestroyed() && windowCloseCoordinators.has(window)) {
+      window.webContents.send('update:result', result);
+    }
   }
 }
 
@@ -4385,97 +4383,7 @@ async function loadBitwardenExtensionWhenReady(
   }
 }
 
-type TreeTooltipRecord = {
-  view: WebContentsView;
-  ready: Promise<void>;
-  revision: number;
-};
-
-class TreeTooltipManager {
-  private readonly records = new Map<number, TreeTooltipRecord>();
-
-  show(owner: BrowserWindow, request: TreeTooltipRequest): void {
-    const record = this.getOrCreate(owner);
-    const revision = ++record.revision;
-    void record.ready
-      .then(async () => {
-        if (record.revision !== revision || owner.isDestroyed()) return;
-        await record.view.webContents.executeJavaScript(
-          `document.getElementById('tooltip-text').textContent = ${JSON.stringify(request.text)}`,
-        );
-        if (record.revision !== revision || owner.isDestroyed()) return;
-
-        const [contentWidth, contentHeight] = owner.getContentSize();
-        const width = Math.round(request.width);
-        const height = 30;
-        const x = Math.min(
-          Math.max(0, Math.round(request.anchor.x + request.anchor.width)),
-          Math.max(0, contentWidth - width),
-        );
-        const y = Math.min(
-          Math.max(0, Math.round(request.anchor.y + (request.anchor.height - height) / 2)),
-          Math.max(0, contentHeight - height),
-        );
-
-        // Reinsert the tooltip last so it stays above every connection WebContentsView.
-        owner.contentView.removeChildView(record.view);
-        owner.contentView.addChildView(record.view);
-        record.view.setBounds({ x, y, width, height });
-      })
-      .catch(() => undefined);
-  }
-
-  hide(owner: BrowserWindow): void {
-    const record = this.records.get(owner.id);
-    if (!record) return;
-    record.revision += 1;
-    record.view.setBounds({ x: 0, y: 0, width: 0, height: 0 });
-  }
-
-  closeForWindow(owner: BrowserWindow): void {
-    const record = this.records.get(owner.id);
-    if (!record) return;
-    this.records.delete(owner.id);
-    if (!owner.isDestroyed()) owner.contentView.removeChildView(record.view);
-    if (!record.view.webContents.isDestroyed()) record.view.webContents.close();
-  }
-
-  private getOrCreate(owner: BrowserWindow): TreeTooltipRecord {
-    const existing = this.records.get(owner.id);
-    if (existing) return existing;
-
-    const view = new WebContentsView({
-      webPreferences: {
-        contextIsolation: true,
-        nodeIntegration: false,
-        sandbox: true,
-        devTools: false,
-      },
-    });
-    view.setBackgroundColor('#00000000');
-    view.setBounds({ x: 0, y: 0, width: 0, height: 0 });
-    owner.contentView.addChildView(view);
-    const html = `<!doctype html>
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
-<style>
-  * { box-sizing: border-box; }
-  html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: transparent; }
-  body { position: relative; display: flex; align-items: center; padding-left: 5px; font: 12px/16px system-ui, sans-serif; }
-  body::before { position: absolute; z-index: 1; top: 50%; left: 1px; width: 10px; height: 10px; content: ''; transform: translateY(-50%) rotate(45deg); border-radius: 2px; background: #fafafa; }
-  .tooltip { position: relative; width: calc(100% - 5px); overflow: hidden; padding: 6px 12px; border-radius: 6px; background: #fafafa; color: #0a0a0a; white-space: nowrap; text-overflow: ellipsis; }
-  #tooltip-text { position: relative; z-index: 2; }
-</style>
-<div class="tooltip"><span id="tooltip-text"></span></div>`;
-    const ready = view.webContents
-      .loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)
-      .then(() => undefined);
-    const record = { view, ready, revision: 0 };
-    this.records.set(owner.id, record);
-    return record;
-  }
-}
-
-const treeTooltips = new TreeTooltipManager();
+const treeTooltips = new TreeTooltipManager((options) => new BrowserWindow(options));
 
 class WebSurfaceManager {
   private readonly surfaces = new Map<string, WebSurfaceRecord>();
@@ -6924,7 +6832,9 @@ class NativeSshBackend {
       return;
     }
     for (const window of BrowserWindow.getAllWindows()) {
-      if (!window.isDestroyed()) window.webContents.send('ssh:event', event);
+      if (!window.isDestroyed() && windowCloseCoordinators.has(window)) {
+        window.webContents.send('ssh:event', event);
+      }
     }
   }
 
@@ -8601,6 +8511,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     });
   });
   ipcMain.handle('tree-tooltip:show', (event, request: unknown) => {
+    if (quitCleanupStarted || isQuitting) return;
     if (!isTreeTooltipRequest(request)) throw new Error('Tree tooltip request is invalid.');
     const ownerWindow = BrowserWindow.fromWebContents(event.sender);
     if (!ownerWindow || ownerWindow.isDestroyed()) return;
@@ -9324,7 +9235,6 @@ function getRdpClient(): RdpBackendClient {
 
   rdpClient = new RdpBackendClient({ executable: backendPath(), args });
   rdpClient.onEvent((event: RdpBackendEvent) => {
-    if (!isRdpLifecycleEvent(event)) return;
     if (
       event.sessionId &&
       event.lifecycleGeneration !== undefined &&
@@ -9332,6 +9242,13 @@ function getRdpClient(): RdpBackendClient {
     ) {
       return;
     }
+    // Native reveal/resize acknowledgements and reconnect events can raise the owned
+    // RDP HWND above its siblings. Restore an open tooltip without showing a closed one.
+    if (event.sessionId) {
+      const owner = rdpSurfacePlacements.get(event.sessionId)?.owner;
+      if (owner) treeTooltips.raiseForWindow(owner);
+    }
+    if (!isRdpLifecycleEvent(event)) return;
     const terminalEvent =
       event.type === 'disconnected' ||
       event.type === 'fatalError' ||
@@ -9349,7 +9266,9 @@ function getRdpClient(): RdpBackendClient {
     }
     if (event.sessionId && terminalEvent) forgetRdpSurfacePlacement(event.sessionId);
     for (const window of BrowserWindow.getAllWindows()) {
-      if (!window.isDestroyed()) window.webContents.send('rdp:event', event);
+      if (!window.isDestroyed() && windowCloseCoordinators.has(window)) {
+        window.webContents.send('rdp:event', event);
+      }
     }
   });
   return rdpClient;
@@ -9474,7 +9393,9 @@ function getSerialBackend(): SerialBackendClient {
   client.onEvent((event: SerialBackendEvent) => {
     if (event.type === 'screen' && !authSession.isAccessAllowed) return;
     for (const window of BrowserWindow.getAllWindows()) {
-      if (!window.isDestroyed()) window.webContents.send('serial:event', event);
+      if (!window.isDestroyed() && windowCloseCoordinators.has(window)) {
+        window.webContents.send('serial:event', event);
+      }
     }
   });
   serialBackend = client;
@@ -9910,6 +9831,8 @@ app.on('before-quit', (event) => {
   event.preventDefault();
   if (quitCleanupStarted) return;
   quitCleanupStarted = true;
+  // Auxiliary tooltips have no renderer close-confirmation or teardown handlers.
+  for (const window of BrowserWindow.getAllWindows()) treeTooltips.closeForWindow(window);
   void (async () => {
     if (!skipQuitConfirmation && confirmOnWindowClose) {
       const windows = BrowserWindow.getAllWindows();
