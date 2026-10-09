@@ -2329,7 +2329,7 @@ func (native *sshNativeSession) runSftpOperationForGeneration(command sshWireCom
 		if destination == "/" {
 			return errors.New("cannot rename to the remote filesystem root")
 		}
-		if path != destination {
+		if !sameRemoteRenameEntry(client, path, destination) {
 			if err := checkSftpRenameDestination(client, "local-to-remote", destination); err != nil {
 				return err
 			}
@@ -2372,6 +2372,29 @@ func sameLocalRenameEntry(source, destination string) bool {
 	}
 	// Inode equality alone also matches distinct hard links. Permit a case-only
 	// change only when both spellings refer to the sole matching directory entry.
+	matches := 0
+	for _, entry := range entries {
+		if strings.EqualFold(entry.Name(), name) {
+			matches++
+		}
+	}
+	return matches == 1
+}
+
+func sameRemoteRenameEntry(client *sftp.Client, source, destination string) bool {
+	if source == destination {
+		return true
+	}
+	parent, name := pathpkg.Dir(source), pathpkg.Base(source)
+	if parent != pathpkg.Dir(destination) || !strings.EqualFold(name, pathpkg.Base(destination)) {
+		return false
+	}
+	entries, err := client.ReadDir(parent)
+	if err != nil {
+		return false
+	}
+	// A single case-folded name can be the same entry on a case-insensitive
+	// server. Multiple matches identify occupied names on a case-sensitive server.
 	matches := 0
 	for _, entry := range entries {
 		if strings.EqualFold(entry.Name(), name) {

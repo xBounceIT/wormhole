@@ -339,6 +339,71 @@ func TestSftpLocalRenameRejectsSameNamedHardLinkInDifferentParent(t *testing.T) 
 	}
 }
 
+func TestSftpRemoteRenamePreservesCaseOnlyChanges(t *testing.T) {
+	client := newSftpTestClient(t)
+	native := &sshNativeSession{sftpClient: client}
+	root := t.TempDir()
+	source, destination := filepath.Join(root, "report.txt"), filepath.Join(root, "Report.txt")
+	if err := os.WriteFile(source, []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := native.runSftpOperation(sshWireCommand{Pane: "remote", Operation: "rename", Path: sftpTestPath(source), DestinationPath: sftpTestPath(destination)}); err != nil {
+		t.Fatalf("remote case-only rename: %v", err)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil || len(entries) != 1 || entries[0].Name() != "Report.txt" {
+		t.Fatalf("remote renamed entries = %v, %v", entries, err)
+	}
+	contents, err := os.ReadFile(destination)
+	if err != nil || string(contents) != "keep" {
+		t.Fatalf("remote case-only rename damaged contents: %q, %v", contents, err)
+	}
+}
+
+func TestSftpRemoteRenameEntryCheckFailsClosed(t *testing.T) {
+	info, err := os.Stat(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name    string
+		names   []string
+		listErr error
+		want    bool
+	}{
+		{name: "single entry", names: []string{"other.txt", "report.txt"}, want: true},
+		{name: "distinct case-sensitive entries", names: []string{"report.txt", "Report.txt"}},
+		{name: "missing entry", names: []string{"other.txt"}},
+		{name: "listing failure", listErr: os.ErrPermission},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var listings atomic.Int32
+			client := newSftpReviewRequestClient(t, sftp.Handlers{FileList: sftpReviewFileList(func(*sftp.Request) (sftp.ListerAt, error) {
+				listings.Add(1)
+				entries := sftpReviewLister{}
+				for _, name := range test.names {
+					entries = append(entries, sftpReviewNamedInfo{FileInfo: info, name: name})
+				}
+				return entries, test.listErr
+			})})
+			if !sameRemoteRenameEntry(client, "/dir/report.txt", "/dir/report.txt") {
+				t.Fatal("identical remote path was not recognized")
+			}
+			for _, destination := range []string{"/dir/other.txt", "/other/Report.txt"} {
+				if sameRemoteRenameEntry(client, "/dir/report.txt", destination) {
+					t.Fatalf("different remote entry was accepted: %s", destination)
+				}
+			}
+			if listings.Load() != 0 {
+				t.Fatal("ordinary rename unexpectedly read the remote directory")
+			}
+			if got := sameRemoteRenameEntry(client, "/dir/report.txt", "/dir/Report.txt"); got != test.want {
+				t.Fatalf("remote entry identity = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
 type sftpReviewReader func(*sftp.Request) (io.ReaderAt, error)
 
 func (reader sftpReviewReader) Fileread(request *sftp.Request) (io.ReaderAt, error) {
