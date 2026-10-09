@@ -3271,7 +3271,7 @@ class NativeBackendProcess {
         }
         if (!authSession.isAccessAllowed) continue;
         for (const window of BrowserWindow.getAllWindows()) {
-          if (window.isDestroyed()) continue;
+          if (window.isDestroyed() || !windowCloseCoordinators.has(window)) continue;
           try {
             window.webContents.send('backend:event', message as BackendEvent);
           } catch {
@@ -4013,7 +4013,9 @@ function performUpdateCheck(): Promise<UpdateCheckResult> {
 
 function broadcastUpdateResult(result: UpdateCheckResult): void {
   for (const window of BrowserWindow.getAllWindows()) {
-    if (!window.isDestroyed()) window.webContents.send('update:result', result);
+    if (!window.isDestroyed() && windowCloseCoordinators.has(window)) {
+      window.webContents.send('update:result', result);
+    }
   }
 }
 
@@ -6708,7 +6710,9 @@ class NativeSshBackend {
       return;
     }
     for (const window of BrowserWindow.getAllWindows()) {
-      if (!window.isDestroyed()) window.webContents.send('ssh:event', event);
+      if (!window.isDestroyed() && windowCloseCoordinators.has(window)) {
+        window.webContents.send('ssh:event', event);
+      }
     }
   }
 
@@ -9140,7 +9144,9 @@ function getRdpClient(): RdpBackendClient {
     }
     if (event.sessionId && terminalEvent) forgetRdpSurfacePlacement(event.sessionId);
     for (const window of BrowserWindow.getAllWindows()) {
-      if (!window.isDestroyed()) window.webContents.send('rdp:event', event);
+      if (!window.isDestroyed() && windowCloseCoordinators.has(window)) {
+        window.webContents.send('rdp:event', event);
+      }
     }
   });
   return rdpClient;
@@ -9265,7 +9271,9 @@ function getSerialBackend(): SerialBackendClient {
   client.onEvent((event: SerialBackendEvent) => {
     if (event.type === 'screen' && !authSession.isAccessAllowed) return;
     for (const window of BrowserWindow.getAllWindows()) {
-      if (!window.isDestroyed()) window.webContents.send('serial:event', event);
+      if (!window.isDestroyed() && windowCloseCoordinators.has(window)) {
+        window.webContents.send('serial:event', event);
+      }
     }
   });
   serialBackend = client;

@@ -119,6 +119,61 @@ test('main process uses the native tooltip manager and closes auxiliary windows 
   assert.ok(closeTooltips >= 0 && closeTooltips < quit.indexOf('requestRendererCloseConfirmation'));
 });
 
+for (const channel of [
+  'backend:event',
+  'ssh:event',
+  'serial:event',
+  'rdp:event',
+  'update:result',
+]) {
+  test(`${channel} broadcasts reach main windows without serializing to auxiliary tooltips`, () => {
+    const main = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
+    const send = main.indexOf(`window.webContents.send('${channel}'`);
+    assert.ok(send >= 0);
+    const start = main.lastIndexOf('for (const window of BrowserWindow.getAllWindows())', send);
+    assert.ok(start >= 0);
+    let end = main.indexOf('{', start);
+    let depth = 1;
+    while (depth > 0 && ++end < main.length) {
+      if (main[end] === '{') depth += 1;
+      if (main[end] === '}') depth -= 1;
+    }
+    assert.equal(depth, 0);
+    const broadcast = stripTypeScriptTypes(main.slice(start, end + 1));
+    const received: string[] = [];
+    const window = (name: string, destroyed = false) => ({
+      isDestroyed: () => destroyed,
+      webContents: {
+        send: (sentChannel: string, payload: unknown) => {
+          assert.equal(sentChannel, channel);
+          assert.equal(payload, event);
+          received.push(name);
+        },
+      },
+    });
+    const primary = window('primary');
+    const secondary = window('secondary');
+    const closed = window('closed', true);
+    const tooltip = window('tooltip');
+    const otherAuxiliary = window('other-auxiliary');
+    const event = { type: 'vnc.frame', data: 'frame-payload' };
+    for (const visible of [true, false]) {
+      Object.assign(tooltip, { isVisible: () => visible });
+      received.length = 0;
+      runInNewContext(broadcast, {
+        BrowserWindow: {
+          getAllWindows: () => [tooltip, primary, closed, otherAuxiliary, secondary],
+        },
+        windowCloseCoordinators: new Set([primary, secondary, closed]),
+        event,
+        message: event,
+        result: event,
+      });
+      assert.deepEqual(received, ['primary', 'secondary']);
+    }
+  });
+}
+
 test('IP tooltip uses an owned native window above RDP without taking focus or mouse input', async () => {
   const { owner, popup, options, show } = harness();
   show();
