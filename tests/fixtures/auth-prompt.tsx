@@ -661,6 +661,9 @@ async function runWindowCloseTests() {
 
 async function runStartupUnlockTests() {
   const root = document.getElementById('root');
+  const style = document.createElement('style');
+  style.textContent = startupCss;
+  document.head.append(style);
   const remoteMessage = "Windows Hello isn't available in Remote Desktop.";
   const ready = { available: true, message: 'Windows Hello is ready.' };
   let checks = 0;
@@ -718,18 +721,42 @@ async function runStartupUnlockTests() {
     const toggle = root.querySelector<HTMLButtonElement>('button[aria-controls="startup-secret"]');
     assert.equal(input.type, 'password');
     assert.equal(toggle.getAttribute('aria-label'), 'Show password');
+    assert.equal(toggle.title, 'Show password');
+    assert.equal(toggle.textContent.trim(), '', 'startup visibility uses an icon without text');
+    assert.equal(toggle.type, 'button', 'visibility must not submit the login form');
+    assert.equal(toggle.querySelector('svg').getAttribute('aria-hidden'), 'true');
+    assert.ok(toggle.querySelector('circle'), 'masked password shows the eye icon');
+    for (const dark of [false, true]) {
+      document.documentElement.classList.toggle('dark', dark);
+      const icon = toggle.querySelector('svg');
+      assert.equal(toggle.getBoundingClientRect().width, 28);
+      assert.equal(toggle.getBoundingClientRect().height, 28);
+      assert.equal(icon.getBoundingClientRect().width, 16);
+      assert.equal(icon.getBoundingClientRect().height, 16);
+      assert.equal(getComputedStyle(input).paddingRight, '36px');
+      assert.ok(icon.getBoundingClientRect().right < input.getBoundingClientRect().right);
+    }
+    document.documentElement.classList.remove('dark');
+    const eyeMarkup = toggle.innerHTML;
     toggle.click();
     assert.equal(input.type, 'text');
     assert.equal(input.spellcheck, false, 'revealed startup secrets must bypass spellcheck');
     assert.equal(input.value, 'test-only-secret');
     assert.equal(toggle.getAttribute('aria-pressed'), 'true');
+    assert.equal(toggle.getAttribute('aria-label'), 'Hide password');
+    assert.equal(toggle.title, 'Hide password');
+    assert.equal(toggle.textContent.trim(), '');
+    assert.equal(toggle.querySelector('circle'), null, 'visible password shows the crossed eye');
+    assert.notEqual(toggle.innerHTML, eyeMarkup);
     toggle.click();
     assert.equal(input.type, 'password');
+    assert.equal(toggle.innerHTML, eyeMarkup, 'masking restores the eye icon');
     toggle.click();
     assert.equal(root.querySelector<HTMLButtonElement>('button[type="submit"]').disabled, false);
     root.querySelector('form').requestSubmit();
     assert.equal(toggle.disabled, true);
     assert.equal(input.type, 'password', 'verification must mask the field immediately');
+    assert.equal(toggle.innerHTML, eyeMarkup, 'verification restores the masked-state icon');
     await settle();
     assert.equal(toggle.disabled, false);
     assert.equal(toggle.getAttribute('aria-pressed'), 'false');
@@ -874,6 +901,7 @@ async function runStartupUnlockTests() {
   }
   assert.equal(mounts.length, 3, 'Hello, PIN, and password all mount without a Bitwarden check');
   assert.equal(startupBitwardenReads, 0);
+  style.remove();
 }
 
 async function runBitwardenPromptTests() {

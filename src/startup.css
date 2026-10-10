@@ -221,19 +221,41 @@ input {
 }
 
 .startup-password-field input {
-  padding-right: 116px;
+  padding-right: 36px;
 }
 
 .startup-password-toggle {
   position: absolute;
   inset: 4px 4px 4px auto;
-  padding: 0 8px;
+  display: grid;
+  width: 28px;
+  padding: 0;
+  place-items: center;
   border: 0;
   border-radius: 4px;
   background: transparent;
-  color: inherit;
+  color: #a1a1aa;
   cursor: pointer;
-  font-size: 11px;
+}
+
+.startup-password-toggle svg {
+  width: 16px;
+  height: 16px;
+  pointer-events: none;
+}
+
+.startup-password-toggle:hover:not(:disabled) {
+  background: #27272a;
+  color: #f3f4f6;
+}
+
+:root:not(.dark) .startup-password-toggle {
+  color: #71717a;
+}
+
+:root:not(.dark) .startup-password-toggle:hover:not(:disabled) {
+  background: #f4f4f5;
+  color: #111827;
 }
 
 .startup-password-toggle:focus-visible {
