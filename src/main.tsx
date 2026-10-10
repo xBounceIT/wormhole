@@ -120,8 +120,18 @@ function showUnlock(startup: WormholeStartupSnapshot) {
   visibility.setAttribute('aria-controls', input.id);
   function setPasswordVisible(visible: boolean) {
     input.type = visible ? 'text' : 'password';
-    visibility.textContent = visible ? 'Hide password' : 'Show password';
-    visibility.setAttribute('aria-label', visibility.textContent);
+    const label = visible ? 'Hide password' : 'Show password';
+    visibility.innerHTML = `
+      <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+        stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        ${
+          visible
+            ? '<path d="M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.444 2.49M14.084 14.158a3 3 0 0 1-4.242-4.242M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143M2 2l20 20" />'
+            : '<path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0" /><circle cx="12" cy="12" r="3" />'
+        }
+      </svg>`;
+    visibility.setAttribute('aria-label', label);
+    visibility.title = label;
     visibility.setAttribute('aria-pressed', String(visible));
   }
   setPasswordVisible(false);
