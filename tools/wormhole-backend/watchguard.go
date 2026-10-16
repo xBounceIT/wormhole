@@ -301,8 +301,10 @@ func prepareWatchguardSAML(
 		return nil, err
 	}
 	baseURL, _ := url.Parse(base)
-	urls := make([]string, 0, 3)
-	for _, path := range []string{"/auth/saml", "/auth/saml/login", "/saml/login"} {
+	// /auth/saml serves the SP configuration/metadata page, not the VPN login.
+	// A successful response there never redirects to the IdP or triggers browser fallback.
+	urls := make([]string, 0, 2)
+	for _, path := range []string{"/auth/saml/login", "/saml/login"} {
 		candidate := *baseURL
 		candidate.Path = path
 		candidate.RawQuery = "from=sslvpn_client"

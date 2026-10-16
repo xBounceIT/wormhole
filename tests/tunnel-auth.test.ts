@@ -226,7 +226,6 @@ function browserAuthHarness(
     { filename: popupFilename },
   );
   const urls = (event.urls as string[] | undefined) ?? [
-    'https://firebox.example.test/auth/saml?from=sslvpn_client',
     'https://firebox.example.test/auth/saml/login?from=sslvpn_client',
     'https://firebox.example.test/saml/login?from=sslvpn_client',
   ];
@@ -334,9 +333,8 @@ test('WatchGuard can reach the last fallback and only responds once after succes
   const auth = browserAuthHarness(t);
   await setImmediate();
   await auth.fail(0);
-  await auth.fail(1);
-  assert.equal(auth.loads[2].url, auth.urls[2]);
-  auth.loads[2].resolve();
+  assert.equal(auth.loads[1].url, auth.urls[1]);
+  auth.loads[1].resolve();
   auth.window.webContents.emit(
     'did-navigate',
     {},
@@ -344,7 +342,7 @@ test('WatchGuard can reach the last fallback and only responds once after succes
   );
   await auth.finished;
   auth.expire();
-  auth.window.webContents.emit('did-fail-load', {}, -105, '', auth.urls[2], true);
+  auth.window.webContents.emit('did-fail-load', {}, -105, '', auth.urls[1], true);
   assert.equal(auth.responses.length, 1);
   assert.equal(auth.responses[0].cancelled, false);
   assert.equal(auth.responses[0].browserFailure, undefined);
@@ -756,7 +754,7 @@ test('WatchGuard HTTP fallback preserves IdP errors and ends after the last unav
     auth.loads[index].resolve();
   }
   await auth.finished;
-  assert.equal(auth.loads.length, 3);
+  assert.equal(auth.loads.length, auth.urls.length);
   assert.equal(auth.responses[0]?.browserFailure, 'load');
 });
 
@@ -895,8 +893,8 @@ for (const status of [404, 410]) {
 for (const origin of ['https://FIREBOX.example.test:443', 'https://[2001:0db8:0:0:0:0:0:1]:443']) {
   test(`WatchGuard HTTP fallback matches Chromium URL normalization for ${origin}`, async (t) => {
     const urls = [
-      `${origin}/auth/saml?from=sslvpn_client`,
       `${origin}/auth/saml/login?from=sslvpn_client`,
+      `${origin}/saml/login?from=sslvpn_client`,
     ];
     const auth = browserAuthHarness(t, { urls });
     await setImmediate();
