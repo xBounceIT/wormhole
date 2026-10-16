@@ -299,14 +299,35 @@ func TestBuildWatchguardProfileFromManualMaterial(t *testing.T) {
 	}
 }
 
-func TestPrepareWatchguardSAMLUsesBrowserResultAndDownloadsWithCookies(t *testing.T) {
+func TestPrepareWatchguardSAMLStartsProviderLoginAndDownloadsWithCookies(t *testing.T) {
 	bundle := testWatchguardBundle(t, map[string]string{
 		"client.ovpn": "client\nca ca.crt\ncert client.crt\nkey client.pem\nremote firebox.example.test 443 tcp\n",
 		"ca.crt":      "CA", "client.crt": "CERT", "client.pem": "KEY",
 	})
+	metadataRequests, loginRequests, providerRequests := 0, 0, 0
 	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/auth/saml":
+			// The metadata endpoint can succeed without ever starting authentication.
+			metadataRequests++
+			writer.WriteHeader(http.StatusOK)
+			return
+		case "/auth/saml/login":
+			loginRequests++
+			if request.URL.Query().Get("from") != "sslvpn_client" {
+				t.Error("SAML login did not request the VPN client flow")
+			}
+			http.Redirect(writer, request, "/test-idp/login", http.StatusFound)
+			return
+		case "/test-idp/login":
+			providerRequests++
+			_, _ = writer.Write([]byte("Provider sign-in"))
+			return
+		}
 		if request.URL.Query().Get("action") != "sslvpn_download" {
-			t.Fatalf("unexpected SAML follow-up: %s", request.URL.String())
+			t.Errorf("unexpected SAML follow-up: %s", request.URL.String())
+			http.NotFound(writer, request)
+			return
 		}
 		cookie, err := request.Cookie("session")
 		if err != nil || cookie.Value != "browser-cookie" {
@@ -321,8 +342,24 @@ func TestPrepareWatchguardSAMLUsesBrowserResultAndDownloadsWithCookies(t *testin
 		"AuthMode": 0, "UseSingleSignOn": true, "TrustServerCertificate": true,
 	})
 	ctx := withTunnelPromptHandler(context.Background(), func(_ context.Context, prompt tunnelPrompt) (string, error) {
-		if !prompt.Browser || len(prompt.URLs) != 3 || !prompt.IgnoreCertificateErrors {
+		if !prompt.Browser || len(prompt.URLs) == 0 || !prompt.IgnoreCertificateErrors {
 			t.Fatalf("unexpected browser prompt: %#v", prompt)
+		}
+		response, err := server.Client().Get(prompt.URLs[0])
+		if err != nil {
+			t.Fatalf("open SAML login: %v", err)
+		}
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusOK || response.Request.URL.Path != "/test-idp/login" {
+			t.Fatal("SAML browser did not reach the provider sign-in page")
+		}
+		if len(prompt.URLs) != 2 {
+			t.Fatalf("SAML login URLs = %v, want two login endpoints", prompt.URLs)
+		}
+		for index, path := range []string{"/auth/saml/login", "/saml/login"} {
+			if prompt.URLs[index] != server.URL+path+"?from=sslvpn_client" {
+				t.Fatalf("unexpected SAML login URL: %s", prompt.URLs[index])
+			}
 		}
 		result, _ := json.Marshal(watchguardSAMLResult{
 			Username: "saml-user", Token: "ephemeral-token",
@@ -340,6 +377,9 @@ func TestPrepareWatchguardSAMLUsesBrowserResultAndDownloadsWithCookies(t *testin
 	_ = json.Unmarshal(prepared, &settings)
 	if tunnelSettingString(settings, "Username") != "saml-user" || tunnelSettingString(settings, "Password") != "ephemeral-token" {
 		t.Fatalf("SAML credentials were not routed to OpenVPN: %s", prepared)
+	}
+	if metadataRequests != 0 || loginRequests != 1 || providerRequests != 1 {
+		t.Fatalf("SAML requests: metadata=%d login=%d provider=%d, want 0/1/1", metadataRequests, loginRequests, providerRequests)
 	}
 }
 
