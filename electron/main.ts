@@ -120,7 +120,10 @@ import {
   isMatchingOAuthRedirect,
   tunnelPromptValueMaxBytes,
   tunnelAuthPartition,
+  tunnelBrowserLoadFailure,
+  TunnelBrowserPromptTracker,
   type TunnelBrowserCompletion,
+  type TunnelBrowserFailure,
 } from './tunnel-auth.js';
 import {
   SerialBackendClient,
@@ -392,6 +395,7 @@ type NativeBackendCommand = {
   promptId?: string;
   value?: string;
   cancelled?: boolean;
+  browserFailure?: TunnelBrowserFailure;
   progressSessionId?: string;
   enabled?: boolean;
   path?: string;
@@ -2731,15 +2735,33 @@ function showCoordinatedMessageBox(
 }
 
 function enqueueTunnelBrowserAuth(backend: NativeBackendProcess, event: TunnelBrowserEvent): void {
+  const signal = backend.browserPrompts.begin(event.sessionId, event.promptId);
+  if (!signal) return;
   tunnelBrowserAuthQueue = tunnelBrowserAuthQueue
     .catch(() => undefined)
-    .then(() => runTunnelBrowserAuth(backend, event));
+    .then(() => runTunnelBrowserAuth(backend, event, signal))
+    .catch(async () => {
+      if (!signal.aborted) {
+        await backend
+          .respondTunnelPrompt({
+            leaseId: event.sessionId,
+            promptId: event.promptId,
+            value: '',
+            cancelled: false,
+            failure: 'session',
+          })
+          .catch(() => undefined);
+      }
+    })
+    .finally(() => backend.browserPrompts.finish(event.promptId, signal));
 }
 
 async function runTunnelBrowserAuth(
   backend: NativeBackendProcess,
   event: TunnelBrowserEvent,
+  signal?: AbortSignal,
 ): Promise<void> {
+  if (signal?.aborted) return;
   if (!authSession.isAccessAllowed || isQuitting) {
     await backend
       .respondTunnelPrompt({
@@ -2804,27 +2826,43 @@ async function runTunnelBrowserAuth(
   const finished = new Promise<void>((resolve) => {
     finish = resolve;
   });
-  const complete = async (cancelled: boolean, value = '') => {
+  const complete = async (cancelled: boolean, value = '', failure?: TunnelBrowserFailure) => {
     if (settled) return;
     settled = true;
     if (authTimeout) clearTimeout(authTimeout);
     if (!authWindow.isDestroyed()) authWindow.destroy();
     try {
-      await backend
-        .respondTunnelPrompt({
-          leaseId: event.sessionId,
-          promptId: event.promptId,
-          value,
-          cancelled,
-        })
-        .catch(() => undefined);
+      if (!signal?.aborted)
+        await backend
+          .respondTunnelPrompt({
+            leaseId: event.sessionId,
+            promptId: event.promptId,
+            value,
+            cancelled,
+            failure,
+          })
+          .catch(() => undefined);
     } finally {
       finish();
     }
   };
-  authTimeout = setTimeout(() => void complete(true), nativeConnectionTimeoutMs - 5_000);
+  const abort = () => void complete(true);
+  signal?.addEventListener('abort', abort, { once: true });
+  authTimeout = setTimeout(
+    () => void complete(false, '', 'timeout'),
+    nativeConnectionTimeoutMs - 5_000,
+  );
   const matchesOAuthRedirect = (current: URL) =>
     event.completion === 'oauth-code' && isMatchingOAuthRedirect(current, event.redirectPrefix!);
+  const nextCandidate = (failure: TunnelBrowserFailure) => {
+    if (settled) return;
+    candidate++;
+    if (candidate < event.urls.length) {
+      void authWindow.loadURL(event.urls[candidate]).catch(() => undefined);
+    } else {
+      void complete(false, '', failure);
+    }
+  };
   const inspectNavigation = async (rawURL: string) => {
     if (settled) return;
     let current: URL;
@@ -2837,27 +2875,29 @@ async function runTunnelBrowserAuth(
       if (!matchesOAuthRedirect(current)) return;
       const value = encodeTunnelOAuthCallback(current);
       if (value === undefined) {
-        await complete(true);
+        await complete(false, '', 'response');
         return;
       }
       await complete(false, value);
       return;
     }
-    if (current.origin !== fireboxOrigin) return;
+    if (event.completion !== 'query-token' || current.origin !== fireboxOrigin) return;
     const username = current.searchParams.get('user')?.trim() ?? '';
     const token = current.searchParams.get('token') ?? '';
-    if (
-      !username ||
-      !token ||
-      username.length > 1024 ||
-      Buffer.byteLength(token, 'utf8') > tunnelPromptValueMaxBytes
-    )
+    if (!username || !token) return;
+    if (username.length > 1024 || Buffer.byteLength(token, 'utf8') > tunnelPromptValueMaxBytes) {
+      await complete(false, '', 'response');
       return;
+    }
     const cookies = await browserSession.cookies.get({ url: cookieScopeURL });
+    if (cookies.length > 256) {
+      await complete(false, '', 'response');
+      return;
+    }
     const value = JSON.stringify({
       username,
       token,
-      cookies: cookies.slice(0, 256).map((cookie) => ({
+      cookies: cookies.map((cookie) => ({
         name: cookie.name,
         value: cookie.value,
         path: cookie.path || '/',
@@ -2867,25 +2907,38 @@ async function runTunnelBrowserAuth(
       })),
     });
     if (Buffer.byteLength(value, 'utf8') > tunnelPromptValueMaxBytes) {
-      await complete(true);
+      await complete(false, '', 'response');
       return;
     }
     await complete(false, value);
   };
+  let inspectingCookie = false;
   const inspectCookie = async () => {
-    if (settled || event.completion !== 'cookie') return;
-    const cookies = await browserSession.cookies.get({ url: cookieScopeURL });
-    const cookie = cookies.find(
-      (candidate) =>
-        candidate.name === event.cookieName &&
-        candidate.value &&
-        (!event.requireHttpOnly || candidate.httpOnly),
-    );
-    if (cookie) await complete(false, cookie.value);
+    if (settled || inspectingCookie || event.completion !== 'cookie') return;
+    inspectingCookie = true;
+    try {
+      const cookies = await browserSession.cookies.get({ url: cookieScopeURL });
+      const cookie = cookies.find(
+        (candidate) =>
+          candidate.name === event.cookieName &&
+          candidate.value &&
+          (!event.requireHttpOnly || candidate.httpOnly),
+      );
+      if (cookie) {
+        if (Buffer.byteLength(cookie.value, 'utf8') > tunnelPromptValueMaxBytes) {
+          await complete(false, '', 'response');
+        } else {
+          await complete(false, cookie.value);
+        }
+      }
+    } finally {
+      inspectingCookie = false;
+    }
   };
-  const clearCompletionCookie = async () => {
+  const clearCompletionCookie = async (isCurrent = () => true) => {
     if (event.completion !== 'cookie') return;
     const cookies = await browserSession.cookies.get({ url: cookieScopeURL });
+    if (!isCurrent()) return;
     await Promise.all(
       cookies
         .filter((cookie) => cookie.name === event.cookieName)
@@ -2907,8 +2960,23 @@ async function runTunnelBrowserAuth(
     }
     return { action: 'deny' };
   });
-  authWindow.webContents.on('did-navigate', (_event, url) => void inspectNavigation(url));
-  authWindow.webContents.on('did-navigate-in-page', (_event, url) => void inspectNavigation(url));
+  const inspectNavigationSafely = (url: string) =>
+    void inspectNavigation(url).catch(() => complete(false, '', 'session'));
+  authWindow.webContents.on('did-navigate', (_event, url, status) => {
+    if (
+      event.completion === 'query-token' &&
+      (status === 404 || status === 410) &&
+      url === event.urls[candidate]
+    ) {
+      nextCandidate('load');
+      return;
+    }
+    inspectNavigationSafely(url);
+  });
+  authWindow.webContents.on('did-navigate-in-page', (_event, url, isMainFrame) => {
+    if (isMainFrame) inspectNavigationSafely(url);
+  });
+  authWindow.webContents.on('render-process-gone', () => void complete(false, '', 'session'));
   const captureOAuthRedirect = (
     navigationEvent: Electron.Event<{ isMainFrame: boolean; url: string }>,
   ) => {
@@ -2929,7 +2997,8 @@ async function runTunnelBrowserAuth(
   // Chromium reports server-side redirects through will-redirect rather than will-navigate; catch
   // the callback before localhost:2023 can fail with ERR_CONNECTION_REFUSED.
   authWindow.webContents.on('will-redirect', captureOAuthRedirect);
-  authWindow.webContents.on('did-fail-load', (_event, _code, _description, url, isMainFrame) => {
+  authWindow.webContents.on('did-fail-load', (_event, code, _description, url, isMainFrame) => {
+    const failure = tunnelBrowserLoadFailure(code);
     if (!isMainFrame || settled) return;
     // Keep a defensive fallback for Chromium versions that report an unreachable loopback target
     // without first delivering a cancellable navigation event.
@@ -2941,12 +3010,8 @@ async function runTunnelBrowserAuth(
     } catch {
       // A malformed failure URL cannot be an OAuth callback and follows normal fallback handling.
     }
-    candidate++;
-    if (candidate < event.urls.length) {
-      void authWindow.loadURL(event.urls[candidate]).catch(() => undefined);
-    } else {
-      void complete(true);
-    }
+    if (failure === undefined) return;
+    nextCandidate(failure);
   });
   authWindow.once('closed', () => {
     mcpApprovalWindowCoordinator.forgetTunnelAuthWindow(authWindow);
@@ -2956,20 +3021,49 @@ async function runTunnelBrowserAuth(
   authWindow.once('ready-to-show', () =>
     mcpApprovalWindowCoordinator.presentTunnelAuthWindow(authWindow),
   );
-  const cookieTimer =
-    event.completion === 'cookie' ? setInterval(() => void inspectCookie(), 250) : undefined;
+  let cookieTimer: NodeJS.Timeout | undefined;
+  let cookieFlowStarted = false;
   authWindow.once('closed', () => {
     if (cookieTimer) clearInterval(cookieTimer);
   });
-  await clearCompletionCookie().catch(() => undefined);
-  await authWindow.loadURL(event.urls[0]).catch(() => complete(true));
+  const initialize = async () => {
+    await clearCompletionCookie(() => !settled);
+    if (!settled) {
+      if (event.completion === 'cookie') {
+        cookieFlowStarted = true;
+        cookieTimer = setInterval(
+          () => void inspectCookie().catch(() => complete(false, '', 'session')),
+          250,
+        );
+      }
+      // Load events own retries and errors. An old rejected promise must not end a newer load.
+      void authWindow.loadURL(event.urls[0]).catch(() => undefined);
+    }
+  };
+  void initialize().catch(() => complete(false, '', 'session'));
   await finished;
+  signal?.removeEventListener('abort', abort);
   // Keep the IdP profile persistent, but never retain Fortinet's ephemeral VPN credential in
   // Chromium's cookie store after it has crossed the one-shot Go sidecar boundary.
-  await clearCompletionCookie().catch(() => undefined);
+  if (cookieFlowStarted) {
+    let cleanupCurrent = true;
+    let cleanupTimeout: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([
+        clearCompletionCookie(() => cleanupCurrent).catch(() => undefined),
+        new Promise<void>((resolve) => {
+          cleanupTimeout = setTimeout(resolve, 1_000);
+        }),
+      ]);
+    } finally {
+      cleanupCurrent = false;
+      if (cleanupTimeout) clearTimeout(cleanupTimeout);
+    }
+  }
 }
 
 class NativeBackendProcess {
+  readonly browserPrompts = new TunnelBrowserPromptTracker();
   private child: ReturnType<typeof spawn> | undefined;
   private startPromise: Promise<void> | undefined;
   private stopPromise: Promise<void> | undefined;
@@ -3104,6 +3198,7 @@ class NativeBackendProcess {
     promptId: string;
     value: string;
     cancelled: boolean;
+    failure?: TunnelBrowserFailure;
   }): Promise<void> {
     const response = await this.send({
       action: 'tunnel.prompt-response',
@@ -3111,6 +3206,7 @@ class NativeBackendProcess {
       promptId: request.promptId,
       value: request.value,
       cancelled: request.cancelled,
+      browserFailure: request.failure,
     });
     if (!response.ok) throw new Error(response.error || 'Could not answer the VPN prompt.');
   }
@@ -3265,6 +3361,12 @@ class NativeBackendProcess {
         continue;
       }
       if ('type' in message && typeof message.type === 'string') {
+        if (message.type === 'tunnel.prompt-closed') {
+          this.browserPrompts.close(
+            'sessionId' in message ? message.sessionId : undefined,
+            'promptId' in message ? message.promptId : undefined,
+          );
+        }
         if (message.type === 'tunnel.browser') {
           const event = parseTunnelBrowserEvent(message);
           if (event) enqueueTunnelBrowserAuth(this, event);
@@ -3291,6 +3393,7 @@ class NativeBackendProcess {
   }
 
   private rejectAll(error: Error): void {
+    this.browserPrompts.clear();
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();
   }
