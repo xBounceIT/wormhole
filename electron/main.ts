@@ -2935,15 +2935,22 @@ async function runTunnelBrowserAuth(
       inspectingCookie = false;
     }
   };
+  let cookieRemovals: Promise<PromiseSettledResult<void>[]> | undefined;
   const clearCompletionCookie = async (isCurrent = () => true) => {
     if (event.completion !== 'cookie') return;
     const cookies = await browserSession.cookies.get({ url: cookieScopeURL });
     if (!isCurrent()) return;
-    await Promise.all(
+    cookieRemovals = Promise.allSettled(
       cookies
         .filter((cookie) => cookie.name === event.cookieName)
-        .map((cookie) => browserSession.cookies.remove(cookieScopeURL, cookie.name)),
+        .map((cookie) =>
+          Promise.resolve().then(() => browserSession.cookies.remove(cookieScopeURL, cookie.name)),
+        ),
     );
+    const results = await cookieRemovals;
+    if (results.some((result) => result.status === 'rejected')) {
+      throw new Error('VPN authentication cookie cleanup failed.');
+    }
   };
   authWindow.webContents.setWindowOpenHandler(({ url }) => {
     try {
@@ -2966,7 +2973,7 @@ async function runTunnelBrowserAuth(
     if (
       event.completion === 'query-token' &&
       (status === 404 || status === 410) &&
-      url === event.urls[candidate]
+      url === initialURLs[candidate]?.href
     ) {
       nextCandidate('load');
       return;
@@ -3060,6 +3067,9 @@ async function runTunnelBrowserAuth(
       if (cleanupTimeout) clearTimeout(cleanupTimeout);
     }
   }
+  // Lookup can time out without side effects. Issued removals cannot be cancelled: retain
+  // ownership until every mutation settles, including when startup was cancelled.
+  await cookieRemovals;
 }
 
 class NativeBackendProcess {

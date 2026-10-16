@@ -225,7 +225,7 @@ function browserAuthHarness(
     },
     { filename: popupFilename },
   );
-  const urls = [
+  const urls = (event.urls as string[] | undefined) ?? [
     'https://firebox.example.test/auth/saml?from=sslvpn_client',
     'https://firebox.example.test/auth/saml/login?from=sslvpn_client',
     'https://firebox.example.test/saml/login?from=sslvpn_client',
@@ -516,6 +516,77 @@ test('slow Fortinet cleanup is bounded and cannot delete a later login cookie', 
   await setImmediate();
   assert.equal(removals, 0);
   assert.equal(auth.windows.length, 2);
+  auth.window.destroy();
+  await next;
+});
+
+for (const peerFails of [false, true]) {
+  test(`Fortinet retains cleanup ownership after ${peerFails ? 'a peer failure' : 'a timeout'}`, async (t) => {
+    let release!: () => void;
+    let reads = 0;
+    let removals = 0;
+    const auth = browserAuthHarness(t, fortinetEvent, {
+      get: async () => {
+        reads++;
+        if (reads === 2) return [{ name: 'SVPNCOOKIE', value: 'ephemeral', httpOnly: true }];
+        if (reads === 3)
+          return [
+            { name: 'SVPNCOOKIE', value: 'old-one', httpOnly: true },
+            { name: 'SVPNCOOKIE', value: 'old-two', httpOnly: true },
+          ];
+        return [];
+      },
+      remove: async () => {
+        if (++removals === 1)
+          return new Promise<void>((resolve) => {
+            release = resolve;
+          });
+        if (peerFails) throw new Error('synthetic removal failure');
+      },
+    });
+    await setImmediate();
+    await auth.tick();
+    const next = auth.enqueue({ sessionId: 'lease-two', promptId: 'prompt-two' });
+    try {
+      auth.expireCleanup();
+      await setImmediate();
+      assert.equal(removals, 2);
+      assert.equal(auth.windows.length, 1);
+      assert.equal(auth.responses.length, 1);
+    } finally {
+      release();
+    }
+    await setImmediate();
+    assert.equal(auth.windows.length, 2);
+    auth.window.destroy();
+    await next;
+  });
+}
+
+test('cancelling startup does not release ownership of an in-flight cookie removal', async (t) => {
+  let release!: () => void;
+  let reads = 0;
+  const auth = browserAuthHarness(t, fortinetEvent, {
+    get: async () => (++reads === 1 ? [{ name: 'SVPNCOOKIE', value: 'stale' }] : []),
+    remove: async () =>
+      new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+  });
+  await setImmediate();
+  const next = auth.enqueue({ sessionId: 'lease-two', promptId: 'prompt-two' });
+  auth.emit({ type: 'tunnel.prompt-closed', sessionId: 'lease', promptId: 'prompt' });
+  try {
+    await setImmediate();
+    assert.equal(auth.windows.length, 1);
+    assert.equal(auth.loads.length, 0);
+    assert.deepEqual(auth.responses, []);
+  } finally {
+    release();
+  }
+  await setImmediate();
+  assert.equal(auth.windows.length, 2);
+  assert.equal(auth.loads.length, 1);
   auth.window.destroy();
   await next;
 });
@@ -816,6 +887,23 @@ for (const status of [404, 410]) {
     auth.loads[0].resolve();
     await setImmediate();
     assert.equal(auth.loads[1]?.url, auth.urls[1]);
+    assert.equal(auth.window.isDestroyed(), false);
+    assert.deepEqual(auth.responses, []);
+  });
+}
+
+for (const origin of ['https://FIREBOX.example.test:443', 'https://[2001:0db8:0:0:0:0:0:1]:443']) {
+  test(`WatchGuard HTTP fallback matches Chromium URL normalization for ${origin}`, async (t) => {
+    const urls = [
+      `${origin}/auth/saml?from=sslvpn_client`,
+      `${origin}/auth/saml/login?from=sslvpn_client`,
+    ];
+    const auth = browserAuthHarness(t, { urls });
+    await setImmediate();
+    auth.window.webContents.emit('did-navigate', {}, new URL(urls[0]).href, 404, 'Not found');
+    auth.loads[0].resolve();
+    await setImmediate();
+    assert.equal(auth.loads[1]?.url, urls[1]);
     assert.equal(auth.window.isDestroyed(), false);
     assert.deepEqual(auth.responses, []);
   });
