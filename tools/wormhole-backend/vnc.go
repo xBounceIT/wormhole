@@ -59,6 +59,7 @@ type backendCommand struct {
 	PromptID          string `json:"promptId,omitempty"`
 	Value             string `json:"value,omitempty"`
 	Cancelled         bool   `json:"cancelled,omitempty"`
+	BrowserFailure    string `json:"browserFailure,omitempty"`
 	X                 int    `json:"x,omitempty"`
 	Y                 int    `json:"y,omitempty"`
 	Buttons           uint8  `json:"buttons,omitempty"`
@@ -240,6 +241,16 @@ type pendingBackendOperation struct {
 type tunnelPromptResult struct {
 	value     string
 	cancelled bool
+	failure   string
+}
+
+// Only fixed, non-secret diagnostics may cross the browser authentication boundary.
+var tunnelBrowserFailureMessages = map[string]string{
+	"load":        "VPN sign-in page could not be loaded. Check the gateway address, port and network connection.",
+	"certificate": "VPN sign-in page certificate validation failed. Check the gateway certificate and trust settings.",
+	"timeout":     "VPN browser authentication timed out.",
+	"session":     "VPN browser authentication could not access its sign-in session. Please retry.",
+	"response":    "VPN browser authentication returned an invalid or oversized response.",
 }
 
 func newVncManager(
@@ -535,6 +546,9 @@ func (m *vncManager) promptTunnel(leaseID string) tunnelPromptHandler {
 		}()
 		select {
 		case result := <-pending.result:
+			if message := tunnelBrowserFailureMessages[result.failure]; message != "" {
+				return "", errors.New(message)
+			}
 			if result.cancelled {
 				return "", errors.New("VPN authentication was cancelled")
 			}
@@ -557,7 +571,7 @@ func (m *vncManager) respondTunnelPrompt(command backendCommand) {
 		return
 	}
 	m.respond(command.ID, nil)
-	pending.result <- tunnelPromptResult{value: command.Value, cancelled: command.Cancelled}
+	pending.result <- tunnelPromptResult{value: command.Value, cancelled: command.Cancelled, failure: command.BrowserFailure}
 }
 
 type tunnelRouteHandler func(context.Context) (string, error)
@@ -1577,6 +1591,9 @@ func validateBackendCommand(command backendCommand) error {
 	case "tunnel.prompt-response":
 		if command.PromptID == "" || len(command.PromptID) > 128 || len(command.Value) > 16*1024 {
 			return errors.New("VPN authentication response is invalid")
+		}
+		if command.BrowserFailure != "" && tunnelBrowserFailureMessages[command.BrowserFailure] == "" {
+			return errors.New("VPN browser authentication failure is invalid")
 		}
 	case "tunnel.route-response":
 		if command.PromptID == "" || len(command.PromptID) > 128 {

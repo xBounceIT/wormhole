@@ -687,6 +687,73 @@ func TestTunnelBrokerRelaysInteractivePromptResponse(t *testing.T) {
 	}
 }
 
+func TestTunnelBrokerRelaysBrowserFailuresAndCancellation(t *testing.T) {
+	for _, tc := range []struct {
+		failure   string
+		cancelled bool
+		want      string
+	}{
+		{"load", false, "VPN sign-in page could not be loaded. Check the gateway address, port and network connection."},
+		{"certificate", false, "VPN sign-in page certificate validation failed. Check the gateway certificate and trust settings."},
+		{"timeout", false, "VPN browser authentication timed out."},
+		{"session", false, "VPN browser authentication could not access its sign-in session. Please retry."},
+		{"response", false, "VPN browser authentication returned an invalid or oversized response."},
+		{"", true, "VPN authentication was cancelled"},
+	} {
+		t.Run(tc.want, func(t *testing.T) {
+			outputReader, outputWriter := io.Pipe()
+			defer outputReader.Close()
+			defer outputWriter.Close()
+			manager := newVncManager(nil, &backendLineWriter{writer: bufio.NewWriter(outputWriter)})
+			defer manager.close()
+			responses := json.NewDecoder(outputReader)
+			result := make(chan error, 1)
+			go func() {
+				value, err := manager.promptTunnel("lease-one")(context.Background(), tunnelPrompt{
+					Title: "WatchGuard SAML sign-in", Browser: true,
+				})
+				if value != "" {
+					result <- errors.New("failed authentication returned a credential")
+					return
+				}
+				result <- err
+			}()
+			var event backendEvent
+			if err := responses.Decode(&event); err != nil || event.Type != "tunnel.browser" {
+				t.Fatalf("browser event = %#v, %v", event, err)
+			}
+			go manager.handle(backendCommand{
+				ID: "answer-one", Action: "tunnel.prompt-response", SessionID: "lease-one",
+				PromptID: event.PromptID, Cancelled: tc.cancelled, BrowserFailure: tc.failure,
+			})
+			var response backendResponse
+			if err := responses.Decode(&response); err != nil || !response.OK {
+				t.Fatalf("prompt response = %#v, %v", response, err)
+			}
+			var closed backendEvent
+			if err := responses.Decode(&closed); err != nil || closed.Type != "tunnel.prompt-closed" {
+				t.Fatalf("closed event = %#v, %v", closed, err)
+			}
+			if err := <-result; err == nil || err.Error() != tc.want {
+				t.Fatalf("authentication error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestTunnelBrokerValidatesBrowserFailureCategories(t *testing.T) {
+	for _, failure := range []string{"", "load", "certificate", "timeout", "session", "response", "unexpected", "https://gateway/?token=private", strings.Repeat("x", 1024)} {
+		command := backendCommand{
+			ID: "answer-one", Action: "tunnel.prompt-response", SessionID: "lease-one",
+			PromptID: "prompt-one", BrowserFailure: failure,
+		}
+		valid := failure == "" || failure == "load" || failure == "certificate" || failure == "timeout" || failure == "session" || failure == "response"
+		if err := validateBackendCommand(command); (err == nil) != valid {
+			t.Fatalf("failure category %q: %v", failure, err)
+		}
+	}
+}
+
 func TestTunnelBrokerClosesDistinctSidecarsConcurrently(t *testing.T) {
 	manager := newVncManager(nil, nil)
 	entered := make(chan struct{}, 2)

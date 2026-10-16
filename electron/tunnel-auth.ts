@@ -1,7 +1,46 @@
 import { createHash } from 'node:crypto';
 
 export type TunnelBrowserCompletion = 'query-token' | 'oauth-code' | 'cookie';
+export type TunnelBrowserFailure = 'load' | 'certificate' | 'timeout' | 'session' | 'response';
 export const tunnelPromptValueMaxBytes = 16 * 1024;
+
+// Chromium aborts superseded loads during redirects. These do not end authentication.
+// Only pass a fixed category across IPC: load descriptions and URLs can contain secrets.
+export function tunnelBrowserLoadFailure(code: number): TunnelBrowserFailure | undefined {
+  if (code === -3) return undefined; // ERR_ABORTED
+  return code <= -200 && code > -300 ? 'certificate' : 'load';
+}
+
+// Prompt IDs are local to a backend process. Keep queued and visible prompts tied to that owner.
+export class TunnelBrowserPromptTracker {
+  private readonly prompts = new Map<string, { sessionId: string; controller: AbortController }>();
+
+  begin(sessionId: string, promptId: string): AbortSignal | undefined {
+    if (this.prompts.has(promptId)) return undefined;
+    const controller = new AbortController();
+    this.prompts.set(promptId, { sessionId, controller });
+    return controller.signal;
+  }
+
+  finish(promptId: string, signal: AbortSignal): void {
+    if (this.prompts.get(promptId)?.controller.signal === signal) this.prompts.delete(promptId);
+  }
+
+  close(sessionId: unknown, promptId: unknown): void {
+    if (typeof promptId !== 'string') return;
+    const prompt = this.prompts.get(promptId);
+    if (!prompt || prompt.sessionId !== sessionId) return;
+    this.prompts.delete(promptId);
+    prompt.controller.abort();
+  }
+
+  clear(): void {
+    const prompts = [...this.prompts.values()];
+    this.prompts.clear();
+    for (const prompt of prompts) prompt.controller.abort();
+  }
+}
+
 export type TunnelAuthPartitionRequest =
   | { completion: 'cookie' | 'oauth-code' }
   | {
