@@ -18,6 +18,7 @@ import {
 } from '../src/session-lifecycle.ts';
 import { WebSessionAttemptTracker } from '../electron/web-session-attempt.ts';
 import {
+  connectionEditorCredentialSelectionIsComplete,
   connectionInlinePasswordAction,
   connectionUsesSavedCredentials,
 } from '../src/credential-state.ts';
@@ -42,7 +43,13 @@ const original: ConnectionEditForm = {
   useSavedCredentials: true,
   credential: 'inherit',
   serial: { baudRate: 9600, dataBits: 8, stopBits: 1, parity: 0, flowControl: 0 },
-  rdp: { domain: '', redirectClipboard: true },
+  rdp: {
+    domain: '',
+    gatewayCredentialId: '',
+    gatewayUseSameCreds: false,
+    gatewayHostname: '',
+    redirectClipboard: true,
+  },
 };
 
 test('only live RDP sessions restart after editing; other protocols keep their existing behavior', () => {
@@ -68,18 +75,29 @@ test('renaming, editing notes, or saving unchanged defaults preserves the sessio
     connectionEditRequiresReconnect(original, {
       ...original,
       serial: { ...(original.serial as object) },
-      rdp: { redirectClipboard: true, domain: '' },
+      rdp: { ...(original.rdp as object) },
     }),
     false,
   );
 });
 
-test('connection settings, password actions, and nested protocol options require reconnection', () => {
+test('connection settings and non-authentication protocol options still require reconnection', () => {
   for (const [field, value] of Object.entries(original)) {
-    if (field === 'name' || field === 'notes') continue;
+    if (
+      [
+        'name',
+        'notes',
+        'username',
+        'inlinePassword',
+        'removeInlinePassword',
+        'useSavedCredentials',
+        'credential',
+      ].includes(field)
+    )
+      continue;
     const changed =
       typeof value === 'object'
-        ? { ...value, [Object.keys(value)[0]]: 'changed' }
+        ? { ...value, [field === 'rdp' ? 'redirectClipboard' : Object.keys(value)[0]]: 'changed' }
         : typeof value === 'boolean'
           ? !value
           : `${value}-changed`;
@@ -94,6 +112,40 @@ test('connection settings, password actions, and nested protocol options require
   assert.equal(connectionEditRequiresReconnect(original, { ...original, rdp: 'changed' }), true);
 });
 
+test('authentication changes take effect on the next connection without restarting the current one', () => {
+  for (const change of [
+    { username: 'bob' },
+    { inlinePassword: 'test-password' },
+    { removeInlinePassword: true },
+    { useSavedCredentials: false },
+    { credential: 'saved-credential' },
+    { credential: 'none' },
+    { rdp: { ...(original.rdp as object), domain: 'EXAMPLE' } },
+    { rdp: { ...(original.rdp as object), gatewayCredentialId: 'gateway-credential' } },
+    { rdp: { ...(original.rdp as object), gatewayUseSameCreds: true } },
+  ]) {
+    assert.equal(connectionEditRequiresReconnect(original, { ...original, ...change }), false);
+    assert.equal(
+      connectionEditRequiresReconnect(original, { ...original, ...change, host: 'other.example' }),
+      true,
+    );
+  }
+  const rdp = { redirectClipboard: true, gatewayHostname: '' };
+  assert.equal(connectionEditRequiresReconnect(original, { ...original, rdp }), false);
+  assert.equal(connectionEditRequiresReconnect({ ...original, rdp }, original), false);
+  assert.equal(
+    connectionEditRequiresReconnect(original, {
+      ...original,
+      rdp: { ...rdp, domain: 'EXAMPLE', gatewayHostname: 'gateway.example' },
+    }),
+    true,
+  );
+  assert.equal(
+    connectionEditRequiresReconnect(original, { ...original, rdp: { ...rdp, newOption: true } }),
+    true,
+  );
+});
+
 const app = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
 const rdpDefaultsStart = app.indexOf('const defaultRdpSettings:');
 const rdpDefaultsEnd = app.indexOf('\nconst rootFolderSelectionValue', rdpDefaultsStart);
@@ -101,9 +153,9 @@ assert.ok(rdpDefaultsStart >= 0 && rdpDefaultsEnd > rdpDefaultsStart);
 const defaultRdpSettings = runInNewContext(
   `${stripTypeScriptTypes(app.slice(rdpDefaultsStart, rdpDefaultsEnd))}\ndefaultRdpSettings;`,
 );
-function handlerSource(name: string, next: string): string {
-  const start = app.indexOf(`  ${name}`);
-  const end = app.indexOf(`\n  ${next}`, start);
+function handlerSource(name: string, next: string, indent = '  '): string {
+  const start = app.indexOf(`${indent}${name}`);
+  const end = app.indexOf(`\n${indent}${next}`, start);
   assert.ok(start >= 0 && end > start);
   return stripTypeScriptTypes(app.slice(start, end));
 }
@@ -112,6 +164,32 @@ const saveSource = handlerSource(
   'async function submitFolderDetails(',
 );
 const editSource = handlerSource('function openEditConnection(', 'function openEditFolder(');
+const credentialSelectionFor = runInNewContext(
+  `${handlerSource('function credentialSelectionFor(', 'function credentialSettingsFor(', '')}\ncredentialSelectionFor;`,
+);
+const credentialSettingsFor = runInNewContext(
+  `${handlerSource('function credentialSettingsFor(', 'function backendErrorMessage(', '')}\ncredentialSettingsFor;`,
+);
+
+test('only authentication options are exempt from the complete RDP settings comparison', () => {
+  const initial = { ...original, rdp: defaultRdpSettings };
+  for (const [key, value] of Object.entries(defaultRdpSettings)) {
+    const changed =
+      typeof value === 'boolean'
+        ? !value
+        : typeof value === 'number'
+          ? value + 1
+          : `${value}-changed`;
+    assert.equal(
+      connectionEditRequiresReconnect(initial, {
+        ...initial,
+        rdp: { ...defaultRdpSettings, [key]: changed },
+      }),
+      !['domain', 'gatewayCredentialId', 'gatewayUseSameCreds'].includes(key),
+      key,
+    );
+  }
+});
 
 function editorHarness(
   protocol: string,
@@ -121,6 +199,12 @@ function editorHarness(
     refreshError?: boolean;
     screenSize?: string;
     rdpStatus?: string;
+    node?: {
+      credentialMode?: number;
+      credentialId?: string;
+      hasInlineCredential?: boolean;
+      username?: string;
+    };
   } = {},
 ) {
   const node = {
@@ -131,6 +215,7 @@ function editorHarness(
     host: protocol === 'serial' ? 'COM1' : 'server.example',
     port: protocol === 'serial' ? undefined : 22,
     rdp: options.screenSize === undefined ? undefined : { screenSize: options.screenSize },
+    ...options.node,
   };
   const session = {
     id: 'session-connection',
@@ -163,7 +248,16 @@ function editorHarness(
     newConnectionForm: original,
     initialConnectionEditForm: { current: null },
     connectionNotesReady: true,
-    connectionEditorCredentialSelectionComplete: true,
+    get connectionEditorCredentialSelectionComplete() {
+      const form = context.newConnectionForm;
+      return connectionEditorCredentialSelectionIsComplete(
+        'saved',
+        ['ssh', 'rdp', 'vnc'].includes(form.protocol),
+        form.useSavedCredentials,
+        form.credential,
+      );
+    },
+    connectionCredentialSelectionError: 'Choose saved credentials.',
     editorBusy: false,
     canConfigureConnectionSshAutoSudo: false,
     defaultRdpSettings,
@@ -208,12 +302,12 @@ function editorHarness(
     autoSudoModeFor: () => 'inherit',
     tunnelModeFor: () => 'inherit',
     connectionUsesSavedCredentials,
-    credentialSelectionFor: () => 'inherit',
+    credentialSelectionFor,
     serialSettingsFromNode: () => original.serial,
     effectiveSshAutoSudoMode: () => 'inherit',
     connectionProtocolSupportsTunnel,
     tunnelValueFor,
-    credentialSettingsFor: () => ({ mode: 0, credentialId: '' }),
+    credentialSettingsFor,
     connectionInlinePasswordAction,
     autoSudoValueFor: () => null,
     connectionEditRequiresReconnect,
@@ -277,6 +371,179 @@ function editorHarness(
   };
 }
 
+for (const protocol of ['ssh', 'rdp', 'vnc']) {
+  test(`${protocol}: invalid saved credential selections cannot persist or restart sessions`, async () => {
+    for (const credential of ['', ' ', 'none']) {
+      const harness = editorHarness(protocol);
+      harness.context.newConnectionForm = { ...harness.context.newConnectionForm, credential };
+      await harness.save();
+      assert.equal(harness.writes.length, 0);
+      assert.equal(harness.sessions[0], harness.session);
+      assert.deepEqual(harness.effects, []);
+      assert.ok(harness.error);
+      assert.equal(harness.open, true);
+      assert.equal(harness.busy, false);
+    }
+  });
+
+  test(`${protocol}: credential saves preserve concurrent session events and never recreate a closed tab`, async () => {
+    for (const status of ['connected', 'connecting', 'closed', 'failed', 'removed']) {
+      const harness = editorHarness(protocol);
+      const pending = Promise.withResolvers<{ updated: boolean }>();
+      harness.context.window.wormhole.updateWorkspaceNode = () => pending.promise;
+      harness.context.newConnectionForm = {
+        ...harness.context.newConnectionForm,
+        credential: 'new-credential',
+      };
+      const saving = harness.save();
+      const live = {
+        ...harness.session,
+        status,
+        rdpStatus:
+          status === 'closed' ? 'disconnected' : status === 'connecting' ? 'starting' : status,
+        terminalFrame: { text: 'output received during save' },
+        sftp: { path: '/new/path' },
+      };
+      const duplicate = { ...harness.session, id: 'duplicate-session' };
+      const unrelated = harness.sessions[1];
+      const current = status === 'removed' ? [duplicate, unrelated] : [live, duplicate, unrelated];
+      harness.context.setSessions(() => current);
+      pending.resolve({ updated: true });
+      await saving;
+      assert.deepEqual(
+        Array.from(harness.sessions, (session) => ({ ...session })),
+        current,
+      );
+      assert.equal(harness.sessions.at(-1), unrelated);
+      assert.deepEqual(harness.effects, ['refresh']);
+      assert.equal(harness.error, '');
+      if (status !== 'removed') {
+        assert.equal(harness.sessions[0].terminalFrame, live.terminalFrame);
+        assert.equal(harness.sessions[0].sftp, live.sftp);
+      }
+    }
+  });
+
+  test(`${protocol}: saving credential changes preserves the active session and persists authentication`, async () => {
+    for (const { change, expectedMode, expectedId } of [
+      {
+        change: { useSavedCredentials: true, credential: 'saved-credential' },
+        expectedMode: 2,
+        expectedId: 'saved-credential',
+      },
+      {
+        change: { useSavedCredentials: true, credential: 'inherit' },
+        expectedMode: 0,
+        expectedId: '',
+      },
+      { change: { useSavedCredentials: false }, expectedMode: 1, expectedId: '' },
+      ...(protocol === 'vnc'
+        ? []
+        : [
+            {
+              change: {
+                useSavedCredentials: false,
+                username: 'bob',
+                inlinePassword: 'test-password',
+              },
+              expectedMode: 1,
+              expectedId: '',
+            },
+            {
+              change: { useSavedCredentials: false, removeInlinePassword: true },
+              expectedMode: 1,
+              expectedId: '',
+            },
+          ]),
+    ]) {
+      const harness = editorHarness(protocol, {
+        node: { credentialMode: 2, credentialId: 'previous-credential' },
+      });
+      const unrelated = harness.sessions[1];
+      harness.context.newConnectionForm = { ...harness.context.newConnectionForm, ...change };
+      await harness.save();
+      assert.equal(harness.writes.length, 1);
+      const write = harness.writes[0];
+      assert.equal(write.credentialMode, expectedMode);
+      assert.equal(write.credentialId, expectedId);
+      assert.equal(write.username, protocol !== 'vnc' ? (change.username ?? '') : '');
+      assert.equal(write.inlinePasswordAction, change.inlinePassword ? 'set' : 'clear');
+      assert.equal(write.inlinePassword, change.inlinePassword ?? '');
+      assert.deepEqual({ ...harness.sessions[0] }, harness.session);
+      assert.equal(harness.sessions[0].terminalFrame, harness.session.terminalFrame);
+      assert.equal(harness.sessions[0].sftp, harness.session.sftp);
+      assert.equal(harness.sessions[1], unrelated);
+      assert.deepEqual(harness.effects, ['refresh']);
+      assert.equal(harness.error, '');
+      assert.equal(harness.open, false);
+      assert.equal(harness.busy, false);
+    }
+  });
+}
+
+for (const protocol of ['ssh', 'rdp']) {
+  test(`${protocol}: editing inline credentials preserves the running session and the correct secret action`, async () => {
+    for (const { change, action, password } of [
+      { change: { username: 'bob' }, action: 'preserve', password: '' },
+      {
+        change: { inlinePassword: 'replacement-password' },
+        action: 'set',
+        password: 'replacement-password',
+      },
+      { change: { removeInlinePassword: true }, action: 'clear', password: '' },
+    ]) {
+      const harness = editorHarness(protocol, {
+        node: { credentialMode: 1, hasInlineCredential: true, username: 'alice' },
+      });
+      assert.equal(harness.context.newConnectionForm.useSavedCredentials, false);
+      harness.context.newConnectionForm = { ...harness.context.newConnectionForm, ...change };
+      await harness.save();
+      assert.equal(harness.writes.length, 1);
+      assert.equal(harness.writes[0].username, change.username ?? 'alice');
+      assert.equal(harness.writes[0].inlinePasswordAction, action);
+      assert.equal(harness.writes[0].inlinePassword, password);
+      assert.equal(harness.writes[0].credentialMode, 1);
+      assert.equal(harness.writes[0].credentialId, '');
+      assert.deepEqual({ ...harness.sessions[0] }, harness.session);
+      assert.deepEqual(harness.effects, ['refresh']);
+      assert.equal(harness.error, '');
+    }
+  });
+}
+
+test('RDP domain and gateway credential changes are saved without disconnecting', async () => {
+  const harness = editorHarness('rdp');
+  const rdp = {
+    ...harness.context.newConnectionForm.rdp,
+    domain: 'EXAMPLE',
+    gatewayCredentialId: '12345678-1234-1234-1234-123456789abc',
+    gatewayUseSameCreds: true,
+  };
+  harness.context.newConnectionForm = { ...harness.context.newConnectionForm, rdp };
+  await harness.save();
+  assert.equal(harness.error, '');
+  assert.deepEqual(harness.writes[0].rdp, rdp);
+  assert.deepEqual({ ...harness.sessions[0] }, harness.session);
+  assert.deepEqual(harness.effects, ['refresh']);
+  assert.equal(harness.error, '');
+});
+
+test('credential save and refresh failures do not release active sessions', async () => {
+  for (const options of [{ updated: false }, { saveError: true }, { refreshError: true }]) {
+    const harness = editorHarness('ssh', options);
+    harness.context.newConnectionForm = {
+      ...harness.context.newConnectionForm,
+      credential: 'new-credential',
+    };
+    await harness.save();
+    assert.deepEqual({ ...harness.sessions[0] }, harness.session);
+    assert.deepEqual(harness.effects, options.refreshError ? ['refresh'] : []);
+    assert.ok(harness.error);
+    assert.equal(harness.open, true);
+    assert.equal(harness.busy, false);
+  }
+});
+
 for (const protocol of ['ssh', 'rdp', 'vnc', 'serial', 'http', 'https']) {
   test(`${protocol}: the real editor save updates the title without releasing or restarting the session`, async () => {
     const harness = editorHarness(protocol);
@@ -335,31 +602,34 @@ test('failed rename saves leave the active session and editor intact', async () 
 });
 
 for (const rdpStatus of ['idle', 'disconnected', 'failed', 'starting', 'connected']) {
-  test(`RDP ${rdpStatus}: saving credentials with a legacy screen size only restarts a live session`, async () => {
-    const harness = editorHarness('rdp', { rdpStatus, screenSize: 'FitToWindow' });
-    const unrelated = harness.sessions[1];
-    harness.context.newConnectionForm = {
-      ...harness.context.newConnectionForm,
-      useSavedCredentials: false,
-      username: 'updated-user',
-      inlinePassword: 'test-password',
-    };
-    await harness.save();
-    assert.equal(harness.error, '');
-    assert.equal(harness.open, false);
-    assert.equal(harness.writes.length, 1);
-    assert.equal(harness.writes[0].username, 'updated-user');
-    assert.equal(harness.writes[0].inlinePasswordAction, 'set');
-    assert.equal(harness.writes[0].inlinePassword, 'test-password');
-    assert.equal((harness.writes[0].rdp as { screenSize: string }).screenSize, 'FitToWindow');
-    const live = rdpStatus === 'starting' || rdpStatus === 'connected';
-    assert.ok(harness.effects.includes('release'));
-    assert.ok(harness.effects.includes('reset release gate'));
-    assert.equal(harness.effects.includes('start rdp'), live);
-    assert.equal(harness.effects.includes('refresh rdp'), true);
-    assert.equal(harness.sessions[0].rdpStatus, live ? 'idle' : rdpStatus);
-    assert.equal(harness.sessions[1], unrelated);
-  });
+  for (const changeHost of [false, true]) {
+    test(`RDP ${rdpStatus}: credentials with a legacy screen size and host change ${changeHost}`, async () => {
+      const harness = editorHarness('rdp', { rdpStatus, screenSize: 'FitToWindow' });
+      const unrelated = harness.sessions[1];
+      harness.context.newConnectionForm = {
+        ...harness.context.newConnectionForm,
+        useSavedCredentials: false,
+        username: 'updated-user',
+        inlinePassword: 'test-password',
+        ...(changeHost ? { host: 'updated.example' } : {}),
+      };
+      await harness.save();
+      assert.equal(harness.error, '');
+      assert.equal(harness.open, false);
+      assert.equal(harness.writes.length, 1);
+      assert.equal(harness.writes[0].username, 'updated-user');
+      assert.equal(harness.writes[0].inlinePasswordAction, 'set');
+      assert.equal(harness.writes[0].inlinePassword, 'test-password');
+      assert.equal((harness.writes[0].rdp as { screenSize: string }).screenSize, 'FitToWindow');
+      const live = changeHost && (rdpStatus === 'starting' || rdpStatus === 'connected');
+      assert.equal(harness.effects.includes('release'), changeHost);
+      assert.equal(harness.effects.includes('reset release gate'), changeHost);
+      assert.equal(harness.effects.includes('start rdp'), live);
+      assert.equal(harness.effects.includes('refresh rdp'), changeHost);
+      assert.equal(harness.sessions[0].rdpStatus, live ? 'idle' : rdpStatus);
+      assert.equal(harness.sessions[1], unrelated);
+    });
+  }
 }
 
 test('updating RDP credentials without an open tab does not start a connection', async () => {
@@ -423,7 +693,10 @@ test('new RDP lifecycle actions during resource release supersede the editor res
       entered.resolve();
       return pending.promise;
     };
-    harness.context.newConnectionForm = { ...harness.context.newConnectionForm, username: 'new' };
+    harness.context.newConnectionForm = {
+      ...harness.context.newConnectionForm,
+      host: 'updated.example',
+    };
     const saving = harness.save();
     await entered.promise;
     harness.context.rdpEditAttempts.current.cancel(harness.session.id);
@@ -448,7 +721,10 @@ test('a newly opened RDP session during persistence is not claimed by the old ed
     if (!hadTab) harness.context.setSessions(() => []);
     const pending = Promise.withResolvers<{ updated: boolean }>();
     harness.context.window.wormhole.updateWorkspaceNode = () => pending.promise;
-    harness.context.newConnectionForm = { ...harness.context.newConnectionForm, username: 'new' };
+    harness.context.newConnectionForm = {
+      ...harness.context.newConnectionForm,
+      host: 'updated.example',
+    };
     const saving = harness.save();
     harness.context.rdpEditAttempts.current.cancel(harness.session.id);
     const replacement = { ...harness.session, rdpStatus: 'starting' };
@@ -465,7 +741,10 @@ test('a deferred editor restart cannot reconnect a session after another lifecyc
   const harness = editorHarness('rdp');
   const timers: (() => void)[] = [];
   harness.context.window.setTimeout = (callback: () => void) => timers.push(callback);
-  harness.context.newConnectionForm = { ...harness.context.newConnectionForm, username: 'new' };
+  harness.context.newConnectionForm = {
+    ...harness.context.newConnectionForm,
+    host: 'updated.example',
+  };
   await harness.save();
   assert.equal(timers.length, 1);
   harness.context.rdpEditAttempts.current.cancel(harness.session.id);
@@ -492,7 +771,10 @@ test('an RDP tab already closing cannot be reclaimed by a save', async () => {
   harness.context.releaseSessionResources = async () => {
     closing.clear();
   };
-  harness.context.newConnectionForm = { ...harness.context.newConnectionForm, username: 'new' };
+  harness.context.newConnectionForm = {
+    ...harness.context.newConnectionForm,
+    host: 'updated.example',
+  };
   await harness.save();
   assert.equal(harness.error, '');
   assert.equal(harness.sessions[0], harness.session);
