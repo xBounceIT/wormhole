@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<mrng:Connections xmlns:mrng="http://mremoteng.org" ConfVersion="2.6" EncryptionEngine="AES" BlockCipherMode="GCM" KdfIterations="1000" FullFileEncryption="false" Protected="AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh/d7jAVX6oolXZ6EPBhi0ozuhVBrNCpuYjGorCQ4apd">
+  <Node Name="Lab" Type="Container">
+    <Node Name="ssh-demo" Type="Connection" Protocol="SSH2" Hostname="ssh.example.test" Port="22" Username="demo" Password="ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj/zfO8gfEeO5H2hgbT5yaFuSFNqcn4S5oU4Q18=" />
+  </Node>
+</mrng:Connections>

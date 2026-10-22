@@ -30,6 +30,7 @@ const (
 	mremoteNamespace                  = "http://mremoteng.org"
 	mremoteDefaultPassword            = "mR3m"
 	mremoteVerifier                   = "ThisIsProtected"
+	mremoteUnprotectedVerifier        = "ThisIsNotProtected"
 	mremoteMaxFileBytes               = 16 * 1024 * 1024
 	mremoteMaxNodes                   = 50_000
 	mremoteMaxDepth                   = 4096
@@ -366,13 +367,9 @@ func buildMRemotePlan(ctx context.Context, databasePath string, request mremoteI
 		if strings.TrimSpace(root.Protected) == "" {
 			return mremotePlan{}, errors.New("this mRemoteNG export has no password verifier")
 		}
-		if password == "" {
-			if plain, ok := decryptMRemote(root.Protected, mremoteDefaultPassword, iterations); ok && plain == mremoteVerifier {
-				password = mremoteDefaultPassword
-			}
-		}
-		plain, ok := decryptMRemote(root.Protected, password, iterations)
-		if !ok || plain != mremoteVerifier {
+		if password == "" && mremoteVerifierAccepts(root.Protected, mremoteDefaultPassword, iterations) {
+			password = mremoteDefaultPassword
+		} else if !mremoteVerifierAccepts(root.Protected, password, iterations) {
 			return mremotePlan{}, errors.New("the mRemoteNG encryption password is incorrect")
 		}
 	}
@@ -408,7 +405,11 @@ func buildMRemotePlan(ctx context.Context, databasePath string, request mremoteI
 		return mremotePlan{}, fmt.Errorf("could not inspect workspace order: %w", err)
 	}
 
-	plan := mremotePlan{FileHash: fileHash, Nodes: make([]mremotePlannedNode, 0), Credentials: make([]mremotePlannedCredential, 0)}
+	// Electron's response contract requires arrays, including empty collections.
+	plan := mremotePlan{
+		FileHash: fileHash, Nodes: make([]mremotePlannedNode, 0), Credentials: make([]mremotePlannedCredential, 0),
+		SkippedSamples: make([]string, 0), Warnings: make([]string, 0), Preview: make([]mremoteImportPreviewNode, 0),
+	}
 	fingerprints := map[string]string{}
 	sequence := 0
 	type frame struct {
@@ -537,12 +538,12 @@ func mremoteUsesSilentDefault(root mremoteXMLRoot) bool {
 	if iterations > mremoteSilentDefaultMaxIterations {
 		return false
 	}
-	for _, password := range []string{mremoteDefaultPassword, ""} {
-		if plain, ok := decryptMRemote(root.Protected, password, iterations); ok && plain == mremoteVerifier {
-			return true
-		}
-	}
-	return false
+	return mremoteVerifierAccepts(root.Protected, mremoteDefaultPassword, iterations)
+}
+
+func mremoteVerifierAccepts(protected, password string, iterations int) bool {
+	plain, ok := decryptMRemote(protected, password, iterations)
+	return ok && (plain == mremoteVerifier || plain == mremoteUnprotectedVerifier)
 }
 
 func readMRemoteFile(path string) (mremoteXMLRoot, int64, string, error) {
@@ -621,13 +622,35 @@ func validateMRemoteXMLStructure(data []byte) error {
 	}
 }
 
+// mremotePasswordBytes matches BouncyCastle 1.8.1's Pkcs5PasswordToBytes.
+// Its Strings.ToByteArray calls Convert.ToByte(char), not an unchecked cast:
+// https://github.com/bcgit/bc-csharp/blob/release-1.8.1/crypto/src/util/Strings.cs#L30-L39
+// Each UTF-16 code unit must fit in one byte; characters above U+00FF are
+// rejected by that library, so mRemoteNG cannot use them as master passwords.
+func mremotePasswordBytes(password string) ([]byte, bool) {
+	encoded := make([]byte, 0, len(password))
+	for _, character := range password {
+		if character > 0xFF {
+			clear(encoded)
+			return nil, false
+		}
+		encoded = append(encoded, byte(character))
+	}
+	return encoded, true
+}
+
 func decryptMRemote(encoded, password string, iterations int) (string, bool) {
 	blob, err := base64.StdEncoding.DecodeString(strings.TrimSpace(encoded))
 	if err != nil || len(blob) < 48 || iterations <= 0 || iterations > mremoteMaxIterations {
 		return "", false
 	}
+	passwordBytes, ok := mremotePasswordBytes(password)
+	if !ok {
+		return "", false
+	}
+	defer clear(passwordBytes)
 	salt, nonce := blob[:16], blob[16:32]
-	key := pbkdf2.Key([]byte(password), salt, iterations, 32, sha1.New)
+	key := pbkdf2.Key(passwordBytes, salt, iterations, 32, sha1.New)
 	defer func() {
 		for i := range key {
 			key[i] = 0
