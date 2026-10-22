@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<mrng:Connections xmlns:mrng="http://mremoteng.org" Name="Connections" Export="false" EncryptionEngine="AES" BlockCipherMode="GCM" KdfIterations="1000" FullFileEncryption="false" Protected="uSLBdOYu85wSi7D2fRYUJ5XhdNm4KfIf/gxiv2++heE+yJTbS5OsqO/g0WgG/ZrPRltX5DhVOl28y1iST1O9x0Tz" ConfVersion="2.6">
+  <Node Name="Lab" Type="Container" Expanded="true" Descr="" Icon="mRemoteNG" Panel="General" Username="" Domain="" Password="" Hostname="" Protocol="RDP" Port="3389" InheritPassword="false">
+    <Node Name="ssh-demo" Type="Connection" Descr="" Icon="SSH" Panel="General" Username="demo" Domain="" Password="+Sq9Za2NTtNvaHtXVix14BwBHILTNNxBFAzF1/80ZOppKZaMMZHNgclBNHSHQgpd4tahj9aid3gZ3ak=" Hostname="ssh.example.test" Protocol="SSH2" Port="22" InheritPassword="false" />
+  </Node>
+</mrng:Connections>

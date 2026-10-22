@@ -80,7 +80,7 @@ func TestMRemoteImportValidEncryptedFixturePlansAndCommitsMappings(t *testing.T)
 
 func TestMRemoteImportSilentlyUsesFactoryDefaultPassword(t *testing.T) {
 	databasePath := newMRemoteTestDatabase(t)
-	verifier := encryptMRemoteFixture(t, mremoteVerifier, mremoteDefaultPassword)
+	verifier := encryptMRemoteFixture(t, mremoteUnprotectedVerifier, mremoteDefaultPassword)
 	secret := encryptMRemoteFixture(t, "default-secret", mremoteDefaultPassword)
 	fixture := writeMRemoteFixture(t, fmt.Sprintf(`<?xml version="1.0"?>
 <mrng:Connections xmlns:mrng="http://mremoteng.org" ConfVersion="2.7" EncryptionEngine="AES" BlockCipherMode="GCM" KdfIterations="%d" FullFileEncryption="false" Protected="%s">
