@@ -1,5 +1,17 @@
 type ConnectionEditValue = string | boolean | Record<string, string | number | boolean>;
 
+// RDP tabs remain open after disconnecting. Saving their profile must not start a connection.
+export function connectionEditCanRestartSession(
+  session: { protocol: string; rdpStatus?: string } | undefined,
+): boolean {
+  return Boolean(
+    session &&
+    (session.protocol !== 'rdp' ||
+      session.rdpStatus === 'starting' ||
+      session.rdpStatus === 'connected'),
+  );
+}
+
 export type ConnectionEditForm = {
   name: string;
   notes: string;
