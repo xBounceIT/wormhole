@@ -49,4 +49,5 @@ export function applyTheme(theme: Theme): void {
   const root = document.documentElement;
   root.classList.toggle('dark', resolved === 'dark');
   root.style.colorScheme = resolved;
+  window.wormhole?.setTitlebarTheme(resolved);
 }

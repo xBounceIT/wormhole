@@ -40,6 +40,7 @@ import {
 } from './connection-tree-settings.js';
 import { initializeLocalCrashDiagnostics } from './crash-diagnostics.js';
 import { isAppTheme, parseThemeStartupRequest, type AppTheme } from './theme-settings.js';
+import { nativeTitlebarOverlay, syncNativeTitlebarTheme } from './native-titlebar-theme.js';
 import {
   normalizeWindowCloseConfirmation,
   parseWindowCloseSettingUpdate,
@@ -172,9 +173,6 @@ import {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rendererUrl = process.env.VITE_DEV_SERVER_URL;
-const nativeTitlebarColor = '#0a0a0a00';
-const nativeTitlebarSymbolColor = '#ffffff';
-const nativeTitlebarHeight = 48;
 const applicationIconPath = path.join(
   __dirname,
   '..',
@@ -7207,6 +7205,12 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     const waiter = rendererTeardownWaiters.get(requestId);
     if (waiter?.webContentsId === event.sender.id) waiter.resolve();
   });
+  ipcMain.on('window:set-titlebar-theme', (event, value: unknown) => {
+    const owner = BrowserWindow.fromWebContents(event.sender);
+    if (!owner || !windowCloseCoordinators.has(owner)) return;
+    syncNativeTitlebarTheme(owner, value, process.platform);
+  });
+
   ipcMain.on('startup:ready', (event) => {
     const owner = BrowserWindow.fromWebContents(event.sender);
     if (!owner || owner.isDestroyed()) return;
@@ -9753,11 +9757,7 @@ function createWindow() {
     titleBarStyle: 'hidden',
     ...(process.platform !== 'darwin'
       ? {
-          titleBarOverlay: {
-            color: nativeTitlebarColor,
-            symbolColor: nativeTitlebarSymbolColor,
-            height: nativeTitlebarHeight,
-          },
+          titleBarOverlay: nativeTitlebarOverlay('dark'),
         }
       : {}),
     webPreferences: {
