@@ -75,6 +75,7 @@ test('middle-click closes tabs without waiting for native teardown or restoring 
       const setSshCredentialForm = () => {}, clearSecretInput = () => {};
       const clearSftpCancelRequestsForBrowser = () => {};
       const rdpSessionAttempts = useRef({ cancel() {} });
+      const rdpEditAttempts = useRef(new WebSessionAttemptTracker());
       const webSessionAttempts = useRef(new WebSessionAttemptTracker());
       const webSessionReconnectAttempts = useRef(new WebSessionAttemptTracker());
       const webSessionOpenInFlight = useRef(new Map());
