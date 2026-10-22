@@ -1470,10 +1470,74 @@ test('connected tab close gate rejects duplicates until the first close settles'
     release = resolve;
   });
   const first = gate.run('session-1', () => pending);
+  assert.deepEqual([...gate.activeSessionIds()], ['session-1']);
   assert.equal(await gate.run('session-1', async () => undefined), false);
   release();
   assert.equal(await first, true);
+  assert.equal(gate.activeSessionIds().size, 0);
   assert.equal(await gate.run('session-1', async () => undefined), true);
+});
+
+test('failed tab teardown clears the close gate', async () => {
+  const gate = new SessionCloseGate();
+  const failure = gate.run('session', async () => {
+    throw new Error('disconnect failed');
+  });
+  await assert.rejects(failure, /disconnect failed/);
+  assert.equal(gate.activeSessionIds().size, 0);
+});
+
+test('deferred opens coalesce and run only after their close gate is released', async () => {
+  const gate = new SessionCloseGate();
+  const opens: number[] = [];
+  assert.equal(
+    gate.reopenAfterClose('missing', () => opens.push(-1)),
+    false,
+  );
+  let finish!: () => void;
+  const closing = gate.run(
+    'session',
+    () =>
+      new Promise<void>((resolve) => {
+        finish = resolve;
+      }),
+  );
+  for (let index = 0; index < 100; index++) {
+    assert.equal(
+      gate.reopenAfterClose('session', () => {
+        assert.equal(gate.activeSessionIds().has('session'), false);
+        opens.push(index);
+      }),
+      true,
+    );
+  }
+  assert.deepEqual(opens, []);
+  finish();
+  await closing;
+  assert.deepEqual(opens, [99]);
+});
+
+test('deleting a connection cancels only its deferred open and lifecycle cancellation clears all', async () => {
+  const gate = new SessionCloseGate();
+  const opens: string[] = [];
+  const releases: Array<() => void> = [];
+  const start = (id: string) => {
+    const closing = gate.run(id, () => new Promise<void>((resolve) => releases.push(resolve)));
+    gate.reopenAfterClose(id, () => opens.push(id));
+    return closing;
+  };
+  const first = start('first'),
+    second = start('second');
+  gate.cancelReopens(new Set(['first']));
+  releases.splice(0).forEach((release) => release());
+  await Promise.all([first, second]);
+  assert.deepEqual(opens, ['second']);
+  const third = start('third'),
+    fourth = start('fourth');
+  gate.cancelReopens();
+  releases.splice(0).forEach((release) => release());
+  await Promise.all([third, fourth]);
+  assert.deepEqual(opens, ['second']);
 });
 
 test('session resources release exactly once across overlapping close paths', async () => {
