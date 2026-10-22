@@ -93,21 +93,36 @@ export function connectedTabCloseMessage(count: number): string {
 }
 
 export class SessionCloseGate {
-  private readonly active = new Set<string>();
+  private readonly active = new Map<string, { reopen?: () => void }>();
 
   async run(sessionId: string, close: () => Promise<void>): Promise<boolean> {
     if (this.active.has(sessionId)) return false;
-    this.active.add(sessionId);
+    const entry: { reopen?: () => void } = {};
+    this.active.set(sessionId, entry);
     try {
       await close();
       return true;
     } finally {
       this.active.delete(sessionId);
+      entry.reopen?.();
     }
   }
 
   activeSessionIds(): ReadonlySet<string> {
-    return new Set(this.active);
+    return new Set(this.active.keys());
+  }
+
+  reopenAfterClose(sessionId: string, reopen: () => void): boolean {
+    const entry = this.active.get(sessionId);
+    if (!entry) return false;
+    entry.reopen = reopen;
+    return true;
+  }
+
+  cancelReopens(sessionIds?: ReadonlySet<string>): void {
+    for (const [sessionId, entry] of this.active) {
+      if (!sessionIds || sessionIds.has(sessionId)) delete entry.reopen;
+    }
   }
 }
 

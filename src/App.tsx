@@ -1848,6 +1848,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   const sshCredentialSubmitInFlight = useRef(false);
   const sshHostKeyTrustInFlight = useRef(new Set<string>());
   const webSessionAttempts = useLazyRef(() => new WebSessionAttemptTracker());
+  const webSessionReconnectAttempts = useLazyRef(() => new WebSessionAttemptTracker());
   const webSessionOpenInFlight = useRef(new Map<string, number>());
   const rdpSavedCredentialAttempts = useRef(new Set<string>());
   const [runtimeBitwardenRetries] = useState(() => new KeyedRetryQueue<string>());
@@ -3569,6 +3570,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
 
   function startWebSession(session: Session) {
     if (webSessionOpenInFlight.current.has(session.id)) return;
+    webSessionReconnectAttempts.current.cancel(session.id);
     const generation = webSessionAttempts.current.begin(session.id);
     webSessionOpenInFlight.current.set(session.id, generation);
     const api = window.wormhole;
@@ -3649,6 +3651,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   }
 
   async function closeWebSession(sessionId: string): Promise<void> {
+    webSessionReconnectAttempts.current.cancel(sessionId);
     webSessionOpenInFlight.current.delete(sessionId);
     webSessionAttempts.current.cancel(sessionId);
     await window.wormhole?.closeWebSession(sessionId);
@@ -4063,6 +4066,16 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     if (node.kind !== 'connection' || !node.protocol) return;
 
     const sessionId = `session-${node.id}`;
+    // Saved connections reuse their tab/native surface ID. Queue a reopen until
+    // the old resources are released so a late disconnect cannot close the new one.
+    if (
+      sessionCloseGate.current.reopenAfterClose(sessionId, () => {
+        const currentNode = findTreeNode(treeRef.current, node.id);
+        if (currentNode) openConnection(currentNode);
+      })
+    ) {
+      return;
+    }
     if (webSessionOpenInFlight.current.has(sessionId)) {
       setSelectedSessionId(sessionId);
       setActivePage('sessions');
@@ -4194,52 +4207,58 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   }
 
   async function performSessionClose(id: string, preferredNextSessionId?: string) {
-    const closing = sessions.find((session) => session.id === id);
+    const currentSessions = sessionsRef.current;
+    const closing = currentSessions.find((session) => session.id === id);
     if (!closing) return;
-    await sessionCloseGate.current.run(id, async () => {
-      for (const key of sessionRuntimeRetryKeys(closing)) {
-        runtimeBitwardenRetries.remove(key);
-      }
-      if (runtimeBitwardenRetries.isEmpty && bitwardenUnlockPrompt) {
-        dismissRuntimeBitwardenUnlock();
-      }
-      rdpSavedCredentialAttempts.current.delete(id);
-      if (rdpCredentialPrompt === id) setRdpCredentialPrompt(null);
-      if (sshCredentialPrompt?.backendSessionId === closing.backendSessionId) {
-        setSshCredentialPrompt(null);
-        setSshCredentialForm({ username: '', password: '' });
-      }
-      if (sshKeyPassphrasePrompt?.sessionId === closing.backendSessionId) {
-        clearSecretInput(sshKeyPassphraseInput.current);
-        setSshKeyPassphrasePrompt(null);
-      }
-      await releaseSessionResources(closing);
-      setSessions((current) => current.filter((session) => session.id !== id));
-      sftpRequestIds.current.delete(id);
-      clearSftpCancelRequestsForBrowser(sftpCancelRequests.current, closing.sftp);
-
-      const closingSessionIds = sessionCloseGate.current.activeSessionIds();
-      setSelectedSessionId((current) => {
-        if (!closingSessionIds.has(current)) return current;
-        if (
-          preferredNextSessionId &&
-          !closingSessionIds.has(preferredNextSessionId) &&
-          sessions.some((session) => session.id === preferredNextSessionId)
-        ) {
-          return preferredNextSessionId;
+    // Retire the tab synchronously. Native disconnects may outlive the tab, and must
+    // not hold the workspace (or the confirmation dialog) open until they respond.
+    void sessionCloseGate.current
+      .run(id, async () => {
+        for (const key of sessionRuntimeRetryKeys(closing)) {
+          runtimeBitwardenRetries.remove(key);
         }
-        return nextSelectedSessionId(sessions, current, (sessionId) =>
-          closingSessionIds.has(sessionId),
+        if (runtimeBitwardenRetries.isEmpty && bitwardenUnlockPrompt) {
+          dismissRuntimeBitwardenUnlock();
+        }
+        rdpSavedCredentialAttempts.current.delete(id);
+        if (rdpCredentialPrompt === id) setRdpCredentialPrompt(null);
+        if (sshCredentialPrompt?.backendSessionId === closing.backendSessionId) {
+          setSshCredentialPrompt(null);
+          setSshCredentialForm({ username: '', password: '' });
+        }
+        if (sshKeyPassphrasePrompt?.sessionId === closing.backendSessionId) {
+          clearSecretInput(sshKeyPassphraseInput.current);
+          setSshKeyPassphrasePrompt(null);
+        }
+        sessionsRef.current = currentSessions.filter((session) => session.id !== id);
+        setSessions((current) => current.filter((session) => session.id !== id));
+        sftpRequestIds.current.delete(id);
+        clearSftpCancelRequestsForBrowser(sftpCancelRequests.current, closing.sftp);
+
+        const closingSessionIds = sessionCloseGate.current.activeSessionIds();
+        setSelectedSessionId((current) => {
+          if (!closingSessionIds.has(current)) return current;
+          if (
+            preferredNextSessionId &&
+            !closingSessionIds.has(preferredNextSessionId) &&
+            currentSessions.some((session) => session.id === preferredNextSessionId)
+          ) {
+            return preferredNextSessionId;
+          }
+          return nextSelectedSessionId(currentSessions, current, (sessionId) =>
+            closingSessionIds.has(sessionId),
+          );
+        });
+        setSshCredentialPrompt((current) =>
+          current?.sessionId === id || current?.backendSessionId === id ? null : current,
         );
-      });
-      setSshCredentialPrompt((current) =>
-        current?.sessionId === id || current?.backendSessionId === id ? null : current,
-      );
-    });
+        await releaseSessionResources(closing);
+      })
+      .catch(() => undefined);
   }
 
   async function closeSession(id: string, preferredNextSessionId?: string) {
-    const closing = sessions.find((session) => session.id === id);
+    const closing = sessionsRef.current.find((session) => session.id === id);
     if (!closing) return;
     if (shouldConfirmConnectedTabClose(confirmOnTabClose, [closing])) {
       setPendingSessionClose((current) => current ?? { id, preferredNextSessionId });
@@ -4261,6 +4280,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   }
 
   async function closeSessionsForNodeIds(nodeIds: ReadonlySet<string>) {
+    sessionCloseGate.current.cancelReopens(new Set([...nodeIds].map((id) => `session-${id}`)));
     const closing = sessionsRef.current.filter(
       (session) => session.nodeId && nodeIds.has(session.nodeId),
     );
@@ -4302,10 +4322,20 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
 
   const releaseSessionResourcesRef = useRef(releaseSessionResources);
   useLayoutEffect(() => {
+    const closeGate = sessionCloseGate.current;
+    const reconnectAttempts = webSessionReconnectAttempts.current;
+    return () => {
+      closeGate.cancelReopens();
+      reconnectAttempts.cancelAll();
+    };
+  }, [authGate, sessionCloseGate, webSessionReconnectAttempts]);
+  useLayoutEffect(() => {
     releaseSessionResourcesRef.current = releaseSessionResources;
   });
   useEffect(() => {
     return window.wormhole?.onWindowCloseRequested(async () => {
+      sessionCloseGate.current.cancelReopens();
+      webSessionReconnectAttempts.current.cancelAll();
       await Promise.allSettled([sidebarWriter.flush(), connectionTreeExpansionWriter.flush()]);
       await Promise.allSettled(
         sessionsRef.current.map((session) => releaseSessionResourcesRef.current(session)),
@@ -4313,7 +4343,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       setSessions([]);
       setSelectedSessionId('');
     });
-  }, [connectionTreeExpansionWriter, sidebarWriter]);
+  }, [connectionTreeExpansionWriter, sidebarWriter, sessionCloseGate, webSessionReconnectAttempts]);
 
   useEffect(() => {
     return window.wormhole?.onWindowCloseConfirmationRequested(
@@ -4343,7 +4373,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   }
 
   function reconnectSession(id: string) {
-    const source = sessions.find((session) => session.id === id);
+    const source = sessionsRef.current.find((session) => session.id === id);
     if (!source) return;
 
     if (source.backendSessionId) {
@@ -4377,9 +4407,18 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         webIsLoading: false,
       };
       setSessions((current) => current.map((session) => (session.id === id ? restarted : session)));
-      void closeWebSession(source.id)
+      const closing = closeWebSession(source.id);
+      const generation = webSessionReconnectAttempts.current.begin(source.id);
+      void closing
         .catch(() => undefined)
-        .finally(() => startWebSession(restarted));
+        .then(() => {
+          if (
+            webSessionReconnectAttempts.current.isCurrent(source.id, generation) &&
+            sessionsRef.current.some((session) => session.id === source.id)
+          ) {
+            startWebSession(restarted);
+          }
+        });
     }
     clearSftpCancelRequestsForBrowser(sftpCancelRequests.current, source.sftp);
     if (source.nodeId && source.protocol === 'ssh') {
@@ -10974,6 +11013,16 @@ function SessionsPage({
                   <div
                     className={`relative flex h-9 min-w-[8rem] max-w-[18rem] flex-1 border-r border-border/60 ${tabPresentation.className}`}
                     data-session-tab-index={tabIndex}
+                    onMouseDown={(event) => {
+                      if (event.button !== 1) return;
+                      event.preventDefault();
+                    }}
+                    onAuxClick={(event) => {
+                      if (event.button !== 1) return;
+                      event.preventDefault();
+                      event.stopPropagation();
+                      closePaneSession(pane, session.id);
+                    }}
                   >
                     <button
                       aria-label={`${session.title}. ${tabPresentation.accessLabel}Drag to a pane edge to split.`}
@@ -10981,9 +11030,6 @@ function SessionsPage({
                       className="flex min-w-0 flex-1 cursor-grab items-center gap-2 pl-3 pr-2 text-left !text-xs font-medium outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
                       data-session-tab-id={session.id}
                       draggable
-                      onAuxClick={(event) => {
-                        if (event.button === 1) closePaneSession(pane, session.id);
-                      }}
                       onClick={() => activateSession(pane.id, session.id)}
                       onDragEnd={() => {
                         setDraggedSessionId('');

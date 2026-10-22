@@ -422,6 +422,7 @@ test('concurrent automatic opens reuse the new SSH tab before React has rendered
       newSessionToken: () => `backend-${started.length}`,
       savedConnectionAddressForEditor: (_protocol: string, host: string) => host,
       sessionResourceReleaseGate: { current: { reset: () => {} } },
+      sessionCloseGate: { current: { reopenAfterClose: () => false } },
       setSessions: (update: (current: typeof sessions) => typeof sessions) => {
         sessions = update(sessions);
       },
