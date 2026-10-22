@@ -20,6 +20,15 @@ type StorageSync = {
   hydrated?(): void;
 };
 
+// Only emitted after Go confirms that the live state needs no further reconciliation.
+// Keep this error free of renderer/backend details so it can cross the main-process wrapper.
+export class BitwardenStorageCheckpointError extends Error {
+  constructor() {
+    super('Bitwarden browser storage could not be saved securely.');
+    this.name = 'BitwardenStorageCheckpointError';
+  }
+}
+
 export async function synchronizeBitwardenStorage(
   storage: StorageSync,
   initialize = false,
@@ -63,10 +72,13 @@ export async function synchronizeBitwardenStorage(
     await storage.flush();
     const accepted = await storage.commit(captured, revision);
     if (!accepted.restore) {
-      if (!accepted.durable)
-        throw new Error('Bitwarden browser storage could not be saved securely.');
-      await storage.markRevision?.(accepted.revision);
-      await storage.flush();
+      if (!accepted.durable) throw new BitwardenStorageCheckpointError();
+      try {
+        await storage.markRevision?.(accepted.revision);
+        await storage.flush();
+      } catch {
+        throw new BitwardenStorageCheckpointError();
+      }
       return;
     }
     // The page can change while Go saves the snapshot. Never replace those newer edits.

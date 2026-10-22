@@ -65,6 +65,7 @@ import {
   afterBitwardenPopupInputEvent,
   closeBitwardenPopupContents,
   flushAndCloseBitwardenPopupContents,
+  prepareBitwardenPopupStorage,
 } from './bitwarden-popup-lifecycle.js';
 import {
   captureBitwardenExtensionStorage,
@@ -75,6 +76,7 @@ import {
 } from './bitwarden-storage.js';
 import {
   BitwardenStorageCheckpoint,
+  BitwardenStorageCheckpointError,
   synchronizeBitwardenStorage,
   type BitwardenBrowserStorageSnapshot,
 } from './bitwarden-storage-sync.js';
@@ -4523,6 +4525,7 @@ class WebSurfaceManager {
     }
   >();
   private readonly bitwardenPopupOpens = new KeyedSingleFlight<string, { open: boolean }>();
+  private bitwardenPopupRequest: { sessionId: string } | undefined;
   private readonly bitwardenStorageTasks = new KeyedTaskTracker<string>();
   private readonly bitwardenExtensionMutation = new ExtensionMutationGuard();
   private bitwardenStorageQueue: Promise<void> = Promise.resolve();
@@ -4888,15 +4891,30 @@ class WebSurfaceManager {
     if (this.bitwardenPopups.has(sessionId)) {
       return { open: true };
     }
+    const openRequest = { sessionId };
+    this.bitwardenPopupRequest = openRequest;
     // Only one Bitwarden popup at a time: a popup on another tab would otherwise float over the
     // window independently of the tab that owns it.
     for (const otherSessionId of [...this.bitwardenPopups.keys()]) {
       if (otherSessionId !== sessionId) await this.closeBitwardenPopup(otherSessionId);
     }
+    // Closing another popup can wait on storage. A newer click, a disconnected tab, or a lock
+    // must win before this request allocates and attaches a native view.
+    if (
+      this.bitwardenPopupRequest !== openRequest ||
+      this.surfaces.get(sessionId) !== record ||
+      record.disposed ||
+      record.owner.isDestroyed() ||
+      !isAuthorizationEpochCurrent(authorizationEpoch) ||
+      mcpApprovalWindowCoordinator.hasPendingApprovals
+    ) {
+      return { open: false };
+    }
 
+    const { partition, popupUrl } = record.bitwarden;
     const popup = new WebContentsView({
       webPreferences: {
-        partition: record.bitwarden.partition,
+        partition,
         contextIsolation: true,
         nodeIntegration: false,
         sandbox: true,
@@ -4906,8 +4924,7 @@ class WebSurfaceManager {
       },
     });
     popup.webContents.setMaxListeners(bitwardenExtensionHostMaxListeners);
-    const popupUrl = record.bitwarden.popupUrl;
-    this.activeBitwardenSessions.set(record.bitwarden.partition, sessionId);
+    this.activeBitwardenSessions.set(partition, sessionId);
     const [contentWidth, contentHeight] = record.owner.getContentSize();
     popup.setBounds(positionBitwardenPopup(request.anchor, [contentWidth, contentHeight]));
     popup.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
@@ -4970,10 +4987,18 @@ class WebSurfaceManager {
     try {
       // The MV2 vault session lives in background memory. Restore it before the popup initializes
       // its account services so an older profile cannot initialize the UI as logged out.
-      await this.synchronizeBitwardenStorageInBridge(
-        record.owner,
-        record.bitwarden.partition,
-        popupUrl,
+      await prepareBitwardenPopupStorage(
+        async () => {
+          await this.synchronizeBitwardenStorageInBridge(record.owner, partition, popupUrl);
+        },
+        (error) => {
+          if (!(error instanceof BitwardenStorageCheckpointError)) return false;
+          const background = this.bitwardenBackgroundContents(
+            partition,
+            new URL(popupUrl).hostname,
+          );
+          return !!background && this.initializedBitwardenStorage.has(background);
+        },
       );
       if (this.bitwardenPopups.get(sessionId) !== popup || record.disposed) {
         return { open: false };
@@ -5000,15 +5025,39 @@ class WebSurfaceManager {
           open: true,
         });
       }
-    } catch (error) {
-      console.warn('[Wormhole] Could not open the Bitwarden browser popup.', error);
-      await this.closeBitwardenPopup(sessionId);
+    } catch {
+      if (this.bitwardenPopups.get(sessionId) !== popup || record.disposed) {
+        return { open: false };
+      }
+      console.warn('[Wormhole] Could not open the Bitwarden browser popup.');
+      // This hidden popup never accepted user edits. Retrying the failed synchronization while
+      // closing it delays feedback and can initialize another extension page unnecessarily.
+      await this.closeBitwardenPopup(sessionId, false);
+      if (
+        !record.disposed &&
+        !record.owner.isDestroyed() &&
+        isAuthorizationEpochCurrent(authorizationEpoch) &&
+        !mcpApprovalWindowCoordinator.hasPendingApprovals
+      ) {
+        // Keep extension/backend diagnostics out of the dialog: they may contain vault data.
+        await showCoordinatedMessageBox(record.owner, {
+          type: 'error',
+          title: 'Bitwarden',
+          message: 'Could not open Bitwarden.',
+          detail:
+            'The browser session could not be prepared. Please try again or reconnect the HTTPS session.',
+          buttons: ['OK'],
+        }).catch(() => undefined);
+      }
       return { open: false };
     }
     return { open: true };
   }
 
-  async closeBitwardenPopup(sessionId: string): Promise<{ open: false }> {
+  async closeBitwardenPopup(sessionId: string, flushStorage = true): Promise<{ open: false }> {
+    if (this.bitwardenPopupRequest?.sessionId === sessionId) {
+      this.bitwardenPopupRequest = undefined;
+    }
     const popup = this.bitwardenPopups.get(sessionId);
     const record = this.surfaces.get(sessionId);
     const owner = record?.owner;
@@ -5063,6 +5112,10 @@ class WebSurfaceManager {
       }
     } catch {
       // Sending state to a renderer that is closing is unnecessary.
+    }
+    if (!flushStorage) {
+      closeBitwardenPopupContents(popup);
+      return { open: false };
     }
     let flushedFromPopup = false;
     if (popup && bitwarden && owner && !owner.isDestroyed()) {
@@ -5154,8 +5207,9 @@ class WebSurfaceManager {
         initialize,
       );
       return true;
-    }).catch(() => {
+    }).catch((error: unknown) => {
       // Neither renderer exceptions nor backend diagnostics may expose extension secrets.
+      if (error instanceof BitwardenStorageCheckpointError) throw error;
       throw new Error('Bitwarden browser storage synchronization failed; retry required.');
     });
   }

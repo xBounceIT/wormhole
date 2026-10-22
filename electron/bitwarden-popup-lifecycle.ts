@@ -7,6 +7,21 @@ type PopupContentsHost<TContents extends ClosableWebContents> = {
   readonly webContents?: TContents;
 };
 
+export async function prepareBitwardenPopupStorage(
+  synchronize: () => Promise<void>,
+  canUseLiveStorage: (error: unknown) => boolean,
+): Promise<void> {
+  try {
+    await synchronize();
+  } catch (error) {
+    // Only a failed checkpoint of reconciled live state is recoverable. Hydration or merge
+    // failures must still block editing, even if the background was initialized earlier.
+    if (!canUseLiveStorage(error)) {
+      throw new Error('Bitwarden could not restore its saved browser session. Please try again.');
+    }
+  }
+}
+
 export async function afterBitwardenPopupInputEvent<TResult>(
   operation: () => Promise<TResult>,
 ): Promise<TResult> {

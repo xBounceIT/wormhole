@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   BitwardenStorageCheckpoint,
+  BitwardenStorageCheckpointError,
   synchronizeBitwardenStorage,
   type BitwardenBrowserStorageSnapshot,
 } from '../electron/bitwarden-storage-sync.ts';
@@ -271,8 +272,49 @@ test('unpersisted snapshots are reported as failures so checkpoints retry', asyn
       commit: async () => snapshot({ durable: false }),
       restore: async () => assert.fail(),
     }),
-    /saved securely/,
+    BitwardenStorageCheckpointError,
   );
+});
+
+test('only final checkpoint failures are recoverable after live state is reconciled', async () => {
+  for (const stage of [
+    'read',
+    'capture',
+    'flush-before-commit',
+    'commit',
+    'restore',
+    'marker',
+    'flush-after-commit',
+  ]) {
+    let committed = false;
+    const fail = () => {
+      throw new Error('private storage details');
+    };
+    await assert.rejects(
+      synchronizeBitwardenStorage({
+        read: async () => (stage === 'read' ? fail() : snapshot()),
+        capture: async () => (stage === 'capture' ? fail() : snapshot()),
+        flush: async () => {
+          if (stage === (committed ? 'flush-after-commit' : 'flush-before-commit')) fail();
+        },
+        commit: async () => {
+          if (stage === 'commit') fail();
+          committed = true;
+          return snapshot({ restore: stage === 'restore' });
+        },
+        restore: async () => fail(),
+        markRevision: async () => {
+          if (stage === 'marker') fail();
+        },
+      }),
+      (error: unknown) => {
+        const recoverable = stage === 'marker' || stage === 'flush-after-commit';
+        assert.equal(error instanceof BitwardenStorageCheckpointError, recoverable, stage);
+        if (recoverable) assert.doesNotMatch(String(error), /private storage details/);
+        return true;
+      },
+    );
+  }
 });
 
 test('continuous mutations have a bounded retry budget', async () => {
