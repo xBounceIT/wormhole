@@ -19,6 +19,9 @@ test('every locked dependency affected by the October advisories uses a patched 
     ['proxy-addr', '2.0.8'],
     ['source-map-js', '1.2.2'],
     ['@modelcontextprotocol/sdk', '1.31.0'],
+    ['follow-redirects', '1.16.1'],
+    ['ip-address', '10.7.4'],
+    ['hono', '4.13.11'],
   ]) {
     const entries = Object.entries(lock.packages).filter(([location]) =>
       location.endsWith(`node_modules/${dependency}`),
@@ -28,6 +31,156 @@ test('every locked dependency affected by the October advisories uses a patched 
       assert.ok(semver.gte(metadata.version, minimum), `${location}: ${metadata.version}`);
     }
   }
+});
+
+test('redirects strip object and array credential headers only when crossing origins', async (t) => {
+  const consumerRequire = createRequire(require.resolve('axios'));
+  const { http } = consumerRequire('follow-redirects');
+  const credentials = {
+    Authorization: 'Bearer test-token',
+    'Proxy-Authorization': 'Basic test-token',
+    Cookie: 'session=test-token',
+    'X-Auth^Token': 'test-caret',
+    'X-Auth|Token': 'test-pipe',
+  };
+  const headers = { ...credentials, 'X-Keep': 'ordinary-header' };
+  const destination = createServer((request, response) => {
+    response.end(JSON.stringify(request.headers));
+  });
+  let initialHeaders;
+  const origin = createServer((request, response) => {
+    if (request.url === '/final') {
+      response.end(JSON.stringify(request.headers));
+      return;
+    }
+    initialHeaders = request.headers;
+    response.writeHead(302, {
+      location:
+        request.url === '/same' ? '/final' : `http://127.0.0.1:${destination.address().port}/final`,
+    });
+    response.end();
+  });
+  for (const server of [destination, origin]) {
+    t.after(
+      () =>
+        new Promise((resolve) => {
+          server.closeAllConnections();
+          server.close(resolve);
+        }),
+    );
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+  }
+  // Raw header arrays need an explicit Host header to be valid HTTP/1.1 on Node 24.
+  headers.Host = `127.0.0.1:${origin.address().port}`;
+  for (const arrayHeaders of [false, true]) {
+    for (const path of ['/cross', '/same']) {
+      const { status, body } = await new Promise((resolve, reject) => {
+        const request = http.get(
+          `http://127.0.0.1:${origin.address().port}${path}`,
+          {
+            headers: arrayHeaders ? Object.entries(headers).flat() : { ...headers },
+            sensitiveHeaders: ['X-Auth^Token', 'X-Auth|Token'],
+          },
+          (response) => {
+            let body = '';
+            response.setEncoding('utf8');
+            response.on('data', (chunk) => {
+              body += chunk;
+            });
+            response.on('error', reject);
+            response.on('end', () => resolve({ status: response.statusCode, body }));
+          },
+        );
+        request.on('error', reject);
+        request.setTimeout(5000, () => request.destroy(new Error('Redirect request timed out')));
+      });
+      assert.equal(status, 200);
+      const received = JSON.parse(body);
+      for (const [name, value] of Object.entries(credentials)) {
+        assert.equal(initialHeaders[name.toLowerCase()], value);
+        assert.equal(
+          received[name.toLowerCase()],
+          path === '/same' ? value : undefined,
+          `${arrayHeaders ? 'array' : 'object'} ${path}: ${name}`,
+        );
+      }
+      assert.equal(received['x-keep'], headers['X-Keep']);
+    }
+  }
+});
+
+test('IPv6 parsing rejects long malformed zones within bounded synchronous work', () => {
+  const consumerRequire = createRequire(require.resolve('express-rate-limit'));
+  const { Address6, AddressError } = consumerRequire('ip-address');
+  for (const terminator of ['\n', '\r', '\u2028', '\u2029']) {
+    const input = `${'%'.repeat(100000)}${terminator}`;
+    assert.equal(
+      runInNewContext('Address6.isValid(input)', { Address6, input }, { timeout: 1000 }),
+      false,
+    );
+    assert.throws(
+      () => runInNewContext('new Address6(input)', { Address6, input }, { timeout: 1000 }),
+      AddressError,
+    );
+  }
+  const address = new Address6('fe80::1%eth0');
+  assert.equal(address.correctForm(), 'fe80::1');
+  assert.equal(address.zone, '%eth0');
+  assert.equal(Address6.isValid('2001:db8::1'), true);
+});
+
+test('Hono static files cannot bypass prefix authorization through a second path decode', async () => {
+  const consumerRequire = createRequire(
+    require.resolve('@modelcontextprotocol/sdk/server/streamableHttp.js'),
+  );
+  const { Hono } = consumerRequire('hono');
+  const { serveStatic } = consumerRequire('hono/serve-static');
+  const files = new Map([
+    ['public.txt', 'public content'],
+    ['admin/secret.txt', 'protected content'],
+  ]);
+  const lookups = [];
+  const app = new Hono();
+  app.use('/admin/*', (context, next) =>
+    context.req.header('x-test-authorized') === 'yes' ? next() : context.text('Unauthorized', 401),
+  );
+  app.use(
+    '*',
+    serveStatic({
+      root: './',
+      getContent: async (path) => {
+        lookups.push(path);
+        return files.get(path) ?? null;
+      },
+    }),
+  );
+  for (const path of ['/admin/secret.txt', '/%61dmin/secret.txt']) {
+    const response = await app.request(`http://localhost${path}`);
+    assert.equal(response.status, 401, path);
+  }
+  for (const path of [
+    '/%6%31dmin/secret.txt',
+    '/%2561dmin/secret.txt',
+    '/%25%36%31dmin/secret.txt',
+    '/admin%252fsecret.txt',
+  ]) {
+    const response = await app.request(`http://localhost${path}`);
+    assert.equal(response.status, 404, path);
+  }
+  assert.deepEqual(lookups, []);
+  const response = await app.request('http://localhost/public.txt');
+  assert.equal(response.status, 200);
+  assert.equal(await response.text(), 'public content');
+  assert.deepEqual(lookups, ['public.txt']);
+  const missing = await app.request('http://localhost/missing.txt');
+  assert.equal(missing.status, 404);
+  const authorized = await app.request('http://localhost/admin/secret.txt', {
+    headers: { 'x-test-authorized': 'yes' },
+  });
+  assert.equal(authorized.status, 200);
+  assert.equal(await authorized.text(), 'protected content');
+  assert.deepEqual(lookups, ['public.txt', 'missing.txt', 'admin/secret.txt']);
 });
 
 test('concurrently rejects line terminators following shell comments', () => {
