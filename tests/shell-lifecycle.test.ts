@@ -564,6 +564,7 @@ test('MCP approval restores and foregrounds the Wormhole window before notifying
   const popupLoad = openBitwardenPopupFlow.indexOf('await withBitwardenBrowserTimeout');
   const popupApprovalGuard = openBitwardenPopupFlow.indexOf(
     'mcpApprovalWindowCoordinator.hasPendingApprovals',
+    popupLoad,
   );
   const popupShow = openBitwardenPopupFlow.indexOf('popup.setVisible(true)');
   assert.ok(popupLoad < popupApprovalGuard && popupApprovalGuard < popupShow);
