@@ -62,8 +62,10 @@ export function parseWorkspaceRdpSettings(value: unknown): WorkspaceRdpSettings 
     if (typeof candidate !== 'boolean') throw new Error('RDP settings are invalid.');
     return candidate;
   };
-  const screenSize = text('screenSize', 32);
-  if (!['fitToWindow', 'Full connection content', 'Full screen'].includes(screenSize)) {
+  const screenSize = text('screenSize', 32) || 'fitToWindow';
+  if (
+    !['fittowindow', 'full connection content', 'full screen'].includes(screenSize.toLowerCase())
+  ) {
     const match = customSizePattern.exec(screenSize);
     const width = match ? Number(match[1]) : 0;
     const height = match ? Number(match[2]) : 0;

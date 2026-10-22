@@ -132,6 +132,10 @@ export class SessionResourceReleaseGate {
   reset(sessionId: string): void {
     this.completed.delete(sessionId);
   }
+
+  waitForRelease(sessionId: string): Promise<void> {
+    return this.pending.get(sessionId) ?? Promise.resolve();
+  }
 }
 
 export function nextSelectedSessionId(

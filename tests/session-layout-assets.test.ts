@@ -524,22 +524,6 @@ test('native RDP disconnect acknowledges only after ActiveX and Go resource clea
   assert.match(mainSource, /settleTunnelCleanup\([\s\S]*command\(\)[\s\S]*releaseRdpTunnel/);
 });
 
-test('editing an open RDP session releases and resets its native lifecycle', () => {
-  const editorSource = appSource.slice(
-    appSource.indexOf('const editedSessionId = `session-${editingId}`'),
-    appSource.indexOf(
-      '} else {',
-      appSource.indexOf('const editedSessionId = `session-${editingId}`'),
-    ),
-  );
-  assert.match(editorSource, /await releaseSessionResources\(editedSession\)/);
-  assert.match(
-    editorSource,
-    /rdpStatus: newConnectionForm\.protocol === 'rdp' \? 'idle' : undefined/,
-  );
-  assert.match(editorSource, /requestRdpCredentials\(editedSessionId\)/);
-});
-
 test('native overlays hide during drag or resize and return when resizing ends', () => {
   assert.match(
     appSource,

@@ -287,7 +287,10 @@ import {
   quickConnectTunnelId,
   type QuickConnectProtocol,
 } from './quick-connect-state';
-import { connectionEditRequiresReconnect } from './connection-edit-state';
+import {
+  connectionEditCanRestartSession,
+  connectionEditRequiresReconnect,
+} from './connection-edit-state';
 import { KeyedRetryQueue } from './keyed-retry-queue';
 import {
   isBitwardenUnlockError,
@@ -2006,6 +2009,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   const sessionDisconnectGate = useLazyRef(() => new SessionCloseGate());
   const sessionResourceReleaseGate = useLazyRef(() => new SessionResourceReleaseGate());
   const rdpSessionAttempts = useLazyRef(() => new WebSessionAttemptTracker());
+  const rdpEditAttempts = useLazyRef(() => new WebSessionAttemptTracker());
   const rdpCapabilityAttempts = useLazyRef(() => new WebSessionAttemptTracker());
   const [updateBusy, setUpdateBusy] = useState(false);
   const [updateStatus, setUpdateStatus] = useState('');
@@ -3673,6 +3677,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   ) {
     const session = sessionsRef.current.find((candidate) => candidate.id === sessionId);
     if (!session || session.protocol !== 'rdp') return;
+    rdpEditAttempts.current.cancel(sessionId);
     const attempt = rdpSessionAttempts.current.begin(sessionId);
 
     const normalizedCredentials = {
@@ -3716,18 +3721,21 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     }
 
     void waitForRdpSurfaceBounds(sessionId)
-      .then((bounds) => {
+      .then(async (bounds) => {
+        await sessionResourceReleaseGate.current.waitForRelease(sessionId);
         // Opening a saved connection creates and starts its tab in one event. Wait one frame for
         // that tab's real layout so the native host never centers prompts or initializes the
         // remote desktop from the backend's 1x1 startup placeholder.
         if (
           !rdpSessionAttempts.current.isCurrent(sessionId, attempt) ||
+          sessionCloseGate.current.activeSessionIds().has(sessionId) ||
           !sessionsRef.current.some(
             (candidate) => candidate.id === sessionId && candidate.protocol === 'rdp',
           )
         ) {
           return;
         }
+        sessionResourceReleaseGate.current.reset(sessionId);
         return wormhole.startRdpSession({
           sessionId,
           profile: {
@@ -3851,7 +3859,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   async function disconnectRemoteDesktopSession(sessionId: string): Promise<boolean> {
     const source = sessionsRef.current.find((session) => session.id === sessionId);
     if (!source || !canDisconnectRemoteDesktopSession(source)) return false;
-    if (source.protocol === 'rdp') rdpSessionAttempts.current.cancel(sessionId);
+    if (source.protocol === 'rdp') {
+      rdpEditAttempts.current.cancel(sessionId);
+      rdpSessionAttempts.current.cancel(sessionId);
+    }
 
     let disconnected = false;
     const ran = await sessionDisconnectGate.current.run(sessionId, async () => {
@@ -3910,10 +3921,22 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     if (!source?.nodeId || !canOpenRdpSystemClient(source)) return;
     const api = window.wormhole;
     if (!api) return;
+    rdpEditAttempts.current.cancel(sessionId);
     const attempt = rdpSessionAttempts.current.begin(sessionId);
     rdpSavedCredentialAttempts.current.delete(sessionId);
     if (rdpCredentialPrompt === sessionId) setRdpCredentialPrompt(null);
     try {
+      await sessionResourceReleaseGate.current.waitForRelease(sessionId);
+      if (
+        !rdpSessionAttempts.current.isCurrent(sessionId, attempt) ||
+        sessionCloseGate.current.activeSessionIds().has(sessionId) ||
+        !sessionsRef.current.some(
+          (session) => session.id === sessionId && session.protocol === 'rdp',
+        )
+      ) {
+        return;
+      }
+      sessionResourceReleaseGate.current.reset(sessionId);
       const result = await api.openRdpInSystemClient({
         sessionId,
         nodeId: source.nodeId,
@@ -4112,10 +4135,11 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   }
 
   async function releaseSessionResources(closing: Session): Promise<void> {
+    rdpEditAttempts.current.cancel(closing.id);
+    if (closing.protocol === 'rdp') rdpSessionAttempts.current.cancel(closing.id);
     await sessionResourceReleaseGate.current.release(closing.id, async () => {
       const releases: Promise<unknown>[] = [];
       if (closing.protocol === 'rdp') {
-        rdpSessionAttempts.current.cancel(closing.id);
         releases.push(
           window.wormhole
             ?.commandRdpSession({
@@ -6001,6 +6025,23 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       const reconnectEditedSession =
         editingId &&
         connectionEditRequiresReconnect(initialConnectionEditForm.current, newConnectionForm);
+      const editedSessionId = editingId ? `session-${editingId}` : '';
+      const editSourceSession = sessionsRef.current.find(
+        (session) => session.id === editedSessionId,
+      );
+      let rdpEditAttempt =
+        reconnectEditedSession &&
+        editSourceSession?.protocol === 'rdp' &&
+        !sessionCloseGate.current.activeSessionIds().has(editedSessionId)
+          ? rdpEditAttempts.current.begin(editedSessionId)
+          : undefined;
+      const isEditedSessionCurrent = () =>
+        Boolean(editSourceSession) &&
+        (editSourceSession?.protocol !== 'rdp' ||
+          (rdpEditAttempt !== undefined &&
+            rdpEditAttempts.current.isCurrent(editedSessionId, rdpEditAttempt) &&
+            !sessionCloseGate.current.activeSessionIds().has(editedSessionId) &&
+            sessionsRef.current.some((session) => session.id === editedSessionId)));
       if (editingId) {
         const result = await window.wormhole.updateWorkspaceNode({
           id: editingId,
@@ -6016,8 +6057,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         );
         await refreshWorkspace();
       } else if (editingId) {
-        const editedSessionId = `session-${editingId}`;
-        const editedSession = sessions.find((session) => session.id === editedSessionId);
+        const editedSession = isEditedSessionCurrent()
+          ? sessionsRef.current.find((session) => session.id === editedSessionId)
+          : undefined;
+        const restartEditedSession = connectionEditCanRestartSession(editedSession);
         if (editedSession) {
           for (const key of sessionRuntimeRetryKeys(editedSession)) {
             runtimeBitwardenRetries.remove(key);
@@ -6035,19 +6078,29 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           if (runtimeBitwardenRetries.isEmpty && bitwardenUnlockPrompt) {
             dismissRuntimeBitwardenUnlock();
           }
-          await releaseSessionResources(editedSession);
-          sessionResourceReleaseGate.current.reset(editedSession.id);
+          const sessionClosing = sessionCloseGate.current.activeSessionIds().has(editedSessionId);
+          const releasing = releaseSessionResources(editedSession);
+          // Cleanup invalidates previous edits synchronously. Reserve this edit before waiting,
+          // so a later connect, disconnect, or tab close can supersede it.
+          if (editedSession.protocol === 'rdp' && !sessionClosing) {
+            rdpEditAttempt = rdpEditAttempts.current.begin(editedSessionId);
+          }
+          await releasing;
+          if (isEditedSessionCurrent()) sessionResourceReleaseGate.current.reset(editedSession.id);
         }
-        clearSftpCancelRequestsForBrowser(sftpCancelRequests.current, editedSession?.sftp);
+        const applyEditedSession = isEditedSessionCurrent();
+        if (applyEditedSession) {
+          clearSftpCancelRequestsForBrowser(sftpCancelRequests.current, editedSession?.sftp);
+        }
         const backendSessionId =
-          editedSession &&
+          applyEditedSession &&
+          restartEditedSession &&
           (newConnectionForm.protocol === 'ssh' || newConnectionForm.protocol === 'serial')
             ? newSessionToken()
             : undefined;
-        await refreshWorkspace();
         setSessions((current) =>
           current.map((session) =>
-            session.id === editedSessionId
+            session.id === editedSessionId && applyEditedSession
               ? {
                   ...session,
                   title: name,
@@ -6058,12 +6111,13 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                   nodeId: editingId,
                   backendSessionId,
                   mcpAccessible: false,
-                  status:
-                    newConnectionForm.protocol === 'ssh' ||
-                    newConnectionForm.protocol === 'vnc' ||
-                    newConnectionForm.protocol === 'serial' ||
-                    newConnectionForm.protocol === 'http' ||
-                    newConnectionForm.protocol === 'https'
+                  status: !restartEditedSession
+                    ? 'closed'
+                    : newConnectionForm.protocol === 'ssh' ||
+                        newConnectionForm.protocol === 'vnc' ||
+                        newConnectionForm.protocol === 'serial' ||
+                        newConnectionForm.protocol === 'http' ||
+                        newConnectionForm.protocol === 'https'
                       ? 'connecting'
                       : 'placeholder',
                   terminalFrame: undefined,
@@ -6073,7 +6127,12 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                     newConnectionForm.protocol === 'serial'
                       ? { ...newConnectionForm.serial }
                       : undefined,
-                  rdpStatus: newConnectionForm.protocol === 'rdp' ? 'idle' : undefined,
+                  rdpStatus:
+                    newConnectionForm.protocol === 'rdp'
+                      ? restartEditedSession
+                        ? 'idle'
+                        : session.rdpStatus
+                      : undefined,
                   rdpBackend: undefined,
                   rdpError: undefined,
                   rdpExternal: undefined,
@@ -6108,12 +6167,18 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
             newConnectionForm.serial,
           );
         }
-        if (editedSession && newConnectionForm.protocol === 'rdp') {
+        if (editedSession && applyEditedSession && newConnectionForm.protocol === 'rdp') {
           refreshRdpSystemClientCapability(editedSessionId, editingId);
-          window.setTimeout(() => void requestRdpCredentials(editedSessionId), 0);
+          if (restartEditedSession) {
+            window.setTimeout(() => {
+              if (isEditedSessionCurrent()) void requestRdpCredentials(editedSessionId);
+            }, 0);
+          }
         }
         if (
           editedSession &&
+          applyEditedSession &&
+          restartEditedSession &&
           (newConnectionForm.protocol === 'http' || newConnectionForm.protocol === 'https')
         ) {
           startWebSession({
@@ -6130,6 +6195,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                 : undefined,
           });
         }
+        await refreshWorkspace();
       } else {
         const result = await window.wormhole.createWorkspaceNode(nodeWrite);
         await refreshWorkspace();

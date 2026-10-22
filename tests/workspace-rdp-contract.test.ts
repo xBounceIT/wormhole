@@ -158,10 +158,38 @@ test('workspace RDP IPC contract accepts the complete persisted profile', () => 
   assert.deepEqual(parseWorkspaceRdpSettings(validSettings()), validSettings());
 });
 
+test('workspace RDP IPC accepts legacy display aliases and defaults consistently with Go', () => {
+  for (const screenSize of [
+    'fitToWindow',
+    'FitToWindow',
+    'FITTOWINDOW',
+    'Full connection content',
+    'full CONNECTION content',
+    'Full screen',
+    'FULL SCREEN',
+    ' FitToWindow ',
+    '',
+    '   ',
+    '640x480',
+    '16384X16384',
+  ]) {
+    const profile = { ...validSettings(), screenSize };
+    assert.deepEqual(parseWorkspaceRdpSettings(profile), {
+      ...profile,
+      screenSize: screenSize.trim() || 'fitToWindow',
+    });
+  }
+});
+
 test('workspace RDP IPC contract rejects malformed sizes, enums, and gateways', () => {
   for (const patch of [
     { screenSize: '639x480' },
     { screenSize: '16385x900' },
+    { screenSize: '1280x479' },
+    { screenSize: '1280x16385' },
+    { screenSize: 'FitToWindow\n' },
+    { screenSize: 'fit to window' },
+    { screenSize: 'FitToWindow'.repeat(4) },
     { colorDepth: 8 },
     { connectionSpeed: 0 },
     { gatewayUsageMethod: 1, gatewayHostname: '' },
