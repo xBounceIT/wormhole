@@ -964,7 +964,7 @@ func (s *vncSession) connect(command backendCommand, database *sql.DB, electronU
 		s.fail(err)
 		return
 	}
-	guardedNetwork := newVncReadGuard(network)
+	guardedNetwork := newVncReadGuard(&vncPixelFormatConn{Conn: network})
 	if !s.setNetworkConnection(guardedNetwork) {
 		_ = guardedNetwork.Close()
 		return
@@ -998,7 +998,7 @@ func (s *vncSession) connect(command backendCommand, database *sql.DB, electronU
 	s.writeMu.Lock()
 	setupError := connection.SetPixelFormat(vnc.PixelFormat{
 		BPP:        32,
-		Depth:      32,
+		Depth:      24,
 		BigEndian:  false,
 		TrueColor:  true,
 		RedMax:     255,
