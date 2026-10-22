@@ -3721,18 +3721,21 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     }
 
     void waitForRdpSurfaceBounds(sessionId)
-      .then((bounds) => {
+      .then(async (bounds) => {
+        await sessionResourceReleaseGate.current.waitForRelease(sessionId);
         // Opening a saved connection creates and starts its tab in one event. Wait one frame for
         // that tab's real layout so the native host never centers prompts or initializes the
         // remote desktop from the backend's 1x1 startup placeholder.
         if (
           !rdpSessionAttempts.current.isCurrent(sessionId, attempt) ||
+          sessionCloseGate.current.activeSessionIds().has(sessionId) ||
           !sessionsRef.current.some(
             (candidate) => candidate.id === sessionId && candidate.protocol === 'rdp',
           )
         ) {
           return;
         }
+        sessionResourceReleaseGate.current.reset(sessionId);
         return wormhole.startRdpSession({
           sessionId,
           profile: {
@@ -3923,6 +3926,17 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     rdpSavedCredentialAttempts.current.delete(sessionId);
     if (rdpCredentialPrompt === sessionId) setRdpCredentialPrompt(null);
     try {
+      await sessionResourceReleaseGate.current.waitForRelease(sessionId);
+      if (
+        !rdpSessionAttempts.current.isCurrent(sessionId, attempt) ||
+        sessionCloseGate.current.activeSessionIds().has(sessionId) ||
+        !sessionsRef.current.some(
+          (session) => session.id === sessionId && session.protocol === 'rdp',
+        )
+      ) {
+        return;
+      }
+      sessionResourceReleaseGate.current.reset(sessionId);
       const result = await api.openRdpInSystemClient({
         sessionId,
         nodeId: source.nodeId,
@@ -4122,10 +4136,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
 
   async function releaseSessionResources(closing: Session): Promise<void> {
     rdpEditAttempts.current.cancel(closing.id);
+    if (closing.protocol === 'rdp') rdpSessionAttempts.current.cancel(closing.id);
     await sessionResourceReleaseGate.current.release(closing.id, async () => {
       const releases: Promise<unknown>[] = [];
       if (closing.protocol === 'rdp') {
-        rdpSessionAttempts.current.cancel(closing.id);
         releases.push(
           window.wormhole
             ?.commandRdpSession({

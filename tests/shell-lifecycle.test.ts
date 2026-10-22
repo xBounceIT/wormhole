@@ -1504,6 +1504,24 @@ test('session resources release exactly once across overlapping close paths', as
   assert.equal(releases, 2);
 });
 
+test('waiting for resource release handles unused, pending and failed cleanup', async () => {
+  const gate = new SessionResourceReleaseGate();
+  await gate.waitForRelease('unused');
+  const pending = Promise.withResolvers<void>();
+  const releasing = gate.release('session-1', () => pending.promise);
+  assert.equal(gate.waitForRelease('session-1'), releasing);
+  const failed = assert.rejects(gate.waitForRelease('session-1'), /cleanup failed/);
+  pending.reject(new Error('cleanup failed'));
+  await failed;
+  await gate.waitForRelease('session-1');
+  gate.reset('session-1');
+  let released = false;
+  await gate.release('session-1', async () => {
+    released = true;
+  });
+  assert.equal(released, true);
+});
+
 test('concurrent tab removal never selects or restores another closing tab', () => {
   const sessions = [{ id: 'a' }, { id: 'b' }, { id: 'c' }];
   const closing = new Set(['a', 'b']);

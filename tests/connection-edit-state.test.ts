@@ -500,7 +500,7 @@ test('an RDP tab already closing cannot be reclaimed by a save', async () => {
   assert.ok(!harness.effects.includes('reset release gate'));
 });
 
-test('RDP lifecycle entry points invalidate pending editor work before awaiting native I/O', async () => {
+function rdpLifecycleHarness() {
   const source = {
     id: 'rdp-tab',
     nodeId: 'saved',
@@ -510,17 +510,19 @@ test('RDP lifecycle entry points invalidate pending editor work before awaiting 
     rdpSystemClientSupported: true,
   };
   const tracker = new WebSessionAttemptTracker();
+  const effects: string[] = [];
   const context: Record<string, any> = {
     sessionsRef: { current: [source] },
     rdpEditAttempts: { current: tracker },
     rdpSessionAttempts: { current: new WebSessionAttemptTracker() },
     rdpSavedCredentialAttempts: { current: new Set() },
     sessionDisconnectGate: { current: new SessionCloseGate() },
+    sessionCloseGate: { current: new SessionCloseGate() },
     sessionResourceReleaseGate: { current: new SessionResourceReleaseGate() },
     rdpCredentialPrompt: null,
     setSessions: () => {},
     defaultRdpProfile: () => ({}),
-    waitForRdpSurfaceBounds: () => new Promise(() => {}),
+    waitForRdpSurfaceBounds: async () => ({ x: 0, y: 0, width: 1024, height: 768 }),
     canDisconnectRemoteDesktopSession,
     canOpenRdpSystemClient,
     disconnectedRemoteDesktopState,
@@ -528,11 +530,28 @@ test('RDP lifecycle entry points invalidate pending editor work before awaiting 
     runtimeBitwardenRetries: { remove() {} },
     window: {
       wormhole: {
-        commandRdpSession: async () => ({}),
-        openRdpInSystemClient: async () => ({ ok: true }),
+        commandRdpSession: async () => {
+          effects.push('disconnect');
+        },
+        startRdpSession: async () => {
+          effects.push('embedded');
+        },
+        openRdpInSystemClient: async () => {
+          effects.push('system');
+          return { ok: true };
+        },
       },
     },
   };
+  const action = (start: string, end: string) => {
+    const name = start.replace('async ', '').replace('function ', '').replace('(', '');
+    return runInNewContext(`${handlerSource(start, end)}\n${name};`, context);
+  };
+  return { source, tracker, context, effects, action };
+}
+
+test('RDP lifecycle entry points invalidate pending editor work before awaiting native I/O', async () => {
+  const { source, tracker, action } = rdpLifecycleHarness();
   const cases: [string, string, unknown[]][] = [
     [
       'function startRdpSession(',
@@ -552,14 +571,87 @@ test('RDP lifecycle entry points invalidate pending editor work before awaiting 
     ],
   ];
   for (const [start, end, args] of cases) {
-    const name = start.replace('async ', '').replace('function ', '').replace('(', '');
-    const action = runInNewContext(`${handlerSource(start, end)}\n${name};`, context);
     const generation = tracker.begin(source.id);
-    const result = action(...args);
-    assert.equal(tracker.isCurrent(source.id, generation), false, name);
+    const result = action(start, end)(...args);
+    assert.equal(tracker.isCurrent(source.id, generation), false, start);
     await result;
   }
 });
+
+for (const client of ['embedded', 'system']) {
+  for (const releaseState of ['none', 'scheduled', 'pending', 'completed']) {
+    test(`${client} RDP start renews cleanup after a ${releaseState} editor release`, async () => {
+      const { source, context, effects, action } = rdpLifecycleHarness();
+      const pending = Promise.withResolvers<void>();
+      context.window.wormhole.commandRdpSession = async () => {
+        effects.push('disconnect');
+        await pending.promise;
+      };
+      const release = action(
+        'async function releaseSessionResources(',
+        'function handleConfirmOnTabCloseChange(',
+      );
+      const releasing = releaseState === 'none' ? Promise.resolve() : release(source);
+      if (releaseState === 'pending') await new Promise(setImmediate);
+      if (releaseState === 'completed') {
+        pending.resolve();
+        await releasing;
+      }
+      const start =
+        client === 'embedded'
+          ? action('function startRdpSession(', 'function retryRdpSession(')
+          : action('async function openRdpInSystemClient(', 'async function submitRdpCredentials(');
+      const starting = start(source.id, { username: '', domain: '', password: '' }, false);
+      await new Promise(setImmediate);
+      if (releaseState === 'scheduled' || releaseState === 'pending') {
+        assert.deepEqual(effects, ['disconnect'], 'replacement waits for old native resources');
+      }
+      pending.resolve();
+      await Promise.all([releasing, starting]);
+      await new Promise(setImmediate);
+      assert.equal(effects.filter((effect) => effect === client).length, 1);
+      await release(source);
+      assert.deepEqual(
+        effects,
+        releaseState === 'none' ? [client, 'disconnect'] : ['disconnect', client, 'disconnect'],
+      );
+      await release(source);
+      assert.equal(
+        effects.filter((effect) => effect === 'disconnect').length,
+        releaseState === 'none' ? 1 : 2,
+      );
+    });
+  }
+
+  for (const cancellation of ['close', 'remove', 'closing']) {
+    test(`${client} RDP start cannot resume after ${cancellation} while cleanup is pending`, async () => {
+      const { source, context, effects, action } = rdpLifecycleHarness();
+      const pending = Promise.withResolvers<void>();
+      context.window.wormhole.commandRdpSession = () => pending.promise;
+      const release = action(
+        'async function releaseSessionResources(',
+        'function handleConfirmOnTabCloseChange(',
+      );
+      const releasing = release(source);
+      const start =
+        client === 'embedded'
+          ? action('function startRdpSession(', 'function retryRdpSession(')
+          : action('async function openRdpInSystemClient(', 'async function submitRdpCredentials(');
+      const starting = start(source.id, { username: '', domain: '', password: '' }, false);
+      await new Promise(setImmediate);
+      let closing;
+      if (cancellation === 'close') closing = release(source);
+      if (cancellation === 'remove') context.sessionsRef.current = [];
+      if (cancellation === 'closing') {
+        context.sessionCloseGate.current.activeSessionIds = () => new Set([source.id]);
+      }
+      pending.resolve();
+      await Promise.all([releasing, starting, closing]);
+      await new Promise(setImmediate);
+      assert.deepEqual(effects, []);
+    });
+  }
+}
 
 test('a refresh failure after saving the rename still preserves runtime resources', async () => {
   const harness = editorHarness('ssh', { refreshError: true });
