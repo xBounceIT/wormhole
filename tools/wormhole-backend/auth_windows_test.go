@@ -12,21 +12,45 @@ import (
 )
 
 func TestParseOwnerWindow(t *testing.T) {
-	expected := uintptr(0x1234)
-	actual, err := parseOwnerWindow(strconv.FormatUint(uint64(expected), 10))
-	if err != nil {
-		t.Fatal(err)
+	for _, expected := range []uintptr{1, 0x1234, 1 << 31, 1<<32 - 1, ^uintptr(0)} {
+		value := strconv.FormatUint(uint64(expected), 10)
+		t.Run(value, func(t *testing.T) {
+			actual, err := parseOwnerWindow(value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if actual != expected {
+				t.Fatalf("owner window=%#x, want %#x", actual, expected)
+			}
+		})
 	}
-	if actual != expected {
-		t.Fatalf("owner window=%#x, want %#x", actual, expected)
+}
+
+func TestParseOwnerWindowPreserves64BitHandles(t *testing.T) {
+	for _, expected := range []uint64{1 << 32, 1 << 63, 1<<64 - 1} {
+		value := strconv.FormatUint(expected, 10)
+		t.Run(value, func(t *testing.T) {
+			actual, err := parseOwnerWindow(value)
+			if strconv.IntSize == 32 {
+				if err == nil || actual != 0 {
+					t.Fatalf("overflowing owner window %q returned %#x, %v", value, actual, err)
+				}
+				return
+			}
+			if err != nil || uint64(actual) != expected {
+				t.Fatalf("owner window=%#x, %v, want %#x", actual, err, expected)
+			}
+		})
 	}
 }
 
 func TestParseOwnerWindowRejectsMissingOrInvalidHandle(t *testing.T) {
-	for _, value := range []string{"", "0", "-1", "not-a-window"} {
-		if _, err := parseOwnerWindow(value); err == nil {
-			t.Fatalf("owner window %q was accepted", value)
-		}
+	for _, value := range []string{"", "0", "-1", "not-a-window", "0x1234", " 42", "42 ", "18446744073709551616"} {
+		t.Run(value, func(t *testing.T) {
+			if actual, err := parseOwnerWindow(value); err == nil || actual != 0 {
+				t.Fatalf("invalid owner window %q returned %#x, %v", value, actual, err)
+			}
+		})
 	}
 }
 

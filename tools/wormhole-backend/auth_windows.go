@@ -175,7 +175,7 @@ func verifyWindowsHello(request authHelloVerifyRequest) authVerificationResponse
 }
 
 func parseOwnerWindow(value string) (uintptr, error) {
-	ownerWindow, err := strconv.ParseUint(value, 10, int(unsafe.Sizeof(uintptr(0))*8))
+	ownerWindow, err := strconv.ParseUint(value, 10, strconv.IntSize)
 	if err != nil || ownerWindow == 0 {
 		return 0, errors.New("invalid owner window")
 	}
