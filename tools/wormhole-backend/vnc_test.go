@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/des"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
@@ -11,6 +12,7 @@ import (
 	"fmt"
 	"image/png"
 	"io"
+	"math/bits"
 	"net"
 	"os"
 	"path/filepath"
@@ -941,6 +943,28 @@ func TestVncSessionCloseCancelsConnectContext(t *testing.T) {
 }
 
 func TestVncSessionCompletesRfbHandshakeAndStreamsInput(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		format [16]byte
+	}{
+		{"RGB888 little endian", [16]byte{32, 24, 0, 1, 0, 255, 0, 255, 0, 255, 16, 8, 0}},
+		{"RGB888 big endian", [16]byte{32, 24, 1, 1, 0, 255, 0, 255, 0, 255, 16, 8, 0}},
+		{"RGB565", [16]byte{16, 16, 0, 1, 0, 31, 0, 63, 0, 31, 11, 5, 0}},
+		{"indexed color", [16]byte{8, 8, 0, 0}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Run("RFB 3.3 None", func(t *testing.T) {
+				testVncSessionHandshake(t, test.format, "")
+			})
+			t.Run("RFB 3.8 VNCAuth", func(t *testing.T) {
+				testVncSessionHandshake(t, test.format, "vnc-test")
+			})
+		})
+	}
+}
+
+func testVncSessionHandshake(t *testing.T, serverFormat [16]byte, password string) {
+	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -950,8 +974,18 @@ func TestVncSessionCompletesRfbHandshakeAndStreamsInput(t *testing.T) {
 	serverInputs := make(chan string, 2)
 	serverDone := make(chan error, 1)
 	go func() {
-		serverDone <- serveFakeVnc(listener, serverInputs)
+		serverDone <- serveFakeVncWithFormat(listener, serverInputs, serverFormat, password)
 	}()
+	t.Cleanup(func() {
+		select {
+		case err := <-serverDone:
+			if err != nil {
+				t.Errorf("fake VNC server: %v", err)
+			}
+		case <-time.After(6 * time.Second):
+			t.Error("fake VNC server did not stop")
+		}
+	})
 
 	readPipe, writePipe, err := os.Pipe()
 	if err != nil {
@@ -968,10 +1002,12 @@ func TestVncSessionCompletesRfbHandshakeAndStreamsInput(t *testing.T) {
 	connectDone := make(chan struct{})
 	go func() {
 		session.connect(backendCommand{
-			Action:    "vnc.connect",
-			SessionID: session.id,
-			Host:      "127.0.0.1",
-			Port:      listener.Addr().(*net.TCPAddr).Port,
+			Action:           "vnc.connect",
+			SessionID:        session.id,
+			Host:             "127.0.0.1",
+			Port:             listener.Addr().(*net.TCPAddr).Port,
+			Password:         password,
+			PasswordProvided: password != "",
 		}, nil)
 		close(connectDone)
 	}()
@@ -996,7 +1032,7 @@ func TestVncSessionCompletesRfbHandshakeAndStreamsInput(t *testing.T) {
 		t.Fatal(err)
 	}
 	r, g, b, a := decoded.At(0, 0).RGBA()
-	if r != 0xffff || g != 0 || b != 0 || a != 0xffff {
+	if r != 0x1212 || g != 0x3434 || b != 0x5656 || a != 0xffff {
 		t.Fatalf("unexpected streamed framebuffer pixel: %#x %#x %#x %#x", r, g, b, a)
 	}
 
@@ -1021,9 +1057,6 @@ func TestVncSessionCompletesRfbHandshakeAndStreamsInput(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("VNC session did not finish after the fake server closed")
 	}
-	if err := <-serverDone; err != nil {
-		t.Fatal(err)
-	}
 }
 
 func readBackendEvent(t *testing.T, reader *bufio.Reader, want string) backendEvent {
@@ -1046,6 +1079,12 @@ func readBackendEvent(t *testing.T, reader *bufio.Reader, want string) backendEv
 }
 
 func serveFakeVnc(listener net.Listener, inputs chan<- string) error {
+	return serveFakeVncWithFormat(listener, inputs, [16]byte{
+		32, 24, 0, 1, 0, 255, 0, 255, 0, 255, 16, 8, 0,
+	}, "")
+}
+
+func serveFakeVncWithFormat(listener net.Listener, inputs chan<- string, serverFormat [16]byte, password string) error {
 	connection, err := listener.Accept()
 	if err != nil {
 		return err
@@ -1053,40 +1092,61 @@ func serveFakeVnc(listener net.Listener, inputs chan<- string) error {
 	defer connection.Close()
 	_ = connection.SetDeadline(time.Now().Add(5 * time.Second))
 
-	if _, err := io.WriteString(connection, "RFB 003.008\n"); err != nil {
+	// RFB 3.3 None has no SecurityResult. Exercise 3.8 with VNCAuth instead:
+	// go-vnc currently skips the mandatory SecurityResult for 3.8 None.
+	version := "RFB 003.003\n"
+	if password != "" {
+		version = "RFB 003.008\n"
+	}
+	if _, err := io.WriteString(connection, version); err != nil {
 		return err
 	}
 	clientVersion := make([]byte, 12)
 	if _, err := io.ReadFull(connection, clientVersion); err != nil {
 		return err
 	}
-	if _, err := connection.Write([]byte{1, 1}); err != nil {
-		return err
+	if string(clientVersion) != version {
+		return fmt.Errorf("unexpected client version %q", clientVersion)
 	}
-	var selectedSecurity [1]byte
-	if _, err := io.ReadFull(connection, selectedSecurity[:]); err != nil {
+	if password == "" {
+		if err := binary.Write(connection, binary.BigEndian, uint32(1)); err != nil {
+			return err
+		}
+	} else if err := authenticateFakeVnc(connection, password); err != nil {
 		return err
-	}
-	if selectedSecurity[0] != 1 {
-		return fmt.Errorf("client selected unexpected security type %d", selectedSecurity[0])
 	}
 	var clientInit [1]byte
 	if _, err := io.ReadFull(connection, clientInit[:]); err != nil {
 		return err
 	}
-	if err := writeFakeServerInit(connection); err != nil {
+	if err := writeFakeServerInit(connection, serverFormat); err != nil {
 		return err
 	}
 
 	frameSent := false
 	inputsSeen := 0
+	pixelFormatsSeen := 0
 	for {
 		messageType, payload, err := readFakeClientMessage(connection)
 		if err != nil {
 			return err
 		}
 		switch messageType {
+		case 0:
+			// Inspect network bytes independently of go-vnc's serializer: channel maxima
+			// must use network byte order even when pixel values are little endian.
+			want := serverFormat
+			if pixelFormatsSeen > 0 {
+				want = [16]byte{32, 24, 0, 1, 0, 255, 0, 255, 0, 255, 16, 8, 0}
+			}
+			if !bytes.Equal(payload[3:], want[:]) {
+				return fmt.Errorf("invalid pixel format %d: got %x, want %x", pixelFormatsSeen+1, payload[3:], want)
+			}
+			pixelFormatsSeen++
 		case 3:
+			if pixelFormatsSeen != 2 {
+				return fmt.Errorf("frame requested before pixel format negotiation completed: %d formats", pixelFormatsSeen)
+			}
 			if !frameSent && payload[0] == 0 {
 				if err := writeFakeFramebuffer(connection); err != nil {
 					return err
@@ -1106,20 +1166,51 @@ func serveFakeVnc(listener net.Listener, inputs chan<- string) error {
 	}
 }
 
-func writeFakeServerInit(connection net.Conn) error {
+func authenticateFakeVnc(connection net.Conn, password string) error {
+	if _, err := connection.Write([]byte{1, 2}); err != nil {
+		return err
+	}
+	var selectedSecurity [1]byte
+	if _, err := io.ReadFull(connection, selectedSecurity[:]); err != nil {
+		return err
+	}
+	if selectedSecurity[0] != 2 {
+		return fmt.Errorf("client selected unexpected security type %d", selectedSecurity[0])
+	}
+	challenge := [16]byte{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}
+	if _, err := connection.Write(challenge[:]); err != nil {
+		return err
+	}
+	var response [16]byte
+	if _, err := io.ReadFull(connection, response[:]); err != nil {
+		return err
+	}
+	var key [8]byte
+	copy(key[:], password)
+	for index := range key {
+		key[index] = bits.Reverse8(key[index])
+	}
+	cipher, err := des.NewCipher(key[:])
+	if err != nil {
+		return err
+	}
+	var decoded [16]byte
+	cipher.Decrypt(decoded[:8], response[:8])
+	cipher.Decrypt(decoded[8:], response[8:])
+	if decoded != challenge {
+		return errors.New("incorrect VNC authentication response")
+	}
+	return binary.Write(connection, binary.BigEndian, uint32(0))
+}
+
+func writeFakeServerInit(connection net.Conn, format [16]byte) error {
 	if err := binary.Write(connection, binary.BigEndian, uint16(1)); err != nil {
 		return err
 	}
 	if err := binary.Write(connection, binary.BigEndian, uint16(1)); err != nil {
 		return err
 	}
-	// 32bpp, 24-bit depth, little-endian true color, RGB shifts 16/8/0.
-	if _, err := connection.Write([]byte{
-		32, 24, 0, 1,
-		0, 255, 0, 255, 0, 255,
-		16, 8, 0,
-		0, 0, 0,
-	}); err != nil {
+	if _, err := connection.Write(format[:]); err != nil {
 		return err
 	}
 	return binary.Write(connection, binary.BigEndian, uint32(0))
@@ -1131,9 +1222,9 @@ func writeFakeFramebuffer(connection net.Conn) error {
 	binary.BigEndian.PutUint16(message[2:4], 1)
 	binary.BigEndian.PutUint16(message[8:10], 1)
 	binary.BigEndian.PutUint16(message[10:12], 1)
-	// Raw encoding, followed by one red pixel in the negotiated little-endian format.
+	// Mixed RGB channels and nonzero padding exercise all shifts and opacity.
 	binary.BigEndian.PutUint32(message[12:16], 0)
-	copy(message[16:], []byte{0, 0, 255, 0})
+	copy(message[16:], []byte{0x56, 0x34, 0x12, 0x78})
 	_, err := connection.Write(message)
 	return err
 }
