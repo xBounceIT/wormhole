@@ -21,6 +21,7 @@ func TestMRemotePasswordBytes(t *testing.T) {
 		{"Latin-1", "Pässwörd1", []byte{0x50, 0xe4, 0x73, 0x73, 0x77, 0xf6, 0x72, 0x64, 0x31}, true},
 		{"boundaries", "\x00\u007f\u0080\u00ff", []byte{0, 0x7f, 0x80, 0xff}, true},
 		{"above Latin-1", "prefix\u0100", nil, false},
+		{"Cyrillic", "prefix\u0410", nil, false},
 		{"surrogate pair", "prefix😀", nil, false},
 		{"invalid UTF-8", "prefix\xff", nil, false},
 	} {
@@ -71,6 +72,7 @@ func TestMRemoteSilentDefaultIterationLimits(t *testing.T) {
 func TestMRemoteImportGoldenFixturesRejectIncorrectPasswords(t *testing.T) {
 	for _, test := range []struct{ name, file, password string }{
 		{"default with wrong password", "default-key.xml", "wrong"},
+		{"default with truncated Unicode alias", "default-key.xml", "\u016dR3m"},
 		{"custom with missing password", "custom-ascii.xml", ""},
 		{"custom with wrong password", "custom-ascii.xml", "wrong"},
 		{"Latin-1 with wrong password", "custom-latin1.xml", "Password1"},

@@ -623,6 +623,8 @@ func validateMRemoteXMLStructure(data []byte) error {
 }
 
 // mremotePasswordBytes matches BouncyCastle 1.8.1's Pkcs5PasswordToBytes.
+// Its Strings.ToByteArray calls Convert.ToByte(char), not an unchecked cast:
+// https://github.com/bcgit/bc-csharp/blob/release-1.8.1/crypto/src/util/Strings.cs#L30-L39
 // Each UTF-16 code unit must fit in one byte; characters above U+00FF are
 // rejected by that library, so mRemoteNG cannot use them as master passwords.
 func mremotePasswordBytes(password string) ([]byte, bool) {

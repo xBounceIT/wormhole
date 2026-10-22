@@ -234,8 +234,9 @@ export function MRemoteImportDialog({
               <li>Complete the export, then select the resulting XML file below.</li>
             </ol>
             <p>
-              mRemoteNG uses the password configured through Password protect on the root Connections
-              node. Wormhole tries the default automatically and prompts when a password is needed.
+              mRemoteNG uses the password configured through Password protect on the root
+              Connections node. Wormhole tries the default automatically and prompts when a password
+              is needed.
             </p>
           </section>
 
