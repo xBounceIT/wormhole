@@ -24,6 +24,7 @@ import './index.css';
 import { authenticationIdleSeconds } from './auth-idle';
 import { McpApprovalDialog } from './components/McpApprovalDialog';
 import { TerminalLinkDialog } from './components/TerminalLinkDialog';
+import { UpdateNotification } from './components/UpdateNotification';
 import {
   applySessionMcpAccess,
   canDisconnectSessionAiAgent,
@@ -72,7 +73,6 @@ import {
   isUpdateInstallable,
   shouldShowReleaseNotes,
   shouldOfferUpdate,
-  unavailableInstallerMessage,
   updateStatusMessage,
 } from './update-state';
 import {
@@ -1973,9 +1973,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   const [autoCheckForUpdates, setAutoCheckForUpdates] = useState(
     initialSettings.autoCheckForUpdates,
   );
-  const [skippedUpdateVersion, setSkippedUpdateVersion] = useState<string | null>(
-    initialSettings.skippedUpdateVersion,
-  );
+  const [dismissedUpdateVersion, setDismissedUpdateVersion] = useState<string | null>(null);
   const [lastUpdateCheck, setLastUpdateCheck] = useState<string | null>(
     initialSettings.lastUpdateCheck,
   );
@@ -2232,20 +2230,22 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   useEffect(() => {
     if (!window.wormhole) return;
     let active = true;
+    let receivedResult = false;
+    const unsubscribeResult = window.wormhole.onUpdateResult((result) => {
+      receivedResult = true;
+      setUpdateResult(result);
+    });
 
     void window.wormhole
       .updateStatus()
       .then(({ currentVersion, result }) => {
         if (!active) return;
         setUpdateCurrentVersion(currentVersion);
-        setUpdateResult(result);
+        if (!receivedResult) setUpdateResult(result);
       })
       .catch(() => {
         // The settings page still exposes "Check now" when status cannot be read.
       });
-    const unsubscribeResult = window.wormhole.onUpdateResult((result) => {
-      setUpdateResult(result);
-    });
     const unsubscribeProgress = window.wormhole.onUpdateProgress(({ downloaded, total }) => {
       setUpdateDownloadProgress(total > 0 ? Math.min(1, downloaded / total) : null);
     });
@@ -2256,8 +2256,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     };
   }, []);
 
-  const updateBannerVisible = Boolean(
-    updateResult && shouldOfferUpdate(updateResult, skippedUpdateVersion),
+  const updateNotificationVisible = Boolean(
+    authGate === 'unlocked' &&
+    updateResult &&
+    shouldOfferUpdate(updateResult, dismissedUpdateVersion),
   );
 
   async function handleCheckForUpdates() {
@@ -2267,13 +2269,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     try {
       const result = await window.wormhole.checkForUpdates();
       setUpdateResult(result);
-      setUpdateStatus(
-        result.checkFailed
-          ? "Couldn't reach the update server. Try again later."
-          : result.isUpdateAvailable
-            ? `Update available: ${result.latestVersion}`
-            : (unavailableInstallerMessage(result) ?? "You're on the latest version."),
-      );
+      setUpdateStatus('');
       const settings = await window.wormhole.readAppSettings();
       setLastUpdateCheck(settings.lastUpdateCheck);
     } catch {
@@ -2286,10 +2282,13 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   function handleDismissUpdate() {
     const latest = updateResult?.latestVersion;
     if (!latest) return;
-    setSkippedUpdateVersion(latest);
-    void window.wormhole?.setUpdatePreferences({ skippedUpdateVersion: latest }).catch(() => {
-      // A failed save leaves the local state; the next settings read re-syncs it.
-    });
+    setDismissedUpdateVersion(latest);
+  }
+
+  function handleViewUpdateChanges() {
+    handleDismissUpdate();
+    setSettingsUpdatesRequest((request) => request + 1);
+    setActivePage('settings');
   }
 
   function handleAutoCopyOnSelectChange(enabled: boolean) {
@@ -6899,22 +6898,20 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
               <img alt="" className="size-full object-contain" src={wormholeIcon} />
             </div>
             <span className="select-none text-sm font-semibold tracking-tight">Wormhole</span>
-            {updateBannerVisible ? (
-              <Button
-                className="h-7 gap-1.5 rounded-md border-border bg-background px-2.5 !text-xs font-semibold text-foreground hover:bg-muted hover:text-foreground"
-                onClick={() => {
-                  setSettingsUpdatesRequest((request) => request + 1);
-                  setActivePage('settings');
-                }}
-                size="sm"
-                variant="outline"
-              >
-                <Download data-icon="inline-start" />
-                Update
-              </Button>
-            ) : null}
           </div>
         </header>
+
+        {updateNotificationVisible && updateResult ? (
+          <UpdateNotification
+            busy={updateBusy}
+            downloadProgress={updateDownloadProgress}
+            onDismiss={handleDismissUpdate}
+            onUpdate={() => void handleInstallUpdate()}
+            onViewChanges={handleViewUpdateChanges}
+            status={updateStatus}
+            version={updateResult.latestVersion}
+          />
+        ) : null}
 
         <ResizablePanelGroup className="h-full min-h-0 flex-1" orientation="horizontal">
           <ResizablePanel
@@ -7178,7 +7175,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                     downloadProgress: updateDownloadProgress,
                     lastUpdateCheck,
                     result: updateResult,
-                    skippedUpdateVersion,
+                    dismissedUpdateVersion,
                     status: updateStatus,
                   }}
                 />
@@ -15316,7 +15313,7 @@ function SettingsPage({
     result: WormholeUpdateCheckResult | null;
     autoCheckForUpdates: boolean;
     lastUpdateCheck: string | null;
-    skippedUpdateVersion: string | null;
+    dismissedUpdateVersion: string | null;
     busy: boolean;
     status: string;
     downloadProgress: number | null;
@@ -16522,7 +16519,7 @@ function SettingsPage({
   const mcpConfigDetails = mcpClientCopyDetails(mcpClient);
   const updateAvailable = Boolean(update.result && isUpdateInstallable(update.result));
   const updateDismissible = Boolean(
-    update.result && shouldOfferUpdate(update.result, update.skippedUpdateVersion),
+    update.result && shouldOfferUpdate(update.result, update.dismissedUpdateVersion),
   );
   const showReleaseNotes = Boolean(update.result && shouldShowReleaseNotes(update.result));
   const updateMessage = updateStatusMessage(update.status, update.result);
@@ -17117,6 +17114,11 @@ function SettingsPage({
           </SettingsSection>
 
           <SettingsSection title="Release notes">
+            {showReleaseNotes ? (
+              <p className="text-xs font-medium">
+                Update available: {update.result?.latestVersion}
+              </p>
+            ) : null}
             <Card className="border-border/70 bg-card/40 p-4 shadow-none">
               {showReleaseNotes ? (
                 <div className="text-[11px] leading-relaxed text-muted-foreground">

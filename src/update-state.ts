@@ -37,14 +37,20 @@ export function updateStatusMessage(
     latestVersion: string;
     isNewerRelease: boolean;
     isUpdateAvailable: boolean;
+    checkFailed?: boolean;
   } | null,
 ): string {
-  return status || (result ? (unavailableInstallerMessage(result) ?? '') : '');
+  if (status || !result) return status;
+  if (result.checkFailed) return "Couldn't reach the update server. Try again later.";
+  return (
+    unavailableInstallerMessage(result) ??
+    (result.latestVersion && !isUpdateInstallable(result) ? "You're on the latest version." : '')
+  );
 }
 
 export function shouldOfferUpdate(
   result: { latestVersion: string; isUpdateAvailable: boolean },
-  skippedVersion: string | null,
+  dismissedVersion: string | null,
 ): boolean {
-  return isUpdateInstallable(result) && result.latestVersion !== skippedVersion;
+  return isUpdateInstallable(result) && result.latestVersion !== dismissedVersion;
 }
