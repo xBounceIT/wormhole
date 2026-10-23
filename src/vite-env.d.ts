@@ -928,7 +928,7 @@ interface Window {
     }): Promise<void>;
     commandWebSession(request: {
       sessionId: string;
-      operation: 'back' | 'forward' | 'reload' | 'stop';
+      operation: 'back' | 'forward' | 'reload' | 'stop' | 'zoom-in' | 'zoom-out';
     }): Promise<void>;
     showTreeTooltip(request: {
       text: string;

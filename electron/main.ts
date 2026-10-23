@@ -139,6 +139,7 @@ import {
 } from './serial.js';
 import { WebSessionAttemptTracker } from './web-session-attempt.js';
 import { getInSessionNavigationUrl } from './web-new-window-navigation.js';
+import { adjustWebZoom } from './web-zoom.js';
 import { webTargetURLMatchesEndpoint } from './web-target-validation.js';
 import { isSafeUpdateInstallerPath, updateInstallAction } from './update-installer.js';
 import { parseWorkspaceRdpSettings, type WorkspaceRdpSettings } from './workspace-rdp-contract.js';
@@ -799,7 +800,7 @@ type WebBoundsRequest = {
 };
 type WebCommandRequest = {
   sessionId: string;
-  operation: 'back' | 'forward' | 'reload' | 'stop';
+  operation: 'back' | 'forward' | 'reload' | 'stop' | 'zoom-in' | 'zoom-out';
 };
 type BitwardenPopupOpenRequest = {
   sessionId: string;
@@ -1392,7 +1393,9 @@ function isWebCommandRequest(value: unknown): value is WebCommandRequest {
     (value.operation === 'back' ||
       value.operation === 'forward' ||
       value.operation === 'reload' ||
-      value.operation === 'stop')
+      value.operation === 'stop' ||
+      value.operation === 'zoom-in' ||
+      value.operation === 'zoom-out')
   );
 }
 
@@ -4849,14 +4852,18 @@ class WebSurfaceManager {
   }
 
   async command(owner: BrowserWindow, request: WebCommandRequest): Promise<void> {
-    let record = this.surfaces.get(request.sessionId);
+    const record = this.surfaces.get(request.sessionId);
     if (!record || record.owner !== owner || record.disposed) return;
     if (this.bitwardenPopups.has(request.sessionId)) {
+      const authorizationEpoch = authSession.authorizationEpoch;
+      const isCurrent = () =>
+        this.surfaces.get(request.sessionId) === record &&
+        !record.disposed &&
+        isAuthorizationEpochCurrent(authorizationEpoch);
       await afterBitwardenPopupInputEvent(async () => {
-        await this.closeBitwardenPopup(request.sessionId);
+        if (isCurrent()) await this.closeBitwardenPopup(request.sessionId);
       });
-      record = this.surfaces.get(request.sessionId);
-      if (!record || record.owner !== owner || record.disposed) return;
+      if (!isCurrent()) return;
     }
     const contents = record.view.webContents;
     if (request.operation === 'back') {
@@ -4865,6 +4872,8 @@ class WebSurfaceManager {
       if (contents.navigationHistory.canGoForward()) contents.navigationHistory.goForward();
     } else if (request.operation === 'stop') {
       contents.stop();
+    } else if (request.operation === 'zoom-in' || request.operation === 'zoom-out') {
+      adjustWebZoom(contents, request.operation);
     } else {
       contents.reload();
     }
@@ -9772,8 +9781,8 @@ function createWindow() {
   window.on('resize', () => scheduleRdpSurfacePlacementSync(window));
   window.once('closed', () => clearRdpSurfacePlacements(window));
 
-  // Wormhole has no user-facing page zoom. Normalize the renderer to its native CSS scale so a
-  // previously persisted Chromium zoom level cannot make the whole workspace look oversized.
+  // Keep the workspace renderer at its native CSS scale so a previously persisted Chromium zoom
+  // level cannot make the whole workspace look oversized.
   window.webContents.setZoomLevel(0);
   window.webContents.setZoomFactor(1);
   window.setOpacity(startupWindowOpacity);
