@@ -92,6 +92,17 @@ function sourceBetween(source: string, startMarker: string, endMarker: string): 
   return source.slice(start, end);
 }
 
+// Static TSX configuration is outside Node's loaded-module coverage in scripts/test-coverage.ts.
+test('sidebar navigation places Sessions above Credentials and preserves the remaining order', () => {
+  const navigation = sourceBetween(appSource, 'const navItems:', 'function protocolLabel(');
+  assert.deepEqual(
+    [...navigation.matchAll(/\bid: '([^']+)'/g)].map(([, id]) => id),
+    ['sessions', 'credentials', 'tunnels', 'settings'],
+  );
+  const footer = sourceBetween(appSource, '<SidebarFooter', '</SidebarFooter>');
+  assert.match(footer, /\{navItems\.map\(\(item\) => \(/);
+});
+
 test('live surfaces are keyed only by session identity in one stable workspace layer', () => {
   const surfaceLayer = appSource.slice(
     appSource.indexOf('{sessions.map((session) => {', appSource.indexOf('function SessionsPage')),
