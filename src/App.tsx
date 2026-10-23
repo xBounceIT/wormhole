@@ -1052,8 +1052,8 @@ function applySshTerminalFrame(
 }
 
 const navItems: Array<{ id: NavItem; label: string; hint: string }> = [
-  { id: 'credentials', label: 'Credentials', hint: 'Stored access profiles' },
   { id: 'sessions', label: 'Sessions', hint: 'Open connections' },
+  { id: 'credentials', label: 'Credentials', hint: 'Stored access profiles' },
   { id: 'tunnels', label: 'Tunnels', hint: 'VPN and network routes' },
   { id: 'settings', label: 'Settings', hint: 'Application preferences' },
 ];
