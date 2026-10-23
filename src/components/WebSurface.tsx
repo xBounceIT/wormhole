@@ -118,7 +118,7 @@ export function WebSurface({
     };
   }, [session.id, visible]);
 
-  const command = (operation: 'back' | 'forward' | 'reload' | 'stop') => {
+  const command = (operation: 'back' | 'forward' | 'reload' | 'stop' | 'zoom-in' | 'zoom-out') => {
     void window.wormhole?.commandWebSession({ sessionId: session.id, operation });
   };
   const address =
@@ -167,6 +167,28 @@ export function WebSurface({
             {address}
           </span>
         </div>
+        {session.protocol === 'https' ? (
+          <div className="flex shrink-0 items-center gap-0.5 border-l border-border/70 pl-2">
+            <ToolbarButton
+              disabled={!visible}
+              label="Decrease text size"
+              onClick={() => command('zoom-out')}
+            >
+              <span aria-hidden="true" className="text-xs font-semibold">
+                A−
+              </span>
+            </ToolbarButton>
+            <ToolbarButton
+              disabled={!visible}
+              label="Increase text size"
+              onClick={() => command('zoom-in')}
+            >
+              <span aria-hidden="true" className="text-xs font-semibold">
+                A+
+              </span>
+            </ToolbarButton>
+          </div>
+        ) : null}
       </header>
 
       <div aria-label="Web browser canvas" className="relative min-h-0 flex-1" ref={surfaceRef}>

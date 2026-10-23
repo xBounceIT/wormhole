@@ -225,7 +225,7 @@ const wormholeBridge = {
   }) => ipcRenderer.invoke('web:set-bounds', request),
   commandWebSession: (request: {
     sessionId: string;
-    operation: 'back' | 'forward' | 'reload' | 'stop';
+    operation: 'back' | 'forward' | 'reload' | 'stop' | 'zoom-in' | 'zoom-out';
   }) => ipcRenderer.invoke('web:command', request),
   showTreeTooltip: (request: {
     text: string;
