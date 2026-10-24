@@ -635,6 +635,7 @@ interface WormholeAppSettings {
   confirmOnTabClose: boolean;
   confirmOnWindowClose: boolean;
   sidebarWidth: number;
+  sidebarPinned: boolean;
   connectionTreeExpansion: { defaultExpanded: boolean; folderIds: string[] } | null;
   autoCheckForUpdates: boolean;
   lastUpdateCheck: string | null;
@@ -1011,6 +1012,7 @@ interface Window {
     setConfirmOnTabClose(enabled: boolean): Promise<{ updated: boolean }>;
     setConfirmOnWindowClose(enabled: boolean): Promise<{ updated: boolean }>;
     setSidebarWidth(width: number): Promise<{ updated: boolean; sidebarWidth: number }>;
+    setSidebarPinned(pinned: boolean): Promise<{ updated: boolean }>;
     setConnectionTreeExpansion(state: {
       defaultExpanded: boolean;
       folderIds: string[];

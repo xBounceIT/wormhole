@@ -468,12 +468,17 @@ async function runWindowCloseTests() {
     },
   };
   let key = 0;
-  const mount = async (locked: boolean, remount = true) => {
+  const mount = async (locked: boolean, remount = true, sidebarOpen = false) => {
     if (remount) key += 1;
     await React.act(async () => {
       root.render(
         <React.StrictMode>
-          <AppCloseHarness key={key} locked={locked} onResult={() => authResults++} />
+          <AppCloseHarness
+            key={key}
+            locked={locked}
+            onResult={() => authResults++}
+            sidebarOpen={sidebarOpen}
+          />
         </React.StrictMode>,
       );
     });
@@ -629,6 +634,19 @@ async function runWindowCloseTests() {
   pending = await requestClose();
   await click('Close and terminate sessions');
   assert.equal(await pending.result, true);
+
+  await mount(false, true, true);
+  assert.equal(
+    document.getElementById('close-native-surface-probe').dataset.visible,
+    'false',
+    'the unpinned sidebar must hide native session surfaces',
+  );
+  await mount(false, false, false);
+  assert.equal(
+    document.getElementById('close-native-surface-probe').dataset.visible,
+    'true',
+    'closing the sidebar must restore native session surfaces',
+  );
 
   // Existing callers without a container must retain the ordinary body portal
   // and its default close control.

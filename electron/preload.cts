@@ -316,6 +316,7 @@ const wormholeBridge = {
       confirmOnTabClose: boolean;
       confirmOnWindowClose: boolean;
       sidebarWidth: number;
+      sidebarPinned: boolean;
       connectionTreeExpansion: { defaultExpanded: boolean; folderIds: string[] } | null;
       autoCheckForUpdates: boolean;
       lastUpdateCheck: string | null;
@@ -331,6 +332,7 @@ const wormholeBridge = {
   setConfirmOnWindowClose: (enabled: boolean) =>
     ipcRenderer.invoke('settings:set-confirm-on-window-close', enabled),
   setSidebarWidth: (width: number) => ipcRenderer.invoke('settings:set-sidebar-width', width),
+  setSidebarPinned: (pinned: boolean) => ipcRenderer.invoke('settings:set-sidebar-pinned', pinned),
   setConnectionTreeExpansion: (state: { defaultExpanded: boolean; folderIds: string[] }) =>
     ipcRenderer.invoke('settings:set-connection-tree-expansion', state),
   reportActiveSessionCount: (count: number) =>

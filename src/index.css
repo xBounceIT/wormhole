@@ -121,6 +121,23 @@
   animation: none !important;
 }
 
+[data-sidebar-surface] {
+  transition: width 200ms ease-out;
+}
+
+[data-sidebar-surface][data-overlay='false'] {
+  transition: none;
+}
+
+[data-sidebar-content] {
+  opacity: 0;
+  transition: opacity 150ms ease-out;
+}
+
+[data-sidebar-surface][data-expanded='true'] [data-sidebar-content] {
+  opacity: 1;
+}
+
 @keyframes terminal-cursor-blink {
   0%,
   49% {
@@ -176,6 +193,11 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  [data-sidebar-surface],
+  [data-sidebar-content] {
+    transition: none;
+  }
+
   .terminal-cursor {
     animation: none;
   }
