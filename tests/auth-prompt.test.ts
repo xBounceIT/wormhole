@@ -72,12 +72,9 @@ test('authentication prompts, window-close controls, and RDP surface layout work
     '  useEffect(() => {',
     source.indexOf('return window.wormhole?.onWindowCloseConfirmationRequested'),
   );
-  const nativeVisibility = slice(
-    '                  isWebSurfaceVisible={',
-    '                  selectedSession=',
-  );
+  const nativeVisibility = slice('isWebSurfaceVisible={', 'selectedSession=');
   const closeHarness = `
-    function AppCloseHarness({ locked, onResult }) {
+    function AppCloseHarness({ locked, onResult, sidebarOpen = false }) {
       const authGate = locked ? 'locked' : 'unlocked';
       const authState = { configured: true, mode: 'pin', windowsHello: { available: false, message: '' } };
       const authPrompt = null;
@@ -89,6 +86,7 @@ test('authentication prompts, window-close controls, and RDP surface layout work
       ${slice('  const visibleAuthPrompt =', '  const credentialResult =')}
       const mcpApprovals = [];
       const bitwardenAccessPromptOpen = false, contextMenuOverlayOpen = false;
+      const sidebarOverlayOpen = sidebarOpen;
       const newConnectionOpen = false, folderDetailsOpen = false, newFolderOpen = false;
       const rdpCredentialPrompt = null, sshCredentialPrompt = null;
       const sshKeyPassphrasePrompt = null, pendingSessionClose = null;
@@ -266,6 +264,7 @@ test('authentication prompts, window-close controls, and RDP surface layout work
       }, []);
       const mcpApprovals = [];
       const contextMenuOverlayOpen = false, newConnectionOpen = false, folderDetailsOpen = false;
+      const sidebarOverlayOpen = false;
       const newFolderOpen = false, authPrompt = null, rdpCredentialPrompt = null;
       const sshCredentialPrompt = null, sshKeyPassphrasePrompt = null, pendingSessionClose = null;
       const pendingWindowClose = null;

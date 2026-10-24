@@ -322,6 +322,7 @@ type BackendOperation =
   | 'settings-set-confirm-on-tab-close'
   | 'settings-set-confirm-on-window-close'
   | 'settings-set-sidebar-width'
+  | 'settings-set-sidebar-pinned'
   | 'settings-set-connection-tree-expansion'
   | 'bitwarden-onboarding-read'
   | 'bitwarden-onboarding-dismiss'
@@ -461,6 +462,7 @@ type AppSettings = {
   confirmOnTabClose: boolean;
   confirmOnWindowClose: boolean;
   sidebarWidth: number;
+  sidebarPinned: boolean;
   connectionTreeExpansion: ConnectionTreeExpansionSetting | null;
   autoCheckForUpdates: boolean;
   lastUpdateCheck: string | null;
@@ -7712,6 +7714,14 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       );
       confirmOnWindowClose = value;
       return result;
+    });
+  });
+
+  ipcMain.handle('settings:set-sidebar-pinned', async (_event, value: unknown) => {
+    if (typeof value !== 'boolean') throw new Error('Sidebar pin setting is invalid.');
+    return serializeAuthOperation(async () => {
+      await requireWorkspaceAuth();
+      return runBackend<{ updated: boolean }>('settings-set-sidebar-pinned', { pinned: value });
     });
   });
 

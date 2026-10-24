@@ -15,7 +15,13 @@ const ContextMenuOverlayContext = React.createContext<ContextMenuOverlayContextV
   report: () => undefined,
 });
 
-function ContextMenuOverlayProvider({ children }: { children: React.ReactNode }) {
+function ContextMenuOverlayProvider({
+  children,
+  onOpenChange,
+}: {
+  children: React.ReactNode;
+  onOpenChange?: (open: boolean) => void;
+}) {
   const [openOverlayIds, setOpenOverlayIds] = React.useState<Set<string>>(() => new Set());
   const report = React.useCallback((overlayId: string, open: boolean) => {
     setOpenOverlayIds((current) => updateOpenOverlayIds(current, overlayId, open));
@@ -24,6 +30,12 @@ function ContextMenuOverlayProvider({ children }: { children: React.ReactNode })
     () => ({ open: hasOpenOverlay(openOverlayIds), report }),
     [openOverlayIds, report],
   );
+  // A scoped provider still contributes to native-surface occlusion in its parent.
+  useNativeSurfaceOverlay(value.open);
+  React.useEffect(() => {
+    onOpenChange?.(value.open);
+    return () => onOpenChange?.(false);
+  }, [onOpenChange, value.open]);
   return (
     <ContextMenuOverlayContext.Provider value={value}>
       {children}

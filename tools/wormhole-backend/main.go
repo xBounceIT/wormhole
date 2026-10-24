@@ -62,6 +62,7 @@ type appSettingsSnapshot struct {
 	ConfirmOnTabClose         bool                          `json:"confirmOnTabClose"`
 	ConfirmOnWindowClose      bool                          `json:"confirmOnWindowClose"`
 	SidebarWidth              int                           `json:"sidebarWidth"`
+	SidebarPinned             bool                          `json:"sidebarPinned"`
 	ConnectionTreeExpansion   *connectionTreeExpansionState `json:"connectionTreeExpansion"`
 	AutoCheckForUpdates       bool                          `json:"autoCheckForUpdates"`
 	LastUpdateCheck           *string                       `json:"lastUpdateCheck"`
@@ -588,6 +589,7 @@ func runBackendCLI(args []string, input io.Reader, output io.Writer, errorOutput
 				"confirmOnTabClose":         settings.ConfirmOnTabClose,
 				"confirmOnWindowClose":      settings.ConfirmOnWindowClose,
 				"sidebarWidth":              settings.SidebarWidth,
+				"sidebarPinned":             settings.SidebarPinned,
 				"connectionTreeExpansion":   settings.ConnectionTreeExpansion,
 				"autoCheckForUpdates":       settings.AutoCheckForUpdates,
 				"lastUpdateCheck":           settings.LastUpdateCheck,
@@ -660,6 +662,20 @@ func runBackendCLI(args []string, input io.Reader, output io.Writer, errorOutput
 		}
 		if err == nil && request.Enabled != nil {
 			err = writeConfirmOnWindowClose(*databasePath, *request.Enabled)
+			if err == nil {
+				result = map[string]bool{"updated": true}
+			}
+		}
+	case "settings-set-sidebar-pinned":
+		var request struct {
+			Pinned *bool `json:"pinned"`
+		}
+		err = decodeInput(&request)
+		if err == nil && request.Pinned == nil {
+			err = errors.New("sidebar pin setting is invalid")
+		}
+		if err == nil && request.Pinned != nil {
+			err = writeSidebarPinned(*databasePath, *request.Pinned)
 			if err == nil {
 				result = map[string]bool{"updated": true}
 			}
@@ -1092,6 +1108,7 @@ func loadAppSettingsSnapshot(databasePath string) (appSettingsSnapshot, error) {
 		ConfirmOnTabClose:         settings.ConfirmOnTabClose,
 		ConfirmOnWindowClose:      settings.ConfirmOnWindowClose,
 		SidebarWidth:              settings.SidebarWidth,
+		SidebarPinned:             settings.SidebarPinned,
 		ConnectionTreeExpansion:   settings.ConnectionTreeExpansion,
 		AutoCheckForUpdates:       settings.AutoCheckForUpdates,
 		LastUpdateCheck:           settings.LastUpdateCheck,

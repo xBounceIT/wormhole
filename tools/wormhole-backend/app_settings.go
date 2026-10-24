@@ -35,6 +35,7 @@ const (
 	confirmOnTabCloseKey       = "ConfirmOnTabClose"
 	confirmOnWindowCloseKey    = "ConfirmOnWindowClose"
 	sidebarWidthKey            = "SidebarWidth"
+	sidebarPinnedKey           = "SidebarPinned"
 	connectionTreeExpansionKey = "ConnectionTreeExpansion"
 	defaultSidebarWidth        = 320
 	// Keep this aligned with src/sidebar-settings.ts so persisted widths cannot hide header actions.
@@ -348,6 +349,10 @@ func writeSidebarWidth(databasePath string, width int) error {
 	return writeSettingsValues(databasePath, map[string]any{sidebarWidthKey: clampSidebarWidth(width)})
 }
 
+func writeSidebarPinned(databasePath string, pinned bool) error {
+	return writeSettingsValues(databasePath, map[string]any{sidebarPinnedKey: pinned})
+}
+
 type connectionTreeExpansionState struct {
 	DefaultExpanded bool     `json:"defaultExpanded"`
 	FolderIDs       []string `json:"folderIds"`
@@ -405,6 +410,7 @@ type appSettingsValues struct {
 	ConfirmOnTabClose         bool
 	ConfirmOnWindowClose      bool
 	SidebarWidth              int
+	SidebarPinned             bool
 	ConnectionTreeExpansion   *connectionTreeExpansionState
 	AutoCheckForUpdates       bool
 	LastUpdateCheck           *string
@@ -422,6 +428,7 @@ func readAppSettings(databasePath string) (appSettingsValues, error) {
 		ConfirmOnTabClose:         true,
 		ConfirmOnWindowClose:      true,
 		SidebarWidth:              defaultSidebarWidth,
+		SidebarPinned:             true,
 		AutoCheckForUpdates:       true,
 	}
 	_, settingsPath := authPaths(databasePath)
@@ -464,6 +471,12 @@ func readAppSettings(databasePath string) (appSettingsValues, error) {
 		var enabled bool
 		if json.Unmarshal(value, &enabled) == nil {
 			settings.ConfirmOnWindowClose = enabled
+		}
+	}
+	if value, ok := document[sidebarPinnedKey]; ok {
+		var pinned *bool
+		if json.Unmarshal(value, &pinned) == nil && pinned != nil {
+			settings.SidebarPinned = *pinned
 		}
 	}
 	if value, ok := document[sidebarWidthKey]; ok {

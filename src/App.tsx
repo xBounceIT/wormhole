@@ -25,13 +25,18 @@ import { authenticationIdleSeconds } from './auth-idle';
 import { McpApprovalDialog } from './components/McpApprovalDialog';
 import { TerminalLinkDialog } from './components/TerminalLinkDialog';
 import { UpdateNotification } from './components/UpdateNotification';
+import { SidebarLayout, SidebarPinButton } from './components/SidebarLayout';
+import {
+  SidebarNavigation,
+  sidebarNavigationItems,
+  type SidebarPage,
+} from './components/SidebarNavigation';
 import {
   applySessionMcpAccess,
   canDisconnectSessionAiAgent,
   sessionTabPresentation,
 } from './session-tab-state';
 import { backupExportPasswordIsValid, backupExportRequiresEncryption } from './backup-state';
-import wormholeIcon from '../Assets/Wormhole.png';
 import bitwardenIcon from '../Assets/Bitwarden/bitwarden-icon.png';
 import {
   buildConnectionCredentialSelectionOptions,
@@ -194,7 +199,6 @@ import {
   Radio,
   RefreshCcw,
   Search,
-  Settings2,
   Terminal,
   Trash2,
   Upload,
@@ -245,7 +249,6 @@ import { Input } from '@/components/ui/input';
 import { PasswordInput } from '@/components/ui/password-input';
 import { Kbd } from '@/components/ui/kbd';
 import { Label } from '@/components/ui/label';
-import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import {
   Select,
@@ -259,13 +262,7 @@ import { Textarea } from '@/components/ui/textarea';
 import {
   Sidebar,
   SidebarContent,
-  SidebarFooter,
-  SidebarGroup,
   SidebarHeader,
-  SidebarMenu,
-  SidebarMenuBadge,
-  SidebarMenuButton,
-  SidebarMenuItem,
   SidebarProvider,
   SidebarInput,
   SidebarInset,
@@ -331,12 +328,7 @@ import {
   SessionResourceReleaseGate,
   shouldConfirmConnectedTabClose,
 } from './session-lifecycle';
-import {
-  createDebouncedSidebarWriter,
-  maxSidebarWidth,
-  minSidebarWidth,
-  normalizeSidebarWidth,
-} from './sidebar-settings';
+import { createDebouncedSidebarWriter, normalizeSidebarWidth } from './sidebar-settings';
 import {
   connectionTreeFolderIsExpanded,
   createConnectionTreeExpansionWriter,
@@ -402,7 +394,7 @@ function blankFolderForm(): FolderForm {
     credential: 'inherit',
   };
 }
-type NavItem = 'sessions' | 'credentials' | 'tunnels' | 'settings';
+type NavItem = SidebarPage;
 type AuthPromptKind = 'lock' | 'confirmation';
 
 type SerialSettings = {
@@ -1051,12 +1043,7 @@ function applySshTerminalFrame(
   };
 }
 
-const navItems: Array<{ id: NavItem; label: string; hint: string }> = [
-  { id: 'sessions', label: 'Sessions', hint: 'Open connections' },
-  { id: 'credentials', label: 'Credentials', hint: 'Stored access profiles' },
-  { id: 'tunnels', label: 'Tunnels', hint: 'VPN and network routes' },
-  { id: 'settings', label: 'Settings', hint: 'Application preferences' },
-];
+const navItems = sidebarNavigationItems;
 
 function protocolLabel(protocol: Protocol) {
   return {
@@ -1996,6 +1983,8 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   } | null>(null);
   const [windowCloseBusy, setWindowCloseBusy] = useState(false);
   const sidebarWidth = normalizeSidebarWidth(initialSettings.sidebarWidth);
+  const [sidebarOverlayOpen, setSidebarOverlayOpen] = useState(false);
+  const [sidebarImportMenuOpen, setSidebarImportMenuOpen] = useState(false);
   const sidebarWriter = useMemo(
     () =>
       createDebouncedSidebarWriter(
@@ -6892,38 +6881,46 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         className="flex h-full min-w-[960px] flex-col bg-background font-sans text-foreground"
         inert={authGate !== 'unlocked'}
       >
-        <header className="relative flex h-12 shrink-0 items-center border-b border-border bg-background px-3 text-foreground [-webkit-app-region:drag]">
-          <div className="flex min-w-0 items-center gap-2.5 [-webkit-app-region:no-drag]">
-            <div className="grid size-8 shrink-0 place-items-center rounded-md p-1">
-              <img alt="" className="size-full object-contain" src={wormholeIcon} />
-            </div>
-            <span className="select-none text-sm font-semibold tracking-tight">Wormhole</span>
-          </div>
-        </header>
-
-        {updateNotificationVisible && updateResult ? (
-          <UpdateNotification
-            busy={updateBusy}
-            downloadProgress={updateDownloadProgress}
-            onDismiss={handleDismissUpdate}
-            onUpdate={() => void handleInstallUpdate()}
-            onViewChanges={handleViewUpdateChanges}
-            status={updateStatus}
-            version={updateResult.latestVersion}
-          />
-        ) : null}
-
-        <ResizablePanelGroup className="h-full min-h-0 flex-1" orientation="horizontal">
-          <ResizablePanel
-            className="min-h-0"
-            defaultSize={`${sidebarWidth}px`}
-            groupResizeBehavior="preserve-pixel-size"
-            maxSize={`${maxSidebarWidth}px`}
-            minSize={`${minSidebarWidth}px`}
-            onResize={(size, _id, previous) => {
-              if (previous) sidebarWriter.schedule(size.inPixels);
-            }}
-          >
+        <SidebarLayout
+          header={
+            <>
+              <header className="relative flex h-12 shrink-0 items-center border-b border-border bg-background px-1 text-foreground [-webkit-app-region:drag]">
+                <div className="flex min-w-0 items-center gap-2.5 [-webkit-app-region:no-drag]">
+                  <SidebarPinButton />
+                  <span className="select-none text-sm font-semibold tracking-tight">Wormhole</span>
+                </div>
+              </header>
+              {updateNotificationVisible && updateResult ? (
+                <UpdateNotification
+                  busy={updateBusy}
+                  downloadProgress={updateDownloadProgress}
+                  onDismiss={handleDismissUpdate}
+                  onUpdate={() => void handleInstallUpdate()}
+                  onViewChanges={handleViewUpdateChanges}
+                  status={updateStatus}
+                  version={updateResult.latestVersion}
+                />
+              ) : null}
+            </>
+          }
+          navigation={(collapsed) => (
+            <SidebarNavigation
+              activePage={activePage}
+              collapsed={collapsed}
+              onNavigate={setActivePage}
+              sessionCount={sessions.length}
+            />
+          )}
+          initialPinned={initialSettings.sidebarPinned !== false}
+          initialWidth={sidebarWidth}
+          keepOpen={sidebarImportMenuOpen}
+          onOverlayOpenChange={setSidebarOverlayOpen}
+          onPinnedChange={async (pinned) => {
+            if (!window.wormhole) throw new Error('Wormhole is unavailable.');
+            await window.wormhole.setSidebarPinned(pinned);
+          }}
+          onWidthChange={(width) => sidebarWriter.schedule(width)}
+          sidebar={
             <SidebarProvider
               className="h-full min-h-0"
               style={{ '--sidebar-width': '100%' } as CSSProperties}
@@ -6944,7 +6941,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                       >
                         <ChevronUp />
                       </IconButton>
-                      <DropdownMenu>
+                      <DropdownMenu onOpenChange={setSidebarImportMenuOpen}>
                         <Tooltip>
                           <TooltipTrigger asChild>
                             <DropdownMenuTrigger asChild>
@@ -6982,16 +6979,18 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                       </IconButton>
                     </div>
                   </div>
-                  <Button
-                    aria-keyshortcuts="Control+K Meta+K"
-                    className="w-full justify-center gap-2 !text-xs"
-                    onClick={openQuickConnect}
-                    size="default"
-                  >
-                    <Zap data-icon="inline-start" />
-                    Quick Connect
-                    <Kbd>Ctrl K</Kbd>
-                  </Button>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      aria-keyshortcuts="Control+K Meta+K"
+                      className="min-w-0 flex-1 justify-center gap-2 !text-xs"
+                      onClick={openQuickConnect}
+                      size="default"
+                    >
+                      <Zap data-icon="inline-start" />
+                      Quick Connect
+                      <Kbd>Ctrl K</Kbd>
+                    </Button>
+                  </div>
                   <div className="relative">
                     <Search className="pointer-events-none absolute left-2.5 top-1/2 z-10 size-3.5 -translate-y-1/2 text-muted-foreground" />
                     <SidebarInput
@@ -7056,165 +7055,137 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                     </ContextMenuContent>
                   </ContextMenu>
                 </SidebarContent>
-
-                <SidebarFooter className="gap-2 border-t border-sidebar-border p-2">
-                  <SidebarGroup className="p-0">
-                    <SidebarMenu>
-                      {navItems.map((item) => (
-                        <SidebarMenuItem key={item.id}>
-                          <SidebarMenuButton
-                            className="!text-xs"
-                            isActive={activePage === item.id}
-                            onClick={() => setActivePage(item.id)}
-                            size="sm"
-                            tooltip={item.hint}
-                          >
-                            {item.id === 'credentials' ? <KeyRound /> : null}
-                            {item.id === 'sessions' ? <PanelLeft /> : null}
-                            {item.id === 'tunnels' ? <Network /> : null}
-                            {item.id === 'settings' ? <Settings2 /> : null}
-                            <span>{item.label}</span>
-                          </SidebarMenuButton>
-                          {item.id === 'sessions' && sessions.length > 0 ? (
-                            <SidebarMenuBadge>{sessions.length}</SidebarMenuBadge>
-                          ) : null}
-                        </SidebarMenuItem>
-                      ))}
-                    </SidebarMenu>
-                  </SidebarGroup>
-                </SidebarFooter>
               </Sidebar>
             </SidebarProvider>
-          </ResizablePanel>
-          <ResizableHandle withHandle />
-          <ResizablePanel className="min-h-0" minSize="54%">
-            <SidebarInset className="h-full min-h-0 min-w-0 rounded-none bg-background">
-              {activePage === 'sessions' ? (
-                <SessionsPage
-                  autoCopyOnSelect={autoCopyOnSelect}
-                  bitwardenUnlockPending={bitwardenUnlockPrompt !== null}
-                  onBitwardenUnlockRequired={(sessionId, reason, retry) =>
-                    requestRuntimeBitwardenUnlock(`vnc:${sessionId}`, reason, retry)
-                  }
-                  onCloseSession={closeSession}
-                  onConnectRdp={requestRdpCredentials}
-                  onDisconnectSession={disconnectRemoteDesktopSession}
-                  onDisconnectAiAgent={disconnectSessionAiAgent}
-                  onDuplicateSession={duplicateSession}
-                  onCloseSftpBrowser={closeSftpBrowser}
-                  onOpenFileTransfer={openFileTransfer}
-                  onOpenQuickConnect={openQuickConnect}
-                  onOpenSystemRdp={openRdpInSystemClient}
-                  onReconnectSession={reconnectSession}
-                  onRetryRdp={retryRdpSession}
-                  onSelectSession={setSelectedSessionId}
-                  onSerialInput={sendSerialInput}
-                  onSftpLocalNavigate={requestLocalSftpDirectory}
-                  onSftpOperation={operateSftp}
-                  onSftpTransfer={startSftpTransfer}
-                  onSftpConflict={decideSftpConflict}
-                  onSftpTransferCancel={cancelSftpTransfer}
-                  onSftpTransferErrorClear={clearSftpTransferError}
-                  onSftpTransferRemove={removeSftpTransfer}
-                  onSftpNavigate={requestSftpDirectory}
-                  onSftpRefresh={refreshSftpBrowser}
-                  onSshInput={sendSshInput}
-                  onTrustSshHostKey={trustSshHostKey}
-                  onVncStatusChange={(sessionId, status) =>
-                    setSessions((current) =>
-                      current.map((session) =>
-                        session.id === sessionId ? { ...session, status } : session,
-                      ),
-                    )
-                  }
-                  isAuthorized={authGate === 'unlocked'}
-                  isWebSurfaceVisible={
-                    mcpApprovals.length === 0 &&
-                    !bitwardenAccessPromptOpen &&
-                    !contextMenuOverlayOpen &&
-                    !newConnectionOpen &&
-                    !folderDetailsOpen &&
-                    !newFolderOpen &&
-                    !authPrompt &&
-                    !rdpCredentialPrompt &&
-                    !sshCredentialPrompt &&
-                    !sshKeyPassphrasePrompt &&
-                    !pendingSessionClose &&
-                    !pendingWindowClose
-                  }
-                  selectedSession={selectedSession}
-                  sessions={sessions}
-                />
-              ) : activePage === 'settings' ? (
-                <SettingsPage
-                  autoCopyOnSelect={autoCopyOnSelect}
-                  backupEncryptionRequired={backupExportRequiresEncryption(credentials)}
-                  confirmOnTabClose={confirmOnTabClose}
-                  confirmOnWindowClose={confirmOnWindowClose}
-                  confirmOnWindowCloseBusy={confirmOnWindowCloseBusy}
-                  authGate={authGate}
-                  authState={authState}
-                  onAuthStateChange={setAuthState}
-                  onAutoCopyOnSelectChange={handleAutoCopyOnSelectChange}
-                  onConfirmOnTabCloseChange={handleConfirmOnTabCloseChange}
-                  onConfirmOnWindowCloseChange={handleConfirmOnWindowCloseChange}
-                  onBackupImported={() => refreshWorkspace(true)}
-                  onRequestAuthentication={requestAuthentication}
-                  onThemeChange={handleThemeChange}
-                  onCheckForUpdates={() => void handleCheckForUpdates()}
-                  onDismissUpdate={handleDismissUpdate}
-                  onInstallUpdate={() => void handleInstallUpdate()}
-                  onSetAutoCheckForUpdates={handleSetAutoCheckForUpdates}
-                  settingsUpdatesRequest={settingsUpdatesRequest}
-                  onWorkspaceCredentialsChanged={refreshWorkspaceCredentials}
-                  theme={theme}
-                  update={{
-                    autoCheckForUpdates,
-                    busy: updateBusy,
-                    currentVersion: updateCurrentVersion,
-                    downloadProgress: updateDownloadProgress,
-                    lastUpdateCheck,
-                    result: updateResult,
-                    dismissedUpdateVersion,
-                    status: updateStatus,
-                  }}
-                />
-              ) : activePage === 'credentials' ? (
-                <CredentialsPage
-                  initialCredentials={credentials}
-                  isAuthorized={authGate === 'unlocked'}
-                  onCreate={createCredential}
-                  onDelete={deleteSavedCredential}
-                  onUpdate={updateCredential}
-                />
-              ) : activePage === 'tunnels' ? (
-                <TunnelsPage
-                  onTunnelsLoaded={setTunnels}
-                  onTunnelCreated={(tunnel) =>
-                    setTunnels((current) =>
-                      [...current.filter((item) => item.id !== tunnel.id), tunnel].sort(
-                        (left, right) => left.name.localeCompare(right.name),
-                      ),
-                    )
-                  }
-                  onTunnelDeleted={(id) =>
-                    setTunnels((current) => current.filter((tunnel) => tunnel.id !== id))
-                  }
-                  onTunnelUpdated={(tunnel) =>
-                    setTunnels((current) =>
-                      current
-                        .map((item) => (item.id === tunnel.id ? tunnel : item))
-                        .sort((left, right) => left.name.localeCompare(right.name)),
-                    )
-                  }
-                  tunnels={tunnels}
-                />
-              ) : (
-                <UtilityPage item={currentPage} sessions={sessions} />
-              )}
-            </SidebarInset>
-          </ResizablePanel>
-        </ResizablePanelGroup>
+          }
+        >
+          <SidebarInset className="h-full min-h-0 min-w-0 rounded-none bg-background">
+            {activePage === 'sessions' ? (
+              <SessionsPage
+                autoCopyOnSelect={autoCopyOnSelect}
+                bitwardenUnlockPending={bitwardenUnlockPrompt !== null}
+                onBitwardenUnlockRequired={(sessionId, reason, retry) =>
+                  requestRuntimeBitwardenUnlock(`vnc:${sessionId}`, reason, retry)
+                }
+                onCloseSession={closeSession}
+                onConnectRdp={requestRdpCredentials}
+                onDisconnectSession={disconnectRemoteDesktopSession}
+                onDisconnectAiAgent={disconnectSessionAiAgent}
+                onDuplicateSession={duplicateSession}
+                onCloseSftpBrowser={closeSftpBrowser}
+                onOpenFileTransfer={openFileTransfer}
+                onOpenQuickConnect={openQuickConnect}
+                onOpenSystemRdp={openRdpInSystemClient}
+                onReconnectSession={reconnectSession}
+                onRetryRdp={retryRdpSession}
+                onSelectSession={setSelectedSessionId}
+                onSerialInput={sendSerialInput}
+                onSftpLocalNavigate={requestLocalSftpDirectory}
+                onSftpOperation={operateSftp}
+                onSftpTransfer={startSftpTransfer}
+                onSftpConflict={decideSftpConflict}
+                onSftpTransferCancel={cancelSftpTransfer}
+                onSftpTransferErrorClear={clearSftpTransferError}
+                onSftpTransferRemove={removeSftpTransfer}
+                onSftpNavigate={requestSftpDirectory}
+                onSftpRefresh={refreshSftpBrowser}
+                onSshInput={sendSshInput}
+                onTrustSshHostKey={trustSshHostKey}
+                onVncStatusChange={(sessionId, status) =>
+                  setSessions((current) =>
+                    current.map((session) =>
+                      session.id === sessionId ? { ...session, status } : session,
+                    ),
+                  )
+                }
+                isAuthorized={authGate === 'unlocked'}
+                isWebSurfaceVisible={
+                  mcpApprovals.length === 0 &&
+                  !bitwardenAccessPromptOpen &&
+                  !contextMenuOverlayOpen &&
+                  !sidebarOverlayOpen &&
+                  !newConnectionOpen &&
+                  !folderDetailsOpen &&
+                  !newFolderOpen &&
+                  !authPrompt &&
+                  !rdpCredentialPrompt &&
+                  !sshCredentialPrompt &&
+                  !sshKeyPassphrasePrompt &&
+                  !pendingSessionClose &&
+                  !pendingWindowClose
+                }
+                selectedSession={selectedSession}
+                sessions={sessions}
+              />
+            ) : activePage === 'settings' ? (
+              <SettingsPage
+                autoCopyOnSelect={autoCopyOnSelect}
+                backupEncryptionRequired={backupExportRequiresEncryption(credentials)}
+                confirmOnTabClose={confirmOnTabClose}
+                confirmOnWindowClose={confirmOnWindowClose}
+                confirmOnWindowCloseBusy={confirmOnWindowCloseBusy}
+                authGate={authGate}
+                authState={authState}
+                onAuthStateChange={setAuthState}
+                onAutoCopyOnSelectChange={handleAutoCopyOnSelectChange}
+                onConfirmOnTabCloseChange={handleConfirmOnTabCloseChange}
+                onConfirmOnWindowCloseChange={handleConfirmOnWindowCloseChange}
+                onBackupImported={() => refreshWorkspace(true)}
+                onRequestAuthentication={requestAuthentication}
+                onThemeChange={handleThemeChange}
+                onCheckForUpdates={() => void handleCheckForUpdates()}
+                onDismissUpdate={handleDismissUpdate}
+                onInstallUpdate={() => void handleInstallUpdate()}
+                onSetAutoCheckForUpdates={handleSetAutoCheckForUpdates}
+                settingsUpdatesRequest={settingsUpdatesRequest}
+                onWorkspaceCredentialsChanged={refreshWorkspaceCredentials}
+                theme={theme}
+                update={{
+                  autoCheckForUpdates,
+                  busy: updateBusy,
+                  currentVersion: updateCurrentVersion,
+                  downloadProgress: updateDownloadProgress,
+                  lastUpdateCheck,
+                  result: updateResult,
+                  dismissedUpdateVersion,
+                  status: updateStatus,
+                }}
+              />
+            ) : activePage === 'credentials' ? (
+              <CredentialsPage
+                initialCredentials={credentials}
+                isAuthorized={authGate === 'unlocked'}
+                onCreate={createCredential}
+                onDelete={deleteSavedCredential}
+                onUpdate={updateCredential}
+              />
+            ) : activePage === 'tunnels' ? (
+              <TunnelsPage
+                onTunnelsLoaded={setTunnels}
+                onTunnelCreated={(tunnel) =>
+                  setTunnels((current) =>
+                    [...current.filter((item) => item.id !== tunnel.id), tunnel].sort(
+                      (left, right) => left.name.localeCompare(right.name),
+                    ),
+                  )
+                }
+                onTunnelDeleted={(id) =>
+                  setTunnels((current) => current.filter((tunnel) => tunnel.id !== id))
+                }
+                onTunnelUpdated={(tunnel) =>
+                  setTunnels((current) =>
+                    current
+                      .map((item) => (item.id === tunnel.id ? tunnel : item))
+                      .sort((left, right) => left.name.localeCompare(right.name)),
+                  )
+                }
+                tunnels={tunnels}
+              />
+            ) : (
+              <UtilityPage item={currentPage} sessions={sessions} />
+            )}
+          </SidebarInset>
+        </SidebarLayout>
 
         {mremoteImportOpen ? (
           <Suspense fallback={null}>
