@@ -82,7 +82,7 @@ test('authentication prompts, window-close controls, and RDP surface layout work
       const handleAuthPromptResult = onResult;
       const [authDialog, setAuthDialog] = useState(null);
       ${slice('  const [pendingWindowClose,', '  const sidebarWidth =')}
-      ${source.slice(subscriptionStart, source.indexOf('  function reconnectSession', subscriptionStart))}
+      ${source.slice(subscriptionStart, source.indexOf('  const sftpReconnectPending =', subscriptionStart))}
       ${slice('  const visibleAuthPrompt =', '  const credentialResult =')}
       const mcpApprovals = [];
       const bitwardenAccessPromptOpen = false, contextMenuOverlayOpen = false;
@@ -474,7 +474,9 @@ test('authentication prompts, window-close controls, and RDP surface layout work
             }
           }
         } finally { window.destroy(); }
-        app.quit();
+        // This process is a test host, and all assertions and window teardown
+        // have completed. Do not wait for Chromium's asynchronous quit hooks.
+        app.exit(0);
       }).catch((error) => { console.error(error); app.exit(1); });
     `,
     );

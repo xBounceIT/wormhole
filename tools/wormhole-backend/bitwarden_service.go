@@ -860,10 +860,10 @@ func resolveNodeCredentialID(database *sql.DB, nodeID string, protocol int64) (s
 		currentID = normalizeID(parentID.String)
 		leaf = false
 	}
-	if resolvedProtocol != nil && *resolvedProtocol != protocol {
+	if resolvedProtocol != nil && sshCredentialProtocol(*resolvedProtocol) != sshCredentialProtocol(protocol) {
 		return "", errors.New("connection protocol does not match the requested credential protocol")
 	}
-	if credentialProtocol != nil && *credentialProtocol != protocol {
+	if credentialProtocol != nil && sshCredentialProtocol(*credentialProtocol) != sshCredentialProtocol(protocol) {
 		return "", nil
 	}
 	return credentialID, nil

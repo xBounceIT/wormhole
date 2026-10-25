@@ -102,7 +102,7 @@ const wormholeBridge = {
     name: string;
     notes?: string;
     kind: 'folder' | 'connection';
-    protocol: '' | 'ssh' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial';
+    protocol: '' | 'ssh' | 'sftp' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial';
     host: string;
     port: number;
     username: string;
@@ -127,7 +127,7 @@ const wormholeBridge = {
     name: string;
     notes?: string;
     kind: 'folder' | 'connection';
-    protocol: '' | 'ssh' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial';
+    protocol: '' | 'ssh' | 'sftp' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial';
     host: string;
     port: number;
     username: string;
@@ -471,6 +471,7 @@ const wormholeBridge = {
     return () => ipcRenderer.removeListener('web:bitwarden-popup-state', handler);
   },
   openSshSession: (request: {
+    mode?: 'terminal' | 'sftp';
     sessionId: string;
     nodeId?: string;
     host?: string;
@@ -497,6 +498,16 @@ const wormholeBridge = {
   pasteClipboardToSsh: (sessionId: string) => ipcRenderer.invoke('ssh:paste-clipboard', sessionId),
   resizeSshSession: (sessionId: string, columns: number, rows: number) =>
     ipcRenderer.invoke('ssh:resize', sessionId, columns, rows),
+  readSftpEditorSettings: () => ipcRenderer.invoke('settings:file-transfer-read'),
+  writeSftpEditorSettings: (settings: unknown) =>
+    ipcRenderer.invoke('settings:file-transfer-write', settings),
+  sftpEdit: (sessionId: string, request: unknown) =>
+    ipcRenderer.invoke('ssh:sftp-edit', sessionId, request),
+  prepareSftpEditClose: (sessionId: string) => ipcRenderer.invoke('ssh:sftp-edit-close', sessionId),
+  shareSftpSession: (sourceId: string, sessionId: string) =>
+    ipcRenderer.invoke('ssh:sftp-share', sourceId, sessionId),
+  listSftpTree: (sessionId: string, pane: 'local' | 'remote', path: string, requestId: string) =>
+    ipcRenderer.invoke('ssh:sftp-tree-list', sessionId, pane, path, requestId),
   openSftpBrowser: (sessionId: string, requestId?: string) =>
     ipcRenderer.invoke('ssh:sftp-open', sessionId, requestId),
   listSftpDirectory: (sessionId: string, path: string, requestId?: string) =>
@@ -631,6 +642,7 @@ const wormholeBridge = {
         | 'reconnect-failed'
         | 'closed'
         | 'error'
+        | 'sftp.edit'
         | 'sftp.opening'
         | 'sftp.ready'
         | 'sftp.error'

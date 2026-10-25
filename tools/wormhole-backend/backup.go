@@ -1894,7 +1894,7 @@ func scrubBackupNodeReferences(object backupObject, state *backupImportState, re
 			fmt.Sprintf("Node '%s' contained unsafe web context data; query, fragment, or invalid path removed.", name))
 	}
 	if protocol, present := backupObjectInteger(object, "protocol"); present &&
-		protocol != 0 && protocol != 1 && protocol != 3 && protocol != 4 && protocol != 5 && protocol != 6 {
+		protocol != 0 && protocol != 1 && protocol != 3 && protocol != 4 && protocol != 5 && protocol != 6 && protocol != 7 {
 		addBackupWarning(result,
 			fmt.Sprintf("Node '%s' uses an unsupported protocol (%d); imported as SSH.", name, protocol))
 		setBackupObjectValue(object, "protocol", int64(0))

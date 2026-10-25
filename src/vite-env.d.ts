@@ -1,6 +1,58 @@
 /// <reference types="vite/client" />
 
-type WormholeProtocol = 'ssh' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial';
+type WormholeSftpEditorSettings = {
+  editors: {
+    id: string;
+    name: string;
+    executable: string;
+    arguments: string[];
+    patterns: string;
+  }[];
+  defaultEditor: string;
+  maxFileSize: number;
+  swapPanels: boolean;
+};
+type WormholeSftpEditView = {
+  id: string;
+  sessionId: string;
+  nodeId: string;
+  name: string;
+  remotePath: string;
+  editor: string;
+  state: string;
+  pending: boolean;
+  recovered: boolean;
+  error?: string;
+  uploadedAt?: string;
+};
+type WormholeSftpEditRequest = {
+  operation:
+    | 'list'
+    | 'start'
+    | 'upload'
+    | 'stop'
+    | 'reload'
+    | 'reveal'
+    | 'recover'
+    | 'discard'
+    | 'prepare-close'
+    | 'finish-close';
+  pane?: 'local' | 'remote';
+  path?: string;
+  editId?: string;
+  editorId?: string;
+  allowBinary?: boolean;
+  decision?: 'overwrite' | 'discard' | 'keep';
+  destinationPath?: string;
+};
+type WormholeSftpEditEvent = {
+  type: 'sftp.edit';
+  sessionId: string;
+  requestId?: string;
+  edits: WormholeSftpEditView[];
+  error?: string;
+};
+type WormholeProtocol = 'ssh' | 'sftp' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial';
 
 interface WormholeRdpSurfaceRect {
   x: number;
@@ -335,6 +387,7 @@ interface WormholeSftpQuickPath {
 }
 
 type WormholeSshEvent =
+  | WormholeSftpEditEvent
   | {
       type: 'terminal-output';
       sessionId: string;
@@ -1097,6 +1150,7 @@ interface Window {
       listener: (state: { sessionId: string; open: boolean }) => void,
     ): () => void;
     openSshSession(request: {
+      mode?: 'terminal' | 'sftp';
       sessionId: string;
       nodeId?: string;
       host?: string;
@@ -1121,6 +1175,17 @@ interface Window {
     sendSshInput(sessionId: string, data: string, paste?: boolean): Promise<void>;
     pasteClipboardToSsh(sessionId: string): Promise<{ pasted: boolean }>;
     resizeSshSession(sessionId: string, columns: number, rows: number): Promise<void>;
+    readSftpEditorSettings(): Promise<WormholeSftpEditorSettings>;
+    writeSftpEditorSettings(settings: WormholeSftpEditorSettings): Promise<{ updated: boolean }>;
+    sftpEdit(sessionId: string, request: WormholeSftpEditRequest): Promise<WormholeSftpEditEvent>;
+    prepareSftpEditClose(sessionId: string): Promise<boolean>;
+    shareSftpSession(sourceId: string, sessionId: string): Promise<unknown>;
+    listSftpTree(
+      sessionId: string,
+      pane: 'local' | 'remote',
+      path: string,
+      requestId: string,
+    ): Promise<void>;
     openSftpBrowser(sessionId: string, requestId?: string): Promise<void>;
     listSftpDirectory(sessionId: string, path: string, requestId?: string): Promise<void>;
     listLocalSftpDirectory(sessionId: string, path: string, requestId: string): Promise<void>;

@@ -71,6 +71,7 @@ export class WindowCloseReasonTracker {
 export type WindowCloseRequest = {
   reason: WindowCloseReason;
   confirmationEnabled: boolean;
+  prepare?(): Promise<boolean>;
   confirm(activeCount: number): Promise<boolean>;
   teardown(): Promise<void>;
   close(): void;
@@ -112,11 +113,16 @@ export class WindowCloseCoordinator {
     }
     if (this.state !== 'idle') return false;
 
-    if (request.reason === 'window' && request.confirmationEnabled && this.activeCount > 0) {
+    if (
+      request.reason === 'window' &&
+      (request.prepare || (request.confirmationEnabled && this.activeCount > 0))
+    ) {
       this.state = 'prompting';
       let confirmed = false;
       try {
-        confirmed = await request.confirm(this.activeCount);
+        confirmed = (await request.prepare?.()) !== false;
+        if (confirmed && request.confirmationEnabled && this.activeCount > 0)
+          confirmed = await request.confirm(this.activeCount);
       } catch {
         confirmed = false;
       }

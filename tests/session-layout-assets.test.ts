@@ -552,7 +552,8 @@ test('native overlays hide during drag or resize and return when resizing ends',
   );
   assert.match(appSource, /<WebSurface[\s\S]*isActive=\{nativeSurfaceActive\}/);
   assert.match(appSource, /<RdpSurface[\s\S]*isActive=\{nativeSurfaceActive\}/);
-  assert.match(appSource, /session\.sftp && isActive/);
+  assert.match(appSource, /session\.protocol === 'sftp'/);
+  assert.match(appSource, /return \(\s*<SftpBrowserSurface/);
 
   // The native view must leave the six-pixel split handle reachable before resizing starts.
   const surfaceStyle = sourceBetween(
@@ -651,7 +652,7 @@ test('session tab titles reserve action width with and without SFTP', () => {
     "{session.canTransfer && session.status === 'connected' ? (",
     ') : null}',
   );
-  assert.match(sftpAction, /label=\{`Open SFTP browser for \$\{session\.title\}`\}/);
+  assert.match(sftpAction, /label=\{`Open file transfer in new tab for \$\{session\.title\}`\}/);
   assert.match(sftpAction, /onClick=\{\(\) => onOpenFileTransfer\(session\.id\)\}/);
   const alwaysVisibleActions = actionContainer[2].slice(actionContainer[2].indexOf(') : null}'));
   assert.match(alwaysVisibleActions, /label=\{`Close \$\{session\.title\}`\}/);
@@ -845,7 +846,7 @@ test('an asynchronous Bitwarden region refresh does not clear an open login form
 
 test('SFTP keyboard range selection replaces a stale anchor', () => {
   const keyboardSelection = sourceBetween(
-    appSource,
+    readFileSync(new URL('../src/components/SftpBrowser.tsx', import.meta.url), 'utf8'),
     'function moveKeyboardSelection',
     'function beginRename',
   );

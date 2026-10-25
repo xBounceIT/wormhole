@@ -209,7 +209,7 @@ test('only connecting SSH renders the tunnel progress stepper', () => {
 test('terminal state content keeps its parent surface, focus, and protocol resize lifecycle', () => {
   const surfaceSource = appSource.slice(
     connectionStateEnd,
-    appSource.indexOf("type SftpPaneKind = 'local' | 'remote'", connectionStateEnd),
+    appSource.indexOf('function clearSftpCancelRequestsForTransfer', connectionStateEnd),
   );
   const stateRender = surfaceSource.slice(
     surfaceSource.indexOf("if (session.status !== 'connected')"),
@@ -612,7 +612,7 @@ test('automatic terminal scrolling tracks the applied offset and clamps short co
 test('live scroll handler catches the final output and preserves the pin across delayed events', () => {
   const surfaceSource = appSource.slice(
     appSource.indexOf('function SshTerminalSurface'),
-    appSource.indexOf("type SftpPaneKind = 'local' | 'remote'"),
+    appSource.indexOf('function clearSftpCancelRequestsForTransfer'),
   );
   const handler = surfaceSource
     .slice(
@@ -707,7 +707,7 @@ test('live terminal wires automatic scroll tracking into frame and user scroll h
   );
   const terminalSurfaceSource = appSource.slice(
     appSource.indexOf('function SshTerminalSurface'),
-    appSource.indexOf("type SftpPaneKind = 'local' | 'remote'"),
+    appSource.indexOf('function clearSftpCancelRequestsForTransfer'),
   );
 
   assert.match(
@@ -739,7 +739,7 @@ test('live terminal wires automatic scroll tracking into frame and user scroll h
 test('live terminal preserves its DOM selection after a copy event', () => {
   const terminalSurfaceSource = appSource.slice(
     appSource.indexOf('function SshTerminalSurface'),
-    appSource.indexOf("type SftpPaneKind = 'local' | 'remote'"),
+    appSource.indexOf('function clearSftpCancelRequestsForTransfer'),
   );
   const copyHandlerSource = terminalSurfaceSource.slice(
     terminalSurfaceSource.indexOf('onCopy='),
@@ -755,7 +755,7 @@ test('live terminal preserves its DOM selection after a copy event', () => {
 test('live terminal retains the copy chord until key release and clears it on focus loss', () => {
   const terminalSurfaceSource = appSource.slice(
     appSource.indexOf('function SshTerminalSurface'),
-    appSource.indexOf("type SftpPaneKind = 'local' | 'remote'"),
+    appSource.indexOf('function clearSftpCancelRequestsForTransfer'),
   );
   const keyboardHandlerSource = terminalSurfaceSource.slice(
     terminalSurfaceSource.indexOf('onKeyDown='),
@@ -817,7 +817,7 @@ test('styled runs remain inline and preserve spaces when Chromium copies a termi
   assert.equal(terminalGridSource.match(/data-terminal-row/g)?.length, 2);
   const terminalSurfaceSource = appSource.slice(
     appSource.indexOf('function SshTerminalSurface'),
-    appSource.indexOf("type SftpPaneKind = 'local' | 'remote'"),
+    appSource.indexOf('function clearSftpCancelRequestsForTransfer'),
   );
   assert.match(terminalSurfaceSource, /onMouseDown={selectTerminalDoubleClick}/);
   assert.equal(terminalGridSource.match(/inline-block overflow-hidden align-top/g)?.length, 2);
@@ -830,7 +830,7 @@ test('styled runs remain inline and preserve spaces when Chromium copies a termi
 
 test('mounted SSH and serial terminals follow long output and preserve manual scroll in Chromium', async () => {
   const start = appSource.indexOf('const terminalFontSize');
-  const end = appSource.indexOf("type SftpPaneKind = 'local' | 'remote'", start);
+  const end = appSource.indexOf('function clearSftpCancelRequestsForTransfer', start);
   assert.ok(start >= 0 && end > start);
   const helpers = readFileSync(
     new URL('../src/terminal-frame.ts', import.meta.url),

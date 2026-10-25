@@ -91,6 +91,11 @@ func (err *sshHostKeyMismatchError) Error() string {
 }
 
 type sshWireCommand struct {
+	EditID                        string                `json:"edit_id"`
+	EditorID                      string                `json:"editor_id"`
+	AllowBinary                   bool                  `json:"allow_binary"`
+	Mode                          string                `json:"mode"`
+	SourceSessionID               string                `json:"source_session_id"`
 	TerminalStream                bool                  `json:"terminal_stream"`
 	Sequence                      uint64                `json:"sequence"`
 	Type                          string                `json:"type"`
@@ -133,6 +138,7 @@ type sshWireCommand struct {
 }
 
 type sshWireEvent struct {
+	Edits               []sftpEditView       `json:"edits,omitempty"`
 	Data                string               `json:"data,omitempty"`
 	Sequence            uint64               `json:"sequence,omitempty"`
 	Reset               bool                 `json:"reset,omitempty"`
@@ -243,6 +249,7 @@ type sshNode struct {
 }
 
 type sshTarget struct {
+	sftpOnly             bool
 	nodeID               string
 	title                string
 	host                 string
@@ -265,6 +272,11 @@ type sshCredentialRow struct {
 }
 
 type sshNativeSession struct {
+	sftpEditRoute    string
+	fingerprint      string
+	sftpOnly         bool
+	transport        *sshSharedTransport
+	treeRequests     int
 	terminalStream   *sshTerminalStream
 	id               string
 	client           *ssh.Client
@@ -308,6 +320,12 @@ type sshNativeSession struct {
 }
 
 type sshServer struct {
+	editOnce             sync.Once
+	editMu               sync.Mutex
+	edits                map[string]*sftpEditRecord
+	editError            error
+	editWorkers          chan struct{}
+	editCleanupWG        sync.WaitGroup
 	databasePath         string
 	electronUserDataPath string
 	output               *sshEventWriter
@@ -497,8 +515,12 @@ func (server *sshServer) handle(command sshWireCommand) {
 		}
 	case "snapshot":
 		server.snapshot(command)
+	case "sftp-edit":
+		server.handleSftpEdit(command)
 	case "sftp-open":
 		server.sftpOpen(command)
+	case "sftp-tree-list":
+		server.sftpTreeList(command)
 	case "sftp-list":
 		server.sftpList(command)
 	case "sftp-local-list":
@@ -575,6 +597,15 @@ func (server *sshServer) prepareSessionForLock(sessionID string) {
 }
 
 func (server *sshServer) open(command sshWireCommand) {
+	if command.Mode != "" && command.Mode != "terminal" && command.Mode != "sftp" {
+		server.writeError(command.SessionID, "SSH session mode is invalid")
+		return
+	}
+	if command.SourceSessionID != "" {
+		server.openSharedSftp(command)
+		return
+	}
+
 	nodeID := strings.TrimSpace(command.NodeID)
 	if nodeID != "" {
 		if len(nodeID) > 128 ||
@@ -680,8 +711,15 @@ func (server *sshServer) connectSSH(ctx context.Context, state *sshReconnectStat
 	}
 
 	native.id = command.SessionID
+	native.fingerprint = target.knownHostFingerprint
+	native.sftpEditRoute = "direct"
+	if target.tunnelConfigID != "" {
+		native.sftpEditRoute = "vpn:" + target.tunnelConfigID
+	} else if target.socksEndpoint != "" {
+		native.sftpEditRoute = "proxy:" + target.socksEndpoint
+	}
 	native.server = server
-	if command.TerminalStream {
+	if command.TerminalStream && !native.sftpOnly {
 		native.terminalStream = newSSHTerminalStream(func(event sshWireEvent) {
 			event.SessionID = native.id
 			server.output.write(event)
@@ -703,13 +741,15 @@ func (server *sshServer) connectSSH(ctx context.Context, state *sshReconnectStat
 		return
 	}
 	logInfo("SSH session connected: %s@%s:%d", target.username, target.host, target.port)
-	if server.mcp != nil {
+	if server.mcp != nil && !native.sftpOnly {
 		server.mcp.sessionConnected(native)
 	}
 	if native.terminalStream != nil {
 		native.terminalStream.send(sshTerminalPacket{reset: true, columns: native.terminal.columns, rows: native.terminal.rows})
 	}
-	native.publishTerminalFrame(native.terminal.initialFrame())
+	if native.terminal != nil {
+		native.publishTerminalFrame(native.terminal.initialFrame())
+	}
 	native.start()
 }
 
@@ -799,7 +839,7 @@ func (server *sshServer) openNativeSSH(
 		directTarget, command.CredentialID, command.SocksEndpoint, command.TunnelEnabled,
 		command.UsernameOverride, command.PasswordOverride, command.CredentialOverride,
 		command.UsernameOverrideAuthoritative, command.KeyPassphraseOverride,
-		command.Columns, command.Rows,
+		command.Columns, command.Rows, command.Mode,
 	)
 }
 
@@ -817,7 +857,7 @@ func (server *sshServer) input(command sshWireCommand) {
 	server.mu.Lock()
 	native := server.sessions[command.SessionID]
 	server.mu.Unlock()
-	if native == nil {
+	if native == nil || native.sftpOnly {
 		server.writeError(command.SessionID, "SSH session is not connected")
 		return
 	}
@@ -1065,6 +1105,13 @@ func (server *sshServer) close(sessionID string) {
 		logInfo("SSH session closed: %s@%s:%d", native.mcpSession.Username, native.mcpSession.Host, native.mcpSession.Port)
 		native.close(false)
 	}
+	// Retain targets still open in an editor even when close came from native
+	// teardown rather than the renderer's edit preflight. Never block stdin here.
+	server.editCleanupWG.Add(1)
+	go func() {
+		defer server.editCleanupWG.Done()
+		_ = server.runSftpEdit(sshWireCommand{SessionID: sessionID, Operation: "finish-close", Decision: "keep"})
+	}()
 	if hadLifecycle {
 		server.output.write(sshWireEvent{Type: "closed", SessionID: sessionID})
 	}
@@ -1312,6 +1359,8 @@ func (server *sshServer) shutdown() {
 		native.close(false)
 	}
 	server.transferWG.Wait()
+	server.editCleanupWG.Wait()
+	_ = server.runSftpEdit(sshWireCommand{SessionID: "sftp-recovery", Operation: "finish-close", Decision: "keep"})
 }
 
 func (server *sshServer) cancelAllTransfers() {
@@ -1365,12 +1414,26 @@ func (server *sshServer) writeSftpRequestError(sessionID, requestID, message str
 }
 
 func (native *sshNativeSession) start() {
+	var subsystem *sftp.Client
+	if native.sftpOnly {
+		native.sftpMu.Lock()
+		subsystem = native.sftpClient
+		native.sftpMu.Unlock()
+	}
 	native.lifecycleMu.Lock()
 	if native.closed || native.started {
 		native.lifecycleMu.Unlock()
 		return
 	}
 	native.started = true
+	if native.sftpOnly {
+		native.lifecycleMu.Unlock()
+		go native.keepAlive()
+		if subsystem != nil {
+			go func() { _ = subsystem.Wait(); native.close(true) }()
+		}
+		return
+	}
 	native.outputWG.Add(2)
 	go func() {
 		defer native.outputWG.Done()
@@ -1749,6 +1812,9 @@ func (native *sshNativeSession) writeRemoteInput(data []byte) error {
 }
 
 func (native *sshNativeSession) resize(columns, rows uint32) error {
+	if native.sftpOnly {
+		return errors.New("SFTP sessions have no terminal")
+	}
 	columns, rows = normalizeTerminalSize(columns, rows)
 	native.terminalOutputMu.Lock()
 	defer native.terminalOutputMu.Unlock()
@@ -1803,7 +1869,9 @@ func (native *sshNativeSession) close(notify bool) {
 		if native.session != nil {
 			_ = native.session.Close()
 		}
-		if native.client != nil {
+		if native.transport != nil {
+			native.transport.release()
+		} else if native.client != nil {
 			_ = native.client.Close()
 		}
 		if notify {
@@ -1812,7 +1880,7 @@ func (native *sshNativeSession) close(notify bool) {
 			// deciding whether this shutdown should reconnect.
 			native.finishShellExit()
 		}
-		if native.tunnel != nil {
+		if native.tunnel != nil && native.transport == nil {
 			native.tunnel.close()
 		}
 		if native.server != nil {
@@ -3390,6 +3458,7 @@ func openNativeSSH(
 	keyPassphraseOverride string,
 	columns uint32,
 	rows uint32,
+	modes ...string,
 ) (*sshNativeSession, sshTarget, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, sshTarget{}, err
@@ -3460,12 +3529,16 @@ func openNativeSSH(
 			return nil, sshTarget{}, err
 		}
 	}
+	target.sftpOnly = len(modes) > 0 && modes[0] == "sftp"
 	native, fingerprint, err := dialNativeSSH(ctx, target, columns, rows, tunnel)
 	if err != nil {
 		tunnel.close()
 		return nil, sshTarget{}, err
 	}
 	native.tunnel = tunnel
+	if native.transport != nil {
+		native.transport.tunnel = tunnel
+	}
 	if target.knownHostFingerprint == "" && target.nodeID != "" {
 		if err := persistSSHFingerprint(databasePath, target.nodeID, fingerprint); err != nil {
 			if errors.Is(err, errSSHHostFingerprintChanged) {
@@ -3578,6 +3651,15 @@ func dialNativeSSH(
 		return nil, "", err
 	}
 	client := ssh.NewClient(clientConnection, channels, requests)
+	if target.sftpOnly {
+		subsystem, err := sftp.NewClient(client)
+		if err != nil {
+			_ = client.Close()
+			return nil, "", fmt.Errorf("could not open SFTP subsystem: %w", err)
+		}
+		return &sshNativeSession{client: client, sftpOnly: true, sftpClient: subsystem,
+			transport: &sshSharedTransport{client: client, refs: 1}, done: make(chan struct{})}, fingerprint, nil
+	}
 	session, err := client.NewSession()
 	if err != nil {
 		_ = client.Close()
@@ -3630,6 +3712,7 @@ func dialNativeSSH(
 	native := &sshNativeSession{
 		id:               "",
 		client:           client,
+		transport:        &sshSharedTransport{client: client, refs: 1},
 		session:          session,
 		stdin:            stdin,
 		stdout:           stdout,
@@ -3752,13 +3835,13 @@ func resolveSSHNodeEndpoint(nodes map[string]*sshNode, nodeID string) (sshNodeEn
 	if !protocolSet {
 		return sshNodeEndpoint{}, errors.New("SSH connection has no protocol")
 	}
-	if protocol != 0 {
+	if protocol != 0 && protocol != 7 {
 		return sshNodeEndpoint{}, errors.New("the selected connection is not an SSH connection")
 	}
 	if host == "" {
 		return sshNodeEndpoint{}, errors.New("SSH connection has no host")
 	}
-	if portContextProtocol != nil && *portContextProtocol != protocol {
+	if portContextProtocol != nil && sshCredentialProtocol(*portContextProtocol) != sshCredentialProtocol(protocol) {
 		port = 0
 	}
 	if port <= 0 || port > 65535 {
@@ -3873,7 +3956,7 @@ func loadSSHTargetWithCredentialOverrides(
 	if tunnelSet && tunnelEnabled && tunnelConfigID == "" {
 		return sshTarget{}, errors.New("SSH connection enables a VPN tunnel but no tunnel is configured")
 	}
-	if credentialContextProtocol != nil && *credentialContextProtocol != endpoint.protocol {
+	if credentialContextProtocol != nil && sshCredentialProtocol(*credentialContextProtocol) != sshCredentialProtocol(endpoint.protocol) {
 		credentialID = ""
 	}
 

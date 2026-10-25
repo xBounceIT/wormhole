@@ -142,7 +142,7 @@ export function connectionInlinePasswordAction(
   hasInlineCredential: boolean | undefined,
   removeInlinePassword: boolean,
 ): 'preserve' | 'set' | 'clear' {
-  const supportsInlineCredentials = protocol === 'ssh' || protocol === 'rdp';
+  const supportsInlineCredentials = protocol === 'ssh' || protocol === 'sftp' || protocol === 'rdp';
   if (useSavedCredentials || !supportsInlineCredentials) return 'clear';
   if (removeInlinePassword) return 'clear';
   if (inlinePassword) return 'set';

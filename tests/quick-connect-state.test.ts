@@ -8,7 +8,7 @@ import {
 } from '../src/quick-connect-state.ts';
 
 test('connection editor exposes VPN only for supported network protocols', () => {
-  const supported: QuickConnectProtocol[] = ['ssh', 'rdp', 'http', 'https', 'vnc'];
+  const supported: QuickConnectProtocol[] = ['ssh', 'sftp', 'rdp', 'http', 'https', 'vnc'];
   const unsupported: QuickConnectProtocol[] = ['serial'];
 
   for (const protocol of supported) assert.equal(connectionProtocolSupportsTunnel(protocol), true);
@@ -20,6 +20,9 @@ test('Quick Connect only marks SSH as connecting when credentials are immediatel
   assert.equal(quickConnectStartsImmediately('ssh', true, undefined), false);
   assert.equal(quickConnectStartsImmediately('ssh', true, 'credential-id'), true);
   assert.equal(quickConnectStartsImmediately('ssh', false, undefined), true);
+  assert.equal(quickConnectStartsImmediately('sftp', true, undefined), false);
+  assert.equal(quickConnectStartsImmediately('sftp', true, 'credential-id'), true);
+  assert.equal(quickConnectStartsImmediately('sftp', false, undefined), true);
   assert.equal(quickConnectStartsImmediately('rdp', true, 'credential-id'), false);
   assert.equal(quickConnectStartsImmediately('https', true, undefined), true);
 });

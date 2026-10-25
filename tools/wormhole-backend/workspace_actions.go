@@ -629,11 +629,11 @@ func loadWorkspaceCredentialProfile(database *sql.DB, credentialID string) (work
 }
 
 func workspaceProtocolCredentialValue(protocol int64) bool {
-	return protocol == 0 || protocol == 1 || protocol == 6
+	return protocol == 0 || protocol == 7 || protocol == 1 || protocol == 6
 }
 
 func workspaceCredentialProtocolMatches(connectionProtocol, credentialProtocol int64) bool {
-	return workspaceProtocolCredentialValue(connectionProtocol) && connectionProtocol == credentialProtocol
+	return workspaceProtocolCredentialValue(connectionProtocol) && sshCredentialProtocol(connectionProtocol) == credentialProtocol
 }
 
 func showWorkspaceNodeCredentials(
@@ -715,7 +715,7 @@ func showWorkspaceNodeCredentials(
 		response.Username = username
 	}
 	if credentialResolved && root.useInlinePassword.Valid && root.useInlinePassword.Int64 != 0 {
-		if protocol != 0 && protocol != 1 {
+		if protocol != 0 && protocol != 7 && protocol != 1 {
 			return response, nil
 		}
 		secret, err := readOptionalCredentialSecret(database, root.id, electronUserDataPath)
@@ -743,7 +743,7 @@ func showWorkspaceNodeCredentials(
 	response.Domain = strings.TrimSpace(nullableString(profile.domain))
 	response.CredentialName = strings.TrimSpace(nullableString(profile.name))
 	secretLabel := "Password"
-	if protocol == 0 && profile.kind.Valid && profile.kind.Int64 == 1 {
+	if (protocol == 0 || protocol == 7) && profile.kind.Valid && profile.kind.Int64 == 1 {
 		secretLabel = "Key passphrase"
 	} else if profile.kind.Valid && profile.kind.Int64 != 0 {
 		return response, nil

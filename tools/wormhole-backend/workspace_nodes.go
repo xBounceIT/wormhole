@@ -418,14 +418,14 @@ func normalizeWorkspaceNodeWrite(
 		if utf8.RuneCountInString(username) > maxCredentialUsernameLength || strings.ContainsAny(username, "\r\n\x00") {
 			return normalizedWorkspaceNode{}, errors.New("workspace connection username is invalid")
 		}
-		if protocol == 0 || protocol == 1 {
+		if protocol == 0 || protocol == 7 || protocol == 1 {
 			node.username = nullableWorkspaceNodeString(username)
 		} else {
 			node.username = nil
 			node.inlinePasswordAction = "clear"
 		}
 		if node.inlinePasswordAction == "set" || node.inlinePasswordAction == "preserve" {
-			if protocol != 0 && protocol != 1 {
+			if protocol != 0 && protocol != 7 && protocol != 1 {
 				return normalizedWorkspaceNode{}, errors.New("inline passwords are supported only for SSH and RDP")
 			}
 			node.useInlinePassword = int64(1)
@@ -569,7 +569,7 @@ func validateWorkspaceNodeReferences(tx *sql.Tx, node normalizedWorkspaceNode, u
 			return errors.New("selected credential was not found")
 		}
 		if node.kind == workspaceNodeConnection && node.protocol.Valid {
-			if credential.protocol != node.protocol.Int64 {
+			if credential.protocol != sshCredentialProtocol(node.protocol.Int64) {
 				return errors.New("selected credential does not match the connection protocol")
 			}
 			if !workspaceCredentialKindSupportsProtocol(credential.kind, node.protocol.Int64) {
@@ -596,7 +596,7 @@ func validateWorkspaceNodeReferences(tx *sql.Tx, node normalizedWorkspaceNode, u
 }
 
 func workspaceCredentialKindSupportsProtocol(kind, protocol int64) bool {
-	return kind == 0 || (protocol == 0 && kind == 1)
+	return kind == 0 || ((protocol == 0 || protocol == 7) && kind == 1)
 }
 
 func nextWorkspaceNodeSortOrder(tx *sql.Tx, parentID string) (int64, error) {
@@ -617,6 +617,8 @@ func workspaceProtocolValue(protocol string) (int64, bool) {
 	switch strings.ToLower(strings.TrimSpace(protocol)) {
 	case "ssh":
 		return 0, true
+	case "sftp":
+		return 7, true
 	case "rdp":
 		return 1, true
 	case "http":
@@ -661,4 +663,12 @@ func nullableWorkspaceNodeSQLString(value sql.NullString) any {
 		return nil
 	}
 	return value.String
+}
+
+// SFTP uses the existing SSH password and key credential profiles.
+func sshCredentialProtocol(protocol int64) int64 {
+	if protocol == 7 {
+		return 0
+	}
+	return protocol
 }

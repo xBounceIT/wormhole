@@ -403,7 +403,7 @@ func (controller *mcpController) listSessions() ([]mcpSessionInfo, error) {
 	defer controller.server.mu.Unlock()
 	result := make([]mcpSessionInfo, 0, len(controller.server.sessions))
 	for _, native := range controller.server.sessions {
-		if native == nil || native.isClosed() {
+		if native == nil || native.sftpOnly || native.isClosed() {
 			continue
 		}
 		result = append(result, native.mcpSession)
@@ -733,7 +733,7 @@ func (controller *mcpController) resolveSession(sessionID string) (*sshNativeSes
 	controller.server.mu.Lock()
 	native := controller.server.sessions[sessionID]
 	controller.server.mu.Unlock()
-	if native == nil || native.isClosed() {
+	if native == nil || native.sftpOnly || native.isClosed() {
 		return nil, fmt.Errorf("no live SSH session with id '%s'", sessionID)
 	}
 	return native, nil
