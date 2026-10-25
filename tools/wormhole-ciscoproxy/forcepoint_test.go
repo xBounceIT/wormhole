@@ -368,11 +368,13 @@ func fpServeLogin(conn net.Conn) error {
 	if err != nil || op != fpControl || len(request) < 8 || request[0] != fpAuthRequest || !bytes.Equal(request[8:], fpTestString("test-user")) {
 		return errors.New("unexpected username request")
 	}
-	if _, err := conn.Write(fpTestWire(fpControl, fpTestControl(fpChallenge, fpTestString("Password")))); err != nil {
+	challenge := fpTestControl(fpChallenge, fpTestString("Password"))
+	if _, err := conn.Write(fpTestWire(fpControl, challenge)); err != nil {
 		return err
 	}
 	op, request, err = readForcepointFrame(conn)
-	if err != nil || op != fpControl || len(request) < 8 || request[0] != fpChallengeReply || !bytes.Equal(request[8:], fpTestString("test-password")) {
+	if err != nil || op != fpControl || len(request) < 8 || request[0] != fpChallengeReply ||
+		!bytes.Equal(request[4:8], challenge[4:8]) || !bytes.Equal(request[8:], fpTestString("test-password")) {
 		return errors.New("unexpected password response")
 	}
 	if _, err := conn.Write(fpTestWire(fpControl, fpTestControl(fpAuthVerdict, fpTestVerdict(true)))); err != nil {

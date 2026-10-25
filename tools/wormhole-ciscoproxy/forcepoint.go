@@ -220,23 +220,28 @@ func (s *forcepointSession) write(op byte, payload []byte) error {
 	return nil
 }
 
-func (s *forcepointSession) control(op byte, body []byte) error {
+// Client-initiated requests generate an ID; replies retain the gateway's opaque ID.
+func (s *forcepointSession) control(op byte, body []byte, requestID *[4]byte) error {
 	payload := make([]byte, 8+len(body))
 	defer clear(payload)
 	payload[0] = op
-	if _, err := io.ReadFull(rand.Reader, payload[4:8]); err != nil {
-		return errors.New("could not initialize Forcepoint SSL request")
+	if requestID == nil {
+		if _, err := io.ReadFull(rand.Reader, payload[4:8]); err != nil {
+			return errors.New("could not initialize Forcepoint SSL request")
+		}
+	} else {
+		copy(payload[4:8], requestID[:])
 	}
 	copy(payload[8:], body)
 	return s.write(fpControl, payload)
 }
 
-func (s *forcepointSession) credential(op byte, value string) error {
+func (s *forcepointSession) credential(op byte, value string, requestID *[4]byte) error {
 	body := make([]byte, 2+len(value))
 	defer clear(body)
 	binary.BigEndian.PutUint16(body, uint16(len(value)))
 	copy(body[2:], value)
-	return s.control(op, body)
+	return s.control(op, body, requestID)
 }
 
 func (s *forcepointSession) pause() {
@@ -252,7 +257,7 @@ func (s *forcepointSession) authenticationExpired(now time.Time) bool {
 func (s *forcepointSession) authenticate() error {
 	s.pause()
 	s.challenged = false
-	return s.credential(fpAuthRequest, s.cfg.Username)
+	return s.credential(fpAuthRequest, s.cfg.Username, nil)
 }
 
 func (s *forcepointSession) requestIP() error {
@@ -264,7 +269,7 @@ func (s *forcepointSession) requestIP() error {
 		}
 		s.mac[0] = s.mac[0]&0xfe | 0x02 // private DHCP identity, never a host adapter
 	}
-	return s.control(fpIPRequest, s.mac[:])
+	return s.control(fpIPRequest, s.mac[:], nil)
 }
 
 func (s *forcepointSession) handleFrame(op byte, payload []byte) error {
@@ -291,7 +296,8 @@ func (s *forcepointSession) handleFrame(op byte, payload []byte) error {
 				return errors.New("Forcepoint requires an unsupported authentication challenge")
 			}
 			s.challenged = true
-			return s.credential(fpChallengeReply, s.cfg.Password)
+			requestID := [4]byte(payload[4:8])
+			return s.credential(fpChallengeReply, s.cfg.Password, &requestID)
 		case fpAuthVerdict:
 			if !s.paused.Load() || s.configuring || len(body) < 8 || !validForcepointString(body[6:]) {
 				return errForcepointProtocol

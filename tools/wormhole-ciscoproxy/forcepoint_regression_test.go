@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"net"
 	"net/netip"
 	"testing"
@@ -32,6 +33,39 @@ func TestForcepointRejectsAmbiguousSecurityCheckAttributes(t *testing.T) {
 	} {
 		if err := validateForcepointPolicy([]byte(`<client-config><security-checks>` + check + `</security-checks></client-config>`)); err == nil {
 			t.Fatalf("accepted ambiguous security check: %s", check)
+		}
+	}
+}
+
+func TestForcepointChallengeRepliesRetainGatewayID(t *testing.T) {
+	for _, id := range [][4]byte{{0x5a, 0x91, 0xe3, 0x07}, {}, {0xff, 0xff, 0xff, 0xff}} {
+		for _, reauthenticate := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%x/reauth=%t", id, reauthenticate), func(t *testing.T) {
+				sess, output := fpTestSession()
+				var err error
+				if reauthenticate {
+					sess.configured = true
+					err = sess.handleFrame(fpControl, fpTestControl(fpReauthenticate, nil))
+				} else {
+					err = sess.authenticate()
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				if op, request, err := readForcepointFrame(output); err != nil || op != fpControl || request[0] != fpAuthRequest {
+					t.Fatal("authentication did not send the username request", err)
+				}
+				challenge := fpTestControl(fpChallenge, fpTestString("Password"))
+				copy(challenge[4:8], id[:])
+				if err := sess.handleFrame(fpControl, challenge); err != nil {
+					t.Fatal(err)
+				}
+				op, reply, err := readForcepointFrame(output)
+				if err != nil || op != fpControl || len(reply) < 8 || reply[0] != fpChallengeReply ||
+					!bytes.Equal(reply[4:8], id[:]) || !bytes.Equal(reply[8:], fpTestString("test-password")) {
+					t.Fatal("password reply did not retain the gateway challenge identifier", err)
+				}
+			})
 		}
 	}
 }

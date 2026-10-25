@@ -97,7 +97,7 @@ type forcepointTLSPeer struct {
 	pin  string
 }
 
-func newForcepointTLSPeer(t *testing.T, expired bool, subject string) forcepointTLSPeer {
+func newForcepointTLSPeer(t *testing.T, expired bool, subject string, configure ...func(*x509.Certificate)) forcepointTLSPeer {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -114,6 +114,9 @@ func newForcepointTLSPeer(t *testing.T, expired bool, subject string) forcepoint
 		KeyUsage:    x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
 		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		IsCA:        true, BasicConstraintsValid: true,
+	}
+	for _, apply := range configure {
+		apply(template)
 	}
 	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
 	if err != nil {
@@ -214,6 +217,44 @@ func TestForcepointCertificateProbeVerifiesOrAbortsWithoutVPNData(t *testing.T) 
 	_ = listener.Close()
 	if _, err := probeForcepointCertificate(context.Background(), "127.0.0.1", port, nil); err == nil || !strings.Contains(err.Error(), "network connectivity") {
 		t.Fatal("network failure was mistaken for certificate consent", err)
+	}
+}
+
+func TestForcepointCertificateProbePreservesStandardTrustErrors(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		expired   bool
+		trusted   bool
+		configure func(*x509.Certificate)
+	}{
+		{"hostname", false, true, func(cert *x509.Certificate) {
+			cert.IPAddresses = nil
+			cert.DNSNames = []string{"vpn.example.test"}
+		}},
+		{"expired-trusted", true, true, func(*x509.Certificate) {}},
+		{"not-yet-valid-private", false, false, func(cert *x509.Certificate) {
+			cert.NotBefore = time.Now().Add(30 * time.Minute)
+		}},
+		{"wrong-server-usage", false, true, func(cert *x509.Certificate) {
+			cert.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			peer := newForcepointTLSPeer(t, test.expired, "Forcepoint trust fixture", test.configure)
+			var roots *x509.CertPool
+			if test.trusted {
+				roots = x509.NewCertPool()
+				roots.AddCert(peer.leaf)
+			}
+			certificate, err := probeForcepointCertificate(context.Background(), peer.host, peer.port, roots)
+			if test.name == "hostname" {
+				if err != nil || certificate == nil || certificate.verified || certificate.pin != peer.pin {
+					t.Fatal("hostname mismatch did not preserve the exact peer for explicit consent", err)
+				}
+			} else if !errors.Is(err, errForcepointCertificateInvalid) || certificate != nil {
+				t.Fatal("invalid certificate could reach consent", err)
+			}
+		})
 	}
 }
 

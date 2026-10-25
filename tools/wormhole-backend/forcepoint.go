@@ -16,10 +16,7 @@ import (
 	"time"
 )
 
-var (
-	errForcepointCertificateUntrusted = errors.New("Forcepoint gateway certificate requires verification")
-	errForcepointCertificateInvalid   = errors.New("Forcepoint gateway certificate is expired or invalid; contact the VPN administrator")
-)
+var errForcepointCertificateInvalid = errors.New("Forcepoint gateway certificate is expired or invalid; contact the VPN administrator")
 
 type forcepointGatewayCertificate struct {
 	pin      string
@@ -29,47 +26,16 @@ type forcepointGatewayCertificate struct {
 	verified bool
 }
 
-// Probe only TLS, before a sidecar or any VPN authentication is started. The
-// verification callback always verifies the peer or aborts the handshake. An
-// untrusted public certificate is returned for explicit fingerprint confirmation;
-// it never authorizes this connection to send credentials.
+// Probe only TLS, before a sidecar or any VPN authentication is started. Go's
+// normal verifier aborts an untrusted handshake. Its typed error preserves the
+// public certificate for explicit fingerprint confirmation, without authorizing
+// this connection to send credentials or disabling TLS certificate checks.
 func probeForcepointCertificate(ctx context.Context, host string, port int, roots *x509.CertPool) (*forcepointGatewayCertificate, error) {
 	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	var certificate *forcepointGatewayCertificate
 	cfg := &tls.Config{
 		ServerName: host, MinVersion: tls.VersionTLS12, NextProtos: []string{"ssvtp/1"},
-		InsecureSkipVerify: true, // mandatory replacement verification below
-		VerifyConnection: func(state tls.ConnectionState) error {
-			if len(state.PeerCertificates) == 0 {
-				return errors.New("Forcepoint gateway did not provide a server certificate")
-			}
-			leaf := state.PeerCertificates[0]
-			now := time.Now()
-			if now.Before(leaf.NotBefore) || now.After(leaf.NotAfter) {
-				return errForcepointCertificateInvalid
-			}
-			digest := sha256.Sum256(leaf.Raw)
-			certificate = &forcepointGatewayCertificate{
-				pin: hex.EncodeToString(digest[:]), subject: leaf.Subject.String(),
-				issuer: leaf.Issuer.String(), expires: leaf.NotAfter,
-			}
-			intermediates := x509.NewCertPool()
-			for _, peer := range state.PeerCertificates[1:] {
-				intermediates.AddCert(peer)
-			}
-			_, err := leaf.Verify(x509.VerifyOptions{DNSName: host, Roots: roots, Intermediates: intermediates})
-			if err == nil {
-				certificate.verified = true
-				return nil
-			}
-			var unknownCA x509.UnknownAuthorityError
-			var hostname x509.HostnameError
-			if errors.As(err, &unknownCA) || errors.As(err, &hostname) {
-				return errForcepointCertificateUntrusted
-			}
-			return errForcepointCertificateInvalid
-		},
+		RootCAs: roots,
 	}
 	dialer := tls.Dialer{NetDialer: &net.Dialer{Timeout: 10 * time.Second}, Config: cfg}
 	conn, err := dialer.DialContext(probeCtx, "tcp", net.JoinHostPort(host, strconv.Itoa(port)))
@@ -82,13 +48,35 @@ func probeForcepointCertificate(ctx context.Context, host string, port int, root
 	if probeCtx.Err() != nil {
 		return nil, errors.New("Forcepoint TLS connection timed out while verifying the gateway certificate")
 	}
-	if errors.Is(err, errForcepointCertificateUntrusted) || err == nil {
-		return certificate, nil
+	var peers []*x509.Certificate
+	if err == nil {
+		peers = conn.(*tls.Conn).ConnectionState().PeerCertificates
+	} else {
+		var verification *tls.CertificateVerificationError
+		if !errors.As(err, &verification) {
+			return nil, errors.New("Forcepoint TLS connection failed; check the SSL gateway host, port and network connectivity")
+		}
+		var unknownCA x509.UnknownAuthorityError
+		var hostname x509.HostnameError
+		if !errors.As(verification.Err, &unknownCA) && !errors.As(verification.Err, &hostname) {
+			return nil, errForcepointCertificateInvalid
+		}
+		peers = verification.UnverifiedCertificates
 	}
-	if errors.Is(err, errForcepointCertificateInvalid) {
+	if len(peers) == 0 {
 		return nil, errForcepointCertificateInvalid
 	}
-	return nil, errors.New("Forcepoint TLS connection failed; check the SSL gateway host, port and network connectivity")
+	leaf := peers[0]
+	// Unknown-authority errors can precede validity errors on some platforms.
+	now := time.Now()
+	if now.Before(leaf.NotBefore) || now.After(leaf.NotAfter) {
+		return nil, errForcepointCertificateInvalid
+	}
+	digest := sha256.Sum256(leaf.Raw)
+	return &forcepointGatewayCertificate{
+		pin: hex.EncodeToString(digest[:]), subject: leaf.Subject.String(),
+		issuer: leaf.Issuer.String(), expires: leaf.NotAfter, verified: err == nil,
+	}, nil
 }
 
 func prepareForcepointAuthentication(ctx context.Context, raw json.RawMessage, snapshots ...tunnelConfigSnapshot) (json.RawMessage, error) {
