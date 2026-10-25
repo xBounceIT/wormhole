@@ -1992,7 +1992,7 @@ func TestLocalSftpTransferCopiesDirectoryAndPublishesProgress(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	server, native, output := newLocalTransferTestServer()
+	server, native, output := newLocalTransferTestServer(t)
 	command := sshWireCommand{
 		SessionID:       native.id,
 		TransferID:      "copy-directory",
@@ -2049,7 +2049,7 @@ func TestLocalSftpTransferAppliesConflictDecisionToAllItems(t *testing.T) {
 		}
 	}
 
-	server, native, output := newLocalTransferTestServer()
+	server, native, output := newLocalTransferTestServer(t)
 	command := sshWireCommand{
 		SessionID:       native.id,
 		TransferID:      "overwrite-all",
@@ -2103,7 +2103,7 @@ func TestLocalSftpTransferCanSkipConflictAndCancelBatch(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		server, native, _ := newLocalTransferTestServer()
+		server, native, _ := newLocalTransferTestServer(t)
 		command := sshWireCommand{
 			SessionID: native.id, TransferID: "skip", Direction: "local-to-local",
 			DestinationPath: destination,
@@ -2126,7 +2126,7 @@ func TestLocalSftpTransferCanSkipConflictAndCancelBatch(t *testing.T) {
 		if err := os.WriteFile(source, []byte(strings.Repeat("x", 1024)), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		server, native, output := newLocalTransferTestServer()
+		server, native, output := newLocalTransferTestServer(t)
 		command := sshWireCommand{
 			SessionID: native.id, TransferID: "cancel", Direction: "local-to-local",
 			DestinationPath: filepath.Join(root, "destination"),
@@ -2143,7 +2143,7 @@ func TestLocalSftpTransferCanSkipConflictAndCancelBatch(t *testing.T) {
 }
 
 func TestSftpTransferRejectsDuplicateAndClosedRemoteSession(t *testing.T) {
-	server, native, output := newLocalTransferTestServer()
+	server, native, output := newLocalTransferTestServer(t)
 	command := sshWireCommand{
 		SessionID: native.id, TransferID: "duplicate", Direction: "local-to-local",
 		DestinationPath: t.TempDir(),
@@ -2251,14 +2251,16 @@ type zeroSSHWriter struct{}
 
 func (zeroSSHWriter) Write([]byte) (int, error) { return 0, nil }
 
-func newLocalTransferTestServer() (*sshServer, *sshNativeSession, *synchronizedBuffer) {
+func newLocalTransferTestServer(t *testing.T) (*sshServer, *sshNativeSession, *synchronizedBuffer) {
+	t.Helper()
 	output := &synchronizedBuffer{}
 	server := &sshServer{
 		output:    &sshEventWriter{encoder: json.NewEncoder(output)},
 		sessions:  make(map[string]*sshNativeSession),
 		transfers: make(map[string]*sshSftpTransfer),
 	}
-	native := &sshNativeSession{id: "session", server: server}
+	client := newSftpSSHTestClient(t, nil)
+	native := &sshNativeSession{id: "session", server: server, client: client, transport: &sshSharedTransport{client: client, refs: 1}}
 	server.sessions[native.id] = native
 	return server, native, output
 }
@@ -2403,7 +2405,7 @@ func TestSftpTransfersCopyBetweenLocalAndRemoteFilesystems(t *testing.T) {
 	if err := client.MkdirAll(remoteRoot); err != nil {
 		t.Fatal(err)
 	}
-	server, native, output := newLocalTransferTestServer()
+	server, native, output := newLocalTransferTestServer(t)
 	native.sftpClient = client
 	native.sftpGeneration = 1
 
@@ -2509,7 +2511,7 @@ func TestSftpConflictWireRefreshAndReopen(t *testing.T) {
 			for _, contents := range []string{"", "replacement"} {
 				t.Run(fmt.Sprintf("%s/%s/size-%d", direction, decision, len(contents)), func(t *testing.T) {
 					client := newSftpTestClient(t)
-					server, native, output := newLocalTransferTestServer()
+					server, native, output := newLocalTransferTestServer(t)
 					native.sftpClient = client
 					native.sftpGeneration = 1
 					t.Cleanup(func() {
@@ -2622,7 +2624,7 @@ func TestSftpConflictWireRefreshAndReopen(t *testing.T) {
 }
 
 func TestSftpQueuedMutationDoesNotBlockRemoteRefresh(t *testing.T) {
-	server, native, output := newLocalTransferTestServer()
+	server, native, output := newLocalTransferTestServer(t)
 	native.sftpClient = newSftpTestClient(t)
 	root := t.TempDir()
 	source := filepath.Join(root, "source.txt")
@@ -2685,7 +2687,7 @@ func TestSftpQueuedMutationDoesNotBlockRemoteRefresh(t *testing.T) {
 func TestSftpTransferPlanningFailuresSettleBatch(t *testing.T) {
 	for _, cancelled := range []bool{false, true} {
 		t.Run(fmt.Sprintf("cancelled-%v", cancelled), func(t *testing.T) {
-			server, native, output := newLocalTransferTestServer()
+			server, native, output := newLocalTransferTestServer(t)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			if cancelled {
@@ -2714,7 +2716,7 @@ func TestSftpTransferPlanningFailuresSettleBatch(t *testing.T) {
 
 func TestSftpOverwriteCannotReplaceDirectoryWithFile(t *testing.T) {
 	client := newSftpTestClient(t)
-	server, native, output := newLocalTransferTestServer()
+	server, native, output := newLocalTransferTestServer(t)
 	native.sftpClient = client
 	root := t.TempDir()
 	source := filepath.Join(root, "report.txt")

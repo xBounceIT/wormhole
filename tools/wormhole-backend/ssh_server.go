@@ -2233,6 +2233,9 @@ func (native *sshNativeSession) listSftp(requestedPath string, generation, seque
 }
 
 func (native *sshNativeSession) closeSftp(notify bool) {
+	if native.server != nil {
+		native.server.cancelTransfersForSession(native.id)
+	}
 	native.sftpMu.Lock()
 	native.sftpGeneration++
 	native.sftpListSeq++
@@ -2747,18 +2750,33 @@ func (server *sshServer) runSftpTransfer(native *sshNativeSession, command sshWi
 	remote := command.Direction != "local-to-local"
 	if remote {
 		native.sftpMu.Lock()
-		client = native.sftpClient
-		closed := native.sftpClosed || native.isClosed()
+		closed := native.sftpClient == nil || native.sftpClosed || native.isClosed()
 		native.sftpMu.Unlock()
-		if client == nil || closed {
+		if closed {
 			server.writeTransferBatchError(command, errSSHSftpClosed)
 			return
 		}
 	}
+	defer func() {
+		if client != nil {
+			_ = client.Close()
+		}
+	}()
 
-	plans, err := buildSftpTransferPlans(client, command, ctx)
+	plans, err := func() ([]sshSftpTransferPlan, error) {
+		if remote {
+			var err error
+			client, err = newSharedSftpClient(ctx, native)
+			if err != nil {
+				return nil, err
+			}
+			stop := interruptSftpTransfer(ctx, client)
+			defer stop()
+		}
+		return buildSftpTransferPlans(client, command, ctx)
+	}()
 	if err != nil {
-		if errors.Is(err, context.Canceled) {
+		if ctx.Err() != nil {
 			server.writeTransferBatchTerminal(command, "batch-cancelled")
 		} else {
 			server.writeTransferBatchError(command, err)
@@ -2783,6 +2801,17 @@ func (server *sshServer) runSftpTransfer(native *sshNativeSession, command sshWi
 			defer transfer.finishItem(itemID)
 			if err := itemContext.Err(); err != nil {
 				return err
+			}
+			if remote {
+				if client == nil {
+					var err error
+					client, err = newSharedSftpClient(itemContext, native)
+					if err != nil {
+						return err
+					}
+				}
+				stop := interruptSftpTransfer(itemContext, client)
+				defer stop()
 			}
 			if command.Direction != "local-to-remote" {
 				if err := validateLocalTransferDestinationParents(plan.destinationPath); err != nil {
@@ -2856,6 +2885,9 @@ func (server *sshServer) runSftpTransfer(native *sshNativeSession, command sshWi
 				lastTransferred = transferred
 				server.writeTransferEvent(command, itemID, "progress", plan.displayName, plan.incomingSize, transferred, nil)
 			})
+			if itemContext.Err() != nil {
+				err = itemContext.Err()
+			}
 			if errors.Is(err, context.Canceled) {
 				server.writeTransferEvent(command, itemID, "cancelled", plan.displayName, plan.incomingSize, lastTransferred, nil)
 				return err
@@ -2867,6 +2899,15 @@ func (server *sshServer) runSftpTransfer(native *sshNativeSession, command sshWi
 			server.writeTransferEvent(command, itemID, "completed", plan.displayName, plan.incomingSize, plan.incomingSize, nil)
 			return nil
 		}()
+		if itemContext.Err() != nil {
+			err = itemContext.Err()
+			// A cancelled row closed its subsystem. Reopen only the transfer
+			// channel for the next row; the browser and shared transport stay live.
+			if client != nil {
+				_ = client.Close()
+				client = nil
+			}
+		}
 		if errors.Is(err, context.Canceled) {
 			if ctx.Err() != nil {
 				server.writeTransferBatchTerminal(command, "batch-cancelled")
@@ -3251,7 +3292,8 @@ func copyTransferFile(ctx context.Context, client *sftp.Client, direction string
 	}
 	destinationPath := plan.destinationPath
 	mode := os.FileMode(0o644)
-	if plan.overwrite {
+	staged := plan.overwrite || direction == "local-to-remote"
+	if staged {
 		id, err := newCredentialID()
 		if err != nil {
 			return err
@@ -3277,7 +3319,7 @@ func copyTransferFile(ctx context.Context, client *sftp.Client, direction string
 		if !closed {
 			_ = destination.Close()
 		}
-		if plan.overwrite && !committed {
+		if !committed {
 			if direction == "local-to-remote" {
 				_ = client.Chmod(destinationPath, 0o600)
 				_ = client.Remove(destinationPath)
@@ -3289,7 +3331,7 @@ func copyTransferFile(ctx context.Context, client *sftp.Client, direction string
 			}
 		}
 	}()
-	if plan.overwrite && direction == "local-to-remote" {
+	if staged && direction == "local-to-remote" {
 		if err := client.Chmod(destinationPath, 0o600); err != nil {
 			return err
 		}
@@ -3324,15 +3366,16 @@ func copyTransferFile(ctx context.Context, client *sftp.Client, direction string
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if plan.overwrite {
-		err := commitTransferFile(ctx, client, direction, destinationPath, plan.destinationPath)
+	if staged {
+		err := commitTransferFile(ctx, client, direction, destinationPath, plan.destinationPath, plan.overwrite)
 		committed = err == nil
 		return err
 	}
+	committed = true
 	return nil
 }
 
-func commitTransferFile(ctx context.Context, client *sftp.Client, direction, temporary, target string) error {
+func commitTransferFile(ctx context.Context, client *sftp.Client, direction, temporary, target string, overwrite bool) error {
 	var info os.FileInfo
 	var err error
 	if direction == "local-to-remote" {
@@ -3342,6 +3385,9 @@ func commitTransferFile(ctx context.Context, client *sftp.Client, direction, tem
 	}
 	if err != nil && !os.IsNotExist(err) {
 		return err
+	}
+	if !overwrite && info != nil {
+		return os.ErrExist
 	}
 	mode := os.FileMode(0o644)
 	if info != nil && info.Mode().IsRegular() {
@@ -3359,7 +3405,7 @@ func commitTransferFile(ctx context.Context, client *sftp.Client, direction, tem
 		return err
 	}
 	if direction == "local-to-remote" {
-		if _, supported := client.HasExtension("posix-rename@openssh.com"); supported {
+		if _, supported := client.HasExtension("posix-rename@openssh.com"); supported && overwrite {
 			return client.PosixRename(temporary, target)
 		}
 		// SFTP v3 rename must fail if replacement is unsupported. Keep the

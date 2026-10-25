@@ -116,6 +116,9 @@ type sftpTransferFaultCommands struct {
 }
 
 func (commands *sftpTransferFaultCommands) Filecmd(request *sftp.Request) error {
+	if commands.fault == "rename" && request.Method == "Rename" {
+		return os.ErrPermission
+	}
 	if request.Method == "Setstat" && strings.Contains(request.Filepath, ".wormhole-transfer-") {
 		count := commands.chmods.Add(1)
 		if commands.fault == "permissions" {
@@ -255,11 +258,105 @@ func TestSftpReadOnlyOverwriteDoesNotLeakStage(t *testing.T) {
 	}
 }
 
+func TestSftpNewCopyCancellationRemovesPartialFile(t *testing.T) {
+	for _, direction := range []string{"local-to-local", "local-to-remote", "remote-to-local"} {
+		t.Run(direction, func(t *testing.T) {
+			client := newSftpTestClient(t)
+			root := t.TempDir()
+			source, destination := filepath.Join(root, "source"), filepath.Join(root, "destination")
+			if err := os.WriteFile(source, bytes.Repeat([]byte("x"), 2*sshSftpTransferBuffer), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			plan := sshSftpTransferPlan{sourcePath: source, destinationPath: destination}
+			if direction == "local-to-remote" {
+				plan.destinationPath = sftpTestPath(destination)
+			} else if direction == "remote-to-local" {
+				plan.sourcePath = sftpTestPath(source)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			err := copyTransferFile(ctx, client, direction, plan, func(int64) { cancel() })
+			if !errors.Is(err, context.Canceled) {
+				t.Fatal("new copy ignored cancellation", err)
+			}
+			if _, err := os.Stat(destination); !os.IsNotExist(err) {
+				t.Fatal("cancelled new copy left the final file", err)
+			}
+			entries, err := os.ReadDir(root)
+			if err != nil || len(entries) != 1 {
+				t.Fatal("cancelled new copy leaked a temporary file", entries, err)
+			}
+		})
+	}
+}
+
+func TestSftpNewUploadFailuresDoNotPublishDestination(t *testing.T) {
+	for _, fault := range []string{"write", "close", "rename"} {
+		t.Run(fault, func(t *testing.T) {
+			handlers := sftp.InMemHandler()
+			put := handlers.FilePut
+			handlers.FilePut = sftpReviewWriter(func(request *sftp.Request) (io.WriterAt, error) {
+				writer, err := put.Filewrite(request)
+				return sftpTransferFaultWriter{WriterAt: writer, fault: fault}, err
+			})
+			handlers.FileCmd = &sftpTransferFaultCommands{FileCmder: handlers.FileCmd, fault: fault}
+			client := newSftpReviewRequestClient(t, handlers)
+			source := filepath.Join(t.TempDir(), "source")
+			if err := os.WriteFile(source, bytes.Repeat([]byte("x"), 2*sshSftpTransferBuffer), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			err := copyTransferFile(context.Background(), client, "local-to-remote", sshSftpTransferPlan{
+				sourcePath: source, destinationPath: "/destination",
+			}, func(int64) {})
+			if err == nil {
+				t.Fatal("failed new upload reported success")
+			}
+			if _, err := client.Lstat("/destination"); !os.IsNotExist(err) {
+				t.Fatal("failed new upload published a partial final file", err)
+			}
+			if entries, err := client.ReadDir("/"); err != nil || len(entries) != 0 {
+				t.Fatal("failed new upload leaked a staged file", entries, err)
+			}
+		})
+	}
+}
+
+func TestSftpNewUploadRejectsDestinationCreatedDuringCopy(t *testing.T) {
+	client := newSftpTestClient(t)
+	root := t.TempDir()
+	source, destination := filepath.Join(root, "source"), filepath.Join(root, "destination")
+	if err := os.WriteFile(source, bytes.Repeat([]byte("x"), 2*sshSftpTransferBuffer), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	created := false
+	err := copyTransferFile(context.Background(), client, "local-to-remote", sshSftpTransferPlan{
+		sourcePath: source, destinationPath: sftpTestPath(destination),
+	}, func(int64) {
+		if !created {
+			created = true
+			if err := os.WriteFile(destination, []byte("independent writer"), 0o600); err != nil {
+				t.Error(err)
+			}
+		}
+	})
+	if !created || !errors.Is(err, os.ErrExist) {
+		t.Fatal("new upload accepted an unapproved replacement", created, err)
+	}
+	contents, err := os.ReadFile(destination)
+	if err != nil || string(contents) != "independent writer" {
+		t.Fatal("new upload overwrote the independent writer", string(contents), err)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil || len(entries) != 2 {
+		t.Fatal("rejected new upload leaked its stage", entries, err)
+	}
+}
+
 func TestSftpDirectoryOverwriteReplacesFileOnlyAfterApproval(t *testing.T) {
 	for _, direction := range []string{"local-to-local", "local-to-remote", "remote-to-local"} {
 		for _, decision := range []string{"overwrite", "skip"} {
 			t.Run(direction+"/"+decision, func(t *testing.T) {
-				server, native, output := newLocalTransferTestServer()
+				server, native, output := newLocalTransferTestServer(t)
 				native.sftpClient = newSftpTestClient(t)
 				root, destinationRoot := t.TempDir(), t.TempDir()
 				if err := os.WriteFile(filepath.Join(root, "child"), []byte("incoming child"), 0o644); err != nil {

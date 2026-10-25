@@ -258,6 +258,21 @@ type sftpSessionWriter struct {
 	session *ssh.Session
 }
 
+// A transfer owns this subsystem, so cancellation can interrupt pending SFTP
+// requests without closing the browser, shell, or shared SSH transport.
+func interruptSftpTransfer(ctx context.Context, client *sftp.Client) func() {
+	done := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		_ = client.Close()
+		close(done)
+	})
+	return func() {
+		if !stop() {
+			<-done
+		}
+	}
+}
+
 func (writer *sftpSessionWriter) Close() error {
 	err := writer.WriteCloser.Close()
 	_ = writer.session.Close()
