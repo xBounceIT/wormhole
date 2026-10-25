@@ -35,9 +35,46 @@ test('File transfer tabs browse trees, route shortcuts and manage editor saves i
   const directory = mkdtempSync(join(tmpdir(), 'wormhole-sftp-session-'));
   try {
     const harness = join(directory, 'session.cjs');
+    writeFileSync(join(directory, 'renderer.js'), renderer);
+    writeFileSync(join(directory, 'coverage.json'), JSON.stringify({ coverageThreshold }));
     writeFileSync(
       harness,
-      `const assert=require('node:assert/strict');const {app,BrowserWindow}=require('electron');app.setPath('userData',${JSON.stringify(directory)});app.whenReady().then(async()=>{const window=new BrowserWindow({show:false,width:1300,height:900,webPreferences:{nodeIntegration:true,contextIsolation:false,backgroundThrottling:false}});window.webContents.on('console-message',(event)=>{if(event.level==='error')console.error(event.message)});try{await window.loadURL('data:text/html,<div id="root"></div>');window.webContents.debugger.attach('1.3');await window.webContents.debugger.sendCommand('Profiler.enable');await window.webContents.debugger.sendCommand('Profiler.startPreciseCoverage',{callCount:true,detailed:true});const source=${JSON.stringify(renderer)};await window.webContents.executeJavaScript(source);const coverage=await window.webContents.debugger.sendCommand('Profiler.takePreciseCoverage');const script=coverage.result.find(item=>item.url==='wormhole-sftp-session.js');assert.ok(script);const failures=[];for(const name of ['SftpBrowserSurface','SftpDirectoryTree','SftpEditorSettings','SftpEditedFiles','SftpRecoveryNotice']){const fn=script.functions.find(item=>item.functionName===name);assert.ok(fn,'Missing '+name);const ranges=script.functions.flatMap(item=>item.ranges).filter(range=>range.startOffset>=fn.ranges[0].startOffset&&range.endOffset<=fn.ranges[0].endOffset);const percent=100*ranges.filter(range=>range.count>0).length/ranges.length;console.log(name+': V8 block coverage '+percent.toFixed(2)+'%');if(percent<${coverageThreshold})failures.push(name);}assert.deepEqual(failures,[]);}finally{window.destroy()}app.quit()}).catch(error=>{console.error(error);app.exit(1)});`,
+      `const assert = require('node:assert/strict');
+const { readFileSync } = require('node:fs');
+const { join } = require('node:path');
+const { app, BrowserWindow } = require('electron');
+const { coverageThreshold } = JSON.parse(readFileSync(join(__dirname, 'coverage.json'), 'utf8'));
+app.setPath('userData', __dirname);
+app.whenReady().then(async () => {
+  const window = new BrowserWindow({ show: false, width: 1300, height: 900, webPreferences: { nodeIntegration: true, contextIsolation: false, backgroundThrottling: false } });
+  window.webContents.on('console-message', (event) => {
+    if (event.level === 'error') console.error(event.message);
+  });
+  try {
+    await window.loadURL('data:text/html,<div id="root"></div>');
+    window.webContents.debugger.attach('1.3');
+    await window.webContents.debugger.sendCommand('Profiler.enable');
+    await window.webContents.debugger.sendCommand('Profiler.startPreciseCoverage', { callCount: true, detailed: true });
+    const source = readFileSync(join(__dirname, 'renderer.js'), 'utf8');
+    await window.webContents.executeJavaScript(source);
+    const coverage = await window.webContents.debugger.sendCommand('Profiler.takePreciseCoverage');
+    const script = coverage.result.find(item => item.url === 'wormhole-sftp-session.js');
+    assert.ok(script);
+    const failures = [];
+    for (const name of ['SftpBrowserSurface', 'SftpDirectoryTree', 'SftpEditorSettings', 'SftpEditedFiles', 'SftpRecoveryNotice']) {
+      const fn = script.functions.find(item => item.functionName === name);
+      assert.ok(fn, 'Missing ' + name);
+      const ranges = script.functions.flatMap(item => item.ranges).filter(range => range.startOffset >= fn.ranges[0].startOffset && range.endOffset <= fn.ranges[0].endOffset);
+      const percent = 100 * ranges.filter(range => range.count > 0).length / ranges.length;
+      console.log(name + ': V8 block coverage ' + percent.toFixed(2) + '%');
+      if (percent < coverageThreshold) failures.push(name);
+    }
+    assert.deepEqual(failures, []);
+  } finally {
+    window.destroy();
+  }
+  app.quit();
+}).catch(error => { console.error(error); app.exit(1); });`,
     );
     const require = createRequire(import.meta.url);
     const electron = require('electron') as string;
