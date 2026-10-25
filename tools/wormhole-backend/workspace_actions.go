@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -327,6 +328,14 @@ func deleteWorkspaceNodes(
 		requested[nodeID] = struct{}{}
 		nodeIDs = append(nodeIDs, nodeID)
 	}
+
+	tunnelMutationMu.Lock()
+	defer tunnelMutationMu.Unlock()
+	releaseTunnel, err := acquireTunnelConfigurationLock(context.Background(), databasePath)
+	if err != nil {
+		return workspaceDeleteNodeResponse{}, err
+	}
+	defer releaseTunnel()
 
 	database, err := openDatabase(databasePath, false)
 	if err != nil {

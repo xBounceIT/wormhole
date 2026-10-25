@@ -563,12 +563,21 @@ WHERE lower(Id) = ? AND COALESCE(Kind, 0) = 1 AND COALESCE(SecretProvider, 0) = 
 }
 
 func deleteCredential(databasePath string, request credentialDeleteRequest) error {
-	if err := rejectSSHJumpDeletion(databasePath, nil, request.ID); err != nil {
-		return err
-	}
 	id := normalizeID(request.ID)
 	if !validCredentialID(id) {
 		return errors.New("credential id is invalid")
+	}
+	// Keep the reference check and deletion in the same configuration critical section.
+	// Take these before the credential lock and SQLite, matching tunnel writers.
+	tunnelMutationMu.Lock()
+	defer tunnelMutationMu.Unlock()
+	releaseTunnel, err := acquireTunnelConfigurationLock(context.Background(), databasePath)
+	if err != nil {
+		return err
+	}
+	defer releaseTunnel()
+	if err := rejectSSHJumpDeletion(databasePath, nil, id); err != nil {
+		return err
 	}
 	release, err := acquireRecoveredCredentialPrivateKeyLock(databasePath)
 	if err != nil {

@@ -33,6 +33,7 @@ downstream sidecar exits; leases are released from the target back to the upstre
 Concurrent sessions in a backend share the established tunnel. New leases resolve
 the current connection, inherited credential and upstream settings, so credential
 rotation cannot reuse a stale tunnel. Active sessions keep their existing lease.
+Runtime cache identities use a random process-local key and are never persisted.
 Changing credentials, host-key trust or the upstream configuration during authentication
 cancels the pending start. Reconnect to use the updated configuration. Cancelling a lease
 also stops its pending network requests and authentication prompts.
@@ -49,6 +50,7 @@ need no remapping. Missing references in an imported backup remain readable and
 produce a connection error. Deleting a referenced jump connection or credential is
 blocked with the referencing tunnel's name. VPN profile-file imports do not create
 or remap SSH connection IDs.
+Deletion is serialized with tunnel edits, so an in-flight save cannot bypass reference checks.
 
 The portable Go sidecar is included in Windows x64/arm64, Linux and macOS builds
 (including the native universal build). CodeQL and coverage discover its Go module

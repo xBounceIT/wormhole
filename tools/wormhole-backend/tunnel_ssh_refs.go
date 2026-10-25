@@ -106,8 +106,8 @@ func tunnelEndpointSummaryForDatabase(db *sql.DB, kind int64, raw json.RawMessag
 	return tunnelEndpointSummary(kind, raw)
 }
 
-// Deletions check references before opening their mutation transaction. Legacy/dangling
-// references restored from a backup remain readable and fail closed when connected.
+// Callers hold the tunnel mutation and native configuration locks through the reference
+// check and deletion. Restored dangling references remain readable and fail closed on connect.
 func rejectSSHJumpDeletion(databasePath string, nodeIDs map[string]bool, credentialID string) error {
 	db, err := openDatabase(databasePath, true)
 	if err != nil || db == nil {

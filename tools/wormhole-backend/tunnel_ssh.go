@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -22,6 +24,16 @@ import (
 )
 
 const maxSSHJumpDepth = 3
+
+// Cache identities live only in this process. Key them so they are not reusable
+// password-derived fingerprints; the key is never persisted or sent to consumers.
+var sshJumpIdentityKey = func() [sha256.Size]byte {
+	var key [sha256.Size]byte
+	if _, err := rand.Read(key[:]); err != nil {
+		panic("could not initialize the SSH tunnel cache key")
+	}
+	return key
+}()
 
 func validSSHFingerprint(pin string) bool {
 	b, err := base64.RawStdEncoding.DecodeString(strings.TrimPrefix(pin, "SHA256:"))
@@ -184,7 +196,7 @@ func sshJumpSnapshotIdentity(snapshot tunnelConfigSnapshot, target *sshTarget, u
 		defer clearTunnelSettingsMap(values)
 		defer clearBytes(settings)
 	}
-	hash := sha256.New()
+	hash := hmac.New(sha256.New, sshJumpIdentityKey[:])
 	// Length-prefix every byte string: passwords and passphrases may themselves contain NUL.
 	write := func(value string) {
 		_, _ = fmt.Fprintf(hash, "%d:", len(value))

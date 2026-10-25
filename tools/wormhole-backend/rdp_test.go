@@ -37,20 +37,22 @@ func init() {
 	os.Exit(0)
 }
 
-// External clients have no stdin protocol. Select one helper test explicitly instead of
-// exiting during package initialization or accidentally running the entire test binary.
-func rdpExternalFixtureCommand(executable string, args ...string) *exec.Cmd {
-	return exec.Command(executable, append([]string{"-test.run=^TestRdpExternalFixtureProcess$", "--"}, args...)...)
-}
-
-func TestRdpExternalFixtureProcess(t *testing.T) {
-	if os.Getenv("WORMHOLE_RDP_TEST_HELPER") != "external" {
-		return
+// The external-client contract is process supervision, with no stdin protocol. Do not
+// bootstrap the backend test binary to impersonate it: test initialization and coverage
+// shutdown can outlive this short-lived client. Assert the target and launch a real process.
+func rdpExternalFixtureCommand(t *testing.T, executable string, args ...string) *exec.Cmd {
+	t.Helper()
+	if executable != os.Args[0] {
+		return exec.Command(executable, args...) // Preserve unstartable-executable cases.
 	}
-	arguments := os.Args[1:]
-	if len(arguments) != 3 || arguments[0] != "-test.run=^TestRdpExternalFixtureProcess$" || arguments[1] != "--" || !strings.HasPrefix(arguments[2], "/v:") {
-		t.Fatal("external client fixture did not receive exactly one target argument")
+	if !reflect.DeepEqual(args, []string{"/v:rdp.example:3389"}) {
+		t.Fatalf("external client received an unexpected target: %q", args)
 	}
+	goExecutable, err := exec.LookPath("go")
+	if err != nil {
+		t.Fatal("Go tool is required for the external-process fixture")
+	}
+	return exec.Command(goExecutable, "version")
 }
 
 func TestSystemRdpCapabilityIsWindowsOnlyAndFailsClosedForUnsupportedRouting(t *testing.T) {
@@ -788,7 +790,6 @@ func TestRdpControllerStartLaunchesValidatedExternalClient(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("system RDP controller dispatch is Windows-only; launcher supervision is tested portably")
 	}
-	t.Setenv("WORMHOLE_RDP_TEST_HELPER", "external")
 	originalExecutable := systemRdpClientExecutableForController
 	originalCommand := newExternalRdpCommand
 	t.Cleanup(func() {
@@ -798,7 +799,7 @@ func TestRdpControllerStartLaunchesValidatedExternalClient(t *testing.T) {
 	systemRdpClientExecutableForController = func() (string, error) { return os.Args[0], nil }
 	var launched *exec.Cmd
 	newExternalRdpCommand = func(executable string, args ...string) *exec.Cmd {
-		launched = rdpExternalFixtureCommand(executable, args...)
+		launched = rdpExternalFixtureCommand(t, executable, args...)
 		return launched
 	}
 	controller := &rdpController{processes: make(map[string]*rdpProcess)}
@@ -952,7 +953,6 @@ func TestRdpLaunchersReportMissingExecutables(t *testing.T) {
 }
 
 func TestRdpExternalLauncherSupervisesSystemClient(t *testing.T) {
-	t.Setenv("WORMHOLE_RDP_TEST_HELPER", "external")
 	originalExecutable := systemRdpClientExecutableForController
 	originalCommand := newExternalRdpCommand
 	t.Cleanup(func() {
@@ -962,7 +962,7 @@ func TestRdpExternalLauncherSupervisesSystemClient(t *testing.T) {
 	systemRdpClientExecutableForController = func() (string, error) { return os.Args[0], nil }
 	var launched *exec.Cmd
 	newExternalRdpCommand = func(executable string, args ...string) *exec.Cmd {
-		launched = rdpExternalFixtureCommand(executable, args...)
+		launched = rdpExternalFixtureCommand(t, executable, args...)
 		return launched
 	}
 
