@@ -1,0 +1,8 @@
+diff --git a/openvpn/mbedtls/mbedtls_compat.hpp b/openvpn/mbedtls/mbedtls_compat.hpp
+--- a/openvpn/mbedtls/mbedtls_compat.hpp
++++ b/openvpn/mbedtls/mbedtls_compat.hpp
+@@ -26,3 +26,4 @@
+ #include <mbedtls/ctr_drbg.h>
++#include <mbedtls/oid.h>
+ #include <mbedtls/version.h>
+ #include <mbedtls/pem.h>
