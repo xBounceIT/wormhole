@@ -1,4 +1,8 @@
-// wormhole-ciscoproxy is the userspace Cisco Secure Client (AnyConnect) SSL VPN sidecar that
+// wormhole-ciscoproxy hosts the autonomous AnyConnect and Forcepoint SSL VPN transports.
+// The stdin vpn_protocol discriminator selects Forcepoint; existing configurations retain
+// AnyConnect. Both share the portable SOCKS5/netstack and process lifecycle below.
+//
+// Its original Cisco Secure Client (AnyConnect) transport is the SSL VPN sidecar that
 // Wormhole launches per active connection. It owns an AnyConnect SSL VPN session — aggregate-auth
 // XML login over HTTPS, then a CSTP tunnel (STF-framed IP packets over TLS) — running in TUN-less
 // netstack mode (gVisor) and exposes the resulting virtual network through a local SOCKS5 listener
@@ -33,10 +37,14 @@ import (
 )
 
 type config struct {
-	Host     string `json:"host"`
-	Port     int    `json:"port"`
-	Username string `json:"username"`
-	Password string `json:"password"`
+	// Empty selects AnyConnect for existing profiles. Forcepoint shares only the
+	// process/SOCKS/netstack shell; its SSL protocol and authentication are separate.
+	VPNProtocol string `json:"vpn_protocol"`
+	MTU         int    `json:"mtu"`
+	Host        string `json:"host"`
+	Port        int    `json:"port"`
+	Username    string `json:"username"`
+	Password    string `json:"password"`
 	// Group is the tunnel group / connection profile to select on the gateway login form
 	// (AnyConnect's "Group" dropdown). Optional — many gateways have a single default group.
 	Group *string `json:"group"`
@@ -115,9 +123,9 @@ func run(mock bool) error {
 		dial = sockstun.OSDialer{}
 		cleanup = func() {}
 	} else {
-		d, a, c, err := startCisco(ctx, cancel, cfg)
+		d, a, c, err := startSSLVPN(ctx, cancel, cfg)
 		if err != nil {
-			return fmt.Errorf("cisco start: %w", err)
+			return fmt.Errorf("SSL VPN start: %w", err)
 		}
 		dial = d
 		arm = a
@@ -157,5 +165,18 @@ func readConfig() (config, error) {
 	if cfg.Port == 0 {
 		cfg.Port = 443
 	}
+	if cfg.VPNProtocol != "" && cfg.VPNProtocol != "forcepoint-ssl" {
+		return cfg, fmt.Errorf("unsupported SSL VPN protocol")
+	}
 	return cfg, nil
+}
+
+func startSSLVPN(ctx context.Context, cancel context.CancelFunc, cfg config) (sockstun.Dialer, func(), func(), error) {
+	if cfg.VPNProtocol == "forcepoint-ssl" {
+		return startForcepoint(ctx, cancel, cfg)
+	}
+	if cfg.VPNProtocol != "" {
+		return nil, nil, nil, fmt.Errorf("unsupported SSL VPN protocol")
+	}
+	return startCisco(ctx, cancel, cfg)
 }

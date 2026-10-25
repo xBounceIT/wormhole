@@ -160,6 +160,12 @@ export function normalizeTunnelEditorSettings(
     }
     stripAll('TotpSecret');
     stripAll('ServerCertSha256Pin');
+  } else if (kind === 7) {
+    trimCrlf('Password');
+    if (typeof settings.ServerCertSha256Pin === 'string') {
+      settings.ServerCertSha256Pin = settings.ServerCertSha256Pin.replace(/[:\s]/g, '');
+    }
+    deleteIfBlank('ServerCertSha256Pin');
   }
   return settings;
 }
@@ -266,6 +272,35 @@ export function missingTunnelFields(value: {
       if (secret && !/^[0-9a-fA-F]{512}$/.test(secret)) {
         missing.push('Server secret (512 hex chars, or blank)');
       }
+      break;
+    }
+    case 7: {
+      const pin =
+        typeof settings.ServerCertSha256Pin === 'string'
+          ? settings.ServerCertSha256Pin.replace(/[:\s]/g, '')
+          : '';
+      if (pin && !/^[a-fA-F0-9]{64}$/.test(pin))
+        missing.push('Certificate SHA-256 pin (64 hex characters)');
+      if (settings.Mtu !== undefined && settings.Mtu !== null && settings.Mtu !== '') {
+        const mtu =
+          typeof settings.Mtu === 'number' || typeof settings.Mtu === 'string'
+            ? Number(settings.Mtu)
+            : NaN;
+        if (!Number.isInteger(mtu) || mtu < 576 || mtu > 16384) missing.push('MTU (576-16384)');
+      }
+      for (const key of ['Username', 'Password']) {
+        const credential = settings[key];
+        if (
+          typeof credential === 'string' &&
+          (new TextEncoder().encode(credential).length > 255 || credential.includes('\0'))
+        ) {
+          missing.push(`${key} (at most 255 UTF-8 bytes, without NUL)`);
+        }
+      }
+      if (blank('Host')) missing.push('Host');
+      if (!validPort('Port')) missing.push('Port (1-65535)');
+      if (blank('Username')) missing.push('Username');
+      if (blank('Password')) missing.push('Password');
       break;
     }
     case 6:

@@ -950,6 +950,17 @@ test('VPN authentication and certificate controls preserve their mounted section
     [3, { TrustServerCertificate: 'switch', VerifyX509Name: undefined }],
     [4, { UseOtp: 'checkbox', TrustServerCertificate: 'checkbox' }],
     [6, { TrustServerCertificate: 'checkbox' }],
+    [
+      7,
+      {
+        Host: undefined,
+        Port: 'number',
+        Username: undefined,
+        Password: 'password',
+        ServerCertSha256Pin: undefined,
+        Mtu: 'number',
+      },
+    ],
   ] as const;
   for (const [kind, controls] of providers) {
     const fields = fieldsForKind(kind) as { key: string; section: string; type?: string }[];

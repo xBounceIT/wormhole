@@ -1,0 +1,9 @@
+{
+  "type": "tunnel.prompt",
+  "sessionId": "forcepoint-test-lease",
+  "promptId": "tunnel-prompt-1",
+  "title": "Verify Forcepoint gateway certificate",
+  "message": "Verify this gateway before connecting.\nSHA-256: ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB",
+  "confirmation": true,
+  "acceptLabel": "Trust certificate and connect"
+}
