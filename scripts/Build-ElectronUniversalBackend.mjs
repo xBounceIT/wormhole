@@ -13,6 +13,7 @@ const sidecarNames = [
   'wormhole-ovpnproxy',
   'wormhole-fortiproxy',
   'wormhole-ciscoproxy',
+  'wormhole-sshproxy',
 ];
 
 if (process.platform !== 'darwin') {

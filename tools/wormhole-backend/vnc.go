@@ -688,6 +688,29 @@ func (m *vncManager) finishTunnelAcquire(
 		response.SocksEndpoint = lease.socksEndpoint()
 	}
 	_ = m.output.write(response)
+	if err == nil && lease != nil {
+		go m.watchTunnelLease(command.SessionID, lease)
+	}
+}
+
+func (m *vncManager) watchTunnelLease(id string, lease *tunnelRuntime) {
+	select {
+	case <-lease.released:
+		return
+	case <-lease.exited():
+	}
+	m.mu.Lock()
+	if m.tunnelLeases[id] != lease {
+		m.mu.Unlock()
+		return
+	}
+	delete(m.tunnelLeases, id)
+	forwarder := m.tunnelForwarders[id]
+	delete(m.tunnelForwarders, id)
+	m.mu.Unlock()
+	forwarder.close()
+	lease.close()
+	m.emit(backendEvent{Type: "tunnel.failed", SessionID: id})
 }
 
 func (m *vncManager) releaseTunnel(command backendCommand) {
@@ -951,6 +974,7 @@ func (s *vncSession) connect(command backendCommand, database *sql.DB, electronU
 			tunnel.close()
 			return
 		}
+		go s.watchTunnel(tunnel)
 	}
 	address := net.JoinHostPort(target.host, strconv.Itoa(target.port))
 	var network net.Conn
@@ -1075,6 +1099,17 @@ func (s *vncSession) connect(command backendCommand, database *sql.DB, electronU
 		case message := <-messages:
 			s.handleServerMessage(connection, message)
 		}
+	}
+}
+
+func (s *vncSession) watchTunnel(tunnel *tunnelRuntime) {
+	select {
+	case <-s.stop:
+		return
+	case <-tunnel.released:
+		return
+	case <-tunnel.exited():
+		s.fail(errors.New("the connection tunnel closed; VNC was disconnected"))
 	}
 }
 

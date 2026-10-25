@@ -238,6 +238,7 @@ test('native Go binaries are shipped outside the Electron asar archive', () => {
     'wormhole-ovpnproxy*',
     'wormhole-fortiproxy*',
     'wormhole-ciscoproxy*',
+    'wormhole-sshproxy*',
   ]) {
     assert.ok(filters.includes(pattern), `${pattern} is missing from extraResources`);
   }

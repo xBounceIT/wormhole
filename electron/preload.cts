@@ -283,6 +283,7 @@ const wormholeBridge = {
   listTunnels: () => ipcRenderer.invoke('tunnel:list'),
   readTunnel: (id: string) => ipcRenderer.invoke('tunnel:read', { id }),
   updateTunnel: (request: {
+    forgetJumpHostKeySha256?: string;
     id: string;
     name: string;
     kind: number;

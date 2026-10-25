@@ -113,9 +113,11 @@ import { RdpBackendClient, stopChildProcess } from './rdp.js';
 import { drainSshBackendSessionIds } from './ssh-backend-lifecycle.js';
 import { sshOpenCredentialFields } from './ssh-open-credentials.js';
 import { settleTunnelCleanup, TunnelLeaseRegistry } from './tunnel-lease-registry.js';
+import { TunnelFailureRegistry, tunnelClosedMessage } from './tunnel-failure.js';
 import {
   isTunnelIdentifier,
   parseTunnelDetailsResponse,
+  parseTunnelWriteRequest,
   parseTunnelSummaryList,
   parseTunnelTestRequest,
 } from './tunnel-test-contract.js';
@@ -836,12 +838,6 @@ type WorkspaceNodeTunnelSettingsRequest = {
   nodeId: string;
   tunnelEnabled: boolean | null;
   tunnelConfigId: string;
-};
-type TunnelWriteRequest = {
-  id?: string;
-  name: string;
-  kind: number;
-  settings: Record<string, unknown>;
 };
 type TunnelReadRequest = { id: string };
 type TunnelDeleteRequest = { id: string };
@@ -3103,6 +3099,7 @@ async function runTunnelBrowserAuth(
 }
 
 class NativeBackendProcess {
+  private readonly tunnelFailures = new TunnelFailureRegistry();
   readonly browserPrompts = new TunnelBrowserPromptTracker();
   private child: ReturnType<typeof spawn> | undefined;
   private startPromise: Promise<void> | undefined;
@@ -3152,6 +3149,7 @@ class NativeBackendProcess {
   }
 
   async acquireTunnel(request: {
+    onExit?: () => void;
     leaseId: string;
     nodeId?: string;
     tunnelConfigId?: string;
@@ -3162,12 +3160,14 @@ class NativeBackendProcess {
   }
 
   async acquireTunnelRoute(request: {
+    onExit?: () => void;
     leaseId: string;
     nodeId?: string;
     tunnelConfigId?: string;
     progressSessionId?: string;
     dedicated?: boolean;
   }): Promise<{ active: boolean; socksEndpoint: string }> {
+    this.tunnelFailures.watch(request.leaseId, request.onExit);
     const response = await this.send(
       {
         action: 'tunnel.acquire',
@@ -3226,6 +3226,8 @@ class NativeBackendProcess {
   }
 
   async releaseTunnel(leaseId: string): Promise<void> {
+    this.tunnelFailures.forget(leaseId);
+    if (!this.child) return;
     const response = await this.send({
       action: 'tunnel.release',
       sessionId: leaseId,
@@ -3401,6 +3403,7 @@ class NativeBackendProcess {
         continue;
       }
       if ('type' in message && typeof message.type === 'string') {
+        if (this.tunnelFailures.fail(message)) continue;
         if (message.type === 'tunnel.prompt-closed') {
           this.browserPrompts.close(
             'sessionId' in message ? message.sessionId : undefined,
@@ -3433,6 +3436,7 @@ class NativeBackendProcess {
   }
 
   private rejectAll(error: Error): void {
+    this.tunnelFailures.failAll();
     this.browserPrompts.clear();
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();
@@ -3842,34 +3846,6 @@ function isWorkspaceNodeTunnelSettingsRequest(
 
 function isTunnelID(value: unknown): value is string {
   return isTunnelIdentifier(value);
-}
-
-function isTunnelSettings(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-}
-
-function parseTunnelWriteRequest(value: unknown, requiresID: boolean): TunnelWriteRequest {
-  if (!value || typeof value !== 'object') throw new Error('VPN tunnel settings are invalid.');
-  const input = value as Record<string, unknown>;
-  if (
-    typeof input.name !== 'string' ||
-    input.name.trim().length === 0 ||
-    input.name.length > 128 ||
-    typeof input.kind !== 'number' ||
-    !Number.isInteger(input.kind) ||
-    input.kind < 0 ||
-    input.kind > 7 ||
-    !isTunnelSettings(input.settings)
-  ) {
-    throw new Error('VPN tunnel settings are invalid.');
-  }
-  if (requiresID && !isTunnelID(input.id)) throw new Error('VPN tunnel id is invalid.');
-  return {
-    ...(isTunnelID(input.id) ? { id: input.id } : {}),
-    name: input.name,
-    kind: input.kind,
-    settings: input.settings,
-  };
 }
 
 function parseTunnelIDRequest(value: unknown): TunnelReadRequest {
@@ -4622,6 +4598,13 @@ class WebSurfaceManager {
         this.tunnelLeaseOwners.set(request.sessionId, owner);
         openingTunnelBackend = getNativeBackend();
         const tunnelRoute = await openingTunnelBackend.acquireTunnelRoute({
+          onExit: () => {
+            if (!this.tunnelLeases.isActive(request.sessionId, leaseId)) return;
+            const record = this.surfaces.get(request.sessionId);
+            if (record)
+              this.sendEvent(request.sessionId, record, 'failed', { error: tunnelClosedMessage });
+            this.close(request.sessionId);
+          },
           leaseId,
           nodeId: request.nodeId,
           tunnelConfigId: target.tunnelConfigId,
@@ -6982,6 +6965,16 @@ class NativeSshBackend {
       this.tunnelLeases.claim(request.sessionId, leaseId);
       try {
         socksEndpoint = await getNativeBackend().acquireTunnel({
+          onExit: () => {
+            if (!this.tunnelLeases.isActive(request.sessionId, leaseId!)) return;
+            this.broadcast({
+              type: 'error',
+              sessionId: request.sessionId,
+              error: tunnelClosedMessage,
+              retainTunnelLease: false,
+            });
+            void this.close(request.sessionId).catch(() => undefined);
+          },
           leaseId,
           nodeId: request.nodeId,
           tunnelConfigId: request.tunnelConfigId,
@@ -9800,6 +9793,28 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
                 let route: { active: boolean; socksEndpoint: string };
                 try {
                   route = await getNativeBackend().acquireTunnelRoute({
+                    onExit: () => {
+                      if (!rdpTunnelLeases.isActive(lifecycleId!, leaseId)) return;
+                      rdpStartAttempts.cancel(request.sessionId);
+                      client.cancelStart(request.sessionId, lifecycleId!);
+                      if (!ownerWindow.isDestroyed())
+                        ownerWindow.webContents.send('rdp:event', {
+                          type: 'error',
+                          sessionId: request.sessionId,
+                          lifecycleId,
+                          message: tunnelClosedMessage,
+                        });
+                      void settleTunnelCleanup(
+                        client.command(
+                          'disconnect',
+                          request.sessionId,
+                          ownerHandle,
+                          bounds,
+                          lifecycleId!,
+                        ),
+                        releaseRdpTunnel(lifecycleId!),
+                      ).catch(() => undefined);
+                    },
                     leaseId,
                     nodeId: resolvedProfile.nodeId,
                     tunnelConfigId: resolvedProfile.tunnelConfigId,

@@ -103,7 +103,7 @@ test('tunnel response contracts reject malformed or unbounded backend output', (
     null,
     { ...validDetails, id: 'invalid' },
     { ...validDetails, name: '' },
-    { ...validDetails, kind: 8 },
+    { ...validDetails, kind: 9 },
     { ...validDetails, settings: [] },
     { ...validDetails, endpoint: '' },
     { ...validDetails, endpoint: 'vpn.example.test:443\nsecret' },

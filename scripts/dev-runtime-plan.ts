@@ -66,14 +66,16 @@ export function createDevRuntimeBuildPlan({
       'tools/internal',
       'go.work',
       'go.work.sum',
-      ...['backend', 'wgproxy', 'fortiproxy', 'ciscoproxy'].map((name) => `tools/wormhole-${name}`),
+      ...['backend', 'wgproxy', 'fortiproxy', 'ciscoproxy', 'sshproxy'].map(
+        (name) => `tools/wormhole-${name}`,
+      ),
       ...(platform === 'win32'
         ? [`obj/ovpnproxy/${architecture}/wormhole-ovpnproxy.exe`]
         : ['tools/wormhole-ovpnproxy']),
     ],
     outputs: [
       `dist-electron/wormhole-backend-${architecture}${platform === 'win32' ? '.exe' : ''}`,
-      ...['wgproxy', 'ovpnproxy', 'fortiproxy', 'ciscoproxy'].map(
+      ...['wgproxy', 'ovpnproxy', 'fortiproxy', 'ciscoproxy', 'sshproxy'].map(
         (name) => `dist-electron/wormhole-${name}${platform === 'win32' ? '.exe' : ''}`,
       ),
     ],

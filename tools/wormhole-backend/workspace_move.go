@@ -34,6 +34,11 @@ func moveWorkspaceNodes(databasePath string, request workspaceMoveNodesRequest) 
 	if selected[targetID] {
 		return errors.New("cannot move a node onto itself")
 	}
+	release, err := acquireTunnelReferenceMutationLock(databasePath)
+	if err != nil {
+		return err
+	}
+	defer release()
 	database, err := openDatabase(databasePath, false)
 	if err != nil {
 		return err

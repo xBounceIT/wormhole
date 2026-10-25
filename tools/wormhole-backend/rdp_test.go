@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -34,6 +35,24 @@ func init() {
 	_, _ = fmt.Fprintln(os.Stdout, `{"type":"connected"}`)
 	_, _ = fmt.Fprintln(os.Stdout, `{"type":"disconnected"}`)
 	os.Exit(0)
+}
+
+// The external-client contract is process supervision, with no stdin protocol. Do not
+// bootstrap the backend test binary to impersonate it: test initialization and coverage
+// shutdown can outlive this short-lived client. Assert the target and launch a real process.
+func rdpExternalFixtureCommand(t *testing.T, executable string, args ...string) *exec.Cmd {
+	t.Helper()
+	if executable != os.Args[0] {
+		return exec.Command(executable, args...) // Preserve unstartable-executable cases.
+	}
+	if !reflect.DeepEqual(args, []string{"/v:rdp.example:3389"}) {
+		t.Fatalf("external client received an unexpected target: %q", args)
+	}
+	goExecutable, err := exec.LookPath("go")
+	if err != nil {
+		t.Fatal("Go tool is required for the external-process fixture")
+	}
+	return exec.Command(goExecutable, "version")
 }
 
 func TestSystemRdpCapabilityIsWindowsOnlyAndFailsClosedForUnsupportedRouting(t *testing.T) {
@@ -768,11 +787,23 @@ func TestRdpControllerStartNormalizesAndLaunchesAValidSession(t *testing.T) {
 }
 
 func TestRdpControllerStartLaunchesValidatedExternalClient(t *testing.T) {
-	t.Setenv("WORMHOLE_RDP_TEST_HELPER", "1")
+	if runtime.GOOS != "windows" {
+		t.Skip("system RDP controller dispatch is Windows-only; launcher supervision is tested portably")
+	}
 	originalExecutable := systemRdpClientExecutableForController
-	t.Cleanup(func() { systemRdpClientExecutableForController = originalExecutable })
+	originalCommand := newExternalRdpCommand
+	t.Cleanup(func() {
+		systemRdpClientExecutableForController = originalExecutable
+		newExternalRdpCommand = originalCommand
+	})
 	systemRdpClientExecutableForController = func() (string, error) { return os.Args[0], nil }
+	var launched *exec.Cmd
+	newExternalRdpCommand = func(executable string, args ...string) *exec.Cmd {
+		launched = rdpExternalFixtureCommand(t, executable, args...)
+		return launched
+	}
 	controller := &rdpController{processes: make(map[string]*rdpProcess)}
+	defer controller.closeAll()
 	controller.start(rdpCommand{
 		Op: "start", RequestID: "external", SessionID: "external", LifecycleID: "lifecycle",
 		Bounds: rdpBounds{Width: 1024, Height: 768},
@@ -782,6 +813,9 @@ func TestRdpControllerStartLaunchesValidatedExternalClient(t *testing.T) {
 		},
 	})
 	waitForRdpProcessExit(t, controller, "external")
+	if launched == nil || launched.ProcessState == nil || !launched.ProcessState.Success() {
+		t.Fatal("external client fixture did not complete successfully")
+	}
 }
 
 func TestRdpControllerHandleAndForwardLifecycleCommands(t *testing.T) {
@@ -919,7 +953,6 @@ func TestRdpLaunchersReportMissingExecutables(t *testing.T) {
 }
 
 func TestRdpExternalLauncherSupervisesSystemClient(t *testing.T) {
-	t.Setenv("WORMHOLE_RDP_TEST_HELPER", "1")
 	originalExecutable := systemRdpClientExecutableForController
 	originalCommand := newExternalRdpCommand
 	t.Cleanup(func() {
@@ -927,6 +960,11 @@ func TestRdpExternalLauncherSupervisesSystemClient(t *testing.T) {
 		newExternalRdpCommand = originalCommand
 	})
 	systemRdpClientExecutableForController = func() (string, error) { return os.Args[0], nil }
+	var launched *exec.Cmd
+	newExternalRdpCommand = func(executable string, args ...string) *exec.Cmd {
+		launched = rdpExternalFixtureCommand(t, executable, args...)
+		return launched
+	}
 
 	controller := &rdpController{processes: make(map[string]*rdpProcess)}
 	controller.startExternalRdp(rdpCommand{
@@ -934,6 +972,9 @@ func TestRdpExternalLauncherSupervisesSystemClient(t *testing.T) {
 		LifecycleGeneration: 7, Profile: rdpProfile{Host: "rdp.example", Port: rdpDefaultPort},
 	})
 	waitForRdpProcessExit(t, controller, "external")
+	if launched == nil || launched.ProcessState == nil || !launched.ProcessState.Success() {
+		t.Fatal("external client fixture did not complete successfully")
+	}
 
 	systemRdpClientExecutableForController = func() (string, error) { return "", errors.New("missing") }
 	controller.startExternalRdp(rdpCommand{RequestID: "missing", SessionID: "missing", Profile: rdpProfile{Host: "rdp.example"}})

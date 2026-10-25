@@ -301,81 +301,20 @@ func TestSSHUserCertificateValidation(t *testing.T) {
 	}
 }
 
-func TestSSHPKCS8RejectsUnsafeAndMalformedParameters(t *testing.T) {
-	password := []byte("pass")
-	for _, oid := range []string{"", "1.2.840.113549.2.7", "1.2.840.113549.2.8", "1.2.840.113549.2.9", "1.2.840.113549.2.10", "1.2.840.113549.2.11"} {
-		var prf pkix.AlgorithmIdentifier
-		if oid != "" {
-			prf.Algorithm = testOID(oid)
-		}
-		kdf := testAlgorithm(t, "1.2.840.113549.1.5.12", struct {
-			Salt       []byte
-			Iterations int
-			KeyLength  int
-			PRF        pkix.AlgorithmIdentifier `asn1:"optional"`
-		}{[]byte("salt"), 1, 32, prf})
-		if _, err := deriveSSHPKCS8Key(kdf, password, 32); err != nil {
-			t.Fatal(err)
-		}
+// Wire-format helpers for backend import/adversarial fixtures; parser unit tests live in sshauth.
+type sshPKCS8Envelope struct {
+	Algorithm pkix.AlgorithmIdentifier
+	Data      []byte
+}
+type sshPBES2Params struct {
+	KDF    pkix.AlgorithmIdentifier
+	Cipher pkix.AlgorithmIdentifier
+}
+
+func decodeSSHASN1(der []byte, value any) error {
+	rest, err := asn1.Unmarshal(der, value)
+	if err != nil || len(rest) != 0 {
+		return errors.New("invalid fixture ASN.1")
 	}
-	for _, kdf := range []pkix.AlgorithmIdentifier{
-		testAlgorithm(t, "1.2.840.113549.1.5.12", struct {
-			Salt       []byte
-			Iterations int
-		}{[]byte("salt"), 10000001}),
-		testAlgorithm(t, "1.2.840.113549.1.5.12", struct {
-			Salt       []byte
-			Iterations int
-			KeyLength  int
-		}{[]byte("salt"), 1, 16}),
-		testAlgorithm(t, "1.2.840.113549.1.5.12", struct {
-			Salt       []byte
-			Iterations int
-			PRF        pkix.AlgorithmIdentifier
-		}{[]byte("salt"), 1, pkix.AlgorithmIdentifier{Algorithm: testOID("1.2.3")}}),
-		testAlgorithm(t, "1.2.840.113549.1.5.12", "bad"),
-		testAlgorithm(t, "1.3.6.1.4.1.11591.4.11", struct {
-			Salt    []byte
-			N, R, P int
-		}{[]byte("salt"), 1 << 30, 8, 1}),
-		testAlgorithm(t, "1.3.6.1.4.1.11591.4.11", struct {
-			Salt    []byte
-			N, R, P int
-		}{[]byte("salt"), 3, 8, 1}),
-		testAlgorithm(t, "1.3.6.1.4.1.11591.4.11", "bad"), testAlgorithm(t, "1.2.3", "bad"),
-	} {
-		if _, err := deriveSSHPKCS8Key(kdf, password, 32); err == nil {
-			t.Fatal("accepted unsafe KDF")
-		}
-	}
-	if err := decodeSSHASN1(append(testASN1(t, 1), 0), new(int)); err == nil {
-		t.Fatal("accepted trailing ASN1 data")
-	}
-	if _, err := decryptSSHPKCS8([]byte("bad"), password); err == nil {
-		t.Fatal("accepted bad envelope")
-	}
-	kdf := testAlgorithm(t, "1.2.840.113549.1.5.12", struct {
-		Salt       []byte
-		Iterations int
-	}{[]byte("salt"), 1})
-	for _, encryption := range []pkix.AlgorithmIdentifier{
-		testAlgorithm(t, "1.2.3", []byte{}),
-		testAlgorithm(t, "2.16.840.1.101.3.4.1.42", "bad"),
-		testAlgorithm(t, "2.16.840.1.101.3.4.1.42", []byte("bad")),
-		testAlgorithm(t, "2.16.840.1.101.3.4.1.6", "bad"),
-		testAlgorithm(t, "2.16.840.1.101.3.4.1.6", struct {
-			Nonce   []byte
-			TagSize int
-		}{[]byte("bad"), 16}),
-	} {
-		der := testASN1(t, sshPKCS8Envelope{Algorithm: testAlgorithm(t, "1.2.840.113549.1.5.13", sshPBES2Params{KDF: kdf, Cipher: encryption}), Data: []byte("bad")})
-		if _, err := decryptSSHPKCS8(der, password); err == nil {
-			t.Fatal("accepted bad cipher parameters")
-		}
-	}
-	for _, algorithm := range []pkix.AlgorithmIdentifier{testAlgorithm(t, "1.2.3", 0), testAlgorithm(t, "1.2.840.113549.1.5.13", "bad")} {
-		if _, err := decryptSSHPKCS8(testASN1(t, sshPKCS8Envelope{Algorithm: algorithm}), password); err == nil {
-			t.Fatal("accepted bad PBES2")
-		}
-	}
+	return nil
 }

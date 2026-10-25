@@ -1914,6 +1914,11 @@ func updateWorkspaceNodeCredentialSettings(
 	if request.Mode != 2 {
 		credentialID = ""
 	}
+	release, err := acquireTunnelReferenceMutationLock(databasePath)
+	if err != nil {
+		return err
+	}
+	defer release()
 	database, err := openDatabase(databasePath, false)
 	if err != nil {
 		return err
@@ -2050,6 +2055,11 @@ func updateWorkspaceNodeInlineCredential(
 		request.Password == "" || utf8.RuneCountInString(request.Password) > 4096 {
 		return errors.New("workspace inline credential is invalid")
 	}
+	release, err := acquireTunnelReferenceMutationLock(databasePath)
+	if err != nil {
+		return err
+	}
+	defer release()
 	database, err := openDatabase(databasePath, false)
 	if err != nil {
 		return err
@@ -2421,7 +2431,7 @@ func loadTunnelSummaries(databasePath string) ([]tunnelRecord, error) {
 		endpoint := ""
 		settings, settingsErr := readTunnelSettings(database, databasePath, row.ID)
 		if settingsErr == nil {
-			endpoint = tunnelEndpointSummary(row.Kind, settings)
+			endpoint = tunnelEndpointSummaryForDatabase(database, row.Kind, settings)
 		}
 		clearBytes(settings)
 		// Missing or damaged protected settings must not make the tunnel list unusable.
@@ -2500,6 +2510,8 @@ func tunnelName(value int64) string {
 		return "Cisco Secure Client"
 	case 7:
 		return "Forcepoint"
+	case 8:
+		return "SSH tunnel (jump host)"
 	default:
 		return "Unknown"
 	}

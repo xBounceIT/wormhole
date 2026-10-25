@@ -1,3 +1,41 @@
+export function normalizeSSHJumpSettings(input: Record<string, unknown>): Record<string, unknown> {
+  const keys =
+    input.Mode === 'connection'
+      ? ['Mode', 'JumpConnectionId', 'KeepaliveSeconds']
+      : ['Mode', 'Host', 'Port', 'Username', 'CredentialId', 'HostKeySha256', 'KeepaliveSeconds'];
+  const result: Record<string, unknown> = {};
+  for (const key of keys) {
+    let value = input[key];
+    if (typeof value === 'string') value = value.trim();
+    if (value === '' || value === undefined) continue;
+    if (
+      (key === 'Port' || key === 'KeepaliveSeconds') &&
+      typeof value === 'string' &&
+      /^\d+$/.test(value)
+    )
+      value = Number(value);
+    result[key] = value;
+  }
+  return result;
+}
+
+export function updateSSHJumpSetting(
+  input: Record<string, unknown>,
+  key: string,
+  next: unknown,
+): Record<string, unknown> {
+  if (key === 'Mode')
+    return {
+      Mode: next,
+      KeepaliveSeconds: input.KeepaliveSeconds ?? 30,
+      ...(next === 'manual' ? { Port: 22 } : {}),
+    };
+  const result = { ...input, [key]: next };
+  if (['Host', 'Port', 'Username', 'CredentialId'].includes(key) && input[key] !== next)
+    delete result.HostKeySha256;
+  return result;
+}
+
 export type TunnelMode = 'inherit' | 'off' | string;
 export type TunnelSettings =
   | { tunnelEnabled: null; tunnelConfigId: '' }
@@ -69,6 +107,7 @@ export function normalizeTunnelEditorSettings(
   kind: number,
   input: Record<string, unknown>,
 ): Record<string, unknown> {
+  if (kind === 8) return normalizeSSHJumpSettings(input);
   let settings = { ...input };
   for (const key of ['AllowedIps', 'Dns']) {
     if (typeof settings[key] === 'string') {
@@ -176,6 +215,7 @@ export function updateTunnelEditorSetting(
   key: string,
   next: unknown,
 ): Record<string, unknown> {
+  if (kind === 8) return updateSSHJumpSetting(input, key, next);
   const settings = { ...input, [key]: next };
   if (kind !== 3) return settings;
 
@@ -308,6 +348,26 @@ export function missingTunnelFields(value: {
       if (!validPort('Port')) missing.push('Port (1-65535)');
       if (blank('Username')) missing.push('Username');
       if (blank('Password')) missing.push('Password');
+      break;
+    case 8:
+      if (settings.Mode === 'connection') {
+        if (blank('JumpConnectionId')) missing.push('SSH connection');
+      } else if (settings.Mode === 'manual') {
+        if (blank('Host')) missing.push('Host');
+        if (!validPort('Port')) missing.push('Port (1-65535)');
+        if (blank('Username')) missing.push('Username');
+        if (blank('CredentialId')) missing.push('Saved SSH credential');
+      } else missing.push('SSH tunnel mode');
+      if (
+        settings.KeepaliveSeconds !== undefined &&
+        !(
+          typeof settings.KeepaliveSeconds === 'string' && settings.KeepaliveSeconds.trim() === ''
+        ) &&
+        (!Number.isInteger(Number(settings.KeepaliveSeconds)) ||
+          Number(settings.KeepaliveSeconds) < 1 ||
+          Number(settings.KeepaliveSeconds) > 3600)
+      )
+        missing.push('Keepalive (1-3600 seconds)');
       break;
   }
   return missing;
