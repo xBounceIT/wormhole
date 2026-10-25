@@ -48,3 +48,15 @@ test('Bitwarden forwarder profiles stay stable because they have no session-wide
   const partition = getBitwardenBrowserPartition(context, false);
   assert.equal(getBitwardenBrowserPartition(context, false), partition);
 });
+
+test('appliance cookie identity belongs to one browser even on the same tunnel and target', () => {
+  const route = [
+    '11111111-2222-3333-4444-555555555555',
+    'socks5',
+    'https://router.example/',
+  ] as const;
+  const first = buildBitwardenPersistentRouteKey(...route, 'browser-one');
+  const second = buildBitwardenPersistentRouteKey(...route, 'browser-two');
+  assert.notEqual(first, second);
+  assert.equal(first, buildBitwardenPersistentRouteKey(...route, 'browser-one'));
+});

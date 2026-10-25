@@ -380,6 +380,10 @@ func (s *cstpState) sendControl(ptype byte, payload []byte) {
 }
 
 func (s *cstpState) injectIPv4(packet []byte) {
+	injectTunnelIPv4(s.ch, packet)
+}
+
+func injectTunnelIPv4(endpoint *channel.Endpoint, packet []byte) {
 	const minIPv4Header = 20
 	if len(packet) < minIPv4Header {
 		return
@@ -394,7 +398,7 @@ func (s *cstpState) injectIPv4(packet []byte) {
 	pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
 		Payload: buffer.MakeWithData(packet[:totalLen]),
 	})
-	s.ch.InjectInbound(ipv4.ProtocolNumber, pkt)
+	endpoint.InjectInbound(ipv4.ProtocolNumber, pkt)
 	pkt.DecRef()
 }
 

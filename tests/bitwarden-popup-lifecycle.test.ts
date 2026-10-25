@@ -157,6 +157,9 @@ function popupHarness({
     disposeSession: () => {
       manager.surfaces.get('session').disposed = true;
     },
+    switchTab: () => {
+      manager.surfaces.get('session').view = { webContents: contents() };
+    },
     popupIds: () => [...manager.bitwardenPopups.keys()],
   };
 }
@@ -179,6 +182,24 @@ test('the newest popup request wins while an older request waits for another pop
   finishFlush();
   assert.equal((await pending).open, false);
   assert.deepEqual(harness.popupIds(), ['newest']);
+});
+
+test('a popup waiting for storage cannot appear over a different browser tab', async () => {
+  let finish!: () => void;
+  const harness = popupHarness({
+    synchronize: () =>
+      new Promise<void>((resolve) => {
+        finish = resolve;
+      }),
+    flush: async () => {},
+  });
+  const pending = harness.open();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  harness.switchTab();
+  finish();
+  assert.equal((await pending).open, false);
+  assert.deepEqual(harness.popupIds(), []);
+  assert.equal(harness.dialogs.length, 0);
 });
 
 test('a disposed or canceled tab cannot attach a popup after waiting for another popup to close', async () => {

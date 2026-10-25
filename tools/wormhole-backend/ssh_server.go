@@ -139,6 +139,7 @@ type sshWireCommand struct {
 
 type sshWireEvent struct {
 	Edits               []sftpEditView       `json:"edits,omitempty"`
+	CredentialID        string               `json:"credential_id,omitempty"`
 	Data                string               `json:"data,omitempty"`
 	Sequence            uint64               `json:"sequence,omitempty"`
 	Reset               bool                 `json:"reset,omitempty"`
@@ -250,6 +251,7 @@ type sshNode struct {
 
 type sshTarget struct {
 	sftpOnly             bool
+	credentialID         string
 	nodeID               string
 	title                string
 	host                 string
@@ -257,6 +259,7 @@ type sshTarget struct {
 	username             string
 	password             string
 	privateKey           []byte
+	certificate          []byte
 	keyPassphrase        string
 	knownHostFingerprint string
 	autoSudo             bool
@@ -269,6 +272,7 @@ type sshCredentialRow struct {
 	Kind           sql.NullInt64
 	Protocol       sql.NullInt64
 	SecretProvider sql.NullInt64
+	Certificate    sql.NullString
 }
 
 type sshNativeSession struct {
@@ -693,6 +697,10 @@ func (server *sshServer) connectSSH(ctx context.Context, state *sshReconnectStat
 			if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 				failure := sshWireEvent{
 					Type: "error", SessionID: command.SessionID, Error: safeSSHError(err),
+				}
+				var certificateError *sshCertificateAuthError
+				if errors.As(err, &certificateError) {
+					failure.CredentialID = certificateError.credentialID
 				}
 				if mismatch != nil {
 					failure.HostKeyExpected = mismatch.expected
@@ -1317,6 +1325,18 @@ func (server *sshServer) reconnectAttemptFailed(state *sshReconnectState, err er
 	}
 	message := safeSSHError(err)
 	logWarn("SSH automatic reconnect attempt failed: %v", message)
+	var certificateError *sshCertificateAuthError
+	if errors.As(err, &certificateError) && strings.Contains(strings.ToLower(message), "ssh certificate") {
+		server.mu.Lock()
+		sessionID := state.commandSnapshot().SessionID
+		if server.lifecycles[sessionID] == state {
+			delete(server.lifecycles, sessionID)
+			state.clearSecrets()
+			server.output.write(sshWireEvent{Type: "error", SessionID: sessionID, CredentialID: certificateError.credentialID, Error: message})
+		}
+		server.mu.Unlock()
+		return
+	}
 	server.scheduleReconnect(state, message)
 }
 
@@ -3512,6 +3532,7 @@ func openNativeSSH(
 		return nil, sshTarget{}, err
 	}
 	defer clearBytes(target.privateKey)
+	defer clearBytes(target.certificate)
 	if keyPassphraseOverride != "" {
 		target.keyPassphrase = keyPassphraseOverride
 	}
@@ -3533,6 +3554,9 @@ func openNativeSSH(
 	native, fingerprint, err := dialNativeSSH(ctx, target, columns, rows, tunnel)
 	if err != nil {
 		tunnel.close()
+		if len(target.certificate) > 0 {
+			return nil, sshTarget{}, &sshCertificateAuthError{error: err, credentialID: target.credentialID}
+		}
 		return nil, sshTarget{}, err
 	}
 	native.tunnel = tunnel
@@ -3552,6 +3576,7 @@ func openNativeSSH(
 	}
 	target.knownHostFingerprint = fingerprint
 	target.privateKey = nil
+	target.certificate = nil
 	target.keyPassphrase = ""
 	return native, target, nil
 }
@@ -3583,15 +3608,9 @@ func dialNativeSSH(
 		},
 	}
 	if len(target.privateKey) > 0 {
-		signer, parseErr := ssh.ParsePrivateKey(target.privateKey)
-		if parseErr != nil && target.keyPassphrase != "" {
-			passphrase := []byte(target.keyPassphrase)
-			signer, parseErr = ssh.ParsePrivateKeyWithPassphrase(
-				target.privateKey,
-				passphrase,
-			)
-			clearBytes(passphrase)
-		}
+		passphrase := []byte(target.keyPassphrase)
+		signer, parseErr := parseSSHSigner(target.privateKey, passphrase)
+		clearBytes(passphrase)
 		if parseErr != nil {
 			var missing *ssh.PassphraseMissingError
 			if errors.As(parseErr, &missing) {
@@ -3599,7 +3618,19 @@ func dialNativeSSH(
 			}
 			return nil, "", fmt.Errorf("could not read the SSH private key: %w", parseErr)
 		}
-		config.Auth = append(config.Auth, ssh.PublicKeys(signer))
+		signers := []ssh.Signer{signer}
+		if len(target.certificate) > 0 {
+			cert, err := parseSSHUserCertificate(target.certificate)
+			if err != nil {
+				return nil, "", fmt.Errorf("the stored SSH certificate is invalid: %w", err)
+			}
+			certSigner, err := sshCertificateSigner(cert, signer, time.Now())
+			if err != nil {
+				return nil, "", err
+			}
+			signers = []ssh.Signer{certSigner, signer}
+		}
+		config.Auth = append(config.Auth, ssh.PublicKeys(signers...))
 	}
 	if target.password != "" {
 		config.Auth = append(config.Auth,
@@ -3643,6 +3674,9 @@ func dialNativeSSH(
 		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, "", ctxErr
+		}
+		if len(target.certificate) > 0 && strings.Contains(err.Error(), "unable to authenticate") {
+			return nil, "", errors.New("the server rejected the SSH certificate and key; check the certificate principals for the SSH username and the server's TrustedUserCAKeys")
 		}
 		return nil, "", err
 	}
@@ -4170,10 +4204,10 @@ func loadSSHCredential(
 	}
 	var row sshCredentialRow
 	err = database.QueryRow(
-		"SELECT "+expression("Username")+", "+expression("Kind")+", "+expression("Protocol")+", "+expression("SecretProvider")+
+		"SELECT "+expression("Username")+", "+expression("Kind")+", "+expression("Protocol")+", "+expression("SecretProvider")+", "+expression("SshCertificate")+
 			" FROM CredentialProfiles WHERE lower(Id) = ? LIMIT 1;",
 		normalizeID(credentialID),
-	).Scan(&row.Username, &row.Kind, &row.Protocol, &row.SecretProvider)
+	).Scan(&row.Username, &row.Kind, &row.Protocol, &row.SecretProvider, &row.Certificate)
 	if errors.Is(err, sql.ErrNoRows) {
 		// Virtual Bitwarden credentials intentionally exist only in the cache. The long-lived Go
 		// vault backend resolves them and Electron forwards the values directly to this separate
@@ -4234,6 +4268,12 @@ func loadSSHCredential(
 		}
 		defer clearBytes(passphrase)
 		target.privateKey = key
+		target.credentialID = normalizeID(credentialID)
+		if len(row.Certificate.String) > maxSSHCertificateBytes {
+			clearBytes(key)
+			return errors.New("the stored SSH certificate exceeds 16 KiB; replace the certificate")
+		}
+		target.certificate = []byte(row.Certificate.String)
 		target.keyPassphrase = string(passphrase)
 		return nil
 	}

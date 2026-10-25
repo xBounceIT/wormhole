@@ -23,6 +23,21 @@ func TestReadConfigDefaultsPort(t *testing.T) {
 	}
 }
 
+func TestReadConfigRejectsUnknownSSLProtocol(t *testing.T) {
+	previous := os.Stdin
+	read, write, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Stdin = previous; read.Close() })
+	os.Stdin = read
+	_, _ = io.WriteString(write, `{"vpn_protocol":"not-supported"}`)
+	_ = write.Close()
+	if _, err := readConfig(); err == nil {
+		t.Fatal("unknown SSL protocol accepted")
+	}
+}
+
 func TestRunMockReadsConfigAndStopsAtEOF(t *testing.T) {
 	originalStdin := os.Stdin
 	originalStdout := os.Stdout

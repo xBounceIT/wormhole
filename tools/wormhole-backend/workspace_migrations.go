@@ -336,6 +336,15 @@ WHERE HttpPath IS NOT NULL
 				})
 			},
 		},
+		{
+			id: "0021_credential_ssh_certificate",
+			ensure: func(ctx context.Context, connection *sql.Conn) error {
+				return ensureWorkspaceColumns(ctx, connection, "CredentialProfiles", []workspaceColumn{
+					{"SshCertificate", "TEXT NULL"},
+					{"SshCertificateFileName", "TEXT NULL"},
+				})
+			},
+		},
 	}
 	for _, migration := range migrations {
 		if err := applyWorkspaceMigration(ctx, connection, migration); err != nil {
