@@ -108,16 +108,43 @@ the Electron main process; browser tokens and VPN cookies stay inside isolated a
 sessions and are handed directly to Go rather than exposed to the renderer. A failed provider
 never falls back to routing outside the tunnel.
 
-Saved HTTP and HTTPS connections use a native Electron Chromium surface, kept
-separate from the React renderer. The Go backend resolves inherited web target
-settings (including the leaf-only HTTPS certificate opt-in) before Electron
-navigates it; connection tabs provide back, forward, and reload controls. A tunneled tab
-uses an isolated Chromium session configured with the Go sidecar's loopback SOCKS5 proxy;
-the Go web controller owns the ref-counted tunnel lease until that tab closes.
-Normal tabs share only an in-memory Electron-run browser profile. A tab that
-ignores certificate errors receives its own in-memory profile so that approval
-cannot affect another connection. As with SSH and VNC, a failed VPN route never falls
-back to the host network.
+The connection editor offers one Browser type for HTTP and HTTPS, with a Home page
+that opens when its session starts. The home page's scheme selects the transport;
+HTTPS is the default. Existing HTTP/HTTPS saved connections keep their settings.
+Each Browser connection opens a dedicated browser inside its Wormhole session,
+with up to 32 native Chromium tabs, an editable address bar, navigation controls,
+and a visible No VPN / VPN tunnel indicator. Site favicons load through the owning
+browser profile, including its VPN route; the workspace displays bounded image data.
+Right-click offers navigation, editing and link actions alongside optional Bitwarden
+entries. New-window links and Bitwarden web
+authentication pages open sibling tabs. Ctrl/Cmd+T, W, L and Ctrl+Tab work inside
+the page as well as the browser controls. The final tab stays open; closing the
+outer Wormhole session closes its browser.
+
+Go resolves inherited connection settings and owns the VPN runtime. Electron holds
+one tunnel lease for the whole browser, configuring its isolated Chromium profile
+with the sidecar's SOCKS5 proxy before any page loads. All tabs share that profile
+and route; other browsers have separate profiles. Loopback requests also use the
+proxy and WebRTC cannot send non-proxied UDP. A proxy failure never falls back to
+the host network. A legacy forwarder route restricts navigation and subresources
+to the original host, with a closed proxy blocking other transports and speculative
+connections outside its loopback endpoint; the new-tab screen explains that
+restriction. Page failures stay local to their tab and retain the lease; a stopped VPN backend closes all
+its browser surfaces. Closing a browser releases its lease and all its tabs.
+
+The leaf-only HTTPS certificate opt-in applies only to the configured origin,
+including sibling tabs visiting that origin. Ordinary browser profiles live in
+memory; Bitwarden-enabled browsers retain the existing native extension storage
+flow in separate profiles. Closed browsers unload their extension background after
+its protected storage has been saved; failed saves retain the host for a later retry.
+
+`npm run test:web-session` covers browser state and IPC validation, the production
+native controller with simulated Go/Electron boundaries, and the mounted browser
+UI in Chromium. The new unit module and modified native/renderer handlers enforce
+at least 80% coverage using Node and V8 tooling. A real Chromium/SOCKS integration
+test verifies multi-host tabs, popup opener support, cookie isolation and rejection
+of direct fallback after the proxy stops. Authenticated Bitwarden login and live
+VPN-provider interoperability still require manual checks with real accounts.
 
 On the first Windows launch, the Electron main process copies legacy local
 Wormhole passwords (saved profiles, inline connection passwords, and the MCP

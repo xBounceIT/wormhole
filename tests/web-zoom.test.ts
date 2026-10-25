@@ -4,6 +4,7 @@ import { stripTypeScriptTypes } from 'node:module';
 import test from 'node:test';
 import vm from 'node:vm';
 import { adjustWebZoom } from '../electron/web-zoom.ts';
+import { isWebBrowserCommand, WebBrowserTabs } from '../electron/web-browser-tabs.ts';
 import { AuthSession } from '../electron/auth-session.ts';
 
 const source = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
@@ -50,6 +51,7 @@ test('web command validation accepts zoom commands and rejects malformed IPC req
       ${slice('function isWebCommandRequest(', 'function isTreeTooltipRequest(')}
       isWebCommandRequest;`,
     ),
+    { isWebBrowserCommand },
   );
   for (const operation of ['back', 'forward', 'reload', 'stop', 'zoom-in', 'zoom-out']) {
     assert.equal(validate({ sessionId: 'session', operation }), true);
@@ -90,6 +92,7 @@ function commandHarness(
   const record = {
     owner,
     disposed: false,
+    tabs: new WebBrowserTabs(),
     view: {
       webContents: {
         getZoomFactor: () => factor,
@@ -107,6 +110,7 @@ function commandHarness(
       },
     },
   };
+  record.tabs.add('page', record.view, 'https://appliance.local/');
   const surfaces = new Map([['session', record]]);
   Object.assign(manager, {
     surfaces,

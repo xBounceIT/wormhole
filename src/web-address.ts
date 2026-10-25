@@ -10,6 +10,20 @@ function isWebProtocol(protocol: string): boolean {
   return protocol === 'http' || protocol === 'https';
 }
 
+/** Include the scheme in the editable home page so legacy HTTP connections remain explicit. */
+export function browserHomePageForEditor(
+  protocol: string,
+  host: string,
+  httpPath?: string,
+): string {
+  const address = savedConnectionAddressForEditor(protocol, host, httpPath);
+  if (!isWebProtocol(protocol) || !host) return address;
+  if (/^https?:\/\//i.test(address)) return address.replace(/^https?:/i, `${protocol}:`);
+  const endpoint =
+    !host.startsWith('[') && host.indexOf(':') !== host.lastIndexOf(':') ? `[${host}]` : host;
+  return `${protocol}://${savedConnectionAddressForEditor(protocol, endpoint, httpPath)}`;
+}
+
 export function connectionAddressForProtocolChange(
   currentProtocol: string,
   nextProtocol: string,

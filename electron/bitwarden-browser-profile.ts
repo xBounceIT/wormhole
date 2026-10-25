@@ -6,11 +6,14 @@ export function buildBitwardenPersistentRouteKey(
   tunnelConfigId: string,
   routeKind: BitwardenRouteKind,
   targetUrl: string,
+  browserId = '',
 ): string {
   const normalizedTunnelId = tunnelConfigId.trim().replaceAll('-', '').toLowerCase();
   const targetOrigin = new URL(targetUrl).origin.toLowerCase();
   return createHash('sha256')
-    .update(`${normalizedTunnelId}\0${routeKind}\0${targetOrigin}`)
+    .update(
+      `${normalizedTunnelId}\0${routeKind}\0${targetOrigin}${browserId ? `\0browser=${browserId}` : ''}`,
+    )
     .digest('hex');
 }
 
