@@ -38,26 +38,34 @@ type sftpEditView struct {
 }
 
 type sftpEditRecord struct {
-	mu           sync.Mutex
-	View         sftpEditView `json:"view"`
-	Host         string       `json:"host"`
-	Port         int          `json:"port"`
-	Username     string       `json:"username"`
-	Fingerprint  string       `json:"fingerprint"`
-	Route        string       `json:"route"`
-	BaseSize     int64        `json:"baseSize"`
-	BaseMtime    int64        `json:"baseMtime"`
-	Mode         uint32       `json:"mode"`
-	UploadedHash string       `json:"uploadedHash"`
-	directory    string
-	lastHash     string
-	changedAt    time.Time
-	stopped      bool
-	maxSize      int64
-	notify       func(sftpEditView)
-	watching     bool
-	hashReadAt   time.Time
-	lastFileInfo os.FileInfo
+	mu               sync.Mutex
+	View             sftpEditView `json:"view"`
+	Host             string       `json:"host"`
+	Port             int          `json:"port"`
+	Username         string       `json:"username"`
+	Fingerprint      string       `json:"fingerprint"`
+	Route            string       `json:"route"`
+	BaseSize         int64        `json:"baseSize"`
+	BaseMtime        int64        `json:"baseMtime"`
+	Mode             uint32       `json:"mode"`
+	UploadedHash     string       `json:"uploadedHash"`
+	directory        string
+	lastHash         string
+	changedAt        time.Time
+	stopped          bool
+	maxSize          int64
+	notify           func(sftpEditView)
+	watching         bool
+	hashReadAt       time.Time
+	lastFileInfo     os.FileInfo
+	failedUploadHash string
+	nextUploadAt     time.Time
+	uploadRetryDelay time.Duration
+}
+
+func (record *sftpEditRecord) resetUploadRetry() {
+	record.failedUploadHash = ""
+	record.nextUploadAt, record.uploadRetryDelay = time.Time{}, 0
 }
 
 func (record *sftpEditRecord) localPath() string {
@@ -345,6 +353,7 @@ func (server *sshServer) runSftpEdit(command sshWireCommand) error {
 			record.View = previous
 			return err
 		}
+		record.resetUploadRetry()
 		go server.watchSftpEdit(record)
 		return nil
 	}
@@ -358,6 +367,7 @@ func (server *sshServer) runSftpEdit(command sshWireCommand) error {
 		}
 		return record.download(native)
 	case "upload", "stop":
+		record.resetUploadRetry()
 		if err := record.uploadTo(native, command.Decision == "overwrite", command.DestinationPath); err != nil {
 			record.View.Error = safeSftpError(err)
 			if record.View.State != "Conflict" && record.View.State != "Disconnected" && record.View.State != "Waiting for transfer queue" {
@@ -569,6 +579,7 @@ func (record *sftpEditRecord) download(native *sshNativeSession) error {
 	record.lastFileInfo, _ = os.Stat(record.localPath())
 	record.hashReadAt = time.Now()
 	record.View.State, record.View.Pending, record.View.Error = "Watching", false, ""
+	record.resetUploadRetry()
 	return record.save()
 }
 
@@ -583,7 +594,7 @@ func (record *sftpEditRecord) upload(native *sshNativeSession, overwrite bool) e
 	return record.uploadTo(native, overwrite, "")
 }
 
-func (record *sftpEditRecord) uploadTo(native *sshNativeSession, overwrite bool, destination string) error {
+func (record *sftpEditRecord) uploadTo(native *sshNativeSession, overwrite bool, destination string) (resultErr error) {
 	target := record.View.RemotePath
 	baseSize, baseMtime := record.BaseSize, record.BaseMtime
 	saveAs := destination != ""
@@ -607,6 +618,14 @@ func (record *sftpEditRecord) uploadTo(native *sshNativeSession, overwrite bool,
 	}
 	defer clear(contents)
 	hash := sftpEditHash(contents)
+	defer func() {
+		if resultErr == nil {
+			record.resetUploadRetry()
+		} else if record.View.State != "Conflict" && record.View.State != "Disconnected" && record.View.State != "Waiting for transfer queue" {
+			// Retry these contents only after a new edit or an explicit action.
+			record.failedUploadHash = hash
+		}
+	}()
 	if !saveAs && hash == record.UploadedHash {
 		record.View.Pending = false
 		return nil
@@ -625,6 +644,7 @@ func (record *sftpEditRecord) uploadTo(native *sshNativeSession, overwrite bool,
 		return errors.New("waiting for transfer queue")
 	}
 	defer native.sftpTransferMu.Unlock()
+	record.View.State = "Uploading"
 	client, err := native.editClient()
 	if err != nil {
 		record.View.State = "Disconnected"
@@ -640,7 +660,6 @@ func (record *sftpEditRecord) uploadTo(native *sshNativeSession, overwrite bool,
 	if statErr == nil && !info.Mode().IsRegular() {
 		return errors.New("remote destination is not a regular file")
 	}
-	record.View.State = "Uploading"
 	if record.notify != nil {
 		record.notify(record.View)
 	}
@@ -772,6 +791,7 @@ func (record *sftpEditRecord) poll(native *sshNativeSession, now time.Time) bool
 		if err == nil {
 			if hash != record.lastHash {
 				record.lastHash, record.changedAt = hash, now
+				record.nextUploadAt, record.uploadRetryDelay = time.Time{}, 0
 			}
 			record.View.Pending = hash != record.UploadedHash
 			record.lastFileInfo, record.hashReadAt = info, now
@@ -779,11 +799,20 @@ func (record *sftpEditRecord) poll(native *sshNativeSession, now time.Time) bool
 	}
 	if err != nil {
 		record.View.Pending, record.View.State, record.View.Error = true, "Failed", safeSftpError(err)
-	} else if record.View.Pending && now.Sub(record.changedAt) >= 750*time.Millisecond && record.View.State != "Conflict" {
+	} else if record.View.Pending && now.Sub(record.changedAt) >= 750*time.Millisecond && record.View.State != "Conflict" &&
+		record.lastHash != record.failedUploadHash && !now.Before(record.nextUploadAt) {
 		if err := record.upload(native, false); err != nil {
 			record.View.Error = safeSftpError(err)
 			if record.View.State != "Conflict" && record.View.State != "Disconnected" && record.View.State != "Waiting for transfer queue" {
 				record.View.State = "Failed"
+			}
+			if record.View.State == "Disconnected" || record.View.State == "Waiting for transfer queue" {
+				if record.uploadRetryDelay == 0 {
+					record.uploadRetryDelay = time.Second
+				} else {
+					record.uploadRetryDelay = min(2*record.uploadRetryDelay, 30*time.Second)
+				}
+				record.nextUploadAt = now.Add(record.uploadRetryDelay)
 			}
 		}
 	}

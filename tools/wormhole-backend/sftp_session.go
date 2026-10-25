@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"sync"
 	"time"
 
@@ -271,6 +272,31 @@ func interruptSftpTransfer(ctx context.Context, client *sftp.Client) func() {
 			<-done
 		}
 	}
+}
+
+type sftpTransferStageError struct {
+	error
+	path string
+}
+
+func (err *sftpTransferStageError) Unwrap() error { return err.error }
+
+func (native *sshNativeSession) cleanupSftpTransferStage(target string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	client, err := newSharedSftpClient(ctx, native)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+	stop := interruptSftpTransfer(ctx, client)
+	defer stop()
+	_ = client.Chmod(target, 0o600)
+	err = client.Remove(target)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return err
 }
 
 func (writer *sftpSessionWriter) Close() error {

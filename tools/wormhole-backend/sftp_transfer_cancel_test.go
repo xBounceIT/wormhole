@@ -222,6 +222,10 @@ func TestSftpRowCancellationInterruptsIOAndContinuesBatch(t *testing.T) {
 					t.Fatal("cancelled upload published a partial final file", err)
 				}
 				contents, err = readSftpTestFile(browser, "/upload/second")
+				entries, listErr := browser.ReadDir("/upload")
+				if listErr != nil || len(entries) != 1 || entries[0].Name() != "second" {
+					t.Fatal("cancelled upload leaked a remote stage", entries, listErr)
+				}
 			}
 			if err != nil || string(contents) != "second" {
 				t.Fatal("row cancellation did not continue with the next file", string(contents), err)

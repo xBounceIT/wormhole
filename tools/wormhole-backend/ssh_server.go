@@ -2885,6 +2885,12 @@ func (server *sshServer) runSftpTransfer(native *sshNativeSession, command sshWi
 				lastTransferred = transferred
 				server.writeTransferEvent(command, itemID, "progress", plan.displayName, plan.incomingSize, transferred, nil)
 			})
+			var stageError *sftpTransferStageError
+			if errors.As(err, &stageError) {
+				if cleanupErr := native.cleanupSftpTransferStage(stageError.path); cleanupErr != nil {
+					logError("SFTP temporary file cleanup failed (session=%q)", native.id)
+				}
+			}
 			if itemContext.Err() != nil {
 				err = itemContext.Err()
 			}
@@ -3322,7 +3328,9 @@ func copyTransferFile(ctx context.Context, client *sftp.Client, direction string
 		if !committed {
 			if direction == "local-to-remote" {
 				_ = client.Chmod(destinationPath, 0o600)
-				_ = client.Remove(destinationPath)
+				if cleanupErr := client.Remove(destinationPath); err != nil && cleanupErr != nil && !os.IsNotExist(cleanupErr) {
+					err = &sftpTransferStageError{error: err, path: destinationPath}
+				}
 			} else {
 				// A failed replacement of a read-only Windows file must not leave
 				// a read-only stage that cannot be removed.
