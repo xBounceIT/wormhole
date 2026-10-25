@@ -10,6 +10,8 @@ Local passwords, private keys and encrypted private keys, including PKCS#8, are 
 Select an optional OpenSSH user certificate in the saved SSH key credential editor.
 The certificate must match the key and be valid; it can be renewed independently.
 The shared SSH signer parser applies the same rules in ordinary SSH sessions and tunnels.
+Authentication offers a valid certificate first, then its underlying public key if the
+server does not authorize that certificate, matching ordinary SSH sessions.
 See [SSH authentication](ssh-authentication.md) for supported formats and protected storage.
 Bitwarden credentials are currently rejected for jump hosts. Passphrases that are
 not saved, and keyboard-interactive/OTP challenges, use the tunnel's secret prompt.

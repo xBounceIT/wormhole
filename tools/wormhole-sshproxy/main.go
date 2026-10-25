@@ -193,14 +193,14 @@ func connect(ctx context.Context, c config, prompt func(string) (string, error))
 	var auth []ssh.AuthMethod
 	if c.PrivateKey != "" {
 		key, passphrase, cert := []byte(c.PrivateKey), []byte(c.KeyPassphrase), []byte(c.Certificate)
-		signer, err := sshauth.ParseSigner(key, passphrase, cert)
+		signers, err := sshauth.ParseSigners(key, passphrase, cert)
 		clear(key)
 		clear(passphrase)
 		clear(cert)
 		if err != nil {
 			return nil, nil, errors.New("SSH tunnel private key or certificate is invalid")
 		}
-		auth = append(auth, ssh.PublicKeys(signer))
+		auth = append(auth, ssh.PublicKeys(signers...))
 	}
 	if c.Password != "" {
 		auth = append(auth, ssh.Password(c.Password))

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -32,15 +33,33 @@ func TestParseSigner(t *testing.T) {
 		{pem.EncodeToMemory(plain), []byte("obsolete"), nil},
 		{pem.EncodeToMemory(encrypted), []byte("phrase"), nil},
 		{pem.EncodeToMemory(plain), nil, cert},
+		{pem.EncodeToMemory(encrypted), []byte("phrase"), cert},
 		{append(pem.EncodeToMemory(plain), cert...), nil, nil},
 	} {
 		parsed, err := ParseSigner(test.key, test.pass, test.cert)
 		if err != nil {
 			t.Fatal(err)
 		}
+		signers, err := ParseSigners(test.key, test.pass, test.cert)
+		if err != nil {
+			t.Fatal(err)
+		}
+		expected := 1
 		if len(test.cert) > 0 || bytes.Contains(test.key, []byte("-cert-v01@openssh.com")) {
+			expected = 2
 			if _, ok := parsed.PublicKey().(*ssh.Certificate); !ok {
 				t.Fatal("certificate was discarded")
+			}
+		}
+		if len(signers) != expected || !bytes.Equal(signers[0].PublicKey().Marshal(), parsed.PublicKey().Marshal()) ||
+			!bytes.Equal(signers[len(signers)-1].PublicKey().Marshal(), signer.PublicKey().Marshal()) {
+			t.Fatal("authentication must offer the certificate first and the raw key last")
+		}
+		for _, offered := range signers {
+			challenge := []byte("authentication fixture")
+			signature, err := offered.Sign(rand.Reader, challenge)
+			if err != nil || offered.PublicKey().Verify(challenge, signature) != nil {
+				t.Fatal("offered key cannot sign an authentication challenge")
 			}
 		}
 	}
@@ -66,5 +85,17 @@ func TestParseSigner(t *testing.T) {
 	_ = certificate.SignCert(rand.Reader, ca)
 	if _, err := ParseSigner(pem.EncodeToMemory(plain), nil, ssh.MarshalAuthorizedKey(certificate)); err == nil {
 		t.Fatal("mismatched certificate accepted")
+	}
+	certificate.Key = signer.PublicKey()
+	for _, window := range []struct{ after, before uint64 }{
+		{0, 1}, {uint64(time.Now().Unix() + 3600), ssh.CertTimeInfinity},
+	} {
+		certificate.ValidAfter, certificate.ValidBefore = window.after, window.before
+		if err := certificate.SignCert(rand.Reader, ca); err != nil {
+			t.Fatal(err)
+		}
+		if signers, err := ParseSigners(pem.EncodeToMemory(plain), nil, ssh.MarshalAuthorizedKey(certificate)); err == nil || len(signers) != 0 {
+			t.Fatal("invalid certificate validity must fail before offering the raw key")
+		}
 	}
 }
