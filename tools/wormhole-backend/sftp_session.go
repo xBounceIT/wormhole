@@ -21,6 +21,21 @@ type sshSharedTransport struct {
 	opening int
 }
 
+func sftpEditRouteIdentity(tunnelConfigID, socksEndpoint string, tunnelEnabled *bool) string {
+	if socksEndpoint != "" {
+		if tunnelConfigID != "" {
+			return "vpn:" + tunnelConfigID
+		}
+		// An unmanaged proxy has no stable configuration identity. Keep exact
+		// matching for it rather than allowing recovery through an unknown route.
+		return "proxy:" + socksEndpoint
+	}
+	if tunnelConfigID != "" && (tunnelEnabled == nil || *tunnelEnabled) {
+		return "vpn:" + tunnelConfigID
+	}
+	return "direct"
+}
+
 func (transport *sshSharedTransport) retain() bool {
 	transport.mu.Lock()
 	defer transport.mu.Unlock()

@@ -20,6 +20,60 @@ import {
   parseSftpEditEvent,
 } from '../electron/sftp-contract.ts';
 
+test('editor snapshots and watcher updates leave the owning session and file browser connected', () => {
+  const source = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  const marker = 'const unsubscribe = window.wormhole?.onSshEvent((event) => {';
+  const start = source.indexOf(marker);
+  const end = source.indexOf('\n    });', start);
+  assert.ok(start > 0 && end > start);
+  let listener: (event: unknown) => void = () => {
+    throw new Error('listener was not installed');
+  };
+  const sessions = [
+    {
+      id: 'file-tab',
+      backendSessionId: 'backend',
+      protocol: 'sftp',
+      status: 'connected',
+      sftp: { status: 'ready', path: '/remote', entries: [] },
+    },
+  ];
+  let current = sessions;
+  let sessionUpdates = 0;
+  new Function(
+    'window',
+    'setSessions',
+    'settlesSshHostKeyTrustAttempt',
+    stripTypeScriptTypes(source.slice(start, end + '\n    });'.length)),
+  )(
+    {
+      wormhole: {
+        onSshEvent: (callback: typeof listener) => {
+          listener = callback;
+        },
+      },
+    },
+    (update: (value: typeof sessions) => typeof sessions) => {
+      sessionUpdates++;
+      current = update(current);
+    },
+    () => false,
+  );
+  for (const state of ['Opening', 'Watching', 'Uploading', 'Uploaded', 'Failed']) {
+    listener({
+      type: 'sftp.edit',
+      sessionId: 'backend',
+      requestId: 'edit-response',
+      edits: [{ id: 'edit', state }],
+    });
+    listener({ type: 'sftp.edit', sessionId: 'backend', edits: [{ id: 'edit', state }] });
+    assert.equal(current, sessions, `editor state ${state} retired the file-transfer tab`);
+  }
+  listener({ type: 'sftp.edit', sessionId: 'backend', requestId: 'empty-list', edits: [] });
+  assert.equal(current, sessions, 'an empty edit inventory retired the file-transfer tab');
+  assert.equal(sessionUpdates, 0, 'edit-only events must not enter the lifecycle mapper');
+});
+
 test('SFTP bridge declarations preserve the renderer Vite ambient type reference', () => {
   const directory = mkdtempSync(join(tmpdir(), 'wormhole-vite-types-'));
   try {

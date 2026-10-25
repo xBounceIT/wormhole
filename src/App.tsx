@@ -2493,6 +2493,8 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
 
   useEffect(() => {
     const unsubscribe = window.wormhole?.onSshEvent((event) => {
+      // The editor owns this event stream; it does not transition the connection.
+      if (event.type === 'sftp.edit') return;
       if (event.type === 'terminal-output') {
         sshTerminal(event.sessionId).receive(event);
         return;

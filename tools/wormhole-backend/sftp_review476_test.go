@@ -282,6 +282,70 @@ func TestSftpEditRecoveryRequiresOriginalRoute(t *testing.T) {
 	}
 }
 
+func TestSftpEditRouteIdentityUsesResolvedVPNBeforeRuntimeDisable(t *testing.T) {
+	disabled, enabled := false, true
+	for _, test := range []struct {
+		name, config, endpoint string
+		enabled                *bool
+		want                   string
+	}{
+		{"direct", "", "", nil, "direct"},
+		{"Go VPN", "original", "", nil, "vpn:original"},
+		{"enabled VPN", "original", "", &enabled, "vpn:original"},
+		{"disabled direct", "original", "", &disabled, "direct"},
+		{"delegated VPN", "original", "127.0.0.1:41001", &disabled, "vpn:original"},
+		{"restarted delegated VPN", "original", "127.0.0.1:42002", &disabled, "vpn:original"},
+		{"unknown proxy", "", "127.0.0.1:41001", &disabled, "proxy:127.0.0.1:41001"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := sftpEditRouteIdentity(test.config, test.endpoint, test.enabled); got != test.want {
+				t.Fatalf("identity = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestSftpRecoveredEditUploadsAfterVPNProxyPortChanges(t *testing.T) {
+	server, native, remote := newSftpEditFixture(t)
+	disabled := false
+	native.sftpEditRoute = sftpEditRouteIdentity("original", "127.0.0.1:41001", &disabled)
+	record := editFixtureRecord(t, server, native, remote)
+	if err := os.WriteFile(record.localPath(), []byte("save pending across application restart"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.runSftpEdit(sshWireCommand{SessionID: native.id, Operation: "finish-close", Decision: "keep"}); err != nil {
+		t.Fatal(err)
+	}
+	recovered := newSSHTestServer(io.Discard)
+	recovered.electronUserDataPath, recovered.databasePath = server.electronUserDataPath, server.databasePath
+	if err := recovered.ensureSftpEdits(); err != nil {
+		t.Fatal(err)
+	}
+	copy := recovered.edits[record.View.ID]
+	if copy == nil || copy.Route != "vpn:original" {
+		t.Fatal("journal did not retain stable VPN identity")
+	}
+	for _, route := range []string{"direct", "vpn:other"} {
+		native.sftpEditRoute = route
+		if copy.matches(native) {
+			t.Fatal("recovered copy accepted another route", route)
+		}
+	}
+	native.sftpEditRoute = sftpEditRouteIdentity("original", "127.0.0.1:42002", &disabled)
+	recovered.sessions[native.id] = native
+	if err := recovered.runSftpEdit(sshWireCommand{SessionID: native.id, Operation: "recover", EditID: copy.View.ID}); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { copy.mu.Lock(); copy.stopped = true; copy.mu.Unlock() }()
+	if err := recovered.runSftpEdit(sshWireCommand{SessionID: native.id, Operation: "upload", EditID: copy.View.ID}); err != nil {
+		t.Fatal(err)
+	}
+	contents, err := readSftpTestFile(native.sftpClient, remote)
+	if err != nil || string(contents) != "save pending across application restart" {
+		t.Fatal(string(contents), err)
+	}
+}
+
 func TestSftpEditCloseRetainsCleanCopyForLaterEditorSave(t *testing.T) {
 	server, native, remote := newSftpEditFixture(t)
 	record := editFixtureRecord(t, server, native, remote)

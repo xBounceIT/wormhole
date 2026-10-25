@@ -720,12 +720,6 @@ func (server *sshServer) connectSSH(ctx context.Context, state *sshReconnectStat
 
 	native.id = command.SessionID
 	native.fingerprint = target.knownHostFingerprint
-	native.sftpEditRoute = "direct"
-	if target.tunnelConfigID != "" {
-		native.sftpEditRoute = "vpn:" + target.tunnelConfigID
-	} else if target.socksEndpoint != "" {
-		native.sftpEditRoute = "proxy:" + target.socksEndpoint
-	}
 	native.server = server
 	if command.TerminalStream && !native.sftpOnly {
 		native.terminalStream = newSSHTerminalStream(func(event sshWireEvent) {
@@ -3540,6 +3534,9 @@ func openNativeSSH(
 		return nil, sshTarget{}, err
 	}
 	target.socksEndpoint = socksEndpoint
+	// Capture the logical route before disabling Go's duplicate tunnel runtime.
+	// A delegated SOCKS port is transient, but its resolved VPN ID is persistent.
+	editRoute := sftpEditRouteIdentity(target.tunnelConfigID, socksEndpoint, tunnelEnabled)
 	if tunnelEnabled != nil && !*tunnelEnabled {
 		target.tunnelConfigID = ""
 	}
@@ -3560,6 +3557,7 @@ func openNativeSSH(
 		return nil, sshTarget{}, err
 	}
 	native.tunnel = tunnel
+	native.sftpEditRoute = editRoute
 	if native.transport != nil {
 		native.transport.tunnel = tunnel
 	}

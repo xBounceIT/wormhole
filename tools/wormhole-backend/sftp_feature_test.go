@@ -541,11 +541,17 @@ func TestSftpOnlyTransportHasNoShellAndSurvivesSiblingClose(t *testing.T) {
 		}
 	}()
 	address := listener.Addr().(*net.TCPAddr)
-	native, fingerprint, err := dialNativeSSH(context.Background(), sshTarget{host: "127.0.0.1", port: address.Port, username: "fixture", password: "test", sftpOnly: true}, 80, 24)
+	goTunnelDisabled := false
+	target := &sshTarget{host: "127.0.0.1", port: address.Port, username: "fixture", password: "test", tunnelConfigID: "disabled-vpn"}
+	native, openedTarget, err := openNativeSSH(context.Background(), "", "", "", target, "", "", &goTunnelDisabled, "", "", false, false, "", 80, 24, "sftp")
 	if err != nil {
 		t.Fatal(err)
 	}
+	fingerprint := openedTarget.knownHostFingerprint
 	defer native.close(false)
+	if native.sftpEditRoute != "direct" || openedTarget.tunnelConfigID != "" {
+		t.Fatal("native open did not capture the actual direct route before clearing disabled VPN configuration")
+	}
 	if native.terminal != nil || native.session != nil || native.inputQueue != nil || native.shellWaitDone != nil || fingerprint == "" {
 		t.Fatal("SFTP allocated terminal resources")
 	}
