@@ -352,6 +352,7 @@ import {
   watchguardUsesSso,
   type TunnelMode,
 } from './tunnel-state';
+import { SshTunnelFields } from './components/SshTunnelFields';
 
 const MRemoteImportDialog = lazy(() =>
   import('./components/MRemoteImportDialog').then((module) => ({
@@ -7403,6 +7404,12 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
               />
             ) : activePage === 'tunnels' ? (
               <TunnelsPage
+                tree={tree}
+                credentials={credentialOptions.ssh.filter(
+                  (credential) =>
+                    credential.provider === 'Local' &&
+                    credentialCanUseProtocol(credential.kind, 'ssh'),
+                )}
                 onTunnelsLoaded={setTunnels}
                 onTunnelCreated={(tunnel) =>
                   setTunnels((current) =>
@@ -11925,9 +11932,12 @@ const tunnelKinds = [
   { value: 5, label: 'Azure VPN' },
   { value: 6, label: 'Cisco Secure Client' },
   { value: 7, label: 'Forcepoint' },
+  { value: 8, label: 'SSH tunnel (jump host)' },
 ] as const;
 
 type TunnelEditorValue = {
+  jumpHostKeySha256?: string;
+  forgetJumpHostKeySha256?: string;
   id?: string;
   name: string;
   kind: number;
@@ -12468,6 +12478,8 @@ function tunnelDefaultSettings(kind: number): Record<string, unknown> {
       return { Port: 443 };
     case 7:
       return { Port: 443, Mtu: 1390 };
+    case 8:
+      return { Mode: 'connection', KeepaliveSeconds: 30 };
     default:
       return {};
   }
@@ -12483,6 +12495,7 @@ function tunnelEditorFromDetails(details: WormholeTunnelDetails): TunnelEditorVa
       ? watchguardEditorSettingsFromDetails(tunnelDefaultSettings(details.kind), details.settings)
       : { ...tunnelDefaultSettings(details.kind), ...details.settings };
   return {
+    jumpHostKeySha256: details.jumpHostKeySha256,
     id: details.id,
     name: details.name,
     kind: details.kind,
@@ -12645,11 +12658,17 @@ function TunnelAdvanced({
 // components would duplicate validation and secret-clearing behavior.
 // react-doctor-disable-next-line react-doctor/no-giant-component
 function TunnelEditorDialog({
+  tree,
+  credentials,
+  tunnels,
   initial,
   open,
   onOpenChange,
   onSaved,
 }: {
+  tree: TreeNode[];
+  credentials: CredentialRecord[];
+  tunnels: TunnelRecord[];
   initial: TunnelEditorValue;
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -12699,6 +12718,9 @@ function TunnelEditorDialog({
   function setSetting(key: string, next: unknown) {
     setValue((current) => ({
       ...current,
+      ...(current.kind === 8 && (key === 'Mode' || key === 'JumpConnectionId')
+        ? { forgetJumpHostKeySha256: undefined, jumpHostKeySha256: undefined }
+        : {}),
       settings: updateTunnelEditorSetting(current.kind, current.settings, key, next),
     }));
   }
@@ -12807,6 +12829,7 @@ function TunnelEditorDialog({
       const settings = normalizeTunnelEditorSettings(value.kind, value.settings);
       const saved = value.id
         ? await api.updateTunnel({
+            forgetJumpHostKeySha256: value.forgetJumpHostKeySha256,
             id: value.id,
             name: value.name,
             kind: value.kind,
@@ -12868,6 +12891,8 @@ function TunnelEditorDialog({
                   setValue((current) => ({
                     ...current,
                     kind: Number(next),
+                    jumpHostKeySha256: undefined,
+                    forgetJumpHostKeySha256: undefined,
                     settings: tunnelDefaultSettings(Number(next)),
                   }))
                 }
@@ -12946,6 +12971,35 @@ function TunnelEditorDialog({
             </p>
           ) : null}
           <div className="grid gap-5 py-1">
+            {value.kind === 8 ? (
+              <SshTunnelFields
+                tree={tree}
+                credentials={credentials}
+                tunnels={tunnels}
+                tunnelId={value.id}
+                settings={value.settings}
+                onChange={setSetting}
+                pin={
+                  value.settings.Mode === 'connection'
+                    ? (value.jumpHostKeySha256 ?? '')
+                    : String(value.settings.HostKeySha256 ?? '')
+                }
+                onForgetPin={() => {
+                  if (value.settings.Mode === 'connection')
+                    setValue((current) => ({
+                      ...current,
+                      forgetJumpHostKeySha256: current.jumpHostKeySha256,
+                      jumpHostKeySha256: undefined,
+                    }));
+                  else
+                    setValue((current) => ({
+                      ...current,
+                      forgetJumpHostKeySha256: String(current.settings.HostKeySha256),
+                      settings: { ...current.settings, HostKeySha256: '' },
+                    }));
+                }}
+              />
+            ) : null}
             {value.kind === 0 ? (
               <>
                 <TunnelSection title="Interface">{rows('Interface')}</TunnelSection>
@@ -13139,12 +13193,16 @@ function TunnelEditorDialog({
 // states transition independently, so combining them in a reducer would obscure those boundaries.
 // react-doctor-disable-next-line react-doctor/no-giant-component, react-doctor/prefer-useReducer
 function TunnelsPage({
+  tree,
+  credentials,
   tunnels,
   onTunnelsLoaded,
   onTunnelCreated,
   onTunnelUpdated,
   onTunnelDeleted,
 }: {
+  tree: TreeNode[];
+  credentials: CredentialRecord[];
   tunnels: TunnelRecord[];
   onTunnelsLoaded: (tunnels: TunnelRecord[]) => void;
   onTunnelCreated: (tunnel: TunnelRecord) => void;
@@ -13485,6 +13543,9 @@ function TunnelsPage({
       </div>
       {editorOpen ? (
         <TunnelEditorDialog
+          tree={tree}
+          credentials={credentials}
+          tunnels={tunnels}
           initial={editorValue}
           key={editorValue.id ?? `new:${editorValue.kind}`}
           onOpenChange={setTunnelEditorOpen}

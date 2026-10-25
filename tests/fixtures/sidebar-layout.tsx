@@ -940,12 +940,12 @@ async function runAppIntegrationTests() {
   const shown = async (expected: boolean) => {
     await waitFor(() => {
       const surface = query('[data-sidebar-surface]');
+      // Flush computed layout even while a hidden Chromium window still reports an animation.
+      const bounds = surface.getBoundingClientRect();
       return (
         query('[data-sidebar-layout]').dataset.revealed === String(expected) &&
         surface.getAnimations().length === 0 &&
-        (expected
-          ? surface.getBoundingClientRect().left === 0
-          : surface.getBoundingClientRect().right === 40)
+        (expected ? bounds.left === 0 : bounds.right === 40)
       );
     }, 'Full App sidebar did not settle: ' + expected);
   };
@@ -1010,6 +1010,9 @@ async function runAppIntegrationTests() {
   // Mount the real App; native services are outside this UI test.
   window.wormhole = undefined;
   try {
+    // Keep the full App's focus/layout checks deterministic in a hidden profiled window.
+    // The component cases above exercise both animated and reduced-motion transitions.
+    await React.act(async () => window.sidebarReducedMotion(true));
     await window.sidebarObserve('mount');
     await mount([
       {
@@ -1292,5 +1295,6 @@ async function runAppIntegrationTests() {
   } finally {
     await React.act(async () => root.unmount());
     window.wormhole = originalBridge;
+    await React.act(async () => window.sidebarReducedMotion(false));
   }
 }

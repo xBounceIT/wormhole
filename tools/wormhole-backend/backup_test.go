@@ -991,6 +991,11 @@ func TestBackupExportProtectsTheDatabaseAndSiblingFiles(t *testing.T) {
 	database := openBackupTestDatabase(t, databasePath)
 	seedBackupTestDatabase(t, database, databasePath)
 	database.Close()
+	unlock, err := acquireTunnelConfigurationLock(context.Background(), databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
 
 	for _, reserved := range []string{
 		databasePath,
@@ -998,12 +1003,16 @@ func TestBackupExportProtectsTheDatabaseAndSiblingFiles(t *testing.T) {
 		databasePath + "-shm",
 		databasePath + "-wal",
 		credentialPrivateKeyLockPath(databasePath),
+		tunnelConfigurationLockPath(databasePath),
 		credentialPrivateKeyPath(databasePath, backupTestKeyID),
 	} {
 		if _, err := exportBackup(databasePath, backupRequest{Path: reserved}); err == nil ||
 			!strings.Contains(err.Error(), "cannot be Wormhole workspace storage") {
 			t.Fatalf("reserved workspace destination %q error = %v", reserved, err)
 		}
+	}
+	if _, err := exportBackup(databasePath, backupRequest{Path: tunnelConfigurationLockPath(databasePath), Password: "file-safety-password"}); err == nil || !strings.Contains(err.Error(), "cannot be Wormhole workspace storage") {
+		t.Fatalf("encrypted self-export could overwrite the active tunnel lock: %v", err)
 	}
 	aliasDirectory := filepath.Join(t.TempDir(), "database-alias")
 	if err := os.Symlink(directory, aliasDirectory); err == nil {

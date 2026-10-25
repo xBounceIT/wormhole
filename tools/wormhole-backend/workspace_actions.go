@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -149,6 +150,11 @@ func duplicateWorkspaceNode(databasePath string, request workspaceNodeRequest) (
 	if err != nil {
 		return workspaceDuplicateNodeResponse{}, err
 	}
+	release, err := acquireTunnelReferenceMutationLock(databasePath)
+	if err != nil {
+		return workspaceDuplicateNodeResponse{}, err
+	}
+	defer release()
 	database, err := openDatabase(databasePath, false)
 	if err != nil {
 		return workspaceDuplicateNodeResponse{}, err
@@ -328,6 +334,14 @@ func deleteWorkspaceNodes(
 		nodeIDs = append(nodeIDs, nodeID)
 	}
 
+	tunnelMutationMu.Lock()
+	defer tunnelMutationMu.Unlock()
+	releaseTunnel, err := acquireTunnelConfigurationLock(context.Background(), databasePath)
+	if err != nil {
+		return workspaceDeleteNodeResponse{}, err
+	}
+	defer releaseTunnel()
+
 	database, err := openDatabase(databasePath, false)
 	if err != nil {
 		return workspaceDeleteNodeResponse{}, err
@@ -447,6 +461,13 @@ func deleteWorkspaceNodes(
 	}
 
 	deletedSecrets := make([]workspaceDeletedSecret, 0)
+	deleting := make(map[string]bool, len(deletedIDs))
+	for _, id := range deletedIDs {
+		deleting[id] = true
+	}
+	if err := rejectSSHJumpDeletion(databasePath, deleting, ""); err != nil {
+		return workspaceDeleteNodeResponse{}, err
+	}
 	if credentialSecretsExist {
 		for _, id := range deletedIDs {
 			if credentialProfilesExist {

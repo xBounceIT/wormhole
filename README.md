@@ -43,6 +43,8 @@ scoped native compatibility helpers; shared domain behavior remains in Go.
   certificates and independent certificate renewal. See [SSH authentication](docs/ssh-authentication.md).
 - Per-connection userspace VPN tunnels for WireGuard, OpenVPN, Fortinet,
   WatchGuard, Stormshield, Azure VPN, and Cisco Secure Client.
+- [SSH jump-host tunnels](docs/ssh-tunnels.md) from saved SSH connections or manual
+  endpoints, with pinned host keys, local credentials, and chained routes.
 - Optional MCP server for controlling already-open SSH sessions.
 - Optional Bitwarden integration for saved credential passwords and HTTPS
   browser autofill.

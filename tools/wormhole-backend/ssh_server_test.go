@@ -2216,7 +2216,7 @@ func TestLocalTransferFilesystemHelpers(t *testing.T) {
 	if err := ensureTransferParent(nil, "local-to-local", filepath.Join(root, "nested", "report.txt")); err != nil {
 		t.Fatal(err)
 	}
-	if err := removeTransferDestinationSymlink(nil, "local-to-local", filepath.Join(root, "missing")); err != nil {
+	if err := removeTransferDirectoryConflict(nil, "local-to-local", filepath.Join(root, "missing")); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -2478,10 +2478,10 @@ func TestRemoteSftpHelpersHandleMissingAndExistingDestinations(t *testing.T) {
 	if err != nil || exists {
 		t.Fatalf("missing remote destination = exists:%v err:%v", exists, err)
 	}
-	if err := removeTransferDestinationSymlink(client, "local-to-remote", pathpkg.Join(root, "missing")); err != nil {
+	if err := removeTransferDirectoryConflict(client, "local-to-remote", pathpkg.Join(root, "missing")); err != nil {
 		t.Fatal(err)
 	}
-	if err := removeTransferDestinationSymlink(client, "local-to-remote", file); err != nil {
+	if err := removeTransferDirectoryConflict(client, "local-to-remote", file); err != nil {
 		t.Fatal(err)
 	}
 }

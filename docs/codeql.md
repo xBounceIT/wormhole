@@ -6,6 +6,9 @@ module under `tools/` for Linux, Windows, and macOS. The Windows-only credential
 reader is built for Windows only. `go build -a` prevents the Go build cache from
 hiding source files from CodeQL.
 
+The SSH jump-host sidecar (`tools/wormhole-sshproxy`) and shared signer parser
+(`tools/internal/sshauth`) are discovered and built on all three platforms.
+
 The default setup runs on Linux and cannot process the Windows-only credential
 reader. It reports **Go files were found but not processed** even when the Actions
 run succeeds. Custom build steps require advanced setup.

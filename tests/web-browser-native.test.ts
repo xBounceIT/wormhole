@@ -18,6 +18,7 @@ import {
 import { WebSessionAttemptTracker } from '../electron/web-session-attempt.ts';
 import { adjustWebZoom } from '../electron/web-zoom.ts';
 import { TunnelLeaseRegistry } from '../electron/tunnel-lease-registry.ts';
+import { tunnelClosedMessage } from '../electron/tunnel-failure.ts';
 import { KeyedSingleFlight } from '../electron/keyed-single-flight.ts';
 import { KeyedTaskTracker } from '../electron/keyed-task-tracker.ts';
 import { ExtensionMutationGuard } from '../electron/extension-mutation-guard.ts';
@@ -305,6 +306,7 @@ function browserHarness({ socks = '127.0.0.1:1080', active = true } = {}) {
     webBrowserTabLimit,
     WebSessionAttemptTracker,
     TunnelLeaseRegistry,
+    tunnelClosedMessage,
     KeyedSingleFlight,
     KeyedTaskTracker,
     ExtensionMutationGuard,
@@ -1406,6 +1408,37 @@ test('a VPN browser cannot finish opening after its acquired lease disappears du
     h.events.some((event) => event.type === 'connected'),
     false,
   );
+});
+
+test('a dropped SSH route closes every browser tab and releases its shared lease', async () => {
+  const h = browserHarness();
+  await h.open();
+  await h.command('new-tab', { address: 'https://second.internal/' });
+  const record = h.manager.surfaces.get('browser-1');
+  const contents = record.tabs.all().map((view: any) => view.webContents);
+  assert.equal(contents.length, 2);
+  const request = h.acquisitions[0] as { onExit: () => void };
+  request.onExit();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(h.manager.surfaces.size, 0);
+  assert.equal(h.children.size, 0);
+  assert.ok(contents.every((tab) => tab.destroyed));
+  assert.equal(h.releases.length, 1);
+  assert.ok(
+    h.events.some((event) => event.type === 'failed' && event.error === tunnelClosedMessage),
+  );
+});
+
+test('an old SSH route exit cannot close a replacement browser', async () => {
+  const h = browserHarness();
+  await h.open();
+  const oldRequest = h.acquisitions[0] as { onExit: () => void };
+  await h.open();
+  const replacement = h.manager.surfaces.get('browser-1');
+  oldRequest.onExit();
+  assert.equal(h.manager.surfaces.get('browser-1'), replacement);
+  assert.equal(replacement.view.webContents.destroyed, false);
+  h.manager.close('browser-1');
 });
 
 test('an explicit Direct route choice releases its unused lease and labels the browser accurately', async () => {

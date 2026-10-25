@@ -74,6 +74,11 @@ type normalizedWorkspaceNode struct {
 
 func createWorkspaceNode(databasePath string, request workspaceNodeWriteRequest) (string, error) {
 	request.ID = ""
+	release, err := acquireTunnelReferenceMutationLock(databasePath)
+	if err != nil {
+		return "", err
+	}
+	defer release()
 	database, err := openDatabase(databasePath, false)
 	if err != nil {
 		return "", err
@@ -151,6 +156,11 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 
 }
 
 func updateWorkspaceNode(databasePath string, request workspaceNodeWriteRequest) error {
+	release, err := acquireTunnelReferenceMutationLock(databasePath)
+	if err != nil {
+		return err
+	}
+	defer release()
 	database, err := openDatabase(databasePath, false)
 	if err != nil {
 		return err

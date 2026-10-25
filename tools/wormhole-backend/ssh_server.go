@@ -251,6 +251,7 @@ type sshNode struct {
 
 type sshTarget struct {
 	sftpOnly             bool
+	nodeTrustContext     map[string]sshNode
 	credentialID         string
 	nodeID               string
 	title                string
@@ -2835,7 +2836,7 @@ func (server *sshServer) runSftpTransfer(native *sshNativeSession, command sshWi
 			}
 			if plan.isDirectory {
 				if exists {
-					if err := removeTransferDestinationSymlink(client, command.Direction, plan.destinationPath); err != nil {
+					if err := removeTransferDirectoryConflict(client, command.Direction, plan.destinationPath); err != nil {
 						return err
 					}
 				}
@@ -2845,11 +2846,6 @@ func (server *sshServer) runSftpTransfer(native *sshNativeSession, command sshWi
 
 			if err := ensureTransferParent(client, command.Direction, plan.destinationPath); err != nil {
 				return err
-			}
-			if exists {
-				if err := removeTransferDestinationSymlink(client, command.Direction, plan.destinationPath); err != nil {
-					return err
-				}
 			}
 			if err := itemContext.Err(); err != nil {
 				return err
@@ -3200,7 +3196,7 @@ func transferDestinationInfo(client *sftp.Client, direction, path string) (bool,
 	return true, info.IsDir(), size, nil
 }
 
-func removeTransferDestinationSymlink(client *sftp.Client, direction, path string) error {
+func removeTransferDirectoryConflict(client *sftp.Client, direction, path string) error {
 	if direction == "local-to-remote" {
 		info, err := client.Lstat(path)
 		if err != nil {
@@ -3209,7 +3205,7 @@ func removeTransferDestinationSymlink(client *sftp.Client, direction, path strin
 			}
 			return err
 		}
-		if info.Mode()&os.ModeSymlink != 0 {
+		if !info.IsDir() {
 			return client.Remove(path)
 		}
 		return nil
@@ -3221,7 +3217,7 @@ func removeTransferDestinationSymlink(client *sftp.Client, direction, path strin
 		}
 		return err
 	}
-	if info.Mode()&os.ModeSymlink != 0 {
+	if !info.IsDir() {
 		return os.Remove(path)
 	}
 	return nil
@@ -3249,27 +3245,55 @@ func copyTransferFile(ctx context.Context, client *sftp.Client, direction string
 	}
 	defer source.Close()
 	// Opening a remote source can block. Check cancellation again before touching
-	// the destination, and require approval before enabling truncation.
+	// the destination. Approved overwrites stay private until copy and close succeed.
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	flags := os.O_WRONLY | os.O_CREATE | os.O_EXCL
+	destinationPath := plan.destinationPath
+	mode := os.FileMode(0o644)
 	if plan.overwrite {
-		flags = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
+		id, err := newCredentialID()
+		if err != nil {
+			return err
+		}
+		mode = 0o600
+		destinationPath = filepath.Join(filepath.Dir(destinationPath), ".wormhole-transfer-"+id)
+		if direction == "local-to-remote" {
+			destinationPath = pathpkg.Join(pathpkg.Dir(plan.destinationPath), ".wormhole-transfer-"+id)
+		}
 	}
+	flags := os.O_WRONLY | os.O_CREATE | os.O_EXCL
 	if direction == "local-to-remote" {
-		destination, err = client.OpenFile(plan.destinationPath, flags)
+		destination, err = client.OpenFile(destinationPath, flags)
 	} else {
-		destination, err = os.OpenFile(plan.destinationPath, flags, 0o644)
+		destination, err = os.OpenFile(destinationPath, flags, mode)
 	}
 	if err != nil {
 		return err
 	}
+	closed := false
+	committed := false
 	defer func() {
-		if closeErr := destination.Close(); err == nil {
-			err = closeErr
+		if !closed {
+			_ = destination.Close()
+		}
+		if plan.overwrite && !committed {
+			if direction == "local-to-remote" {
+				_ = client.Chmod(destinationPath, 0o600)
+				_ = client.Remove(destinationPath)
+			} else {
+				// A failed replacement of a read-only Windows file must not leave
+				// a read-only stage that cannot be removed.
+				_ = os.Chmod(destinationPath, 0o600)
+				_ = os.Remove(destinationPath)
+			}
 		}
 	}()
+	if plan.overwrite && direction == "local-to-remote" {
+		if err := client.Chmod(destinationPath, 0o600); err != nil {
+			return err
+		}
+	}
 
 	buffer := make([]byte, sshSftpTransferBuffer)
 	var transferred int64
@@ -3287,11 +3311,62 @@ func copyTransferFile(ctx context.Context, client *sftp.Client, direction string
 		}
 		if readErr != nil {
 			if errors.Is(readErr, io.EOF) {
-				return nil
+				break
 			}
 			return readErr
 		}
 	}
+	err = destination.Close()
+	closed = true
+	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if plan.overwrite {
+		err := commitTransferFile(ctx, client, direction, destinationPath, plan.destinationPath)
+		committed = err == nil
+		return err
+	}
+	return nil
+}
+
+func commitTransferFile(ctx context.Context, client *sftp.Client, direction, temporary, target string) error {
+	var info os.FileInfo
+	var err error
+	if direction == "local-to-remote" {
+		info, err = client.Lstat(target)
+	} else {
+		info, err = os.Lstat(target)
+	}
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	mode := os.FileMode(0o644)
+	if info != nil && info.Mode().IsRegular() {
+		mode = info.Mode().Perm()
+	}
+	if direction == "local-to-remote" {
+		err = client.Chmod(temporary, mode)
+	} else {
+		err = os.Chmod(temporary, mode)
+	}
+	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if direction == "local-to-remote" {
+		if _, supported := client.HasExtension("posix-rename@openssh.com"); supported {
+			return client.PosixRename(temporary, target)
+		}
+		// SFTP v3 rename must fail if replacement is unsupported. Keep the
+		// original instead of deleting it to make room for the staged upload.
+		return client.Rename(temporary, target)
+	}
+	return os.Rename(temporary, target)
 }
 
 func writeTransferBytes(destination io.Writer, data []byte) error {
@@ -3934,11 +4009,13 @@ func loadSSHTargetWithCredentialOverrides(
 	tunnelConfigID := ""
 	current := root
 	seen := make(map[string]struct{})
+	trustContext := make(map[string]sshNode)
 	for current != nil {
 		if _, duplicate := seen[current.id]; duplicate {
 			return sshTarget{}, errors.New("SSH connection tree contains a cycle")
 		}
 		seen[current.id] = struct{}{}
+		trustContext[current.id] = *current
 		if !identityBoundary && username == "" && strings.TrimSpace(current.username) != "" {
 			username = strings.TrimSpace(current.username)
 		}
@@ -3993,6 +4070,8 @@ func loadSSHTargetWithCredentialOverrides(
 	}
 
 	target := sshTarget{
+		nodeTrustContext:     trustContext,
+		credentialID:         credentialID,
 		nodeID:               root.id,
 		title:                root.name,
 		host:                 endpoint.host,
