@@ -162,6 +162,8 @@ const wormholeBridge = {
     passphrase: string;
     clearPassphrase: boolean;
     privateKeySelectionId?: string;
+    certificateSelectionId?: string;
+    clearCertificate?: boolean;
     provider: 'Local';
   }) => ipcRenderer.invoke('workspace:create-credential', request),
   updateCredential: (request: {
@@ -175,12 +177,17 @@ const wormholeBridge = {
     passphrase: string;
     clearPassphrase: boolean;
     privateKeySelectionId?: string;
+    certificateSelectionId?: string;
+    clearCertificate?: boolean;
     provider: 'Local' | 'Bitwarden';
     bitwardenItemId?: string;
     bitwardenItemName?: string;
     bitwardenFieldPath?: string;
   }) => ipcRenderer.invoke('workspace:update-credential', request),
   selectSshPrivateKey: () => ipcRenderer.invoke('credential:select-ssh-private-key'),
+  selectSshCertificate: () => ipcRenderer.invoke('credential:select-ssh-certificate'),
+  discardSshCertificateSelection: (request: { selectionId: string }) =>
+    ipcRenderer.invoke('credential:discard-ssh-certificate', request),
   discardSshPrivateKeySelection: (request: { selectionId: string }) =>
     ipcRenderer.invoke('credential:discard-ssh-private-key', request),
   deleteCredential: (request: { id: string }) =>

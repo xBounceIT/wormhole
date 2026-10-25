@@ -154,6 +154,15 @@ interface WormholeWorkspaceCredential {
   bitwardenItemId?: string;
   bitwardenItemName?: string;
   privateKeyFileName?: string;
+  hasCertificate?: boolean;
+  certificateFileName?: string;
+  certificate?: {
+    keyId: string;
+    principals: string[];
+    validAfter?: string;
+    validBefore?: string;
+    signingCaFingerprint: string;
+  };
   isVirtualBitwarden?: boolean;
 }
 
@@ -368,6 +377,7 @@ type WormholeSshEvent =
       sessionId: string;
       error: string;
       hostKeyExpected?: string;
+      credentialId?: string;
       hostKeyReceived?: string;
     }
   | {
@@ -860,6 +870,8 @@ interface Window {
       passphrase: string;
       clearPassphrase: boolean;
       privateKeySelectionId?: string;
+      certificateSelectionId?: string;
+      clearCertificate?: boolean;
       provider: 'Local';
     }): Promise<WormholeWorkspaceCredential>;
     updateCredential(request: {
@@ -873,6 +885,8 @@ interface Window {
       passphrase: string;
       clearPassphrase: boolean;
       privateKeySelectionId?: string;
+      certificateSelectionId?: string;
+      clearCertificate?: boolean;
       provider: 'Local' | 'Bitwarden';
       bitwardenItemId?: string;
       bitwardenItemName?: string;
@@ -881,7 +895,12 @@ interface Window {
     selectSshPrivateKey(): Promise<{
       selectionId: string;
       fileName: string;
+      suggestedCertificate?: { selectionId: string; fileName: string };
     } | null>;
+    selectSshCertificate(): Promise<{ selectionId: string; fileName: string } | null>;
+    discardSshCertificateSelection(request: {
+      selectionId: string;
+    }): Promise<{ discarded: boolean }>;
     discardSshPrivateKeySelection(request: {
       selectionId: string;
     }): Promise<{ discarded: boolean }>;
