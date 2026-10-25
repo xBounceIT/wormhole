@@ -358,7 +358,7 @@ func TestSSHCertificateBackupRoundTripAndMismatch(t *testing.T) {
 	key := testSshPrivateKey(t, "")
 	signer, _ := parseSSHSigner(key, nil)
 	cert, _ := testSSHCertificate(t, signer, ssh.UserCert, 0, ssh.CertTimeInfinity)
-	for _, mode := range []string{"valid", "mismatch", "missing-key", "malformed", "password-profile"} {
+	for _, mode := range []string{"valid", "mismatch", "tampered-signature", "missing-key", "malformed", "password-profile"} {
 		t.Run(mode, func(t *testing.T) {
 			payload := newBackupPayload()
 			line := string(ssh.MarshalAuthorizedKey(cert))
@@ -370,6 +370,11 @@ func TestSSHCertificateBackupRoundTripAndMismatch(t *testing.T) {
 			}
 			if mode == "malformed" {
 				line = "invalid"
+			}
+			if mode == "tampered-signature" {
+				changed := *cert
+				changed.KeyId += "-tampered"
+				line = string(ssh.MarshalAuthorizedKey(&changed))
 			}
 			if mode == "password-profile" {
 				kind = 0
@@ -411,7 +416,10 @@ func TestSSHCertificateBackupRoundTripAndMismatch(t *testing.T) {
 			} else if stored.Valid || !strings.Contains(strings.Join(result.Warnings, " "), "certificate") {
 				t.Fatalf("invalid certificate retained: %#v", result)
 			}
-			if mode == "mismatch" {
+			if mode == "tampered-signature" && !strings.Contains(strings.Join(result.Warnings, " "), "signature") {
+				t.Fatal("missing certificate signature warning")
+			}
+			if mode == "mismatch" || mode == "tampered-signature" {
 				restored, err := readBackupPrivateKey(credentialPrivateKeyPath(dbPath, backupTestKeyID))
 				if err != nil || !bytes.Equal(restored, key) {
 					t.Fatal("mismatch discarded key", err)

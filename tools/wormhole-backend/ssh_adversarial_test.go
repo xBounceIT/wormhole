@@ -25,13 +25,16 @@ func TestSSHCertificateBackupMetadataValidationWithRetainedKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, mode := range []string{"valid", "mismatch", "unreadable-passphrase", "canceled"} {
+	for _, mode := range []string{"valid", "mismatch", "tampered-signature", "unreadable-passphrase", "canceled"} {
 		t.Run(mode, func(t *testing.T) {
 			certificateSigner := signer
 			if mode == "mismatch" {
 				certificateSigner, _ = parseSSHSigner(testSshPrivateKey(t, ""), nil)
 			}
 			cert, _ := testSSHCertificate(t, certificateSigner, ssh.UserCert, 0, ssh.CertTimeInfinity)
+			if mode == "tampered-signature" {
+				cert.KeyId += "-tampered"
+			}
 			line := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(cert))) + " renewed\x1b-key"
 			dbPath := filepath.Join(t.TempDir(), "workspace.db")
 			db := openBackupTestDatabase(t, dbPath)
@@ -90,6 +93,9 @@ func TestSSHCertificateBackupMetadataValidationWithRetainedKey(t *testing.T) {
 				expected := "does not match"
 				if mode == "unreadable-passphrase" {
 					expected = "passphrase is unavailable"
+				}
+				if mode == "tampered-signature" {
+					expected = "signature"
 				}
 				if stored.Valid || name.Valid || !strings.Contains(strings.Join(result.Warnings, " "), expected) {
 					t.Fatalf("unsafe metadata retained or missing warning: %#v", result)

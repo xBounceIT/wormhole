@@ -12,7 +12,9 @@ import: when it is omitted, connecting prompts for it without saving it.
 An optional certificate must be a single OpenSSH user certificate line up to
 16 KiB. Selecting a key suggests its sibling `<key>-cert.pub`, when present;
 remove that suggestion or select another certificate as needed. Host certificates
-and plain public key files are rejected. The editor shows the saved certificate's
+and plain public key files are rejected. Its signature is verified against the
+embedded CA key; the server determines which CAs and principals it trusts.
+The editor shows the saved certificate's
 key ID, principals and expiry. Use **Replace…** to renew just the certificate, or
 **Remove** to return to plain key authentication. A failed connection with an
 expired certificate offers **Replace certificate…** for the affected credential,

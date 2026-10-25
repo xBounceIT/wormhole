@@ -126,7 +126,33 @@ func parseSSHUserCertificate(line []byte) (*ssh.Certificate, error) {
 	if cert.CertType != ssh.UserCert {
 		return nil, errors.New("file is a host certificate, not a user certificate")
 	}
+	if err := checkSSHCertificateSignature(cert); err != nil {
+		return nil, err
+	}
 	return cert, nil
+}
+
+func checkSSHCertificateSignature(cert *ssh.Certificate) error {
+	// Reuse the library verifier, including its OpenSSH security-key CA rules.
+	// The signed principal, options and start time avoid applying server policy
+	// here. Import/runtime check the current validity window separately, while
+	// backup may retain an expired certificate for independent renewal.
+	principal := ""
+	if len(cert.ValidPrincipals) > 0 {
+		principal = cert.ValidPrincipals[0]
+	}
+	options := make([]string, 0, len(cert.CriticalOptions))
+	for option := range cert.CriticalOptions {
+		options = append(options, option)
+	}
+	checker := ssh.CertChecker{
+		SupportedCriticalOptions: options,
+		Clock:                    func() time.Time { return time.Unix(int64(cert.ValidAfter), 0) },
+	}
+	if err := checker.CheckCert(principal, cert); err != nil {
+		return fmt.Errorf("SSH certificate is invalid: %w", err)
+	}
+	return nil
 }
 
 func checkSSHCertificateKey(cert *ssh.Certificate, public ssh.PublicKey) error {
