@@ -125,6 +125,7 @@ func resolveSSHJumpTarget(snapshot tunnelConfigSnapshot) (sshTarget, error) {
 	}
 	if err != nil {
 		clearBytes(target.privateKey)
+		clearBytes(target.certificate)
 		return sshTarget{}, err
 	}
 	if target.password == "" && len(target.privateKey) == 0 {
@@ -167,12 +168,13 @@ func sshJumpIdentitiesUnlocked(databasePath, id string, path []string) (string, 
 	defer clearBytes(snapshot.settings)
 	var target *sshTarget
 	upstream, upstreamConfiguration := "", ""
-	if snapshot.kind == 7 {
+	if snapshot.kind == 8 {
 		resolved, err := resolveSSHJumpTarget(snapshot)
 		if err != nil {
 			return "", "", err
 		}
 		defer clearBytes(resolved.privateKey)
+		defer clearBytes(resolved.certificate)
 		target = &resolved
 		if resolved.tunnelConfigID != "" {
 			upstream, upstreamConfiguration, err = sshJumpIdentitiesUnlocked(databasePath, resolved.tunnelConfigID, append(path, id))
@@ -188,7 +190,7 @@ func sshJumpIdentitiesUnlocked(databasePath, id string, path []string) (string, 
 // upstream edit must not relabel an older in-flight authentication as the new configuration.
 func sshJumpSnapshotIdentity(snapshot tunnelConfigSnapshot, target *sshTarget, upstream string, includeTrust bool) string {
 	settings := snapshot.settings
-	if !includeTrust && snapshot.kind == 7 {
+	if !includeTrust && snapshot.kind == 8 {
 		var values map[string]json.RawMessage
 		_ = json.Unmarshal(settings, &values)
 		delete(values, "HostKeySha256")
@@ -210,7 +212,7 @@ func sshJumpSnapshotIdentity(snapshot tunnelConfigSnapshot, target *sshTarget, u
 		if !includeTrust {
 			pin = ""
 		}
-		for _, value := range []string{target.host, strconv.Itoa(target.port), target.username, pin, target.credentialID, target.password, string(target.privateKey), target.keyPassphrase, upstream} {
+		for _, value := range []string{target.host, strconv.Itoa(target.port), target.username, pin, target.credentialID, target.password, string(target.privateKey), string(target.certificate), target.keyPassphrase, upstream} {
 			write(value)
 		}
 	}
@@ -226,6 +228,7 @@ func prepareSSHJump(ctx context.Context, snapshot tunnelConfigSnapshot) (json.Ra
 		return nil, nil, "", err
 	}
 	defer clearBytes(target.privateKey)
+	defer clearBytes(target.certificate)
 	sourceTarget := target
 	var upstream *tunnelRuntime
 	if target.tunnelConfigID != "" {
@@ -262,7 +265,7 @@ func prepareSSHJump(ctx context.Context, snapshot tunnelConfigSnapshot) (json.Ra
 	}
 	if len(target.privateKey) > 0 {
 		passphrase := []byte(target.keyPassphrase)
-		_, parseErr := sshauth.ParseSigner(target.privateKey, passphrase, nil)
+		_, parseErr := sshauth.ParseSigner(target.privateKey, passphrase, target.certificate)
 		clearBytes(passphrase)
 		var missing *ssh.PassphraseMissingError
 		if errors.As(parseErr, &missing) {
@@ -271,7 +274,7 @@ func prepareSSHJump(ctx context.Context, snapshot tunnelConfigSnapshot) (json.Ra
 				return nil, nil, "", err
 			}
 			passphrase = []byte(target.keyPassphrase)
-			_, parseErr = sshauth.ParseSigner(target.privateKey, passphrase, nil)
+			_, parseErr = sshauth.ParseSigner(target.privateKey, passphrase, target.certificate)
 			clearBytes(passphrase)
 		}
 		if parseErr != nil {
@@ -300,7 +303,7 @@ func prepareSSHJump(ctx context.Context, snapshot tunnelConfigSnapshot) (json.Ra
 	if keepalive == 0 {
 		keepalive = 30
 	}
-	payload, err := json.Marshal(map[string]any{"host": target.host, "port": target.port, "username": target.username, "password": target.password, "private_key": string(target.privateKey), "key_passphrase": target.keyPassphrase, "host_key_sha256": pin, "keepalive_s": keepalive, "upstream_socks": upstream.socksEndpoint()})
+	payload, err := json.Marshal(map[string]any{"host": target.host, "port": target.port, "username": target.username, "password": target.password, "private_key": string(target.privateKey), "certificate": string(target.certificate), "key_passphrase": target.keyPassphrase, "host_key_sha256": pin, "keepalive_s": keepalive, "upstream_socks": upstream.socksEndpoint()})
 	succeeded = err == nil
 	return payload, upstream, identity, err
 }
@@ -315,7 +318,7 @@ func verifySSHJumpTargetCurrent(snapshot tunnelConfigSnapshot, expected sshTarge
 
 func currentSSHJumpSnapshot(snapshot tunnelConfigSnapshot, expected sshTarget) (tunnelConfigSnapshot, error) {
 	latest, err := loadTunnelSnapshot(snapshot.databasePath, snapshot.id)
-	if err != nil || latest.updatedAt != snapshot.updatedAt || latest.kind != 7 {
+	if err != nil || latest.updatedAt != snapshot.updatedAt || latest.kind != 8 {
 		return tunnelConfigSnapshot{}, errors.New("SSH tunnel changed while authentication was in progress")
 	}
 	latest, err = loadTunnelSnapshotSettings(latest)
@@ -324,7 +327,8 @@ func currentSSHJumpSnapshot(snapshot tunnelConfigSnapshot, expected sshTarget) (
 	}
 	current, err := resolveSSHJumpTarget(latest)
 	defer clearBytes(current.privateKey)
-	if err != nil || current.host != expected.host || current.port != expected.port || current.username != expected.username || current.credentialID != expected.credentialID || current.password != expected.password || !bytes.Equal(current.privateKey, expected.privateKey) || current.keyPassphrase != expected.keyPassphrase || current.tunnelConfigID != expected.tunnelConfigID || current.knownHostFingerprint != expected.knownHostFingerprint {
+	defer clearBytes(current.certificate)
+	if err != nil || current.host != expected.host || current.port != expected.port || current.username != expected.username || current.credentialID != expected.credentialID || current.password != expected.password || !bytes.Equal(current.privateKey, expected.privateKey) || !bytes.Equal(current.certificate, expected.certificate) || current.keyPassphrase != expected.keyPassphrase || current.tunnelConfigID != expected.tunnelConfigID || current.knownHostFingerprint != expected.knownHostFingerprint {
 		clearBytes(latest.settings)
 		return tunnelConfigSnapshot{}, errors.New("SSH jump connection, credential or host key changed while authentication was in progress")
 	}

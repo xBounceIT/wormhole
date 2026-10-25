@@ -1,6 +1,8 @@
 import { sshTerminal, retainSshTerminals } from './xterm-terminal';
 import {
   lazy,
+  createContext,
+  useContext,
   memo,
   startTransition,
   Suspense,
@@ -40,6 +42,7 @@ import { backupExportPasswordIsValid, backupExportRequiresEncryption } from './b
 import bitwardenIcon from '../Assets/Bitwarden/bitwarden-icon.png';
 import {
   buildConnectionCredentialSelectionOptions,
+  sshCertificateExpiry,
   connectionEditorCredentialSelectionIsComplete,
   connectionCredentialSelectionAfterSavedToggle,
   connectionInlinePasswordAction,
@@ -280,9 +283,13 @@ import {
 } from './tree-shortcuts';
 import {
   connectionProtocolSupportsTunnel,
+  connectionTypeForProtocol,
+  connectionProtocolForType,
+  connectionProtocolForAddress,
   quickConnectStartsImmediately,
   quickConnectTunnelId,
   type QuickConnectProtocol,
+  type ConnectionType,
 } from './quick-connect-state';
 import {
   connectionEditCanRestartSession,
@@ -294,6 +301,7 @@ import {
   isSshHostKeyMismatchError,
   requiresRdpCredentialPrompt,
   requiresSshKeyPassphrasePrompt,
+  requiresSshCertificateReplacement,
   sshCredentialPromptTarget,
 } from './runtime-credential-errors';
 import { RdpSurface } from './components/RdpSurface';
@@ -341,7 +349,11 @@ import {
   shouldRenderConnectionTreeChildren,
   updateConnectionTreeSearchExpansion,
 } from './connection-tree-state';
-import { connectionAddressForProtocolChange, savedConnectionAddressForEditor } from './web-address';
+import {
+  browserHomePageForEditor,
+  connectionAddressForProtocolChange,
+  savedConnectionAddressForEditor,
+} from './web-address';
 import {
   appendTunnelTestLog,
   isTunnelTestCancellation,
@@ -718,6 +730,7 @@ type Session = {
   webCanGoBack?: boolean;
   webCanGoForward?: boolean;
   webIsLoading?: boolean;
+  webBrowser?: WormholeWebBrowserState;
   bitwardenPopupUrl?: string;
 };
 
@@ -761,6 +774,9 @@ type CredentialRecord = {
   bitwardenItemId?: string;
   bitwardenItemName?: string;
   privateKeyFileName?: string;
+  hasCertificate?: boolean;
+  certificateFileName?: string;
+  certificate?: WormholeWorkspaceCredential['certificate'];
   isVirtualBitwarden?: boolean;
 };
 
@@ -873,6 +889,9 @@ type CredentialDraft = {
   clearPassphrase: boolean;
   privateKeySelectionId: string;
   privateKeyFileName: string;
+  certificateSelectionId: string;
+  certificateFileName: string;
+  clearCertificate: boolean;
   provider: 'Local' | 'Bitwarden';
   bitwardenItemId: string;
   bitwardenItemName: string;
@@ -893,11 +912,32 @@ function emptyCredentialDraft(): CredentialDraft {
     clearPassphrase: false,
     privateKeySelectionId: '',
     privateKeyFileName: '',
+    certificateSelectionId: '',
+    certificateFileName: '',
+    clearCertificate: false,
     provider: 'Local',
     bitwardenItemId: '',
     bitwardenItemName: '',
   };
 }
+
+function credentialDraftFor(credential: CredentialRecord): CredentialDraft {
+  return {
+    ...emptyCredentialDraft(),
+    name: credential.name,
+    protocol: credential.protocol as CredentialProtocol,
+    kind: credential.kind === 'sshKey' ? 'sshKey' : 'password',
+    username: credential.username === 'No username' ? '' : credential.username,
+    domain: credential.domain ?? '',
+    privateKeyFileName: credential.privateKeyFileName ?? '',
+    certificateFileName: credential.certificateFileName ?? '',
+    provider: credential.provider,
+    bitwardenItemId: credential.bitwardenItemId ?? '',
+    bitwardenItemName: credential.bitwardenItemName ?? '',
+  };
+}
+
+const SshCertificateEditorContext = createContext<((credentialId: string) => void) | null>(null);
 
 function clearSecretInput(input: HTMLInputElement | null): void {
   if (input) input.value = '';
@@ -949,7 +989,7 @@ function formatBitwardenExtensionStatus(state: WormholeBitwardenExtensionState):
         ? 'manual folder, pinned'
         : 'official release, auto-update enabled';
   const parts = [
-    `Installed ${state.installed.version} (${sourceLabel}). HTTPS tabs will load the Bitwarden extension.`,
+    `Installed ${state.installed.version} (${sourceLabel}). Browser connections with HTTPS home pages will load the Bitwarden extension.`,
   ];
   if (state.lastUpdateCheckUtc) {
     parts.push(`Last update check: ${formatLocalDateTime(state.lastUpdateCheckUtc)}.`);
@@ -1050,8 +1090,8 @@ function protocolLabel(protocol: Protocol) {
   return {
     ssh: 'SSH',
     rdp: 'RDP',
-    http: 'HTTP',
-    https: 'HTTPS',
+    http: 'Browser',
+    https: 'Browser',
     vnc: 'VNC',
     serial: 'Serial',
   }[protocol];
@@ -1922,6 +1962,15 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   const [editorError, setEditorError] = useState('');
   const [editorBusy, setEditorBusy] = useState(false);
   const [credentialDialog, setCredentialDialog] = useState<CredentialDialogState | null>(null);
+  const [sshKeyEditor, setSshKeyEditor] = useState<{
+    credential?: CredentialRecord;
+    username?: string;
+    fromConnection?: boolean;
+  } | null>(null);
+  const sshKeyEditorRef = useRef(sshKeyEditor);
+  useLayoutEffect(() => {
+    sshKeyEditorRef.current = authGate === 'unlocked' ? sshKeyEditor : null;
+  }, [authGate, sshKeyEditor]);
   const [copiedCredentialField, setCopiedCredentialField] = useState<CredentialCopyField | null>(
     null,
   );
@@ -2810,6 +2859,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                       received: event.hostKeyReceived,
                     }
                   : undefined,
+              credentialId: event.credentialId ?? session.credentialId,
               error: event.error,
             };
           }
@@ -2923,7 +2973,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         !event.promptId ||
         !event.title ||
         typeof event.message !== 'string' ||
-        typeof event.secret !== 'boolean' ||
+        (event.secret !== undefined && typeof event.secret !== 'boolean') ||
         (event.confirmation !== undefined && typeof event.confirmation !== 'boolean') ||
         (event.acceptLabel !== undefined && typeof event.acceptLabel !== 'string')
       ) {
@@ -2935,7 +2985,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         promptId: event.promptId,
         title: event.title,
         message: event.message,
-        secret: event.secret,
+        secret: event.secret === true,
         confirmation: event.confirmation === true,
         acceptLabel: event.acceptLabel,
       };
@@ -3036,6 +3086,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     newFolderGeneration.current += 1;
     setEditorError('');
     setCredentialDialog(null);
+    setSshKeyEditor(null);
     setCopiedCredentialField(null);
     setPendingDeleteNodes([]);
     setDeleteNodeError('');
@@ -3102,6 +3153,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
               webUrl: event.url || session.webUrl,
               webCanGoBack: event.canGoBack,
               webCanGoForward: event.canGoForward,
+              webBrowser: event.browser,
             };
           }
           return {
@@ -3113,6 +3165,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
             webUrl: event.url || session.webUrl,
             webCanGoBack: event.canGoBack,
             webCanGoForward: event.canGoForward,
+            webBrowser: event.browser,
           };
         }),
       );
@@ -3608,6 +3661,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                     ? {
                         ...candidate,
                         webUrl: target.url,
+                        webBrowser: candidate.webBrowser ?? target.browser,
                         webIgnoreCertErrors: target.ignoreCertErrors,
                         bitwardenPopupUrl: target.bitwarden?.popupUrl,
                       }
@@ -4394,6 +4448,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         webCanGoBack: false,
         webCanGoForward: false,
         webIsLoading: false,
+        webBrowser: undefined,
       };
       setSessions((current) => current.map((session) => (session.id === id ? restarted : session)));
       const closing = closeWebSession(source.id);
@@ -4535,6 +4590,8 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       rdpExternal: source.protocol === 'rdp' ? false : source.rdpExternal,
       rdpError: undefined,
       vncConnectionGeneration: source.protocol === 'vnc' ? 0 : source.vncConnectionGeneration,
+      webBrowser: undefined,
+      webUrl: undefined,
       serialSettings: source.serialSettings
         ? { ...source.serialSettings }
         : source.protocol === 'serial'
@@ -4584,6 +4641,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     if (duplicate.protocol === 'rdp') {
       setRdpCredentialForm({ username: '', domain: '', password: '' });
       setRdpCredentialPrompt(duplicate.id);
+    }
+    if (duplicate.protocol === 'http' || duplicate.protocol === 'https') {
+      startWebSession(duplicate);
     }
   }
 
@@ -5734,7 +5794,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     const form: typeof newConnectionForm = {
       name: node.name,
       notes: node.notes ?? '',
-      host: savedConnectionAddressForEditor(node.protocol, node.host ?? '', node.httpPath),
+      host: browserHomePageForEditor(node.protocol, node.host ?? '', node.httpPath),
       port: node.port === undefined ? '' : String(node.port),
       username: node.username ?? '',
       inlinePassword: '',
@@ -6577,10 +6637,25 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       passphrase: draft.passphrase,
       clearPassphrase: draft.clearPassphrase,
       privateKeySelectionId: draft.privateKeySelectionId || undefined,
+      certificateSelectionId: draft.certificateSelectionId || undefined,
+      clearCertificate: draft.clearCertificate,
       provider: 'Local',
     })) as CredentialRecord;
     setCredentials((current) => mergeCredential(current, credential));
     setCredentialOptions((current) => mergeCredentialOption(current, credential));
+    if (sshKeyEditor?.fromConnection) {
+      setNewConnectionForm((current) =>
+        sshKeyEditorRef.current === sshKeyEditor
+          ? {
+              ...current,
+              useSavedCredentials: true,
+              credential: credential.id,
+              inlinePassword: '',
+              removeInlinePassword: false,
+            }
+          : current,
+      );
+    }
     void refreshWorkspaceCredentials().catch(() => {
       // The new option is already visible; a later workspace refresh can reconcile vault aliases.
     });
@@ -6634,6 +6709,20 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
 
   return (
     <TooltipProvider delayDuration={300}>
+      {sshKeyEditor && authGate === 'unlocked' ? (
+        <CredentialsPage
+          editorOnly
+          initialEditor={sshKeyEditor}
+          initialCredentials={credentials}
+          isAuthorized={authGate === 'unlocked'}
+          onCreate={createCredential}
+          onUpdate={updateCredential}
+          onDelete={deleteSavedCredential}
+          onEditorClose={() =>
+            setSshKeyEditor((current) => (current === sshKeyEditor ? null : current))
+          }
+        />
+      ) : null}
       {authGate === 'unlocked' && bitwardenUnlockPrompt ? (
         <BitwardenAccessPrompt
           onAuthenticated={resumeBitwardenActions}
@@ -6810,7 +6899,11 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           >
             <DialogHeader>
               <DialogTitle>{tunnelPrompts[0]?.title || 'VPN authentication'}</DialogTitle>
-              <DialogDescription>
+              <DialogDescription
+                className={
+                  tunnelPrompts[0]?.confirmation ? 'whitespace-pre-wrap break-words' : undefined
+                }
+              >
                 {tunnelPrompts[0]?.message || 'Enter the value requested by the VPN gateway.'}
               </DialogDescription>
             </DialogHeader>
@@ -7065,62 +7158,70 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         >
           <SidebarInset className="h-full min-h-0 min-w-0 rounded-none bg-background">
             {activePage === 'sessions' ? (
-              <SessionsPage
-                autoCopyOnSelect={autoCopyOnSelect}
-                bitwardenUnlockPending={bitwardenUnlockPrompt !== null}
-                onBitwardenUnlockRequired={(sessionId, reason, retry) =>
-                  requestRuntimeBitwardenUnlock(`vnc:${sessionId}`, reason, retry)
-                }
-                onCloseSession={closeSession}
-                onConnectRdp={requestRdpCredentials}
-                onDisconnectSession={disconnectRemoteDesktopSession}
-                onDisconnectAiAgent={disconnectSessionAiAgent}
-                onDuplicateSession={duplicateSession}
-                onCloseSftpBrowser={closeSftpBrowser}
-                onOpenFileTransfer={openFileTransfer}
-                onOpenQuickConnect={openQuickConnect}
-                onOpenSystemRdp={openRdpInSystemClient}
-                onReconnectSession={reconnectSession}
-                onRetryRdp={retryRdpSession}
-                onSelectSession={setSelectedSessionId}
-                onSerialInput={sendSerialInput}
-                onSftpLocalNavigate={requestLocalSftpDirectory}
-                onSftpOperation={operateSftp}
-                onSftpTransfer={startSftpTransfer}
-                onSftpConflict={decideSftpConflict}
-                onSftpTransferCancel={cancelSftpTransfer}
-                onSftpTransferErrorClear={clearSftpTransferError}
-                onSftpTransferRemove={removeSftpTransfer}
-                onSftpNavigate={requestSftpDirectory}
-                onSftpRefresh={refreshSftpBrowser}
-                onSshInput={sendSshInput}
-                onTrustSshHostKey={trustSshHostKey}
-                onVncStatusChange={(sessionId, status) =>
-                  setSessions((current) =>
-                    current.map((session) =>
-                      session.id === sessionId ? { ...session, status } : session,
-                    ),
-                  )
-                }
-                isAuthorized={authGate === 'unlocked'}
-                isWebSurfaceVisible={
-                  mcpApprovals.length === 0 &&
-                  !bitwardenAccessPromptOpen &&
-                  !contextMenuOverlayOpen &&
-                  !sidebarOverlayOpen &&
-                  !newConnectionOpen &&
-                  !folderDetailsOpen &&
-                  !newFolderOpen &&
-                  !authPrompt &&
-                  !rdpCredentialPrompt &&
-                  !sshCredentialPrompt &&
-                  !sshKeyPassphrasePrompt &&
-                  !pendingSessionClose &&
-                  !pendingWindowClose
-                }
-                selectedSession={selectedSession}
-                sessions={sessions}
-              />
+              <SshCertificateEditorContext
+                value={(credentialId) => {
+                  const credential = credentials.find((candidate) => candidate.id === credentialId);
+                  if (credential?.canEdit) setSshKeyEditor({ credential });
+                }}
+              >
+                <SessionsPage
+                  autoCopyOnSelect={autoCopyOnSelect}
+                  bitwardenUnlockPending={bitwardenUnlockPrompt !== null}
+                  onBitwardenUnlockRequired={(sessionId, reason, retry) =>
+                    requestRuntimeBitwardenUnlock(`vnc:${sessionId}`, reason, retry)
+                  }
+                  onCloseSession={closeSession}
+                  onConnectRdp={requestRdpCredentials}
+                  onDisconnectSession={disconnectRemoteDesktopSession}
+                  onDisconnectAiAgent={disconnectSessionAiAgent}
+                  onDuplicateSession={duplicateSession}
+                  onCloseSftpBrowser={closeSftpBrowser}
+                  onOpenFileTransfer={openFileTransfer}
+                  onOpenQuickConnect={openQuickConnect}
+                  onOpenSystemRdp={openRdpInSystemClient}
+                  onReconnectSession={reconnectSession}
+                  onRetryRdp={retryRdpSession}
+                  onSelectSession={setSelectedSessionId}
+                  onSerialInput={sendSerialInput}
+                  onSftpLocalNavigate={requestLocalSftpDirectory}
+                  onSftpOperation={operateSftp}
+                  onSftpTransfer={startSftpTransfer}
+                  onSftpConflict={decideSftpConflict}
+                  onSftpTransferCancel={cancelSftpTransfer}
+                  onSftpTransferErrorClear={clearSftpTransferError}
+                  onSftpTransferRemove={removeSftpTransfer}
+                  onSftpNavigate={requestSftpDirectory}
+                  onSftpRefresh={refreshSftpBrowser}
+                  onSshInput={sendSshInput}
+                  onTrustSshHostKey={trustSshHostKey}
+                  onVncStatusChange={(sessionId, status) =>
+                    setSessions((current) =>
+                      current.map((session) =>
+                        session.id === sessionId ? { ...session, status } : session,
+                      ),
+                    )
+                  }
+                  isAuthorized={authGate === 'unlocked'}
+                  isWebSurfaceVisible={
+                    mcpApprovals.length === 0 &&
+                    !bitwardenAccessPromptOpen &&
+                    !contextMenuOverlayOpen &&
+                    !sidebarOverlayOpen &&
+                    !newConnectionOpen &&
+                    !folderDetailsOpen &&
+                    !newFolderOpen &&
+                    !authPrompt &&
+                    !rdpCredentialPrompt &&
+                    !sshCredentialPrompt &&
+                    !sshKeyPassphrasePrompt &&
+                    !sshKeyEditor &&
+                    !pendingSessionClose &&
+                    !pendingWindowClose
+                  }
+                  selectedSession={selectedSession}
+                  sessions={sessions}
+                />
+              </SshCertificateEditorContext>
             ) : activePage === 'settings' ? (
               <SettingsPage
                 autoCopyOnSelect={autoCopyOnSelect}
@@ -7402,7 +7503,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
               <Tabs
                 className="flex min-h-0 flex-1 flex-col gap-0 overflow-hidden"
                 defaultValue="general"
-                key={newConnectionForm.protocol}
+                key={connectionTypeForProtocol(newConnectionForm.protocol)}
               >
                 <TabsList
                   className="h-9 w-full shrink-0 justify-start gap-1 overflow-x-auto overflow-y-hidden rounded-none border-b border-border p-0"
@@ -7502,36 +7603,42 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                       )}
                     >
                       <div className="grid gap-2">
-                        <Label htmlFor="connection-protocol">Protocol</Label>
+                        <Label htmlFor="connection-protocol">Connection type</Label>
                         <Select
-                          onValueChange={(protocol: Protocol) =>
-                            setNewConnectionForm((form) => ({
-                              ...form,
-                              protocol,
-                              host: connectionAddressForProtocolChange(
+                          onValueChange={(type: ConnectionType) =>
+                            setNewConnectionForm((form) => {
+                              const protocol = connectionProtocolForType(
+                                type,
                                 form.protocol,
-                                protocol,
                                 form.host,
-                              ),
-                              port: protocol === form.protocol ? form.port : '',
-                              credential:
-                                protocol === form.protocol
-                                  ? form.credential
-                                  : connectionEditorMode === 'quick'
-                                    ? 'none'
-                                    : 'inherit',
-                            }))
+                              );
+                              return {
+                                ...form,
+                                protocol,
+                                host: connectionAddressForProtocolChange(
+                                  form.protocol,
+                                  protocol,
+                                  form.host,
+                                ),
+                                port: protocol === form.protocol ? form.port : '',
+                                credential:
+                                  protocol === form.protocol
+                                    ? form.credential
+                                    : connectionEditorMode === 'quick'
+                                      ? 'none'
+                                      : 'inherit',
+                              };
+                            })
                           }
-                          value={newConnectionForm.protocol}
+                          value={connectionTypeForProtocol(newConnectionForm.protocol)}
                         >
                           <SelectTrigger id="connection-protocol" className="w-full">
-                            <SelectValue placeholder="Select protocol" />
+                            <SelectValue placeholder="Select connection type" />
                           </SelectTrigger>
                           <SelectContent>
                             <SelectItem value="ssh">SSH</SelectItem>
                             <SelectItem value="rdp">RDP</SelectItem>
-                            <SelectItem value="http">HTTP</SelectItem>
-                            <SelectItem value="https">HTTPS</SelectItem>
+                            <SelectItem value="browser">Browser</SelectItem>
                             <SelectItem value="vnc">VNC</SelectItem>
                             <SelectItem value="serial">Serial</SelectItem>
                           </SelectContent>
@@ -7541,7 +7648,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                         <Label htmlFor="connection-host">
                           {newConnectionForm.protocol === 'serial'
                             ? 'Serial line'
-                            : 'Host or address'}
+                            : connectionTypeForProtocol(newConnectionForm.protocol) === 'browser'
+                              ? 'Home page'
+                              : 'Host or address'}
                         </Label>
                         <Input
                           id="connection-host"
@@ -7549,12 +7658,18 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                             setNewConnectionForm((form) => ({
                               ...form,
                               host: event.target.value,
+                              protocol: connectionProtocolForAddress(
+                                form.protocol,
+                                event.target.value,
+                              ),
                             }))
                           }
                           placeholder={
                             newConnectionForm.protocol === 'serial'
                               ? 'COM1'
-                              : 'hostname or IP address'
+                              : connectionTypeForProtocol(newConnectionForm.protocol) === 'browser'
+                                ? 'https://example.com'
+                                : 'hostname or IP address'
                           }
                           required
                           value={newConnectionForm.host}
@@ -7720,6 +7835,22 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                           />
                         </div>
                       </div>
+                    ) : null}
+
+                    {newConnectionForm.protocol === 'ssh' ? (
+                      <Button
+                        className="justify-start px-0 text-xs"
+                        onClick={() =>
+                          setSshKeyEditor({
+                            username: newConnectionForm.username,
+                            fromConnection: true,
+                          })
+                        }
+                        type="button"
+                        variant="link"
+                      >
+                        Use an SSH key or certificate…
+                      </Button>
                     ) : null}
 
                     {canConfigureConnectionSshAutoSudo ? (
@@ -9135,6 +9266,7 @@ function SshTerminalConnectionState({
   onReconnect: (sessionId: string) => void;
   onTrustHostKey?: (sessionId: string, mismatch: NonNullable<Session['hostKeyMismatch']>) => void;
 }) {
+  const replaceCertificate = useContext(SshCertificateEditorContext);
   const isConnecting = session.status === 'connecting';
   const isFailed = session.status === 'failed';
   const hostKeyMismatch = !isSerial && isFailed ? session.hostKeyMismatch : undefined;
@@ -9185,6 +9317,20 @@ function SshTerminalConnectionState({
       </p>
       <h3 className="mt-2 text-sm font-semibold text-zinc-100">{title}</h3>
       <p className="mt-2 max-w-xl break-words text-sm leading-relaxed text-zinc-400">{message}</p>
+      {!isSerial &&
+      isFailed &&
+      session.credentialId &&
+      requiresSshCertificateReplacement(session.error) &&
+      replaceCertificate ? (
+        <Button
+          className="mt-4"
+          onClick={() => replaceCertificate(session.credentialId!)}
+          size="sm"
+          variant="secondary"
+        >
+          Replace certificate…
+        </Button>
+      ) : null}
       <p className="mt-3 max-w-xl truncate font-mono text-[10px] text-zinc-600">
         {session.host || 'inherited target'}
       </p>
@@ -11093,7 +11239,6 @@ function SessionsPage({
               bitwardenUnlockPending={bitwardenUnlockPending}
               isActive={active}
               isAuthorized={isAuthorized}
-              isWebSurfaceVisible={isWebSurfaceVisible}
               nativeSurfaceActive={
                 active && isWebSurfaceVisible && !activeDraggedSessionId && !resizingSplitId
               }
@@ -11320,7 +11465,6 @@ function SessionSurface({
   bitwardenUnlockPending,
   isActive,
   isAuthorized,
-  isWebSurfaceVisible,
   nativeSurfaceActive,
   onBitwardenUnlockRequired,
   onCloseSftpBrowser,
@@ -11348,7 +11492,6 @@ function SessionSurface({
   bitwardenUnlockPending: boolean;
   isActive: boolean;
   isAuthorized: boolean;
-  isWebSurfaceVisible: boolean;
   nativeSurfaceActive: boolean;
   session: Session;
   onBitwardenUnlockRequired: (sessionId: string, reason: string, retry: () => void) => void;
@@ -11511,8 +11654,9 @@ function SessionSurface({
       <Suspense fallback={<SessionSurfaceFallback protocol={session.protocol} />}>
         <WebSurface
           bitwardenOpen={bitwardenOpen}
-          isActive={nativeSurfaceActive}
-          isAuthorized={isAuthorized && isWebSurfaceVisible}
+          isActive={isActive}
+          isAuthorized={isAuthorized}
+          isOccluded={!nativeSurfaceActive}
           onReconnect={onReconnectSession}
           session={session}
         />
@@ -11539,30 +11683,52 @@ function discardPrivateKeySelection(selectionId: string) {
   void window.wormhole?.discardSshPrivateKeySelection({ selectionId }).catch(() => undefined);
 }
 
+function discardCertificateSelection(selectionId: string) {
+  if (!selectionId) return;
+  void window.wormhole?.discardSshCertificateSelection({ selectionId }).catch(() => undefined);
+}
+
 // Credential editing and Bitwarden lookup deliberately share one authorization boundary so every
 // close, lock, and failed lookup scrubs the same renderer-held secret state.
 // react-doctor-disable-next-line react-doctor/no-giant-component, react-doctor/prefer-useReducer
-function CredentialsPage({
+export function CredentialsPage({
   initialCredentials,
   isAuthorized,
   onCreate,
   onUpdate,
   onDelete,
+  initialEditor,
+  editorOnly = false,
+  onEditorClose,
 }: {
   initialCredentials: CredentialRecord[];
   isAuthorized: boolean;
   onCreate: (draft: CredentialWriteRequest) => Promise<void>;
   onUpdate: (id: string, draft: CredentialWriteRequest) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
+  initialEditor?: { credential?: CredentialRecord; username?: string };
+  editorOnly?: boolean;
+  onEditorClose?: () => void;
   // react-doctor-disable-next-line react-doctor/prefer-useReducer
 }) {
   const [searchText, setSearchText] = useState('');
   const [credentialSourceFilter, setCredentialSourceFilter] =
     useState<CredentialSourceFilter>('all');
   const [selectedCredentials, setSelectedCredentials] = useState<Set<string>>(() => new Set());
-  const [editorOpen, setEditorOpen] = useState(false);
-  const [editingCredential, setEditingCredential] = useState<CredentialRecord | null>(null);
-  const [credentialForm, setCredentialForm] = useState<CredentialDraft>(emptyCredentialDraft);
+  const [editorOpen, setEditorOpen] = useState(editorOnly);
+  const [editingCredential, setEditingCredential] = useState<CredentialRecord | null>(
+    initialEditor?.credential ?? null,
+  );
+  const [credentialForm, setCredentialForm] = useState<CredentialDraft>(() =>
+    initialEditor?.credential
+      ? credentialDraftFor(initialEditor.credential)
+      : {
+          ...emptyCredentialDraft(),
+          ...(editorOnly
+            ? { kind: 'sshKey' as const, username: initialEditor?.username ?? '' }
+            : {}),
+        },
+  );
   const [pendingDeletion, setPendingDeletion] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [operationError, setOperationError] = useState('');
@@ -11575,13 +11741,22 @@ function CredentialsPage({
   const [privateKeySelectionRetryRequired, setPrivateKeySelectionRetryRequired] = useState(false);
   const [privateKeyPassphraseRetryRequired, setPrivateKeyPassphraseRetryRequired] = useState(false);
   const credentialKeyPassphraseInput = useRef<HTMLInputElement>(null);
+  const credentialEditorGeneration = useRef(0);
   const bitwardenSearchAttempts = useLazyRef(() => new WebSessionAttemptTracker());
+
+  useEffect(
+    () => () => {
+      credentialEditorGeneration.current++;
+    },
+    [],
+  );
 
   // App lock is an external security boundary. Scrub every renderer-held secret without
   // remounting this page, because a remount would orphan credential mutations already in flight.
   // react-doctor-disable-next-line react-hooks-js/set-state-in-effect, react-doctor/no-adjust-state-on-prop-change
   useEffect(() => {
     if (isAuthorized) return;
+    credentialEditorGeneration.current++;
     clearSecretInput(credentialKeyPassphraseInput.current);
     setEditorOpen(false); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
     setEditingCredential(null); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
@@ -11663,21 +11838,7 @@ function CredentialsPage({
     clearSecretInput(credentialKeyPassphraseInput.current);
     const protocol = credential.protocol as CredentialDraft['protocol'];
     setEditingCredential(credential);
-    setCredentialForm({
-      name: credential.name,
-      protocol,
-      kind: credential.kind === 'sshKey' ? 'sshKey' : 'password',
-      username: credential.username === 'No username' ? '' : credential.username,
-      domain: credential.domain ?? '',
-      // The renderer never reads saved secrets. Leaving this blank preserves a local secret.
-      password: '',
-      clearPassphrase: false,
-      privateKeySelectionId: '',
-      privateKeyFileName: credential.privateKeyFileName ?? '',
-      provider: credential.provider,
-      bitwardenItemId: credential.bitwardenItemId ?? '',
-      bitwardenItemName: credential.bitwardenItemName ?? '',
-    });
+    setCredentialForm({ ...credentialDraftFor(credential), protocol });
     setPrivateKeySelectionRetryRequired(false);
     setPrivateKeyPassphraseRetryRequired(false);
     setOperationError('');
@@ -11686,37 +11847,87 @@ function CredentialsPage({
   }
 
   function closeCredentialEditor() {
+    credentialEditorGeneration.current++;
     clearSecretInput(credentialKeyPassphraseInput.current);
     discardPrivateKeySelection(credentialForm.privateKeySelectionId);
+    discardCertificateSelection(credentialForm.certificateSelectionId);
     setEditorOpen(false);
+    setPrivateKeySelecting(false);
     setEditingCredential(null);
     setCredentialForm(emptyCredentialDraft());
     setPrivateKeySelectionRetryRequired(false);
     setPrivateKeyPassphraseRetryRequired(false);
     setOperationError('');
     resetBitwardenSearch();
+    onEditorClose?.();
   }
 
   async function selectPrivateKey() {
     if (privateKeySelecting || !window.wormhole) return;
+    const generation = credentialEditorGeneration.current;
     setPrivateKeySelecting(true);
     setOperationError('');
     try {
       const selected = await window.wormhole.selectSshPrivateKey();
       if (!selected) return;
+      if (generation !== credentialEditorGeneration.current) {
+        discardPrivateKeySelection(selected.selectionId);
+        if (selected.suggestedCertificate)
+          discardCertificateSelection(selected.suggestedCertificate.selectionId);
+        return;
+      }
       clearSecretInput(credentialKeyPassphraseInput.current);
       discardPrivateKeySelection(credentialForm.privateKeySelectionId);
+      if (selected.suggestedCertificate)
+        discardCertificateSelection(credentialForm.certificateSelectionId);
       setCredentialForm((form) => ({
         ...form,
         clearPassphrase: false,
         privateKeySelectionId: selected.selectionId,
         privateKeyFileName: selected.fileName,
+        ...(selected.suggestedCertificate
+          ? {
+              certificateSelectionId: selected.suggestedCertificate.selectionId,
+              certificateFileName: selected.suggestedCertificate.fileName,
+              clearCertificate: false,
+            }
+          : {}),
       }));
       setPrivateKeySelectionRetryRequired(false);
     } catch (error) {
+      if (generation !== credentialEditorGeneration.current) return;
       setOperationError(error instanceof Error ? error.message : 'Could not select the SSH key.');
     } finally {
-      setPrivateKeySelecting(false);
+      if (generation === credentialEditorGeneration.current) setPrivateKeySelecting(false);
+    }
+  }
+
+  async function selectCertificate() {
+    if (privateKeySelecting || !window.wormhole) return;
+    const generation = credentialEditorGeneration.current;
+    setPrivateKeySelecting(true);
+    setOperationError('');
+    try {
+      const selected = await window.wormhole.selectSshCertificate();
+      if (!selected) return;
+      if (generation !== credentialEditorGeneration.current) {
+        discardCertificateSelection(selected.selectionId);
+        return;
+      }
+      discardCertificateSelection(credentialForm.certificateSelectionId);
+      setCredentialForm((form) => ({
+        ...form,
+        certificateSelectionId: selected.selectionId,
+        certificateFileName: selected.fileName,
+        clearCertificate: false,
+      }));
+    } catch (error) {
+      if (generation !== credentialEditorGeneration.current) return;
+      setOperationError(
+        error instanceof Error ? error.message : 'Could not select the SSH certificate.',
+      );
+    } finally {
+      if (generation === credentialEditorGeneration.current) setPrivateKeySelecting(false);
     }
   }
 
@@ -11795,6 +12006,11 @@ function CredentialsPage({
       privateKeySelectionId:
         credentialForm.kind === 'sshKey' ? credentialForm.privateKeySelectionId : '',
       privateKeyFileName: credentialForm.kind === 'sshKey' ? credentialForm.privateKeyFileName : '',
+      certificateSelectionId:
+        credentialForm.kind === 'sshKey' ? credentialForm.certificateSelectionId : '',
+      certificateFileName:
+        credentialForm.kind === 'sshKey' ? credentialForm.certificateFileName : '',
+      clearCertificate: credentialForm.kind === 'sshKey' && credentialForm.clearCertificate,
       provider: credentialForm.kind === 'sshKey' ? 'Local' : credentialForm.provider,
       bitwardenItemId:
         credentialForm.kind === 'password' && credentialForm.provider === 'Bitwarden'
@@ -11847,14 +12063,16 @@ function CredentialsPage({
     };
     setBusy(true);
     setOperationError('');
+    const generation = credentialEditorGeneration.current;
     try {
       if (editingCredential) {
         await onUpdate(editingCredential.id, request);
       } else {
         await onCreate(request);
       }
-      closeCredentialEditor();
+      if (generation === credentialEditorGeneration.current) closeCredentialEditor();
     } catch (error) {
+      if (generation !== credentialEditorGeneration.current) return;
       const message = error instanceof Error ? error.message : 'Could not save the credential.';
       const failedSelectionId = request.kind === 'sshKey' ? request.privateKeySelectionId : '';
       const selectionMustBeRepeated = failedSelectionId.length > 0;
@@ -11926,189 +12144,197 @@ function CredentialsPage({
           onClose={() => setBitwardenAccessRequested(false)}
         />
       ) : null}
-      <section className="flex h-full min-h-0 flex-col overflow-hidden px-6 py-5">
-        <h2 className="shrink-0 text-xl font-semibold tracking-tight">Credentials</h2>
+      {!editorOnly ? (
+        <section className="flex h-full min-h-0 flex-col overflow-hidden px-6 py-5">
+          <h2 className="shrink-0 text-xl font-semibold tracking-tight">Credentials</h2>
 
-        <div className="mt-4 flex shrink-0 flex-wrap items-center gap-2">
-          <Input
-            aria-label="Search credentials"
-            className="!text-xs min-w-60 max-w-xl flex-1"
-            onChange={(event) => setSearchText(event.target.value)}
-            placeholder="Search credentials"
-            value={searchText}
-          />
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button
-                aria-label={`Filter credentials by source: ${credentialSourceFilterLabel}`}
-                className="!text-xs"
-                size="default"
-                variant={credentialSourceFilter === 'all' ? 'outline' : 'secondary'}
-              >
-                <ListFilter data-icon="inline-start" />
-                {credentialSourceFilterLabel}
-                <ChevronDown data-icon="inline-end" />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              <DropdownMenuRadioGroup
-                onValueChange={(value) =>
-                  setCredentialSourceFilter(value as CredentialSourceFilter)
-                }
-                value={credentialSourceFilter}
-              >
-                {credentialSourceFilterOptions.map((option) => (
-                  <DropdownMenuRadioItem key={option.value} value={option.value}>
-                    {option.label}
-                  </DropdownMenuRadioItem>
-                ))}
-              </DropdownMenuRadioGroup>
-            </DropdownMenuContent>
-          </DropdownMenu>
-          <Button
-            className="!text-xs"
-            disabled={credentialSearchResultsPending}
-            onClick={() =>
-              setSelectedCredentials((current) =>
-                credentialSelectionAfterSelectAll(filteredCredentials, current),
-              )
-            }
-            size="default"
-            variant="outline"
-          >
-            <Check data-icon="inline-start" />
-            Select all
-          </Button>
-          <Button className="!text-xs" onClick={openNewCredential} size="default">
-            <Plus data-icon="inline-start" />
-            Add credential
-          </Button>
-        </div>
-
-        {validSelectedCredentials.size > 0 ? (
-          <div className="mt-3 flex shrink-0 flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-muted/30 px-3 py-2">
-            <div className="flex items-center gap-2 text-xs text-foreground/80">
-              <Check className="size-3.5" />
-              <span>{validSelectedCredentials.size} credential(s) selected</span>
-            </div>
-            <div className="flex gap-2">
-              <Button
-                className="!text-xs"
-                onClick={() => setSelectedCredentials(new Set())}
-                size="default"
-                variant="ghost"
-              >
-                Clear
-              </Button>
-              <Button
-                className="!text-xs"
-                disabled={deletableSelectedCredentials.length === 0}
-                onClick={() => setPendingDeletion(deletableSelectedCredentials)}
-                size="default"
-                variant="destructive"
-              >
-                <X data-icon="inline-start" />
-                Delete selected
-              </Button>
-            </div>
+          <div className="mt-4 flex shrink-0 flex-wrap items-center gap-2">
+            <Input
+              aria-label="Search credentials"
+              className="!text-xs min-w-60 max-w-xl flex-1"
+              onChange={(event) => setSearchText(event.target.value)}
+              placeholder="Search credentials"
+              value={searchText}
+            />
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  aria-label={`Filter credentials by source: ${credentialSourceFilterLabel}`}
+                  className="!text-xs"
+                  size="default"
+                  variant={credentialSourceFilter === 'all' ? 'outline' : 'secondary'}
+                >
+                  <ListFilter data-icon="inline-start" />
+                  {credentialSourceFilterLabel}
+                  <ChevronDown data-icon="inline-end" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuRadioGroup
+                  onValueChange={(value) =>
+                    setCredentialSourceFilter(value as CredentialSourceFilter)
+                  }
+                  value={credentialSourceFilter}
+                >
+                  {credentialSourceFilterOptions.map((option) => (
+                    <DropdownMenuRadioItem key={option.value} value={option.value}>
+                      {option.label}
+                    </DropdownMenuRadioItem>
+                  ))}
+                </DropdownMenuRadioGroup>
+              </DropdownMenuContent>
+            </DropdownMenu>
+            <Button
+              className="!text-xs"
+              disabled={credentialSearchResultsPending}
+              onClick={() =>
+                setSelectedCredentials((current) =>
+                  credentialSelectionAfterSelectAll(filteredCredentials, current),
+                )
+              }
+              size="default"
+              variant="outline"
+            >
+              <Check data-icon="inline-start" />
+              Select all
+            </Button>
+            <Button className="!text-xs" onClick={openNewCredential} size="default">
+              <Plus data-icon="inline-start" />
+              Add credential
+            </Button>
           </div>
-        ) : null}
 
-        {operationError ? <p className="mt-3 text-xs text-destructive">{operationError}</p> : null}
-
-        <div className="min-h-0 flex-1">
-          {filteredCredentials.length === 0 ? (
-            <div className="flex h-full items-center justify-center px-6 text-center">
-              <div className="max-w-[420px] space-y-3">
-                <KeyRound className="mx-auto size-12 text-muted-foreground/50" />
-                <h3 className="text-sm font-semibold">
-                  {credentialListProjection.emptyState === 'empty'
-                    ? 'No credentials yet'
-                    : 'No credentials match your filters'}
-                </h3>
-                <p className="text-xs leading-relaxed text-muted-foreground">
-                  {credentialListProjection.emptyState === 'empty'
-                    ? 'Add a password or SSH key credential to reuse across your connections.'
-                    : 'Try a different search or credential source.'}
-                </p>
+          {validSelectedCredentials.size > 0 ? (
+            <div className="mt-3 flex shrink-0 flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-muted/30 px-3 py-2">
+              <div className="flex items-center gap-2 text-xs text-foreground/80">
+                <Check className="size-3.5" />
+                <span>{validSelectedCredentials.size} credential(s) selected</span>
+              </div>
+              <div className="flex gap-2">
+                <Button
+                  className="!text-xs"
+                  onClick={() => setSelectedCredentials(new Set())}
+                  size="default"
+                  variant="ghost"
+                >
+                  Clear
+                </Button>
+                <Button
+                  className="!text-xs"
+                  disabled={deletableSelectedCredentials.length === 0}
+                  onClick={() => setPendingDeletion(deletableSelectedCredentials)}
+                  size="default"
+                  variant="destructive"
+                >
+                  <X data-icon="inline-start" />
+                  Delete selected
+                </Button>
               </div>
             </div>
-          ) : (
-            <VirtualCardGrid
-              ariaLabel="Credentials"
-              bottomPadding={20}
-              className="mt-4 h-full"
-              endPadding={8}
-              gap={16}
-              getKey={(credential) => credential.id}
-              items={filteredCredentials}
-              minimumColumnWidth={280}
-              renderItem={(credential) => (
-                <Card className="h-full transition-colors hover:bg-muted/50">
-                  <CardHeader>
-                    <CardTitle className="min-w-0 truncate text-sm">{credential.name}</CardTitle>
-                    <CardAction>
-                      <Badge className="shrink-0" variant="secondary">
-                        {credential.isVirtualBitwarden ? 'ANY' : protocolLabel(credential.protocol)}
-                      </Badge>
-                    </CardAction>
-                    <CardDescription className="flex min-w-0 items-center gap-1.5 text-xs">
-                      <KeyRound className="size-3 shrink-0" />
-                      <span className="truncate">{credential.username}</span>
-                    </CardDescription>
-                  </CardHeader>
-                  <CardContent className="flex-1 space-y-2">
-                    <div className="flex flex-wrap gap-2">
-                      {credential.domain ? (
-                        <Badge variant="outline">Domain · {credential.domain}</Badge>
-                      ) : null}
-                      {credential.kind === 'sshKey' ? (
-                        <Badge variant="outline">SSH key</Badge>
-                      ) : null}
-                      <CredentialProviderIcon
-                        kind={credential.kind}
-                        provider={credential.provider}
-                      />
-                    </div>
-                  </CardContent>
-                  <CardFooter className="justify-between gap-2">
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <Checkbox
-                          aria-label={`Select ${credential.name}`}
-                          checked={validSelectedCredentials.has(credential.id)}
-                          onCheckedChange={(checked) =>
-                            toggleCredential(credential.id, checked === true)
-                          }
+          ) : null}
+
+          {operationError ? (
+            <p className="mt-3 text-xs text-destructive">{operationError}</p>
+          ) : null}
+
+          <div className="min-h-0 flex-1">
+            {filteredCredentials.length === 0 ? (
+              <div className="flex h-full items-center justify-center px-6 text-center">
+                <div className="max-w-[420px] space-y-3">
+                  <KeyRound className="mx-auto size-12 text-muted-foreground/50" />
+                  <h3 className="text-sm font-semibold">
+                    {credentialListProjection.emptyState === 'empty'
+                      ? 'No credentials yet'
+                      : 'No credentials match your filters'}
+                  </h3>
+                  <p className="text-xs leading-relaxed text-muted-foreground">
+                    {credentialListProjection.emptyState === 'empty'
+                      ? 'Add a password or SSH key credential to reuse across your connections.'
+                      : 'Try a different search or credential source.'}
+                  </p>
+                </div>
+              </div>
+            ) : (
+              <VirtualCardGrid
+                ariaLabel="Credentials"
+                bottomPadding={20}
+                className="mt-4 h-full"
+                endPadding={8}
+                gap={16}
+                getKey={(credential) => credential.id}
+                items={filteredCredentials}
+                minimumColumnWidth={280}
+                renderItem={(credential) => (
+                  <Card className="h-full transition-colors hover:bg-muted/50">
+                    <CardHeader>
+                      <CardTitle className="min-w-0 truncate text-sm">{credential.name}</CardTitle>
+                      <CardAction>
+                        <Badge className="shrink-0" variant="secondary">
+                          {credential.isVirtualBitwarden
+                            ? 'ANY'
+                            : protocolLabel(credential.protocol)}
+                        </Badge>
+                      </CardAction>
+                      <CardDescription className="flex min-w-0 items-center gap-1.5 text-xs">
+                        <KeyRound className="size-3 shrink-0" />
+                        <span className="truncate">{credential.username}</span>
+                      </CardDescription>
+                    </CardHeader>
+                    <CardContent className="flex-1 space-y-2">
+                      <div className="flex flex-wrap gap-2">
+                        {credential.domain ? (
+                          <Badge variant="outline">Domain · {credential.domain}</Badge>
+                        ) : null}
+                        {credential.kind === 'sshKey' ? (
+                          <Badge variant="outline">
+                            {credential.hasCertificate ? 'SSH key + certificate' : 'SSH key'}
+                          </Badge>
+                        ) : null}
+                        <CredentialProviderIcon
+                          kind={credential.kind}
+                          provider={credential.provider}
                         />
-                      </TooltipTrigger>
-                      <TooltipContent side="bottom">Select credential</TooltipContent>
-                    </Tooltip>
-                    <div className="flex items-center gap-1">
-                      <IconButton
-                        disabled={!credential.canEdit}
-                        label={`Edit ${credential.name}`}
-                        onClick={() => openEditCredential(credential)}
-                      >
-                        <Pencil />
-                      </IconButton>
-                      <IconButton
-                        disabled={!credential.canDelete}
-                        label={`Delete ${credential.name}`}
-                        onClick={() => setPendingDeletion([credential.id])}
-                      >
-                        <Trash2 />
-                      </IconButton>
-                    </div>
-                  </CardFooter>
-                </Card>
-              )}
-              resetKey={credentialListProjection.resetKey}
-              rowHeight={176}
-            />
-          )}
-        </div>
-      </section>
+                      </div>
+                    </CardContent>
+                    <CardFooter className="justify-between gap-2">
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Checkbox
+                            aria-label={`Select ${credential.name}`}
+                            checked={validSelectedCredentials.has(credential.id)}
+                            onCheckedChange={(checked) =>
+                              toggleCredential(credential.id, checked === true)
+                            }
+                          />
+                        </TooltipTrigger>
+                        <TooltipContent side="bottom">Select credential</TooltipContent>
+                      </Tooltip>
+                      <div className="flex items-center gap-1">
+                        <IconButton
+                          disabled={!credential.canEdit}
+                          label={`Edit ${credential.name}`}
+                          onClick={() => openEditCredential(credential)}
+                        >
+                          <Pencil />
+                        </IconButton>
+                        <IconButton
+                          disabled={!credential.canDelete}
+                          label={`Delete ${credential.name}`}
+                          onClick={() => setPendingDeletion([credential.id])}
+                        >
+                          <Trash2 />
+                        </IconButton>
+                      </div>
+                    </CardFooter>
+                  </Card>
+                )}
+                resetKey={credentialListProjection.resetKey}
+                rowHeight={176}
+              />
+            )}
+          </div>
+        </section>
+      ) : null}
 
       <Dialog
         onOpenChange={(open) => {
@@ -12119,7 +12345,7 @@ function CredentialsPage({
         }}
         open={editorOpen}
       >
-        <DialogContent className="border-border/70 bg-card text-card-foreground sm:max-w-md">
+        <DialogContent className="max-h-[90vh] overflow-y-auto border-border/70 bg-card text-card-foreground sm:max-w-md">
           <DialogHeader>
             <DialogTitle>{editingCredential ? 'Edit credential' : 'Add credential'}</DialogTitle>
             <DialogDescription>
@@ -12160,6 +12386,7 @@ function CredentialsPage({
                   if (value !== 'ssh') {
                     clearSecretInput(credentialKeyPassphraseInput.current);
                     discardPrivateKeySelection(credentialForm.privateKeySelectionId);
+                    discardCertificateSelection(credentialForm.certificateSelectionId);
                   }
                   setCredentialForm((form) => ({
                     ...form,
@@ -12168,6 +12395,9 @@ function CredentialsPage({
                     clearPassphrase: value === 'ssh' ? form.clearPassphrase : false,
                     privateKeySelectionId: value === 'ssh' ? form.privateKeySelectionId : '',
                     privateKeyFileName: value === 'ssh' ? form.privateKeyFileName : '',
+                    certificateSelectionId: value === 'ssh' ? form.certificateSelectionId : '',
+                    certificateFileName: value === 'ssh' ? form.certificateFileName : '',
+                    clearCertificate: value === 'ssh' && form.clearCertificate,
                   }));
                 }}
                 value={credentialForm.protocol}
@@ -12192,6 +12422,7 @@ function CredentialsPage({
                     if (kind === 'password') {
                       clearSecretInput(credentialKeyPassphraseInput.current);
                       discardPrivateKeySelection(credentialForm.privateKeySelectionId);
+                      discardCertificateSelection(credentialForm.certificateSelectionId);
                     }
                     setCredentialForm((form) => ({
                       ...form,
@@ -12201,6 +12432,10 @@ function CredentialsPage({
                       clearPassphrase: kind === 'password' ? false : form.clearPassphrase,
                       privateKeySelectionId: kind === 'password' ? '' : form.privateKeySelectionId,
                       privateKeyFileName: kind === 'password' ? '' : form.privateKeyFileName,
+                      certificateSelectionId:
+                        kind === 'password' ? '' : form.certificateSelectionId,
+                      certificateFileName: kind === 'password' ? '' : form.certificateFileName,
+                      clearCertificate: kind === 'sshKey' && form.clearCertificate,
                       bitwardenItemId: kind === 'sshKey' ? '' : form.bitwardenItemId,
                       bitwardenItemName: kind === 'sshKey' ? '' : form.bitwardenItemName,
                     }));
@@ -12308,11 +12543,78 @@ function CredentialsPage({
                     </Button>
                   </div>
                   <p className="text-[11px] leading-relaxed text-muted-foreground">
-                    OpenSSH and PEM private keys up to 1 MB are supported.
+                    OpenSSH, PEM and PKCS#8 (including encrypted) private keys up to 1 MB.
+                    Optionally attach an OpenSSH user certificate (*-cert.pub).
                   </p>
                   {privateKeySelectionRetryRequired ? (
                     <p className="text-[11px] leading-relaxed text-destructive">
                       Select the private key again before retrying.
+                    </p>
+                  ) : null}
+                </div>
+                <div className="grid gap-2" role="group" aria-label="SSH certificate">
+                  <Label>Certificate (optional)</Label>
+                  <div className="flex min-w-0 items-center justify-between gap-2 rounded-md border border-input bg-background px-3 py-2">
+                    <span className="min-w-0 truncate text-xs">
+                      {credentialForm.certificateFileName || 'No certificate attached'}
+                    </span>
+                    <Button
+                      aria-label={
+                        credentialForm.certificateFileName
+                          ? 'Replace SSH certificate'
+                          : 'Select SSH certificate'
+                      }
+                      disabled={busy || privateKeySelecting}
+                      onClick={() => void selectCertificate()}
+                      size="sm"
+                      type="button"
+                      variant="outline"
+                    >
+                      {credentialForm.certificateFileName ? 'Replace…' : 'Select…'}
+                    </Button>
+                    {credentialForm.certificateFileName ||
+                    (!credentialForm.clearCertificate && editingCredential?.hasCertificate) ? (
+                      <Button
+                        aria-label="Remove SSH certificate"
+                        disabled={busy || privateKeySelecting}
+                        onClick={() => {
+                          discardCertificateSelection(credentialForm.certificateSelectionId);
+                          setCredentialForm((form) => ({
+                            ...form,
+                            certificateSelectionId: '',
+                            certificateFileName: '',
+                            clearCertificate: Boolean(editingCredential?.hasCertificate),
+                          }));
+                        }}
+                        size="sm"
+                        type="button"
+                        variant="ghost"
+                      >
+                        Remove
+                      </Button>
+                    ) : null}
+                  </div>
+                  {!credentialForm.clearCertificate &&
+                  !credentialForm.certificateSelectionId &&
+                  editingCredential?.certificate ? (
+                    <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
+                      <Badge
+                        variant={
+                          sshCertificateExpiry(editingCredential.certificate.validBefore).expired
+                            ? 'destructive'
+                            : 'outline'
+                        }
+                      >
+                        {sshCertificateExpiry(editingCredential.certificate.validBefore).label}
+                      </Badge>
+                      <span className="break-all">{editingCredential.certificate.keyId}</span>
+                      <span className="break-all">
+                        {editingCredential.certificate.principals.join(', ')}
+                      </span>
+                    </div>
+                  ) : credentialForm.certificateSelectionId ? (
+                    <p className="text-[11px] text-muted-foreground">
+                      Certificate will be validated when saving.
                     </p>
                   ) : null}
                 </div>
@@ -12524,7 +12826,8 @@ const tunnelKinds = [
   { value: 4, label: 'Stormshield' },
   { value: 5, label: 'Azure VPN' },
   { value: 6, label: 'Cisco Secure Client' },
-  { value: 7, label: 'SSH tunnel (jump host)' },
+  { value: 7, label: 'Forcepoint' },
+  { value: 8, label: 'SSH tunnel (jump host)' },
 ] as const;
 
 type TunnelEditorValue = {
@@ -13015,6 +13318,32 @@ function tunnelEditorFields(kind: number): TunnelField[] {
           section: 'Two-factor & advanced',
         },
       ];
+    case 7:
+      return [
+        {
+          key: 'Host',
+          label: 'Host',
+          section: 'Gateway',
+          placeholder: 'vpn.example.com',
+          hint: 'SSL VPN with username and password.',
+        },
+        { key: 'Port', label: 'SSL port', section: 'Gateway', type: 'number', placeholder: '443' },
+        { key: 'Username', label: 'Username', section: 'Credentials' },
+        { key: 'Password', label: 'Password', section: 'Credentials', type: 'password' },
+        {
+          key: 'ServerCertSha256Pin',
+          label: 'Server certificate SHA-256 pin (optional)',
+          section: 'Certificates & advanced',
+          hint: 'Leave blank to verify the gateway certificate on first connection, or enter a fingerprint verified with your administrator or trusted client.',
+        },
+        {
+          key: 'Mtu',
+          label: 'MTU',
+          section: 'Certificates & advanced',
+          type: 'number',
+          placeholder: '1390',
+        },
+      ];
     default:
       return [];
   }
@@ -13043,6 +13372,8 @@ function tunnelDefaultSettings(kind: number): Record<string, unknown> {
     case 6:
       return { Port: 443 };
     case 7:
+      return { Port: 443, Mtu: 1390 };
+    case 8:
       return { Mode: 'connection', KeepaliveSeconds: 30 };
     default:
       return {};
@@ -13193,11 +13524,13 @@ function TunnelAdvanced({
   open,
   onOpenChange,
   children,
+  contentClassName,
 }: {
   label: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   children: ReactNode;
+  contentClassName?: string;
 }) {
   return (
     <Collapsible
@@ -13210,7 +13543,7 @@ function TunnelAdvanced({
         <ChevronDown className={cn('size-3.5 transition-transform', open ? 'rotate-180' : '')} />
       </CollapsibleTrigger>
       <CollapsibleContent>
-        <div className="mt-3 grid gap-4 md:grid-cols-2">{children}</div>
+        <div className={cn('mt-3 grid gap-4 md:grid-cols-2', contentClassName)}>{children}</div>
       </CollapsibleContent>
     </Collapsible>
   );
@@ -13280,7 +13613,7 @@ function TunnelEditorDialog({
   function setSetting(key: string, next: unknown) {
     setValue((current) => ({
       ...current,
-      ...(current.kind === 7 && (key === 'Mode' || key === 'JumpConnectionId')
+      ...(current.kind === 8 && (key === 'Mode' || key === 'JumpConnectionId')
         ? { forgetJumpHostKeySha256: undefined, jumpHostKeySha256: undefined }
         : {}),
       settings: updateTunnelEditorSetting(current.kind, current.settings, key, next),
@@ -13533,7 +13866,7 @@ function TunnelEditorDialog({
             </p>
           ) : null}
           <div className="grid gap-5 py-1">
-            {value.kind === 7 ? (
+            {value.kind === 8 ? (
               <SshTunnelFields
                 tree={tree}
                 credentials={credentials}
@@ -13702,6 +14035,22 @@ function TunnelEditorDialog({
                     client-certificate authentication are not supported.
                   </p>
                   {rows('Two-factor & advanced')}
+                </TunnelAdvanced>
+              </>
+            ) : null}
+            {value.kind === 7 ? (
+              <>
+                <TunnelSection contentClassName="items-start md:grid-cols-2" title="Gateway">
+                  {rows('Gateway')}
+                </TunnelSection>
+                <TunnelSection title="Credentials">{rows('Credentials')}</TunnelSection>
+                <TunnelAdvanced
+                  contentClassName="items-start"
+                  label="Certificates & advanced"
+                  onOpenChange={setAdvancedOpen}
+                  open={advancedOpen}
+                >
+                  {rows('Certificates & advanced')}
                 </TunnelAdvanced>
               </>
             ) : null}
@@ -16818,7 +17167,7 @@ function SettingsPage({
 
         <SettingsTabPanel value="extensions">
           <SettingsSection
-            description="Use Bitwarden for credential passwords and HTTPS browser sessions."
+            description="Use Bitwarden for credential passwords and Browser connections."
             title="Bitwarden"
           >
             <SettingsSection title="Credential vault">
@@ -17015,9 +17364,9 @@ function SettingsPage({
             <SettingsSection title="Browser extension">
               <SettingsSwitch
                 checked={browserExtensionEnabled}
-                description="Use the official Bitwarden extension inside HTTPS sessions."
+                description="Use the official Bitwarden extension with HTTPS home pages in Browser connections."
                 disabled={browserExtensionBusy}
-                label="Enable Bitwarden in HTTPS windows"
+                label="Enable Bitwarden in Browser windows"
                 onCheckedChange={(enabled) => void handleBrowserExtensionEnabledChange(enabled)}
               />
               <p

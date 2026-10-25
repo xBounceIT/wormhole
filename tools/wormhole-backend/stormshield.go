@@ -326,6 +326,11 @@ func writeStormshieldCachedProfile(
 func persistStormshieldTrustIfUnchanged(snapshot tunnelConfigSnapshot, original, trusted json.RawMessage) {
 	tunnelMutationMu.Lock()
 	defer tunnelMutationMu.Unlock()
+	release, err := acquireTunnelMutationLock(snapshot.databasePath)
+	if err != nil {
+		return
+	}
+	defer release()
 	details, err := readTunnelUnlocked(snapshot.databasePath, tunnelReadRequest{ID: snapshot.id})
 	if err != nil {
 		return

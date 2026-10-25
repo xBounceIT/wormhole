@@ -377,6 +377,7 @@ func TestProtocolAndTunnelNamesCoverKnownAndUnknownValues(t *testing.T) {
 		{value: 4, name: "Stormshield"},
 		{value: 5, name: "Azure VPN"},
 		{value: 6, name: "Cisco Secure Client"},
+		{value: 7, name: "Forcepoint"},
 		{value: 99, name: "Unknown"},
 	} {
 		if name := tunnelName(test.value); name != test.name {

@@ -60,7 +60,7 @@ func TestSSHJumpTrustSurvivesAnotherProcessRollingBackItsSave(t *testing.T) {
 	host, port, pin := jumpTestServer(t)
 	path, details := jumpFixture(t, host, port)
 	raw, _ := json.Marshal(map[string]any{"Mode": "manual", "Host": host, "Port": port, "Username": "ops", "CredentialId": jumpCredentialID})
-	details, err := updateTunnel(path, tunnelWriteRequest{ID: details.ID, Name: details.Name, Kind: 7, Settings: raw})
+	details, err := updateTunnel(path, tunnelWriteRequest{ID: details.ID, Name: details.Name, Kind: 8, Settings: raw})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +88,7 @@ func TestSSHJumpTrustSurvivesAnotherProcessRollingBackItsSave(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer command.Process.Kill()
-	if err := json.NewEncoder(stdin).Encode(map[string]any{"database": path, "request": tunnelWriteRequest{ID: details.ID, Name: "Parallel editor", Kind: 7, Settings: details.Settings}}); err != nil {
+	if err := json.NewEncoder(stdin).Encode(map[string]any{"database": path, "request": tunnelWriteRequest{ID: details.ID, Name: "Parallel editor", Kind: 8, Settings: details.Settings}}); err != nil {
 		t.Fatal(err)
 	}
 	reader := bufio.NewScanner(stdout)

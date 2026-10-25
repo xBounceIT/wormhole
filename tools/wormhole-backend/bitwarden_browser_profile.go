@@ -240,17 +240,13 @@ func bitwardenCookieSourceProfiles(
 	if routeKey == "" {
 		return []string{}
 	}
-	desiredRoutes := []string{routeKey, ""}
-	if initialized {
-		desiredRoutes = desiredRoutes[:1]
-	}
 	profiles := make([]string, 0, len(candidates))
-	for _, desiredRoute := range desiredRoutes {
-		for _, candidate := range candidates {
-			if candidate.marker.RouteKey == desiredRoute &&
-				(!initialized || candidate.cookieUpdatedAt.After(destinationCookieUpdatedAt)) {
-				profiles = append(profiles, candidate.profilePath)
-			}
+	// Browser cookie scopes are exact. Legacy/global vault profiles may seed the
+	// extension's own storage, but must never transfer appliance login cookies.
+	for _, candidate := range candidates {
+		if candidate.marker.RouteKey == routeKey &&
+			(!initialized || candidate.cookieUpdatedAt.After(destinationCookieUpdatedAt)) {
+			profiles = append(profiles, candidate.profilePath)
 		}
 	}
 	return profiles

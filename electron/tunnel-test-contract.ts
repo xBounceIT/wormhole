@@ -16,6 +16,49 @@ export type TunnelDetailsResponse = {
   settings: Record<string, unknown>;
 };
 
+export type TunnelWriteRequest = {
+  forgetJumpHostKeySha256?: string;
+  id?: string;
+  name: string;
+  kind: number;
+  settings: Record<string, unknown>;
+};
+export function parseTunnelWriteRequest(value: unknown, requiresID: boolean): TunnelWriteRequest {
+  if (!value || typeof value !== 'object') throw new Error('VPN tunnel settings are invalid.');
+  const input = value as Record<string, unknown>;
+  if (
+    typeof input.name !== 'string' ||
+    input.name.trim().length === 0 ||
+    input.name.length > 128 ||
+    typeof input.kind !== 'number' ||
+    !Number.isInteger(input.kind) ||
+    input.kind < 0 ||
+    input.kind > 8 ||
+    !isRecord(input.settings)
+  ) {
+    throw new Error('VPN tunnel settings are invalid.');
+  }
+  if (requiresID && !isTunnelIdentifier(input.id)) throw new Error('VPN tunnel id is invalid.');
+  if (input.kind === 8) parseSSHJumpSettings(input.settings);
+  if (
+    input.forgetJumpHostKeySha256 !== undefined &&
+    (input.kind !== 8 ||
+      !requiresID ||
+      typeof input.forgetJumpHostKeySha256 !== 'string' ||
+      !/^SHA256:[A-Za-z0-9+/]{43}$/.test(input.forgetJumpHostKeySha256))
+  )
+    throw new Error('SSH tunnel pin reset is invalid.');
+  return {
+    ...(input.forgetJumpHostKeySha256
+      ? { forgetJumpHostKeySha256: input.forgetJumpHostKeySha256 as string }
+      : {}),
+    ...(isTunnelIdentifier(input.id) ? { id: input.id } : {}),
+    name: input.name,
+    kind: input.kind,
+    settings: input.settings,
+  };
+}
+
 export type TunnelSummaryResponse = Omit<TunnelDetailsResponse, 'kind' | 'settings'> & {
   kind: string;
 };
@@ -63,12 +106,12 @@ export function parseTunnelDetailsResponse(value: unknown): TunnelDetailsRespons
     typeof value.kind !== 'number' ||
     !Number.isInteger(value.kind) ||
     value.kind < 0 ||
-    value.kind > 7 ||
+    value.kind > 8 ||
     !isRecord(value.settings)
   ) {
     throw new Error('The VPN service returned invalid tunnel details.');
   }
-  if (value.kind === 7) parseSSHJumpSettings(value.settings);
+  if (value.kind === 8) parseSSHJumpSettings(value.settings);
   if (
     value.jumpHostKeySha256 !== undefined &&
     (typeof value.jumpHostKeySha256 !== 'string' ||

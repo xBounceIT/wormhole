@@ -301,7 +301,7 @@ func startTunnelRuntimeScoped(ctx context.Context, databasePath, id, scope strin
 	if err != nil {
 		return nil, err
 	}
-	if processTunnelPool.loadSettings && snapshot.kind == 7 {
+	if processTunnelPool.loadSettings && snapshot.kind == 8 {
 		tunnelMutationMu.RLock()
 		snapshot.identity, snapshot.configurationIdentity, err = sshJumpIdentitiesUnlocked(databasePath, snapshot.id, chain)
 		tunnelMutationMu.RUnlock()
@@ -391,7 +391,7 @@ func (pool *tunnelRuntimePool) acquire(
 		}
 		entry.establish = withTunnelProgressHandler(context.WithValue(establish, sshJumpPathKey{}, snapshot.chain), pool.progress(entry))
 		entry.establish = withTunnelPromptHandler(entry.establish, pool.prompt(entry))
-		if snapshot.kind == 7 {
+		if snapshot.kind == 8 {
 			entry.refreshTrustIdentity = func() (string, error) {
 				identity, configuration, err := sshJumpIdentitiesUnlocked(snapshot.databasePath, snapshot.id, nil)
 				if err == nil && configuration != snapshot.configurationIdentity {
@@ -713,7 +713,7 @@ func startTunnelProcess(ctx context.Context, snapshot tunnelConfigSnapshot) (*tu
 	var settings json.RawMessage
 	var upstream *tunnelRuntime
 	var err error
-	if snapshot.kind == 7 {
+	if snapshot.kind == 8 {
 		settings, upstream, snapshot.identity, err = prepareSSHJump(ctx, snapshot)
 	} else {
 		settings, err = prepareTunnelAuthentication(ctx, snapshot.kind, snapshot.settings, snapshot)
@@ -783,14 +783,14 @@ func startTunnelProcess(ctx context.Context, snapshot tunnelConfigSnapshot) (*tu
 
 	ready := make(chan string, 1)
 	readErr := make(chan error, 1)
-	if snapshot.kind == 7 {
+	if snapshot.kind == 8 {
 		go readSSHJumpReady(ctx, bufio.NewReaderSize(stdout, 8192), stdin, ready, readErr)
 	} else {
 		go readTunnelReady(bufio.NewReaderSize(stdout, 1024), ready, readErr)
 	}
 	select {
 	case port := <-ready:
-		if snapshot.kind == 7 {
+		if snapshot.kind == 8 {
 			identity, err := sshJumpIdentity(snapshot.databasePath, snapshot.id, nil)
 			if err != nil || identity != snapshot.identity {
 				process.close()
@@ -927,6 +927,14 @@ func tunnelSidecarFailureMessage(executable, stderr string, exitCode int) error 
 	lower := strings.ToLower(detail)
 	var message string
 	switch {
+	case strings.Contains(lower, "forcepoint tls connection failed"):
+		message = "Forcepoint TLS connection failed; verify the SSL endpoint and the trusted server certificate or SHA-256 pin"
+	case strings.Contains(lower, "forcepoint ssvtp version"):
+		message = "the Forcepoint gateway did not negotiate the supported SSL VPN protocol (SSVTP version 9)"
+	case strings.Contains(lower, "forcepoint requires local security checks") || strings.Contains(lower, "forcepoint endpoint control"):
+		message = "the Forcepoint gateway requires endpoint security checks unsupported by the autonomous tunnel"
+	case strings.Contains(lower, "unsupported authentication challenge") && strings.Contains(lower, "forcepoint"):
+		message = "this Forcepoint SSL tunnel supports username and password authentication only"
 	case strings.Contains(lower, "binding not linked"):
 		message = "this build is missing the OpenVPN engine, so OpenVPN-based tunnels can't start. Rebuild the sidecar with scripts/Fetch-OvpnProxy.ps1 -RequireReal"
 	case strings.Contains(lower, "no such host"):
@@ -964,6 +972,9 @@ func prepareTunnelAuthentication(
 	raw json.RawMessage,
 	snapshots ...tunnelConfigSnapshot,
 ) (json.RawMessage, error) {
+	if kind == 7 {
+		return prepareForcepointAuthentication(ctx, raw, snapshots...)
+	}
 	if kind == 4 {
 		return prepareStormshieldProfile(ctx, raw, snapshots...)
 	}
@@ -1174,7 +1185,7 @@ func (process *tunnelProcess) close() {
 }
 
 func tunnelSidecarCommand(kind int64, raw json.RawMessage) (string, []byte, error) {
-	if kind == 7 {
+	if kind == 8 {
 		return "wormhole-sshproxy", append([]byte(nil), raw...), nil
 	}
 	var settings map[string]json.RawMessage
@@ -1282,6 +1293,17 @@ func tunnelSidecarCommand(kind int64, raw json.RawMessage) (string, []byte, erro
 			"totp_secret":              optionalJSONString(settings, "TotpSecret"),
 			"trust_server_certificate": tunnelSettingBool(settings, "TrustServerCertificate"),
 			"server_cert_sha256_pin":   optionalJSONString(settings, "ServerCertSha256Pin"),
+		})
+		return "wormhole-ciscoproxy", payload, err
+	case 7:
+		payload, err := encode(map[string]any{
+			"vpn_protocol":           "forcepoint-ssl",
+			"host":                   stringValue("Host"),
+			"port":                   numberValue("Port", 443),
+			"username":               stringValue("Username"),
+			"password":               stringValue("Password"),
+			"mtu":                    optionalJSONNumber(settings, "Mtu"),
+			"server_cert_sha256_pin": optionalJSONString(settings, "ServerCertSha256Pin"),
 		})
 		return "wormhole-ciscoproxy", payload, err
 	default:

@@ -9,7 +9,7 @@ import (
 )
 
 func preserveSSHJumpTrust(db *sql.DB, databasePath string, request *tunnelWriteRequest) error {
-	if request.Kind != 7 {
+	if request.Kind != 8 {
 		return nil
 	}
 	var next map[string]json.RawMessage
@@ -57,7 +57,7 @@ func preserveSSHJumpTrust(db *sql.DB, databasePath string, request *tunnelWriteR
 
 // The editor can display an inherited connection pin without loading any credential.
 func sshJumpHostKeyInfo(db *sql.DB, kind int64, raw json.RawMessage) (string, string) {
-	if kind != 7 {
+	if kind != 8 {
 		return "", ""
 	}
 	var settings map[string]json.RawMessage
@@ -89,7 +89,7 @@ func sshJumpHostKeyInfo(db *sql.DB, kind int64, raw json.RawMessage) (string, st
 }
 
 func tunnelEndpointSummaryForDatabase(db *sql.DB, kind int64, raw json.RawMessage) string {
-	if kind == 7 {
+	if kind == 8 {
 		var settings map[string]json.RawMessage
 		_ = json.Unmarshal(raw, &settings)
 		defer clearTunnelSettingsMap(settings)
@@ -118,7 +118,7 @@ func rejectSSHJumpDeletion(databasePath string, nodeIDs map[string]bool, credent
 	if err != nil || !exists {
 		return err
 	}
-	rows, err := db.Query("SELECT Id, Name FROM TunnelConfigs WHERE Kind = 7;")
+	rows, err := db.Query("SELECT Id, Name FROM TunnelConfigs WHERE Kind = 8;")
 	if err != nil {
 		return err
 	}

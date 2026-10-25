@@ -6,11 +6,11 @@ choose **Manual** and enter a host, port, username and local saved SSH credentia
 Assign this tunnel through the existing route selector on a connection or folder.
 SSH, RDP, VNC, HTTP and HTTPS use the same SOCKS route.
 
-Local passwords, private keys and encrypted private keys are supported. An OpenSSH
-user certificate can be appended on a new line after the private key in the file
-selected when creating a saved SSH key credential. Both are kept together in the
-protected key store and encrypted backup. The certificate must match that key.
-The shared SSH signer parser also handles these credentials in normal SSH sessions.
+Local passwords, private keys and encrypted private keys, including PKCS#8, are supported.
+Select an optional OpenSSH user certificate in the saved SSH key credential editor.
+The certificate must match the key and be valid; it can be renewed independently.
+The shared SSH signer parser applies the same rules in ordinary SSH sessions and tunnels.
+See [SSH authentication](ssh-authentication.md) for supported formats and protected storage.
 Bitwarden credentials are currently rejected for jump hosts. Passphrases that are
 not saved, and keyboard-interactive/OTP challenges, use the tunnel's secret prompt.
 
@@ -50,7 +50,8 @@ need no remapping. Missing references in an imported backup remain readable and
 produce a connection error. Deleting a referenced jump connection or credential is
 blocked with the referencing tunnel's name. VPN profile-file imports do not create
 or remap SSH connection IDs.
-Deletion is serialized with tunnel edits, so an in-flight save cannot bypass reference checks.
+Deletion is serialized with tunnel edits and node credential or ancestry changes, so an
+in-flight save cannot bypass reference checks, including inherited credentials.
 
 The portable Go sidecar is included in Windows x64/arm64, Linux and macOS builds
 (including the native universal build). CodeQL and coverage discover its Go module

@@ -37,6 +37,10 @@ export function requiresSshKeyPassphrasePrompt(message: string): boolean {
   return message.toLowerCase().includes('ssh private key passphrase is required');
 }
 
+export function requiresSshCertificateReplacement(message: string | undefined): boolean {
+  return message?.toLowerCase().includes('ssh certificate expired') ?? false;
+}
+
 export function isSshHostKeyMismatchError(message: string): boolean {
   const value = message
     .trimStart()

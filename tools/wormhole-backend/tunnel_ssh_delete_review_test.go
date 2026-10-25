@@ -129,7 +129,7 @@ func TestSSHJumpDeletionFailsClosedWhenConfigurationLockIsUnavailable(t *testing
 }
 
 func jumpCacheIdentityFixture() string {
-	snapshot := tunnelConfigSnapshot{id: "jump", kind: 7}
+	snapshot := tunnelConfigSnapshot{id: "jump", kind: 8}
 	target := sshTarget{host: "bastion.test", port: 22, username: "ops", password: "fixed test password"}
 	return sshJumpSnapshotIdentity(snapshot, &target, "", true)
 }

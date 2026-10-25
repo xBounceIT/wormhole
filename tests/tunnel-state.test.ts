@@ -20,6 +20,57 @@ import {
 
 const tunnelId = 'b2a0a6b0-69c8-4f3e-a4cb-f3395aa0a9f7';
 
+test('Forcepoint normalizes SSL settings without changing input or enabling other auth modes', () => {
+  const input = {
+    Host: 'vpn.example.test',
+    Port: '443',
+    Mtu: '1390',
+    Username: 'user',
+    Password: 'password\r\n',
+    ServerCertSha256Pin: 'ab:'.repeat(31) + 'ab\n',
+  };
+  const settings = normalizeTunnelEditorSettings(7, input);
+  assert.deepEqual(settings, {
+    ...input,
+    Port: 443,
+    Mtu: 1390,
+    Password: 'password',
+    ServerCertSha256Pin: 'ab'.repeat(32),
+  });
+  assert.equal(input.Password, 'password\r\n');
+  assert.deepEqual(missingTunnelFields({ name: 'Forcepoint', kind: 7, settings }), []);
+  for (const pin of [undefined, '', ' \r\n']) {
+    const normalized = normalizeTunnelEditorSettings(7, { ...settings, ServerCertSha256Pin: pin });
+    assert.equal(normalized.ServerCertSha256Pin, undefined);
+  }
+});
+
+test('Forcepoint validates required credentials, certificate pins and MTU bounds', () => {
+  const settings = { Host: 'vpn.example.test', Port: 443, Username: 'user', Password: 'password' };
+  const missing = (overrides: Record<string, unknown>) =>
+    missingTunnelFields({ name: 'Forcepoint', kind: 7, settings: { ...settings, ...overrides } });
+  assert.deepEqual(missing({}), []);
+  assert.deepEqual(missing({ Host: '', Port: 70000, Username: '', Password: '' }), [
+    'Host',
+    'Port (1-65535)',
+    'Username',
+    'Password',
+  ]);
+  for (const pin of ['abc', 'gg'.repeat(32), '00'.repeat(33)]) {
+    assert.ok(missing({ ServerCertSha256Pin: pin }).some((field) => field.includes('pin')));
+  }
+  for (const mtu of [undefined, null, '', 576, 1390, '16384'])
+    assert.deepEqual(missing({ Mtu: mtu }), []);
+  for (const mtu of [575, 16385, 1390.5, 'bad', {}, false]) {
+    assert.ok(missing({ Mtu: mtu }).some((field) => field.includes('MTU')));
+  }
+  for (const key of ['Username', 'Password']) {
+    for (const value of ['é'.repeat(128), 'a\0b']) {
+      assert.ok(missing({ [key]: value }).some((field) => field.startsWith(key)));
+    }
+  }
+});
+
 test('Azure VPN edits retain opaque server key references without a raw key control', () => {
   const settings = {
     Servers: 'gateway.vpn.azure.com',

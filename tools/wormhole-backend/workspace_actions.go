@@ -150,6 +150,11 @@ func duplicateWorkspaceNode(databasePath string, request workspaceNodeRequest) (
 	if err != nil {
 		return workspaceDuplicateNodeResponse{}, err
 	}
+	release, err := acquireTunnelReferenceMutationLock(databasePath)
+	if err != nil {
+		return workspaceDuplicateNodeResponse{}, err
+	}
+	defer release()
 	database, err := openDatabase(databasePath, false)
 	if err != nil {
 		return workspaceDuplicateNodeResponse{}, err

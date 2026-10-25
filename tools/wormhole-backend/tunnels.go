@@ -75,7 +75,7 @@ func tunnelEndpointSummary(kind int64, raw json.RawMessage) string {
 		return normalizeTunnelEndpoint(tunnelSettingString(settings, "PeerEndpoint"))
 	case 1:
 		return profileEndpoint()
-	case 2, 6:
+	case 2, 6, 7:
 		return hostPort(tunnelSettingString(settings, "Host"), tunnelSettingNumber(settings, "Port"))
 	case 3:
 		return hostPort(tunnelSettingString(settings, "Server"), tunnelSettingNumber(settings, "Port"))
@@ -90,7 +90,7 @@ func tunnelEndpointSummary(kind int64, raw json.RawMessage) string {
 			return ""
 		}
 		return formatTunnelEndpoint(servers[0], "443")
-	case 7:
+	case 8:
 		if tunnelSettingString(settings, "Mode") == "connection" {
 			return "" // The referenced connection can move or be renamed independently.
 		}
@@ -140,12 +140,12 @@ func sanitizeTunnelEndpoint(value string) string {
 const tunnelSecretPrefix = "tunnel:"
 const maxTunnelProtectedBytes = backendMaxTunnelRequestBytes + 64*1024
 
-// A tunnel save spans both SQLite and a protected sidecar file. Serialize mutations so a
-// provider that persists newly accepted trust cannot race an editor save or a delete.
+// A tunnel save spans both SQLite and a protected sidecar file. This mutex orders
+// in-process readers/writers; the file lock also covers the separate editor backend.
 var tunnelMutationMu sync.RWMutex
 
 func tunnelConfigurationLockPath(databasePath string) string {
-	return filepath.Clean(databasePath) + ".tunnels.lock"
+	return filepath.Join(filepath.Dir(filepath.Clean(databasePath)), ".tunnels.lock")
 }
 
 func acquireTunnelConfigurationLock(ctx context.Context, databasePath string) (func(), error) {
@@ -157,7 +157,7 @@ func acquireTunnelConfigurationLock(ctx context.Context, databasePath string) (f
 	}
 	path := filepath.Clean(databasePath)
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return nil, errors.New("could not prepare tunnel configuration storage")
+		return nil, errors.New("could not prepare VPN tunnel storage")
 	}
 	bounded, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
@@ -166,9 +166,29 @@ func acquireTunnelConfigurationLock(ctx context.Context, databasePath string) (f
 		if bounded.Err() != nil {
 			return nil, bounded.Err()
 		}
-		return nil, errors.New("could not lock tunnel configuration storage")
+		return nil, errors.New("could not lock VPN tunnel storage")
 	}
 	return release, nil
+}
+
+func acquireTunnelMutationLock(databasePath string) (func(), error) {
+	return acquireTunnelConfigurationLock(context.Background(), databasePath)
+}
+
+// Node credential bindings and ancestry participate in SSH tunnel references.
+// Serialize their validation and commit with tunnel writes and guarded deletion,
+// before taking any credential lock or opening a SQLite transaction.
+func acquireTunnelReferenceMutationLock(databasePath string) (func(), error) {
+	tunnelMutationMu.Lock()
+	release, err := acquireTunnelMutationLock(databasePath)
+	if err != nil {
+		tunnelMutationMu.Unlock()
+		return nil, err
+	}
+	return func() {
+		release()
+		tunnelMutationMu.Unlock()
+	}, nil
 }
 
 func createTunnel(databasePath string, request tunnelWriteRequest) (tunnelDetails, error) {
@@ -686,10 +706,10 @@ func validateTunnelWriteRequest(request *tunnelWriteRequest, requireID bool) err
 	if request.Name == "" || len([]rune(request.Name)) > 128 {
 		return errors.New("VPN tunnel name is required and must be 128 characters or fewer")
 	}
-	if request.Kind < 0 || request.Kind > 7 {
+	if request.Kind < 0 || request.Kind > 8 {
 		return errors.New("VPN tunnel type is invalid")
 	}
-	if request.ForgetJumpHostKeySha256 != "" && (request.Kind != 7 || !requireID || !validSSHFingerprint(request.ForgetJumpHostKeySha256)) {
+	if request.ForgetJumpHostKeySha256 != "" && (request.Kind != 8 || !requireID || !validSSHFingerprint(request.ForgetJumpHostKeySha256)) {
 		return errors.New("SSH tunnel pin reset is invalid")
 	}
 	if len(request.Settings) == 0 || len(request.Settings) > backendMaxTunnelRequestBytes {
@@ -713,7 +733,7 @@ func validateTunnelWriteRequest(request *tunnelWriteRequest, requireID bool) err
 }
 
 func validateTunnelSettings(kind int64, settings map[string]json.RawMessage) error {
-	if kind == 7 {
+	if kind == 8 {
 		return validateSSHJumpSettings(settings)
 	}
 	required := func(names ...string) error {
@@ -724,7 +744,7 @@ func validateTunnelSettings(kind int64, settings map[string]json.RawMessage) err
 		}
 		return nil
 	}
-	if kind == 2 || kind == 3 || kind == 4 || kind == 6 {
+	if kind == 2 || kind == 3 || kind == 4 || kind == 6 || kind == 7 {
 		if err := validateOptionalTunnelPort(settings, "Port"); err != nil {
 			return err
 		}
@@ -739,6 +759,7 @@ func validateTunnelSettings(kind int64, settings map[string]json.RawMessage) err
 		3: {"UseSingleSignOn", "TrustServerCertificate"},
 		4: {"UseSingleSignOn", "UseOtp", "TrustServerCertificate"},
 		6: {"TrustServerCertificate"},
+		7: {"TrustServerCertificate"},
 	}
 	for _, name := range boolFields[kind] {
 		if err := validateOptionalTunnelBool(settings, name); err != nil {
@@ -847,6 +868,39 @@ func validateTunnelSettings(kind int64, settings map[string]json.RawMessage) err
 		}
 	case 6:
 		return required("Host", "Username", "Password")
+	case 7:
+		if err := required("Host", "Username", "Password"); err != nil {
+			return err
+		}
+		if host := tunnelSettingString(settings, "Host"); len(host) > 253 || strings.ContainsAny(host, "/\\?#@ \t\r\n\x00") {
+			return errors.New("Forcepoint gateway must be a bare host name or IP address")
+		}
+		for _, name := range []string{"Username", "Password"} {
+			value := tunnelSettingString(settings, name)
+			if len(value) > 255 || strings.ContainsRune(value, 0) {
+				return errors.New("Forcepoint credentials must be at most 255 UTF-8 bytes without NUL")
+			}
+		}
+		if tunnelSettingBool(settings, "TrustServerCertificate") {
+			return errors.New("Forcepoint requires certificate verification or a SHA-256 certificate pin")
+		}
+		if err := validateOptionalTunnelInteger(settings, "Mtu", 576, 16384); err != nil {
+			return err
+		}
+		if raw, present := settings["ServerCertSha256Pin"]; present && string(raw) != "null" {
+			var pin string
+			if err := json.Unmarshal(raw, &pin); err != nil {
+				return errors.New("Forcepoint certificate pin must be a string")
+			}
+			pin = strings.ReplaceAll(strings.Join(strings.Fields(pin), ""), ":", "")
+			if pin != "" {
+				decoded, err := hex.DecodeString(pin)
+				if err != nil || len(decoded) != 32 {
+					return errors.New("Forcepoint certificate pin must contain 64 hexadecimal characters")
+				}
+			}
+			settings["ServerCertSha256Pin"], _ = json.Marshal(pin)
+		}
 	}
 	return nil
 }

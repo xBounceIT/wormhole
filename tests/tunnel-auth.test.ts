@@ -34,12 +34,13 @@ const popupScript = stripTypeScriptTypes(
     ),
     `class BrowserAuthBackend {
       send = backendSend;
+      child = {};
       browserPrompts = new TunnelBrowserPromptTracker();
       tunnelFailures = new TunnelFailureRegistry();
       outputBuffer = '';
       pending = new Map();`,
     mainSource.slice(
-      mainSource.indexOf('  async respondTunnelPrompt(request:'),
+      mainSource.indexOf('  async releaseTunnel(leaseId:'),
       mainSource.indexOf('  async respondTunnelRoute(request:'),
     ),
     mainSource.slice(
@@ -88,6 +89,10 @@ after(async () => {
       ],
       [popupScript.indexOf('  let cookieTimer'), popupScript.indexOf('class BrowserAuthBackend')],
       [popupScript.indexOf('  async respondTunnelPrompt('), popupScript.indexOf('readOutput(')],
+      [
+        popupScript.indexOf('  async releaseTunnel('),
+        popupScript.indexOf('  async respondTunnelPrompt('),
+      ],
       [
         popupScript.indexOf("if (message.type === 'tunnel.prompt-closed')"),
         popupScript.indexOf("if (message.type === 'tunnel.browser')"),
@@ -420,6 +425,34 @@ test('backend loss closes a hidden SAML popup and discards queued prompts', asyn
   assert.equal(auth.windows.length, 1);
   assert.equal(auth.window.isDestroyed(), true);
   assert.deepEqual(auth.responses, []);
+});
+
+test('tunnel failure cleanup after backend exit never sends a release to a new process', async (t) => {
+  const auth = browserAuthHarness(t);
+  await setImmediate();
+  auth.backend.child = undefined;
+  let cleanup: Promise<void> | undefined;
+  auth.backend.tunnelFailures.watch('lease', () => {
+    cleanup = auth.backend.releaseTunnel('lease');
+  });
+  auth.backend.rejectAll(new Error('Service exited'));
+  await cleanup;
+  // send() starts the native backend; cleanup must never call it after that backend died.
+  assert.deepEqual(auth.responses, []);
+  assert.equal(auth.window.isDestroyed(), true);
+});
+
+test('live tunnel release forgets its failure handler and retains backend errors', async (t) => {
+  const auth = browserAuthHarness(t);
+  auth.backend.tunnelFailures.watch('lease', () => assert.fail('released callback was retained'));
+  await auth.backend.releaseTunnel('lease');
+  assert.equal(auth.responses[0].action, 'tunnel.release');
+  assert.equal(auth.responses[0].sessionId, 'lease');
+  auth.backend.tunnelFailures.fail({ type: 'tunnel.failed', sessionId: 'lease' });
+  auth.backend.send = async () => ({ ok: false, error: 'Release unavailable' });
+  await assert.rejects(auth.backend.releaseTunnel('other'), /Release unavailable/);
+  auth.backend.send = async () => ({ ok: false });
+  await assert.rejects(auth.backend.releaseTunnel('other'), /Could not release/);
 });
 
 test('native popup setup errors settle the prompt and leave the queue usable', async (t) => {

@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
@@ -282,6 +283,8 @@ var backupCredentialColumns = []backupColumn{
 	{DB: "Domain", JSON: "domain", Kind: backupString, SQLType: "TEXT NULL"},
 	{DB: "Kind", JSON: "kind", Kind: backupInteger, Required: true, Default: int64(0), SQLType: "INTEGER NOT NULL DEFAULT 0"},
 	{DB: "PrivateKeyFileName", JSON: "privateKeyFileName", Kind: backupString, SQLType: "TEXT NULL"},
+	{DB: "SshCertificate", JSON: "sshCertificate", Kind: backupString, SQLType: "TEXT NULL"},
+	{DB: "SshCertificateFileName", JSON: "sshCertificateFileName", Kind: backupString, SQLType: "TEXT NULL"},
 	{DB: "Protocol", JSON: "protocol", Kind: backupInteger, Required: true, Default: int64(0), SQLType: "INTEGER NOT NULL DEFAULT 0"},
 	{DB: "SecretProvider", JSON: "secretProvider", Kind: backupInteger, Required: true, Default: int64(0), SQLType: "INTEGER NOT NULL DEFAULT 0"},
 	{DB: "BitwardenItemId", JSON: "bitwardenItemId", Kind: backupString, SQLType: "TEXT NULL"},
@@ -1328,7 +1331,7 @@ func importBackupContext(
 			}
 		}
 	}
-	if len(payload.PrivateKeys) > 0 || len(payload.Passwords) > 0 || len(payload.InlinePasswords) > 0 {
+	if len(payload.Credentials) > 0 || len(payload.PrivateKeys) > 0 || len(payload.Passwords) > 0 || len(payload.InlinePasswords) > 0 {
 		release, err := acquireRecoveredCredentialPrivateKeyLock(databasePath)
 		if err != nil {
 			return result, err
@@ -1381,7 +1384,6 @@ func importBackupContext(
 	); err != nil {
 		return result, err
 	}
-
 	for _, warning := range result.Warnings {
 		logInfo("backup import warning: %s", warning)
 	}
@@ -1991,6 +1993,7 @@ func restoreBackupSecretsContext(
 	result *backupImportResult,
 ) error {
 	passwordSnapshots := indexBackupCredentialPasswordSnapshots(payload.Passwords)
+	certificatesPendingValidation := maps.Clone(insertedCredentials)
 	for _, entry := range payload.Passwords {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -2137,7 +2140,7 @@ func restoreBackupSecretsContext(
 			continue
 		}
 		passphraseImported, err := restoreBackupSshKeySnapshot(
-			database, databasePath, id, keyBytes, passphrase, creating,
+			database, databasePath, id, keyBytes, passphrase, creating, result,
 		)
 		if err != nil {
 			clearBytes(keyBytes)
@@ -2148,6 +2151,7 @@ func restoreBackupSecretsContext(
 			result.PasswordsImported++
 		}
 		result.PrivateKeysImported++
+		delete(certificatesPendingValidation, id)
 	}
 	for _, entry := range payload.TunnelPayloads {
 		if err := ctx.Err(); err != nil {
@@ -2202,7 +2206,7 @@ func restoreBackupSecretsContext(
 		}
 		result.TunnelPayloadsImported++
 	}
-	return nil
+	return validateRestoredSSHCertificates(ctx, database, databasePath, certificatesPendingValidation, result)
 }
 
 func backupIDExists(id string, inserted, existing map[string]struct{}) bool {
@@ -2219,6 +2223,7 @@ func restoreBackupSshKeySnapshot(
 	keyBytes []byte,
 	passphrase backupCredentialPasswordSnapshot,
 	creating bool,
+	result *backupImportResult,
 ) (bool, error) {
 	staged, err := stageCredentialPrivateKeyWrite(databasePath, id, keyBytes)
 	if err != nil {
@@ -2254,6 +2259,10 @@ func restoreBackupSshKeySnapshot(
 	if err := mutation.apply(transaction); err != nil {
 		return false, err
 	}
+	certificateWarning, err := reconcileRestoredSSHCertificate(transaction, id, keyBytes, passphrase.password)
+	if err != nil {
+		return false, err
+	}
 	if creating {
 		err = recordCredentialPrivateKeyCreation(transaction, staged)
 	} else {
@@ -2266,6 +2275,9 @@ func restoreBackupSshKeySnapshot(
 		return false, err
 	}
 	committed = true
+	if certificateWarning != "" {
+		addBackupWarning(result, certificateWarning)
+	}
 	defer mutation.deletePreviousSecret()
 	if err := finalizeCommittedCredentialPrivateKeyWrite(database, staged); err != nil {
 		return false, err

@@ -91,7 +91,7 @@ func jumpFixture(t *testing.T, host string, port int) (string, tunnelDetails) {
 	}
 	db.Close()
 	raw, _ := json.Marshal(map[string]any{"Mode": "connection", "JumpConnectionId": jumpNodeID, "KeepaliveSeconds": 30})
-	details, err := createTunnel(path, tunnelWriteRequest{Name: "Jump", Kind: 7, Settings: raw})
+	details, err := createTunnel(path, tunnelWriteRequest{Name: "Jump", Kind: 8, Settings: raw})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +127,7 @@ func TestSSHJumpValidation(t *testing.T) {
 	valid := map[string]any{"Mode": "manual", "Host": "bastion.test", "Port": 22, "Username": "ops", "CredentialId": jumpCredentialID}
 	for _, input := range []map[string]any{valid, {"Mode": "connection", "JumpConnectionId": jumpNodeID}} {
 		raw, _ := json.Marshal(input)
-		request := tunnelWriteRequest{Name: "Jump", Kind: 7, Settings: raw}
+		request := tunnelWriteRequest{Name: "Jump", Kind: 8, Settings: raw}
 		if err := validateTunnelWriteRequest(&request, false); err != nil {
 			t.Fatal(err)
 		}
@@ -143,28 +143,28 @@ func TestSSHJumpValidation(t *testing.T) {
 		raw, _ := json.Marshal(input)
 		var settings map[string]json.RawMessage
 		_ = json.Unmarshal(raw, &settings)
-		if validateTunnelSettings(7, settings) == nil {
+		if validateTunnelSettings(8, settings) == nil {
 			t.Fatalf("accepted invalid setting %v", change)
 		}
 	}
 	for _, raw := range []string{`{"Mode":"connection","JumpConnectionId":"bad"}`, fmt.Sprintf(`{"Mode":"connection","JumpConnectionId":%q,"Host":"override"}`, jumpNodeID)} {
 		var settings map[string]json.RawMessage
 		_ = json.Unmarshal([]byte(raw), &settings)
-		if validateTunnelSettings(7, settings) == nil {
+		if validateTunnelSettings(8, settings) == nil {
 			t.Fatal("accepted invalid connection mode")
 		}
 	}
-	request := tunnelWriteRequest{Name: "Jump", Kind: 8, Settings: []byte(`{}`)}
+	request := tunnelWriteRequest{Name: "Jump", Kind: 9, Settings: []byte(`{}`)}
 	if validateTunnelWriteRequest(&request, false) == nil {
-		t.Fatal("kind 8 accepted")
+		t.Fatal("unknown tunnel kind accepted")
 	}
-	request.Kind = 7
+	request.Kind = 8
 	request.ForgetJumpHostKeySha256 = "bad"
 	if validateTunnelWriteRequest(&request, false) == nil {
 		t.Fatal("bad pin reset accepted")
 	}
 	raw, _ := json.Marshal(valid)
-	if endpoint := tunnelEndpointSummary(7, raw); endpoint != "ops@bastion.test:22" {
+	if endpoint := tunnelEndpointSummary(8, raw); endpoint != "ops@bastion.test:22" {
 		t.Fatal(endpoint)
 	}
 }
@@ -213,14 +213,14 @@ func TestSSHJumpTrustResolutionAndPinReset(t *testing.T) {
 	if details.JumpHostKeySha256 != pin || details.Endpoint != "Bastion" || bytes.Contains(details.Settings, []byte("secret")) {
 		t.Fatal("pin missing or secret in settings")
 	}
-	details, err = updateTunnel(path, tunnelWriteRequest{ID: details.ID, Name: details.Name, Kind: 7, Settings: details.Settings, ForgetJumpHostKeySha256: pin})
+	details, err = updateTunnel(path, tunnelWriteRequest{ID: details.ID, Name: details.Name, Kind: 8, Settings: details.Settings, ForgetJumpHostKeySha256: pin})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if details.JumpHostKeySha256 != "" {
 		t.Fatal("pin reset failed")
 	}
-	if _, err = updateTunnel(path, tunnelWriteRequest{ID: details.ID, Name: details.Name, Kind: 7, Settings: details.Settings, ForgetJumpHostKeySha256: pin}); err == nil {
+	if _, err = updateTunnel(path, tunnelWriteRequest{ID: details.ID, Name: details.Name, Kind: 8, Settings: details.Settings, ForgetJumpHostKeySha256: pin}); err == nil {
 		t.Fatal("stale reset accepted")
 	}
 	jumpExec(t, path, "UPDATE Nodes SET SshKnownHostFingerprint = ? WHERE Id = ?;", "SHA256:"+strings.Repeat("A", 43), jumpNodeID)
@@ -241,7 +241,7 @@ func TestSSHJumpManualAndPassphrase(t *testing.T) {
 	jumpExec(t, path, "UPDATE CredentialProfiles SET Kind=1 WHERE Id=?;", jumpCredentialID)
 	jumpExec(t, path, "DELETE FROM CredentialSecrets WHERE Id=?;", jumpCredentialID)
 	raw, _ := json.Marshal(map[string]any{"Mode": "manual", "Host": host, "Port": port, "Username": "ops", "CredentialId": jumpCredentialID})
-	details, err := updateTunnel(path, tunnelWriteRequest{ID: details.ID, Name: details.Name, Kind: 7, Settings: raw})
+	details, err := updateTunnel(path, tunnelWriteRequest{ID: details.ID, Name: details.Name, Kind: 8, Settings: raw})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -571,7 +571,7 @@ func TestSSHJumpStaleEditorPreservesNewTrustAndGuardsReset(t *testing.T) {
 	host, port, pin := jumpTestServer(t)
 	path, details := jumpFixture(t, host, port)
 	raw, _ := json.Marshal(map[string]any{"Mode": "manual", "Host": host, "Port": port, "Username": "ops", "CredentialId": jumpCredentialID})
-	details, err := updateTunnel(path, tunnelWriteRequest{ID: details.ID, Name: details.Name, Kind: 7, Settings: raw})
+	details, err := updateTunnel(path, tunnelWriteRequest{ID: details.ID, Name: details.Name, Kind: 8, Settings: raw})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -579,15 +579,15 @@ func TestSSHJumpStaleEditorPreservesNewTrustAndGuardsReset(t *testing.T) {
 	if _, _, _, err := prepareSSHJump(ctx, jumpSnapshot(t, path, details.ID)); err != nil {
 		t.Fatal(err)
 	}
-	saved, err := updateTunnel(path, tunnelWriteRequest{ID: details.ID, Name: details.Name, Kind: 7, Settings: raw})
+	saved, err := updateTunnel(path, tunnelWriteRequest{ID: details.ID, Name: details.Name, Kind: 8, Settings: raw})
 	if err != nil || !bytes.Contains(saved.Settings, []byte(pin)) {
 		t.Fatal("stale editor erased newly approved pin", err)
 	}
-	saved, err = updateTunnel(path, tunnelWriteRequest{ID: details.ID, Name: details.Name, Kind: 7, Settings: raw, ForgetJumpHostKeySha256: pin})
+	saved, err = updateTunnel(path, tunnelWriteRequest{ID: details.ID, Name: details.Name, Kind: 8, Settings: raw, ForgetJumpHostKeySha256: pin})
 	if err != nil || bytes.Contains(saved.Settings, []byte(pin)) {
 		t.Fatal("explicit reset failed", err)
 	}
-	if _, err := updateTunnel(path, tunnelWriteRequest{ID: details.ID, Name: details.Name, Kind: 7, Settings: raw, ForgetJumpHostKeySha256: pin}); err == nil {
+	if _, err := updateTunnel(path, tunnelWriteRequest{ID: details.ID, Name: details.Name, Kind: 8, Settings: raw, ForgetJumpHostKeySha256: pin}); err == nil {
 		t.Fatal("stale manual reset accepted")
 	}
 	// The manual username is explicit; a password rotation must still invalidate the attempt.
@@ -664,7 +664,7 @@ func TestSSHJumpTOFUDoesNotSplitAPendingSharedPassphrasePrompt(t *testing.T) {
 			upstreamID := ""
 			if chained {
 				raw, _ := json.Marshal(map[string]any{"Mode": "manual", "Host": host, "Port": port, "Username": "ops", "CredentialId": jumpCredentialID})
-				upstream, err := createTunnel(path, tunnelWriteRequest{Name: "SSH upstream", Kind: 7, Settings: raw})
+				upstream, err := createTunnel(path, tunnelWriteRequest{Name: "SSH upstream", Kind: 8, Settings: raw})
 				if err != nil {
 					t.Fatal(err)
 				}

@@ -49,7 +49,7 @@ func (c *config) validate() error {
 	if !strings.HasPrefix(c.HostKeySHA256, "SHA256:") || err != nil || len(pin) != 32 {
 		return errors.New("SSH tunnel host-key pin is required")
 	}
-	if len(c.PrivateKey) > sshauth.MaxKeyBytes || len(c.Certificate) > sshauth.MaxKeyBytes || len(c.Password) > 16384 || len(c.KeyPassphrase) > 16384 {
+	if len(c.PrivateKey) > sshauth.MaxKeyBytes || len(c.Certificate) > sshauth.MaxCertificateBytes || len(c.Password) > 16384 || len(c.KeyPassphrase) > 16384 {
 		return errors.New("SSH tunnel credential is too large")
 	}
 	if c.KeepaliveSeconds == 0 {

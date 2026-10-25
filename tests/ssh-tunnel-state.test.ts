@@ -11,11 +11,53 @@ import {
 import {
   parseSSHJumpSettings,
   parseTunnelDetailsResponse,
+  parseTunnelWriteRequest,
 } from '../electron/tunnel-test-contract.ts';
 
 const id = '11111111-1111-4111-8111-111111111111';
 const credential = '22222222-2222-4222-8222-222222222222';
 const pin = 'SHA256:' + 'A'.repeat(43);
+
+test('tunnel write IPC distinguishes Forcepoint and SSH and restricts pin reset to saved SSH tunnels', () => {
+  const forcepoint = {
+    name: 'Forcepoint',
+    kind: 7,
+    settings: { Host: 'vpn.test', Password: 'secret' },
+  };
+  assert.deepEqual(parseTunnelWriteRequest(forcepoint, false), forcepoint);
+  const jump = { name: 'Jump', kind: 8, settings: { Mode: 'connection', JumpConnectionId: id } };
+  assert.deepEqual(parseTunnelWriteRequest(jump, false), jump);
+  assert.deepEqual(parseTunnelWriteRequest({ ...jump, id, forgetJumpHostKeySha256: pin }, true), {
+    ...jump,
+    id,
+    forgetJumpHostKeySha256: pin,
+  });
+  for (const invalid of [
+    null,
+    [],
+    {},
+    { ...jump, name: '' },
+    { ...jump, name: 'x'.repeat(129) },
+    { ...jump, kind: -1 },
+    { ...jump, kind: 9 },
+    { ...jump, kind: 1.5 },
+    { ...jump, settings: [] },
+    { ...jump, settings: forcepoint.settings },
+  ]) {
+    assert.throws(() => parseTunnelWriteRequest(invalid, false));
+  }
+  assert.throws(() => parseTunnelWriteRequest(jump, true), /id is invalid/);
+  for (const invalid of [
+    { ...jump, id, forgetJumpHostKeySha256: 'bad' },
+    { ...forcepoint, id, forgetJumpHostKeySha256: pin },
+    { ...jump, id, forgetJumpHostKeySha256: 1 },
+  ])
+    assert.throws(() => parseTunnelWriteRequest(invalid, true), /pin reset/);
+  assert.throws(
+    () => parseTunnelWriteRequest({ ...jump, forgetJumpHostKeySha256: pin }, false),
+    /pin reset/,
+  );
+});
 
 test('tunnel failure dispatch disconnects current dependents once and ignores released or stale leases', () => {
   const registry = new TunnelFailureRegistry();
@@ -64,7 +106,7 @@ test('tunnel failure dispatch disconnects current dependents once and ignores re
 });
 
 test('SSH editor modes retain only references and reset trust on endpoint changes', () => {
-  const manual = normalizeTunnelEditorSettings(7, {
+  const manual = normalizeTunnelEditorSettings(8, {
     Mode: 'manual',
     Host: ' bastion.test ',
     Port: '22',
@@ -82,30 +124,30 @@ test('SSH editor modes retain only references and reset trust on endpoint change
     CredentialId: credential,
     KeepaliveSeconds: 30,
   });
-  assert.deepEqual(missingTunnelFields({ name: 'jump', kind: 7, settings: manual }), []);
-  const connection = normalizeTunnelEditorSettings(7, {
+  assert.deepEqual(missingTunnelFields({ name: 'jump', kind: 8, settings: manual }), []);
+  const connection = normalizeTunnelEditorSettings(8, {
     ...manual,
     Mode: 'connection',
     JumpConnectionId: ' ' + id + ' ',
     HostKeySha256: pin,
   });
   assert.deepEqual(connection, { Mode: 'connection', JumpConnectionId: id, KeepaliveSeconds: 30 });
-  assert.deepEqual(missingTunnelFields({ name: 'jump', kind: 7, settings: connection }), []);
+  assert.deepEqual(missingTunnelFields({ name: 'jump', kind: 8, settings: connection }), []);
   for (const key of ['Host', 'Port', 'Username', 'CredentialId'])
     assert.equal(
-      updateTunnelEditorSetting(7, { ...manual, HostKeySha256: pin }, key, 'new').HostKeySha256,
+      updateTunnelEditorSetting(8, { ...manual, HostKeySha256: pin }, key, 'new').HostKeySha256,
       undefined,
     );
   assert.equal(
-    updateTunnelEditorSetting(7, { ...manual, HostKeySha256: pin }, 'Host', manual.Host)
+    updateTunnelEditorSetting(8, { ...manual, HostKeySha256: pin }, 'Host', manual.Host)
       .HostKeySha256,
     pin,
   );
-  assert.deepEqual(updateTunnelEditorSetting(7, manual, 'Mode', 'connection'), {
+  assert.deepEqual(updateTunnelEditorSetting(8, manual, 'Mode', 'connection'), {
     Mode: 'connection',
     KeepaliveSeconds: 30,
   });
-  assert.deepEqual(updateTunnelEditorSetting(7, {}, 'Mode', 'manual'), {
+  assert.deepEqual(updateTunnelEditorSetting(8, {}, 'Mode', 'manual'), {
     Mode: 'manual',
     KeepaliveSeconds: 30,
     Port: 22,
@@ -113,14 +155,14 @@ test('SSH editor modes retain only references and reset trust on endpoint change
   assert.ok(
     missingTunnelFields({
       name: '',
-      kind: 7,
+      kind: 8,
       settings: { Mode: 'manual', Port: 0, KeepaliveSeconds: 0 },
     }).length >= 5,
   );
-  assert.deepEqual(missingTunnelFields({ name: 'x', kind: 7, settings: { Mode: 'connection' } }), [
+  assert.deepEqual(missingTunnelFields({ name: 'x', kind: 8, settings: { Mode: 'connection' } }), [
     'SSH connection',
   ]);
-  assert.deepEqual(missingTunnelFields({ name: 'x', kind: 7, settings: {} }), ['SSH tunnel mode']);
+  assert.deepEqual(missingTunnelFields({ name: 'x', kind: 8, settings: {} }), ['SSH tunnel mode']);
 });
 
 test('SSH IPC rejects secrets, invalid references, endpoint bounds and incompatible modes', () => {
@@ -137,7 +179,7 @@ test('SSH IPC rejects secrets, invalid references, endpoint bounds and incompati
     parseTunnelDetailsResponse({
       id,
       name: 'jump',
-      kind: 7,
+      kind: 8,
       settings: { Mode: 'connection', JumpConnectionId: credential },
       jumpHostKeySha256: pin,
     }).jumpHostKeySha256,
@@ -169,7 +211,7 @@ test('SSH IPC rejects secrets, invalid references, endpoint bounds and incompati
     parseTunnelDetailsResponse({
       id,
       name: 'jump',
-      kind: 7,
+      kind: 8,
       settings: manual,
       jumpHostKeySha256: 'bad',
     }),
@@ -180,20 +222,20 @@ test('blank optional SSH keepalive uses the default while invalid values remain 
   const connection = { Mode: 'connection', JumpConnectionId: id };
   for (const KeepaliveSeconds of [undefined, '', '   ']) {
     const settings = { ...connection, KeepaliveSeconds };
-    assert.deepEqual(missingTunnelFields({ name: 'Jump', kind: 7, settings }), []);
-    const normalized = normalizeTunnelEditorSettings(7, settings);
+    assert.deepEqual(missingTunnelFields({ name: 'Jump', kind: 8, settings }), []);
+    const normalized = normalizeTunnelEditorSettings(8, settings);
     assert.deepEqual(normalized, connection);
     assert.deepEqual(parseSSHJumpSettings(normalized), connection);
   }
   for (const KeepaliveSeconds of [0, 3601, 1.5, null, [], {}]) {
     assert.deepEqual(
-      missingTunnelFields({ name: 'Jump', kind: 7, settings: { ...connection, KeepaliveSeconds } }),
+      missingTunnelFields({ name: 'Jump', kind: 8, settings: { ...connection, KeepaliveSeconds } }),
       ['Keepalive (1-3600 seconds)'],
     );
   }
   for (const KeepaliveSeconds of [1, 3600]) {
     assert.deepEqual(
-      missingTunnelFields({ name: 'Jump', kind: 7, settings: { ...connection, KeepaliveSeconds } }),
+      missingTunnelFields({ name: 'Jump', kind: 8, settings: { ...connection, KeepaliveSeconds } }),
       [],
     );
   }

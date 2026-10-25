@@ -89,7 +89,7 @@ test('authentication prompts, window-close controls, and RDP surface layout work
       const sidebarOverlayOpen = sidebarOpen;
       const newConnectionOpen = false, folderDetailsOpen = false, newFolderOpen = false;
       const rdpCredentialPrompt = null, sshCredentialPrompt = null;
-      const sshKeyPassphrasePrompt = null, pendingSessionClose = null;
+      const sshKeyPassphrasePrompt = null, sshKeyEditor = null, pendingSessionClose = null;
       return <>
         ${source.slice(authMountStart, authMountEnd)}
         ${source.slice(workspaceStart, workspaceEnd)}
@@ -266,7 +266,7 @@ test('authentication prompts, window-close controls, and RDP surface layout work
       const contextMenuOverlayOpen = false, newConnectionOpen = false, folderDetailsOpen = false;
       const sidebarOverlayOpen = false;
       const newFolderOpen = false, authPrompt = null, rdpCredentialPrompt = null;
-      const sshCredentialPrompt = null, sshKeyPassphrasePrompt = null, pendingSessionClose = null;
+      const sshCredentialPrompt = null, sshKeyPassphrasePrompt = null, sshKeyEditor = null, pendingSessionClose = null;
       const pendingWindowClose = null;
       return <TooltipProvider>${bitwardenMount}<NativeSurfaceProbe ${nativeVisibility} /></TooltipProvider>;
     }
@@ -325,7 +325,7 @@ test('authentication prompts, window-close controls, and RDP surface layout work
         ${slice('  function resetBitwardenSearch()', '  function selectBitwardenItem(')}
         useEffect(() => { if (!isAuthorized) resetBitwardenSearch(); }, [isAuthorized]);
         return <TooltipProvider>
-          ${slice('      {isAuthorized && editorOpen && bitwardenAccessRequested ? (', '      <section className="flex h-full min-h-0 flex-col overflow-hidden px-6 py-5">')}
+          ${slice('      {isAuthorized && editorOpen && bitwardenAccessRequested ? (', '      {!editorOnly ? (')}
           <button id="vault-search" onClick={() => void searchBitwarden()}>Search</button>
           <input id="vault-query" value={bitwardenQuery} onChange={event => setBitwardenQuery(event.target.value)} />
           <button id="vault-editor-close" onClick={() => { setEditorOpen(false); resetBitwardenSearch(); }}>Close</button>

@@ -284,7 +284,7 @@ func TestSSHJumpRejectsMalformedPromptBeforeRequestingSecrets(t *testing.T) {
 }
 
 func TestSSHJumpSnapshotSettingsPreservesConfigurationAndErrors(t *testing.T) {
-	if tunnelName(7) != "SSH tunnel (jump host)" {
+	if tunnelName(8) != "SSH tunnel (jump host)" {
 		t.Fatal("backend kind label no longer matches the editor's SSH route catalog")
 	}
 	path, details := jumpFixture(t, "bastion.test", 22)
@@ -329,7 +329,7 @@ func TestSSHJumpIdentitySeparatesCredentialFieldsContainingNull(t *testing.T) {
 	if _, err := normalizeCredentialDraft(credentialCreateRequest{Name: "Password", Protocol: "ssh", Username: "ops", Password: password}, false); err != nil {
 		t.Fatalf("password fixture is not a supported credential: %v", err)
 	}
-	snapshot := tunnelConfigSnapshot{id: "jump", kind: 7, settings: json.RawMessage(`{"Mode":"connection"}`)}
+	snapshot := tunnelConfigSnapshot{id: "jump", kind: 8, settings: json.RawMessage(`{"Mode":"connection"}`)}
 	passwordTarget := sshTarget{host: "bastion.test", port: 22, username: "ops", credentialID: jumpCredentialID, password: password}
 	keyTarget := passwordTarget
 	keyTarget.password, keyTarget.privateKey, keyTarget.keyPassphrase = "", keyBytes, phrase
@@ -419,7 +419,7 @@ func TestSSHJumpStaleEditorCannotRestoreOrReplaceManualTrust(t *testing.T) {
 			host, port, pin := jumpTestServer(t)
 			path, details := jumpFixture(t, host, port)
 			raw, _ := json.Marshal(map[string]any{"Mode": "manual", "Host": host, "Port": port, "Username": "ops", "CredentialId": jumpCredentialID})
-			details, err := updateTunnel(path, tunnelWriteRequest{ID: details.ID, Name: details.Name, Kind: 7, Settings: raw})
+			details, err := updateTunnel(path, tunnelWriteRequest{ID: details.ID, Name: details.Name, Kind: 8, Settings: raw})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -435,7 +435,7 @@ func TestSSHJumpStaleEditorCannotRestoreOrReplaceManualTrust(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer clearBytes(editor.Settings)
-			if _, err := updateTunnel(path, tunnelWriteRequest{ID: details.ID, Name: details.Name, Kind: 7, Settings: editor.Settings, ForgetJumpHostKeySha256: pin}); err != nil {
+			if _, err := updateTunnel(path, tunnelWriteRequest{ID: details.ID, Name: details.Name, Kind: 8, Settings: editor.Settings, ForgetJumpHostKeySha256: pin}); err != nil {
 				t.Fatal(err)
 			}
 			expected := ""
@@ -449,11 +449,11 @@ func TestSSHJumpStaleEditorCannotRestoreOrReplaceManualTrust(t *testing.T) {
 				if err := persistSSHJumpPin(context.Background(), snapshot, target, expected); err != nil {
 					t.Fatal(err)
 				}
-				if _, err := updateTunnel(path, tunnelWriteRequest{ID: details.ID, Name: details.Name, Kind: 7, Settings: editor.Settings, ForgetJumpHostKeySha256: pin}); err == nil {
+				if _, err := updateTunnel(path, tunnelWriteRequest{ID: details.ID, Name: details.Name, Kind: 8, Settings: editor.Settings, ForgetJumpHostKeySha256: pin}); err == nil {
 					t.Fatal("an old reset request cleared newly approved trust")
 				}
 			}
-			saved, err := updateTunnel(path, tunnelWriteRequest{ID: details.ID, Name: "Renamed", Kind: 7, Settings: editor.Settings})
+			saved, err := updateTunnel(path, tunnelWriteRequest{ID: details.ID, Name: "Renamed", Kind: 8, Settings: editor.Settings})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -472,7 +472,7 @@ func TestSSHJumpClientCannotSeedOrMoveManualTrust(t *testing.T) {
 	path, _ := jumpFixture(t, "bastion.test", 22)
 	manual := map[string]any{"Mode": "manual", "Host": "bastion.test", "Port": 22, "Username": "ops", "CredentialId": jumpCredentialID, "HostKeySha256": "SHA256:" + strings.Repeat("A", 43)}
 	raw, _ := json.Marshal(manual)
-	details, err := createTunnel(path, tunnelWriteRequest{Name: "Manual", Kind: 7, Settings: raw})
+	details, err := createTunnel(path, tunnelWriteRequest{Name: "Manual", Kind: 8, Settings: raw})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -506,7 +506,7 @@ func TestSSHJumpClientCannotSeedOrMoveManualTrust(t *testing.T) {
 	}
 	manual["Host"] = "another-bastion.test"
 	raw, _ = json.Marshal(manual)
-	details, err = updateTunnel(path, tunnelWriteRequest{ID: details.ID, Name: details.Name, Kind: 7, Settings: raw})
+	details, err = updateTunnel(path, tunnelWriteRequest{ID: details.ID, Name: details.Name, Kind: 8, Settings: raw})
 	if err != nil {
 		t.Fatal(err)
 	}
