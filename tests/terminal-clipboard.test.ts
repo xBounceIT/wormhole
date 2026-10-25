@@ -22,6 +22,7 @@ import {
   terminalCopyChordAfterKeyUp,
 } from '../src/terminal-clipboard.ts';
 import { terminalControlKeyData } from '../src/terminal-keyboard.ts';
+import { requiresSshCertificateReplacement } from '../src/runtime-credential-errors.ts';
 import {
   nextTerminalViewportResetSequence,
   scrollTerminalToBottom,
@@ -40,6 +41,7 @@ type TerminalConnectionStateProps = {
     status: 'connecting' | 'failed' | 'disconnected';
     host?: string;
     error?: string;
+    credentialId?: string;
     hostKeyMismatch?: { expected: string; received: string };
     tunnelProgress?: object;
   };
@@ -57,10 +59,14 @@ const connectionStateTransform = await transformWithOxc(
   'terminal-connection-state.tsx',
   { jsx: { runtime: 'classic' } },
 );
+let certificateEditor: ((id: string) => void) | null = null;
 const renderConnectionState = runInNewContext(
   `${connectionStateTransform.code}\nSshTerminalConnectionState;`,
   {
     React,
+    useContext: () => certificateEditor,
+    SshCertificateEditorContext: {},
+    requiresSshCertificateReplacement,
     Button: 'button',
     LoaderCircle: 'loading-icon',
     AlertCircle: 'error-icon',
@@ -203,6 +209,43 @@ test('only connecting SSH renders the tunnel progress stepper', () => {
         assert.equal(stepper, undefined);
       }
     }
+  }
+});
+
+test('expired SSH certificates deep-link to their saved credential without changing reconnect', () => {
+  const replaced: string[] = [];
+  certificateEditor = (id) => replaced.push(id);
+  try {
+    const props: TerminalConnectionStateProps = {
+      session: {
+        id: 'expired',
+        status: 'failed',
+        credentialId: 'saved-key',
+        error: 'SSH certificate expired on 2026-10-24 14:00 UTC',
+      },
+      isSerial: false,
+      onReconnect: () => {},
+    };
+    const element = renderConnectionState(props);
+    const replace = connectionStateElements(element).find(
+      (child) => child.type === 'button' && child.props.children === 'Replace certificate…',
+    );
+    assert.ok(replace);
+    (replace.props.onClick as () => void)();
+    assert.deepEqual(replaced, ['saved-key']);
+    for (const override of [
+      { isSerial: true },
+      { session: { ...props.session, status: 'connecting' as const } },
+      { session: { ...props.session, credentialId: undefined } },
+      { session: { ...props.session, error: 'SSH private key passphrase is required' } },
+    ]) {
+      assert.doesNotMatch(
+        renderToStaticMarkup(renderConnectionState({ ...props, ...override })),
+        /Replace certificate/,
+      );
+    }
+  } finally {
+    certificateEditor = null;
   }
 });
 

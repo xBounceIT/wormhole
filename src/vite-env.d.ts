@@ -1,6 +1,7 @@
 /// <reference types="vite/client" />
 
 type WormholeProtocol = 'ssh' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial';
+type WormholeWebBrowserState = import('../electron/web-browser-tabs').WebBrowserState;
 
 interface WormholeRdpSurfaceRect {
   x: number;
@@ -154,6 +155,15 @@ interface WormholeWorkspaceCredential {
   bitwardenItemId?: string;
   bitwardenItemName?: string;
   privateKeyFileName?: string;
+  hasCertificate?: boolean;
+  certificateFileName?: string;
+  certificate?: {
+    keyId: string;
+    principals: string[];
+    validAfter?: string;
+    validBefore?: string;
+    signingCaFingerprint: string;
+  };
   isVirtualBitwarden?: boolean;
 }
 
@@ -195,6 +205,7 @@ interface WormholeWebTarget {
   host: string;
   port: number;
   ignoreCertErrors: boolean;
+  browser?: WormholeWebBrowserState;
   bitwarden?: {
     partition: string;
     popupUrl: string;
@@ -262,13 +273,14 @@ interface WormholeBitwardenLoginItem {
 }
 
 interface WormholeWebEvent {
-  type: 'connected' | 'failed' | 'navigation';
+  type: 'connected' | 'failed' | 'navigation' | 'focus-address';
   sessionId: string;
   attempt: number;
   url: string;
   canGoBack: boolean;
   canGoForward: boolean;
   isLoading: boolean;
+  browser: WormholeWebBrowserState;
   error?: string;
 }
 
@@ -368,6 +380,7 @@ type WormholeSshEvent =
       sessionId: string;
       error: string;
       hostKeyExpected?: string;
+      credentialId?: string;
       hostKeyReceived?: string;
     }
   | {
@@ -860,6 +873,8 @@ interface Window {
       passphrase: string;
       clearPassphrase: boolean;
       privateKeySelectionId?: string;
+      certificateSelectionId?: string;
+      clearCertificate?: boolean;
       provider: 'Local';
     }): Promise<WormholeWorkspaceCredential>;
     updateCredential(request: {
@@ -873,6 +888,8 @@ interface Window {
       passphrase: string;
       clearPassphrase: boolean;
       privateKeySelectionId?: string;
+      certificateSelectionId?: string;
+      clearCertificate?: boolean;
       provider: 'Local' | 'Bitwarden';
       bitwardenItemId?: string;
       bitwardenItemName?: string;
@@ -881,7 +898,12 @@ interface Window {
     selectSshPrivateKey(): Promise<{
       selectionId: string;
       fileName: string;
+      suggestedCertificate?: { selectionId: string; fileName: string };
     } | null>;
+    selectSshCertificate(): Promise<{ selectionId: string; fileName: string } | null>;
+    discardSshCertificateSelection(request: {
+      selectionId: string;
+    }): Promise<{ discarded: boolean }>;
     discardSshPrivateKeySelection(request: {
       selectionId: string;
     }): Promise<{ discarded: boolean }>;
@@ -926,11 +948,12 @@ interface Window {
       width: number;
       height: number;
       visible: boolean;
-    }): Promise<void>;
-    commandWebSession(request: {
-      sessionId: string;
-      operation: 'back' | 'forward' | 'reload' | 'stop' | 'zoom-in' | 'zoom-out';
-    }): Promise<void>;
+      capturePreview?: boolean;
+      previewId?: string;
+    }): Promise<string | undefined>;
+    commandWebSession(
+      request: import('../electron/web-browser-tabs').WebBrowserCommand,
+    ): Promise<void>;
     showTreeTooltip(request: {
       text: string;
       anchor: { x: number; y: number; width: number; height: number };

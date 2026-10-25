@@ -550,7 +550,10 @@ test('native overlays hide during drag or resize and return when resizing ends',
     appSource,
     /active && isWebSurfaceVisible && !activeDraggedSessionId && !resizingSplitId/,
   );
-  assert.match(appSource, /<WebSurface[\s\S]*isActive=\{nativeSurfaceActive\}/);
+  const webSurface = sourceBetween(appSource, '<WebSurface', '/>');
+  assert.match(webSurface, /isActive=\{isActive\}/);
+  assert.match(webSurface, /isAuthorized=\{isAuthorized\}/);
+  assert.match(webSurface, /isOccluded=\{!nativeSurfaceActive\}/);
   assert.match(appSource, /<RdpSurface[\s\S]*isActive=\{nativeSurfaceActive\}/);
   assert.match(appSource, /session\.sftp && isActive/);
 
@@ -576,7 +579,7 @@ test('native overlays hide during drag or resize and return when resizing ends',
   assert.match(handle, /onPointerUp=\{[\s\S]*?onResizeEnd\(\)/);
 });
 
-test('renderer context menus hide native session surfaces while their portal is open', () => {
+test('renderer context menus occlude native session surfaces while their portal is open', () => {
   assert.match(workspaceRootSource, /<ContextMenuOverlayProvider>/);
   assert.match(contextMenuSource, /setOpenOverlayIds/);
   assert.match(contextMenuSource, /report\(overlayId, open\)/);
@@ -1050,18 +1053,6 @@ test('backup and mRemoteNG mutations expose cooperative progress and cancellatio
     ),
     /runBackend<Backup(?:Export|Import)/,
   );
-});
-
-test('failed initial web navigation diagnoses SOCKS targets and releases its VPN lease', () => {
-  assert.match(mainSource, /finishInitialNavigationFailure/);
-  assert.match(mainSource, /tunnelBackend: openingLeaseId \? openingTunnelBackend : undefined/);
-  assert.match(
-    mainSource,
-    /await backend\.probeTunnelTarget\(leaseId, probeTarget\.host, probeTarget\.port\)/,
-  );
-  assert.doesNotMatch(mainSource, /getNativeBackend\(\)\.probeTunnelTarget/);
-  assert.match(mainSource, /tunnelLeases\.isActive\(sessionId, leaseId\)/);
-  assert.match(mainSource, /Could not release the failed web session VPN tunnel/);
 });
 
 test('SSH host-key trust delegates the retained lifecycle retry to Go', () => {

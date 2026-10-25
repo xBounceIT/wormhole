@@ -23,7 +23,7 @@ import {
   connectionUsesSavedCredentials,
 } from '../src/credential-state.ts';
 import { connectionProtocolSupportsTunnel } from '../src/quick-connect-state.ts';
-import { savedConnectionAddressForEditor } from '../src/web-address.ts';
+import { browserHomePageForEditor, savedConnectionAddressForEditor } from '../src/web-address.ts';
 import { tunnelValueFor } from '../src/tunnel-state.ts';
 import { parseWorkspaceRdpSettings } from '../electron/workspace-rdp-contract.ts';
 
@@ -200,6 +200,8 @@ function editorHarness(
     screenSize?: string;
     rdpStatus?: string;
     node?: {
+      host?: string;
+      httpPath?: string;
       credentialMode?: number;
       credentialId?: string;
       hasInlineCredential?: boolean;
@@ -299,6 +301,7 @@ function editorHarness(
     findTreeNode: () => node,
     findParentFolderId: () => '',
     savedConnectionAddressForEditor,
+    browserHomePageForEditor,
     autoSudoModeFor: () => 'inherit',
     tunnelModeFor: () => 'inherit',
     connectionUsesSavedCredentials,
@@ -993,6 +996,28 @@ test('a session closed during a pending rename is not recreated', async () => {
   assert.equal(harness.sessions[0], unrelated);
   assert.deepEqual(harness.effects, ['refresh']);
 });
+
+for (const protocol of ['http', 'https']) {
+  test(`${protocol}: Browser home page saves preserve the current tab URL`, async () => {
+    const harness = editorHarness(protocol, {
+      node: {
+        host: 'server.example',
+        httpPath: '/start?section=network#tab',
+      },
+    });
+    const homePage = `${protocol}://server.example/start?section=network#tab`;
+    assert.equal(harness.context.newConnectionForm.host, homePage);
+    harness.context.newConnectionForm = {
+      ...harness.context.newConnectionForm,
+      name: 'Browser connection',
+    };
+    await harness.save();
+    assert.equal(harness.writes[0].protocol, protocol);
+    assert.equal(harness.writes[0].host, homePage);
+    assert.equal(harness.sessions[0].webUrl, 'https://server.example/current');
+    assert.deepEqual(harness.effects, ['refresh']);
+  });
+}
 
 test('renaming a connection without an open session only saves and refreshes the workspace', async () => {
   const harness = editorHarness('ssh');

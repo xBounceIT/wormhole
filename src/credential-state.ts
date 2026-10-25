@@ -29,6 +29,9 @@ type CredentialListItem = {
   provider: string;
   kind: CredentialKind;
   privateKeyFileName?: string;
+  hasCertificate?: boolean;
+  certificateFileName?: string;
+  certificate?: { keyId: string };
 };
 
 type CredentialListProjection<T> = {
@@ -43,12 +46,33 @@ function credentialListSearchText(credential: CredentialListItem): string {
     credential.username,
     credential.domain,
     credential.provider,
-    credential.kind === 'sshKey' ? 'SSH key' : 'Password',
+    credential.kind === 'sshKey'
+      ? credential.hasCertificate
+        ? 'SSH key + certificate'
+        : 'SSH key'
+      : 'Password',
     credential.privateKeyFileName,
+    credential.certificateFileName,
+    credential.certificate?.keyId,
   ]
     .filter(Boolean)
     .join('\u0000')
     .toLowerCase();
+}
+
+export function sshCertificateExpiry(
+  validBefore: string | undefined,
+  now = Date.now(),
+): { label: string; expired: boolean } {
+  if (!validBefore) return { label: 'No expiry', expired: false };
+  const remaining = Date.parse(validBefore) - now;
+  if (!Number.isFinite(remaining)) return { label: 'Unknown expiry', expired: false };
+  if (remaining <= 0) return { label: 'Expired', expired: true };
+  const hours = Math.ceil(remaining / 3600000);
+  return {
+    label: hours < 24 ? `Expires in ${hours} h` : `Expires in ${Math.ceil(hours / 24)} d`,
+    expired: false,
+  };
 }
 
 export function filterCredentialsBySource<T extends { provider: string }>(

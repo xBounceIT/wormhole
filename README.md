@@ -39,6 +39,8 @@ scoped native compatibility helpers; shared domain behavior remains in Go.
 - VNC connections with no-auth and classic password authentication.
 - HTTP/HTTPS appliance sessions in isolated Electron Chromium surfaces.
 - Native app authentication and protected credential storage owned by Go.
+- SSH private keys, including encrypted PKCS#8, with optional OpenSSH user
+  certificates and independent certificate renewal. See [SSH authentication](docs/ssh-authentication.md).
 - Per-connection userspace VPN tunnels for WireGuard, OpenVPN, Fortinet,
   WatchGuard, Stormshield, Azure VPN, and Cisco Secure Client.
 - Optional MCP server for controlling already-open SSH sessions.

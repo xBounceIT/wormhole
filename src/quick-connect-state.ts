@@ -1,4 +1,33 @@
 export type QuickConnectProtocol = 'ssh' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial';
+export type ConnectionType = Exclude<QuickConnectProtocol, 'http' | 'https'> | 'browser';
+
+export function connectionTypeForProtocol(protocol: QuickConnectProtocol): ConnectionType {
+  return protocol === 'http' || protocol === 'https' ? 'browser' : protocol;
+}
+
+export function connectionProtocolForType(
+  type: ConnectionType,
+  current: QuickConnectProtocol,
+  address = '',
+): QuickConnectProtocol {
+  return type === 'browser'
+    ? connectionTypeForProtocol(current) === 'browser'
+      ? current
+      : connectionProtocolForAddress('https', address)
+    : type;
+}
+
+/** The Browser form defaults to HTTPS; an explicit HTTP home page selects HTTP. */
+export function connectionProtocolForAddress(
+  current: QuickConnectProtocol,
+  address: string,
+): QuickConnectProtocol {
+  return connectionTypeForProtocol(current) === 'browser'
+    ? /^\s*http:\/\//i.test(address)
+      ? 'http'
+      : 'https'
+    : current;
+}
 
 export function connectionProtocolSupportsTunnel(protocol: QuickConnectProtocol): boolean {
   return (

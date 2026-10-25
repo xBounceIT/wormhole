@@ -364,6 +364,8 @@ test('idle lock cancels an earlier Hello before draining security mutations and 
     const blockedStart = new Promise<void>((resolve) => {
       releaseHelloStart = resolve;
     });
+    const privateKeySelections = new WeakMap([[sender, { id: 'selected-key' }]]);
+    const certificateSelections = new WeakMap([[sender, { id: 'selected-certificate' }]]);
     const context = runInNewContext(
       stripTypeScriptTypes(`
       let authOperationQueue = Promise.resolve();
@@ -427,7 +429,8 @@ test('idle lock cancels an earlier Hello before draining security mutations and 
         },
         cancelAllUserOperations: () => {},
         backupImportSelections: new WeakMap(),
-        sshPrivateKeySelections: new WeakMap(),
+        sshPrivateKeySelections: privateKeySelections,
+        sshCertificateSelections: certificateSelections,
         mremoteImportAnalysis: new WeakMap(),
         mremoteImportSelections: new WeakMap(),
         sshBackend: {
@@ -466,6 +469,8 @@ test('idle lock cancels an earlier Hello before draining security mutations and 
     assert.equal((await oldConfirmation).succeeded, false);
     await queuedSettings;
     await locked;
+    assert.equal(privateKeySelections.has(sender), false);
+    assert.equal(certificateSelections.has(sender), false);
     assert.equal(session.isAccessAllowed, false);
     assert.equal(context.activeHello, undefined);
     assert.equal(sender.listenerCount('destroyed'), 0);
