@@ -1040,6 +1040,42 @@ test('page failures, aborted loads and tab crashes keep the browser route alive'
   assert.ok(h.events.some((event) => event.type === 'failed' && /VPN/.test(event.error)));
 });
 
+test('forwarder popups adopt their native guest and rewrite only authorized main-frame requests', async () => {
+  const h = browserHarness({ socks: '' });
+  await h.open();
+  const record = h.manager.surfaces.get('browser-1');
+  const contents = record.view.webContents;
+  const popup = contents.opens({ url: 'https://router.internal/auth?flow=login#reply' });
+  assert.equal(popup.action, 'allow');
+  assert.equal(popup.outlivesOpener, true);
+  const guest = new contents.constructor(record.partition);
+  assert.equal(popup.createWindow({ webContents: guest }), guest);
+  assert.equal(guest.getURL(), '', 'Chromium owns initial guest navigation and its POST data');
+  assert.equal(record.tabs.size, 2);
+  const filter = h.sessions.get(record.partition)!.requestFilter as any;
+  for (const [url, resourceType, expected] of [
+    [
+      'https://router.internal/auth?flow=login',
+      'mainFrame',
+      { redirectURL: 'https://127.0.0.1:53001/auth?flow=login' },
+    ],
+    ['https://127.0.0.1:53001/auth', 'mainFrame', { cancel: false }],
+    ['https://outside.internal/auth', 'mainFrame', { cancel: true }],
+    ['https://user:secret@router.internal/auth', 'mainFrame', { cancel: true }],
+    ['https://router.internal/script.js', 'script', { cancel: true }],
+    ['https://router.internal/frame', 'subFrame', { cancel: true }],
+    ['https://router.internal/', undefined, { cancel: true }],
+    ['wss://router.internal/live', 'webSocket', { cancel: true }],
+    ['wss://127.0.0.1:53001/live', 'webSocket', { cancel: false }],
+    ['not a URL', 'mainFrame', { cancel: true }],
+  ] as const) {
+    filter({ url, resourceType }, (response: object) =>
+      assert.deepEqual({ ...response }, expected),
+    );
+  }
+  h.manager.close('browser-1');
+});
+
 test('forwarder tabs rewrite their host and deny cross-host navigation and subresources', async () => {
   const h = browserHarness({ socks: '' });
   await h.open();
@@ -1482,8 +1518,9 @@ test('navigation restrictions, certificate scope, cancellations and tab limits f
     return prevented;
   };
   assert.equal(prevent('https://outside.internal/'), true);
-  assert.equal(prevent('https://router.internal/admin'), true);
-  assert.equal(contents.getURL(), 'https://127.0.0.1:53001/admin');
+  const currentUrl = contents.getURL();
+  assert.equal(prevent('https://router.internal/admin'), false);
+  assert.equal(contents.getURL(), currentUrl, 'Do not replay a page navigation with loadURL');
   assert.equal(prevent('https://127.0.0.1:53001/'), false);
   contents.emit('page-title-updated');
   contents.emit('did-navigate-in-page');

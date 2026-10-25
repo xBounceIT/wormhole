@@ -4698,7 +4698,8 @@ class WebSurfaceManager {
         });
       }
       if (resolvedTunnelRoute === 'forwarder') {
-        const routedOrigin = new URL(target.url).origin;
+        const routedUrl = target.url;
+        const routedOrigin = new URL(routedUrl).origin;
         // webRequest cannot intercept WebTransport or speculative connections. Keep a closed
         // proxy as the session default, with direct access only to this loopback TCP forwarder.
         // Port zero cannot host a proxy and the single proxy rule has no DIRECT fallback.
@@ -4708,6 +4709,19 @@ class WebSurfaceManager {
           proxyBypassRules: `<-loopback>;${routedOrigin};${routedOrigin.replace(/^http/, 'ws')}`,
         });
         browserSession.webRequest.onBeforeRequest((details, callback) => {
+          const navigationUrl =
+            details.resourceType === 'mainFrame'
+              ? getInSessionNavigationUrl(details.url, routedUrl, logicalTargetUrl)
+              : undefined;
+          if (
+            navigationUrl &&
+            navigationUrl !== details.url &&
+            isAllowedWebNavigation(navigationUrl)
+          ) {
+            // Redirect the native request so a popup keeps its guest, opener and POST body.
+            callback({ redirectURL: navigationUrl });
+            return;
+          }
           callback({
             cancel: !isWebBrowserRouteRequestAllowed(details.url, routedOrigin),
           });
@@ -6468,10 +6482,6 @@ class WebSurfaceManager {
           ? `content-type: ${postBody.contentType}${postBody.boundary ? `; boundary=${postBody.boundary}` : ''}`
           : undefined,
       };
-      if (navigationUrl !== url) {
-        this.addBrowserTab(sessionId, record, navigationUrl, undefined, loadOptions);
-        return { action: 'deny' };
-      }
       return {
         action: 'allow',
         outlivesOpener: true,
@@ -6496,10 +6506,8 @@ class WebSurfaceManager {
         event.preventDefault();
         return;
       }
-      if (navigationUrl !== url) {
-        event.preventDefault();
-        void contents.loadURL(navigationUrl).catch(() => undefined);
-      }
+      // The forwarder's request filter rewrites allowed main-frame requests without
+      // replacing their Chromium navigation, which would discard POST data and its initiator.
     };
     contents.on('will-navigate', enforceRoutedNavigation);
     contents.on('will-redirect', enforceRoutedNavigation);
