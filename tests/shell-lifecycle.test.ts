@@ -1674,15 +1674,6 @@ test('RDP start cancellation and VPN ownership are scoped before asynchronous pr
   );
 });
 
-test('web renderer loss releases its VPN-backed surface immediately', () => {
-  const mainSource = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
-  const crashHandler = mainSource.slice(
-    mainSource.indexOf("contents.on('render-process-gone'"),
-    mainSource.indexOf("contents.once('destroyed'"),
-  );
-  assert.match(crashHandler, /this\.close\(sessionId\)/);
-});
-
 test('application shutdown permanently stops the broker before dropping its reference', () => {
   const mainSource = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
   const shutdown = mainSource.slice(

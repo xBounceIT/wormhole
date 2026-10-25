@@ -45,6 +45,8 @@ test('HTTPS text buttons zoom only the native page and honor connection visibili
   };
   const mainCode = stripTypeScriptTypes(`
     const sshMaxSessionIdLength = 128;
+    const authSession = { isAccessAllowed: true };
+    ${readFileSync(new URL('../electron/web-browser-tabs.ts', import.meta.url), 'utf8').replace(/^export /gm, '')}
     ${slice(main, 'function isRecord(', 'function parseBackupPasswordRequest(')}
     ${slice(main, 'function isSshSessionId(', 'function isUuid(')}
     ${slice(main, 'function isWebCommandRequest(', 'function isTreeTooltipRequest(')}
@@ -88,7 +90,7 @@ test('HTTPS text buttons zoom only the native page and honor connection visibili
         let navigationCount = 0;
         view.webContents.on('did-start-navigation', () => navigationCount++);
         Object.assign(manager, {
-          surfaces: new Map([['session', { owner, view, disposed: false }]]),
+          surfaces: new Map([['session', { owner, view, disposed: false, tabs: new WebBrowserTabs() }]]),
           bitwardenPopups: new Map(), sendEvent: () => {},
         });
         ipcMain.handle('web:command', async (event, request) => {

@@ -3,7 +3,22 @@ import test from 'node:test';
 import {
   connectionAddressForProtocolChange,
   savedConnectionAddressForEditor,
+  browserHomePageForEditor,
 } from '../src/web-address.ts';
+
+test('Browser home page editing preserves scheme, path, query and IPv6 addresses', () => {
+  for (const [protocol, host, path, expected] of [
+    ['http', 'device.test', '/admin?q=one#section', 'http://device.test/admin?q=one#section'],
+    ['https', 'device.test', '', 'https://device.test'],
+    ['https', '2001:db8::1', '/admin', 'https://[2001:db8::1]/admin'],
+    ['http', '[::1]:8080', '/page', 'http://[::1]:8080/page'],
+    ['https', 'https://device.test', '/admin', 'https://device.test/admin'],
+    ['https', 'http://legacy.test', '/admin', 'https://legacy.test/admin'],
+    ['https', '', '', ''],
+    ['ssh', 'server.test', '/ignored', 'server.test'],
+  ])
+    assert.equal(browserHomePageForEditor(protocol, host, path), expected);
+});
 import { WebSessionAttemptTracker } from '../electron/web-session-attempt.ts';
 import { webTargetURLMatchesEndpoint } from '../electron/web-target-validation.ts';
 
