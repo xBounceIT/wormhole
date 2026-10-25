@@ -153,19 +153,22 @@ type credentialsForProtocolRequest struct {
 }
 
 type credentialRecord struct {
-	ID                 string `json:"id"`
-	Name               string `json:"name"`
-	Protocol           string `json:"protocol"`
-	Kind               string `json:"kind"`
-	Username           string `json:"username"`
-	Domain             string `json:"domain,omitempty"`
-	Provider           string `json:"provider"`
-	CanEdit            bool   `json:"canEdit"`
-	CanDelete          bool   `json:"canDelete"`
-	BitwardenItemID    string `json:"bitwardenItemId,omitempty"`
-	BitwardenItemName  string `json:"bitwardenItemName,omitempty"`
-	PrivateKeyFileName string `json:"privateKeyFileName,omitempty"`
-	IsVirtualBitwarden bool   `json:"isVirtualBitwarden,omitempty"`
+	ID                  string                  `json:"id"`
+	Name                string                  `json:"name"`
+	Protocol            string                  `json:"protocol"`
+	Kind                string                  `json:"kind"`
+	Username            string                  `json:"username"`
+	Domain              string                  `json:"domain,omitempty"`
+	Provider            string                  `json:"provider"`
+	CanEdit             bool                    `json:"canEdit"`
+	CanDelete           bool                    `json:"canDelete"`
+	BitwardenItemID     string                  `json:"bitwardenItemId,omitempty"`
+	BitwardenItemName   string                  `json:"bitwardenItemName,omitempty"`
+	PrivateKeyFileName  string                  `json:"privateKeyFileName,omitempty"`
+	HasCertificate      bool                    `json:"hasCertificate,omitempty"`
+	CertificateFileName string                  `json:"certificateFileName,omitempty"`
+	Certificate         *sshCertificateMetadata `json:"certificate,omitempty"`
+	IsVirtualBitwarden  bool                    `json:"isVirtualBitwarden,omitempty"`
 }
 
 type credentialBindingMetadata struct {
@@ -441,7 +444,7 @@ func runBackendCLI(args []string, input io.Reader, output io.Writer, errorOutput
 		var request credentialUpdateRequest
 		err = decodeInput(&request)
 		if err == nil {
-			result, err = updateCredential(*databasePath, request)
+			result, err = updateCredential(*databasePath, request, *electronUserDataPath)
 		}
 	case "credential-delete":
 		var request credentialDeleteRequest
@@ -2221,7 +2224,14 @@ func loadStoredCredentials(database *sql.DB) ([]credentialRecord, map[string]str
 	if _, ok := columns["PrivateKeyFileName"]; ok {
 		privateKeyFileNameExpression = "PrivateKeyFileName"
 	}
-	rows, err := database.Query(`SELECT Id, Name, Username, Domain, ` + protocolExpression + `, ` + providerExpression + `, ` + kindExpression + `, ` + bitwardenItemIDExpression + `, ` + bitwardenItemNameExpression + `, ` + privateKeyFileNameExpression + `
+	certificateExpression, certificateFileNameExpression := "NULL", "NULL"
+	if _, ok := columns["SshCertificate"]; ok {
+		certificateExpression = "SshCertificate"
+	}
+	if _, ok := columns["SshCertificateFileName"]; ok {
+		certificateFileNameExpression = "SshCertificateFileName"
+	}
+	rows, err := database.Query(`SELECT Id, Name, Username, Domain, ` + protocolExpression + `, ` + providerExpression + `, ` + kindExpression + `, ` + bitwardenItemIDExpression + `, ` + bitwardenItemNameExpression + `, ` + privateKeyFileNameExpression + `, ` + certificateExpression + `, ` + certificateFileNameExpression + `
 FROM CredentialProfiles ORDER BY Name, Id;`)
 	if err != nil {
 		return nil, nil, fmt.Errorf("cannot read credentials: %w", err)
@@ -2229,8 +2239,8 @@ FROM CredentialProfiles ORDER BY Name, Id;`)
 	defer rows.Close()
 	for rows.Next() {
 		var row credentialRow
-		var itemID, itemName, privateKeyFileName sql.NullString
-		if err := rows.Scan(&row.ID, &row.Name, &row.Username, &row.Domain, &row.Protocol, &row.Provider, &row.Kind, &itemID, &itemName, &privateKeyFileName); err != nil {
+		var itemID, itemName, privateKeyFileName, certificate, certificateFileName sql.NullString
+		if err := rows.Scan(&row.ID, &row.Name, &row.Username, &row.Domain, &row.Protocol, &row.Provider, &row.Kind, &itemID, &itemName, &privateKeyFileName, &certificate, &certificateFileName); err != nil {
 			return nil, nil, fmt.Errorf("cannot read a credential: %w", err)
 		}
 		username := "No username"
@@ -2252,6 +2262,9 @@ FROM CredentialProfiles ORDER BY Name, Id;`)
 			BitwardenItemID:    strings.TrimSpace(nullableString(itemID)),
 			BitwardenItemName:  strings.TrimSpace(nullableString(itemName)),
 			PrivateKeyFileName: credentialPrivateKeyDisplayName(nullableString(privateKeyFileName)),
+		}
+		if row.Kind == 1 && row.Provider == 0 {
+			setSSHCertificateMetadata(&record, nullableString(certificate), nullableString(certificateFileName))
 		}
 		credentials = append(credentials, record)
 		if row.Provider == 1 && record.BitwardenItemID != "" {

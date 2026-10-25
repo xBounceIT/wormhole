@@ -412,7 +412,7 @@ test('SSH key credential import keeps key paths and material behind the native b
     /Buffer\.byteLength\((?:value\.keyPassphrase|passphrase), 'utf8'\)/,
   );
 
-  assert.match(backendSource, /ssh\.ParsePrivateKeyWithPassphrase/);
+  assert.match(backendSource, /parseSSHSigner/);
   assert.match(backendSource, /credentialPrivateKeyStageProtect/);
   assert.match(backendSource, /maxSshPrivateKeyBytes/);
   assert.match(backendSource, /ClearPassphrase/);

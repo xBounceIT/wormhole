@@ -21,6 +21,7 @@ import {
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
+import { stat as statFile } from 'node:fs/promises';
 import path from 'node:path';
 import { createInterface, type Interface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
@@ -644,6 +645,15 @@ type WorkspaceCredential = {
   bitwardenItemId?: string;
   bitwardenItemName?: string;
   privateKeyFileName?: string;
+  hasCertificate?: boolean;
+  certificateFileName?: string;
+  certificate?: {
+    keyId: string;
+    principals: string[];
+    validAfter?: string;
+    validBefore?: string;
+    signingCaFingerprint: string;
+  };
   isVirtualBitwarden?: boolean;
 };
 type CredentialProtocol = 'ssh' | 'rdp' | 'vnc';
@@ -657,6 +667,8 @@ type CredentialWriteRequest = {
   passphrase: string;
   clearPassphrase: boolean;
   privateKeySelectionId?: string;
+  certificateSelectionId?: string;
+  clearCertificate: boolean;
   provider: 'Local' | 'Bitwarden';
   bitwardenItemId?: string;
   bitwardenItemName?: string;
@@ -866,8 +878,14 @@ let authOperationQueue: Promise<void> = Promise.resolve();
 let currentAuthState: AuthStateResponse | undefined;
 let authRefreshInFlight: Promise<AuthStateResponse> | undefined;
 const backupImportSelections = new WeakMap<Electron.WebContents, string>();
-type SshPrivateKeySelection = { id: string; path: string; fileName: string };
+type SshPrivateKeySelection = {
+  id: string;
+  path: string;
+  fileName: string;
+  authorizationEpoch: number;
+};
 const sshPrivateKeySelections = new WeakMap<Electron.WebContents, SshPrivateKeySelection>();
+const sshCertificateSelections = new WeakMap<Electron.WebContents, SshPrivateKeySelection>();
 type MRemoteImportSelection = {
   path: string;
   planNonce?: string;
@@ -1004,6 +1022,7 @@ type SshBackendEvent =
       sessionId: string;
       error: string;
       hostKeyExpected?: string;
+      credentialId?: string;
       hostKeyReceived?: string;
       retainTunnelLease: boolean;
     }
@@ -1554,6 +1573,11 @@ function parseCredentialWriteRequest(value: unknown, updating = false): Credenti
     typeof value.privateKeySelectionId === 'string' && value.privateKeySelectionId.length > 0
       ? value.privateKeySelectionId
       : undefined;
+  const certificateSelectionId =
+    typeof value.certificateSelectionId === 'string' && value.certificateSelectionId.length > 0
+      ? value.certificateSelectionId
+      : undefined;
+  const clearCertificate = value.clearCertificate === undefined ? false : value.clearCertificate;
   const provider =
     value.provider === 'Bitwarden' ? 'Bitwarden' : value.provider === 'Local' ? 'Local' : undefined;
   const bitwardenItemId = typeof value.bitwardenItemId === 'string' ? value.bitwardenItemId : '';
@@ -1574,6 +1598,13 @@ function parseCredentialWriteRequest(value: unknown, updating = false): Credenti
     typeof clearPassphrase !== 'boolean' ||
     provider === undefined ||
     (privateKeySelectionId !== undefined && !isUuid(privateKeySelectionId)) ||
+    (value.privateKeySelectionId !== undefined &&
+      typeof value.privateKeySelectionId !== 'string') ||
+    (value.certificateSelectionId !== undefined &&
+      typeof value.certificateSelectionId !== 'string') ||
+    (certificateSelectionId !== undefined && !isUuid(certificateSelectionId)) ||
+    typeof clearCertificate !== 'boolean' ||
+    (clearCertificate && (!updating || certificateSelectionId !== undefined)) ||
     (kind === 'password' && provider === 'Local' && password.length === 0 && !updating) ||
     (kind === 'password' &&
       provider === 'Bitwarden' &&
@@ -1581,7 +1612,11 @@ function parseCredentialWriteRequest(value: unknown, updating = false): Credenti
         bitwardenItemId.length > credentialMaxBitwardenItemIdLength ||
         bitwardenItemName.length > credentialMaxBitwardenItemNameLength)) ||
     (kind === 'password' &&
-      (passphrase.length !== 0 || clearPassphrase || privateKeySelectionId !== undefined)) ||
+      (passphrase.length !== 0 ||
+        clearPassphrase ||
+        privateKeySelectionId !== undefined ||
+        certificateSelectionId !== undefined ||
+        clearCertificate)) ||
     (kind === 'sshKey' &&
       (protocol !== 'ssh' ||
         provider !== 'Local' ||
@@ -1605,6 +1640,8 @@ function parseCredentialWriteRequest(value: unknown, updating = false): Credenti
     passphrase,
     clearPassphrase,
     privateKeySelectionId,
+    certificateSelectionId,
+    clearCertificate,
     provider,
     bitwardenItemId,
     bitwardenItemName,
@@ -1627,6 +1664,8 @@ function parseCredentialCreateRequest(value: unknown): CredentialCreateRequest {
     passphrase: request.passphrase,
     clearPassphrase: request.clearPassphrase,
     privateKeySelectionId: request.privateKeySelectionId,
+    certificateSelectionId: request.certificateSelectionId,
+    clearCertificate: request.clearCertificate,
     provider: 'Local',
   };
 }
@@ -2417,6 +2456,7 @@ function parseSshBackendEvent(line: string): SshBackendEvent | undefined {
       sessionId: value.session_id,
       error: value.error,
       hostKeyExpected: hasHostKeyMismatch ? hostKeyExpected : undefined,
+      credentialId: isUuid(value.credential_id) ? value.credential_id : undefined,
       hostKeyReceived: hasHostKeyMismatch ? hostKeyReceived : undefined,
       retainTunnelLease,
     };
@@ -8101,8 +8141,11 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
         title: 'Select SSH private key',
         properties: ['openFile'],
         filters: [
-          { name: 'SSH private keys', extensions: ['key', 'pem'] },
           { name: 'All files', extensions: ['*'] },
+          {
+            name: 'SSH private keys (including extension-less id_* files)',
+            extensions: ['key', 'pem', '*'],
+          },
         ],
       };
       const selection = await showCoordinatedOpenDialog(owner, options);
@@ -8113,10 +8156,65 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
         id: randomUUID(),
         path: selectedPath,
         fileName: sshPrivateKeyDisplayName(selectedPath),
+        authorizationEpoch,
       };
+      let suggestedCertificate: { selectionId: string; fileName: string } | undefined;
+      const certificatePath = `${selectedPath}-cert.pub`;
+      const info = await statFile(certificatePath).catch(() => null);
+      requireAuthorizationEpoch(authorizationEpoch);
+      if (info?.isFile() && info.size > 0 && info.size <= 16 * 1024) {
+        const certificate = {
+          id: randomUUID(),
+          path: certificatePath,
+          fileName: sshPrivateKeyDisplayName(certificatePath),
+          authorizationEpoch,
+        };
+        sshCertificateSelections.set(event.sender, certificate);
+        suggestedCertificate = { selectionId: certificate.id, fileName: certificate.fileName };
+      }
       sshPrivateKeySelections.set(event.sender, selected);
+      return { selectionId: selected.id, fileName: selected.fileName, suggestedCertificate };
+    });
+  });
+
+  ipcMain.handle('credential:select-ssh-certificate', async (event) => {
+    return serializeAuthOperation(async () => {
+      await requireWorkspaceAuth();
+      const authorizationEpoch = authSession.authorizationEpoch;
+      const owner = BrowserWindow.fromWebContents(event.sender);
+      const options: Electron.OpenDialogOptions = {
+        title: 'Select OpenSSH user certificate',
+        properties: ['openFile'],
+        filters: [
+          { name: 'OpenSSH user certificates (*-cert.pub)', extensions: ['pub'] },
+          { name: 'All files', extensions: ['*'] },
+        ],
+      };
+      const selection = await showCoordinatedOpenDialog(owner, options);
+      if (selection.canceled || selection.filePaths.length !== 1) return null;
+      const selectedPath = selection.filePaths[0];
+      const info = await statFile(selectedPath).catch(() => null);
+      requireAuthorizationEpoch(authorizationEpoch);
+      if (!info?.isFile() || info.size <= 0 || info.size > 16 * 1024) {
+        throw new Error('Select a regular OpenSSH user certificate file up to 16 KiB.');
+      }
+      const selected = {
+        id: randomUUID(),
+        path: selectedPath,
+        fileName: sshPrivateKeyDisplayName(selectedPath),
+        authorizationEpoch,
+      };
+      sshCertificateSelections.set(event.sender, selected);
       return { selectionId: selected.id, fileName: selected.fileName };
     });
+  });
+
+  ipcMain.handle('credential:discard-ssh-certificate', (event, value: unknown) => {
+    const selectionId = isRecord(value) ? value.selectionId : undefined;
+    if (!isUuid(selectionId)) throw new Error('SSH certificate selection is invalid.');
+    if (sshCertificateSelections.get(event.sender)?.id !== selectionId) return { discarded: false };
+    sshCertificateSelections.delete(event.sender);
+    return { discarded: true };
   });
 
   ipcMain.handle('credential:discard-ssh-private-key', (event, value: unknown) => {
@@ -8140,12 +8238,26 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       if (request.privateKeySelectionId && selection?.id !== request.privateKeySelectionId) {
         throw new Error('Select the SSH private key again.');
       }
-      const { privateKeySelectionId: _selectionId, ...backendRequest } = request;
+      if (selection) requireAuthorizationEpoch(selection.authorizationEpoch);
+      const certificate = request.certificateSelectionId
+        ? sshCertificateSelections.get(event.sender)
+        : undefined;
+      if (request.certificateSelectionId && certificate?.id !== request.certificateSelectionId) {
+        throw new Error('Select the SSH certificate again.');
+      }
+      if (certificate) requireAuthorizationEpoch(certificate.authorizationEpoch);
+      const {
+        privateKeySelectionId: _selectionId,
+        certificateSelectionId: _certificateSelectionId,
+        ...backendRequest
+      } = request;
       const credential = await runBackend<WorkspaceCredential>('credential-create', {
         ...backendRequest,
         ...(selection ? { privateKeyPath: selection.path } : {}),
+        ...(certificate ? { certificatePath: certificate.path } : {}),
       });
       if (selection) sshPrivateKeySelections.delete(event.sender);
+      if (certificate) sshCertificateSelections.delete(event.sender);
       return credential;
     });
   });
@@ -8160,12 +8272,26 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       if (request.privateKeySelectionId && selection?.id !== request.privateKeySelectionId) {
         throw new Error('Select the SSH private key again.');
       }
-      const { privateKeySelectionId: _selectionId, ...backendRequest } = request;
+      if (selection) requireAuthorizationEpoch(selection.authorizationEpoch);
+      const certificate = request.certificateSelectionId
+        ? sshCertificateSelections.get(event.sender)
+        : undefined;
+      if (request.certificateSelectionId && certificate?.id !== request.certificateSelectionId) {
+        throw new Error('Select the SSH certificate again.');
+      }
+      if (certificate) requireAuthorizationEpoch(certificate.authorizationEpoch);
+      const {
+        privateKeySelectionId: _selectionId,
+        certificateSelectionId: _certificateSelectionId,
+        ...backendRequest
+      } = request;
       const credential = await runBackend<WorkspaceCredential>('credential-update', {
         ...backendRequest,
         ...(selection ? { privateKeyPath: selection.path } : {}),
+        ...(certificate ? { certificatePath: certificate.path } : {}),
       });
       if (selection) sshPrivateKeySelections.delete(event.sender);
+      if (certificate) sshCertificateSelections.delete(event.sender);
       return credential;
     });
   });
@@ -9051,6 +9177,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       cancelAllUserOperations();
       backupImportSelections.delete(event.sender);
       sshPrivateKeySelections.delete(event.sender);
+      sshCertificateSelections.delete(event.sender);
       mremoteImportAnalysis.get(event.sender)?.abort();
       mremoteImportAnalysis.delete(event.sender);
       mremoteImportSelections.delete(event.sender);
@@ -10320,6 +10447,11 @@ function createWindow() {
   window.on('move', () => scheduleRdpSurfacePlacementSync(window));
   window.on('resize', () => scheduleRdpSurfacePlacementSync(window));
   window.once('closed', () => clearRdpSurfacePlacements(window));
+  const credentialSelectionOwner = window.webContents;
+  credentialSelectionOwner.once('destroyed', () => {
+    sshPrivateKeySelections.delete(credentialSelectionOwner);
+    sshCertificateSelections.delete(credentialSelectionOwner);
+  });
 
   // Keep the workspace renderer at its native CSS scale so a previously persisted Chromium zoom
   // level cannot make the whole workspace look oversized.
@@ -10352,6 +10484,7 @@ function createWindow() {
       authSession.lock();
       backupImportSelections.delete(window.webContents);
       sshPrivateKeySelections.delete(window.webContents);
+      sshCertificateSelections.delete(window.webContents);
       mremoteImportAnalysis.get(window.webContents)?.abort();
       mremoteImportAnalysis.delete(window.webContents);
       mremoteImportSelections.delete(window.webContents);

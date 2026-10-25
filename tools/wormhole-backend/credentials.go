@@ -64,6 +64,8 @@ type credentialCreateRequest struct {
 	Passphrase         string `json:"passphrase"`
 	ClearPassphrase    bool   `json:"clearPassphrase"`
 	PrivateKeyPath     string `json:"privateKeyPath"`
+	CertificatePath    string `json:"certificatePath"`
+	ClearCertificate   bool   `json:"clearCertificate"`
 	Provider           string `json:"provider"`
 	BitwardenItemID    string `json:"bitwardenItemId"`
 	BitwardenItemName  string `json:"bitwardenItemName"`
@@ -92,6 +94,8 @@ type normalizedCredentialDraft struct {
 	clearPassphrase    bool
 	privateKeyPath     string
 	privateKeyFileName string
+	certificatePath    string
+	clearCertificate   bool
 	provider           int64
 	itemID             string
 	itemName           string
@@ -275,6 +279,10 @@ func createCredential(databasePath string, request credentialCreateRequest) (cre
 		}
 		defer clearBytes(privateKey)
 	}
+	certificate, certificateFileName, err := readCredentialSSHCertificate(draft.certificatePath, privateKey, draft.passphrase)
+	if err != nil {
+		return credentialRecord{}, err
+	}
 
 	var stagedSecret *stagedCredentialSecretWrite
 	if draft.provider == 0 && secretValue != "" {
@@ -308,11 +316,12 @@ func createCredential(databasePath string, request credentialCreateRequest) (cre
 	if _, err := tx.Exec(`
 INSERT INTO CredentialProfiles
     (Id, Name, Username, Domain, Kind, PrivateKeyFileName, Protocol, SecretProvider,
-     BitwardenItemId, BitwardenItemName, BitwardenFieldPath, CreatedAt)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
+     BitwardenItemId, BitwardenItemName, BitwardenFieldPath, CreatedAt, SshCertificate, SshCertificateFileName)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
 		id, draft.name, nullableCredentialField(draft.username), nullableCredentialField(draft.domain),
 		draft.kind, nullableCredentialField(draft.privateKeyFileName), draft.protocolValue, draft.provider, nullableCredentialField(draft.itemID),
-		nullableCredentialField(draft.itemName), draft.fieldPath, createdAt); err != nil {
+		nullableCredentialField(draft.itemName), draft.fieldPath, createdAt,
+		nullableCredentialField(certificate), nullableCredentialField(certificateFileName)); err != nil {
 		return credentialRecord{}, normalizeCredentialWriteError(err)
 	}
 	// The profile insert acquires SQLite's write lock before any protected file is staged.
@@ -346,15 +355,17 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
 			return credentialRecord{}, err
 		}
 	}
-	return credentialRecord{
+	record := credentialRecord{
 		ID: id, Name: draft.name, Protocol: draft.protocol, Username: displayCredentialUsername(draft.username),
 		Kind: draft.kindName, Domain: draft.domain, Provider: providerName(draft.provider), CanEdit: true, CanDelete: true,
 		BitwardenItemID: draft.itemID, BitwardenItemName: draft.itemName,
 		PrivateKeyFileName: draft.privateKeyFileName,
-	}, nil
+	}
+	setSSHCertificateMetadata(&record, certificate, certificateFileName)
+	return record, nil
 }
 
-func updateCredential(databasePath string, request credentialUpdateRequest) (credentialRecord, error) {
+func updateCredential(databasePath string, request credentialUpdateRequest, electronUserDataPath ...string) (credentialRecord, error) {
 	id := normalizeID(request.ID)
 	if !validCredentialID(id) {
 		return credentialRecord{}, errors.New("credential id is invalid")
@@ -386,10 +397,11 @@ func updateCredential(databasePath string, request credentialUpdateRequest) (cre
 
 	var kind, provider int64
 	var previousKeyFileName sql.NullString
+	var previousCertificate, previousCertificateFileName sql.NullString
 	err = database.QueryRow(
-		"SELECT COALESCE(Kind, 0), COALESCE(SecretProvider, 0), PrivateKeyFileName FROM CredentialProfiles WHERE lower(Id) = ? LIMIT 1;",
+		"SELECT COALESCE(Kind, 0), COALESCE(SecretProvider, 0), PrivateKeyFileName, SshCertificate, SshCertificateFileName FROM CredentialProfiles WHERE lower(Id) = ? LIMIT 1;",
 		id,
-	).Scan(&kind, &provider, &previousKeyFileName)
+	).Scan(&kind, &provider, &previousKeyFileName, &previousCertificate, &previousCertificateFileName)
 	if errors.Is(err, sql.ErrNoRows) {
 		return credentialRecord{}, errors.New("credential was not found")
 	}
@@ -423,10 +435,11 @@ func updateCredential(databasePath string, request credentialUpdateRequest) (cre
 		return credentialRecord{}, errors.New("the stored credential password is missing; enter it again")
 	}
 
+	err = nil // A missing optional passphrase is not a failed key update.
 	var privateKey []byte
 	if kind == 1 && draft.privateKeyPath != "" {
 		privateKey, err = readAndValidateSshPrivateKey(draft.privateKeyPath, draft.passphrase)
-	} else if kind == 1 && draft.passphrase != "" {
+	} else if kind == 1 && (draft.passphrase != "" || draft.certificatePath != "") {
 		privateKey, err = credentialPrivateKeyUnprotect(credentialPrivateKeyPath(databasePath, id))
 		if err == nil {
 			err = validateSshPrivateKey(privateKey, draft.passphrase)
@@ -437,6 +450,33 @@ func updateCredential(databasePath string, request credentialUpdateRequest) (cre
 		}
 	}
 	defer clearBytes(privateKey)
+	if err != nil {
+		return credentialRecord{}, err
+	}
+	certificate, certificateFileName := nullableString(previousCertificate), nullableString(previousCertificateFileName)
+	validationPassphrase := draft.passphrase
+	if draft.certificatePath != "" && draft.privateKeyPath == "" && validationPassphrase == "" && !draft.clearPassphrase {
+		storedPassphrase, readErr := readOptionalCredentialSecret(database, id, electronUserDataPath...)
+		if readErr != nil {
+			return credentialRecord{}, readErr
+		}
+		validationPassphrase = string(storedPassphrase)
+		clearBytes(storedPassphrase)
+	}
+	if kind != 1 || draft.clearCertificate {
+		certificate, certificateFileName = "", ""
+	} else if draft.certificatePath != "" {
+		certificate, certificateFileName, err = readCredentialSSHCertificate(draft.certificatePath, privateKey, validationPassphrase)
+	} else if certificate != "" && len(privateKey) > 0 {
+		var cert *ssh.Certificate
+		cert, err = parseSSHUserCertificate([]byte(certificate))
+		if err == nil {
+			err = validateSSHCertificateKey(cert, privateKey, draft.passphrase)
+		}
+	}
+	if err != nil {
+		return credentialRecord{}, err
+	}
 
 	replaceSecret := draft.provider == 0 && secretValue != ""
 	clearSecret := draft.provider != 0 || (kind == 1 &&
@@ -473,7 +513,8 @@ func updateCredential(databasePath string, request credentialUpdateRequest) (cre
 		result, err = tx.Exec(`
 UPDATE CredentialProfiles
 SET Name = ?, Username = ?, Domain = ?, Protocol = ?, SecretProvider = ?,
-    PrivateKeyFileName = NULL, BitwardenItemId = ?, BitwardenItemName = ?, BitwardenFieldPath = ?
+    PrivateKeyFileName = NULL, SshCertificate = NULL, SshCertificateFileName = NULL,
+    BitwardenItemId = ?, BitwardenItemName = ?, BitwardenFieldPath = ?
 WHERE lower(Id) = ? AND COALESCE(Kind, 0) = 0 AND COALESCE(SecretProvider, 0) IN (0, 1);`,
 			draft.name, nullableCredentialField(draft.username), nullableCredentialField(draft.domain),
 			draft.protocolValue, draft.provider, nullableCredentialField(draft.itemID),
@@ -483,10 +524,11 @@ WHERE lower(Id) = ? AND COALESCE(Kind, 0) = 0 AND COALESCE(SecretProvider, 0) IN
 UPDATE CredentialProfiles
 SET Name = ?, Username = ?, Domain = NULL, Protocol = 0, SecretProvider = 0,
     PrivateKeyFileName = CASE WHEN ? <> '' THEN ? ELSE PrivateKeyFileName END,
+    SshCertificate = ?, SshCertificateFileName = ?,
     BitwardenItemId = NULL, BitwardenItemName = NULL, BitwardenFieldPath = ''
 WHERE lower(Id) = ? AND COALESCE(Kind, 0) = 1 AND COALESCE(SecretProvider, 0) = 0;`,
 			draft.name, nullableCredentialField(draft.username), draft.privateKeyFileName,
-			draft.privateKeyFileName, id)
+			draft.privateKeyFileName, nullableCredentialField(certificate), nullableCredentialField(certificateFileName), id)
 	}
 	if err != nil {
 		return credentialRecord{}, normalizeCredentialWriteError(err)
@@ -553,12 +595,14 @@ WHERE lower(Id) = ? AND COALESCE(Kind, 0) = 1 AND COALESCE(SecretProvider, 0) = 
 	if keyFileName == "" {
 		keyFileName = credentialPrivateKeyDisplayName(nullableString(previousKeyFileName))
 	}
-	return credentialRecord{
+	record := credentialRecord{
 		ID: id, Name: draft.name, Protocol: draft.protocol, Username: displayCredentialUsername(draft.username),
 		Kind: draft.kindName, Domain: draft.domain, Provider: providerName(draft.provider), CanEdit: true, CanDelete: true,
 		BitwardenItemID: draft.itemID, BitwardenItemName: draft.itemName,
 		PrivateKeyFileName: keyFileName,
-	}, nil
+	}
+	setSSHCertificateMetadata(&record, certificate, certificateFileName)
+	return record, nil
 }
 
 func deleteCredential(databasePath string, request credentialDeleteRequest) error {
@@ -850,7 +894,7 @@ func unprotectSshPrivateKey(path string) ([]byte, error) {
 }
 
 func validateSshPrivateKey(contents []byte, passphrase string) error {
-	if _, err := ssh.ParsePrivateKey(contents); err == nil {
+	if _, err := parseSSHSigner(contents, nil); err == nil {
 		if passphrase != "" {
 			return errors.New("the SSH private key is not encrypted; leave the passphrase blank")
 		}
@@ -858,7 +902,7 @@ func validateSshPrivateKey(contents []byte, passphrase string) error {
 	} else {
 		var missingPassphrase *ssh.PassphraseMissingError
 		if !errors.As(err, &missingPassphrase) {
-			return errors.New("the selected file is not a supported SSH private key")
+			return err
 		}
 	}
 	if passphrase == "" {
@@ -868,7 +912,7 @@ func validateSshPrivateKey(contents []byte, passphrase string) error {
 	}
 	passphraseBytes := []byte(passphrase)
 	defer clearBytes(passphraseBytes)
-	if _, err := ssh.ParsePrivateKeyWithPassphrase(contents, passphraseBytes); err != nil {
+	if _, err := parseSSHSigner(contents, passphraseBytes); err != nil {
 		return errors.New("the SSH private key passphrase is incorrect")
 	}
 	return nil
@@ -1420,6 +1464,12 @@ func normalizeCredentialDraft(
 		if privateKeyPath != "" && !filepath.IsAbs(privateKeyPath) {
 			return normalizedCredentialDraft{}, errors.New("SSH private key path is invalid")
 		}
+		if request.ClearCertificate && (!updating || request.CertificatePath != "") {
+			return normalizedCredentialDraft{}, errors.New("SSH certificate update is invalid")
+		}
+		if request.CertificatePath != "" && !filepath.IsAbs(request.CertificatePath) {
+			return normalizedCredentialDraft{}, errors.New("SSH certificate path is invalid")
+		}
 		if username == "" {
 			return normalizedCredentialDraft{}, errors.New("SSH credentials need a username")
 		}
@@ -1432,9 +1482,10 @@ func normalizeCredentialDraft(
 			username: username, passphrase: request.Passphrase, clearPassphrase: request.ClearPassphrase,
 			privateKeyPath:     privateKeyPath,
 			privateKeyFileName: privateKeyFileName, provider: 0,
+			certificatePath: request.CertificatePath, clearCertificate: request.ClearCertificate,
 		}, nil
 	}
-	if request.Passphrase != "" || request.ClearPassphrase || request.PrivateKeyPath != "" {
+	if request.Passphrase != "" || request.ClearPassphrase || request.PrivateKeyPath != "" || request.CertificatePath != "" || request.ClearCertificate {
 		return normalizedCredentialDraft{}, errors.New("password credentials cannot include an SSH private key")
 	}
 	if provider == 0 {
@@ -1490,6 +1541,8 @@ CREATE TABLE IF NOT EXISTS CredentialProfiles (
     Domain                TEXT NULL,
     Kind                  INTEGER NOT NULL DEFAULT 0,
     PrivateKeyFileName    TEXT NULL,
+    SshCertificate        TEXT NULL,
+    SshCertificateFileName TEXT NULL,
     Protocol              INTEGER NOT NULL DEFAULT 0,
     SecretProvider        INTEGER NOT NULL DEFAULT 0,
     BitwardenItemId       TEXT NULL,
@@ -1525,6 +1578,8 @@ CREATE TABLE IF NOT EXISTS CredentialSecrets (
 		{"Domain", "ALTER TABLE CredentialProfiles ADD COLUMN Domain TEXT NULL;"},
 		{"Kind", "ALTER TABLE CredentialProfiles ADD COLUMN Kind INTEGER NOT NULL DEFAULT 0;"},
 		{"PrivateKeyFileName", "ALTER TABLE CredentialProfiles ADD COLUMN PrivateKeyFileName TEXT NULL;"},
+		{"SshCertificate", "ALTER TABLE CredentialProfiles ADD COLUMN SshCertificate TEXT NULL;"},
+		{"SshCertificateFileName", "ALTER TABLE CredentialProfiles ADD COLUMN SshCertificateFileName TEXT NULL;"},
 		{"Protocol", "ALTER TABLE CredentialProfiles ADD COLUMN Protocol INTEGER NOT NULL DEFAULT 0;"},
 		{"SecretProvider", "ALTER TABLE CredentialProfiles ADD COLUMN SecretProvider INTEGER NOT NULL DEFAULT 0;"},
 		{"BitwardenItemId", "ALTER TABLE CredentialProfiles ADD COLUMN BitwardenItemId TEXT NULL;"},
