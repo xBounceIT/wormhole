@@ -62,7 +62,7 @@ export function parseTunnelDetailsResponse(value: unknown): TunnelDetailsRespons
     typeof value.kind !== 'number' ||
     !Number.isInteger(value.kind) ||
     value.kind < 0 ||
-    value.kind > 6 ||
+    value.kind > 7 ||
     !isRecord(value.settings)
   ) {
     throw new Error('The VPN service returned invalid tunnel details.');

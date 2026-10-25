@@ -141,6 +141,7 @@ func TestTunnelSidecarCommandCoversEveryPortableProvider(t *testing.T) {
 		{kind: 5, settings: `{"ProfileOvpn":"client\n","Password":"token"}`, executable: "wormhole-ovpnproxy"},
 		{kind: 5, settings: `{}`, wantError: true},
 		{kind: 6, settings: `{"Host":"vpn.example","Port":443,"Username":"u","Password":"p","Group":"staff"}`, executable: "wormhole-ciscoproxy"},
+		{kind: 7, settings: `{"Host":"vpn.example","Port":443,"Username":"u","Password":"p"}`, executable: "wormhole-ciscoproxy"},
 		{kind: 99, settings: `{}`, wantError: true},
 	}
 	for _, test := range tests {

@@ -3858,7 +3858,7 @@ function parseTunnelWriteRequest(value: unknown, requiresID: boolean): TunnelWri
     typeof input.kind !== 'number' ||
     !Number.isInteger(input.kind) ||
     input.kind < 0 ||
-    input.kind > 6 ||
+    input.kind > 7 ||
     !isTunnelSettings(input.settings)
   ) {
     throw new Error('VPN tunnel settings are invalid.');

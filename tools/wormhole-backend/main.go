@@ -2498,6 +2498,8 @@ func tunnelName(value int64) string {
 		return "Azure VPN"
 	case 6:
 		return "Cisco Secure Client"
+	case 7:
+		return "Forcepoint"
 	default:
 		return "Unknown"
 	}

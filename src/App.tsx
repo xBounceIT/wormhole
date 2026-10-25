@@ -2972,7 +2972,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         !event.promptId ||
         !event.title ||
         typeof event.message !== 'string' ||
-        typeof event.secret !== 'boolean' ||
+        (event.secret !== undefined && typeof event.secret !== 'boolean') ||
         (event.confirmation !== undefined && typeof event.confirmation !== 'boolean') ||
         (event.acceptLabel !== undefined && typeof event.acceptLabel !== 'string')
       ) {
@@ -2984,7 +2984,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         promptId: event.promptId,
         title: event.title,
         message: event.message,
-        secret: event.secret,
+        secret: event.secret === true,
         confirmation: event.confirmation === true,
         acceptLabel: event.acceptLabel,
       };
@@ -6898,7 +6898,11 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           >
             <DialogHeader>
               <DialogTitle>{tunnelPrompts[0]?.title || 'VPN authentication'}</DialogTitle>
-              <DialogDescription>
+              <DialogDescription
+                className={
+                  tunnelPrompts[0]?.confirmation ? 'whitespace-pre-wrap break-words' : undefined
+                }
+              >
                 {tunnelPrompts[0]?.message || 'Enter the value requested by the VPN gateway.'}
               </DialogDescription>
             </DialogHeader>
@@ -12815,6 +12819,7 @@ const tunnelKinds = [
   { value: 4, label: 'Stormshield' },
   { value: 5, label: 'Azure VPN' },
   { value: 6, label: 'Cisco Secure Client' },
+  { value: 7, label: 'Forcepoint' },
 ] as const;
 
 type TunnelEditorValue = {
@@ -13303,6 +13308,32 @@ function tunnelEditorFields(kind: number): TunnelField[] {
           section: 'Two-factor & advanced',
         },
       ];
+    case 7:
+      return [
+        {
+          key: 'Host',
+          label: 'Host',
+          section: 'Gateway',
+          placeholder: 'vpn.example.com',
+          hint: 'SSL VPN with username and password.',
+        },
+        { key: 'Port', label: 'SSL port', section: 'Gateway', type: 'number', placeholder: '443' },
+        { key: 'Username', label: 'Username', section: 'Credentials' },
+        { key: 'Password', label: 'Password', section: 'Credentials', type: 'password' },
+        {
+          key: 'ServerCertSha256Pin',
+          label: 'Server certificate SHA-256 pin (optional)',
+          section: 'Certificates & advanced',
+          hint: 'Leave blank to verify the gateway certificate on first connection, or enter a fingerprint verified with your administrator or trusted client.',
+        },
+        {
+          key: 'Mtu',
+          label: 'MTU',
+          section: 'Certificates & advanced',
+          type: 'number',
+          placeholder: '1390',
+        },
+      ];
     default:
       return [];
   }
@@ -13330,6 +13361,8 @@ function tunnelDefaultSettings(kind: number): Record<string, unknown> {
       return { Protocol: 0 };
     case 6:
       return { Port: 443 };
+    case 7:
+      return { Port: 443, Mtu: 1390 };
     default:
       return {};
   }
@@ -13478,11 +13511,13 @@ function TunnelAdvanced({
   open,
   onOpenChange,
   children,
+  contentClassName,
 }: {
   label: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   children: ReactNode;
+  contentClassName?: string;
 }) {
   return (
     <Collapsible
@@ -13495,7 +13530,7 @@ function TunnelAdvanced({
         <ChevronDown className={cn('size-3.5 transition-transform', open ? 'rotate-180' : '')} />
       </CollapsibleTrigger>
       <CollapsibleContent>
-        <div className="mt-3 grid gap-4 md:grid-cols-2">{children}</div>
+        <div className={cn('mt-3 grid gap-4 md:grid-cols-2', contentClassName)}>{children}</div>
       </CollapsibleContent>
     </Collapsible>
   );
@@ -13946,6 +13981,22 @@ function TunnelEditorDialog({
                     client-certificate authentication are not supported.
                   </p>
                   {rows('Two-factor & advanced')}
+                </TunnelAdvanced>
+              </>
+            ) : null}
+            {value.kind === 7 ? (
+              <>
+                <TunnelSection contentClassName="items-start md:grid-cols-2" title="Gateway">
+                  {rows('Gateway')}
+                </TunnelSection>
+                <TunnelSection title="Credentials">{rows('Credentials')}</TunnelSection>
+                <TunnelAdvanced
+                  contentClassName="items-start"
+                  label="Certificates & advanced"
+                  onOpenChange={setAdvancedOpen}
+                  open={advancedOpen}
+                >
+                  {rows('Certificates & advanced')}
                 </TunnelAdvanced>
               </>
             ) : null}

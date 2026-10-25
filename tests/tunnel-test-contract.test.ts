@@ -74,6 +74,7 @@ test('tunnel response contracts preserve bounded generic endpoint metadata', () 
     settings: { Host: '2001:db8::1', Password: 'secret' },
   };
   assert.deepEqual(parseTunnelDetailsResponse(details), details);
+  assert.equal(parseTunnelDetailsResponse({ ...details, kind: 7 }).kind, 7);
   assert.deepEqual(
     parseTunnelSummaryList([
       { id: tunnelID, name: 'Corporate VPN', kind: 'Fortinet', endpoint: 'vpn.example.test:443' },
@@ -102,7 +103,7 @@ test('tunnel response contracts reject malformed or unbounded backend output', (
     null,
     { ...validDetails, id: 'invalid' },
     { ...validDetails, name: '' },
-    { ...validDetails, kind: 7 },
+    { ...validDetails, kind: 8 },
     { ...validDetails, settings: [] },
     { ...validDetails, endpoint: '' },
     { ...validDetails, endpoint: 'vpn.example.test:443\nsecret' },
