@@ -118,7 +118,7 @@ test('pinned and auto-hide sidebars preserve layout, focus, menus and saved pref
         ipcMain.handle('test:input', (_event, input) => window.webContents.sendInputEvent(input));
         ipcMain.handle('test:observe', async (_event, stage) => {
           console.log('Sidebar App: ' + stage);
-          if (process.env.WORMHOLE_TEST_SCREENSHOTS && ['collapsed', 'hover'].includes(stage)) {
+          if (process.env.WORMHOLE_TEST_SCREENSHOTS && ['collapsed', 'hover', 'tree-highlight'].includes(stage)) {
             // Freeze motion for stills: capturing a hidden window can resume a stale paint frame.
             const stillStyles = await window.webContents.insertCSS('[data-sidebar-surface], [data-sidebar-content] { transition: none !important; }');
             try {

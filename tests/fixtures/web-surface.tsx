@@ -16,14 +16,18 @@ export async function runWebSurfaceTests() {
   const commands: { sessionId: string; operation: string }[] = [];
   const pending: Promise<void>[] = [];
   const popupCommands: string[] = [];
+  let rejectCommand = false;
   const api = {
     commandWebSession: (request) => {
       commands.push(request);
-      const operation = runWebCommand(request);
-      pending.push(operation);
+      const operation = rejectCommand
+        ? Promise.reject(new Error('Browser command unavailable'))
+        : runWebCommand(request);
+      pending.push(operation.catch(() => undefined));
       return operation;
     },
     setWebSessionBounds: async () => {},
+    onWebEvent: () => () => {},
     closeBitwardenPopup: async () => {
       popupCommands.push('close');
     },
@@ -33,7 +37,11 @@ export async function runWebSurfaceTests() {
     },
   } as Pick<
     NonNullable<Window['wormhole']>,
-    'commandWebSession' | 'setWebSessionBounds' | 'closeBitwardenPopup' | 'openBitwardenPopup'
+    | 'commandWebSession'
+    | 'setWebSessionBounds'
+    | 'onWebEvent'
+    | 'closeBitwardenPopup'
+    | 'openBitwardenPopup'
   >;
   Object.defineProperty(window, 'wormhole', { configurable: true, value: api });
   const session = {
@@ -116,6 +124,10 @@ export async function runWebSurfaceTests() {
   await click('Close Bitwarden');
   assert.equal(popupCommands.at(-1), 'close');
   assert.equal((await readWebZoom()).pageFactor, 1.1, 'rerendering preserves page zoom');
+  rejectCommand = true;
+  await click('Increase text size');
+  assert.match(document.querySelector('[role="alert"]').textContent, /Browser command unavailable/);
+  assert.equal((await readWebZoom()).pageFactor, 1.1, 'failed commands preserve native zoom');
 
   await act(async () => root.unmount());
 }

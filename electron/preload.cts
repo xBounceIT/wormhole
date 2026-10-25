@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
+import type { WebBrowserCommand, WebBrowserState } from './web-browser-tabs.js';
 import type {
   RdpBackendEvent,
   RdpCommandRequest,
@@ -229,11 +230,10 @@ const wormholeBridge = {
     width: number;
     height: number;
     visible: boolean;
+    capturePreview?: boolean;
+    previewId?: string;
   }) => ipcRenderer.invoke('web:set-bounds', request),
-  commandWebSession: (request: {
-    sessionId: string;
-    operation: 'back' | 'forward' | 'reload' | 'stop' | 'zoom-in' | 'zoom-out';
-  }) => ipcRenderer.invoke('web:command', request),
+  commandWebSession: (request: WebBrowserCommand) => ipcRenderer.invoke('web:command', request),
   showTreeTooltip: (request: {
     text: string;
     anchor: { x: number; y: number; width: number; height: number };
@@ -243,13 +243,14 @@ const wormholeBridge = {
   closeWebSession: (sessionId: string) => ipcRenderer.invoke('web:close', sessionId),
   onWebEvent: (
     listener: (event: {
-      type: 'connected' | 'failed' | 'navigation';
+      type: 'connected' | 'failed' | 'navigation' | 'focus-address';
       sessionId: string;
       attempt: number;
       url: string;
       canGoBack: boolean;
       canGoForward: boolean;
       isLoading: boolean;
+      browser: WebBrowserState;
       error?: string;
     }) => void,
   ) => {

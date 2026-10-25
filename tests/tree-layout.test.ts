@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   getTreeRowGeometry,
+  getTreeRowStyles,
   treeBranchRailWidth,
   treeSelectionSlotWidth,
   treeSlotGap,
@@ -49,4 +50,37 @@ test('branch connectors end at the checkbox slot', () => {
 test('tree depth rejects invalid values', () => {
   assert.throws(() => getTreeRowGeometry(-1), RangeError);
   assert.throws(() => getTreeRowGeometry(1.5), RangeError);
+});
+
+test('tree row styles reserve room for controls and labels without capping the depth', () => {
+  assert.deepEqual(getTreeRowStyles(0), {
+    paddingLeft: 'min(8px, calc(100% - 112px))',
+    branch: null,
+  });
+  for (const [depth, requestedInset] of [
+    [2, 52],
+    [16, 360],
+    [4096, 90120],
+  ]) {
+    const styles = getTreeRowStyles(depth);
+    assert.equal(styles.paddingLeft, `min(${requestedInset}px, calc(100% - 112px))`);
+    assert.ok(styles.branch);
+    const parentInset = `min(${requestedInset - 22}px, calc(100% - 112px))`;
+    assert.equal(styles.branch.left, `calc(${parentInset} + 8px)`);
+  }
+});
+
+test('tree row styles keep connectors bounded in either direction', () => {
+  const { paddingLeft, branch } = getTreeRowStyles(2);
+  assert.ok(branch);
+  assert.equal(branch.connectorLeft, `min(${paddingLeft}, calc(${branch.left} + 1px))`);
+  assert.equal(
+    branch.connectorWidth,
+    `max(calc(${paddingLeft} - ${branch.left} - 1px), calc(${branch.left} - ${paddingLeft}))`,
+  );
+});
+
+test('tree row styles reject invalid depths before producing CSS', () => {
+  for (const depth of [-1, 0.5, NaN, Infinity])
+    assert.throws(() => getTreeRowStyles(depth), RangeError);
 });

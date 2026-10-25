@@ -272,7 +272,7 @@ import {
 } from '@/components/ui/sidebar';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
-import { getTreeRowGeometry } from './tree-layout';
+import { getTreeRowStyles } from './tree-layout';
 import { findParentFolderId } from './tree-parent';
 import { WorkspaceRefreshCoordinator } from './workspace-refresh';
 import {
@@ -283,9 +283,13 @@ import {
 } from './tree-shortcuts';
 import {
   connectionProtocolSupportsTunnel,
+  connectionTypeForProtocol,
+  connectionProtocolForType,
+  connectionProtocolForAddress,
   quickConnectStartsImmediately,
   quickConnectTunnelId,
   type QuickConnectProtocol,
+  type ConnectionType,
 } from './quick-connect-state';
 import {
   connectionEditCanRestartSession,
@@ -345,7 +349,11 @@ import {
   shouldRenderConnectionTreeChildren,
   updateConnectionTreeSearchExpansion,
 } from './connection-tree-state';
-import { connectionAddressForProtocolChange, savedConnectionAddressForEditor } from './web-address';
+import {
+  browserHomePageForEditor,
+  connectionAddressForProtocolChange,
+  savedConnectionAddressForEditor,
+} from './web-address';
 import {
   appendTunnelTestLog,
   isTunnelTestCancellation,
@@ -721,6 +729,7 @@ type Session = {
   webCanGoBack?: boolean;
   webCanGoForward?: boolean;
   webIsLoading?: boolean;
+  webBrowser?: WormholeWebBrowserState;
   bitwardenPopupUrl?: string;
 };
 
@@ -979,7 +988,7 @@ function formatBitwardenExtensionStatus(state: WormholeBitwardenExtensionState):
         ? 'manual folder, pinned'
         : 'official release, auto-update enabled';
   const parts = [
-    `Installed ${state.installed.version} (${sourceLabel}). HTTPS tabs will load the Bitwarden extension.`,
+    `Installed ${state.installed.version} (${sourceLabel}). Browser connections with HTTPS home pages will load the Bitwarden extension.`,
   ];
   if (state.lastUpdateCheckUtc) {
     parts.push(`Last update check: ${formatLocalDateTime(state.lastUpdateCheckUtc)}.`);
@@ -1080,8 +1089,8 @@ function protocolLabel(protocol: Protocol) {
   return {
     ssh: 'SSH',
     rdp: 'RDP',
-    http: 'HTTP',
-    https: 'HTTPS',
+    http: 'Browser',
+    https: 'Browser',
     vnc: 'VNC',
     serial: 'Serial',
   }[protocol];
@@ -3143,6 +3152,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
               webUrl: event.url || session.webUrl,
               webCanGoBack: event.canGoBack,
               webCanGoForward: event.canGoForward,
+              webBrowser: event.browser,
             };
           }
           return {
@@ -3154,6 +3164,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
             webUrl: event.url || session.webUrl,
             webCanGoBack: event.canGoBack,
             webCanGoForward: event.canGoForward,
+            webBrowser: event.browser,
           };
         }),
       );
@@ -3649,6 +3660,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                     ? {
                         ...candidate,
                         webUrl: target.url,
+                        webBrowser: candidate.webBrowser ?? target.browser,
                         webIgnoreCertErrors: target.ignoreCertErrors,
                         bitwardenPopupUrl: target.bitwarden?.popupUrl,
                       }
@@ -4435,6 +4447,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         webCanGoBack: false,
         webCanGoForward: false,
         webIsLoading: false,
+        webBrowser: undefined,
       };
       setSessions((current) => current.map((session) => (session.id === id ? restarted : session)));
       const closing = closeWebSession(source.id);
@@ -4576,6 +4589,8 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       rdpExternal: source.protocol === 'rdp' ? false : source.rdpExternal,
       rdpError: undefined,
       vncConnectionGeneration: source.protocol === 'vnc' ? 0 : source.vncConnectionGeneration,
+      webBrowser: undefined,
+      webUrl: undefined,
       serialSettings: source.serialSettings
         ? { ...source.serialSettings }
         : source.protocol === 'serial'
@@ -4625,6 +4640,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     if (duplicate.protocol === 'rdp') {
       setRdpCredentialForm({ username: '', domain: '', password: '' });
       setRdpCredentialPrompt(duplicate.id);
+    }
+    if (duplicate.protocol === 'http' || duplicate.protocol === 'https') {
+      startWebSession(duplicate);
     }
   }
 
@@ -5775,7 +5793,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     const form: typeof newConnectionForm = {
       name: node.name,
       notes: node.notes ?? '',
-      host: savedConnectionAddressForEditor(node.protocol, node.host ?? '', node.httpPath),
+      host: browserHomePageForEditor(node.protocol, node.host ?? '', node.httpPath),
       port: node.port === undefined ? '' : String(node.port),
       username: node.username ?? '',
       inlinePassword: '',
@@ -6417,7 +6435,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       const activeDropPlacement = dropTarget?.id === node.id ? dropTarget.placement : null;
       const isDragging = draggedNodeIdSet.has(node.id);
       const treeDragEnabled = !connectionTreeSearchActive;
-      const treeGeometry = getTreeRowGeometry(depth);
+      const treeGeometry = getTreeRowStyles(depth);
       const branchGeometry = treeGeometry.branch;
       const dropIndicator =
         activeDropPlacement === 'before' ? (
@@ -6443,14 +6461,14 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           aria-current={isSelected ? 'true' : undefined}
           aria-keyshortcuts={isFolder ? 'F2 Delete' : 'F2 Delete Enter'}
           className={[
-            'relative z-10 h-8 w-full justify-start gap-1.5 rounded-md px-2 text-left !text-xs font-medium text-sidebar-foreground/80 transition-[background-color,box-shadow,opacity] duration-150 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground aria-expanded:bg-transparent aria-expanded:text-sidebar-foreground/80',
+            'relative z-10 h-8 w-full justify-start gap-1.5 rounded-md px-2 text-left !text-xs font-medium text-sidebar-foreground/80 transition-[background-color,box-shadow,opacity] duration-150 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground focus-visible:ring-inset aria-expanded:bg-transparent aria-expanded:text-sidebar-foreground/80',
             showsMoveCursor ? 'cursor-grab active:cursor-grabbing' : 'cursor-default',
             isSelected
               ? 'bg-sidebar-accent text-sidebar-accent-foreground aria-expanded:bg-sidebar-accent aria-expanded:text-sidebar-accent-foreground'
               : '',
             isDragging ? 'opacity-40' : '',
             activeDropPlacement === 'inside'
-              ? 'bg-sidebar-accent/70 text-sidebar-accent-foreground ring-1 ring-sidebar-ring'
+              ? 'bg-sidebar-accent/70 text-sidebar-accent-foreground ring-1 ring-inset ring-sidebar-ring'
               : '',
           ].join(' ')}
           draggable={treeDragEnabled}
@@ -6461,7 +6479,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           onDragStart={(event) => handleTreeDragStart(event, node)}
           onDoubleClick={() => openConnection(node)}
           onFocus={() => setSelectedNodeId(node.id)}
-          style={{ paddingLeft: `${treeGeometry.paddingLeft}px` }}
+          style={{ paddingLeft: treeGeometry.paddingLeft }}
           variant="ghost"
         >
           {treeCheckbox}
@@ -6499,7 +6517,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
             ].join(' ')}
             style={{
               bottom: isLastSibling ? '50%' : undefined,
-              left: `${branchGeometry.left}px`,
+              left: branchGeometry.left,
             }}
           />
         ) : null;
@@ -6508,7 +6526,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           <span
             aria-hidden="true"
             className="pointer-events-none absolute top-0 z-0 h-1/2 w-px bg-foreground/50"
-            style={{ left: `${branchGeometry.left}px` }}
+            style={{ left: branchGeometry.left }}
           />
         ) : null;
       const treeConnector = branchGeometry ? (
@@ -6516,8 +6534,8 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           aria-hidden="true"
           className="pointer-events-none absolute top-1/2 z-0 h-px bg-foreground/50"
           style={{
-            left: `${branchGeometry.connectorLeft}px`,
-            width: `${branchGeometry.connectorWidth}px`,
+            left: branchGeometry.connectorLeft,
+            width: branchGeometry.connectorWidth,
           }}
         />
       ) : null;
@@ -7103,14 +7121,17 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                         data-connection-tree=""
                         data-connection-tree-shortcut-scope=""
                       >
-                        <ScrollArea className="min-h-0 flex-1 px-1">
-                          {visibleTree.length > 0 ? (
-                            renderTree(visibleTree)
-                          ) : (
-                            <p className="px-3 py-8 text-center text-xs text-muted-foreground">
-                              Nothing here yet.
-                            </p>
-                          )}
+                        {/* Keep Radix's intrinsic-width content from stretching rows past the viewport. */}
+                        <ScrollArea className="min-h-0 flex-1 [&>[data-slot=scroll-area-viewport]>div]:block!">
+                          <div className="pl-1 pr-3">
+                            {visibleTree.length > 0 ? (
+                              renderTree(visibleTree)
+                            ) : (
+                              <p className="px-3 py-8 text-center text-xs text-muted-foreground">
+                                Nothing here yet.
+                              </p>
+                            )}
+                          </div>
                         </ScrollArea>
                       </div>
                     </ContextMenuTrigger>
@@ -7471,7 +7492,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
               <Tabs
                 className="flex min-h-0 flex-1 flex-col gap-0 overflow-hidden"
                 defaultValue="general"
-                key={newConnectionForm.protocol}
+                key={connectionTypeForProtocol(newConnectionForm.protocol)}
               >
                 <TabsList
                   className="h-9 w-full shrink-0 justify-start gap-1 overflow-x-auto overflow-y-hidden rounded-none border-b border-border p-0"
@@ -7571,36 +7592,42 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                       )}
                     >
                       <div className="grid gap-2">
-                        <Label htmlFor="connection-protocol">Protocol</Label>
+                        <Label htmlFor="connection-protocol">Connection type</Label>
                         <Select
-                          onValueChange={(protocol: Protocol) =>
-                            setNewConnectionForm((form) => ({
-                              ...form,
-                              protocol,
-                              host: connectionAddressForProtocolChange(
+                          onValueChange={(type: ConnectionType) =>
+                            setNewConnectionForm((form) => {
+                              const protocol = connectionProtocolForType(
+                                type,
                                 form.protocol,
-                                protocol,
                                 form.host,
-                              ),
-                              port: protocol === form.protocol ? form.port : '',
-                              credential:
-                                protocol === form.protocol
-                                  ? form.credential
-                                  : connectionEditorMode === 'quick'
-                                    ? 'none'
-                                    : 'inherit',
-                            }))
+                              );
+                              return {
+                                ...form,
+                                protocol,
+                                host: connectionAddressForProtocolChange(
+                                  form.protocol,
+                                  protocol,
+                                  form.host,
+                                ),
+                                port: protocol === form.protocol ? form.port : '',
+                                credential:
+                                  protocol === form.protocol
+                                    ? form.credential
+                                    : connectionEditorMode === 'quick'
+                                      ? 'none'
+                                      : 'inherit',
+                              };
+                            })
                           }
-                          value={newConnectionForm.protocol}
+                          value={connectionTypeForProtocol(newConnectionForm.protocol)}
                         >
                           <SelectTrigger id="connection-protocol" className="w-full">
-                            <SelectValue placeholder="Select protocol" />
+                            <SelectValue placeholder="Select connection type" />
                           </SelectTrigger>
                           <SelectContent>
                             <SelectItem value="ssh">SSH</SelectItem>
                             <SelectItem value="rdp">RDP</SelectItem>
-                            <SelectItem value="http">HTTP</SelectItem>
-                            <SelectItem value="https">HTTPS</SelectItem>
+                            <SelectItem value="browser">Browser</SelectItem>
                             <SelectItem value="vnc">VNC</SelectItem>
                             <SelectItem value="serial">Serial</SelectItem>
                           </SelectContent>
@@ -7610,7 +7637,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                         <Label htmlFor="connection-host">
                           {newConnectionForm.protocol === 'serial'
                             ? 'Serial line'
-                            : 'Host or address'}
+                            : connectionTypeForProtocol(newConnectionForm.protocol) === 'browser'
+                              ? 'Home page'
+                              : 'Host or address'}
                         </Label>
                         <Input
                           id="connection-host"
@@ -7618,12 +7647,18 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                             setNewConnectionForm((form) => ({
                               ...form,
                               host: event.target.value,
+                              protocol: connectionProtocolForAddress(
+                                form.protocol,
+                                event.target.value,
+                              ),
                             }))
                           }
                           placeholder={
                             newConnectionForm.protocol === 'serial'
                               ? 'COM1'
-                              : 'hostname or IP address'
+                              : connectionTypeForProtocol(newConnectionForm.protocol) === 'browser'
+                                ? 'https://example.com'
+                                : 'hostname or IP address'
                           }
                           required
                           value={newConnectionForm.host}
@@ -11193,7 +11228,6 @@ function SessionsPage({
               bitwardenUnlockPending={bitwardenUnlockPending}
               isActive={active}
               isAuthorized={isAuthorized}
-              isWebSurfaceVisible={isWebSurfaceVisible}
               nativeSurfaceActive={
                 active && isWebSurfaceVisible && !activeDraggedSessionId && !resizingSplitId
               }
@@ -11420,7 +11454,6 @@ function SessionSurface({
   bitwardenUnlockPending,
   isActive,
   isAuthorized,
-  isWebSurfaceVisible,
   nativeSurfaceActive,
   onBitwardenUnlockRequired,
   onCloseSftpBrowser,
@@ -11448,7 +11481,6 @@ function SessionSurface({
   bitwardenUnlockPending: boolean;
   isActive: boolean;
   isAuthorized: boolean;
-  isWebSurfaceVisible: boolean;
   nativeSurfaceActive: boolean;
   session: Session;
   onBitwardenUnlockRequired: (sessionId: string, reason: string, retry: () => void) => void;
@@ -11611,8 +11643,9 @@ function SessionSurface({
       <Suspense fallback={<SessionSurfaceFallback protocol={session.protocol} />}>
         <WebSurface
           bitwardenOpen={bitwardenOpen}
-          isActive={nativeSurfaceActive}
-          isAuthorized={isAuthorized && isWebSurfaceVisible}
+          isActive={isActive}
+          isAuthorized={isAuthorized}
+          isOccluded={!nativeSurfaceActive}
           onReconnect={onReconnectSession}
           session={session}
         />
@@ -17022,7 +17055,7 @@ function SettingsPage({
 
         <SettingsTabPanel value="extensions">
           <SettingsSection
-            description="Use Bitwarden for credential passwords and HTTPS browser sessions."
+            description="Use Bitwarden for credential passwords and Browser connections."
             title="Bitwarden"
           >
             <SettingsSection title="Credential vault">
@@ -17219,9 +17252,9 @@ function SettingsPage({
             <SettingsSection title="Browser extension">
               <SettingsSwitch
                 checked={browserExtensionEnabled}
-                description="Use the official Bitwarden extension inside HTTPS sessions."
+                description="Use the official Bitwarden extension with HTTPS home pages in Browser connections."
                 disabled={browserExtensionBusy}
-                label="Enable Bitwarden in HTTPS windows"
+                label="Enable Bitwarden in Browser windows"
                 onCheckedChange={(enabled) => void handleBrowserExtensionEnabledChange(enabled)}
               />
               <p

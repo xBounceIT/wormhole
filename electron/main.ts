@@ -11,6 +11,7 @@ import {
   dialog,
   ipcMain,
   Menu,
+  net as electronNet,
   screen,
   session as electronSession,
   shell,
@@ -141,6 +142,18 @@ import {
 import { WebSessionAttemptTracker } from './web-session-attempt.js';
 import { getInSessionNavigationUrl } from './web-new-window-navigation.js';
 import { adjustWebZoom } from './web-zoom.js';
+import {
+  WebBrowserTabs,
+  isWebBrowserCommand,
+  isAbortedWebNavigation,
+  isWebBrowserRouteRequestAllowed,
+  fetchWebBrowserFavicon,
+  webBrowserFaviconUrlLimit,
+  resolveWebBrowserAddress,
+  webBrowserTabLimit,
+  type WebBrowserCommand,
+  type WebBrowserState,
+} from './web-browser-tabs.js';
 import { webTargetURLMatchesEndpoint } from './web-target-validation.js';
 import { isSafeUpdateInstallerPath, updateInstallAction } from './update-installer.js';
 import { parseWorkspaceRdpSettings, type WorkspaceRdpSettings } from './workspace-rdp-contract.js';
@@ -258,7 +271,6 @@ let updateDownloadChild: ChildProcessWithoutNullStreams | undefined;
 let startupUpdateTimer: NodeJS.Timeout | undefined;
 let startupUpdateScheduled = false;
 let startupBackgroundTimer: NodeJS.Timeout | undefined;
-let webSharedSessionReady: Promise<void> | undefined;
 const startupReadyWindows = new WeakSet<BrowserWindow>();
 
 type BackendOperation =
@@ -721,6 +733,7 @@ type WebTargetResponse = {
   ignoreCertErrors: boolean;
   tunnelConfigId?: string;
   proxyUrl?: string;
+  browser?: WebBrowserState;
   bitwarden?: {
     partition: string;
     popupUrl: string;
@@ -811,11 +824,10 @@ type WebBoundsRequest = {
   width: number;
   height: number;
   visible: boolean;
+  capturePreview?: boolean;
+  previewId?: string;
 };
-type WebCommandRequest = {
-  sessionId: string;
-  operation: 'back' | 'forward' | 'reload' | 'stop' | 'zoom-in' | 'zoom-out';
-};
+type WebCommandRequest = WebBrowserCommand;
 type BitwardenPopupOpenRequest = {
   sessionId: string;
   anchor: BitwardenPopupAnchor;
@@ -1319,31 +1331,9 @@ function isUuid(value: unknown): value is string {
   return typeof value === 'string' && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(value);
 }
 
-// Omit the `persist:` prefix so appliance cookies and cache remain available to tabs during this
-// Electron run but are never written to disk after the app closes.
-const webSharedPartition = 'wormhole-web';
 const webMaxUrlLength = 4096;
 const webMaxAddressLength = 4096;
 const webMaxSurfaceCoordinate = 100_000;
-
-function ensureWebSharedSessionReady(): Promise<void> {
-  if (!webSharedSessionReady) {
-    const browserSession = electronSession.fromPartition(webSharedPartition, {
-      cache: true,
-    });
-    webSharedSessionReady = Promise.all([
-      browserSession.clearStorageData(),
-      browserSession.clearCache(),
-    ])
-      .then(() => undefined)
-      .catch((error) => {
-        // Clearing an in-memory partition is defense in depth. A failure should not prevent the
-        // user from opening an appliance, and this lazy path keeps the work off app startup.
-        console.warn('[Wormhole] Could not clear the browser session.', error);
-      });
-  }
-  return webSharedSessionReady;
-}
 
 function isWebOpenRequest(value: unknown): value is WebOpenRequest {
   if (
@@ -1391,6 +1381,10 @@ function isWebBoundsRequest(value: unknown): value is WebBoundsRequest {
   if (!isRecord(value) || !isSshSessionId(value.sessionId) || typeof value.visible !== 'boolean') {
     return false;
   }
+  if (value.capturePreview !== undefined && typeof value.capturePreview !== 'boolean') return false;
+  if (value.previewId !== undefined && !isUuid(value.previewId)) return false;
+  if (value.capturePreview && !value.previewId) return false;
+  if (value.visible && (value.capturePreview || value.previewId)) return false;
   for (const field of ['x', 'y', 'width', 'height'] as const) {
     const coordinate = value[field];
     if (
@@ -1408,16 +1402,7 @@ function isWebBoundsRequest(value: unknown): value is WebBoundsRequest {
 }
 
 function isWebCommandRequest(value: unknown): value is WebCommandRequest {
-  return (
-    isRecord(value) &&
-    isSshSessionId(value.sessionId) &&
-    (value.operation === 'back' ||
-      value.operation === 'forward' ||
-      value.operation === 'reload' ||
-      value.operation === 'stop' ||
-      value.operation === 'zoom-in' ||
-      value.operation === 'zoom-out')
-  );
+  return isWebBrowserCommand(value);
 }
 
 function isTreeTooltipRequest(value: unknown): value is TreeTooltipRequest {
@@ -4370,19 +4355,33 @@ function isWorkspaceNodeWebSettingsRequest(
   );
 }
 
+type WebBrowserWindowOptions = Electron.BrowserWindowConstructorOptions & {
+  webContents?: Electron.WebContents;
+};
+
 type WebSurfaceRecord = {
+  sessionId: string;
   owner: BrowserWindow;
-  view: WebContentsView;
+  readonly view: WebContentsView;
+  tabs: WebBrowserTabs<WebContentsView>;
+  displayedTabId: string;
+  target: WebTargetResponse;
+  partition: string;
+  bounds?: WebBoundsRequest;
+  preview?: {
+    id: string;
+    tabId: string;
+    authorizationEpoch: number;
+    image: Promise<string | undefined>;
+  };
+  route: 'direct' | 'vpn';
   attempt: number;
-  initialNavigationPending: boolean;
   disposed: boolean;
   navigation: {
     navigateUrl: string;
     originalUrl?: string;
   };
   tunnelLeaseId?: string;
-  tunnelBackend?: NativeBackendProcess;
-  tunnelProbeTarget?: { host: string; port: number };
   bitwardenUseRelease?: () => void;
   bitwardenTabRegistered?: boolean;
   bitwarden?: {
@@ -4553,6 +4552,7 @@ class WebSurfaceManager {
   private readonly extensionLoadKeys = new Map<string, string>();
   private readonly extensionIds = new Map<string, string>();
   private readonly extensionPopupPaths = new Map<string, string>();
+  private readonly retiringBitwardenProfiles = new Set<string>();
   private readonly chromeExtensionApis = new Map<string, ElectronChromeExtensions>();
   private readonly activeBitwardenSessions = new Map<string, string>();
   private readonly bitwardenAuxiliaryWindows = new Map<number, BitwardenAuxiliaryWindow>();
@@ -4589,6 +4589,7 @@ class WebSurfaceManager {
     let openingLeaseId: string | undefined;
     let openingTunnelBackend: NativeBackendProcess | undefined;
     let bitwardenUseRelease: (() => void) | undefined;
+    let openingRecord: WebSurfaceRecord | undefined;
     try {
       await this.releaseTunnel(request.sessionId);
       this.assertOpenCurrent(
@@ -4687,18 +4688,18 @@ class WebSurfaceManager {
         }
         const freshInstall = freshState?.installed;
         if (freshState?.enabled && freshInstall) {
-          // Match the WinUI 3 browser context: direct HTTPS tabs share one profile. SOCKS tabs use
-          // a runtime endpoint-specific Chromium session (proxy is session-wide) plus a stable route
-          // identity that lets the next endpoint inherit extension state and appliance cookies.
+          // Each dedicated browser has its own profile. SOCKS endpoints can change on reconnect;
+          // the stable browser/route identity preserves only that browser's appliance cookies.
           let routeKey = '';
           if (target.tunnelConfigId && resolvedTunnelRoute !== 'direct') {
             routeKey = buildBitwardenPersistentRouteKey(
               target.tunnelConfigId,
               resolvedTunnelRoute,
               logicalTargetUrl,
+              request.sessionId,
             );
           }
-          const browserContext = buildBitwardenBrowserContext(target.proxyUrl, routeKey);
+          const browserContext = `${buildBitwardenBrowserContext(target.proxyUrl, routeKey)}\0browser=${request.sessionId}`;
           bitwardenPartition = getBitwardenBrowserPartition(
             browserContext,
             target.ignoreCertErrors,
@@ -4725,20 +4726,45 @@ class WebSurfaceManager {
       );
 
       const partition =
-        bitwardenPartition ??
-        (resolvedTunnelRoute !== 'direct'
-          ? `wormhole-web-tunnel-${++this.isolatedPartitionSequence}`
-          : target.ignoreCertErrors
-            ? `wormhole-web-isolated-${++this.isolatedPartitionSequence}`
-            : webSharedPartition);
-      if (partition === webSharedPartition) await ensureWebSharedSessionReady();
+        bitwardenPartition ?? `wormhole-web-browser-${++this.isolatedPartitionSequence}`;
       const browserSession = electronSession.fromPartition(partition, {
         cache: true,
       });
       if (target.proxyUrl) {
         await browserSession.setProxy({
+          mode: 'fixed_servers',
           proxyRules: target.proxyUrl,
           proxyBypassRules: '<-loopback>',
+        });
+      }
+      if (resolvedTunnelRoute === 'forwarder') {
+        const routedUrl = target.url;
+        const routedOrigin = new URL(routedUrl).origin;
+        // webRequest cannot intercept WebTransport or speculative connections. Keep a closed
+        // proxy as the session default, with direct access only to this loopback TCP forwarder.
+        // Port zero cannot host a proxy and the single proxy rule has no DIRECT fallback.
+        await browserSession.setProxy({
+          mode: 'fixed_servers',
+          proxyRules: 'socks5://127.0.0.1:0',
+          proxyBypassRules: `<-loopback>;${routedOrigin};${routedOrigin.replace(/^http/, 'ws')}`,
+        });
+        browserSession.webRequest.onBeforeRequest((details, callback) => {
+          const navigationUrl =
+            details.resourceType === 'mainFrame'
+              ? getInSessionNavigationUrl(details.url, routedUrl, logicalTargetUrl)
+              : undefined;
+          if (
+            navigationUrl &&
+            navigationUrl !== details.url &&
+            isAllowedWebNavigation(navigationUrl)
+          ) {
+            // Redirect the native request so a popup keeps its guest, opener and POST body.
+            callback({ redirectURL: navigationUrl });
+            return;
+          }
+          callback({
+            cancel: !isWebBrowserRouteRequestAllowed(details.url, routedOrigin),
+          });
         });
       }
       if (extensionPath && bitwardenPartition) {
@@ -4796,6 +4822,11 @@ class WebSurfaceManager {
         owner,
         'Web session was superseded while preparing its browser surface.',
       );
+      if (openingLeaseId && !this.tunnelLeases.isActive(request.sessionId, openingLeaseId)) {
+        throw new Error(
+          'The VPN connection stopped while preparing this browser. Reconnect to continue.',
+        );
+      }
 
       const view = new WebContentsView({
         webPreferences: {
@@ -4811,29 +4842,37 @@ class WebSurfaceManager {
       if (target.bitwarden) {
         view.webContents.setMaxListeners(bitwardenExtensionHostMaxListeners);
       }
+      const tabs = new WebBrowserTabs<WebContentsView>();
+      const initialTabId = randomUUID();
+      tabs.add(initialTabId, view, logicalTargetUrl);
       const record: WebSurfaceRecord = {
+        sessionId: request.sessionId,
         owner,
-        view,
+        get view() {
+          return tabs.get()!;
+        },
+        tabs,
+        displayedTabId: initialTabId,
+        target,
+        partition,
+        route: resolvedTunnelRoute === 'direct' ? 'direct' : 'vpn',
         attempt: request.attempt,
-        initialNavigationPending: true,
         disposed: false,
         navigation: {
           navigateUrl: target.url,
           originalUrl: resolvedTunnelRoute === 'forwarder' ? logicalTargetUrl : undefined,
         },
         tunnelLeaseId: openingLeaseId,
-        tunnelBackend: openingLeaseId ? openingTunnelBackend : undefined,
-        tunnelProbeTarget:
-          resolvedTunnelRoute === 'socks5' ? { host: target.host, port: target.port } : undefined,
         bitwardenUseRelease,
         bitwarden: target.bitwarden,
       };
       this.surfaces.set(request.sessionId, record);
+      openingRecord = record;
       bitwardenUseRelease = undefined;
       this.pendingOpenOwners.delete(request.sessionId);
       owner.contentView.addChildView(view);
       view.setVisible(false);
-      this.configureWebContents(request.sessionId, record, target);
+      this.configureWebContents(request.sessionId, record, tabs.activeId, view);
       const bitwardenTabPartition = selectBitwardenTabRegistrationPartition(
         bitwardenPartition,
         record.bitwarden?.partition,
@@ -4849,22 +4888,27 @@ class WebSurfaceManager {
         }
       }
       void view.webContents.loadURL(target.url).catch((error: unknown) => {
-        if (!record.disposed && record.initialNavigationPending) {
-          this.beginInitialNavigationFailure(
-            request.sessionId,
-            record,
-            describeWebNavigationError(error),
-          );
-        }
+        if (isAbortedWebNavigation(error)) return;
+        this.failBrowserTab(
+          request.sessionId,
+          record,
+          initialTabId,
+          describeWebNavigationError(error),
+        );
       });
+      target.browser = tabs.snapshot(
+        record.route,
+        record.navigation.originalUrl ? new URL(logicalTargetUrl).origin : undefined,
+      );
+      this.sendEvent(request.sessionId, record, 'connected');
       openingLeaseId = undefined;
       return target;
     } catch (error) {
       bitwardenUseRelease?.();
-      if (this.surfaces.has(request.sessionId)) {
+      if (openingRecord && this.surfaces.get(request.sessionId) === openingRecord) {
         this.dispose(request.sessionId);
       }
-      if (openingLeaseId || this.tunnelLeases.has(request.sessionId)) {
+      if (openingLeaseId && this.tunnelLeases.isActive(request.sessionId, openingLeaseId)) {
         await this.releaseTunnel(request.sessionId).catch(() => undefined);
       }
       if (
@@ -4877,38 +4921,146 @@ class WebSurfaceManager {
     }
   }
 
-  setBounds(owner: BrowserWindow, request: WebBoundsRequest): void {
+  async setBounds(owner: BrowserWindow, request: WebBoundsRequest): Promise<string | undefined> {
     const record = this.surfaces.get(request.sessionId);
     if (!record || record.owner !== owner || record.disposed) return;
-    record.view.setBounds({
+    if (request.previewId && !request.capturePreview) {
+      const preview = record.preview;
+      if (
+        !preview ||
+        preview.id !== request.previewId ||
+        preview.tabId !== record.tabs.activeId ||
+        !isAuthorizationEpochCurrent(preview.authorizationEpoch)
+      )
+        return;
+      // The renderer acknowledges only after decoding and painting this exact preview.
+      record.bounds = { ...request, capturePreview: true };
+      for (const view of record.tabs.all()) if (view.getVisible()) view.setVisible(false);
+      return;
+    }
+    record.bounds = request;
+    if (request.capturePreview) {
+      const authorizationEpoch = authSession.authorizationEpoch;
+      if (!isAuthorizationEpochCurrent(authorizationEpoch)) return;
+      const tabId = record.tabs.activeId;
+      if (
+        record.preview?.tabId !== tabId ||
+        record.preview.id !== request.previewId ||
+        record.preview.authorizationEpoch !== authorizationEpoch
+      ) {
+        record.preview = {
+          id: request.previewId!,
+          tabId,
+          authorizationEpoch,
+          image: this.capturePreview(record.view),
+        };
+      }
+      const preview = record.preview;
+      const image = await preview.image;
+      if (
+        record.disposed ||
+        record.owner.isDestroyed() ||
+        record.preview !== preview ||
+        !isAuthorizationEpochCurrent(authorizationEpoch)
+      )
+        return;
+      // Keep Chromium visible until its renderer replacement is painted. A failed capture
+      // must still leave the menu accessible, without waiting for an acknowledgement.
+      if (!image) for (const view of record.tabs.all()) view.setVisible(false);
+      return image;
+    }
+    record.preview = undefined;
+    const bounds = {
       x: Math.round(request.x),
       y: Math.round(request.y),
       width: Math.round(request.width),
       height: Math.round(request.height),
-    });
-    record.view.setVisible(request.visible);
+    };
+    const previous = record.view.getBounds();
+    if (
+      previous.x !== bounds.x ||
+      previous.y !== bounds.y ||
+      previous.width !== bounds.width ||
+      previous.height !== bounds.height
+    ) {
+      record.view.setBounds(bounds);
+    }
+    for (const view of record.tabs.all()) {
+      const visible = view === record.view && request.visible;
+      if (view.getVisible() !== visible) view.setVisible(visible);
+    }
     if (request.visible && record.bitwardenTabRegistered && record.bitwarden) {
       this.activeBitwardenSessions.set(record.bitwarden.partition, request.sessionId);
       this.chromeExtensionApis.get(record.bitwarden.partition)?.selectTab(record.view.webContents);
     }
   }
 
-  async command(owner: BrowserWindow, request: WebCommandRequest): Promise<void> {
+  private async capturePreview(view: WebContentsView): Promise<string | undefined> {
+    try {
+      const bounds = view.getBounds();
+      const image = await view.webContents.capturePage(
+        {
+          x: 0,
+          y: 0,
+          width: Math.min(bounds.width, 4096),
+          height: Math.min(bounds.height, 4096),
+        },
+        { stayHidden: true },
+      );
+      if (image.isEmpty()) return;
+      const size = image.getSize();
+      const scale = Math.min(1, 2048 / Math.max(size.width, size.height));
+      const bounded =
+        scale < 1 ? image.resize({ width: Math.max(1, Math.round(size.width * scale)) }) : image;
+      const bytes = bounded.toJPEG(90);
+      if (bytes.length > 4 * 1024 * 1024) return;
+      return `data:image/jpeg;base64,${bytes.toString('base64')}`;
+    } catch {
+      // Closing or crashing a tab during capture must not leave a native view over the menu.
+      return;
+    }
+  }
+
+  async command(owner: BrowserWindow, request: WebCommandRequest): Promise<boolean> {
+    if (!authSession.isAccessAllowed) return false;
     const record = this.surfaces.get(request.sessionId);
-    if (!record || record.owner !== owner || record.disposed) return;
+    if (!record || record.owner !== owner || record.disposed) return false;
+    const sourceTabId = record.tabs.activeId;
     if (this.bitwardenPopups.has(request.sessionId)) {
       const authorizationEpoch = authSession.authorizationEpoch;
       const isCurrent = () =>
         this.surfaces.get(request.sessionId) === record &&
         !record.disposed &&
+        record.tabs.activeId === sourceTabId &&
         isAuthorizationEpochCurrent(authorizationEpoch);
       await afterBitwardenPopupInputEvent(async () => {
         if (isCurrent()) await this.closeBitwardenPopup(request.sessionId);
       });
-      if (!isCurrent()) return;
+      if (!isCurrent()) return false;
     }
     const contents = record.view.webContents;
-    if (request.operation === 'back') {
+    if (request.operation === 'new-tab') {
+      this.addBrowserTab(request.sessionId, record, 'about:blank');
+    } else if (request.operation === 'select-tab') {
+      if (record.tabs.select(request.tabId!)) this.showBrowserTab(record);
+    } else if (request.operation === 'close-tab') {
+      const view = record.tabs.remove(request.tabId!);
+      if (view) {
+        this.destroyBrowserTab(record, view);
+        this.showBrowserTab(record);
+      }
+    } else if (request.operation === 'navigate') {
+      const url = resolveWebBrowserAddress(request.url!);
+      const navigationUrl = url && this.browserNavigationUrl(record, url);
+      if (!navigationUrl)
+        throw new Error('Enter an HTTP or HTTPS address allowed by this browser’s VPN route.');
+      const tabId = record.tabs.activeId;
+      record.tabs.update(tabId, { error: undefined, url: url!, isLoading: true });
+      void contents.loadURL(navigationUrl).catch((error: unknown) => {
+        if (isAbortedWebNavigation(error)) return;
+        this.failBrowserTab(request.sessionId, record, tabId, describeWebNavigationError(error));
+      });
+    } else if (request.operation === 'back') {
       if (contents.navigationHistory.canGoBack()) contents.navigationHistory.goBack();
     } else if (request.operation === 'forward') {
       if (contents.navigationHistory.canGoForward()) contents.navigationHistory.goForward();
@@ -4917,9 +5069,123 @@ class WebSurfaceManager {
     } else if (request.operation === 'zoom-in' || request.operation === 'zoom-out') {
       adjustWebZoom(contents, request.operation);
     } else {
+      record.tabs.update(record.tabs.activeId, { error: undefined });
       contents.reload();
     }
     this.sendEvent(request.sessionId, record, 'navigation');
+    return true;
+  }
+
+  private browserNavigationUrl(record: WebSurfaceRecord, url: string): string | undefined {
+    if (url === 'about:blank') return url;
+    const navigationUrl = getInSessionNavigationUrl(
+      url,
+      record.navigation.originalUrl ? record.navigation.navigateUrl : undefined,
+      record.navigation.originalUrl,
+    );
+    return navigationUrl && isAllowedWebNavigation(navigationUrl) ? navigationUrl : undefined;
+  }
+
+  private addBrowserTab(
+    sessionId: string,
+    record: WebSurfaceRecord,
+    url: string,
+    windowOptions?: WebBrowserWindowOptions,
+    loadOptions?: Electron.LoadURLOptions,
+  ): WebContentsView {
+    if (record.disposed || !authSession.isAccessAllowed || record.tabs.size >= webBrowserTabLimit) {
+      throw new Error('This browser cannot open another tab.');
+    }
+    const navigationUrl = this.browserNavigationUrl(record, url);
+    if (!navigationUrl)
+      throw new Error('This address cannot be opened through the selected route.');
+    const view = new WebContentsView({
+      // window.open supplies its Chromium guest. Adopting it preserves window.opener,
+      // POST targets and the synchronous reply expected by the opening page.
+      ...(windowOptions?.webContents ? { webContents: windowOptions.webContents } : {}),
+      webPreferences: {
+        ...windowOptions?.webPreferences,
+        partition: record.partition,
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+        webSecurity: true,
+        allowRunningInsecureContent: false,
+        devTools: false,
+        preload: undefined,
+      },
+    });
+    const tabId = randomUUID();
+    const previousTabId = record.tabs.activeId;
+    record.tabs.add(tabId, view, url);
+    try {
+      record.owner.contentView.addChildView(view);
+      view.setVisible(false);
+      this.configureWebContents(sessionId, record, tabId, view);
+      if (record.bitwarden) {
+        view.webContents.setMaxListeners(bitwardenExtensionHostMaxListeners);
+        this.chromeExtensionApis
+          .get(record.bitwarden.partition)
+          ?.addTab(view.webContents, record.owner);
+      }
+      this.showBrowserTab(record);
+    } catch (error) {
+      record.tabs.remove(tabId);
+      record.tabs.select(previousTabId);
+      this.destroyBrowserTab(record, view);
+      if (!record.owner.isDestroyed()) this.showBrowserTab(record);
+      throw error;
+    }
+    this.sendEvent(sessionId, record, 'navigation');
+    if (!windowOptions?.webContents) {
+      void view.webContents.loadURL(navigationUrl, loadOptions).catch((error: unknown) => {
+        if (isAbortedWebNavigation(error)) return;
+        this.failBrowserTab(sessionId, record, tabId, describeWebNavigationError(error));
+      });
+    }
+    return view;
+  }
+
+  private showBrowserTab(record: WebSurfaceRecord): void {
+    if (record.displayedTabId !== record.tabs.activeId) {
+      record.displayedTabId = record.tabs.activeId;
+      if (this.bitwardenPopupRequest?.sessionId === record.sessionId) {
+        this.bitwardenPopupRequest = undefined;
+      }
+      const popup = this.bitwardenPopups.get(record.sessionId);
+      if (popup) {
+        try {
+          popup.setVisible(false);
+        } catch {
+          /* The extension already closed it. */
+        }
+        void afterBitwardenPopupInputEvent(async () => {
+          if (this.bitwardenPopups.get(record.sessionId) === popup) {
+            await this.closeBitwardenPopup(record.sessionId);
+          }
+        }).catch(() => {
+          console.warn('[Wormhole] Could not dismiss the previous browser tab’s Bitwarden popup.');
+        });
+      }
+    }
+    if (record.bounds) this.setBounds(record.owner, record.bounds);
+    else for (const view of record.tabs.all()) view.setVisible(false);
+  }
+
+  private destroyBrowserTab(record: WebSurfaceRecord, view: WebContentsView): void {
+    if (record.bitwarden) {
+      try {
+        this.chromeExtensionApis.get(record.bitwarden.partition)?.removeTab(view.webContents);
+      } catch {
+        /* Already removed. */
+      }
+    }
+    try {
+      record.owner.contentView.removeChildView(view);
+    } catch {
+      /* Owner is closing. */
+    }
+    if (!view.webContents.isDestroyed()) view.webContents.close();
   }
 
   async openBitwardenPopup(request: BitwardenPopupOpenRequest): Promise<{ open: boolean }> {
@@ -4937,6 +5203,7 @@ class WebSurfaceManager {
     if (!record || record.disposed || !record.bitwarden?.popupUrl) {
       return { open: false };
     }
+    const pageContents = record.view.webContents;
     if (this.bitwardenPopups.has(sessionId)) {
       return { open: true };
     }
@@ -4952,6 +5219,7 @@ class WebSurfaceManager {
     if (
       this.bitwardenPopupRequest !== openRequest ||
       this.surfaces.get(sessionId) !== record ||
+      record.view.webContents !== pageContents ||
       record.disposed ||
       record.owner.isDestroyed() ||
       !isAuthorizationEpochCurrent(authorizationEpoch) ||
@@ -5013,7 +5281,7 @@ class WebSurfaceManager {
     };
     record.owner.on('blur', dismiss);
     record.owner.webContents.on('before-mouse-event', onOwnerMouse);
-    record.view.webContents.on('before-mouse-event', onPageMouse);
+    pageContents.on('before-mouse-event', onPageMouse);
     popup.webContents.once('destroyed', () => {
       // Bitwarden can close its own popup after completing an extension action. Route that path
       // through the ordinary cleanup so the background page gets a final storage flush and the
@@ -5028,7 +5296,7 @@ class WebSurfaceManager {
     this.bitwardenPopups.set(sessionId, popup);
     this.bitwardenPopupDismissHandlers.set(sessionId, {
       owner: record.owner,
-      pageContents: record.view.webContents,
+      pageContents,
       ownerBlur: dismiss,
       ownerMouse: onOwnerMouse,
       pageMouse: onPageMouse,
@@ -5052,6 +5320,10 @@ class WebSurfaceManager {
       if (this.bitwardenPopups.get(sessionId) !== popup || record.disposed) {
         return { open: false };
       }
+      if (record.view.webContents !== pageContents || this.bitwardenPopupRequest !== openRequest) {
+        await this.closeBitwardenPopup(sessionId, false);
+        return { open: false };
+      }
       await withBitwardenBrowserTimeout(
         popup.webContents.loadURL(popupUrl),
         bitwardenBrowserNavigationTimeoutMs,
@@ -5062,6 +5334,8 @@ class WebSurfaceManager {
       }
       if (
         mcpApprovalWindowCoordinator.hasPendingApprovals ||
+        record.view.webContents !== pageContents ||
+        this.bitwardenPopupRequest !== openRequest ||
         !isAuthorizationEpochCurrent(authorizationEpoch)
       ) {
         await this.closeBitwardenPopup(sessionId);
@@ -5078,12 +5352,17 @@ class WebSurfaceManager {
       if (this.bitwardenPopups.get(sessionId) !== popup || record.disposed) {
         return { open: false };
       }
+      if (record.view.webContents !== pageContents || this.bitwardenPopupRequest !== openRequest) {
+        await this.closeBitwardenPopup(sessionId, false);
+        return { open: false };
+      }
       console.warn('[Wormhole] Could not open the Bitwarden browser popup.');
       // This hidden popup never accepted user edits. Retrying the failed synchronization while
       // closing it delays feedback and can initialize another extension page unnecessarily.
       await this.closeBitwardenPopup(sessionId, false);
       if (
         !record.disposed &&
+        record.view.webContents === pageContents &&
         !record.owner.isDestroyed() &&
         isAuthorizationEpochCurrent(authorizationEpoch) &&
         !mcpApprovalWindowCoordinator.hasPendingApprovals
@@ -5288,7 +5567,14 @@ class WebSurfaceManager {
     this.bitwardenCheckpointTimer ??= setInterval(() => {
       if (isQuitting || !authSession.isAccessAllowed || this.bitwardenStoragePaused) return;
       for (const [partition, extensionId] of this.extensionIds) {
-        if (this.extensionLoads.has(partition)) continue;
+        if (this.extensionLoads.has(partition) || this.retiringBitwardenProfiles.has(partition))
+          continue;
+        if (this.isBitwardenProfileUnused(partition)) {
+          void this.retireBitwardenProfile(partition).catch(() => {
+            // Preserve the live background on save failures and retry next tick.
+          });
+          continue;
+        }
         const contents = this.bitwardenBackgroundContents(partition, extensionId);
         if (!contents) continue;
         let checkpoint = this.bitwardenCheckpoints.get(contents);
@@ -5404,6 +5690,32 @@ class WebSurfaceManager {
       session,
       license: 'GPL-3.0',
       createTab: async (details) => this.openExtensionTabInSession(partition, details),
+      selectTab: (contents) => {
+        for (const [sessionId, record] of this.surfaces) {
+          const tab = record.tabs
+            .snapshot(record.route)
+            .tabs.find((candidate) => record.tabs.get(candidate.id)?.webContents === contents);
+          if (!tab || record.disposed) continue;
+          record.tabs.select(tab.id);
+          this.showBrowserTab(record);
+          this.sendEvent(sessionId, record, 'navigation');
+          break;
+        }
+      },
+      removeTab: (contents) => {
+        for (const [sessionId, record] of this.surfaces) {
+          const tab = record.tabs
+            .snapshot(record.route)
+            .tabs.find((candidate) => record.tabs.get(candidate.id)?.webContents === contents);
+          if (!tab || record.disposed) continue;
+          if (record.tabs.size === 1) this.addBrowserTab(sessionId, record, 'about:blank');
+          const view = record.tabs.remove(tab.id);
+          if (view) this.destroyBrowserTab(record, view);
+          this.showBrowserTab(record);
+          this.sendEvent(sessionId, record, 'navigation');
+          break;
+        }
+      },
       createWindow: async (details) =>
         this.openExtensionWindow(partition, instance, details as ExtensionWindowCreateDetails),
       assignTabDetails: (details, contents) => {
@@ -5411,7 +5723,7 @@ class WebSurfaceManager {
           (candidate) =>
             !candidate.disposed &&
             candidate.bitwarden?.partition === partition &&
-            candidate.view.webContents === contents,
+            candidate.tabs.all().some((view) => view.webContents === contents),
         );
         if (!record) return;
         const context = createBitwardenActiveTabContext(
@@ -5488,9 +5800,9 @@ class WebSurfaceManager {
     // Chrome resolves tabs.create when the tab exists, before its navigation completes. Bitwarden's
     // web-auth flow installs a tabs.onUpdated listener after that resolution, so awaiting loadURL
     // here would lose the completion event and leave the login hanging.
-    void record.view.webContents.loadURL(navigationUrl).catch(() => undefined);
+    const view = this.addBrowserTab(selectedSessionId, record, navigationUrl);
     this.activeBitwardenSessions.set(partition, selectedSessionId);
-    return [record.view.webContents, record.owner];
+    return [view.webContents, record.owner];
   }
 
   private async openExtensionWindow(
@@ -5877,10 +6189,46 @@ class WebSurfaceManager {
     });
   }
 
+  private isBitwardenProfileUnused(partition: string): boolean {
+    return (
+      this.pendingOpenOwners.size === 0 &&
+      !this.extensionLoads.has(partition) &&
+      ![...this.surfaces.values()].some(
+        (record) => !record.disposed && record.bitwarden?.partition === partition,
+      )
+    );
+  }
+
+  private async retireBitwardenProfile(partition: string): Promise<void> {
+    if (this.retiringBitwardenProfiles.has(partition)) return;
+    this.retiringBitwardenProfiles.add(partition);
+    try {
+      await this.bitwardenStorageTasks.waitForIdle(partition);
+      if (!this.isBitwardenProfileUnused(partition)) return;
+      await this.bitwardenStorageTasks.run(partition, async () => {
+        const extensionId = this.extensionIds.get(partition);
+        if (!extensionId) return;
+        const background = this.bitwardenBackgroundContents(partition, extensionId);
+        if (background && !(await this.synchronizeBitwardenStorageCore(partition, background))) {
+          throw new Error('Bitwarden background closed before its storage could be saved.');
+        }
+        // Reopening can start while the protected checkpoint awaits Go. It now owns the host.
+        if (!this.isBitwardenProfileUnused(partition)) return;
+        electronSession.fromPartition(partition).extensions.removeExtension(extensionId);
+        this.extensionIds.delete(partition);
+        this.extensionLoadKeys.delete(partition);
+        this.extensionPopupPaths.delete(partition);
+      });
+    } finally {
+      this.retiringBitwardenProfiles.delete(partition);
+    }
+  }
+
   private dispose(sessionId: string, bitwardenAlreadyFlushed = false): void {
     const record = this.surfaces.get(sessionId);
     if (!record) return;
     record.disposed = true;
+    record.preview = undefined;
     for (const auxiliary of [...this.bitwardenAuxiliaryWindows.values()]) {
       if (auxiliary.sessionId === sessionId && !auxiliary.window.isDestroyed()) {
         auxiliary.window.destroy();
@@ -5906,16 +6254,6 @@ class WebSurfaceManager {
         );
       });
     }
-    if (record.bitwarden && record.bitwardenTabRegistered) {
-      const api = this.chromeExtensionApis.get(record.bitwarden.partition);
-      if (api) {
-        try {
-          api.removeTab(record.view.webContents);
-        } catch {
-          // Removing an already-destroyed tab is harmless.
-        }
-      }
-    }
     record.bitwardenUseRelease?.();
     record.bitwardenUseRelease = undefined;
     if (
@@ -5930,15 +6268,11 @@ class WebSurfaceManager {
         console.warn('[Wormhole] Could not release the web VPN tunnel.', error);
       });
     }
-    try {
-      record.owner.contentView.removeChildView(record.view);
-    } catch {
-      // A window can already be closing while the renderer removes its session.
-    }
-    try {
-      record.view.webContents.close();
-    } catch {
-      // Closing an already-destroyed WebContents is harmless.
+    for (const view of record.tabs.all()) this.destroyBrowserTab(record, view);
+    if (record.bitwarden) {
+      void this.retireBitwardenProfile(record.bitwarden.partition).catch(() => {
+        console.warn('[Wormhole] Bitwarden profile remains loaded until its storage can be saved.');
+      });
     }
   }
 
@@ -5976,7 +6310,12 @@ class WebSurfaceManager {
       void this.releaseTunnel(sessionId).catch(() => undefined);
     }
     for (const record of this.surfaces.values()) {
-      if (!record.disposed) record.view.setVisible(false);
+      if (!record.disposed) {
+        record.preview = undefined;
+        if (record.bounds)
+          record.bounds = { ...record.bounds, visible: false, capturePreview: false };
+        for (const view of record.tabs.all()) view.setVisible(false);
+      }
     }
     this.closeBitwardenFloatingWindows();
   }
@@ -6111,73 +6450,277 @@ class WebSurfaceManager {
   backendStopped(): void {
     this.tunnelLeases.clear();
     this.tunnelLeaseOwners.clear();
-    for (const record of this.surfaces.values()) record.tunnelLeaseId = undefined;
+    for (const [sessionId, record] of this.surfaces) {
+      record.tunnelLeaseId = undefined;
+      if (record.route === 'vpn') {
+        this.sendEvent(sessionId, record, 'failed', {
+          error: 'The VPN connection stopped. Reconnect this browser to continue.',
+        });
+        this.dispose(sessionId);
+      }
+    }
   }
 
   private configureWebContents(
     sessionId: string,
     record: WebSurfaceRecord,
-    target: WebTargetResponse,
+    tabId: string,
+    view: WebContentsView,
   ): void {
-    const contents = record.view.webContents;
-    const routeNavigation = (url: string) =>
-      getInSessionNavigationUrl(
-        url,
-        record.navigation.originalUrl ? record.navigation.navigateUrl : undefined,
-        record.navigation.originalUrl,
-      );
-    contents.setWindowOpenHandler(({ url }) => {
+    const contents = view.webContents;
+    let faviconRequest: AbortController | undefined;
+    let faviconSource: string | undefined;
+    contents.setWebRTCIPHandlingPolicy('disable_non_proxied_udp');
+    contents.on('before-input-event', (event, input) => {
+      if (
+        input.type !== 'keyDown' ||
+        !(input.control || input.meta) ||
+        !authSession.isAccessAllowed ||
+        record.disposed
+      )
+        return;
+      const key = input.key.toLowerCase();
+      if (!['t', 'w', 'l', 'tab'].includes(key)) return;
+      event.preventDefault();
+      if (key === 'l') {
+        record.owner.webContents.focus();
+        this.sendEvent(sessionId, record, 'focus-address');
+        return;
+      }
+      const operation: WebBrowserCommand =
+        key === 't'
+          ? { sessionId, operation: 'new-tab' }
+          : {
+              sessionId,
+              operation: key === 'w' ? 'close-tab' : 'select-tab',
+              tabId: key === 'w' ? tabId : record.tabs.adjacent(input.shift ? -1 : 1),
+            };
+      void this.command(record.owner, operation)
+        .then((applied) => {
+          if (!applied || record.disposed || record.owner.isDestroyed()) return;
+          if (key === 't') {
+            record.owner.webContents.focus();
+            this.sendEvent(sessionId, record, 'focus-address');
+          } else record.view.webContents.focus();
+        })
+        .catch(() => undefined);
+    });
+    const routeNavigation = (url: string) => this.browserNavigationUrl(record, url);
+    contents.setWindowOpenHandler(({ url, referrer, postBody }) => {
       const navigationUrl = routeNavigation(url);
-      if (!navigationUrl || !isAllowedWebNavigation(navigationUrl)) return { action: 'deny' };
-      void contents.loadURL(navigationUrl).catch(() => undefined);
-      return { action: 'deny' };
+      if (
+        !navigationUrl ||
+        !authSession.isAccessAllowed ||
+        record.disposed ||
+        record.tabs.size >= webBrowserTabLimit
+      )
+        return { action: 'deny' };
+      const loadOptions: Electron.LoadURLOptions = {
+        httpReferrer: referrer,
+        postData: postBody?.data,
+        extraHeaders: postBody
+          ? `content-type: ${postBody.contentType}${postBody.boundary ? `; boundary=${postBody.boundary}` : ''}`
+          : undefined,
+      };
+      return {
+        action: 'allow',
+        outlivesOpener: true,
+        overrideBrowserWindowOptions: {
+          webPreferences: {
+            partition: record.partition,
+            contextIsolation: true,
+            nodeIntegration: false,
+            sandbox: true,
+            webSecurity: true,
+            allowRunningInsecureContent: false,
+            devTools: false,
+          },
+        },
+        createWindow: (options) =>
+          this.addBrowserTab(sessionId, record, navigationUrl, options, loadOptions).webContents,
+      };
     });
     const enforceRoutedNavigation = (event: Electron.Event, url: string) => {
       const navigationUrl = routeNavigation(url);
-      if (!navigationUrl || !isAllowedWebNavigation(navigationUrl)) {
+      if (!navigationUrl || !authSession.isAccessAllowed || record.disposed) {
         event.preventDefault();
         return;
       }
-      if (navigationUrl !== url) {
-        event.preventDefault();
-        void contents.loadURL(navigationUrl).catch(() => undefined);
-      }
+      // The forwarder's request filter rewrites allowed main-frame requests without
+      // replacing their Chromium navigation, which would discard POST data and its initiator.
     };
     contents.on('will-navigate', enforceRoutedNavigation);
     contents.on('will-redirect', enforceRoutedNavigation);
     contents.on('context-menu', (_event, params) => {
-      if (!authSession.isAccessAllowed || !record.bitwarden) return;
-      const api = this.chromeExtensionApis.get(record.bitwarden.partition);
-      if (!api) return;
-      const items = api.getContextMenuItems(contents, params);
-      if (items.length === 0) return;
-      const menu = new Menu();
-      for (const item of items) menu.append(item);
+      const epoch = authSession.authorizationEpoch;
+      const isCurrent = () =>
+        isAuthorizationEpochCurrent(epoch) &&
+        !record.disposed &&
+        this.surfaces.get(sessionId) === record &&
+        record.tabs.activeId === tabId &&
+        !record.owner.isDestroyed() &&
+        !contents.isDestroyed();
+      if (!isCurrent()) return;
+      const click = (action: () => unknown) => () => {
+        void Promise.resolve()
+          .then(() => {
+            if (isCurrent()) return action();
+          })
+          .catch(() => undefined);
+      };
+      const navigate = (operation: 'back' | 'forward' | 'reload') =>
+        click(() => this.command(record.owner, { sessionId, operation }));
+      const template: Electron.MenuItemConstructorOptions[] = [
+        { label: 'Back', enabled: contents.navigationHistory.canGoBack(), click: navigate('back') },
+        {
+          label: 'Forward',
+          enabled: contents.navigationHistory.canGoForward(),
+          click: navigate('forward'),
+        },
+        { label: 'Reload', click: navigate('reload') },
+      ];
+      if (isAllowedWebNavigation(params.linkURL)) {
+        const logicalUrl = createBitwardenActiveTabContext(
+          record.navigation.navigateUrl,
+          record.navigation.originalUrl,
+          params.linkURL,
+        )!.logicalUrl;
+        template.push(
+          { type: 'separator' },
+          {
+            label: 'Open link in new tab',
+            enabled: !!routeNavigation(params.linkURL) && record.tabs.size < webBrowserTabLimit,
+            click: click(() => this.addBrowserTab(sessionId, record, params.linkURL)),
+          },
+          { label: 'Copy link address', click: click(() => clipboard.writeText(logicalUrl)) },
+        );
+      }
+      const flags = params.editFlags;
+      template.push({ type: 'separator' });
+      if (params.isEditable) {
+        template.push(
+          { label: 'Undo', enabled: flags.canUndo, click: click(() => contents.undo()) },
+          { label: 'Redo', enabled: flags.canRedo, click: click(() => contents.redo()) },
+          { type: 'separator' },
+          { label: 'Cut', enabled: flags.canCut, click: click(() => contents.cut()) },
+          { label: 'Copy', enabled: flags.canCopy, click: click(() => contents.copy()) },
+          { label: 'Paste', enabled: flags.canPaste, click: click(() => contents.paste()) },
+        );
+      } else if (params.selectionText) {
+        template.push({
+          label: 'Copy',
+          enabled: flags.canCopy,
+          click: click(() => contents.copy()),
+        });
+      }
+      template.push({
+        label: 'Select all',
+        enabled: flags.canSelectAll,
+        click: click(() => contents.selectAll()),
+      });
+      let extensionItems: Electron.MenuItem[] = [];
+      try {
+        if (record.bitwarden)
+          extensionItems =
+            this.chromeExtensionApis
+              .get(record.bitwarden.partition)
+              ?.getContextMenuItems(contents, params) ?? [];
+      } catch {
+        // Extension teardown must not suppress the browser's own menu.
+      }
+      if (extensionItems.length) template.push({ type: 'separator' });
+      const menu = Menu.buildFromTemplate(template);
+      for (const item of extensionItems) menu.append(item);
       menu.popup({ window: record.owner });
     });
-    if (target.ignoreCertErrors) {
+    if (record.target.ignoreCertErrors) {
       contents.on('certificate-error', (event, _url, _error, _certificate, callback) => {
         // The opt-in belongs to this isolated WebContents only. A regular tab cannot inherit this
         // exception through Chromium's shared profile or certificate-decision cache.
         event.preventDefault();
-        callback(true);
+        callback(new URL(_url).origin === new URL(record.navigation.navigateUrl).origin);
       });
     }
-    contents.on('did-navigate', () => this.sendEvent(sessionId, record, 'navigation'));
-    contents.on('did-navigate-in-page', () => this.sendEvent(sessionId, record, 'navigation'));
-    contents.on('did-start-loading', () =>
-      this.sendEvent(sessionId, record, 'navigation', { isLoading: true }),
-    );
-    contents.on('did-stop-loading', () =>
-      this.sendEvent(sessionId, record, 'navigation', { isLoading: false }),
-    );
+    const update = (values: Partial<import('./web-browser-tabs.js').WebBrowserTabState> = {}) => {
+      if (record.disposed || record.tabs.get(tabId) !== view || contents.isDestroyed()) return;
+      const currentUrl = contents.getURL();
+      const context =
+        currentUrl && currentUrl !== 'about:blank'
+          ? createBitwardenActiveTabContext(
+              record.navigation.navigateUrl,
+              record.navigation.originalUrl,
+              currentUrl,
+            )
+          : undefined;
+      record.tabs.update(tabId, {
+        title:
+          contents.getTitle() || (contents.getURL() === 'about:blank' ? 'New tab' : 'Loading…'),
+        url:
+          context?.logicalUrl ||
+          currentUrl ||
+          record.tabs.snapshot(record.route).tabs.find((tab) => tab.id === tabId)!.url,
+        isLoading: contents.isLoading(),
+        canGoBack: contents.navigationHistory.canGoBack(),
+        canGoForward: contents.navigationHistory.canGoForward(),
+        ...values,
+      });
+      this.sendEvent(sessionId, record, 'navigation');
+    };
+    contents.on('did-navigate', () => {
+      faviconRequest?.abort();
+      faviconSource = undefined;
+      update({ favicon: undefined });
+    });
+    contents.on('page-favicon-updated', (_event, favicons: string[]) => {
+      if (record.disposed || record.tabs.get(tabId) !== view || !authSession.isAccessAllowed)
+        return;
+      const url = favicons
+        .slice(0, 4)
+        .find(
+          (candidate) =>
+            candidate.length <= webBrowserFaviconUrlLimit &&
+            (candidate.startsWith('data:image/') || !!routeNavigation(candidate)),
+        );
+      if (!url || url === faviconSource) return;
+      faviconSource = url;
+      faviconRequest?.abort();
+      const request = new AbortController();
+      faviconRequest = request;
+      const pageUrl = contents.getURL();
+      const timeout = setTimeout(() => request.abort(), 5_000);
+      timeout.unref();
+      void (async () => {
+        const favicon = await fetchWebBrowserFavicon(
+          {
+            fetchData: (url, signal) =>
+              contents.session.fetch(url, { signal, credentials: 'omit' }),
+            request: (url, origin) =>
+              electronNet.request({
+                url,
+                credentials: origin === 'null' ? 'omit' : 'same-origin',
+                origin: origin === 'null' ? undefined : origin,
+                session: contents.session,
+                redirect: 'follow',
+              }),
+          },
+          pageUrl,
+          url,
+          routeNavigation,
+          request.signal,
+        );
+        if (!request.signal.aborted && contents.getURL() === pageUrl) update({ favicon });
+      })()
+        .catch(() => undefined)
+        .finally(() => clearTimeout(timeout));
+    });
+    contents.on('did-navigate-in-page', () => update());
+    contents.on('page-title-updated', () => update());
+    contents.on('did-start-loading', () => update({ isLoading: true, error: undefined }));
+    contents.on('did-stop-loading', () => update({ isLoading: false }));
     contents.on('did-finish-load', () => {
-      this.sendEvent(
-        sessionId,
-        record,
-        record.initialNavigationPending ? 'connected' : 'navigation',
-      );
-      record.initialNavigationPending = false;
+      // Chromium can finish loading its own error document after did-fail-load.
+      // Retain the failure until the user starts another navigation.
+      update({ isLoading: false });
     });
     contents.on(
       'did-fail-load',
@@ -6191,99 +6734,71 @@ class WebSurfaceManager {
         // ERR_ABORTED is the normal companion to client-side redirects and must not turn a viable
         // connection into a failed tab.
         if (!isMainFrame || errorCode === -3 || record.disposed) return;
-        if (record.initialNavigationPending) {
-          this.beginInitialNavigationFailure(
-            sessionId,
-            record,
-            describeWebLoadFailure(errorCode, errorDescription),
-          );
-          return;
-        }
-        this.sendEvent(sessionId, record, 'navigation');
+        update({ isLoading: false, error: describeWebLoadFailure(errorCode, errorDescription) });
       },
     );
     contents.on('render-process-gone', () => {
       if (record.disposed || this.surfaces.get(sessionId) !== record) return;
-      record.initialNavigationPending = false;
-      this.sendEvent(sessionId, record, 'failed', {
-        error: 'The browser process stopped unexpectedly.',
+      update({
+        isLoading: false,
+        error: 'This tab stopped unexpectedly. Reload the page to continue.',
       });
-      // A crashed renderer no longer has a connection that can consume this route. Dispose the
-      // unusable surface and release its VPN lease instead of leaving the proxy alive until the
-      // user closes or retries the failed tab.
-      this.close(sessionId);
     });
     contents.once('destroyed', () => {
-      if (record.disposed || this.surfaces.get(sessionId) !== record) return;
-      // Covers destruction paths that do not emit render-process-gone (for example a native
-      // WebContents teardown during an owner-window failure).
-      this.close(sessionId);
+      faviconRequest?.abort();
+      if (
+        record.disposed ||
+        this.surfaces.get(sessionId) !== record ||
+        record.tabs.get(tabId) !== view
+      )
+        return;
+      if (record.tabs.remove(tabId)) {
+        this.destroyBrowserTab(record, view);
+        this.showBrowserTab(record);
+        this.sendEvent(sessionId, record, 'navigation');
+      } else {
+        this.sendEvent(sessionId, record, 'failed', {
+          error: 'The browser closed unexpectedly. Reconnect to continue.',
+        });
+        this.close(sessionId);
+      }
     });
   }
 
-  private beginInitialNavigationFailure(
+  private failBrowserTab(
     sessionId: string,
     record: WebSurfaceRecord,
+    tabId: string,
     error: string,
   ): void {
-    if (
-      record.disposed ||
-      !record.initialNavigationPending ||
-      this.surfaces.get(sessionId) !== record
-    ) {
-      return;
-    }
-    record.initialNavigationPending = false;
-    void this.finishInitialNavigationFailure(sessionId, record, error);
-  }
-
-  private async finishInitialNavigationFailure(
-    sessionId: string,
-    record: WebSurfaceRecord,
-    error: string,
-  ): Promise<void> {
-    const leaseId = record.tunnelLeaseId;
-    const backend = record.tunnelBackend;
-    const probeTarget = record.tunnelProbeTarget;
-    let finalError = error;
-    if (leaseId && backend && probeTarget) {
-      try {
-        await backend.probeTunnelTarget(leaseId, probeTarget.host, probeTarget.port);
-      } catch {
-        finalError = `The VPN tunnel is up, but target ${probeTarget.host}:${probeTarget.port} did not respond through it. Check that the target allows access from the VPN network.`;
-      }
-    }
     if (record.disposed || this.surfaces.get(sessionId) !== record) return;
-
-    this.sendEvent(sessionId, record, 'failed', { error: finalError });
-    if (leaseId && this.tunnelLeases.isActive(sessionId, leaseId)) {
-      record.tunnelLeaseId = undefined;
-      void this.releaseTunnel(sessionId).catch((releaseError) => {
-        console.warn(
-          '[Wormhole] Could not release the failed web session VPN tunnel.',
-          releaseError,
-        );
-      });
-    }
+    record.tabs.update(tabId, { isLoading: false, error });
+    this.sendEvent(sessionId, record, 'navigation');
   }
 
   private sendEvent(
     sessionId: string,
     record: WebSurfaceRecord,
-    type: 'connected' | 'failed' | 'navigation',
+    type: 'connected' | 'failed' | 'navigation' | 'focus-address',
     values: { error?: string; isLoading?: boolean } = {},
   ): void {
     if (record.disposed || record.owner.isDestroyed()) return;
-    const contents = record.view.webContents;
+    const browser = record.tabs.snapshot(
+      record.route,
+      record.navigation.originalUrl ? new URL(record.navigation.originalUrl).origin : undefined,
+    );
+    const tab = browser.tabs.find((candidate) => candidate.id === browser.activeTabId);
+    if (!tab) return;
     try {
       record.owner.webContents.send('web:event', {
         type,
         sessionId,
         attempt: record.attempt,
-        url: contents.getURL().slice(0, webMaxUrlLength),
-        canGoBack: contents.navigationHistory.canGoBack(),
-        canGoForward: contents.navigationHistory.canGoForward(),
-        isLoading: values.isLoading ?? contents.isLoading(),
+        url: tab.url.slice(0, webMaxUrlLength),
+        canGoBack: tab.canGoBack,
+        canGoForward: tab.canGoForward,
+        isLoading: values.isLoading ?? tab.isLoading,
+        browser,
         error: values.error?.slice(0, 2048),
       });
     } catch {
@@ -6295,7 +6810,11 @@ class WebSurfaceManager {
 function isAllowedWebNavigation(value: string): boolean {
   try {
     const target = new URL(value);
-    return target.protocol === 'http:' || target.protocol === 'https:';
+    return (
+      (target.protocol === 'http:' || target.protocol === 'https:') &&
+      !target.username &&
+      !target.password
+    );
   } catch {
     return false;
   }
@@ -6313,9 +6832,18 @@ function clampWindowDimension(
 }
 
 function describeWebNavigationError(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
-  return message
-    ? `The browser could not start the page: ${message}`
+  const failure =
+    error && typeof error === 'object' ? (error as { errno?: unknown; code?: unknown }) : undefined;
+  const code =
+    typeof failure?.code === 'string' && /^ERR_[A-Z0-9_]{1,64}$/.test(failure.code)
+      ? failure.code
+      : '';
+  if (typeof failure?.errno === 'number' && Number.isInteger(failure.errno)) {
+    return describeWebLoadFailure(failure.errno, code);
+  }
+  // Electron's raw loadURL error contains the complete URL, including authentication parameters.
+  return code
+    ? `The browser could not start the page (${code}).`
     : 'The browser could not start the page.';
 }
 
@@ -6337,7 +6865,9 @@ function describeWebLoadFailure(errorCode: number, description: string): string 
     case -204:
       return 'The server certificate could not be validated. If this appliance uses a self-signed certificate, enable “Ignore certificate errors” for this connection.';
     default:
-      return description ? `Navigation failed (${description}).` : 'Navigation failed.';
+      return /^ERR_[A-Z0-9_]{1,64}$/.test(description)
+        ? `Navigation failed (${description}).`
+        : 'Navigation failed.';
   }
 }
 
@@ -8863,7 +9393,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       webSurfaces.hideAll();
       return;
     }
-    webSurfaces.setBounds(ownerWindow, request);
+    return webSurfaces.setBounds(ownerWindow, request);
   });
   ipcMain.handle('web:command', async (event, request: unknown) => {
     if (!isWebCommandRequest(request)) throw new Error('Web browser command is invalid.');

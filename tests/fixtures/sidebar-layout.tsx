@@ -949,14 +949,16 @@ async function runAppIntegrationTests() {
       );
     }, 'Full App sidebar did not settle: ' + expected);
   };
-  const originalBridge = window.wormhole;
-  // Mount the real App with an empty workspace; native services are outside this UI test.
-  window.wormhole = undefined;
-  try {
-    await window.sidebarObserve('mount');
+  let appKey = 0;
+  const mount = async (
+    tree: WormholeWorkspaceNode[],
+    width = 320,
+    pinned = false,
+    theme: 'dark' | 'light' = 'dark',
+  ) => {
     await React.act(async () =>
       root.render(
-        <React.StrictMode>
+        <React.StrictMode key={++appKey}>
           <ContextMenuOverlayProvider>
             <App
               initialAuthState={{
@@ -970,19 +972,19 @@ async function runAppIntegrationTests() {
                 windowsHello: { available: false, message: '' },
               }}
               initialWorkspace={{
-                tree: [],
+                tree,
                 credentials: [],
                 credentialOptions: { ssh: [], rdp: [], vnc: [] },
                 tunnels: [],
               }}
               initialSettings={{
-                theme: 'dark',
+                theme,
                 promptBeforeTunnelConnect: true,
                 autoCopyOnSelect: false,
                 confirmOnTabClose: true,
                 confirmOnWindowClose: true,
-                sidebarWidth: 320,
-                sidebarPinned: false,
+                sidebarWidth: width,
+                sidebarPinned: pinned,
                 connectionTreeExpansion: null,
                 autoCheckForUpdates: false,
                 lastUpdateCheck: null,
@@ -1003,6 +1005,40 @@ async function runAppIntegrationTests() {
       ),
     );
     await tick();
+  };
+  const originalBridge = window.wormhole;
+  // Mount the real App; native services are outside this UI test.
+  window.wormhole = undefined;
+  try {
+    await window.sidebarObserve('mount');
+    await mount([
+      {
+        id: 'tree-folder',
+        kind: 'folder',
+        name: 'DD LAB',
+        children: [
+          {
+            id: 'tree-child-folder',
+            kind: 'folder',
+            name: 'Nested folder',
+            children: [
+              {
+                id: 'tree-child-connection',
+                kind: 'connection',
+                name: 'k3s-cp-01',
+                protocol: 'ssh',
+              },
+            ],
+          },
+        ],
+      },
+      ...Array.from({ length: 40 }, (_, index) => ({
+        id: `tree-connection-${index}`,
+        kind: 'connection' as const,
+        name: index === 0 ? 'Long connection name '.repeat(8) : `Server ${index}`,
+        protocol: 'ssh' as const,
+      })),
+    ]);
     await move(1000, 400);
     await shown(false);
     const pin = query('[data-sidebar-pin]');
@@ -1073,6 +1109,95 @@ async function runAppIntegrationTests() {
       'Opening the sidebar left its actions hidden',
     );
     await window.sidebarObserve('hover');
+    // App's style-only JSX is outside Node loaded-module coverage. Exercise the changed
+    // layout through Chromium's computed styles and geometry, including focus and drop rings.
+    const tree = query('[data-connection-tree]');
+    const viewport = query('[data-connection-tree] [data-slot="scroll-area-viewport"]');
+    await move(
+      viewport.getBoundingClientRect().left + 20,
+      viewport.getBoundingClientRect().top + 16,
+    );
+    await waitFor(
+      () =>
+        query('[data-connection-tree] [data-slot="scroll-area-scrollbar"]')?.dataset.state ===
+        'visible',
+      'Tree scrollbar did not appear',
+    );
+    const scrollbar = query('[data-connection-tree] [data-slot="scroll-area-scrollbar"]');
+    assert.ok(
+      viewport.scrollHeight > viewport.clientHeight,
+      'Tree fixture must overflow vertically',
+    );
+    assert.equal(
+      viewport.scrollWidth,
+      viewport.clientWidth,
+      'Long names must stay within the tree',
+    );
+    const rows = [...tree.querySelectorAll<HTMLButtonElement>('button[draggable]')];
+    assert.equal(rows.length, 43);
+    for (const row of rows) {
+      const bounds = row.getBoundingClientRect();
+      assert.ok(
+        bounds.left >= viewport.getBoundingClientRect().left + 4,
+        'Tree highlight has no inset from the left viewport edge',
+      );
+      assert.ok(
+        bounds.right <= scrollbar.getBoundingClientRect().left - 2,
+        'Tree highlight overlaps the scrollbar',
+      );
+    }
+    await React.act(async () => {
+      await window.sidebarInput({ type: 'keyDown', keyCode: 'Tab' });
+      await window.sidebarInput({ type: 'keyUp', keyCode: 'Tab' });
+    });
+    // Cover the shared row style on root/nested folders and connections, including the last row.
+    for (const row of [rows[0], rows[1], rows[2], rows[3], rows.at(-1)!]) {
+      await React.act(async () => row.focus());
+      await tick();
+      assert.ok(row.matches(':focus-visible'), 'Tree keyboard focus must remain visible');
+      assert.match(
+        getComputedStyle(row).boxShadow,
+        /\binset\b/,
+        'Tree focus ring must stay inside its row',
+      );
+    }
+    await React.act(async () => {
+      rows[3].focus();
+      viewport.scrollTop = 0;
+    });
+    await tick();
+    const dragData = new DataTransfer();
+    await React.act(async () =>
+      rows[3].dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer: dragData })),
+    );
+    const folder = rows[0];
+    const folderBounds = folder.getBoundingClientRect();
+    assert.ok(
+      folderBounds.top >= viewport.getBoundingClientRect().top,
+      'Drop target must be visible',
+    );
+    assert.ok(!folder.matches(':focus-visible'), 'The drop assertion must not match a focus ring');
+    await React.act(async () =>
+      folder.dispatchEvent(
+        new DragEvent('dragover', {
+          bubbles: true,
+          cancelable: true,
+          clientY: folderBounds.top + folderBounds.height / 2,
+          dataTransfer: dragData,
+        }),
+      ),
+    );
+    assert.match(
+      getComputedStyle(folder).boxShadow,
+      /\binset\b/,
+      'Tree drop ring must stay inside its row',
+    );
+    await React.act(async () => {
+      rows[3].dispatchEvent(new DragEvent('dragend', { bubbles: true, dataTransfer: dragData }));
+      folder.focus();
+    });
+    await tick();
+    await window.sidebarObserve('tree-highlight');
     await React.act(async () => {
       query('[aria-label="Show sidebar"]').focus();
       query('[aria-label="Show sidebar"]').dispatchEvent(
@@ -1087,6 +1212,83 @@ async function runAppIntegrationTests() {
     await shown(false);
     assert.ok(document.activeElement === pin);
     await window.sidebarObserve('complete');
+
+    // Cover viewport-dependent indentation using real row and guide bounds, not just scrollWidth:
+    // nested Collapsible overflow can hide oversized rows from the viewport's scroll metrics.
+    for (const width of [256, 320, 600]) {
+      for (const depth of [0, 2, 8, 16]) {
+        let node: WormholeWorkspaceNode = {
+          id: 'boundary-connection',
+          kind: 'connection',
+          name: '服务器 🔒 Long connection '.repeat(8),
+          protocol: 'ssh',
+        };
+        for (let level = depth - 1; level >= 0; level--) {
+          node = {
+            id: `boundary-folder-${level}`,
+            kind: 'folder',
+            name: `Folder ${level}`,
+            children: [node],
+          };
+        }
+        await mount([node], width, true, width === 256 ? 'light' : 'dark');
+        const viewport = query('[data-connection-tree] [data-slot="scroll-area-viewport"]');
+        const rows = [
+          ...document.querySelectorAll<HTMLButtonElement>(
+            '[data-connection-tree] button[draggable]',
+          ),
+        ];
+        assert.equal(rows.length, depth + 1);
+        await React.act(async () => rows.at(-1)!.focus());
+        await tick();
+        assert.equal(
+          viewport.scrollLeft,
+          0,
+          'Focusing a deep row must not shift the tree horizontally',
+        );
+        const viewportBounds = viewport.getBoundingClientRect();
+        for (const [index, row] of rows.entries()) {
+          const bounds = row.getBoundingClientRect();
+          assert.ok(bounds.left >= viewportBounds.left + 4, 'Deep row lost its left inset');
+          assert.ok(
+            bounds.right <= viewportBounds.right - 12,
+            'Deep row overlaps the scrollbar gutter',
+          );
+          assert.ok(
+            row.lastElementChild!.getBoundingClientRect().width >= 31,
+            'Deep row must retain a readable label',
+          );
+          if (index === 0) continue;
+          const wrapper = row.parentElement!.parentElement!;
+          const rail = wrapper
+            .querySelector<HTMLElement>(':scope > span.w-px')!
+            .getBoundingClientRect();
+          const connector = wrapper
+            .querySelector<HTMLElement>(':scope > span.h-px')!
+            .getBoundingClientRect();
+          const parentCheckbox = rows[index - 1]
+            .querySelector('[role="checkbox"]')!
+            .getBoundingClientRect();
+          const checkbox = row.querySelector('[role="checkbox"]')!.getBoundingClientRect();
+          assert.ok(
+            Math.abs(rail.left - (parentCheckbox.left + parentCheckbox.width / 2)) <= 1,
+            'Branch must stay aligned with the parent selection slot',
+          );
+          assert.ok(
+            Math.abs(connector.left - Math.min(rail.right, checkbox.left - 1)) <= 1,
+            'Connector must start at a visible slot',
+          );
+          assert.ok(
+            Math.abs(connector.right - Math.max(rail.left, checkbox.left - 1)) <= 1,
+            'Connector must terminate at the other slot',
+          );
+        }
+      }
+    }
+    await mount([], 256, true);
+    assert.match(query('[data-connection-tree]').textContent!, /Nothing here yet\./);
+    assert.equal(document.querySelectorAll('[data-connection-tree] button[draggable]').length, 0);
+    await window.sidebarObserve('tree-boundaries');
   } finally {
     await React.act(async () => root.unmount());
     window.wormhole = originalBridge;

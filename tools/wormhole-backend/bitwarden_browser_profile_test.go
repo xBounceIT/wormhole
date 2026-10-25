@@ -251,7 +251,7 @@ func TestSeedBitwardenBrowserProfileIgnoresMismatchedMarker(t *testing.T) {
 	}
 }
 
-func TestSeedBitwardenBrowserProfilePrefersCookieSourcesForSameRoute(t *testing.T) {
+func TestSeedBitwardenBrowserProfileUsesOnlyCookieSourcesForSameBrowserRoute(t *testing.T) {
 	root := t.TempDir()
 	extension := filepath.Join(root, "extensions", "bitwarden")
 	direct := filepath.Join(root, "Partitions", "persist_direct")
@@ -286,8 +286,7 @@ func TestSeedBitwardenBrowserProfilePrefersCookieSourcesForSameRoute(t *testing.
 	if err != nil {
 		t.Fatalf("seed routed profile: %v", err)
 	}
-	if len(result.CookieSourceProfiles) != 2 ||
-		result.CookieSourceProfiles[0] != matching || result.CookieSourceProfiles[1] != direct {
+	if len(result.CookieSourceProfiles) != 1 || result.CookieSourceProfiles[0] != matching {
 		t.Fatalf("unexpected cookie sources: %#v", result.CookieSourceProfiles)
 	}
 

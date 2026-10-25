@@ -1,6 +1,7 @@
 /// <reference types="vite/client" />
 
 type WormholeProtocol = 'ssh' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial';
+type WormholeWebBrowserState = import('../electron/web-browser-tabs').WebBrowserState;
 
 interface WormholeRdpSurfaceRect {
   x: number;
@@ -204,6 +205,7 @@ interface WormholeWebTarget {
   host: string;
   port: number;
   ignoreCertErrors: boolean;
+  browser?: WormholeWebBrowserState;
   bitwarden?: {
     partition: string;
     popupUrl: string;
@@ -271,13 +273,14 @@ interface WormholeBitwardenLoginItem {
 }
 
 interface WormholeWebEvent {
-  type: 'connected' | 'failed' | 'navigation';
+  type: 'connected' | 'failed' | 'navigation' | 'focus-address';
   sessionId: string;
   attempt: number;
   url: string;
   canGoBack: boolean;
   canGoForward: boolean;
   isLoading: boolean;
+  browser: WormholeWebBrowserState;
   error?: string;
 }
 
@@ -945,11 +948,12 @@ interface Window {
       width: number;
       height: number;
       visible: boolean;
-    }): Promise<void>;
-    commandWebSession(request: {
-      sessionId: string;
-      operation: 'back' | 'forward' | 'reload' | 'stop' | 'zoom-in' | 'zoom-out';
-    }): Promise<void>;
+      capturePreview?: boolean;
+      previewId?: string;
+    }): Promise<string | undefined>;
+    commandWebSession(
+      request: import('../electron/web-browser-tabs').WebBrowserCommand,
+    ): Promise<void>;
     showTreeTooltip(request: {
       text: string;
       anchor: { x: number; y: number; width: number; height: number };
