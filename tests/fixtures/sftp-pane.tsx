@@ -6,7 +6,6 @@ declare function SftpFilePane(props: Record<string, unknown>): import('react').R
 declare function SftpConflictOverlay(props: Record<string, unknown>): import('react').ReactElement;
 declare function pressSftpTestKey(key: string): Promise<void>;
 declare function SftpTestDialog(props: Record<string, unknown>): import('react').ReactElement;
-declare const DialogPrimitive: typeof import('radix-ui').Dialog;
 declare const sftpDragDataType: string;
 
 async function runSftpPaneTests() {
@@ -195,8 +194,8 @@ async function runSftpPaneTests() {
           session={{ id: 'session', sftp: { conflict: {} } }}
           onCloseSftpBrowser={() => browserCloses++}
         >
-          <DialogPrimitive.Title>Files</DialogPrimitive.Title>
-          <DialogPrimitive.Description>Transfer conflict</DialogPrimitive.Description>
+          <h2>Files</h2>
+          <p>Transfer conflict</p>
           <SftpConflictOverlay
             key={direction}
             conflict={{
@@ -254,14 +253,14 @@ async function runSftpPaneTests() {
         session={{ id: 'session', sftp: {} }}
         onCloseSftpBrowser={() => browserCloses++}
       >
-        <DialogPrimitive.Title>Files</DialogPrimitive.Title>
-        <DialogPrimitive.Description>Browser without conflict</DialogPrimitive.Description>
+        <h2>Files</h2>
+        <p>Browser without conflict</p>
         <button autoFocus>Close</button>
       </SftpTestDialog>,
     ),
   );
   await React.act(async () => pressSftpTestKey('Escape'));
-  assert.equal(browserCloses, 1, 'Escape still closes a browser without conflicts');
+  assert.equal(browserCloses, 0, 'Escape leaves the File transfer session tab open');
   await React.act(async () => root.unmount());
 }
 

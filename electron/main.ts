@@ -1,3 +1,10 @@
+import { SharedSshRoutes } from './ssh-shared-route.js';
+import {
+  isSftpEditRequest,
+  parseSftpEditEvent,
+  type SftpEditRequest,
+  type SftpEditEvent,
+} from './sftp-contract.js';
 import {
   parseSshTerminalOutput,
   SshTerminalDelivery,
@@ -322,6 +329,8 @@ type BackendOperation =
   | 'auth-hello-verify'
   | 'auth-system-idle'
   | 'ssh-trust-host-key'
+  | 'settings-file-transfer-read'
+  | 'settings-file-transfer-write'
   | 'settings-read'
   | 'settings-set-theme'
   | 'settings-set-prompt-before-tunnel'
@@ -708,7 +717,7 @@ type WorkspaceNodeWriteRequest = {
   name: string;
   notes?: string;
   kind: 'folder' | 'connection';
-  protocol: '' | 'ssh' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial';
+  protocol: '' | 'ssh' | 'sftp' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial';
   host: string;
   port: number;
   username: string;
@@ -986,6 +995,7 @@ type SshSftpTransferItem = {
 };
 
 type SshBackendEvent =
+  | SftpEditEvent
   | SshTerminalOutput
   | { type: 'mcp.access'; sessionId: string; accessible: boolean }
   | {
@@ -1095,6 +1105,7 @@ type SshBackendEvent =
     };
 
 type SshOpenRequest = {
+  mode?: 'terminal' | 'sftp';
   sessionId: string;
   nodeId?: string;
   host?: string;
@@ -1456,6 +1467,7 @@ function isSshOpenRequest(value: unknown): value is SshOpenRequest {
   if (
     !isRecord(value) ||
     !isSshSessionId(value.sessionId) ||
+    (value.mode !== undefined && value.mode !== 'terminal' && value.mode !== 'sftp') ||
     typeof value.columns !== 'number' ||
     !Number.isInteger(value.columns) ||
     value.columns < 0 ||
@@ -1691,6 +1703,7 @@ function parseWorkspaceNodeWriteRequest(
   const validProtocol =
     protocol === '' ||
     protocol === 'ssh' ||
+    protocol === 'sftp' ||
     protocol === 'rdp' ||
     protocol === 'http' ||
     protocol === 'https' ||
@@ -1724,7 +1737,10 @@ function parseWorkspaceNodeWriteRequest(
     typeof inlinePassword !== 'string' ||
     inlinePassword.length > credentialMaxPasswordLength ||
     (inlinePasswordAction === 'set' ? inlinePassword.length === 0 : inlinePassword.length !== 0) ||
-    (protocol !== 'ssh' && protocol !== 'rdp' && inlinePasswordAction !== 'clear')
+    (protocol !== 'ssh' &&
+      protocol !== 'sftp' &&
+      protocol !== 'rdp' &&
+      inlinePasswordAction !== 'clear')
   ) {
     throw new Error('Workspace node is invalid.');
   }
@@ -2152,6 +2168,8 @@ function parseSshBackendEvent(line: string): SshBackendEvent | undefined {
   if (!isRecord(value) || typeof value.type !== 'string' || !isSshSessionId(value.session_id)) {
     return undefined;
   }
+
+  if (value.type === 'sftp.edit') return parseSftpEditEvent(value);
 
   if (
     value.type === 'connected' &&
@@ -6878,6 +6896,77 @@ class NativeSshBackend {
     }
   }
 
+  private readonly editWaiters = new Map<
+    string,
+    {
+      resolve: (event: SftpEditEvent) => void;
+      reject: (error: Error) => void;
+      timeout: NodeJS.Timeout;
+    }
+  >();
+  async edit(sessionId: string, request: SftpEditRequest): Promise<SftpEditEvent> {
+    this.ensureStarted();
+    const requestId = randomUUID();
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.editWaiters.delete(requestId);
+        reject(new Error('File edit operation timed out; working copies are retained.'));
+      }, 60_000);
+      this.editWaiters.set(requestId, { resolve, reject, timeout });
+      try {
+        this.write({
+          type: 'sftp-edit',
+          session_id: sessionId,
+          request_id: requestId,
+          operation: request.operation,
+          pane: request.pane,
+          path: request.path,
+          edit_id: request.editId,
+          editor_id: request.editorId,
+          allow_binary: request.allowBinary,
+          decision: request.decision,
+          destination_path: request.destinationPath,
+        });
+      } catch (error) {
+        clearTimeout(timeout);
+        this.editWaiters.delete(requestId);
+        reject(error);
+      }
+    });
+  }
+
+  async prepareEditClose(sessionId = 'sftp-recovery'): Promise<boolean> {
+    if (!this.child || this.child.killed) return true;
+    const snapshot = await this.edit(sessionId, { operation: 'prepare-close' });
+    if (snapshot.error) throw new Error(snapshot.error);
+    const pending = snapshot.edits.filter((edit) => edit.pending && !edit.recovered);
+    if (pending.length) {
+      const owner =
+        BrowserWindow.getFocusedWindow() ??
+        BrowserWindow.getAllWindows().find((window) => windowCloseCoordinators.has(window));
+      if (!owner) return false;
+      const answer = await showCoordinatedMessageBox(owner, {
+        type: 'warning',
+        title: 'Pending file edits',
+        message: `${pending.length} edited file(s) have changes that have not been uploaded.`,
+        detail:
+          'Keep the private working copies for recovery after reconnecting, or return to File transfer to finish uploading.',
+        buttons: ['Return to editing', 'Keep copies and close'],
+        defaultId: 0,
+        cancelId: 0,
+      });
+      if (answer.response !== 1) return false;
+    }
+
+    return true;
+  }
+
+  async finishEditClose(sessionId = 'sftp-recovery'): Promise<void> {
+    if (!this.child || this.child.killed) return;
+    const finished = await this.edit(sessionId, { operation: 'finish-close', decision: 'keep' });
+    if (finished.error) throw new Error(finished.error);
+  }
+
   private child: ChildProcessWithoutNullStreams | undefined;
   private lineReader: Interface | undefined;
   private controlSequence = 0;
@@ -7011,7 +7100,8 @@ class NativeSshBackend {
     return await this.waitForConnection(request.sessionId, () => {
       this.write({
         type: 'open',
-        terminal_stream: true,
+        terminal_stream: request.mode !== 'sftp',
+        mode: request.mode ?? 'terminal',
         session_id: request.sessionId,
         node_id: request.nodeId,
         ...credentialFields,
@@ -7084,6 +7174,41 @@ class NativeSshBackend {
 
   resize(sessionId: string, columns: number, rows: number): void {
     this.write({ type: 'resize', session_id: sessionId, columns, rows });
+  }
+
+  private readonly sharedRoutes = new SharedSshRoutes();
+
+  async shareSftp(sourceId: string, sessionId: string): Promise<SshConnectedResponse> {
+    if (
+      !this.activeSessions.has(sourceId) ||
+      this.activeSessions.has(sessionId) ||
+      this.openWaiters.has(sessionId)
+    )
+      throw new Error('Source SSH connection is unavailable.');
+    this.sharedRoutes.attach(sourceId, sessionId);
+    try {
+      return await this.waitForConnection(sessionId, () =>
+        this.write({
+          type: 'open',
+          mode: 'sftp',
+          source_session_id: sourceId,
+          session_id: sessionId,
+        }),
+      );
+    } catch (error) {
+      await this.releaseTunnel(sessionId);
+      throw error;
+    }
+  }
+
+  listSftpTree(sessionId: string, pane: 'local' | 'remote', path: string, requestId: string): void {
+    this.write({
+      type: 'sftp-tree-list',
+      session_id: sessionId,
+      pane,
+      path,
+      request_id: requestId,
+    });
   }
 
   openSftp(sessionId: string, requestId = ''): void {
@@ -7191,6 +7316,13 @@ class NativeSshBackend {
   }
 
   async close(sessionId: string): Promise<void> {
+    // Native resources must still close when retaining a journal fails. Go also
+    // freezes copies on native close, and the existing journal stays recoverable.
+    try {
+      await this.finishEditClose(sessionId);
+    } catch {
+      console.warn('[Wormhole] File edit journal could not be finalized; working copies retained.');
+    }
     this.terminalDelivery.remove(sessionId);
     this.terminalOwners.delete(sessionId);
     this.connectionAttempts.cancel(sessionId);
@@ -7220,7 +7352,8 @@ class NativeSshBackend {
   }
 
   private async releaseTunnel(sessionId: string): Promise<void> {
-    await this.tunnelLeases.release(sessionId, releaseNativeTunnelLease);
+    const owner = this.sharedRoutes.release(sessionId);
+    if (owner) await this.tunnelLeases.release(owner, releaseNativeTunnelLease);
   }
 
   requestSnapshots(): void {
@@ -7344,6 +7477,7 @@ class NativeSshBackend {
     this.activeSessions.clear();
     this.retainedMismatchSessions.clear();
     const tunnelReleases = this.tunnelLeases.releaseAll(releaseNativeTunnelLease);
+    this.sharedRoutes.clear();
     this.lineReader?.close();
     this.lineReader = undefined;
     const child = this.child;
@@ -7359,6 +7493,7 @@ class NativeSshBackend {
 
   backendStopped(): void {
     this.tunnelLeases.clear();
+    this.sharedRoutes.clear();
     this.retainedMismatchSessions.clear();
   }
 
@@ -7423,6 +7558,7 @@ class NativeSshBackend {
         this.broadcastMcpApprovalCancellation(requestId);
       }
       void this.tunnelLeases.releaseAll(releaseNativeTunnelLease);
+      this.sharedRoutes.clear();
     });
   }
 
@@ -7558,6 +7694,14 @@ class NativeSshBackend {
       void this.releaseTunnel(event.sessionId).catch(() => undefined);
     }
 
+    if (event.type === 'sftp.edit' && event.requestId) {
+      const waiter = this.editWaiters.get(event.requestId);
+      if (waiter) {
+        clearTimeout(waiter.timeout);
+        this.editWaiters.delete(event.requestId);
+        waiter.resolve(event);
+      }
+    }
     this.broadcast(event);
   }
 
@@ -7595,6 +7739,11 @@ class NativeSshBackend {
   }
 
   private failControlWaiters(error: Error): void {
+    for (const waiter of this.editWaiters.values()) {
+      clearTimeout(waiter.timeout);
+      waiter.reject(error);
+    }
+    this.editWaiters.clear();
     for (const waiter of this.controlWaiters.values()) {
       clearTimeout(waiter.timeout);
       waiter.reject(error);
@@ -9485,6 +9634,54 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       });
     },
   );
+  ipcMain.handle('settings:file-transfer-read', async () =>
+    serializeAuthOperation(async () => {
+      await requireWorkspaceAuth();
+      return runBackend('settings-file-transfer-read');
+    }),
+  );
+  ipcMain.handle('settings:file-transfer-write', async (_event, request: unknown) => {
+    if (!isRecord(request) || JSON.stringify(request).length > 64 * 1024)
+      throw new Error('Invalid editor settings.');
+    return serializeAuthOperation(async () => {
+      await requireWorkspaceAuth();
+      return runBackend('settings-file-transfer-write', request);
+    });
+  });
+  ipcMain.handle('ssh:sftp-edit', async (_event, sessionId: unknown, request: unknown) => {
+    if (!isSshSessionId(sessionId) || !isSftpEditRequest(request))
+      throw new Error('Invalid file edit request.');
+    return runAuthorizedOperation(() => sshBackend.edit(sessionId, request));
+  });
+  ipcMain.handle('ssh:sftp-edit-close', async (_event, sessionId: unknown) => {
+    if (!isSshSessionId(sessionId)) throw new Error('Invalid file edit close request.');
+    return runAuthorizedOperation(() => sshBackend.prepareEditClose(sessionId));
+  });
+  ipcMain.handle('ssh:sftp-share', async (_event, sourceId: unknown, sessionId: unknown) => {
+    requireNativeResourcesRunning();
+    if (!isSshSessionId(sourceId) || !isSshSessionId(sessionId) || sourceId === sessionId)
+      throw new Error('Invalid SFTP session.');
+    return runAuthorizedOperation(
+      () => sshBackend.shareSftp(sourceId, sessionId),
+      () => sshBackend.close(sessionId),
+    );
+  });
+  ipcMain.handle(
+    'ssh:sftp-tree-list',
+    async (_event, sessionId: unknown, pane: unknown, path: unknown, requestId: unknown) => {
+      if (
+        !isSshSessionId(sessionId) ||
+        !isSftpRequestId(requestId) ||
+        !isSftpPane(pane) ||
+        !(pane === 'local' ? isLocalSftpPath(path) : isSftpPath(path))
+      )
+        throw new Error('Invalid SFTP tree request.');
+      return serializeAuthOperation(async () => {
+        await requireWorkspaceAuth();
+        sshBackend.listSftpTree(sessionId, pane, path as string, requestId);
+      });
+    },
+  );
   ipcMain.handle('ssh:sftp-open', async (_event, sessionId: unknown, requestId: unknown) => {
     if (!isSshSessionId(sessionId) || (requestId !== undefined && !isSftpRequestId(requestId))) {
       throw new Error('SFTP open request is invalid.');
@@ -10556,6 +10753,7 @@ function createWindow() {
       .request({
         reason: closeReason.reason,
         confirmationEnabled: confirmOnWindowClose,
+        prepare: () => sshBackend.prepareEditClose(),
         confirm: (activeCount) => requestRendererCloseConfirmation(window, activeCount, 'window'),
         teardown: async () => {
           await runWindowTeardown(
@@ -10698,6 +10896,10 @@ app.on('before-quit', (event) => {
   // Auxiliary tooltips have no renderer close-confirmation or teardown handlers.
   for (const window of BrowserWindow.getAllWindows()) treeTooltips.closeForWindow(window);
   void (async () => {
+    if (!(await sshBackend.prepareEditClose())) {
+      quitCleanupStarted = false;
+      return;
+    }
     if (!skipQuitConfirmation && confirmOnWindowClose) {
       const windows = BrowserWindow.getAllWindows();
       const activeCount = windows.reduce(
@@ -10715,6 +10917,7 @@ app.on('before-quit', (event) => {
       }
     }
 
+    await sshBackend.finishEditClose();
     isQuitting = true;
     if (startupUpdateTimer) clearTimeout(startupUpdateTimer);
     startupUpdateTimer = undefined;
@@ -10742,7 +10945,10 @@ app.on('before-quit', (event) => {
       quitCleanupComplete = true;
       app.quit();
     }
-  })();
+  })().catch(() => {
+    quitCleanupStarted = false;
+    console.warn('[Wormhole] Close did not finish; file editing copies are retained.');
+  });
 });
 
 app.on('window-all-closed', () => {

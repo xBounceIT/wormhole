@@ -26,27 +26,30 @@ async function runElectronHarness(harnessPath: string): Promise<void> {
 // scripts/test-coverage.ts excludes TSX from Node's loaded-module percentage.
 // Exercise the modified pane handlers and border geometry in real React/Chromium instead.
 test('SFTP panes keep drag feedback stable and draw unclipped borders in Chromium', async () => {
-  const source = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  const source = readFileSync(
+    new URL('../src/components/SftpBrowser.tsx', import.meta.url),
+    'utf8',
+  ).replace(/^export /gm, '');
   const start = source.indexOf('function isSftpPaneRoot');
   const end = source.indexOf('function SftpTransferQueue', start);
   assert.ok(start >= 0 && end > start);
-  const helpers = ['sftp-state', 'sftp-format', 'sftp-dnd']
+  const helpers = ['sftp-state', 'sftp-format', 'sftp-dnd', 'sftp-tree-state']
     .map((name) =>
-      readFileSync(new URL(`../src/${name}.ts`, import.meta.url), 'utf8').replace(/^export /gm, ''),
+      readFileSync(new URL(`../src/${name}.ts`, import.meta.url), 'utf8')
+        .replace(/^import .*;$/gm, '')
+        .replace(/^export /gm, ''),
     )
     .join('\n');
   const fixture = readFileSync(new URL('./fixtures/sftp-pane.tsx', import.meta.url), 'utf8');
   const conflictStart = source.indexOf('function SftpConflictOverlay');
   const conflictEnd = source.indexOf('function SftpBrowserSurface', conflictStart);
   assert.ok(conflictStart > end && conflictEnd > conflictStart);
-  const modalStart = source.indexOf('<Dialog', source.indexOf('{session.sftp && isActive ? ('));
-  const modalEnd = source.indexOf('<SftpBrowserSurface', modalStart);
-  assert.ok(modalStart > conflictEnd && modalEnd > modalStart);
-  const modal = `function SftpTestDialog({ session, onCloseSftpBrowser, children }) {
-    return (${source.slice(modalStart, modalEnd)}{children}</DialogContent></Dialog>);
-  }`;
+  const modal = `function SftpTestDialog({ children }) { return React.createElement('div', null, children); }`;
   const transformed = await transformWithOxc(
-    helpers + source.slice(start, end) + source.slice(conflictStart, conflictEnd) + modal,
+    helpers +
+      source.slice(start, end).replace(/^export /gm, '') +
+      source.slice(conflictStart, conflictEnd) +
+      modal,
     'sftp-pane.tsx',
     {
       jsx: { runtime: 'classic' },
@@ -91,7 +94,7 @@ test('SFTP panes keep drag feedback stable and draw unclipped borders in Chromiu
     const Hidden = () => null;
     const Tooltip = Wrapper, TooltipTrigger = Wrapper, TooltipContent = Hidden;
     const ContextMenu = Wrapper, ContextMenuTrigger = Wrapper, ContextMenuContent = Hidden;
-    const ContextMenuItem = Hidden, ContextMenuSeparator = Hidden;
+    const ContextMenuItem = Hidden, ContextMenuSeparator = Hidden, ContextMenuSub = Hidden, ContextMenuSubContent = Hidden, ContextMenuSubTrigger = Hidden;
     const ArrowUp = 'i', ChevronDown = 'i', ChevronUp = 'i', RefreshCcw = 'i';
     const FolderPlus = 'i', FilePlus2 = 'i', Trash2 = 'i', LoaderCircle = 'i';
     const Search = 'i', FolderOpen = 'i', File = 'i', Pencil = 'i';
@@ -113,6 +116,7 @@ test('SFTP panes keep drag feedback stable and draw unclipped borders in Chromiu
         const window = new BrowserWindow({ show: false, width: 1200, height: 800, webPreferences: {
           nodeIntegration: true, contextIsolation: false,
         } });
+        window.webContents.on('console-message', (_event, level, message) => { console.error(message); });
         window.webContents.debugger.attach('1.3');
         ipcMain.handle('sftp-test-key', async (_event, keyCode) => {
           const key = keyCode === 'Return' ? 'Enter' : keyCode;

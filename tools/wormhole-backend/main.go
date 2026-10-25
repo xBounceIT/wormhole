@@ -581,6 +581,17 @@ func runBackendCLI(args []string, input io.Reader, output io.Writer, errorOutput
 		if err == nil {
 			result, err = authUpdateSettings(*databasePath, request)
 		}
+	case "settings-file-transfer-read":
+		result, err = readSftpEditorSettings(*databasePath)
+	case "settings-file-transfer-write":
+		var settings sftpEditorSettings
+		err = decodeInput(&settings)
+		if err == nil {
+			err = writeSftpEditorSettings(*databasePath, settings)
+			if err == nil {
+				result = map[string]bool{"updated": true}
+			}
+		}
 	case "settings-read":
 		var settings appSettingsValues
 		settings, err = readAppSettings(*databasePath)
@@ -2077,7 +2088,7 @@ func updateWorkspaceNodeInlineCredential(
 	} else if err != nil {
 		return fmt.Errorf("could not read workspace node: %w", err)
 	}
-	if kind != workspaceNodeConnection || !storedProtocol.Valid || storedProtocol.Int64 != protocol {
+	if kind != workspaceNodeConnection || !storedProtocol.Valid || sshCredentialProtocol(storedProtocol.Int64) != sshCredentialProtocol(protocol) {
 		return errors.New("workspace inline credential does not match the connection protocol")
 	}
 	tx, err := database.Begin()
@@ -2465,6 +2476,8 @@ func protocolName(value sql.NullInt64) string {
 		return "serial"
 	case 6:
 		return "vnc"
+	case 7:
+		return "sftp"
 	default:
 		return "ssh"
 	}

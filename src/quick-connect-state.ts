@@ -1,4 +1,4 @@
-export type QuickConnectProtocol = 'ssh' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial';
+export type QuickConnectProtocol = 'ssh' | 'sftp' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial';
 export type ConnectionType = Exclude<QuickConnectProtocol, 'http' | 'https'> | 'browser';
 
 export function connectionTypeForProtocol(protocol: QuickConnectProtocol): ConnectionType {
@@ -32,6 +32,7 @@ export function connectionProtocolForAddress(
 export function connectionProtocolSupportsTunnel(protocol: QuickConnectProtocol): boolean {
   return (
     protocol === 'ssh' ||
+    protocol === 'sftp' ||
     protocol === 'rdp' ||
     protocol === 'http' ||
     protocol === 'https' ||
@@ -53,6 +54,6 @@ export function quickConnectStartsImmediately(
   useSavedCredentials: boolean,
   credentialId: string | undefined,
 ): boolean {
-  if (protocol !== 'ssh') return protocol !== 'rdp';
+  if (protocol !== 'ssh' && protocol !== 'sftp') return protocol !== 'rdp';
   return !useSavedCredentials || Boolean(credentialId);
 }

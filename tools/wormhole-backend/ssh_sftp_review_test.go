@@ -107,7 +107,7 @@ func TestSftpRenameRejectsOccupiedName(t *testing.T) {
 }
 
 func TestSftpQueuedOperationCannotMutateReopenedBrowser(t *testing.T) {
-	server, native, output := newLocalTransferTestServer()
+	server, native, output := newLocalTransferTestServer(t)
 	native.sftpClient, native.sftpGeneration = newSftpTestClient(t), 1
 	file := filepath.Join(t.TempDir(), "keep.txt")
 	if err := os.WriteFile(file, []byte("keep"), 0o644); err != nil {
@@ -159,7 +159,7 @@ func TestSftpDirectorySymlinkReplacementNeedsConfirmation(t *testing.T) {
 	if err := os.Symlink(outside, link); err != nil {
 		t.Skipf("symbolic links unavailable: %v", err)
 	}
-	server, native, output := newLocalTransferTestServer()
+	server, native, output := newLocalTransferTestServer(t)
 	server.sftpTransfer(sshWireCommand{SessionID: native.id, TransferID: "directory-link", Direction: "local-to-local", DestinationPath: destination, Items: []sshSftpTransferItem{{SourcePath: source, Name: "folder", IsDirectory: true}}})
 	t.Cleanup(func() { server.cancelTransfersForSession(native.id); server.transferWG.Wait() })
 	event := waitSftpTestEvent(t, output, func(event sshWireEvent) bool {
@@ -196,7 +196,7 @@ func TestSftpSkippedDirectoryDoesNotCopyDescendants(t *testing.T) {
 			if err := os.Symlink(outside, filepath.Join(destination, "folder")); err != nil {
 				t.Skipf("symbolic links unavailable: %v", err)
 			}
-			server, native, output := newLocalTransferTestServer()
+			server, native, output := newLocalTransferTestServer(t)
 			native.sftpClient = client
 			command := sshWireCommand{SessionID: native.id, TransferID: "skip-folder", Direction: direction, DestinationPath: destination, Items: []sshSftpTransferItem{
 				{SourcePath: source, Name: "folder", IsDirectory: true},
@@ -416,10 +416,18 @@ func (writer sftpReviewWriter) Filewrite(request *sftp.Request) (io.WriterAt, er
 	return writer(request)
 }
 
-type sftpReviewCloseFailure struct{}
+type sftpReviewCloseFailure struct {
+	io.WriterAt
+	closed *atomic.Bool
+}
 
-func (sftpReviewCloseFailure) WriteAt(data []byte, _ int64) (int, error) { return len(data), nil }
-func (sftpReviewCloseFailure) Close() error                              { return errors.New("remote destination close failed") }
+func (writer sftpReviewCloseFailure) Close() error {
+	writer.closed.Store(true)
+	if closer, ok := writer.WriterAt.(io.Closer); ok {
+		_ = closer.Close()
+	}
+	return errors.New("remote destination close failed")
+}
 
 func newSftpReviewRequestClient(t *testing.T, handlers sftp.Handlers) *sftp.Client {
 	t.Helper()
@@ -476,11 +484,18 @@ func TestSftpCopyReportsRemoteCloseFailure(t *testing.T) {
 	if err := os.WriteFile(source, []byte("incoming"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	client := newSftpReviewRequestClient(t, sftp.Handlers{FilePut: sftpReviewWriter(func(*sftp.Request) (io.WriterAt, error) { return sftpReviewCloseFailure{}, nil })})
+	handlers := sftp.InMemHandler()
+	put := handlers.FilePut
+	var closed atomic.Bool
+	handlers.FilePut = sftpReviewWriter(func(request *sftp.Request) (io.WriterAt, error) {
+		writer, err := put.Filewrite(request)
+		return sftpReviewCloseFailure{WriterAt: writer, closed: &closed}, err
+	})
+	client := newSftpReviewRequestClient(t, handlers)
 	err := copyTransferFile(context.Background(), client, "local-to-remote", sshSftpTransferPlan{
 		sourcePath: source, destinationPath: "/destination",
 	}, func(int64) {})
-	if err == nil {
+	if err == nil || !closed.Load() {
 		t.Fatal("remote close failure was reported as a successful transfer")
 	}
 }

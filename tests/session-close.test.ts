@@ -94,7 +94,7 @@ test('middle-click closes tabs without waiting for native teardown or restoring 
       ${slice('async function performSessionClose(', 'async function closeSessionsForNodeIds(')}
       ${slice('async function closeSessionsForNodeIds(', 'const releaseSessionResourcesRef =')}
       ${slice('const releaseSessionResourcesRef =', '  useEffect(() => {\n    return window.wormhole?.onWindowCloseConfirmationRequested').replaceAll('\r', '')}
-      ${slice('function reconnectSession(', 'function duplicateSession(')}
+      ${slice('const sftpReconnectPending =', 'function duplicateSession(')}
       controls = { closeSession, confirmSessionClose, performSessionClose, setSelectedSessionId, openConnection, treeRef, reconnectSession, setAuthGate, closeSessionsForNodeIds, webSessionAttempts,
         pendingSessionClose, sessionCloseBusy, selectedSessionId, sessions, sessionsRef,
         append: session => setSessions(current => [...current, session]),

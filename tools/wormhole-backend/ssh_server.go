@@ -91,6 +91,11 @@ func (err *sshHostKeyMismatchError) Error() string {
 }
 
 type sshWireCommand struct {
+	EditID                        string                `json:"edit_id"`
+	EditorID                      string                `json:"editor_id"`
+	AllowBinary                   bool                  `json:"allow_binary"`
+	Mode                          string                `json:"mode"`
+	SourceSessionID               string                `json:"source_session_id"`
 	TerminalStream                bool                  `json:"terminal_stream"`
 	Sequence                      uint64                `json:"sequence"`
 	Type                          string                `json:"type"`
@@ -133,6 +138,7 @@ type sshWireCommand struct {
 }
 
 type sshWireEvent struct {
+	Edits               []sftpEditView       `json:"edits,omitempty"`
 	CredentialID        string               `json:"credential_id,omitempty"`
 	Data                string               `json:"data,omitempty"`
 	Sequence            uint64               `json:"sequence,omitempty"`
@@ -244,6 +250,7 @@ type sshNode struct {
 }
 
 type sshTarget struct {
+	sftpOnly             bool
 	nodeTrustContext     map[string]sshNode
 	credentialID         string
 	nodeID               string
@@ -270,6 +277,11 @@ type sshCredentialRow struct {
 }
 
 type sshNativeSession struct {
+	sftpEditRoute    string
+	fingerprint      string
+	sftpOnly         bool
+	transport        *sshSharedTransport
+	treeRequests     int
 	terminalStream   *sshTerminalStream
 	id               string
 	client           *ssh.Client
@@ -313,6 +325,12 @@ type sshNativeSession struct {
 }
 
 type sshServer struct {
+	editOnce             sync.Once
+	editMu               sync.Mutex
+	edits                map[string]*sftpEditRecord
+	editError            error
+	editWorkers          chan struct{}
+	editCleanupWG        sync.WaitGroup
 	databasePath         string
 	electronUserDataPath string
 	output               *sshEventWriter
@@ -502,8 +520,12 @@ func (server *sshServer) handle(command sshWireCommand) {
 		}
 	case "snapshot":
 		server.snapshot(command)
+	case "sftp-edit":
+		server.handleSftpEdit(command)
 	case "sftp-open":
 		server.sftpOpen(command)
+	case "sftp-tree-list":
+		server.sftpTreeList(command)
 	case "sftp-list":
 		server.sftpList(command)
 	case "sftp-local-list":
@@ -580,6 +602,15 @@ func (server *sshServer) prepareSessionForLock(sessionID string) {
 }
 
 func (server *sshServer) open(command sshWireCommand) {
+	if command.Mode != "" && command.Mode != "terminal" && command.Mode != "sftp" {
+		server.writeError(command.SessionID, "SSH session mode is invalid")
+		return
+	}
+	if command.SourceSessionID != "" {
+		server.openSharedSftp(command)
+		return
+	}
+
 	nodeID := strings.TrimSpace(command.NodeID)
 	if nodeID != "" {
 		if len(nodeID) > 128 ||
@@ -689,8 +720,9 @@ func (server *sshServer) connectSSH(ctx context.Context, state *sshReconnectStat
 	}
 
 	native.id = command.SessionID
+	native.fingerprint = target.knownHostFingerprint
 	native.server = server
-	if command.TerminalStream {
+	if command.TerminalStream && !native.sftpOnly {
 		native.terminalStream = newSSHTerminalStream(func(event sshWireEvent) {
 			event.SessionID = native.id
 			server.output.write(event)
@@ -712,13 +744,15 @@ func (server *sshServer) connectSSH(ctx context.Context, state *sshReconnectStat
 		return
 	}
 	logInfo("SSH session connected: %s@%s:%d", target.username, target.host, target.port)
-	if server.mcp != nil {
+	if server.mcp != nil && !native.sftpOnly {
 		server.mcp.sessionConnected(native)
 	}
 	if native.terminalStream != nil {
 		native.terminalStream.send(sshTerminalPacket{reset: true, columns: native.terminal.columns, rows: native.terminal.rows})
 	}
-	native.publishTerminalFrame(native.terminal.initialFrame())
+	if native.terminal != nil {
+		native.publishTerminalFrame(native.terminal.initialFrame())
+	}
 	native.start()
 }
 
@@ -808,7 +842,7 @@ func (server *sshServer) openNativeSSH(
 		directTarget, command.CredentialID, command.SocksEndpoint, command.TunnelEnabled,
 		command.UsernameOverride, command.PasswordOverride, command.CredentialOverride,
 		command.UsernameOverrideAuthoritative, command.KeyPassphraseOverride,
-		command.Columns, command.Rows,
+		command.Columns, command.Rows, command.Mode,
 	)
 }
 
@@ -826,7 +860,7 @@ func (server *sshServer) input(command sshWireCommand) {
 	server.mu.Lock()
 	native := server.sessions[command.SessionID]
 	server.mu.Unlock()
-	if native == nil {
+	if native == nil || native.sftpOnly {
 		server.writeError(command.SessionID, "SSH session is not connected")
 		return
 	}
@@ -1074,6 +1108,13 @@ func (server *sshServer) close(sessionID string) {
 		logInfo("SSH session closed: %s@%s:%d", native.mcpSession.Username, native.mcpSession.Host, native.mcpSession.Port)
 		native.close(false)
 	}
+	// Retain targets still open in an editor even when close came from native
+	// teardown rather than the renderer's edit preflight. Never block stdin here.
+	server.editCleanupWG.Add(1)
+	go func() {
+		defer server.editCleanupWG.Done()
+		_ = server.runSftpEdit(sshWireCommand{SessionID: sessionID, Operation: "finish-close", Decision: "keep"})
+	}()
 	if hadLifecycle {
 		server.output.write(sshWireEvent{Type: "closed", SessionID: sessionID})
 	}
@@ -1333,6 +1374,8 @@ func (server *sshServer) shutdown() {
 		native.close(false)
 	}
 	server.transferWG.Wait()
+	server.editCleanupWG.Wait()
+	_ = server.runSftpEdit(sshWireCommand{SessionID: "sftp-recovery", Operation: "finish-close", Decision: "keep"})
 }
 
 func (server *sshServer) cancelAllTransfers() {
@@ -1386,12 +1429,26 @@ func (server *sshServer) writeSftpRequestError(sessionID, requestID, message str
 }
 
 func (native *sshNativeSession) start() {
+	var subsystem *sftp.Client
+	if native.sftpOnly {
+		native.sftpMu.Lock()
+		subsystem = native.sftpClient
+		native.sftpMu.Unlock()
+	}
 	native.lifecycleMu.Lock()
 	if native.closed || native.started {
 		native.lifecycleMu.Unlock()
 		return
 	}
 	native.started = true
+	if native.sftpOnly {
+		native.lifecycleMu.Unlock()
+		go native.keepAlive()
+		if subsystem != nil {
+			go func() { _ = subsystem.Wait(); native.close(true) }()
+		}
+		return
+	}
 	native.outputWG.Add(2)
 	go func() {
 		defer native.outputWG.Done()
@@ -1770,6 +1827,9 @@ func (native *sshNativeSession) writeRemoteInput(data []byte) error {
 }
 
 func (native *sshNativeSession) resize(columns, rows uint32) error {
+	if native.sftpOnly {
+		return errors.New("SFTP sessions have no terminal")
+	}
 	columns, rows = normalizeTerminalSize(columns, rows)
 	native.terminalOutputMu.Lock()
 	defer native.terminalOutputMu.Unlock()
@@ -1824,7 +1884,9 @@ func (native *sshNativeSession) close(notify bool) {
 		if native.session != nil {
 			_ = native.session.Close()
 		}
-		if native.client != nil {
+		if native.transport != nil {
+			native.transport.release()
+		} else if native.client != nil {
 			_ = native.client.Close()
 		}
 		if notify {
@@ -1833,7 +1895,7 @@ func (native *sshNativeSession) close(notify bool) {
 			// deciding whether this shutdown should reconnect.
 			native.finishShellExit()
 		}
-		if native.tunnel != nil {
+		if native.tunnel != nil && native.transport == nil {
 			native.tunnel.close()
 		}
 		if native.server != nil {
@@ -2171,6 +2233,9 @@ func (native *sshNativeSession) listSftp(requestedPath string, generation, seque
 }
 
 func (native *sshNativeSession) closeSftp(notify bool) {
+	if native.server != nil {
+		native.server.cancelTransfersForSession(native.id)
+	}
 	native.sftpMu.Lock()
 	native.sftpGeneration++
 	native.sftpListSeq++
@@ -2685,18 +2750,33 @@ func (server *sshServer) runSftpTransfer(native *sshNativeSession, command sshWi
 	remote := command.Direction != "local-to-local"
 	if remote {
 		native.sftpMu.Lock()
-		client = native.sftpClient
-		closed := native.sftpClosed || native.isClosed()
+		closed := native.sftpClient == nil || native.sftpClosed || native.isClosed()
 		native.sftpMu.Unlock()
-		if client == nil || closed {
+		if closed {
 			server.writeTransferBatchError(command, errSSHSftpClosed)
 			return
 		}
 	}
+	defer func() {
+		if client != nil {
+			_ = client.Close()
+		}
+	}()
 
-	plans, err := buildSftpTransferPlans(client, command, ctx)
+	plans, err := func() ([]sshSftpTransferPlan, error) {
+		if remote {
+			var err error
+			client, err = newSharedSftpClient(ctx, native)
+			if err != nil {
+				return nil, err
+			}
+			stop := interruptSftpTransfer(ctx, client)
+			defer stop()
+		}
+		return buildSftpTransferPlans(client, command, ctx)
+	}()
 	if err != nil {
-		if errors.Is(err, context.Canceled) {
+		if ctx.Err() != nil {
 			server.writeTransferBatchTerminal(command, "batch-cancelled")
 		} else {
 			server.writeTransferBatchError(command, err)
@@ -2721,6 +2801,17 @@ func (server *sshServer) runSftpTransfer(native *sshNativeSession, command sshWi
 			defer transfer.finishItem(itemID)
 			if err := itemContext.Err(); err != nil {
 				return err
+			}
+			if remote {
+				if client == nil {
+					var err error
+					client, err = newSharedSftpClient(itemContext, native)
+					if err != nil {
+						return err
+					}
+				}
+				stop := interruptSftpTransfer(itemContext, client)
+				defer stop()
 			}
 			if command.Direction != "local-to-remote" {
 				if err := validateLocalTransferDestinationParents(plan.destinationPath); err != nil {
@@ -2774,7 +2865,7 @@ func (server *sshServer) runSftpTransfer(native *sshNativeSession, command sshWi
 			}
 			if plan.isDirectory {
 				if exists {
-					if err := removeTransferDestinationSymlink(client, command.Direction, plan.destinationPath); err != nil {
+					if err := removeTransferDirectoryConflict(client, command.Direction, plan.destinationPath); err != nil {
 						return err
 					}
 				}
@@ -2785,11 +2876,6 @@ func (server *sshServer) runSftpTransfer(native *sshNativeSession, command sshWi
 			if err := ensureTransferParent(client, command.Direction, plan.destinationPath); err != nil {
 				return err
 			}
-			if exists {
-				if err := removeTransferDestinationSymlink(client, command.Direction, plan.destinationPath); err != nil {
-					return err
-				}
-			}
 			if err := itemContext.Err(); err != nil {
 				return err
 			}
@@ -2799,6 +2885,15 @@ func (server *sshServer) runSftpTransfer(native *sshNativeSession, command sshWi
 				lastTransferred = transferred
 				server.writeTransferEvent(command, itemID, "progress", plan.displayName, plan.incomingSize, transferred, nil)
 			})
+			var stageError *sftpTransferStageError
+			if errors.As(err, &stageError) {
+				if cleanupErr := native.cleanupSftpTransferStage(stageError.path); cleanupErr != nil {
+					logError("SFTP temporary file cleanup failed (session=%q)", native.id)
+				}
+			}
+			if itemContext.Err() != nil {
+				err = itemContext.Err()
+			}
 			if errors.Is(err, context.Canceled) {
 				server.writeTransferEvent(command, itemID, "cancelled", plan.displayName, plan.incomingSize, lastTransferred, nil)
 				return err
@@ -2810,6 +2905,15 @@ func (server *sshServer) runSftpTransfer(native *sshNativeSession, command sshWi
 			server.writeTransferEvent(command, itemID, "completed", plan.displayName, plan.incomingSize, plan.incomingSize, nil)
 			return nil
 		}()
+		if itemContext.Err() != nil {
+			err = itemContext.Err()
+			// A cancelled row closed its subsystem. Reopen only the transfer
+			// channel for the next row; the browser and shared transport stay live.
+			if client != nil {
+				_ = client.Close()
+				client = nil
+			}
+		}
 		if errors.Is(err, context.Canceled) {
 			if ctx.Err() != nil {
 				server.writeTransferBatchTerminal(command, "batch-cancelled")
@@ -3139,7 +3243,7 @@ func transferDestinationInfo(client *sftp.Client, direction, path string) (bool,
 	return true, info.IsDir(), size, nil
 }
 
-func removeTransferDestinationSymlink(client *sftp.Client, direction, path string) error {
+func removeTransferDirectoryConflict(client *sftp.Client, direction, path string) error {
 	if direction == "local-to-remote" {
 		info, err := client.Lstat(path)
 		if err != nil {
@@ -3148,7 +3252,7 @@ func removeTransferDestinationSymlink(client *sftp.Client, direction, path strin
 			}
 			return err
 		}
-		if info.Mode()&os.ModeSymlink != 0 {
+		if !info.IsDir() {
 			return client.Remove(path)
 		}
 		return nil
@@ -3160,7 +3264,7 @@ func removeTransferDestinationSymlink(client *sftp.Client, direction, path strin
 		}
 		return err
 	}
-	if info.Mode()&os.ModeSymlink != 0 {
+	if !info.IsDir() {
 		return os.Remove(path)
 	}
 	return nil
@@ -3188,27 +3292,58 @@ func copyTransferFile(ctx context.Context, client *sftp.Client, direction string
 	}
 	defer source.Close()
 	// Opening a remote source can block. Check cancellation again before touching
-	// the destination, and require approval before enabling truncation.
+	// the destination. Approved overwrites stay private until copy and close succeed.
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	flags := os.O_WRONLY | os.O_CREATE | os.O_EXCL
-	if plan.overwrite {
-		flags = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
+	destinationPath := plan.destinationPath
+	mode := os.FileMode(0o644)
+	staged := plan.overwrite || direction == "local-to-remote"
+	if staged {
+		id, err := newCredentialID()
+		if err != nil {
+			return err
+		}
+		mode = 0o600
+		destinationPath = filepath.Join(filepath.Dir(destinationPath), ".wormhole-transfer-"+id)
+		if direction == "local-to-remote" {
+			destinationPath = pathpkg.Join(pathpkg.Dir(plan.destinationPath), ".wormhole-transfer-"+id)
+		}
 	}
+	flags := os.O_WRONLY | os.O_CREATE | os.O_EXCL
 	if direction == "local-to-remote" {
-		destination, err = client.OpenFile(plan.destinationPath, flags)
+		destination, err = client.OpenFile(destinationPath, flags)
 	} else {
-		destination, err = os.OpenFile(plan.destinationPath, flags, 0o644)
+		destination, err = os.OpenFile(destinationPath, flags, mode)
 	}
 	if err != nil {
 		return err
 	}
+	closed := false
+	committed := false
 	defer func() {
-		if closeErr := destination.Close(); err == nil {
-			err = closeErr
+		if !closed {
+			_ = destination.Close()
+		}
+		if !committed {
+			if direction == "local-to-remote" {
+				_ = client.Chmod(destinationPath, 0o600)
+				if cleanupErr := client.Remove(destinationPath); err != nil && cleanupErr != nil && !os.IsNotExist(cleanupErr) {
+					err = &sftpTransferStageError{error: err, path: destinationPath}
+				}
+			} else {
+				// A failed replacement of a read-only Windows file must not leave
+				// a read-only stage that cannot be removed.
+				_ = os.Chmod(destinationPath, 0o600)
+				_ = os.Remove(destinationPath)
+			}
 		}
 	}()
+	if staged && direction == "local-to-remote" {
+		if err := client.Chmod(destinationPath, 0o600); err != nil {
+			return err
+		}
+	}
 
 	buffer := make([]byte, sshSftpTransferBuffer)
 	var transferred int64
@@ -3226,11 +3361,66 @@ func copyTransferFile(ctx context.Context, client *sftp.Client, direction string
 		}
 		if readErr != nil {
 			if errors.Is(readErr, io.EOF) {
-				return nil
+				break
 			}
 			return readErr
 		}
 	}
+	err = destination.Close()
+	closed = true
+	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if staged {
+		err := commitTransferFile(ctx, client, direction, destinationPath, plan.destinationPath, plan.overwrite)
+		committed = err == nil
+		return err
+	}
+	committed = true
+	return nil
+}
+
+func commitTransferFile(ctx context.Context, client *sftp.Client, direction, temporary, target string, overwrite bool) error {
+	var info os.FileInfo
+	var err error
+	if direction == "local-to-remote" {
+		info, err = client.Lstat(target)
+	} else {
+		info, err = os.Lstat(target)
+	}
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if !overwrite && info != nil {
+		return os.ErrExist
+	}
+	mode := os.FileMode(0o644)
+	if info != nil && info.Mode().IsRegular() {
+		mode = info.Mode().Perm()
+	}
+	if direction == "local-to-remote" {
+		err = client.Chmod(temporary, mode)
+	} else {
+		err = os.Chmod(temporary, mode)
+	}
+	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if direction == "local-to-remote" {
+		if _, supported := client.HasExtension("posix-rename@openssh.com"); supported && overwrite {
+			return client.PosixRename(temporary, target)
+		}
+		// SFTP v3 rename must fail if replacement is unsupported. Keep the
+		// original instead of deleting it to make room for the staged upload.
+		return client.Rename(temporary, target)
+	}
+	return os.Rename(temporary, target)
 }
 
 func writeTransferBytes(destination io.Writer, data []byte) error {
@@ -3411,6 +3601,7 @@ func openNativeSSH(
 	keyPassphraseOverride string,
 	columns uint32,
 	rows uint32,
+	modes ...string,
 ) (*sshNativeSession, sshTarget, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, sshTarget{}, err
@@ -3472,6 +3663,9 @@ func openNativeSSH(
 		return nil, sshTarget{}, err
 	}
 	target.socksEndpoint = socksEndpoint
+	// Capture the logical route before disabling Go's duplicate tunnel runtime.
+	// A delegated SOCKS port is transient, but its resolved VPN ID is persistent.
+	editRoute := sftpEditRouteIdentity(target.tunnelConfigID, socksEndpoint, tunnelEnabled)
 	if tunnelEnabled != nil && !*tunnelEnabled {
 		target.tunnelConfigID = ""
 	}
@@ -3482,6 +3676,7 @@ func openNativeSSH(
 			return nil, sshTarget{}, err
 		}
 	}
+	target.sftpOnly = len(modes) > 0 && modes[0] == "sftp"
 	native, fingerprint, err := dialNativeSSH(ctx, target, columns, rows, tunnel)
 	if err != nil {
 		tunnel.close()
@@ -3491,6 +3686,10 @@ func openNativeSSH(
 		return nil, sshTarget{}, err
 	}
 	native.tunnel = tunnel
+	native.sftpEditRoute = editRoute
+	if native.transport != nil {
+		native.transport.tunnel = tunnel
+	}
 	if target.knownHostFingerprint == "" && target.nodeID != "" {
 		if err := persistSSHFingerprint(databasePath, target.nodeID, fingerprint); err != nil {
 			if errors.Is(err, errSSHHostFingerprintChanged) {
@@ -3613,6 +3812,15 @@ func dialNativeSSH(
 		return nil, "", err
 	}
 	client := ssh.NewClient(clientConnection, channels, requests)
+	if target.sftpOnly {
+		subsystem, err := sftp.NewClient(client)
+		if err != nil {
+			_ = client.Close()
+			return nil, "", fmt.Errorf("could not open SFTP subsystem: %w", err)
+		}
+		return &sshNativeSession{client: client, sftpOnly: true, sftpClient: subsystem,
+			transport: &sshSharedTransport{client: client, refs: 1}, done: make(chan struct{})}, fingerprint, nil
+	}
 	session, err := client.NewSession()
 	if err != nil {
 		_ = client.Close()
@@ -3665,6 +3873,7 @@ func dialNativeSSH(
 	native := &sshNativeSession{
 		id:               "",
 		client:           client,
+		transport:        &sshSharedTransport{client: client, refs: 1},
 		session:          session,
 		stdin:            stdin,
 		stdout:           stdout,
@@ -3787,13 +3996,13 @@ func resolveSSHNodeEndpoint(nodes map[string]*sshNode, nodeID string) (sshNodeEn
 	if !protocolSet {
 		return sshNodeEndpoint{}, errors.New("SSH connection has no protocol")
 	}
-	if protocol != 0 {
+	if protocol != 0 && protocol != 7 {
 		return sshNodeEndpoint{}, errors.New("the selected connection is not an SSH connection")
 	}
 	if host == "" {
 		return sshNodeEndpoint{}, errors.New("SSH connection has no host")
 	}
-	if portContextProtocol != nil && *portContextProtocol != protocol {
+	if portContextProtocol != nil && sshCredentialProtocol(*portContextProtocol) != sshCredentialProtocol(protocol) {
 		port = 0
 	}
 	if port <= 0 || port > 65535 {
@@ -3910,7 +4119,7 @@ func loadSSHTargetWithCredentialOverrides(
 	if tunnelSet && tunnelEnabled && tunnelConfigID == "" {
 		return sshTarget{}, errors.New("SSH connection enables a VPN tunnel but no tunnel is configured")
 	}
-	if credentialContextProtocol != nil && *credentialContextProtocol != endpoint.protocol {
+	if credentialContextProtocol != nil && sshCredentialProtocol(*credentialContextProtocol) != sshCredentialProtocol(endpoint.protocol) {
 		credentialID = ""
 	}
 
