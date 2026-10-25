@@ -7,11 +7,14 @@ require (
 	github.com/modelcontextprotocol/go-sdk v1.7.0
 	github.com/pkg/sftp v1.13.9
 	github.com/stretchr/testify v1.11.1
+	github.com/xBounceIT/wormhole/tools/internal/sshauth v0.0.0
 	github.com/zalando/go-keyring v0.2.8
 	go.bug.st/serial v1.8.0
 	golang.org/x/text v0.37.0
 	modernc.org/sqlite v1.56.0
 )
+
+replace github.com/xBounceIT/wormhole/tools/internal/sshauth => ../internal/sshauth
 
 require (
 	github.com/danieljoos/wincred v1.2.3 // indirect

@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/pkg/sftp"
+	"github.com/xBounceIT/wormhole/tools/internal/sshauth"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -243,6 +244,8 @@ type sshNode struct {
 }
 
 type sshTarget struct {
+	nodeTrustContext     map[string]sshNode
+	credentialID         string
 	nodeID               string
 	title                string
 	host                 string
@@ -3510,15 +3513,9 @@ func dialNativeSSH(
 		},
 	}
 	if len(target.privateKey) > 0 {
-		signer, parseErr := ssh.ParsePrivateKey(target.privateKey)
-		if parseErr != nil && target.keyPassphrase != "" {
-			passphrase := []byte(target.keyPassphrase)
-			signer, parseErr = ssh.ParsePrivateKeyWithPassphrase(
-				target.privateKey,
-				passphrase,
-			)
-			clearBytes(passphrase)
-		}
+		passphrase := []byte(target.keyPassphrase)
+		signer, parseErr := sshauth.ParseSigner(target.privateKey, passphrase, nil)
+		clearBytes(passphrase)
 		if parseErr != nil {
 			var missing *ssh.PassphraseMissingError
 			if errors.As(parseErr, &missing) {
@@ -3819,11 +3816,13 @@ func loadSSHTargetWithCredentialOverrides(
 	tunnelConfigID := ""
 	current := root
 	seen := make(map[string]struct{})
+	trustContext := make(map[string]sshNode)
 	for current != nil {
 		if _, duplicate := seen[current.id]; duplicate {
 			return sshTarget{}, errors.New("SSH connection tree contains a cycle")
 		}
 		seen[current.id] = struct{}{}
+		trustContext[current.id] = *current
 		if !identityBoundary && username == "" && strings.TrimSpace(current.username) != "" {
 			username = strings.TrimSpace(current.username)
 		}
@@ -3878,6 +3877,8 @@ func loadSSHTargetWithCredentialOverrides(
 	}
 
 	target := sshTarget{
+		nodeTrustContext:     trustContext,
+		credentialID:         credentialID,
 		nodeID:               root.id,
 		title:                root.name,
 		host:                 endpoint.host,

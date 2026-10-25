@@ -1093,6 +1093,7 @@ func isBackupWorkspaceStoragePath(databasePath, targetPath string) bool {
 		databasePath + "-shm",
 		databasePath + "-wal",
 		credentialPrivateKeyLockPath(databasePath),
+		tunnelConfigurationLockPath(databasePath),
 	} {
 		if sameBackupFile(reserved, targetPath) {
 			return true

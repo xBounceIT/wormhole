@@ -33,12 +33,14 @@ var physicalTransportAdapterIDsForTunnel = physicalTransportAdapterIDs
 // Go backend coalesces concurrent sessions for the same config and closes the sidecar when its
 // final lease closes. No route or VPN secret crosses the Go/renderer boundary.
 type tunnelRuntime struct {
+	released    chan struct{}
 	entry       *sharedTunnelEntry
 	pool        *tunnelRuntimePool
 	releaseOnce sync.Once
 }
 
 type tunnelProcess struct {
+	identity  string
 	stdin     io.WriteCloser
 	command   *exec.Cmd
 	socks     string
@@ -47,14 +49,17 @@ type tunnelProcess struct {
 }
 
 type tunnelConfigSnapshot struct {
-	databasePath string
-	id           string
-	name         string
-	updatedAt    string
-	kind         int64
-	settings     json.RawMessage
-	prompt       tunnelPromptHandler
-	progress     tunnelProgressHandler
+	configurationIdentity string
+	identity              string
+	chain                 []string
+	databasePath          string
+	id                    string
+	name                  string
+	updatedAt             string
+	kind                  int64
+	settings              json.RawMessage
+	prompt                tunnelPromptHandler
+	progress              tunnelProgressHandler
 }
 
 type tunnelPrompt struct {
@@ -116,20 +121,23 @@ func reportTunnelProgress(ctx context.Context, phase, detail string) error {
 }
 
 type sharedTunnelEntry struct {
-	key              string
-	updatedAt        string
-	ready            chan struct{}
-	settled          chan struct{}
-	process          *tunnelProcess
-	err              error
-	refs             int
-	cancel           context.CancelFunc
-	establish        context.Context
-	progressHandlers []tunnelProgressSubscription
-	promptHandlers   []tunnelPromptSubscription
-	lastPhase        string
-	lastDetail       string
-	hasProgress      bool
+	refreshTrustIdentity func() (string, error)
+	initialIdentity      string
+	identity             string
+	key                  string
+	updatedAt            string
+	ready                chan struct{}
+	settled              chan struct{}
+	process              *tunnelProcess
+	err                  error
+	refs                 int
+	cancel               context.CancelFunc
+	establish            context.Context
+	progressHandlers     []tunnelProgressSubscription
+	promptHandlers       []tunnelPromptSubscription
+	lastPhase            string
+	lastDetail           string
+	hasProgress          bool
 }
 
 type tunnelProgressSubscription struct {
@@ -153,12 +161,14 @@ type tunnelRuntimePool struct {
 	start          func(context.Context, tunnelConfigSnapshot) (*tunnelProcess, error)
 }
 
-var processTunnelPool = func() *tunnelRuntimePool {
+var processTunnelPool *tunnelRuntimePool
+
+func init() {
 	pool := newTunnelRuntimePool(startTunnelProcess)
 	pool.loadSettings = true
 	pool.probe = probeTunnelProcess
-	return pool
-}()
+	processTunnelPool = pool
+}
 
 func newTunnelRuntimePool(
 	start func(context.Context, tunnelConfigSnapshot) (*tunnelProcess, error),
@@ -269,6 +279,15 @@ func startTunnelRuntime(ctx context.Context, databasePath, id string) (*tunnelRu
 // runtime is still lifecycle-managed by the same pool, but cannot join an already-live tunnel.
 // Diagnostics use this to prove that the saved config can establish from scratch.
 func startTunnelRuntimeScoped(ctx context.Context, databasePath, id, scope string) (*tunnelRuntime, error) {
+	chain, _ := ctx.Value(sshJumpPathKey{}).([]string)
+	for _, visited := range chain {
+		if strings.EqualFold(id, visited) {
+			return nil, errors.New("SSH tunnel chain contains a cycle")
+		}
+	}
+	if len(chain) >= maxSSHJumpDepth {
+		return nil, errors.New("SSH tunnel chain exceeds the maximum depth of 3")
+	}
 	tunnelMutationMu.RLock()
 	snapshot, err := loadTunnelSnapshot(databasePath, id)
 	if err != nil {
@@ -276,19 +295,24 @@ func startTunnelRuntimeScoped(ctx context.Context, databasePath, id, scope strin
 		return nil, err
 	}
 	if processTunnelPool.loadSettings {
-		database, openErr := openDatabase(databasePath, true)
-		if openErr == nil && database != nil {
-			snapshot.settings, openErr = readTunnelSettings(database, databasePath, snapshot.id)
-			_ = database.Close()
-		} else if openErr == nil {
-			openErr = errors.New("VPN tunnel was not found")
-		}
-		err = openErr
+		snapshot, err = loadTunnelSnapshotSettings(snapshot)
 	}
 	tunnelMutationMu.RUnlock()
 	if err != nil {
 		return nil, err
 	}
+	if processTunnelPool.loadSettings && snapshot.kind == 7 {
+		tunnelMutationMu.RLock()
+		snapshot.identity, snapshot.configurationIdentity, err = sshJumpIdentitiesUnlocked(databasePath, snapshot.id, chain)
+		tunnelMutationMu.RUnlock()
+		if err != nil {
+			clearBytes(snapshot.settings)
+			return nil, err
+		}
+	} else if processTunnelPool.loadSettings {
+		snapshot.identity = sshJumpSnapshotIdentity(snapshot, nil, "", true)
+	}
+	snapshot.chain = append(append([]string(nil), chain...), snapshot.id)
 	absoluteDatabasePath, err := filepath.Abs(databasePath)
 	if err != nil {
 		absoluteDatabasePath = databasePath
@@ -324,6 +348,24 @@ func loadTunnelSnapshot(databasePath, id string) (tunnelConfigSnapshot, error) {
 	return snapshot, nil
 }
 
+// Read only the protected configuration; identity checks do not need editor summaries or
+// the two full connection-tree scans used to display a jump host's name and inherited pin.
+func loadTunnelSnapshotSettings(snapshot tunnelConfigSnapshot) (tunnelConfigSnapshot, error) {
+	if snapshot.id == "" {
+		return snapshot, errors.New("VPN tunnel id is invalid")
+	}
+	database, err := openDatabase(snapshot.databasePath, true)
+	if err != nil {
+		return snapshot, err
+	}
+	if database == nil {
+		return snapshot, errors.New("VPN tunnel was not found")
+	}
+	defer database.Close()
+	snapshot.settings, err = readTunnelSettings(database, snapshot.databasePath, snapshot.id)
+	return snapshot, err
+}
+
 func (pool *tunnelRuntimePool) acquire(
 	ctx context.Context,
 	key string,
@@ -336,18 +378,31 @@ func (pool *tunnelRuntimePool) acquire(
 	var replayPhase, replayDetail string
 	reusedReady := false
 	joinedEstablishment := false
-	if entry != nil && (entry.updatedAt != snapshot.updatedAt || (entry.process != nil && !entry.process.alive())) {
+	identityMatches := entry != nil && (entry.identity == snapshot.identity || (entry.process == nil && entry.initialIdentity == snapshot.identity))
+	if entry != nil && (entry.updatedAt != snapshot.updatedAt || !identityMatches || (entry.process != nil && !entry.process.alive())) {
 		delete(pool.entries, key)
 		entry = nil
 	}
 	if entry == nil {
 		establish, cancel := context.WithTimeout(context.Background(), tunnelStartTimeout)
 		entry = &sharedTunnelEntry{
-			key: key, updatedAt: snapshot.updatedAt, ready: make(chan struct{}), settled: make(chan struct{}), refs: 1,
+			key: key, updatedAt: snapshot.updatedAt, identity: snapshot.identity, initialIdentity: snapshot.identity, ready: make(chan struct{}), settled: make(chan struct{}), refs: 1,
 			cancel: cancel,
 		}
-		entry.establish = withTunnelProgressHandler(establish, pool.progress(entry))
+		entry.establish = withTunnelProgressHandler(context.WithValue(establish, sshJumpPathKey{}, snapshot.chain), pool.progress(entry))
 		entry.establish = withTunnelPromptHandler(entry.establish, pool.prompt(entry))
+		if snapshot.kind == 7 {
+			entry.refreshTrustIdentity = func() (string, error) {
+				identity, configuration, err := sshJumpIdentitiesUnlocked(snapshot.databasePath, snapshot.id, nil)
+				if err == nil && configuration != snapshot.configurationIdentity {
+					err = errors.New("SSH tunnel configuration changed while confirming its host key")
+				}
+				return identity, err
+			}
+			entry.establish = context.WithValue(entry.establish, sshJumpTrustRefreshKey{}, func() error {
+				return pool.refreshPendingSSHTrust(entry)
+			})
+		}
 		if snapshot.progress != nil {
 			subscriptionID = pool.subscribeProgressLocked(entry, snapshot.progress)
 		}
@@ -406,7 +461,7 @@ func (pool *tunnelRuntimePool) acquire(
 			pool.release(entry)
 			return nil, entry.err
 		}
-		return &tunnelRuntime{entry: entry, pool: pool}, nil
+		return &tunnelRuntime{entry: entry, pool: pool, released: make(chan struct{})}, nil
 	case <-ctx.Done():
 		pool.unsubscribeProgress(entry, subscriptionID)
 		pool.unsubscribePrompt(entry, promptSubscriptionID)
@@ -421,6 +476,34 @@ func (pool *tunnelRuntimePool) evict(entry *sharedTunnelEntry) {
 		delete(pool.entries, entry.key)
 	}
 	pool.mu.Unlock()
+}
+
+// Called under tunnelMutationMu when TOFU commits. Refresh pending dependents too: an
+// upstream SSH pin changes the whole chain's identity while its prompt can still be open.
+func (pool *tunnelRuntimePool) refreshPendingSSHTrust(required *sharedTunnelEntry) error {
+	pool.mu.Lock()
+	var pending []*sharedTunnelEntry
+	for _, entry := range pool.entries {
+		if entry.process == nil && entry.refreshTrustIdentity != nil {
+			pending = append(pending, entry)
+		}
+	}
+	pool.mu.Unlock()
+	for _, entry := range pending {
+		identity, err := entry.refreshTrustIdentity()
+		if err != nil {
+			if entry == required {
+				return err
+			}
+			continue
+		}
+		pool.mu.Lock()
+		if entry.process == nil {
+			entry.identity = identity
+		}
+		pool.mu.Unlock()
+	}
+	return nil
 }
 
 func probeTunnelProcess(ctx context.Context, process *tunnelProcess) error {
@@ -487,9 +570,12 @@ func (pool *tunnelRuntimePool) unsubscribePrompt(entry *sharedTunnelEntry, id ui
 }
 
 func (pool *tunnelRuntimePool) prompt(entry *sharedTunnelEntry) tunnelPromptHandler {
-	return func(_ context.Context, prompt tunnelPrompt) (string, error) {
+	return func(ctx context.Context, prompt tunnelPrompt) (string, error) {
 		tried := make(map[uint64]struct{})
 		for {
+			if err := ctx.Err(); err != nil {
+				return "", err
+			}
 			pool.mu.Lock()
 			var selected tunnelPromptSubscription
 			for _, subscription := range entry.promptHandlers {
@@ -504,7 +590,14 @@ func (pool *tunnelRuntimePool) prompt(entry *sharedTunnelEntry) tunnelPromptHand
 				return "", errors.New("this VPN tunnel requires interactive authentication")
 			}
 
-			value, err := selected.handler(selected.ctx, prompt)
+			promptContext, cancel := context.WithCancel(selected.ctx)
+			stop := context.AfterFunc(ctx, cancel)
+			value, err := selected.handler(promptContext, prompt)
+			stop()
+			cancel()
+			if ctx.Err() != nil {
+				return "", ctx.Err()
+			}
 			if err == nil {
 				return value, nil
 			}
@@ -545,6 +638,9 @@ func (pool *tunnelRuntimePool) establish(entry *sharedTunnelEntry, snapshot tunn
 	pool.mu.Lock()
 	entry.cancel()
 	entry.process = process
+	if process != nil && process.identity != "" {
+		entry.identity = process.identity
+	}
 	entry.err = err
 	entry.progressHandlers = nil
 	entry.promptHandlers = nil
@@ -614,7 +710,20 @@ func startTunnelProcess(ctx context.Context, snapshot tunnelConfigSnapshot) (*tu
 	if err := reportTunnelProgress(ctx, "authenticating", ""); err != nil {
 		return nil, err
 	}
-	settings, err := prepareTunnelAuthentication(ctx, snapshot.kind, snapshot.settings, snapshot)
+	var settings json.RawMessage
+	var upstream *tunnelRuntime
+	var err error
+	if snapshot.kind == 7 {
+		settings, upstream, snapshot.identity, err = prepareSSHJump(ctx, snapshot)
+	} else {
+		settings, err = prepareTunnelAuthentication(ctx, snapshot.kind, snapshot.settings, snapshot)
+	}
+	keepUpstream := false
+	defer func() {
+		if !keepUpstream {
+			upstream.close()
+		}
+	}()
 	if err != nil {
 		return nil, err
 	}
@@ -648,7 +757,7 @@ func startTunnelProcess(ctx context.Context, snapshot tunnelConfigSnapshot) (*tu
 	if err := command.Start(); err != nil {
 		return nil, errors.New("could not start VPN tunnel")
 	}
-	process := &tunnelProcess{stdin: stdin, command: command, exited: make(chan struct{})}
+	process := &tunnelProcess{stdin: stdin, command: command, exited: make(chan struct{}), identity: snapshot.identity}
 	stderrDone := make(chan struct{})
 	diagnostics := &boundedStderrBuilder{limit: tunnelSidecarStderrLimit}
 	go func() {
@@ -674,10 +783,32 @@ func startTunnelProcess(ctx context.Context, snapshot tunnelConfigSnapshot) (*tu
 
 	ready := make(chan string, 1)
 	readErr := make(chan error, 1)
-	go readTunnelReady(bufio.NewReaderSize(stdout, 1024), ready, readErr)
+	if snapshot.kind == 7 {
+		go readSSHJumpReady(ctx, bufio.NewReaderSize(stdout, 8192), stdin, ready, readErr)
+	} else {
+		go readTunnelReady(bufio.NewReaderSize(stdout, 1024), ready, readErr)
+	}
 	select {
 	case port := <-ready:
+		if snapshot.kind == 7 {
+			identity, err := sshJumpIdentity(snapshot.databasePath, snapshot.id, nil)
+			if err != nil || identity != snapshot.identity {
+				process.close()
+				return nil, errors.New("SSH tunnel changed while authentication was in progress")
+			}
+		}
 		process.socks = net.JoinHostPort("127.0.0.1", port)
+		if upstream != nil {
+			keepUpstream = true
+			go func() { <-process.exited; upstream.close() }()
+			go func() {
+				select {
+				case <-upstream.exited():
+					process.close()
+				case <-process.exited:
+				}
+			}()
+		}
 		return process, nil
 	case <-ctx.Done():
 		process.close()
@@ -929,7 +1060,12 @@ func (runtime *tunnelRuntime) close() {
 	if runtime == nil {
 		return
 	}
-	runtime.releaseOnce.Do(func() { runtime.pool.release(runtime.entry) })
+	runtime.releaseOnce.Do(func() {
+		if runtime.released != nil {
+			close(runtime.released)
+		}
+		runtime.pool.release(runtime.entry)
+	})
 }
 
 func (runtime *tunnelRuntime) socksEndpoint() string {
@@ -952,7 +1088,42 @@ func (runtime *tunnelRuntime) dialContext(ctx context.Context, network, address 
 	if runtime == nil || runtime.entry == nil || runtime.entry.process == nil || runtime.entry.process.socks == "" {
 		return nil, errors.New("VPN tunnel is not ready")
 	}
-	return dialSocks5(ctx, runtime.entry.process.socks, network, address)
+	process := runtime.entry.process
+	if !process.alive() {
+		return nil, errors.New("connection tunnel closed")
+	}
+	select {
+	case <-runtime.released:
+		return nil, errors.New("connection tunnel lease was released")
+	default:
+	}
+	dialContext, cancel := context.WithCancel(ctx)
+	defer cancel()
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-runtime.released:
+			cancel()
+		case <-process.exited:
+			cancel()
+		case <-done:
+		}
+	}()
+	connection, err := dialSocks5(dialContext, process.socks, network, address)
+	if err == nil && !process.alive() {
+		_ = connection.Close()
+		return nil, errors.New("connection tunnel closed while dialing")
+	}
+	select {
+	case <-runtime.released:
+		if connection != nil {
+			_ = connection.Close()
+		}
+		return nil, errors.New("connection tunnel lease was released while dialing")
+	default:
+	}
+	return connection, err
 }
 
 func isLoopbackSocksEndpoint(endpoint string) bool {
@@ -1003,6 +1174,9 @@ func (process *tunnelProcess) close() {
 }
 
 func tunnelSidecarCommand(kind int64, raw json.RawMessage) (string, []byte, error) {
+	if kind == 7 {
+		return "wormhole-sshproxy", append([]byte(nil), raw...), nil
+	}
 	var settings map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &settings); err != nil {
 		return "", nil, errors.New("VPN tunnel settings are invalid")

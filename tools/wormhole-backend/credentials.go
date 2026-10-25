@@ -16,6 +16,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/xBounceIT/wormhole/tools/internal/sshauth"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -562,6 +563,9 @@ WHERE lower(Id) = ? AND COALESCE(Kind, 0) = 1 AND COALESCE(SecretProvider, 0) = 
 }
 
 func deleteCredential(databasePath string, request credentialDeleteRequest) error {
+	if err := rejectSSHJumpDeletion(databasePath, nil, request.ID); err != nil {
+		return err
+	}
 	id := normalizeID(request.ID)
 	if !validCredentialID(id) {
 		return errors.New("credential id is invalid")
@@ -850,7 +854,7 @@ func unprotectSshPrivateKey(path string) ([]byte, error) {
 }
 
 func validateSshPrivateKey(contents []byte, passphrase string) error {
-	if _, err := ssh.ParsePrivateKey(contents); err == nil {
+	if _, err := sshauth.ParseSigner(contents, nil, nil); err == nil {
 		if passphrase != "" {
 			return errors.New("the SSH private key is not encrypted; leave the passphrase blank")
 		}
@@ -868,7 +872,7 @@ func validateSshPrivateKey(contents []byte, passphrase string) error {
 	}
 	passphraseBytes := []byte(passphrase)
 	defer clearBytes(passphraseBytes)
-	if _, err := ssh.ParsePrivateKeyWithPassphrase(contents, passphraseBytes); err != nil {
+	if _, err := sshauth.ParseSigner(contents, passphraseBytes, nil); err != nil {
 		return errors.New("the SSH private key passphrase is incorrect")
 	}
 	return nil

@@ -447,6 +447,13 @@ func deleteWorkspaceNodes(
 	}
 
 	deletedSecrets := make([]workspaceDeletedSecret, 0)
+	deleting := make(map[string]bool, len(deletedIDs))
+	for _, id := range deletedIDs {
+		deleting[id] = true
+	}
+	if err := rejectSSHJumpDeletion(databasePath, deleting, ""); err != nil {
+		return workspaceDeleteNodeResponse{}, err
+	}
 	if credentialSecretsExist {
 		for _, id := range deletedIDs {
 			if credentialProfilesExist {

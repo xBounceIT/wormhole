@@ -136,14 +136,18 @@ test('CodeQL entrypoint builds real modules from its own root without output art
   assert.deepEqual(readdirSync(reader).sort(), ['go.mod', 'main_windows.go']);
 });
 
-test('CodeQL covers all seven repository modules and all portable backend platforms', () => {
+test('CodeQL covers all nine repository modules and all portable backend platforms', () => {
   const plan = codeqlGoBuildPlan(repositoryRoot);
   const windows = plan.filter(({ goos }) => goos === 'windows');
-  assert.equal(windows.length, 7);
+  assert.equal(windows.length, 9);
   assert.ok(windows.some(({ cwd }) => cwd.endsWith('wormhole-credential-reader')));
   assert.ok(windows.some(({ cwd }) => cwd.endsWith(join('internal', 'sockstun'))));
   for (const goos of ['linux', 'windows', 'darwin']) {
     assert.ok(plan.some((build) => build.goos === goos && build.cwd.endsWith('wormhole-backend')));
+    assert.ok(plan.some((build) => build.goos === goos && build.cwd.endsWith('wormhole-sshproxy')));
+    assert.ok(
+      plan.some((build) => build.goos === goos && build.cwd.endsWith(join('internal', 'sshauth'))),
+    );
   }
 });
 

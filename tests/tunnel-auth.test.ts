@@ -7,6 +7,7 @@ import { setImmediate } from 'node:timers/promises';
 import test, { after, before } from 'node:test';
 import { runInNewContext } from 'node:vm';
 import { coverageThreshold } from '../scripts/test-coverage.ts';
+import { TunnelFailureRegistry } from '../electron/tunnel-failure.ts';
 import {
   encodeTunnelOAuthCallback,
   isMatchingOAuthRedirect,
@@ -34,6 +35,7 @@ const popupScript = stripTypeScriptTypes(
     `class BrowserAuthBackend {
       send = backendSend;
       browserPrompts = new TunnelBrowserPromptTracker();
+      tunnelFailures = new TunnelFailureRegistry();
       outputBuffer = '';
       pending = new Map();`,
     mainSource.slice(
@@ -204,6 +206,7 @@ function browserAuthHarness(
       tunnelPromptValueMaxBytes,
       tunnelBrowserLoadFailure,
       TunnelBrowserPromptTracker,
+      TunnelFailureRegistry,
       nativeBackendLineLimit: 64 * 1024 * 1024,
       routeNativeOperationProgress() {},
       routeTunnelTestProgress: () => false,

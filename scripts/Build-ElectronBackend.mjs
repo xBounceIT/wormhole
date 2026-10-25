@@ -47,12 +47,24 @@ console.log(`OK    ${binaryPath}`);
 // build: the real OpenVPN3-linked binary produced by scripts/Fetch-OvpnProxy.ps1 (staged under
 // obj\ovpnproxy\<arch>) is reused when present so a plain `npm run build` can never silently
 // regress OpenVPN/WatchGuard/Stormshield tunnels to the "binding not linked" stub.
-for (const name of ['wormhole-wgproxy', 'wormhole-ovpnproxy', 'wormhole-fortiproxy', 'wormhole-ciscoproxy']) {
+for (const name of [
+  'wormhole-wgproxy',
+  'wormhole-ovpnproxy',
+  'wormhole-fortiproxy',
+  'wormhole-ciscoproxy',
+  'wormhole-sshproxy',
+]) {
   const source = path.join(repoRoot, 'tools', name);
   const output = path.join(stagingDir, `${name}${suffix}`);
   rmSync(output, { force: true });
   if (goos === 'windows' && name === 'wormhole-ovpnproxy') {
-    const realSource = path.join(repoRoot, 'obj', 'ovpnproxy', architecture, 'wormhole-ovpnproxy.exe');
+    const realSource = path.join(
+      repoRoot,
+      'obj',
+      'ovpnproxy',
+      architecture,
+      'wormhole-ovpnproxy.exe',
+    );
     if (existsSync(realSource) && !isMockOnlyOvpnProxy(realSource)) {
       copyFileSync(realSource, output);
       console.log(`OK    ${output} (real OpenVPN3 build from obj\\ovpnproxy\\${architecture})`);
@@ -61,7 +73,9 @@ for (const name of ['wormhole-wgproxy', 'wormhole-ovpnproxy', 'wormhole-fortipro
     if (existsSync(realSource)) {
       console.warn(
         `wormhole-ovpnproxy.exe under obj\\ovpnproxy\\${architecture} is the development-only mock stub; building the portable fallback. ` +
-        'Run scripts\\Fetch-OvpnProxy.ps1 -Arch ' + architecture + ' -RequireReal before packaging.',
+          'Run scripts\\Fetch-OvpnProxy.ps1 -Arch ' +
+          architecture +
+          ' -RequireReal before packaging.',
       );
     }
   }

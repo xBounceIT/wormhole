@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
@@ -24,10 +25,11 @@ import (
 // backend validates the provider's required fields, DPAPI-protects the exact compatible legacy
 // shape, and only returns it after the native authentication gate has admitted the request.
 type tunnelWriteRequest struct {
-	ID       string          `json:"id"`
-	Name     string          `json:"name"`
-	Kind     int64           `json:"kind"`
-	Settings json.RawMessage `json:"settings"`
+	ForgetJumpHostKeySha256 string          `json:"forgetJumpHostKeySha256,omitempty"`
+	ID                      string          `json:"id"`
+	Name                    string          `json:"name"`
+	Kind                    int64           `json:"kind"`
+	Settings                json.RawMessage `json:"settings"`
 }
 
 type tunnelReadRequest struct {
@@ -39,11 +41,12 @@ type tunnelDeleteRequest struct {
 }
 
 type tunnelDetails struct {
-	ID       string          `json:"id"`
-	Name     string          `json:"name"`
-	Kind     int64           `json:"kind"`
-	Endpoint string          `json:"endpoint,omitempty"`
-	Settings json.RawMessage `json:"settings"`
+	JumpHostKeySha256 string          `json:"jumpHostKeySha256,omitempty"`
+	ID                string          `json:"id"`
+	Name              string          `json:"name"`
+	Kind              int64           `json:"kind"`
+	Endpoint          string          `json:"endpoint,omitempty"`
+	Settings          json.RawMessage `json:"settings"`
 }
 
 func tunnelEndpointSummary(kind int64, raw json.RawMessage) string {
@@ -87,6 +90,12 @@ func tunnelEndpointSummary(kind int64, raw json.RawMessage) string {
 			return ""
 		}
 		return formatTunnelEndpoint(servers[0], "443")
+	case 7:
+		if tunnelSettingString(settings, "Mode") == "connection" {
+			return "" // The referenced connection can move or be renamed independently.
+		}
+		return sanitizeTunnelEndpoint(tunnelSettingString(settings, "Username") + "@" +
+			formatTunnelEndpoint(tunnelSettingString(settings, "Host"), fmt.Sprint(tunnelSettingNumber(settings, "Port"))))
 	default:
 		return ""
 	}
@@ -135,6 +144,33 @@ const maxTunnelProtectedBytes = backendMaxTunnelRequestBytes + 64*1024
 // provider that persists newly accepted trust cannot race an editor save or a delete.
 var tunnelMutationMu sync.RWMutex
 
+func tunnelConfigurationLockPath(databasePath string) string {
+	return filepath.Clean(databasePath) + ".tunnels.lock"
+}
+
+func acquireTunnelConfigurationLock(ctx context.Context, databasePath string) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(databasePath) == "" {
+		return nil, errors.New("tunnel database path is required")
+	}
+	path := filepath.Clean(databasePath)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, errors.New("could not prepare tunnel configuration storage")
+	}
+	bounded, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	release, err := acquireExclusiveFileLockContext(bounded, tunnelConfigurationLockPath(path))
+	if err != nil {
+		if bounded.Err() != nil {
+			return nil, bounded.Err()
+		}
+		return nil, errors.New("could not lock tunnel configuration storage")
+	}
+	return release, nil
+}
+
 func createTunnel(databasePath string, request tunnelWriteRequest) (tunnelDetails, error) {
 	request.ID = newTunnelID()
 	return writeTunnel(databasePath, request, true)
@@ -151,6 +187,11 @@ func writeTunnel(databasePath string, request tunnelWriteRequest, create bool) (
 	if err := validateTunnelWriteRequest(&request, !create); err != nil {
 		return tunnelDetails{}, err
 	}
+	release, err := acquireTunnelConfigurationLock(context.Background(), databasePath)
+	if err != nil {
+		return tunnelDetails{}, err
+	}
+	defer release()
 
 	database, err := openDatabase(databasePath, false)
 	if err != nil {
@@ -173,9 +214,16 @@ func writeTunnel(databasePath string, request tunnelWriteRequest, create bool) (
 		}
 		defer clearBytes(request.Settings)
 	}
+	if err := preserveSSHJumpTrust(database, databasePath, &request); err != nil {
+		return tunnelDetails{}, err
+	}
 	editorSettings, err := azureVPNEditorSettings(request.Kind, request.ID, request.Settings)
 	if err != nil {
 		return tunnelDetails{}, err
+	}
+	pinOwner, pin := sshJumpHostKeyInfo(database, request.Kind, request.Settings)
+	if request.ForgetJumpHostKeySha256 != "" && pinOwner != "" && (create || pin != request.ForgetJumpHostKeySha256) {
+		return tunnelDetails{}, errors.New("SSH jump host key changed; reload the tunnel before forgetting its pin")
 	}
 
 	secretPath := legacyTunnelSecretPath(databasePath, request.ID)
@@ -275,10 +323,24 @@ func writeTunnel(databasePath string, request tunnelWriteRequest, create bool) (
 	if _, err := transaction.Exec("DELETE FROM CredentialSecrets WHERE Id = ?;", tunnelSecretID(request.ID)); err != nil {
 		return tunnelDetails{}, fmt.Errorf("could not clean up legacy VPN tunnel settings: %w", err)
 	}
+	if request.ForgetJumpHostKeySha256 != "" && pinOwner != "" {
+		result, err := transaction.Exec("UPDATE Nodes SET SshKnownHostFingerprint = NULL, UpdatedAt = ? WHERE lower(Id) = ? AND SshKnownHostFingerprint = ?;", timestamp, pinOwner, request.ForgetJumpHostKeySha256)
+		if err != nil {
+			return tunnelDetails{}, errors.New("could not forget the SSH jump host key")
+		}
+		count, err := result.RowsAffected()
+		if err != nil || count != 1 {
+			return tunnelDetails{}, errors.New("SSH jump host key changed; reload the tunnel")
+		}
+		pin = ""
+	}
 	if err := transaction.Commit(); err != nil {
 		return tunnelDetails{}, fmt.Errorf("could not save VPN tunnel: %w", err)
 	}
 	committed = true
+	if request.ForgetJumpHostKeySha256 != "" {
+		_, pin = sshJumpHostKeyInfo(database, request.Kind, request.Settings)
+	}
 	if !create && cacheIdentityChanged {
 		clearTunnelProviderCaches(databasePath, request.ID, previousKind, request.Kind)
 	}
@@ -286,8 +348,9 @@ func writeTunnel(databasePath string, request tunnelWriteRequest, create bool) (
 		removeAzureImportKey(databasePath, importedAzureKey)
 	}
 	return tunnelDetails{
-		ID: request.ID, Name: request.Name, Kind: request.Kind,
-		Endpoint: tunnelEndpointSummary(request.Kind, request.Settings), Settings: editorSettings,
+		JumpHostKeySha256: pin,
+		ID:                request.ID, Name: request.Name, Kind: request.Kind,
+		Endpoint: tunnelEndpointSummaryForDatabase(database, request.Kind, request.Settings), Settings: editorSettings,
 	}, nil
 }
 
@@ -331,7 +394,8 @@ func readTunnelUnlocked(databasePath string, request tunnelReadRequest) (tunnelD
 		return tunnelDetails{}, err
 	}
 	result.Settings = settings
-	result.Endpoint = tunnelEndpointSummary(result.Kind, result.Settings)
+	_, result.JumpHostKeySha256 = sshJumpHostKeyInfo(database, result.Kind, settings)
+	result.Endpoint = tunnelEndpointSummaryForDatabase(database, result.Kind, result.Settings)
 	return result, nil
 }
 
@@ -343,6 +407,11 @@ func deleteTunnel(databasePath string, request tunnelDeleteRequest) error {
 	if id == "" {
 		return errors.New("VPN tunnel id is invalid")
 	}
+	release, err := acquireTunnelConfigurationLock(context.Background(), databasePath)
+	if err != nil {
+		return err
+	}
+	defer release()
 	database, err := openDatabase(databasePath, false)
 	if err != nil {
 		return err
@@ -617,8 +686,11 @@ func validateTunnelWriteRequest(request *tunnelWriteRequest, requireID bool) err
 	if request.Name == "" || len([]rune(request.Name)) > 128 {
 		return errors.New("VPN tunnel name is required and must be 128 characters or fewer")
 	}
-	if request.Kind < 0 || request.Kind > 6 {
+	if request.Kind < 0 || request.Kind > 7 {
 		return errors.New("VPN tunnel type is invalid")
+	}
+	if request.ForgetJumpHostKeySha256 != "" && (request.Kind != 7 || !requireID || !validSSHFingerprint(request.ForgetJumpHostKeySha256)) {
+		return errors.New("SSH tunnel pin reset is invalid")
 	}
 	if len(request.Settings) == 0 || len(request.Settings) > backendMaxTunnelRequestBytes {
 		return errors.New("VPN tunnel settings are invalid")
@@ -641,6 +713,9 @@ func validateTunnelWriteRequest(request *tunnelWriteRequest, requireID bool) err
 }
 
 func validateTunnelSettings(kind int64, settings map[string]json.RawMessage) error {
+	if kind == 7 {
+		return validateSSHJumpSettings(settings)
+	}
 	required := func(names ...string) error {
 		for _, name := range names {
 			if strings.TrimSpace(tunnelSettingString(settings, name)) == "" {

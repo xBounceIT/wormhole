@@ -2408,7 +2408,7 @@ func loadTunnelSummaries(databasePath string) ([]tunnelRecord, error) {
 		endpoint := ""
 		settings, settingsErr := readTunnelSettings(database, databasePath, row.ID)
 		if settingsErr == nil {
-			endpoint = tunnelEndpointSummary(row.Kind, settings)
+			endpoint = tunnelEndpointSummaryForDatabase(database, row.Kind, settings)
 		}
 		clearBytes(settings)
 		// Missing or damaged protected settings must not make the tunnel list unusable.
@@ -2485,6 +2485,8 @@ func tunnelName(value int64) string {
 		return "Azure VPN"
 	case 6:
 		return "Cisco Secure Client"
+	case 7:
+		return "SSH tunnel (jump host)"
 	default:
 		return "Unknown"
 	}

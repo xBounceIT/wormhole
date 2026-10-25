@@ -165,6 +165,7 @@ interface WormholeWorkspaceTunnel {
 }
 
 interface WormholeTunnelDetails {
+  jumpHostKeySha256?: string;
   id: string;
   name: string;
   kind: number;
@@ -965,6 +966,7 @@ interface Window {
     listTunnels(): Promise<WormholeWorkspaceTunnel[]>;
     readTunnel(id: string): Promise<WormholeTunnelDetails>;
     updateTunnel(request: {
+      forgetJumpHostKeySha256?: string;
       id: string;
       name: string;
       kind: number;

@@ -412,7 +412,12 @@ test('SSH key credential import keeps key paths and material behind the native b
     /Buffer\.byteLength\((?:value\.keyPassphrase|passphrase), 'utf8'\)/,
   );
 
-  assert.match(backendSource, /ssh\.ParsePrivateKeyWithPassphrase/);
+  assert.match(backendSource, /sshauth\.ParseSigner/);
+  const signerSource = readFileSync(
+    new URL('../tools/internal/sshauth/signer.go', import.meta.url),
+    'utf8',
+  );
+  assert.match(signerSource, /ssh\.ParsePrivateKeyWithPassphrase/);
   assert.match(backendSource, /credentialPrivateKeyStageProtect/);
   assert.match(backendSource, /maxSshPrivateKeyBytes/);
   assert.match(backendSource, /ClearPassphrase/);

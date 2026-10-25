@@ -71,6 +71,9 @@ function runTypeScriptCoverage(repositoryRoot: string): void {
     [
       '--experimental-strip-types',
       '--experimental-test-coverage',
+      // Native Electron fixtures own focus and precise profilers. Bound coverage memory
+      // and avoid competing hidden windows while their V8 reports are flushed on exit.
+      '--test-concurrency=1',
       `--test-coverage-lines=${coverageThreshold}`,
       `--test-coverage-branches=${coverageThreshold}`,
       `--test-coverage-functions=${coverageThreshold}`,

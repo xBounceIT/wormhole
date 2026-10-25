@@ -8,6 +8,7 @@ export type TunnelTestRequest = {
 };
 
 export type TunnelDetailsResponse = {
+  jumpHostKeySha256?: string;
   id: string;
   name: string;
   kind: number;
@@ -62,18 +63,79 @@ export function parseTunnelDetailsResponse(value: unknown): TunnelDetailsRespons
     typeof value.kind !== 'number' ||
     !Number.isInteger(value.kind) ||
     value.kind < 0 ||
-    value.kind > 6 ||
+    value.kind > 7 ||
     !isRecord(value.settings)
   ) {
     throw new Error('The VPN service returned invalid tunnel details.');
   }
+  if (value.kind === 7) parseSSHJumpSettings(value.settings);
+  if (
+    value.jumpHostKeySha256 !== undefined &&
+    (typeof value.jumpHostKeySha256 !== 'string' ||
+      !/^SHA256:[A-Za-z0-9+/]{43}$/.test(value.jumpHostKeySha256))
+  ) {
+    throw new Error('The SSH tunnel service returned an invalid host-key fingerprint.');
+  }
   return {
+    ...(value.jumpHostKeySha256 ? { jumpHostKeySha256: value.jumpHostKeySha256 as string } : {}),
     id: value.id,
     name: value.name,
     kind: value.kind,
     endpoint: parseTunnelEndpoint(value.endpoint),
     settings: value.settings,
   };
+}
+
+export function parseSSHJumpSettings(value: unknown): Record<string, unknown> {
+  if (!isRecord(value) || Buffer.byteLength(JSON.stringify(value), 'utf8') > 8192)
+    throw new Error('SSH tunnel settings are invalid.');
+  const allowed = new Set([
+    'Mode',
+    'JumpConnectionId',
+    'Host',
+    'Port',
+    'Username',
+    'CredentialId',
+    'HostKeySha256',
+    'KeepaliveSeconds',
+  ]);
+  if (Object.keys(value).some((key) => !allowed.has(key)))
+    throw new Error('SSH tunnel settings must contain references only.');
+  if (
+    value.KeepaliveSeconds !== undefined &&
+    (!Number.isInteger(value.KeepaliveSeconds) ||
+      (value.KeepaliveSeconds as number) < 1 ||
+      (value.KeepaliveSeconds as number) > 3600)
+  )
+    throw new Error('SSH tunnel keepalive is invalid.');
+  if (value.Mode === 'connection') {
+    if (
+      !isTunnelIdentifier(value.JumpConnectionId) ||
+      ['Host', 'Port', 'Username', 'CredentialId', 'HostKeySha256'].some((key) =>
+        Object.hasOwn(value, key),
+      )
+    )
+      throw new Error('SSH jump connection is invalid.');
+  } else if (value.Mode === 'manual') {
+    if (
+      Object.hasOwn(value, 'JumpConnectionId') ||
+      typeof value.Host !== 'string' ||
+      !isTunnelTestHost(value.Host) ||
+      typeof value.Username !== 'string' ||
+      !value.Username.trim() ||
+      value.Username.length > 512 ||
+      /\p{Cc}/u.test(value.Username) ||
+      !isTunnelIdentifier(value.CredentialId) ||
+      !Number.isInteger(value.Port) ||
+      (value.Port as number) < 1 ||
+      (value.Port as number) > 65535 ||
+      (value.HostKeySha256 !== undefined &&
+        (typeof value.HostKeySha256 !== 'string' ||
+          !/^SHA256:[A-Za-z0-9+/]{43}$/.test(value.HostKeySha256)))
+    )
+      throw new Error('SSH tunnel endpoint or credential is invalid.');
+  } else throw new Error('SSH tunnel mode is invalid.');
+  return value;
 }
 
 function parseTunnelSummaryResponse(value: unknown): TunnelSummaryResponse {
