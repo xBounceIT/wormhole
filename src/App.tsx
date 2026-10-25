@@ -269,7 +269,7 @@ import {
 } from '@/components/ui/sidebar';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
-import { getTreeRowGeometry } from './tree-layout';
+import { getTreeRowStyles } from './tree-layout';
 import { findParentFolderId } from './tree-parent';
 import { WorkspaceRefreshCoordinator } from './workspace-refresh';
 import {
@@ -6375,7 +6375,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       const activeDropPlacement = dropTarget?.id === node.id ? dropTarget.placement : null;
       const isDragging = draggedNodeIdSet.has(node.id);
       const treeDragEnabled = !connectionTreeSearchActive;
-      const treeGeometry = getTreeRowGeometry(depth);
+      const treeGeometry = getTreeRowStyles(depth);
       const branchGeometry = treeGeometry.branch;
       const dropIndicator =
         activeDropPlacement === 'before' ? (
@@ -6401,14 +6401,14 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           aria-current={isSelected ? 'true' : undefined}
           aria-keyshortcuts={isFolder ? 'F2 Delete' : 'F2 Delete Enter'}
           className={[
-            'relative z-10 h-8 w-full justify-start gap-1.5 rounded-md px-2 text-left !text-xs font-medium text-sidebar-foreground/80 transition-[background-color,box-shadow,opacity] duration-150 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground aria-expanded:bg-transparent aria-expanded:text-sidebar-foreground/80',
+            'relative z-10 h-8 w-full justify-start gap-1.5 rounded-md px-2 text-left !text-xs font-medium text-sidebar-foreground/80 transition-[background-color,box-shadow,opacity] duration-150 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground focus-visible:ring-inset aria-expanded:bg-transparent aria-expanded:text-sidebar-foreground/80',
             showsMoveCursor ? 'cursor-grab active:cursor-grabbing' : 'cursor-default',
             isSelected
               ? 'bg-sidebar-accent text-sidebar-accent-foreground aria-expanded:bg-sidebar-accent aria-expanded:text-sidebar-accent-foreground'
               : '',
             isDragging ? 'opacity-40' : '',
             activeDropPlacement === 'inside'
-              ? 'bg-sidebar-accent/70 text-sidebar-accent-foreground ring-1 ring-sidebar-ring'
+              ? 'bg-sidebar-accent/70 text-sidebar-accent-foreground ring-1 ring-inset ring-sidebar-ring'
               : '',
           ].join(' ')}
           draggable={treeDragEnabled}
@@ -6419,7 +6419,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           onDragStart={(event) => handleTreeDragStart(event, node)}
           onDoubleClick={() => openConnection(node)}
           onFocus={() => setSelectedNodeId(node.id)}
-          style={{ paddingLeft: `${treeGeometry.paddingLeft}px` }}
+          style={{ paddingLeft: treeGeometry.paddingLeft }}
           variant="ghost"
         >
           {treeCheckbox}
@@ -6457,7 +6457,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
             ].join(' ')}
             style={{
               bottom: isLastSibling ? '50%' : undefined,
-              left: `${branchGeometry.left}px`,
+              left: branchGeometry.left,
             }}
           />
         ) : null;
@@ -6466,7 +6466,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           <span
             aria-hidden="true"
             className="pointer-events-none absolute top-0 z-0 h-1/2 w-px bg-foreground/50"
-            style={{ left: `${branchGeometry.left}px` }}
+            style={{ left: branchGeometry.left }}
           />
         ) : null;
       const treeConnector = branchGeometry ? (
@@ -6474,8 +6474,8 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           aria-hidden="true"
           className="pointer-events-none absolute top-1/2 z-0 h-px bg-foreground/50"
           style={{
-            left: `${branchGeometry.connectorLeft}px`,
-            width: `${branchGeometry.connectorWidth}px`,
+            left: branchGeometry.connectorLeft,
+            width: branchGeometry.connectorWidth,
           }}
         />
       ) : null;
@@ -7032,14 +7032,17 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                         data-connection-tree=""
                         data-connection-tree-shortcut-scope=""
                       >
-                        <ScrollArea className="min-h-0 flex-1 px-1">
-                          {visibleTree.length > 0 ? (
-                            renderTree(visibleTree)
-                          ) : (
-                            <p className="px-3 py-8 text-center text-xs text-muted-foreground">
-                              Nothing here yet.
-                            </p>
-                          )}
+                        {/* Keep Radix's intrinsic-width content from stretching rows past the viewport. */}
+                        <ScrollArea className="min-h-0 flex-1 [&>[data-slot=scroll-area-viewport]>div]:block!">
+                          <div className="pl-1 pr-3">
+                            {visibleTree.length > 0 ? (
+                              renderTree(visibleTree)
+                            ) : (
+                              <p className="px-3 py-8 text-center text-xs text-muted-foreground">
+                                Nothing here yet.
+                              </p>
+                            )}
+                          </div>
                         </ScrollArea>
                       </div>
                     </ContextMenuTrigger>
