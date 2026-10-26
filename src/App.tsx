@@ -179,6 +179,7 @@ import {
   KeyRound,
   ListFilter,
   LoaderCircle,
+  Lock,
   Maximize2,
   Monitor,
   MoreHorizontal,
@@ -1626,7 +1627,7 @@ function AuthPrompt({
         <CardHeader className="gap-3 px-5 py-5">
           <div className="flex items-start gap-3">
             <div className="grid size-9 shrink-0 place-items-center rounded-lg border border-border/70 bg-muted/60 text-foreground">
-              <KeyRound className="size-4" />
+              <Lock className="size-4" />
             </div>
             <div className="min-w-0 space-y-1">
               <CardTitle className="text-base" id="auth-prompt-title">

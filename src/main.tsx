@@ -35,14 +35,18 @@ function renderLoading() {
     </main>`;
 }
 
-function renderCard(title: string, detail: string): HTMLElement {
+function renderCard(title: string, detail: string, icon: 'key' | 'lock' = 'key'): HTMLElement {
   root.innerHTML = `
     <main class="startup-shell">
       <section class="startup-card">
         <div class="startup-heading">
           <span class="startup-mark-box">
-            <svg aria-hidden="true" class="startup-mark" viewBox="0 0 24 24">
-              <path d="M12 3a5 5 0 0 0-3.54 8.54L5 15v4h4v-2h2v-2h1.17A5 5 0 1 0 12 3Zm0 2a3 3 0 1 1 0 6 3 3 0 0 1 0-6Z"></path>
+            <svg aria-hidden="true" class="startup-mark startup-mark-${icon}" viewBox="0 0 24 24">
+              ${
+                icon === 'lock'
+                  ? '<rect x="3" y="11" width="18" height="11" rx="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path>'
+                  : '<path d="M12 3a5 5 0 0 0-3.54 8.54L5 15v4h4v-2h2v-2h1.17A5 5 0 1 0 12 3Zm0 2a3 3 0 1 1 0 6 3 3 0 0 1 0-6Z"></path>'
+              }
             </svg>
           </span>
           <span>
@@ -97,7 +101,7 @@ function showUnlock(startup: WormholeStartupSnapshot) {
       : 'pin';
   const isHelloMode = auth.mode === 'windowsHello';
   const fallbackName = method === 'pin' ? 'Wormhole PIN' : 'Wormhole password';
-  const card = renderCard('Wormhole is locked', 'Unlock to load your connections.');
+  const card = renderCard('Wormhole is locked', 'Unlock to load your connections.', 'lock');
   window.wormhole?.markStartupReady();
   let busy = false;
 
