@@ -98,6 +98,21 @@ $env:PATH = "C:\llvm-mingw\bin;$env:PATH"
 .\scripts\Fetch-OvpnProxy.ps1 -Arch arm64 -Force -RequireReal
 ```
 
+## OpenVPN3 compatibility patches
+
+`Fetch-OvpnProxy.ps1` applies the files in `patches/` before compiling and restores
+the submodule afterward. Patch `0003` loads mbedTLS's OID definitions before checking
+the compatibility fallback, avoiding macro redefinitions with mbedTLS 3.6. The existing
+legacy fallback remains unchanged to preserve upstream certificate-policy behavior.
+
+Run `node --test tests/ovpn-mbedtls-compat.test.mjs` to check patch application and
+reversal, both header orders, and native/legacy extension masks. These tests also run
+in `npm run test:packaging`. Patch application and reversal checks always run. The
+compile scenarios require a GCC/Clang-compatible C++ compiler (`CXX`, or `g++` on
+Windows / `c++` elsewhere) and skip when it is unavailable. Patch `0003`
+changes only preprocessor directives, which Node/Go statement coverage cannot measure;
+the compile checks exercise both fallback branches with warnings treated as errors.
+
 ## Why a Go sidecar?
 
 The gVisor netstack used to expose a userspace TUN to the SOCKS5 surface is Go-only.
