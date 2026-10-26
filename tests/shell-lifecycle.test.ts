@@ -590,7 +590,10 @@ test('MCP approval restores and foregrounds the Wormhole window before notifying
     bitwardenStorageBridgeFlow,
     /if \(await this\.synchronizeBitwardenStorageCore\(partition, backgroundContents\)\) return;/,
   );
-  assert.match(bitwardenStorageBridgeFlow, /memoryReady = await withBitwardenBrowserTimeout\(/);
+  assert.match(
+    bitwardenStorageBridgeFlow,
+    /await waitForBitwardenBackgroundStorage\(backgroundContents\)/,
+  );
   const bridgeTry = bitwardenStorageBridgeFlow.indexOf(
     'try {',
     bitwardenStorageBridgeFlow.indexOf('const bridge = new WebContentsView'),

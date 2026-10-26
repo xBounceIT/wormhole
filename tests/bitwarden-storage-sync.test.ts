@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   BitwardenStorageCheckpoint,
   BitwardenStorageCheckpointError,
+  checkpointBitwardenStorageBeforeClose,
   synchronizeBitwardenStorage,
   type BitwardenBrowserStorageSnapshot,
 } from '../electron/bitwarden-storage-sync.ts';
@@ -17,6 +18,23 @@ const snapshot = (
   restore: false,
   durable: true,
   ...overrides,
+});
+
+test('a stable checkpoint returns whether native close was still allowed after saving', async () => {
+  for (const allowed of [true, false]) {
+    let saved = false;
+    const result = await checkpointBitwardenStorageBeforeClose(
+      async () => 7,
+      async () => {
+        saved = true;
+      },
+      () => {
+        assert.equal(saved, true);
+        return allowed;
+      },
+    );
+    assert.equal(result, allowed);
+  }
 });
 
 test('restart restores the remembered account even when a matching marker outlives Chromium storage', async () => {
@@ -333,6 +351,119 @@ test('continuous mutations have a bounded retry budget', async () => {
     /retry required/,
   );
   assert.equal(captures, 3);
+});
+
+test('an extension update accepts a durable acknowledged merge without replaying other profiles into a closed background', async () => {
+  let commits = 0;
+  await synchronizeBitwardenStorage(
+    {
+      read: async () => snapshot(),
+      capture: async () =>
+        snapshot({
+          localJson: '{"account":"saved","theme":"new"}',
+          sessionJson: '{"token":"older"}',
+        }),
+      flush: async () => {},
+      commit: async (captured, revision) => {
+        commits++;
+        assert.equal(revision, 4);
+        assert.match(captured.localJson, /"theme":"new"/);
+        return snapshot({
+          ...captured,
+          sessionJson: '{"token":"newer"}',
+          revision: 5,
+          profileRevision: 5,
+          restore: true,
+        });
+      },
+      restore: async () => assert.fail('the merged data is already stored securely by Go'),
+      markRevision: async () =>
+        assert.fail('a stale native profile must not claim to contain the merged state'),
+    },
+    false,
+    { checkpointOnly: true },
+  );
+  assert.equal(commits, 1);
+});
+
+test('update checkpoints still hydrate cold profiles and require secure persistence of the accepted capture', async () => {
+  for (const durable of [true, false]) {
+    let restored = false;
+    const operation = synchronizeBitwardenStorage(
+      {
+        read: async () => snapshot(),
+        capture: async () => snapshot({ localJson: restored ? '{"account":"saved"}' : '{}' }),
+        restore: async (saved) => {
+          assert.equal(restored, false);
+          restored = true;
+          assert.equal(saved.localJson, snapshot().localJson);
+        },
+        flush: async () => {},
+        commit: async () => {
+          assert.equal(restored, true);
+          return snapshot({ revision: 5, profileRevision: 5, restore: true, durable });
+        },
+        markRevision: async () => assert.fail('the native profile has not consumed the merge'),
+      },
+      true,
+      { checkpointOnly: true },
+    );
+    if (durable) await operation;
+    else
+      await assert.rejects(operation, (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /checkpoint is unavailable/);
+        assert.equal(
+          error instanceof BitwardenStorageCheckpointError,
+          false,
+          'an unreconciled background is not safe for the popup fallback',
+        );
+        return true;
+      });
+  }
+});
+
+test('a merge without an accepted profile revision cannot bypass reconciliation during an update', async () => {
+  for (const [revision, profileRevision] of [
+    [5, 4],
+    [0, 0],
+  ]) {
+    let restores = 0;
+    await assert.rejects(
+      synchronizeBitwardenStorage(
+        {
+          read: async () => snapshot(),
+          capture: async () => snapshot(),
+          flush: async () => {},
+          commit: async () => snapshot({ revision, profileRevision, restore: true }),
+          restore: async () => {
+            restores++;
+          },
+        },
+        false,
+        { checkpointOnly: true },
+      ),
+      /retry required/,
+    );
+    assert.equal(restores, 3);
+  }
+});
+
+test('unreadable protected storage still blocks an update before any profile capture', async () => {
+  await assert.rejects(
+    synchronizeBitwardenStorage(
+      {
+        read: async () => snapshot({ revision: 0, durable: false }),
+        capture: async () => assert.fail('an unavailable protected store cannot be replaced'),
+        restore: async () => assert.fail(),
+        flush: async () => assert.fail(),
+        commit: async () => assert.fail(),
+      },
+      true,
+      { checkpointOnly: true },
+    ),
+    /temporarily unavailable/,
+  );
 });
 
 test('capture and flush failures cannot replace the saved snapshot', async () => {

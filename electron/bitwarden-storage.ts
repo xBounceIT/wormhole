@@ -189,7 +189,9 @@ export async function readBitwardenStorageRevision(contents: StorageContents): P
       if (!globalThis[key]) {
         const state = { revision: 0 };
         const changed = () => { state.revision++; };
-        chrome.storage.local.onChanged.addListener(changed);
+        chrome.storage.local.onChanged.addListener(changes => {
+          if (Object.keys(changes).some(entry => entry !== ${JSON.stringify(profileRevisionKey)})) changed();
+        });
         if (memory?.updates$) memory.updates$.subscribe(changed);
         else chrome.storage.session.onChanged.addListener(changed);
         globalThis[key] = state;
@@ -203,6 +205,27 @@ export async function readBitwardenStorageRevision(contents: StorageContents): P
     throw new Error('Bitwarden background storage is not ready.');
   }
   return result as number;
+}
+
+export async function waitForBitwardenBackgroundStorage(contents: StorageContents): Promise<void> {
+  const deadline = Date.now() + operationTimeoutMs;
+  const message = 'Bitwarden background storage readiness timed out.';
+  while (!contents.isDestroyed()) {
+    const ready = await executePageScript(
+      contents,
+      `(() => {
+        const memory = globalThis.bitwardenMain?.memoryStorageForStateProviders;
+        if (chrome.runtime.getManifest?.().manifest_version === 2)
+          return Boolean(memory?.store && memory?.save && memory?.remove);
+        return Boolean(chrome.storage.session || memory?.store);
+      })()`,
+      deadline,
+      message,
+    );
+    if (ready === true) return;
+    await new Promise<void>((resolve) => setTimeout(resolve, pollIntervalMs));
+  }
+  throw new Error('Bitwarden background storage page closed before it became ready.');
 }
 
 export async function prepareBitwardenStorageMigrations(

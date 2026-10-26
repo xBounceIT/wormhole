@@ -23,6 +23,11 @@ import { KeyedSingleFlight } from '../electron/keyed-single-flight.ts';
 import { KeyedTaskTracker } from '../electron/keyed-task-tracker.ts';
 import { ExtensionMutationGuard } from '../electron/extension-mutation-guard.ts';
 import {
+  BitwardenStorageCheckpointError,
+  checkpointBitwardenStorageBeforeClose,
+} from '../electron/bitwarden-storage-sync.ts';
+import { describeBitwardenBrowserFailure } from '../electron/bitwarden-popup-lifecycle.ts';
+import {
   buildBitwardenBrowserContext,
   buildBitwardenPersistentRouteKey,
   getBitwardenBrowserPartition,
@@ -310,6 +315,11 @@ function browserHarness({ socks = '127.0.0.1:1080', active = true } = {}) {
     KeyedSingleFlight,
     KeyedTaskTracker,
     ExtensionMutationGuard,
+    BitwardenStorageCheckpointError,
+    checkpointBitwardenStorageBeforeClose,
+    describeBitwardenBrowserFailure,
+    waitForBitwardenBackgroundStorage: async () => {},
+    readBitwardenStorageRevision: async () => 0,
     getInSessionNavigationUrl,
     createBitwardenActiveTabContext,
     selectBitwardenTabRegistrationPartition,
@@ -1315,7 +1325,9 @@ test('closed dedicated Bitwarden profiles unload only after storage is saved and
     });
     h.manager.synchronizeBitwardenStorageInBridge = () =>
       h.manager.bitwardenStorageTasks.run(record.partition, () => flush);
-    h.manager.bitwardenBackgroundContents = () => (scenario === 'background-gone' ? undefined : {});
+    const background = { isDestroyed: () => false };
+    h.manager.bitwardenBackgroundContents = () =>
+      scenario === 'background-gone' ? undefined : background;
     h.manager.synchronizeBitwardenStorageCore = async () => {
       if (scenario === 'save-failed') throw new Error('Protected storage unavailable');
       if (scenario === 'reopened-during-save')

@@ -1,3 +1,56 @@
+export type BitwardenBrowserStage =
+  | 'prepare'
+  | 'profile'
+  | 'migrations'
+  | 'read'
+  | 'capture'
+  | 'restore'
+  | 'commit'
+  | 'flush'
+  | 'marker'
+  | 'background'
+  | 'bridge'
+  | 'checkpoint'
+  | 'popup';
+
+type BitwardenBrowserReason = 'failed' | 'timeout' | 'closed' | 'unavailable' | 'conflict';
+
+// Raw Chromium/extension/backend errors can contain account or vault data. Only these
+// fixed classifications may leave the native extension flow or reach persistent logs.
+export class BitwardenBrowserFailure extends Error {
+  readonly stage: BitwardenBrowserStage;
+  readonly reason: BitwardenBrowserReason;
+
+  constructor(stage: BitwardenBrowserStage, reason: BitwardenBrowserReason) {
+    super(`Bitwarden browser operation failed (${stage}/${reason}).`);
+    this.name = 'BitwardenBrowserFailure';
+    this.stage = stage;
+    this.reason = reason;
+  }
+
+  get code(): string {
+    return `${this.stage}/${this.reason}`;
+  }
+}
+
+export function describeBitwardenBrowserFailure(
+  error: unknown,
+  stage: BitwardenBrowserStage,
+): BitwardenBrowserFailure {
+  if (error instanceof BitwardenBrowserFailure) return error;
+  const message = error instanceof Error ? error.message : '';
+  const reason = /timed out/i.test(message)
+    ? 'timeout'
+    : /closed|destroyed/i.test(message)
+      ? 'closed'
+      : /unavailable|not ready/i.test(message)
+        ? 'unavailable'
+        : /changed during synchronization/i.test(message)
+          ? 'conflict'
+          : 'failed';
+  return new BitwardenBrowserFailure(stage, reason);
+}
+
 type ClosableWebContents = {
   isDestroyed(): boolean;
   close(): void;
@@ -17,7 +70,7 @@ export async function prepareBitwardenPopupStorage(
     // Only a failed checkpoint of reconciled live state is recoverable. Hydration or merge
     // failures must still block editing, even if the background was initialized earlier.
     if (!canUseLiveStorage(error)) {
-      throw new Error('Bitwarden could not restore its saved browser session. Please try again.');
+      throw describeBitwardenBrowserFailure(error, 'prepare');
     }
   }
 }

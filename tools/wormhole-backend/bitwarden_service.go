@@ -28,6 +28,11 @@ var (
 )
 
 func (m *vncManager) handleBitwarden(command backendCommand, expectedGeneration uint64) {
+	if command.Action == "bitwarden.browser-failure" {
+		result, err := reportBitwardenBrowserFailure(command.Value)
+		m.respondResult(command.ID, result, err)
+		return
+	}
 	if command.Action == "bitwarden.clear-session" {
 		m.clearBitwardenSession()
 		m.cancelPendingVncConnections()
