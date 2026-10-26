@@ -148,6 +148,7 @@ export type WebBrowserState = {
   activeTabId: string;
   tabs: WebBrowserTabState[];
   route: 'direct' | 'vpn';
+  tunnel?: { name: string; kind: string };
   restrictedOrigin?: string;
 };
 
@@ -240,12 +241,17 @@ export class WebBrowserTabs<T> {
     return entry.surface;
   }
 
-  snapshot(route: WebBrowserState['route'], restrictedOrigin?: string): WebBrowserState {
+  snapshot(
+    route: WebBrowserState['route'],
+    restrictedOrigin?: string,
+    tunnel?: WebBrowserState['tunnel'],
+  ): WebBrowserState {
     return {
       activeTabId: this.selectedId,
       tabs: [...this.entries.values()].map(({ state }) => ({ ...state })),
       route,
       restrictedOrigin,
+      tunnel: route === 'vpn' ? tunnel : undefined,
     };
   }
 }

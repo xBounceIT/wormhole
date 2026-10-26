@@ -33,6 +33,8 @@ var physicalTransportAdapterIDsForTunnel = physicalTransportAdapterIDs
 // Go backend coalesces concurrent sessions for the same config and closes the sidecar when its
 // final lease closes. No route or VPN secret crosses the Go/renderer boundary.
 type tunnelRuntime struct {
+	name        string
+	kind        int64
 	released    chan struct{}
 	entry       *sharedTunnelEntry
 	pool        *tunnelRuntimePool
@@ -461,7 +463,7 @@ func (pool *tunnelRuntimePool) acquire(
 			pool.release(entry)
 			return nil, entry.err
 		}
-		return &tunnelRuntime{entry: entry, pool: pool, released: make(chan struct{})}, nil
+		return &tunnelRuntime{name: snapshot.name, kind: snapshot.kind, entry: entry, pool: pool, released: make(chan struct{})}, nil
 	case <-ctx.Done():
 		pool.unsubscribeProgress(entry, subscriptionID)
 		pool.unsubscribePrompt(entry, promptSubscriptionID)

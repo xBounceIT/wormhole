@@ -65,7 +65,12 @@ async function runWebBrowserTests() {
     protocol: 'https',
     host: 'gateway.internal',
     status: 'connected',
-    webBrowser: { activeTabId: 'one', tabs: [first, second, third], route: 'vpn' },
+    webBrowser: {
+      activeTabId: 'one',
+      tabs: [first, second, third],
+      route: 'vpn',
+      tunnel: { name: 'Office', kind: 'WireGuard' },
+    },
   };
   let props = { isActive: true, isAuthorized: true, isOccluded: false, bitwardenOpen: false };
   let hostHeight = '100vh';
@@ -120,7 +125,30 @@ async function runWebBrowserTests() {
   await React.act(async () => icon.dispatchEvent(new Event('error')));
   assert.equal(document.querySelector('[role="tab"]')!.querySelector('img'), null);
   assert.ok(document.querySelectorAll('[role="tab"]')[1].querySelector('img'));
-  assert.ok(document.body.textContent?.includes('VPN tunnel'));
+  assert.ok(document.body.textContent?.includes("Office's WireGuard ACTIVE"));
+  assert.ok(
+    document.querySelector(
+      '[title="Office\'s WireGuard ACTIVE. All tabs use this browser’s VPN tunnel"]',
+    ),
+  );
+  const longName = 'Corporate VPN '.repeat(20);
+  await render({
+    webBrowser: { ...session.webBrowser, tunnel: { name: longName, kind: 'Cisco Secure Client' } },
+  });
+  const badge = document.querySelector<HTMLElement>(
+    '[title$="All tabs use this browser’s VPN tunnel"]',
+  )!;
+  const badgeText = badge.querySelector<HTMLElement>('.truncate')!;
+  assert.ok(badge.title.startsWith(`${longName}'s Cisco Secure Client ACTIVE`));
+  assert.ok(badgeText.scrollWidth > badgeText.clientWidth, 'Long VPN names must truncate');
+  assertNewTabPosition();
+  await render({
+    webBrowser: { ...session.webBrowser, tunnel: { name: 'Office', kind: 'OpenVPN' } },
+  });
+  assert.ok(document.body.textContent?.includes("Office's OpenVPN ACTIVE"));
+  await render({ status: 'failed' });
+  assert.ok(!document.body.textContent?.includes('ACTIVE'));
+  await render({ status: 'connected' });
   assert.equal(document.querySelector<HTMLInputElement>('input')!.value, first.url);
   assert.ok(bounds.some((value) => value.visible && value.height > 100));
   const frames = async (count = 1) => {
@@ -336,11 +364,13 @@ async function runWebBrowserTests() {
   await render({
     webBrowser: {
       route: 'direct',
+      tunnel: { name: 'Stale VPN', kind: 'WireGuard' },
       activeTabId: 'one',
       tabs: [{ ...first, isLoading: true, canGoBack: false, canGoForward: false }],
     },
   });
   assert.ok(document.body.textContent?.includes('No VPN'));
+  assert.ok(!document.body.textContent?.includes('Stale VPN'));
   assertNewTabPosition();
   assert.ok(document.querySelector('[title*="No VPN tunnel is attached"]'));
   await click('Stop loading');
@@ -354,11 +384,17 @@ async function runWebBrowserTests() {
     webBrowser: {
       route: 'vpn',
       restrictedOrigin: 'https://gateway.internal',
+      tunnel: { name: 'Branch', kind: 'Fortinet' },
       activeTabId: 'blank',
       tabs: [{ ...first, id: 'blank', title: 'New tab', url: 'about:blank' }],
     },
   });
   assert.equal(input.value, '');
+  assert.ok(
+    document.querySelector(
+      '[title="Branch\'s Fortinet ACTIVE. VPN access is limited to https://gateway.internal"]',
+    ),
+  );
   assert.equal(document.activeElement, input);
   assert.match(document.body.textContent!, /Available host/);
   assert.equal(bounds.at(-1).visible, false);
@@ -377,6 +413,7 @@ async function runWebBrowserTests() {
     webBrowser: { route: 'vpn', activeTabId: 'one', tabs: [first] },
     bitwardenPopupUrl: 'chrome-extension://test/popup.html',
   });
+  assert.ok(document.body.textContent?.includes('VPN tunnel ACTIVE'));
   await click('Open Bitwarden');
   assert.equal(popups.at(-1).sessionId, 'browser');
   assert.ok(popups.at(-1).anchor.width > 0);

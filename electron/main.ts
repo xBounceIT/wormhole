@@ -455,6 +455,8 @@ type BackendResponse = {
   forwardHost?: string;
   forwardPort?: number;
   tunnelActive?: boolean;
+  tunnelName?: string;
+  tunnelKind?: string;
   leaseId?: string;
   result?: unknown;
 };
@@ -3191,7 +3193,7 @@ class NativeBackendProcess {
     tunnelConfigId?: string;
     progressSessionId?: string;
     dedicated?: boolean;
-  }): Promise<{ active: boolean; socksEndpoint: string }> {
+  }): Promise<{ active: boolean; socksEndpoint: string; tunnel?: WebBrowserState['tunnel'] }> {
     this.tunnelFailures.watch(request.leaseId, request.onExit);
     const response = await this.send(
       {
@@ -3208,6 +3210,10 @@ class NativeBackendProcess {
     return {
       active: response.tunnelActive === true,
       socksEndpoint: response.socksEndpoint ?? '',
+      tunnel: {
+        name: typeof response.tunnelName === 'string' ? response.tunnelName.slice(0, 256) : '',
+        kind: typeof response.tunnelKind === 'string' ? response.tunnelKind.slice(0, 128) : '',
+      },
     };
   }
 
@@ -4376,6 +4382,7 @@ type WebSurfaceRecord = {
     image: Promise<string | undefined>;
   };
   route: 'direct' | 'vpn';
+  tunnel?: WebBrowserState['tunnel'];
   attempt: number;
   disposed: boolean;
   navigation: {
@@ -4616,6 +4623,7 @@ class WebSurfaceManager {
       );
       const logicalTargetUrl = target.url;
       let resolvedTunnelRoute: 'direct' | 'socks5' | 'forwarder' = 'direct';
+      let tunnel: WebBrowserState['tunnel'];
       if (target.tunnelConfigId) {
         const leaseId = randomUUID();
         openingLeaseId = leaseId;
@@ -4635,6 +4643,7 @@ class WebSurfaceManager {
           tunnelConfigId: target.tunnelConfigId,
           progressSessionId: request.sessionId,
         });
+        tunnel = tunnelRoute.tunnel;
         if (tunnelRoute.socksEndpoint) {
           resolvedTunnelRoute = 'socks5';
           target.proxyUrl = `socks5://${tunnelRoute.socksEndpoint}`;
@@ -4864,6 +4873,7 @@ class WebSurfaceManager {
         target,
         partition,
         route: resolvedTunnelRoute === 'direct' ? 'direct' : 'vpn',
+        tunnel,
         attempt: request.attempt,
         disposed: false,
         navigation: {
@@ -4907,6 +4917,7 @@ class WebSurfaceManager {
       target.browser = tabs.snapshot(
         record.route,
         record.navigation.originalUrl ? new URL(logicalTargetUrl).origin : undefined,
+        record.tunnel,
       );
       this.sendEvent(request.sessionId, record, 'connected');
       openingLeaseId = undefined;
@@ -6924,6 +6935,7 @@ class WebSurfaceManager {
     const browser = record.tabs.snapshot(
       record.route,
       record.navigation.originalUrl ? new URL(record.navigation.originalUrl).origin : undefined,
+      record.tunnel,
     );
     const tab = browser.tabs.find((candidate) => candidate.id === browser.activeTabId);
     if (!tab) return;
