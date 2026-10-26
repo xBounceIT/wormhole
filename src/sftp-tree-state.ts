@@ -1,6 +1,14 @@
 import { parentLocalSftpPath, parentSftpPath } from './sftp-state.ts';
+import { compareSftpEntries, type SftpSortColumn } from './sftp-state.ts';
+import { isLocalSftpPathRoot, isSftpPathWithin } from './sftp-state.ts';
 
-export type SftpTreeEntry = { fullPath: string; name: string; isDirectory: boolean };
+export type SftpTreeEntry = {
+  fullPath: string;
+  name: string;
+  isDirectory: boolean;
+  lastModifiedUtc?: string;
+  size?: number;
+};
 type TreeNode = {
   children: SftpTreeEntry[];
   status: 'idle' | 'loading' | 'ready' | 'failed';
@@ -15,25 +23,14 @@ export type SftpTreeState = {
 };
 export const sftpTreeCacheLimit = 128;
 
-export function sftpTreeAncestors(pane: SftpTreeState['pane'], path: string): string[] {
-  const result: string[] = [];
-  const parent = pane === 'local' ? parentLocalSftpPath : parentSftpPath;
-  for (let current = path; current && result.length < 256; current = parent(current)) {
-    result.unshift(current);
-    if (parent(current) === current) break;
-  }
-  return result;
-}
-
 export function createSftpTree(pane: SftpTreeState['pane']): SftpTreeState {
   return { pane, path: '', expanded: [], nodes: {} };
 }
 
 function boundTree(state: SftpTreeState): SftpTreeState {
-  const protectedPaths = new Set(sftpTreeAncestors(state.pane, state.path));
   const keys = Object.keys(state.nodes);
   const removable = keys.filter(
-    (path) => !protectedPaths.has(path) && state.nodes[path].status !== 'loading',
+    (path) => path !== state.path && state.nodes[path].status !== 'loading',
   );
   const remove = new Set(removable.slice(0, Math.max(0, keys.length - sftpTreeCacheLimit)));
   const nodes = Object.fromEntries(
@@ -43,18 +40,25 @@ function boundTree(state: SftpTreeState): SftpTreeState {
 }
 
 export function revealSftpTreePath(state: SftpTreeState, path: string): SftpTreeState {
-  const ancestors = sftpTreeAncestors(state.pane, path);
   const nodes = { ...state.nodes };
-  for (const ancestor of ancestors) nodes[ancestor] ??= { children: [], status: 'idle' };
+  if (path) nodes[path] ??= { children: [], status: 'idle' };
   return boundTree({
     ...state,
     path,
     nodes,
-    expanded: [...new Set([...state.expanded, ...ancestors])],
+    expanded: path
+      ? [
+          path,
+          ...state.expanded.filter(
+            (value) => value !== path && isSftpPathWithin(state.pane, path, value),
+          ),
+        ]
+      : [],
   });
 }
 
 export function toggleSftpTreePath(state: SftpTreeState, path: string): SftpTreeState {
+  if (!isSftpPathWithin(state.pane, state.path, path)) return state;
   if (state.expanded.includes(path))
     return { ...state, expanded: state.expanded.filter((value) => value !== path) };
   return boundTree({
@@ -112,46 +116,80 @@ export function invalidateSftpTree(state: SftpTreeState): SftpTreeState {
   };
 }
 
-export function sftpTreeRows(state: SftpTreeState): {
+export function sftpTreeRows(
+  state: SftpTreeState,
+  sortColumn: SftpSortColumn = 'name',
+  ascending = true,
+): {
   path: string;
   name: string;
   depth: number;
   expanded: boolean;
   status?: TreeNode['status'];
   error?: string;
+  lastModifiedUtc?: string;
 }[] {
-  const ancestors = sftpTreeAncestors(state.pane, state.path);
   const rows: ReturnType<typeof sftpTreeRows> = [];
-  function visit(path: string, name: string, depth: number) {
-    if (rows.length >= 4096 || depth >= 256) return;
+  const visited = new Set<string>();
+  function visit(path: string, name: string, depth: number, lastModifiedUtc?: string) {
+    if (rows.length >= 4096 || depth >= 256 || visited.has(path)) return;
+    visited.add(path);
     const node = state.nodes[path];
     const expanded = state.expanded.includes(path);
-    rows.push({ path, name, depth, expanded, status: node?.status, error: node?.error });
+    rows.push({
+      path,
+      name,
+      depth,
+      expanded,
+      status: node?.status,
+      error: node?.error,
+      lastModifiedUtc,
+    });
     if (!expanded) return;
     const children = [...(node?.children ?? [])];
-    const ancestorIndex = ancestors.indexOf(path);
-    const child = ancestorIndex < 0 ? undefined : ancestors[ancestorIndex + 1];
-    if (child && !children.some((entry) => entry.fullPath === child))
-      children.push({
-        fullPath: child,
-        name: child.split(/[\\/]/).filter(Boolean).at(-1) ?? child,
-        isDirectory: true,
-      });
-    children.sort((a, b) => a.name.localeCompare(b.name));
-    const seen = new Set<string>();
+    children.sort((a, b) => compareSftpEntries(a, b, sortColumn, ascending));
     for (const entry of children) {
       if (
-        entry.fullPath === path ||
-        seen.has(entry.fullPath) ||
-        ancestors.slice(0, ancestorIndex + 1).includes(entry.fullPath)
+        !isSftpPathWithin(state.pane, path, entry.fullPath) ||
+        isSftpPathWithin(state.pane, entry.fullPath, path)
       )
         continue;
-      seen.add(entry.fullPath);
-      visit(entry.fullPath, entry.name, depth + 1);
+      visit(entry.fullPath, entry.name, depth + 1, entry.lastModifiedUtc);
     }
   }
-  if (ancestors[0]) visit(ancestors[0], ancestors[0], 0);
+  if (state.path) {
+    const parent =
+      state.pane === 'local' ? parentLocalSftpPath(state.path) : parentSftpPath(state.path);
+    // Reuse cached parent metadata when available; rooting the tree must not read ancestors.
+    const entry = state.nodes[parent]?.children.find((child) => child.fullPath === state.path);
+    const root =
+      parent === state.path || (state.pane === 'local' && isLocalSftpPathRoot(state.path));
+    const name = root
+      ? state.path
+      : (state.path
+          .split(state.pane === 'local' && !state.path.startsWith('/') ? /[\\/]/ : /\//)
+          .filter(Boolean)
+          .at(-1) ?? state.path);
+    visit(state.path, entry?.name ?? name, 0, entry?.lastModifiedUtc);
+  }
   return rows;
+}
+
+export function filterSftpTreeRows(
+  rows: ReturnType<typeof sftpTreeRows>,
+  search: string,
+): ReturnType<typeof sftpTreeRows> {
+  const query = search.trim().toLocaleLowerCase();
+  if (!query) return rows;
+  const ancestors: string[] = [];
+  const included = new Set<string>();
+  for (const row of rows) {
+    ancestors.length = row.depth;
+    ancestors.push(row.path);
+    if (row.name.toLocaleLowerCase().includes(query))
+      for (const path of ancestors) included.add(path);
+  }
+  return rows.filter((row) => included.has(row.path));
 }
 
 export function sftpShortcut(

@@ -595,12 +595,13 @@ func TestSftpOnlyTransportHasNoShellAndSurvivesSiblingClose(t *testing.T) {
 	if sibling.sftpListSeq != 0 {
 		t.Fatal("tree expansion invalidated the file listing")
 	}
+	waitSftpTreeRequests(t, sibling, 0)
 	sibling.sftpMu.Lock()
-	sibling.treeRequests = 4
+	sibling.treeRequests = sftpTreeConcurrency + sftpTreeQueueLimit
 	sibling.sftpMu.Unlock()
 	backend.sftpTreeList(sshWireCommand{SessionID: sibling.id, Pane: "local", Path: directory, RequestID: "busy"})
 	if event := waitSftpTestEvent(t, output, func(event sshWireEvent) bool { return event.RequestID == "busy" }); event.Error == "" {
-		t.Fatal("tree concurrency limit ignored")
+		t.Fatal("tree queue limit ignored")
 	}
 	sibling.sftpMu.Lock()
 	sibling.treeRequests = 0

@@ -54,9 +54,16 @@ function sftpModifiedTime(value?: string): number {
   return Number.isNaN(time) ? 0 : time;
 }
 
+type SftpSortableEntry = {
+  name: string;
+  isDirectory: boolean;
+  size?: number;
+  lastModifiedUtc?: string;
+};
+
 export function compareSftpEntries(
-  left: WormholeSftpEntry,
-  right: WormholeSftpEntry,
+  left: SftpSortableEntry,
+  right: SftpSortableEntry,
   sortColumn: SftpSortColumn,
   sortAscending: boolean,
 ): number {
@@ -64,7 +71,7 @@ export function compareSftpEntries(
 
   const primary =
     sortColumn === 'size'
-      ? compareSftpValues(left.size, right.size)
+      ? compareSftpValues(left.size ?? 0, right.size ?? 0)
       : sortColumn === 'modified'
         ? compareSftpValues(
             sftpModifiedTime(left.lastModifiedUtc),
@@ -396,6 +403,16 @@ function localSftpPathContains(
     ? normalizedParent
     : `${normalizedParent}${separator}`;
   return normalizedCandidate.startsWith(prefix);
+}
+
+export function isSftpPathWithin(
+  pane: 'local' | 'remote',
+  root: string,
+  candidate: string,
+): boolean {
+  const style = pane === 'remote' ? 'posix' : localSftpPathStyle(root);
+  if (!root || !candidate || !style || localSftpPathStyle(candidate) !== style) return false;
+  return localSftpPathContains(root, candidate, style);
 }
 
 export function isInvalidLocalSftpDropDestination(

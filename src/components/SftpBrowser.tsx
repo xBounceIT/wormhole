@@ -1,5 +1,6 @@
 import { SftpEditedFiles } from './SftpEditors';
 import { SftpDirectoryTree } from './SftpDirectoryTree';
+import { SftpSectionHeader } from './SftpSectionHeader';
 import { sftpShortcut } from '../sftp-tree-state';
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from './ui/resizable';
 import { type SftpBrowserState } from '../sftp-state';
@@ -38,17 +39,17 @@ import {
   ArrowUp,
   ArrowRightLeft,
   ChevronDown,
-  ChevronUp,
   Check,
   Download,
   File,
   FilePlus2,
   FolderOpen,
   FolderPlus,
+  FolderTree,
+  House,
   LoaderCircle,
   Pencil,
   RefreshCcw,
-  Search,
   Trash2,
   Upload,
   X,
@@ -95,9 +96,14 @@ function IconButton({
   ...props
 }: ComponentProps<typeof Button> & { label: string; children: ReactNode }) {
   return (
-    <Button aria-label={label} title={label} size="icon-sm" variant="ghost" {...props}>
-      {children}
-    </Button>
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Button aria-label={label} size="icon-sm" variant="ghost" {...props}>
+          {children}
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent side="bottom">{label}</TooltipContent>
+    </Tooltip>
   );
 }
 export type SftpPaneKind = 'local' | 'remote';
@@ -192,12 +198,19 @@ export function SftpFilePane({
   onTransfer: (payload: SftpDragPayload, destinationPath: string) => void;
 }) {
   const [treeVisible, setTreeVisible] = useState(true);
+  // Home temporarily unmounts the tree while its default directory is resolved.
+  const [treeHeight, setTreeHeight] = useState(140);
   const [treeRefresh, setTreeRefresh] = useState(0);
   function refreshPane() {
     setTreeRefresh((current) => current + 1);
     onRefresh();
   }
   const [search, setSearch] = useState('');
+  const [treeSearch, setTreeSearch] = useState('');
+  const [treeSort, setTreeSort] = useState<{ column: SftpSortColumn; ascending: boolean }>({
+    column: 'name',
+    ascending: true,
+  });
   const [sortColumn, setSortColumn] = useState<SftpSortColumn>('name');
   const [ascending, setAscending] = useState(true);
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
@@ -286,13 +299,20 @@ export function SftpFilePane({
     }
   }
 
+  function changeTreeSort(column: SftpSortColumn) {
+    setTreeSort((current) => ({
+      column,
+      ascending: current.column === column ? !current.ascending : true,
+    }));
+  }
+
   function toggleSelection(entry: WormholeSftpEntry, event: MouseEvent) {
     const next = nextSftpSelection(
       validSelectedPaths,
       visibleEntries.map((candidate) => candidate.fullPath),
       entry.fullPath,
       selectionAnchorPath.current,
-      { extend: event.shiftKey, toggle: event.ctrlKey || event.metaKey },
+      { extend: event.shiftKey, toggle: true },
     );
     selectionAnchorPath.current = next.anchorPath;
     setSelectedPaths(next.selected);
@@ -335,7 +355,9 @@ export function SftpFilePane({
     const viewport = listViewportRef.current;
     if (viewport) {
       const rowTop = targetIndex * sftpVirtualRowHeight;
-      const rowBottom = rowTop + sftpVirtualRowHeight;
+      const headerHeight =
+        viewport.querySelector('[data-sftp-file-header]')?.getBoundingClientRect().height ?? 0;
+      const rowBottom = rowTop + sftpVirtualRowHeight + headerHeight;
       if (rowTop < viewport.scrollTop) viewport.scrollTop = rowTop;
       else if (rowBottom > viewport.scrollTop + viewport.clientHeight) {
         viewport.scrollTop = rowBottom - viewport.clientHeight;
@@ -343,8 +365,8 @@ export function SftpFilePane({
       syncListViewport(viewport.clientHeight, viewport.scrollTop);
     }
     requestAnimationFrame(() => {
-      document
-        .querySelector<HTMLElement>(`[data-sftp-pane="${pane}"][data-sftp-index="${targetIndex}"]`)
+      listViewportRef.current
+        ?.querySelector<HTMLElement>(`[data-sftp-index="${targetIndex}"]`)
         ?.focus();
     });
   }
@@ -543,16 +565,18 @@ export function SftpFilePane({
 
       <div className="flex shrink-0 flex-wrap items-center gap-1">
         <IconButton label="Home" onClick={() => onNavigate('')}>
-          <FolderOpen />
+          <House />
         </IconButton>
-        <Button
-          size="sm"
-          variant="ghost"
+        <IconButton
+          label={treeVisible ? 'Hide directory tree' : 'Show directory tree'}
           aria-pressed={treeVisible}
+          variant={treeVisible ? 'default' : 'ghost'}
+          className={treeVisible ? undefined : 'text-muted-foreground'}
           onClick={() => setTreeVisible((current) => !current)}
+          type="button"
         >
-          Tree
-        </Button>
+          <FolderTree />
+        </IconButton>
         <IconButton disabled={busy} label="Refresh" onClick={refreshPane}>
           <RefreshCcw className={busy ? 'animate-spin' : undefined} />
         </IconButton>
@@ -584,18 +608,6 @@ export function SftpFilePane({
           <Trash2 />
         </IconButton>
         {busy ? <LoaderCircle className="ml-2 size-4 animate-spin text-muted-foreground" /> : null}
-        <div className="ml-auto min-w-36 flex-1 sm:max-w-56">
-          <div className="relative">
-            <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              aria-label={`Search ${pane} folder`}
-              className="h-8 pl-7 text-[11px]"
-              onChange={(event) => setSearch(event.target.value)}
-              placeholder="Search this folder"
-              value={search}
-            />
-          </div>
-        </div>
       </div>
 
       {sessionId && treeVisible && state.path ? (
@@ -603,50 +615,47 @@ export function SftpFilePane({
           sessionId={sessionId}
           pane={pane}
           path={state.path}
+          height={treeHeight}
+          onHeightChange={setTreeHeight}
+          search={treeSearch}
+          onSearchChange={setTreeSearch}
+          sortColumn={treeSort.column}
+          ascending={treeSort.ascending}
+          onSort={changeTreeSort}
           revision={`${revision}:${treeRefresh}`}
           onNavigate={onNavigate}
           onDrop={handleDrop}
         />
       ) : null}
       <div
-        className="min-h-0 flex-1 overflow-auto rounded-sm border border-border"
+        className="min-h-0 flex-1 overflow-auto rounded-sm border border-border [scrollbar-gutter:stable]"
         onScroll={(event) => {
           const viewport = event.currentTarget;
           syncListViewport(viewport.clientHeight, viewport.scrollTop);
         }}
         ref={listViewportRef}
       >
-        <div className="min-w-0">
-          <div className="grid min-h-[34px] grid-cols-[1.5rem_minmax(0,1fr)_5.25rem_7.75rem] gap-x-2.5 border-b border-border bg-muted/20 px-[22px] py-2 font-mono text-[9px] uppercase tracking-[0.12em] text-muted-foreground">
-            <span aria-hidden="true" />
-            {(['name', 'size', 'modified'] as SftpSortColumn[]).map((column) => (
-              <Tooltip key={column}>
-                <TooltipTrigger asChild>
-                  <button
-                    className={`flex items-center gap-1 hover:text-foreground ${column === 'size' ? 'justify-end text-right' : 'text-left'}`}
-                    onClick={() => changeSort(column)}
-                    type="button"
-                  >
-                    {column === 'name' ? 'Name' : column === 'size' ? 'Size' : 'Modified'}
-                    {sortColumn === column ? (
-                      ascending ? (
-                        <ChevronUp className="size-3" />
-                      ) : (
-                        <ChevronDown className="size-3" />
-                      )
-                    ) : null}
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent side="top">
-                  Sort by {column === 'name' ? 'name' : column === 'size' ? 'size' : 'modified'}
-                </TooltipContent>
-              </Tooltip>
-            ))}
-          </div>
+        <div
+          className="min-w-0"
+          role="grid"
+          aria-label={`${pane === 'local' ? 'Local' : 'Remote'} file list`}
+          aria-multiselectable="true"
+          aria-rowcount={visibleEntries.length + 1}
+          aria-colcount={5}
+        >
+          <SftpSectionHeader
+            pane={pane}
+            kind="files"
+            sortColumn={sortColumn}
+            ascending={ascending}
+            onSort={changeSort}
+            search={search}
+            onSearchChange={setSearch}
+          />
           {visibleEntries.length > 0 ? (
             <div
               className="relative"
-              role="listbox"
+              role="rowgroup"
               style={{
                 contain: 'layout paint style',
                 height: visibleEntries.length * sftpVirtualRowHeight,
@@ -667,15 +676,13 @@ export function SftpFilePane({
                       <ContextMenuTrigger asChild>
                         <div
                           aria-selected={selected}
-                          aria-posinset={entryIndex + 1}
-                          aria-setsize={visibleEntries.length}
-                          className={`grid h-7 grid-cols-[1.5rem_minmax(0,1fr)_5.25rem_7.75rem] items-center gap-x-2.5 border-b border-border/50 px-[22px] text-xs outline-none transition-colors ${
+                          aria-rowindex={entryIndex + 2}
+                          className={`grid h-7 grid-cols-[1rem_1.5rem_minmax(0,1fr)_5.25rem_7.75rem] items-center gap-x-2.5 border-b border-border/50 px-[22px] text-xs outline-none transition-colors ${
                             selected ? 'bg-primary/15 text-foreground' : 'hover:bg-muted/30'
                           } ${dropPath === entry.fullPath ? 'ring-1 ring-inset ring-primary' : ''}`}
                           draggable={!busy && !isEditing}
                           data-sftp-index={entryIndex}
                           data-sftp-pane={pane}
-                          onClick={(event) => toggleSelection(entry, event)}
                           onDoubleClick={() => {
                             if (busy) return;
                             if (entry.isDirectory) onNavigate(entry.fullPath);
@@ -717,6 +724,7 @@ export function SftpFilePane({
                             handleDrop(event, entry.isDirectory ? entry.fullPath : state.path)
                           }
                           onKeyDown={(event) => {
+                            if (event.target instanceof HTMLInputElement) return;
                             if (
                               !busy &&
                               (event.key === 'ArrowUp' ||
@@ -736,17 +744,38 @@ export function SftpFilePane({
                               onNavigate(entry.fullPath);
                             }
                           }}
-                          role="option"
+                          role="row"
                           tabIndex={0}
                         >
-                          <span className="flex items-center justify-center">
+                          <span role="gridcell" className="flex items-center justify-center">
+                            <Checkbox
+                              aria-label={`Select ${entry.name}`}
+                              checked={selected}
+                              disabled={busy || isEditing}
+                              className="after:-inset-1"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                toggleSelection(entry, event);
+                              }}
+                              onDoubleClick={(event) => event.stopPropagation()}
+                              onKeyDown={(event) => {
+                                if (event.key === ' ' || event.key === 'Enter')
+                                  event.stopPropagation();
+                              }}
+                            />
+                          </span>
+                          <span
+                            role="gridcell"
+                            aria-hidden="true"
+                            className="flex items-center justify-center"
+                          >
                             {entry.isDirectory ? (
                               <FolderOpen className="size-4 shrink-0 text-amber-400" />
                             ) : (
                               <File className="size-4 shrink-0 text-muted-foreground" />
                             )}
                           </span>
-                          <span className="flex min-w-0 items-center">
+                          <span role="gridcell" className="flex min-w-0 items-center">
                             {isEditing ? (
                               <Input
                                 autoFocus
@@ -767,10 +796,10 @@ export function SftpFilePane({
                               <span className="truncate text-foreground">{entry.name}</span>
                             )}
                           </span>
-                          <span className="text-right text-muted-foreground">
+                          <span role="gridcell" className="text-right text-muted-foreground">
                             {entry.isDirectory ? '' : formatSftpSize(entry.size)}
                           </span>
-                          <span className="truncate text-muted-foreground">
+                          <span role="gridcell" className="truncate text-muted-foreground">
                             {formatSftpDate(entry.lastModifiedUtc)}
                           </span>
                         </div>
@@ -867,7 +896,7 @@ export function SftpFilePane({
         </div>
       </div>
 
-      <div className="shrink-0 border-t border-border pt-1 text-[11px] text-muted-foreground">
+      <div className="shrink-0 pt-1 text-[11px] text-muted-foreground">
         {selectedEntries.length} of {state.entries.length} selected ·{' '}
         {formatSftpSize(
           selectedEntries.reduce((total, entry) => total + (entry.isDirectory ? 0 : entry.size), 0),
@@ -1289,8 +1318,6 @@ export function SftpBrowserSurface({
         >
           Queue ({browser.transfers?.length ?? 0})
         </Button>
-        <h2 className="truncate text-sm font-semibold">{session.title}</h2>
-        <span className="truncate text-xs text-muted-foreground">{session.host || 'SSH'}</span>
       </div>
 
       {Object.keys(browser.knownOperationIds ?? {}).length > 0 ? (

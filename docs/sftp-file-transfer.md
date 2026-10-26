@@ -13,12 +13,31 @@ from MCP terminal inventory and control. Duplicating a connected SFTP tab also
 reuses its authenticated transport.
 
 Both panes have independent lazy directory trees, file lists and resize handles.
-Use the Tree button to hide a tree, Swap panels to reverse the panes, and Queue
-to collapse transfers. The persistent default order is in Settings > File
+Each tree starts at its pane's current directory and shows only its descendants.
+Navigating up or to another path changes that root without reading its ancestors.
+Trees use the same Name, Size and Modified columns as the file lists, with headers
+that remain visible while scrolling.
+Each Tree and file list has a search icon at the top right of its section.
+Click it to replace the column headings with a focused search field. The close
+button or Escape clears that filter and restores the headings and sort order.
+Tree searches filter the expanded folders and retain ancestors of matches;
+they do not fetch additional directories. All four filters work independently.
+Click Name, Size or Modified to sort either view; click again to reverse the
+direction. Each view retains its own order. Trees sort siblings within each
+folder, preserving expanded branches and keeping the current folder visible.
+The directory tree icon is highlighted while its tree is visible. Use it to show
+or hide the tree, Swap panels to reverse the panes, and Queue to collapse
+transfers. The persistent default order is in Settings > File
 transfer. Tree requests have independent correlation, at most four concurrent
-reads per session, the existing 4,096-entry limit and remote listing timeout.
-The tree cache retains up to 128 ordinary directory listings plus the bounded
-active ancestor chain and in-flight requests.
+reads shared by both panes per session, with up to 128 additional queued requests,
+the existing 4,096-entry limit and remote listing timeout. Refreshes wait for
+in-flight reads of the same folder before requesting a replacement listing.
+The tree cache retains up to 128 directory listings, protecting the current root
+and in-flight requests from eviction.
+
+Use the checkboxes in either pane to select files and folders. Checkbox clicks
+add or remove one item; Shift-click selects a range. Clicking a row leaves the
+selection unchanged, and double-clicking still opens folders and local files.
 
 Within File transfer, Tab switches panes; Enter opens a focused directory;
 Backspace or Alt+Up goes up; F5 copies to the other pane; F2 renames; F7 creates

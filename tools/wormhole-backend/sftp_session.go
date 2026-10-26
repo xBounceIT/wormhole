@@ -114,6 +114,11 @@ func (server *sshServer) openSharedSftp(command sshWireCommand) {
 
 var errSftpTreeBusy = errors.New("too many directory tree requests; retry shortly")
 
+const (
+	sftpTreeConcurrency = 4
+	sftpTreeQueueLimit  = 128
+)
+
 func (server *sshServer) sftpTreeList(command sshWireCommand) {
 	native := server.session(command.SessionID)
 	writeFailure := func(err error) {
@@ -132,50 +137,34 @@ func (server *sshServer) sftpTreeList(command sshWireCommand) {
 		return
 	}
 	native.sftpMu.Lock()
-	if native.treeRequests >= 4 {
+	if native.treeRequests >= sftpTreeConcurrency+sftpTreeQueueLimit {
 		native.sftpMu.Unlock()
 		writeFailure(errSftpTreeBusy)
 		return
 	}
+	if native.treeSlots == nil {
+		native.treeSlots = make(chan struct{}, sftpTreeConcurrency)
+	}
+	slots := native.treeSlots
 	client, generation := native.sftpClient, native.sftpGeneration
 	native.treeRequests++
 	native.sftpMu.Unlock()
 	go func() {
+		// Count queued and publishing requests too, bounding workers even if stdout stalls.
 		defer func() { native.sftpMu.Lock(); native.treeRequests--; native.sftpMu.Unlock() }()
-		var entries []sshSftpEntry
-		var truncated bool
-		var path string
-		var err error
-		if command.Pane == "local" {
-			path, err = normalizeLocalPath(command.Path)
-			if err == nil {
-				entries, truncated, err = readLocalDirectory(path)
-			}
-		} else {
-			path, err = normalizeSftpPath(command.Path)
-			if err == nil && client == nil {
-				err = errSSHSftpClosed
-			}
-			if err == nil {
-				path, entries, truncated, err = readSftpDirectory(client, path)
-			}
+		select {
+		case slots <- struct{}{}:
+		case <-native.done:
+			writeFailure(errSSHSessionClosed)
+			return
 		}
+		// Retain capacity through publication so a blocked writer cannot buffer
+		// a complete listing for every queued request.
+		defer func() { <-slots }()
+		path, directories, truncated, err := native.readSftpTree(command, client, generation)
 		if err != nil {
 			writeFailure(err)
 			return
-		}
-		native.sftpMu.Lock()
-		current := generation == native.sftpGeneration && !native.sftpClosed
-		native.sftpMu.Unlock()
-		if !current || native.isClosed() {
-			writeFailure(errSSHSftpClosed)
-			return
-		}
-		directories := make([]sshSftpEntry, 0)
-		for _, entry := range entries {
-			if entry.IsDirectory {
-				directories = append(directories, entry)
-			}
 		}
 		kind := "sftp.ready"
 		if command.Pane == "local" {
@@ -183,6 +172,50 @@ func (server *sshServer) sftpTreeList(command sshWireCommand) {
 		}
 		server.output.write(sshWireEvent{Type: kind, SessionID: native.id, RequestID: command.RequestID, Pane: command.Pane, Path: path, Entries: directories, Truncated: truncated})
 	}()
+}
+
+func (native *sshNativeSession) currentSftpTree(generation uint64) bool {
+	native.sftpMu.Lock()
+	current := generation == native.sftpGeneration && !native.sftpClosed
+	native.sftpMu.Unlock()
+	return current && !native.isClosed()
+}
+
+func (native *sshNativeSession) readSftpTree(command sshWireCommand, client *sftp.Client, generation uint64) (string, []sshSftpEntry, bool, error) {
+	if !native.currentSftpTree(generation) {
+		return "", nil, false, errSSHSftpClosed
+	}
+	var path string
+	var entries []sshSftpEntry
+	var truncated bool
+	var err error
+	if command.Pane == "local" {
+		path, err = normalizeLocalPath(command.Path)
+		if err == nil {
+			entries, truncated, err = readLocalDirectory(path)
+		}
+	} else {
+		path, err = normalizeSftpPath(command.Path)
+		if err == nil && client == nil {
+			err = errSSHSftpClosed
+		}
+		if err == nil {
+			path, entries, truncated, err = readSftpDirectory(client, path)
+		}
+	}
+	if err != nil {
+		return "", nil, false, err
+	}
+	if !native.currentSftpTree(generation) {
+		return "", nil, false, errSSHSftpClosed
+	}
+	directories := make([]sshSftpEntry, 0)
+	for _, entry := range entries {
+		if entry.IsDirectory {
+			directories = append(directories, entry)
+		}
+	}
+	return path, directories, truncated, nil
 }
 
 func newSharedSftpClient(ctx context.Context, source *sshNativeSession) (*sftp.Client, error) {

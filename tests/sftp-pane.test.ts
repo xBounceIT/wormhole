@@ -41,12 +41,20 @@ test('SFTP panes keep drag feedback stable and draw unclipped borders in Chromiu
     )
     .join('\n');
   const fixture = readFileSync(new URL('./fixtures/sftp-pane.tsx', import.meta.url), 'utf8');
+  const paneComponents = ['SftpSearchInput', 'SftpColumnHeader', 'SftpSectionHeader']
+    .map((name) =>
+      readFileSync(new URL(`../src/components/${name}.tsx`, import.meta.url), 'utf8')
+        .replace(/^import .*;$/gm, '')
+        .replace(/^export /gm, ''),
+    )
+    .join('\n');
   const conflictStart = source.indexOf('function SftpConflictOverlay');
   const conflictEnd = source.indexOf('function SftpBrowserSurface', conflictStart);
   assert.ok(conflictStart > end && conflictEnd > conflictStart);
   const modal = `function SftpTestDialog({ children }) { return React.createElement('div', null, children); }`;
   const transformed = await transformWithOxc(
     helpers +
+      paneComponents +
       source.slice(start, end).replace(/^export /gm, '') +
       source.slice(conflictStart, conflictEnd) +
       modal,
@@ -77,7 +85,7 @@ test('SFTP panes keep drag feedback stable and draw unclipped borders in Chromiu
     const assert = require('node:assert/strict');
     const React = require(${JSON.stringify(require.resolve('react'))});
     const { createRoot } = require(${JSON.stringify(require.resolve('react-dom/client'))});
-    const { useState, useRef, useMemo, useCallback, useEffect, useLayoutEffect } = React;
+    const { useId, useState, useRef, useMemo, useCallback, useEffect, useLayoutEffect } = React;
     const DialogPrimitive = require(${JSON.stringify(require.resolve('radix-ui'))}).Dialog;
     const Dialog = DialogPrimitive.Root;
     const DialogContent = ({ showCloseButton, ...props }) => React.createElement(DialogPrimitive.Content, props);
@@ -86,8 +94,8 @@ test('SFTP panes keep drag feedback stable and draw unclipped borders in Chromiu
       await new Promise((resolve) => setTimeout(resolve, 0));
     };
     const Input = 'input', Button = 'button';
-    const Checkbox = ({ checked, onCheckedChange }) => React.createElement('input', {
-      type: 'checkbox', checked, onChange: (event) => onCheckedChange(event.target.checked),
+    const Checkbox = ({ checked, onCheckedChange, ...props }) => React.createElement('input', {
+      ...props, type: 'checkbox', checked, onChange: (event) => onCheckedChange?.(event.target.checked),
     });
     const IconButton = ({ label, children, ...props }) => React.createElement('button', { ...props, 'aria-label': label }, children);
     const Wrapper = ({ children }) => children;
@@ -97,7 +105,7 @@ test('SFTP panes keep drag feedback stable and draw unclipped borders in Chromiu
     const ContextMenuItem = Hidden, ContextMenuSeparator = Hidden, ContextMenuSub = Hidden, ContextMenuSubContent = Hidden, ContextMenuSubTrigger = Hidden;
     const ArrowUp = 'i', ChevronDown = 'i', ChevronUp = 'i', RefreshCcw = 'i';
     const FolderPlus = 'i', FilePlus2 = 'i', Trash2 = 'i', LoaderCircle = 'i';
-    const Search = 'i', FolderOpen = 'i', File = 'i', Pencil = 'i';
+    const Search = 'i', FolderOpen = 'i', FolderTree = 'i', House = 'i', File = 'i', Pencil = 'i';
     globalThis.IS_REACT_ACT_ENVIRONMENT = true;
     const style = document.createElement('style');
     style.textContent = ${JSON.stringify(css)};

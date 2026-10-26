@@ -282,6 +282,7 @@ type sshNativeSession struct {
 	sftpOnly         bool
 	transport        *sshSharedTransport
 	treeRequests     int
+	treeSlots        chan struct{}
 	terminalStream   *sshTerminalStream
 	id               string
 	client           *ssh.Client
