@@ -198,8 +198,13 @@ export function SidebarLayout({
               }}
               panelRef={panelRef}
             />
+            {/* Both 1px borders form the visible divider. */}
             <ResizableHandle
-              className={pinned ? undefined : 'hidden'}
+              className={
+                pinned
+                  ? 'z-40 [&>div]:absolute [&>div]:top-1/2 [&>div]:left-0 [&>div]:-translate-1/2'
+                  : 'hidden'
+              }
               disabled={!pinned}
               withHandle
             />

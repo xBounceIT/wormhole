@@ -28,7 +28,7 @@ declare global {
     sidebarInput: (event: Record<string, unknown>) => Promise<void>;
     sidebarReducedMotion: (reduce: boolean) => Promise<void>;
     sidebarObserve: (stage: string) => Promise<void>;
-    runSidebarTests: () => Promise<void>;
+    runSidebarTests: (handleOnly?: boolean) => Promise<void>;
   }
 }
 
@@ -138,7 +138,8 @@ function Harness({
   );
 }
 
-window.runSidebarTests = async () => {
+window.runSidebarTests = async (handleOnly = false) => {
+  if (handleOnly) return runAppIntegrationTests(true);
   const assert = window.sidebarAssert;
   const root = createRoot(document.getElementById('root')!);
   let key = 0;
@@ -288,7 +289,35 @@ window.runSidebarTests = async () => {
       'The session count badge must stay centered inside the Sessions button',
     );
   };
+  const assertResizeHandleCentered = () => {
+    const separator = query('[data-slot="resizable-handle"]');
+    const separatorBounds = separator.getBoundingClientRect();
+    const gripBounds = separator.firstElementChild!.getBoundingClientRect();
+    const surface = query('[data-sidebar-surface]');
+    const dividerLeft =
+      surface.getBoundingClientRect().right -
+      parseFloat(getComputedStyle(surface).borderRightWidth);
+    assert.ok(
+      Math.abs(
+        gripBounds.left + gripBounds.width / 2 - (dividerLeft + separatorBounds.right) / 2,
+      ) <= 0.25,
+      'The resize grip must stay centered across both visible divider borders',
+    );
+    assert.ok(
+      Math.abs(
+        gripBounds.top + gripBounds.height / 2 - (separatorBounds.top + separatorBounds.height / 2),
+      ) <= 0.5,
+      'The resize grip must stay vertically centered on the separator',
+    );
+    for (const x of [gripBounds.left + 0.5, gripBounds.right - 0.5]) {
+      assert.ok(
+        separator.contains(document.elementFromPoint(x, gripBounds.top + gripBounds.height / 2)),
+        'Both sides of the resize grip must remain above the sidebar surface',
+      );
+    }
+  };
   assertBadgeAligned();
+  assertResizeHandleCentered();
   assert.equal(pin().getAttribute('aria-label'), 'Unpin sidebar');
   assert.equal(pin().getAttribute('aria-pressed'), 'true');
   assert.ok(
@@ -345,11 +374,12 @@ window.runSidebarTests = async () => {
   );
   assert.ok(writes.length > 0);
   const keyboardWidth = aside().getBoundingClientRect().width;
-  const separatorBounds = query('[role="separator"]').getBoundingClientRect();
-  const dragX = Math.round(separatorBounds.x + separatorBounds.width / 2);
-  await move(dragX);
+  const gripBounds = query('[data-slot="resizable-handle"] > div').getBoundingClientRect();
+  const dragX = Math.ceil(gripBounds.left + 0.5);
+  const dragY = Math.round(gripBounds.top + gripBounds.height / 2);
+  await move(dragX, dragY);
   await React.act(async () =>
-    window.sidebarInput({ type: 'mouseDown', button: 'left', x: dragX, y: 450, clickCount: 1 }),
+    window.sidebarInput({ type: 'mouseDown', button: 'left', x: dragX, y: dragY, clickCount: 1 }),
   );
   await tick();
   await React.act(async () =>
@@ -357,12 +387,18 @@ window.runSidebarTests = async () => {
       type: 'mouseMove',
       modifiers: ['leftbuttondown'],
       x: dragX + 30,
-      y: 450,
+      y: dragY,
     }),
   );
   await tick();
   await React.act(async () =>
-    window.sidebarInput({ type: 'mouseUp', button: 'left', x: dragX + 30, y: 450, clickCount: 1 }),
+    window.sidebarInput({
+      type: 'mouseUp',
+      button: 'left',
+      x: dragX + 30,
+      y: dragY,
+      clickCount: 1,
+    }),
   );
   await waitFor(
     () => aside().getBoundingClientRect().width > keyboardWidth,
@@ -370,6 +406,7 @@ window.runSidebarTests = async () => {
   );
   const resizedWidth = aside().getBoundingClientRect().width;
   assert.ok(resizedWidth > 320, JSON.stringify({ resizedWidth, writes, left: left() }));
+  assertResizeHandleCentered();
 
   await click(pin());
   assert.equal(layout().dataset.pinned, 'false');
@@ -380,6 +417,7 @@ window.runSidebarTests = async () => {
   assert.deepEqual(saves, [false]);
   await settle();
   await shown(false);
+  assert.equal(getComputedStyle(query('[data-slot="resizable-handle"]')).display, 'none');
   assert.equal(document.querySelector('[data-slot="sidebar-menu-badge"]'), null);
   assert.equal(
     document.querySelectorAll('nav[aria-label="Main navigation"]').length,
@@ -473,6 +511,7 @@ window.runSidebarTests = async () => {
     () => Math.abs(left() - resizedWidth - 1) <= 1,
     'Pinned sidebar did not restore its previous width',
   );
+  assertResizeHandleCentered();
   assert.equal(query('#native-visible').textContent, 'true');
   assert.ok(
     writes.every((width) => width >= 256),
@@ -910,7 +949,7 @@ window.runSidebarTests = async () => {
   await runAppIntegrationTests();
 };
 
-async function runAppIntegrationTests() {
+async function runAppIntegrationTests(handleOnly = false) {
   const assert = window.sidebarAssert;
   const root = createRoot(document.getElementById('root')!);
   const query = (selector: string) => document.querySelector<HTMLElement>(selector)!;
@@ -1006,6 +1045,12 @@ async function runAppIntegrationTests() {
     );
     await tick();
   };
+  const checkPinnedHandle = async () => {
+    for (const theme of ['dark', 'light'] as const) {
+      await mount([], 294, true, theme);
+      await window.sidebarObserve('pinned-' + theme);
+    }
+  };
   const originalBridge = window.wormhole;
   // Mount the real App; native services are outside this UI test.
   window.wormhole = undefined;
@@ -1013,6 +1058,10 @@ async function runAppIntegrationTests() {
     // Keep the full App's focus/layout checks deterministic in a hidden profiled window.
     // The component cases above exercise both animated and reduced-motion transitions.
     await React.act(async () => window.sidebarReducedMotion(true));
+    if (handleOnly) {
+      await checkPinnedHandle();
+      return;
+    }
     await window.sidebarObserve('mount');
     await mount([
       {
@@ -1292,6 +1341,7 @@ async function runAppIntegrationTests() {
     assert.match(query('[data-connection-tree]').textContent!, /Nothing here yet\./);
     assert.equal(document.querySelectorAll('[data-connection-tree] button[draggable]').length, 0);
     await window.sidebarObserve('tree-boundaries');
+    await checkPinnedHandle();
   } finally {
     await React.act(async () => root.unmount());
     window.wormhole = originalBridge;

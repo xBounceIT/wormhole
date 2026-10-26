@@ -141,7 +141,7 @@ export function meetsCoverageThreshold(coverage: GoCoverage, threshold: number):
   return coverage.covered * 100 >= coverage.total * threshold;
 }
 
-function runGoCoverage(repositoryRoot: string): void {
+export function runGoCoverage(repositoryRoot: string, runCommand: typeof run = run): void {
   const goModules = discoverGoModules(repositoryRoot);
   if (goModules.length === 0) {
     throw new Error('No Go modules were found.');
@@ -155,7 +155,12 @@ function runGoCoverage(repositoryRoot: string): void {
   try {
     for (const [index, modulePath] of goModules.entries()) {
       const profilePath = join(temporaryDirectory, `module-${index}.out`);
-      run('go', ['test', '-timeout=180s', './...', `-coverprofile=${profilePath}`], modulePath);
+      // The SQLite-backed Windows suite can exceed five minutes before coverage instrumentation.
+      runCommand(
+        'go',
+        ['test', '-timeout=10m', './...', `-coverprofile=${profilePath}`],
+        modulePath,
+      );
 
       const moduleCoverage = parseGoCoverage(readFileSync(profilePath, 'utf8'));
       covered += moduleCoverage.covered;
