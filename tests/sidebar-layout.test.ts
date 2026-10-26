@@ -96,7 +96,6 @@ test('pinned and auto-hide sidebars preserve layout, focus, menus and saved pref
     window.sidebarReducedMotion = reduce => require('electron').ipcRenderer.invoke('test:reduced-motion', reduce);
     window.sidebarObserve = stage => require('electron').ipcRenderer.invoke('test:observe', stage);
     ${script.code}
-    window.runSidebarTests();
     //# sourceURL=wormhole-sidebar-layout.js
   `;
   const directory = mkdtempSync(join(tmpdir(), 'wormhole-sidebar-layout-'));
@@ -107,6 +106,8 @@ test('pinned and auto-hide sidebars preserve layout, focus, menus and saved pref
       harnessPath,
       `
       const { app, BrowserWindow, ipcMain } = require('electron');
+      const nativeScale = Number(process.argv[2]);
+      app.commandLine.appendSwitch('force-device-scale-factor', String(nativeScale));
       app.setPath('userData', ${JSON.stringify(directory)});
       app.setPath('sessionData', ${JSON.stringify(directory)});
       app.whenReady().then(async () => {
@@ -118,15 +119,54 @@ test('pinned and auto-hide sidebars preserve layout, focus, menus and saved pref
         ipcMain.handle('test:input', (_event, input) => window.webContents.sendInputEvent(input));
         ipcMain.handle('test:observe', async (_event, stage) => {
           console.log('Sidebar App: ' + stage);
-          if (process.env.WORMHOLE_TEST_SCREENSHOTS && ['collapsed', 'hover', 'tree-highlight'].includes(stage)) {
+          const checkHandle = stage.startsWith('pinned-');
+          if (checkHandle || (process.env.WORMHOLE_TEST_SCREENSHOTS && ['collapsed', 'hover', 'tree-highlight'].includes(stage))) {
             // Freeze motion for stills: capturing a hidden window can resume a stale paint frame.
             const stillStyles = await window.webContents.insertCSS('[data-sidebar-surface], [data-sidebar-content] { transition: none !important; }');
             try {
-              await window.webContents.capturePage();
-              await window.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
-              const capture = await window.webContents.capturePage();
-              require('node:fs').writeFileSync(require('node:path').join(process.env.WORMHOLE_TEST_SCREENSHOTS, 'sidebar-' + stage + '.png'), capture.toPNG());
-            } finally { await window.webContents.removeInsertedCSS(stillStyles); }
+              const viewport = await window.webContents.executeJavaScript('({ width: innerWidth, height: innerHeight })');
+              for (const scale of checkHandle ? [1, 1.25, 1.5, 2] : [null]) {
+                if (scale !== null) {
+                  await window.webContents.debugger.sendCommand('Emulation.setDeviceMetricsOverride', { ...viewport, mobile: false, deviceScaleFactor: scale });
+                }
+                await window.webContents.capturePage();
+                await window.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+                const capture = await window.webContents.capturePage();
+                if (process.env.WORMHOLE_TEST_SCREENSHOTS) {
+                  const suffix = (nativeScale === 1 ? '' : '-native-' + nativeScale) + (scale === null || scale === 1 ? '' : '-' + scale);
+                  require('node:fs').writeFileSync(require('node:path').join(process.env.WORMHOLE_TEST_SCREENSHOTS, 'sidebar-' + stage + suffix + '.png'), capture.toPNG());
+                }
+                if (checkHandle) {
+                  const bounds = await window.webContents.executeJavaScript('(() => { const separator = document.querySelector("[data-slot=resizable-handle]").getBoundingClientRect(); const grip = document.querySelector("[data-slot=resizable-handle] > div").getBoundingClientRect(); return { left: separator.left, centerX: separator.left + separator.width / 2, centerY: grip.top + grip.height / 2 }; })()');
+                  const size = capture.getSize(1);
+                  const scaleX = size.width / viewport.width;
+                  const scaleY = size.height / viewport.height;
+                  const left = Math.floor((bounds.left - 6) * scaleX);
+                  const top = Math.floor((bounds.centerY - 24) * scaleY);
+                  const width = Math.ceil(13 * scaleX);
+                  const middleY = Math.floor(bounds.centerY * scaleY) - top;
+                  const pixels = capture.toBitmap({ scaleFactor: 1 });
+                  const colorAt = (x, y) => pixels.readUInt32LE(((top + y) * size.width + left + x) * 4);
+                  const borderColor = colorAt(Math.floor(bounds.centerX * scaleX) - left, 0);
+                  const borderPixels = [];
+                  const gripPixels = [];
+                  for (let x = 0; x < width; x++) {
+                    if (colorAt(x, 0) === borderColor) borderPixels.push(x);
+                    if (colorAt(x, middleY) === borderColor) gripPixels.push(x);
+                  }
+                  const assert = require('node:assert/strict');
+                  assert.ok(Math.abs(scaleX - nativeScale) < 0.01, 'The native capture must exercise the selected physical pixel scale');
+                  assert.equal(pixels.length, size.width * size.height * 4);
+                  assert.ok(borderPixels.length > 0 && gripPixels.length > borderPixels.length, 'The grip must visibly extend beyond the divider');
+                  // Opposite pixel-width parity permits only the nearest half-pixel center.
+                  const centerDelta = Math.abs(gripPixels[0] + gripPixels.at(-1) - borderPixels[0] - borderPixels.at(-1));
+                  assert.ok(centerDelta <= (gripPixels.length + borderPixels.length) % 2, 'Painted grip pixels must be centered on the complete divider in ' + stage + ' at ' + scale + 'x');
+                }
+              }
+            } finally {
+              if (checkHandle) await window.webContents.debugger.sendCommand('Emulation.clearDeviceMetricsOverride');
+              await window.webContents.removeInsertedCSS(stillStyles);
+            }
           }
         });
         ipcMain.handle('test:reduced-motion', (_event, reduce) => window.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', {
@@ -142,11 +182,11 @@ test('pinned and auto-hide sidebars preserve layout, focus, menus and saved pref
           });
           await window.webContents.debugger.sendCommand('Profiler.enable');
           await window.webContents.debugger.sendCommand('Profiler.startPreciseCoverage', { callCount: true, detailed: true });
-          await window.webContents.executeJavaScript(${JSON.stringify(renderer)});
+          await window.webContents.executeJavaScript(${JSON.stringify(renderer)} + ';window.runSidebarTests(' + (nativeScale !== 1) + ');');
           const coverage = await window.webContents.debugger.sendCommand('Profiler.takePreciseCoverage');
           const script = coverage.result.find(item => item.url === 'wormhole-sidebar-layout.js');
           if (!script) throw new Error('Missing sidebar renderer coverage');
-          for (const name of ['SidebarLayout', 'SidebarPinButton', 'SidebarNavigation', 'ContextMenuOverlayProvider']) {
+          for (const name of nativeScale === 1 ? ['SidebarLayout', 'SidebarPinButton', 'SidebarNavigation', 'ContextMenuOverlayProvider'] : []) {
             const parent = script.functions.find(item => item.functionName === name);
             if (!parent) throw new Error('Missing coverage for ' + name);
             const range = parent.ranges[0];
@@ -163,13 +203,17 @@ test('pinned and auto-hide sidebars preserve layout, focus, menus and saved pref
     );
     const electron = require('electron') as string;
     const needsDisplay = process.platform === 'linux' && !environment.DISPLAY;
-    const { stdout, stderr } = await promisify(execFile)(
-      needsDisplay ? 'xvfb-run' : electron,
-      needsDisplay ? ['--auto-servernum', electron, '--no-sandbox', harnessPath] : [harnessPath],
-      { env: { ...environment, NODE_ENV: 'test' }, timeout: 120_000, windowsHide: true },
-    );
-    for (const line of stdout.trim().split(/\r?\n/)) context.diagnostic(line);
-    if (stderr.trim()) process.stderr.write(stderr);
+    for (const scale of [1, 2]) {
+      const args = [harnessPath, String(scale)];
+      const { stdout, stderr } = await promisify(execFile)(
+        needsDisplay ? 'xvfb-run' : electron,
+        needsDisplay ? ['--auto-servernum', electron, '--no-sandbox', ...args] : args,
+        { env: { ...environment, NODE_ENV: 'test' }, timeout: 120_000, windowsHide: true },
+      );
+      context.diagnostic('Native pixel scale: ' + scale);
+      for (const line of stdout.trim().split(/\r?\n/)) context.diagnostic(line);
+      if (stderr.trim()) process.stderr.write(stderr);
+    }
   } finally {
     assert.equal(resolve(directory, '..'), resolve(tmpdir()));
     rmSync(directory, { recursive: true, force: true });
