@@ -221,6 +221,7 @@ export async function runSftpToolbarTooltipTests() {
     });
     await React.act(async () => control.focus());
     await tick();
+    assert.equal(document.activeElement === control, true, `${label} must receive keyboard focus`);
     checkDescription('focus');
     await dismiss(async () => {
       await React.act(async () =>

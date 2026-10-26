@@ -97,6 +97,9 @@ app.whenReady().then(async () => {
     await window.loadURL('data:text/html,<div id="root"></div>');
     await window.webContents.executeJavaScript('const style = document.createElement("style"); style.textContent = ' + JSON.stringify(readFileSync(join(__dirname, 'layout.css'), 'utf8')) + '; document.head.append(style);');
     window.webContents.debugger.attach('1.3');
+    // Keep DOM focus deterministic in the hidden window, independently of the CI desktop.
+    await window.webContents.debugger.sendCommand('Emulation.setFocusEmulationEnabled', { enabled: true });
+    assert.equal(await window.webContents.executeJavaScript('document.hasFocus()'), true);
     await window.webContents.debugger.sendCommand('DOM.enable');
     await window.webContents.debugger.sendCommand('CSS.enable');
     ipcMain.handle('sftp-test-key', async (_event, key) => {
