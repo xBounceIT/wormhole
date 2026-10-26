@@ -239,7 +239,7 @@ test('authentication prompts, window-close controls, and RDP surface layout work
   ).replace(/^export /gm, '');
   const startupSource = readFileSync(new URL('../src/main.tsx', import.meta.url), 'utf8');
   const cardStart = startupSource.indexOf('function renderCard');
-  const cardEnd = startupSource.indexOf('function showError', cardStart);
+  const cardEnd = startupSource.indexOf('async function mountWorkspace', cardStart);
   const unlockStart = startupSource.indexOf('function showUnlock');
   const unlockEnd = startupSource.indexOf('async function bootstrap', unlockStart);
   assert.ok(cardStart >= 0 && cardEnd > cardStart);
@@ -399,7 +399,7 @@ test('authentication prompts, window-close controls, and RDP surface layout work
     const CardContent = 'div', Label = 'label', Textarea = 'textarea';
     const KeyRound = 'span', LoaderCircle = 'span', XIcon = 'span', TriangleAlert = 'span', Power = 'span', Badge = 'span';
     const ChevronDownIcon = 'span', ChevronUpIcon = 'span', CheckIcon = 'span';
-    const { Eye, EyeOff, Check, ExternalLink, Monitor, RefreshCcw, ShieldAlert, Wifi } = require(${JSON.stringify(require.resolve('lucide-react'))});
+    const { Eye, EyeOff, Check, ExternalLink, Lock, Monitor, RefreshCcw, ShieldAlert, Wifi } = require(${JSON.stringify(require.resolve('lucide-react'))});
     const root = document.getElementById('root');
     const startupCss = ${JSON.stringify(readFileSync(new URL('../src/startup.css', import.meta.url), 'utf8'))};
     globalThis.IS_REACT_ACT_ENVIRONMENT = true;
@@ -457,7 +457,7 @@ test('authentication prompts, window-close controls, and RDP surface layout work
           const coverage = await window.webContents.debugger.sendCommand('Profiler.takePreciseCoverage');
           const script = coverage.result.find(item => item.url === 'wormhole-auth-prompt.js');
           if (!script) throw new Error('Missing authentication renderer coverage.');
-          for (const name of ['AuthPrompt', 'IdleLockHarness', 'showUnlock', 'setPasswordVisible', 'AppCloseHarness', 'DialogContent', 'useDialogOpen', 'PasswordInput', 'BitwardenCliDialog', 'BitwardenSettingsHarness', 'BitwardenAccessPrompt', 'BitwardenStartupHarness', 'CredentialsSearchHarness', 'ConnectionNotesHarness', 'RuntimeCredentialPasswordInput', 'RuntimeCredentialsHarness', 'RdpSurface']) {
+          for (const name of ['AuthPrompt', 'IdleLockHarness', 'renderCard', 'showUnlock', 'setPasswordVisible', 'AppCloseHarness', 'DialogContent', 'useDialogOpen', 'PasswordInput', 'BitwardenCliDialog', 'BitwardenSettingsHarness', 'BitwardenAccessPrompt', 'BitwardenStartupHarness', 'CredentialsSearchHarness', 'ConnectionNotesHarness', 'RuntimeCredentialPasswordInput', 'RuntimeCredentialsHarness', 'RdpSurface']) {
             const parent = script.functions.find(item => item.functionName === name);
             if (!parent) throw new Error('Missing coverage for ' + name);
             const range = parent.ranges[0];

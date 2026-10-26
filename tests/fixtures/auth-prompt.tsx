@@ -35,6 +35,7 @@ declare function TooltipProvider(props: Record<string, unknown>): import('react'
 declare function DialogContent(props: Record<string, unknown>): import('react').ReactElement;
 declare function DialogTitle(props: Record<string, unknown>): import('react').ReactElement;
 declare function showUnlock(startup: Record<string, unknown>): void;
+declare function showError(message: string): void;
 declare const PasswordInput: typeof import('../../src/components/ui/password-input').PasswordInput;
 declare function TunnelFieldRow(props: Record<string, unknown>): import('react').ReactElement;
 
@@ -47,6 +48,34 @@ async function pressNativeEscape() {
     await require('electron').ipcRenderer.invoke('test:escape');
     await released;
   });
+}
+
+function assertPadlockIcon(icon: SVGSVGElement | null, size: number) {
+  assert.ok(icon, 'the authentication heading must display a padlock');
+  assert.equal(icon.getAttribute('aria-hidden'), 'true');
+  assert.equal(icon.querySelector('path')?.getAttribute('d'), 'M7 11V7a5 5 0 0 1 10 0v4');
+  const body = icon.querySelector('rect');
+  assert.ok(body, 'the padlock must include its body');
+  assert.equal(body.getAttribute('x'), '3');
+  assert.equal(body.getAttribute('y'), '11');
+  assert.equal(body.getAttribute('width'), '18');
+  assert.equal(body.getAttribute('height'), '11');
+  assert.equal(body.getAttribute('rx'), '2');
+  const wasDark = document.documentElement.classList.contains('dark');
+  for (const dark of [false, true]) {
+    document.documentElement.classList.toggle('dark', dark);
+    const style = getComputedStyle(icon);
+    assert.equal(style.fill, 'none');
+    assert.equal(
+      style.stroke,
+      style.color,
+      'the padlock outline must inherit the foreground color',
+    );
+    assert.equal(style.strokeWidth, '2px');
+    assert.equal(icon.getBoundingClientRect().width, size);
+    assert.equal(icon.getBoundingClientRect().height, size);
+  }
+  document.documentElement.classList.toggle('dark', wasDark);
 }
 
 async function runAuthPromptTests() {
@@ -91,6 +120,11 @@ async function runAuthPromptTests() {
         </React.StrictMode>,
       );
     });
+    const heading = document.getElementById('auth-prompt-title');
+    assertPadlockIcon(
+      heading.parentElement.parentElement.querySelector<SVGSVGElement>('svg.lucide-lock'),
+      16,
+    );
   };
   const text = () => document.getElementById('root').textContent;
   const helloButton = () =>
@@ -716,6 +750,15 @@ async function runStartupUnlockTests() {
     mounts.push({ startup, workspace });
   };
   const settle = () => new Promise((resolve) => window.setTimeout(resolve, 0));
+  showError('Test startup failure.');
+  const errorMark = root.querySelector<SVGSVGElement>('svg.startup-mark');
+  assert.equal(errorMark.querySelector('rect'), null, 'startup failures must retain the key icon');
+  assert.equal(
+    errorMark.querySelector('path').getAttribute('d'),
+    'M12 3a5 5 0 0 0-3.54 8.54L5 15v4h4v-2h2v-2h1.17A5 5 0 1 0 12 3Zm0 2a3 3 0 1 1 0 6 3 3 0 0 1 0-6Z',
+  );
+  assert.equal(getComputedStyle(errorMark).fill, getComputedStyle(errorMark).color);
+  assert.equal(getComputedStyle(errorMark).stroke, 'none');
   const mount = (auth = {}) => {
     showUnlock({
       auth: {
@@ -725,6 +768,7 @@ async function runStartupUnlockTests() {
         ...auth,
       },
     });
+    assertPadlockIcon(root.querySelector<SVGSVGElement>('svg.startup-mark'), 18);
   };
   const helloButton = () =>
     [...root.querySelectorAll('button')].find(
