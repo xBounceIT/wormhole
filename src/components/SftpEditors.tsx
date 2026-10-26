@@ -4,6 +4,7 @@ import { Input } from './ui/input';
 import { Label } from './ui/label';
 import { Textarea } from './ui/textarea';
 import { Switch } from './ui/switch';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
 
 export function SftpEditorSettings() {
   const [settings, setSettings] = useState<WormholeSftpEditorSettings>();
@@ -40,20 +41,23 @@ export function SftpEditorSettings() {
       </p>
       <div className="grid gap-2">
         <Label htmlFor="sftp-default-editor">Default editor</Label>
-        <select
-          id="sftp-default-editor"
-          className="h-9 rounded-md border border-input bg-background px-2 text-xs"
+        <Select
           value={settings.defaultEditor}
-          onChange={(event) => setSettings({ ...settings, defaultEditor: event.target.value })}
+          onValueChange={(value) => setSettings({ ...settings, defaultEditor: value })}
         >
-          <option value="auto">Detect a text editor</option>
-          <option value="system">System default application</option>
-          {settings.editors.map((editor) => (
-            <option key={editor.id} value={editor.id}>
-              {editor.name}
-            </option>
-          ))}
-        </select>
+          <SelectTrigger id="sftp-default-editor" className="w-full">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="auto">Detect a text editor</SelectItem>
+            <SelectItem value="system">System default application</SelectItem>
+            {settings.editors.map((editor) => (
+              <SelectItem key={editor.id} value={editor.id}>
+                {editor.name}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
       </div>
       <div className="grid max-w-xs gap-2">
         <Label htmlFor="sftp-edit-size">Maximum editing size (MiB)</Label>
