@@ -54,6 +54,7 @@ after(async () => {
     const coverage = await profiler.post('Profiler.takePreciseCoverage');
     const methods = new Set([
       'open',
+      'acquireTunnelRoute',
       'setBounds',
       'capturePreview',
       'command',
@@ -302,7 +303,7 @@ function browserHarness({ socks = '127.0.0.1:1080', active = true } = {}) {
   const backend = {
     acquireTunnelRoute: async (request: unknown) => {
       acquisitions.push(request);
-      return { active, socksEndpoint: socks };
+      return { active, socksEndpoint: socks, tunnel: { name: 'Office', kind: 'WireGuard' } };
     },
     bindTunnelForwarder: async () => ({ host: '127.0.0.1', port: 53001 }),
   };
@@ -470,6 +471,74 @@ function browserHarness({ socks = '127.0.0.1:1080', active = true } = {}) {
     copiedLinks,
   };
 }
+
+test('native tunnel acquisition bounds display metadata and preserves backend failures', async () => {
+  const source = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
+  const start = source.indexOf('  async acquireTunnelRoute(');
+  const end = source.indexOf('  async bindTunnelForwarder(', start);
+  const context = vm.createContext({ tunnelTestTimeoutMs: 1000 });
+  vm.runInContext(
+    stripTypeScriptTypes(
+      `class Backend { ${source.slice(start, end)} }; globalThis.Backend = Backend;`,
+      { mode: 'transform' },
+    ),
+    context,
+    { filename: 'wormhole-web-browser-native.js' },
+  );
+  const backend = new (context as any).Backend();
+  const watched: string[] = [];
+  backend.tunnelFailures = { watch: (id: string) => watched.push(id) };
+  for (const response of [
+    {
+      ok: true,
+      tunnelActive: true,
+      socksEndpoint: '127.0.0.1:1080',
+      tunnelName: 'Office',
+      tunnelKind: 'OpenVPN',
+    },
+    { ok: true, tunnelName: 'N'.repeat(500), tunnelKind: 'K'.repeat(500) },
+    { ok: true, tunnelName: 42, tunnelKind: null },
+  ]) {
+    backend.send = async () => response;
+    const result = await backend.acquireTunnelRoute({ leaseId: 'lease' });
+    assert.equal(
+      result.tunnel.name,
+      typeof response.tunnelName === 'string' ? response.tunnelName.slice(0, 256) : '',
+    );
+    assert.equal(
+      result.tunnel.kind,
+      typeof response.tunnelKind === 'string' ? response.tunnelKind.slice(0, 128) : '',
+    );
+    assert.equal(result.active, response.tunnelActive === true);
+  }
+  for (const error of ['Gateway unavailable', undefined]) {
+    backend.send = async () => ({ ok: false, error });
+    await assert.rejects(backend.acquireTunnelRoute({ leaseId: 'lease' }), {
+      message: error || 'Could not establish the VPN tunnel.',
+    });
+  }
+  assert.equal(watched.length, 5);
+});
+
+test('browser route metadata survives tab commands for saved and temporary connections', async () => {
+  for (const socks of ['127.0.0.1:1080', '']) {
+    for (const extra of [{}, { nodeId: 'saved-web' }]) {
+      const h = browserHarness({ socks });
+      const target = await h.open('browser-1', 'vpn-1', extra);
+      assert.equal(target.browser.tunnel.name, 'Office');
+      assert.equal(target.browser.tunnel.kind, 'WireGuard');
+      await h.command('new-tab');
+      assert.equal(h.events.at(-1).browser.tunnel.name, 'Office');
+      assert.equal(h.events.at(-1).browser.tunnel.kind, 'WireGuard');
+      h.manager.close('browser-1');
+    }
+  }
+  const direct = browserHarness();
+  const target = await direct.open('direct', undefined, { tunnelConfigId: undefined });
+  assert.equal(target.browser.route, 'direct');
+  assert.equal(target.browser.tunnel, undefined);
+  direct.manager.close('direct');
+});
 
 test('browser favicons use the owning session, reject route escapes and cancel stale work', async () => {
   const h = browserHarness({ socks: '' });

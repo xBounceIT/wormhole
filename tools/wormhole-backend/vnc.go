@@ -91,6 +91,8 @@ type backendResponse struct {
 	ForwardHost   string `json:"forwardHost,omitempty"`
 	ForwardPort   int    `json:"forwardPort,omitempty"`
 	TunnelActive  bool   `json:"tunnelActive,omitempty"`
+	TunnelName    string `json:"tunnelName,omitempty"`
+	TunnelKind    string `json:"tunnelKind,omitempty"`
 	LeaseID       string `json:"leaseId,omitempty"`
 	Result        any    `json:"result,omitempty"`
 }
@@ -685,6 +687,8 @@ func (m *vncManager) finishTunnelAcquire(
 		response.Error = publicBackendError(err)
 	} else if lease != nil {
 		response.TunnelActive = true
+		response.TunnelName = lease.name
+		response.TunnelKind = tunnelName(lease.kind)
 		response.SocksEndpoint = lease.socksEndpoint()
 	}
 	_ = m.output.write(response)

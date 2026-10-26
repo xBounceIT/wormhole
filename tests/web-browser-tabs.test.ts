@@ -16,6 +16,15 @@ import {
   webBrowserFaviconUrlLimit,
 } from '../electron/web-browser-tabs.ts';
 
+test('browser snapshots show tunnel metadata only for the VPN route', () => {
+  const tabs = new WebBrowserTabs<number>();
+  tabs.add('page', 1, 'https://site.test/');
+  const tunnel = { name: 'Office', kind: 'WireGuard' };
+  assert.deepEqual(tabs.snapshot('vpn', undefined, tunnel).tunnel, tunnel);
+  assert.equal(tabs.snapshot('direct', undefined, tunnel).tunnel, undefined);
+  assert.equal(tabs.snapshot('vpn').tunnel, undefined);
+});
+
 test('favicon metadata accepts bounded image data only, never remote resources', () => {
   const image = 'data:image/png;base64,AQID';
   assert.equal(isWebBrowserFavicon(image), true);

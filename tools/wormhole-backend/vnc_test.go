@@ -589,6 +589,57 @@ func TestVncCommandRejectsSavedCredentialOverride(t *testing.T) {
 	}
 }
 
+func TestFinishTunnelAcquireReturnsOnlyActiveTunnelDisplayMetadata(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		active bool
+		err    error
+	}{
+		{name: "active", active: true},
+		{name: "direct"},
+		{name: "failed", err: errors.New("cannot start tunnel")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var output bytes.Buffer
+			manager := newVncManager(nil, &backendLineWriter{writer: bufio.NewWriter(&output)})
+			start := &pendingTunnelStart{}
+			manager.tunnelStarts["lease"] = start
+			var lease *tunnelRuntime
+			if tc.active {
+				pool := newTunnelRuntimePool(func(context.Context, tunnelConfigSnapshot) (*tunnelProcess, error) {
+					return newTestTunnelProcess(), nil
+				})
+				var err error
+				lease, err = pool.acquire(context.Background(), "vpn", tunnelConfigSnapshot{
+					name: "Office", kind: 0, settings: json.RawMessage(`{"Password":"private-test-value"}`),
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer lease.close()
+			}
+			manager.finishTunnelAcquire(backendCommand{ID: "request", SessionID: "lease"}, start, lease, tc.err)
+			var response backendResponse
+			if err := json.Unmarshal(output.Bytes(), &response); err != nil {
+				t.Fatal(err)
+			}
+			if response.TunnelActive != tc.active || response.OK != (tc.err == nil) {
+				t.Fatalf("unexpected tunnel status: %#v", response)
+			}
+			if tc.active {
+				if response.TunnelName != "Office" || response.TunnelKind != "WireGuard" {
+					t.Fatalf("missing tunnel metadata: %#v", response)
+				}
+			} else if response.TunnelName != "" || response.TunnelKind != "" {
+				t.Fatal("inactive route exposed active tunnel metadata")
+			}
+			if strings.Contains(output.String(), "private-test-value") || strings.Contains(output.String(), "Password") {
+				t.Fatal("tunnel settings leaked into acquire response")
+			}
+		})
+	}
+}
+
 func TestFinishTunnelAcquireHandlesCancellationBeforeLeaseCreation(t *testing.T) {
 	outputFile, err := os.CreateTemp(t.TempDir(), "backend-output-*.jsonl")
 	if err != nil {

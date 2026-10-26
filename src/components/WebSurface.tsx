@@ -54,6 +54,7 @@ export function WebSurface({
   const addressRef = useRef<HTMLInputElement>(null);
   const previewIdRef = useRef<string | undefined>(undefined);
   const browser = session.webBrowser;
+  const vpnLabel = `${browser?.tunnel?.name ? `${browser.tunnel.name}'s ` : ''}${browser?.tunnel?.kind || 'VPN tunnel'}${session.status === 'connected' ? ' ACTIVE' : ''}`;
   const tab = browser?.tabs.find((candidate) => candidate.id === browser.activeTabId);
   const available = isActive && isAuthorized && session.status === 'connected';
   const ready = available && !isOccluded;
@@ -352,25 +353,27 @@ export function WebSurface({
           <Plus />
         </ToolbarButton>
         <span
-          className="ml-auto flex shrink-0 items-center gap-1.5 border-l border-border pl-3 pr-1 text-[10px] font-medium text-muted-foreground"
+          className="ml-auto flex max-w-[40%] shrink-0 items-center gap-1.5 border-l border-border pl-3 pr-1 text-[10px] font-medium text-muted-foreground"
           title={
             browser?.restrictedOrigin
-              ? `VPN access is limited to ${browser.restrictedOrigin}`
+              ? `${vpnLabel}. VPN access is limited to ${browser.restrictedOrigin}`
               : browser?.route === 'vpn'
-                ? 'All tabs use this browser’s VPN tunnel'
+                ? `${vpnLabel}. All tabs use this browser’s VPN tunnel`
                 : 'No VPN tunnel is attached to this browser. Tabs use the normal network connection.'
           }
         >
           {browser?.route === 'vpn' ? (
-            <ShieldCheck className="size-3.5 text-emerald-600 dark:text-emerald-400" />
+            <ShieldCheck className="size-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
           ) : (
             <Globe className="size-3.5" />
           )}
-          {session.status === 'connecting'
-            ? 'Connecting…'
-            : browser?.route === 'vpn'
-              ? 'VPN tunnel'
-              : 'No VPN'}
+          <span className="truncate">
+            {session.status === 'connecting'
+              ? 'Connecting…'
+              : browser?.route === 'vpn'
+                ? vpnLabel
+                : 'No VPN'}
+          </span>
         </span>
       </div>
       <header className="flex h-11 shrink-0 items-center gap-2 border-b border-border bg-card px-2">

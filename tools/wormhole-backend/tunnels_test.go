@@ -953,7 +953,7 @@ func TestTunnelRuntimePoolCoalescesAndReferenceCounts(t *testing.T) {
 		<-start
 		return newTestTunnelProcess(), nil
 	})
-	snapshot := tunnelConfigSnapshot{id: "id", updatedAt: "one"}
+	snapshot := tunnelConfigSnapshot{id: "id", name: "Office", kind: 1, updatedAt: "one"}
 	results := make(chan *tunnelRuntime, 2)
 	errors := make(chan error, 2)
 	for range 2 {
@@ -974,6 +974,11 @@ func TestTunnelRuntimePoolCoalescesAndReferenceCounts(t *testing.T) {
 	}
 	if first.entry.process != second.entry.process {
 		t.Fatal("concurrent leases did not share one sidecar")
+	}
+	for _, lease := range []*tunnelRuntime{first, second} {
+		if lease.name != "Office" || lease.kind != 1 {
+			t.Fatal("lease lost its tunnel display metadata")
+		}
 	}
 	startsMu.Lock()
 	startCount := starts
