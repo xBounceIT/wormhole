@@ -122,7 +122,7 @@ export function SftpSectionHeader({
                 columnIndex={index + (kind === 'tree' ? 1 : 3)}
                 sortColumn={sortColumn}
                 ascending={ascending}
-                onSort={onSort}
+                onSort={kind === 'tree' && column === 'size' ? undefined : onSort}
                 className={
                   kind === 'tree' && column === 'name'
                     ? 'pl-[60px]'

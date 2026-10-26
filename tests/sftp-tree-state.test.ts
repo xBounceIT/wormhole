@@ -193,42 +193,40 @@ test('tree search preserves matching folders and their ancestors without changin
   assert.equal(filterSftpTreeRows(rows, '').length, rows.length);
 });
 
-test('tree column sorting orders siblings and preserves hierarchy, filters and cached metadata', () => {
+test('tree name and date sorting preserve hierarchy, filters and real directory metadata', () => {
   let state = revealSftpTreePath(createSftpTree('remote'), '/parent');
-  const entry = (parent: string, name: string, size?: number, lastModifiedUtc?: string) => ({
+  const entry = (parent: string, name: string, lastModifiedUtc?: string) => ({
     name,
     fullPath: `${parent}/${name}`,
     isDirectory: true,
-    size,
+    size: 0,
     lastModifiedUtc,
   });
   const children = [
-    entry('/parent', 'zulu', 40, '2026-10-24T12:00:00Z'),
-    entry('/parent', 'Beta', 20, '2026-10-25T12:00:00Z'),
-    entry('/parent', 'alpha', 20, '2026-10-25T12:00:00Z'),
+    entry('/parent', 'zulu', '2026-10-24T12:00:00Z'),
+    entry('/parent', 'Beta', '2026-10-25T12:00:00Z'),
+    entry('/parent', 'alpha', '2026-10-25T12:00:00Z'),
     entry('/parent', 'missing'),
-    entry('/parent', 'invalid', 0, 'not a date'),
+    entry('/parent', 'invalid', 'not a date'),
   ];
   state = beginSftpTreeRequest(state, '/parent', 'parent');
   state = finishSftpTreeRequest(state, '/parent', 'parent', children);
   state = toggleSftpTreePath(state, '/parent/zulu');
   state = beginSftpTreeRequest(state, '/parent/zulu', 'zulu');
   state = finishSftpTreeRequest(state, '/parent/zulu', 'zulu', [
-    entry('/parent/zulu', 'small', 5, '2026-10-23T12:00:00Z'),
-    entry('/parent/zulu', 'large', 80, '2026-10-26T12:00:00Z'),
+    entry('/parent/zulu', 'small', '2026-10-23T12:00:00Z'),
+    entry('/parent/zulu', 'large', '2026-10-26T12:00:00Z'),
   ]);
   const snapshot = structuredClone(state);
-  const names = (column: 'name' | 'size' | 'modified', ascending: boolean, depth = 1) =>
+  const names = (column: 'name' | 'modified', ascending: boolean, depth = 1) =>
     sftpTreeRows(state, column, ascending)
       .filter((row) => row.depth === depth)
       .map((row) => row.name);
   assert.deepEqual(names('name', true), ['alpha', 'Beta', 'invalid', 'missing', 'zulu']);
   assert.deepEqual(names('name', false), ['zulu', 'missing', 'invalid', 'Beta', 'alpha']);
-  assert.deepEqual(names('size', true), ['invalid', 'missing', 'alpha', 'Beta', 'zulu']);
-  assert.deepEqual(names('size', false), ['zulu', 'alpha', 'Beta', 'invalid', 'missing']);
   assert.deepEqual(names('modified', true), ['invalid', 'missing', 'zulu', 'alpha', 'Beta']);
   assert.deepEqual(names('modified', false), ['alpha', 'Beta', 'zulu', 'invalid', 'missing']);
-  assert.deepEqual(names('size', false, 2), ['large', 'small']);
+  assert.deepEqual(names('modified', false, 2), ['large', 'small']);
   const sorted = sftpTreeRows(state, 'name', false);
   assert.deepEqual(
     sorted.slice(0, 4).map((row) => row.path),

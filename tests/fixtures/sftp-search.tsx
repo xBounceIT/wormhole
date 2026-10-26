@@ -196,9 +196,16 @@ export async function runSftpSearchTests(
     assert.deepEqual([...requests].sort(), ['local:/local/alpha', 'remote:/remote/alpha']);
     const headingStyles: Record<string, string>[] = [];
     for (const pane of ['local', 'remote']) {
+      assert.equal(
+        !!header(pane, 'tree', 1).querySelector('button'),
+        false,
+        'Directory trees must not offer sorting by unavailable folder sizes',
+      );
+      assert.equal(header(pane, 'tree', 1).hasAttribute('aria-sort'), false);
+      assert.ok(header(pane, 'files', 1).querySelector('button'));
       for (const view of ['tree', 'files'] as const) {
         for (const index of [0, 1, 2]) {
-          const label = header(pane, view, index).querySelector('button')!;
+          const label = header(pane, view, index).querySelector(':scope > button, :scope > span')!;
           const style = getComputedStyle(label);
           headingStyles.push(
             Object.fromEntries(
@@ -305,22 +312,21 @@ export async function runSftpSearchTests(
     assert.equal(header('local', 'tree', 0).getAttribute('aria-sort'), 'descending');
     assert.equal(header('local', 'files', 0).getAttribute('aria-sort'), 'ascending');
     assert.equal(header('remote', 'tree', 0).getAttribute('aria-sort'), 'ascending');
-    for (const index of [2, 1]) {
-      await sort('local', 'tree', index);
-      assert.equal(header('local', 'tree', index).getAttribute('aria-sort'), 'ascending');
-      assert.equal(header('local', 'tree', 0).getAttribute('aria-sort'), 'none');
-      assert.deepEqual(
-        directoryNames('local'),
-        index === 1 ? ['Needle', 'Other'] : ['Other', 'Needle'],
-      );
-      await sort('local', 'tree', index);
-      assert.equal(header('local', 'tree', index).getAttribute('aria-sort'), 'descending');
-      assert.deepEqual(directoryNames('local'), ['Needle', 'Other']);
-    }
+    await sort('local', 'tree', 2);
+    assert.equal(header('local', 'tree', 2).getAttribute('aria-sort'), 'ascending');
+    assert.equal(header('local', 'tree', 0).getAttribute('aria-sort'), 'none');
+    assert.deepEqual(directoryNames('local'), ['Other', 'Needle']);
+    await sort('local', 'tree', 2);
+    assert.equal(header('local', 'tree', 2).getAttribute('aria-sort'), 'descending');
+    assert.deepEqual(directoryNames('local'), ['Needle', 'Other']);
+    await sort('local', 'files', 1);
+    assert.equal(header('local', 'files', 1).getAttribute('aria-sort'), 'ascending');
+    await sort('local', 'files', 1);
+    assert.equal(header('local', 'files', 1).getAttribute('aria-sort'), 'descending');
     await sort('local', 'files', 2);
     await sort('local', 'files', 2);
     assert.equal(header('local', 'files', 2).getAttribute('aria-sort'), 'descending');
-    assert.equal(header('local', 'tree', 1).getAttribute('aria-sort'), 'descending');
+    assert.equal(header('local', 'tree', 2).getAttribute('aria-sort'), 'descending');
     await sort('local', 'files', 0);
     await sort('local', 'tree', 0);
     await sort('local', 'tree', 0);

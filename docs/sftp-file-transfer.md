@@ -22,9 +22,10 @@ Click it to replace the column headings with a focused search field. The close
 button or Escape clears that filter and restores the headings and sort order.
 Tree searches filter the expanded folders and retain ancestors of matches;
 they do not fetch additional directories. All four filters work independently.
-Click Name, Size or Modified to sort either view; click again to reverse the
-direction. Each view retains its own order. Trees sort siblings within each
-folder, preserving expanded branches and keeping the current folder visible.
+Click Name or Modified to sort a tree, or Name, Size or Modified to sort a file
+list; click again to reverse the direction. Tree Size headers are labels only
+because folder sizes are unavailable. Each view retains its own order. Trees sort
+siblings within each folder, preserving expanded branches and the current folder.
 The directory tree icon is highlighted while its tree is visible. Use it to show
 or hide the tree, Swap panels to reverse the panes, and Queue to collapse
 transfers. The persistent default order is in Settings > File
