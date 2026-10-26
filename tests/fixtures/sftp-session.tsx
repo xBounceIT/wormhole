@@ -1310,18 +1310,59 @@ export async function runSftpSessionTests() {
   await input(patterns[patterns.length - 1], '*.conf;*.txt');
   await input(document.querySelector('#sftp-edit-size')!, '75');
   await click(document.querySelector('[role="switch"]'));
-  const defaultEditor = document.querySelector<HTMLSelectElement>('#sftp-default-editor')!;
-  await React.act(async () => {
-    defaultEditor.value = settings.editors[0].id;
-    defaultEditor.dispatchEvent(new Event('change', { bubbles: true }));
-  });
+  const defaultEditor = document.querySelector<HTMLButtonElement>('#sftp-default-editor')!;
+  assert.equal(defaultEditor.getAttribute('role'), 'combobox');
+  assert.equal(defaultEditor.dataset.slot, 'select-trigger');
+  assert.equal(
+    document.querySelector<HTMLLabelElement>('label[for="sftp-default-editor"]')?.control,
+    defaultEditor,
+  );
+  assert.equal(defaultEditor.textContent, 'Code');
+  assert.ok(
+    Math.abs(
+      defaultEditor.getBoundingClientRect().width -
+        defaultEditor.parentElement!.getBoundingClientRect().width,
+    ) < 1,
+  );
+  const editorOptions = () => [...document.querySelectorAll<HTMLElement>('[role="option"]')];
+  for (const [value, label] of [
+    ['system', 'System default application'],
+    ['auto', 'Detect a text editor'],
+    [names[names.length - 1].id.replace(/-name$/, ''), 'Kate'],
+  ]) {
+    await click(defaultEditor);
+    assert.deepEqual(
+      editorOptions().map((item) => item.textContent),
+      ['Detect a text editor', 'System default application', 'Code', 'Kate'],
+    );
+    await click(editorOptions().find((item) => item.textContent === label));
+    assert.equal(defaultEditor.textContent, label);
+    assert.equal(document.querySelector('[role="listbox"]'), null);
+    await click(button('Save editor settings'));
+    assert.equal(settings.defaultEditor, value);
+  }
+  await key(defaultEditor, 'ArrowDown');
+  const codeOption = editorOptions().find((item) => item.textContent === 'Code')!;
+  assert.ok(codeOption, 'Keyboard opens the shared Select');
+  await key(codeOption, 'Enter');
   await click(button('Save editor settings'));
+  assert.equal(settings.defaultEditor, 'code');
   assert.equal(settings.editors.at(-1)?.executable, 'kate');
   assert.deepEqual(settings.editors.at(-1)?.arguments, ['--new-window', '{file}']);
   assert.equal(settings.editors.at(-1)?.patterns, '*.conf;*.txt');
   assert.equal(settings.maxFileSize, 75 * 1048576);
   assert.equal(settings.swapPanels, true);
   await click(button('Remove'));
+  assert.equal(defaultEditor.textContent, 'Detect a text editor');
+  await click(button('Save editor settings'));
+  assert.equal(settings.defaultEditor, 'auto');
+  await click(button('Remove'));
+  await click(defaultEditor);
+  assert.deepEqual(
+    editorOptions().map((item) => item.textContent),
+    ['Detect a text editor', 'System default application'],
+  );
+  await click(editorOptions()[0]);
   files = [
     {
       id: 'recovered',
