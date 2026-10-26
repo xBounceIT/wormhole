@@ -192,10 +192,18 @@ export async function runSftpToolbarTooltipTests() {
         }),
       ),
     );
-    await tick();
-    const checkDescription = (phase: string) => {
-      const content = document.getElementById(control.getAttribute('aria-describedby') ?? '');
-      assert.ok(content, `Missing ${phase} tooltip for ${label}`);
+    const description = () =>
+      document.getElementById(control.getAttribute('aria-describedby') ?? '');
+    const checkDescription = async (phase: string) => {
+      let content = description();
+      for (let attempt = 0; attempt < 20 && !content; attempt++) {
+        await tick();
+        content = description();
+      }
+      assert.ok(
+        content,
+        `Missing ${phase} tooltip for ${label}, state=${control.getAttribute('data-state')}, focused=${document.activeElement === control}`,
+      );
       assert.equal(content.getAttribute('data-slot'), 'tooltip-content');
       assert.equal(content.textContent, label);
       assert.ok(
@@ -212,7 +220,7 @@ export async function runSftpToolbarTooltipTests() {
         `Tooltip must finish dismissing: ${label}, state=${control.getAttribute('data-state')}`,
       );
     };
-    checkDescription('hover');
+    await checkDescription('hover');
     await dismiss(async () => {
       await React.act(async () => {
         control.focus();
@@ -220,9 +228,8 @@ export async function runSftpToolbarTooltipTests() {
       });
     });
     await React.act(async () => control.focus());
-    await tick();
     assert.equal(document.activeElement === control, true, `${label} must receive keyboard focus`);
-    checkDescription('focus');
+    await checkDescription('focus');
     await dismiss(async () => {
       await React.act(async () =>
         control.dispatchEvent(
