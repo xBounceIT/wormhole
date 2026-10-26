@@ -20,6 +20,27 @@ type StorageSync = {
   hydrated?(): void;
 };
 
+export type BitwardenStorageSyncOptions = { checkpointOnly?: boolean };
+
+const storageChangedMessage =
+  'Bitwarden browser storage changed during synchronization; retry required.';
+
+export async function checkpointBitwardenStorageBeforeClose<TResult>(
+  readRevision: () => Promise<number>,
+  save: () => Promise<void>,
+  close: () => TResult,
+): Promise<TResult> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const before = await readRevision();
+    await save();
+    if ((await readRevision()) === before) {
+      // No await between proving this checkpoint current and retiring its native host.
+      return close();
+    }
+  }
+  throw new Error(storageChangedMessage);
+}
+
 // Only emitted after Go confirms that the live state needs no further reconciliation.
 // Keep this error free of renderer/backend details so it can cross the main-process wrapper.
 export class BitwardenStorageCheckpointError extends Error {
@@ -32,6 +53,7 @@ export class BitwardenStorageCheckpointError extends Error {
 export async function synchronizeBitwardenStorage(
   storage: StorageSync,
   initialize = false,
+  { checkpointOnly = false }: BitwardenStorageSyncOptions = {},
 ): Promise<void> {
   const shared = await storage.read();
   if (initialize && !shared.durable && shared.revision === 0) {
@@ -81,11 +103,20 @@ export async function synchronizeBitwardenStorage(
       }
       return;
     }
+    if (checkpointOnly && accepted.revision > 0 && accepted.profileRevision === accepted.revision) {
+      // Go has acknowledged this capture and merged its edits into the shared state.
+      // Closed profiles do not need to consume that merged state before an update can
+      // proceed. Replaying other profiles' volatile memory can keep this loop dirty.
+      // Leave the native marker unchanged: this profile still needs reconciliation.
+      if (!accepted.durable)
+        throw new Error('Bitwarden browser storage checkpoint is unavailable.');
+      return;
+    }
     // The page can change while Go saves the snapshot. Never replace those newer edits.
     await storage.restore(accepted, captured);
     revision = accepted.revision;
   }
-  throw new Error('Bitwarden browser storage changed during synchronization; retry required.');
+  throw new Error(storageChangedMessage);
 }
 
 // Only the monotonically increasing change counter crosses the polling boundary.

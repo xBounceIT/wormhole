@@ -73,9 +73,12 @@ import {
 } from './bitwarden-popup-layout.js';
 import {
   afterBitwardenPopupInputEvent,
+  describeBitwardenBrowserFailure,
   closeBitwardenPopupContents,
   flushAndCloseBitwardenPopupContents,
   prepareBitwardenPopupStorage,
+  type BitwardenBrowserFailure,
+  type BitwardenBrowserStage,
 } from './bitwarden-popup-lifecycle.js';
 import {
   captureBitwardenExtensionStorage,
@@ -83,12 +86,15 @@ import {
   prepareBitwardenStorageMigrations,
   readBitwardenStorageRevision,
   restoreBitwardenExtensionStorage,
+  waitForBitwardenBackgroundStorage,
 } from './bitwarden-storage.js';
 import {
   BitwardenStorageCheckpoint,
   BitwardenStorageCheckpointError,
+  checkpointBitwardenStorageBeforeClose,
   synchronizeBitwardenStorage,
   type BitwardenBrowserStorageSnapshot,
+  type BitwardenStorageSyncOptions,
 } from './bitwarden-storage-sync.js';
 import {
   buildBitwardenCookieSetDetails,
@@ -398,6 +404,7 @@ type NativeBackendAction =
   | 'bitwarden.browser-storage-capture'
   | 'bitwarden.browser-profile-seed'
   | 'bitwarden.browser-profile-register'
+  | 'bitwarden.browser-failure'
   | 'bitwarden.clear-session';
 type NativeBackendCommand = {
   action: NativeBackendAction;
@@ -5302,6 +5309,7 @@ class WebSurfaceManager {
       ownerMouse: onOwnerMouse,
       pageMouse: onPageMouse,
     });
+    let stage: BitwardenBrowserStage = 'prepare';
     try {
       // The MV2 vault session lives in background memory. Restore it before the popup initializes
       // its account services so an older profile cannot initialize the UI as logged out.
@@ -5325,6 +5333,7 @@ class WebSurfaceManager {
         await this.closeBitwardenPopup(sessionId, false);
         return { open: false };
       }
+      stage = 'popup';
       await withBitwardenBrowserTimeout(
         popup.webContents.loadURL(popupUrl),
         bitwardenBrowserNavigationTimeoutMs,
@@ -5349,7 +5358,7 @@ class WebSurfaceManager {
           open: true,
         });
       }
-    } catch {
+    } catch (error) {
       if (this.bitwardenPopups.get(sessionId) !== popup || record.disposed) {
         return { open: false };
       }
@@ -5357,7 +5366,7 @@ class WebSurfaceManager {
         await this.closeBitwardenPopup(sessionId, false);
         return { open: false };
       }
-      console.warn('[Wormhole] Could not open the Bitwarden browser popup.');
+      const failure = this.reportBitwardenBrowserFailure(error, stage);
       // This hidden popup never accepted user edits. Retrying the failed synchronization while
       // closing it delays feedback and can initialize another extension page unnecessarily.
       await this.closeBitwardenPopup(sessionId, false);
@@ -5373,14 +5382,26 @@ class WebSurfaceManager {
           type: 'error',
           title: 'Bitwarden',
           message: 'Could not open Bitwarden.',
-          detail:
-            'The browser session could not be prepared. Please try again or reconnect the HTTPS session.',
+          detail: `The browser session could not be prepared. Please try again or reconnect the HTTPS session.\n\nDiagnostic code: ${failure.code}`,
           buttons: ['OK'],
         }).catch(() => undefined);
       }
       return { open: false };
     }
     return { open: true };
+  }
+
+  private reportBitwardenBrowserFailure(
+    error: unknown,
+    stage: BitwardenBrowserStage,
+  ): BitwardenBrowserFailure {
+    const failure = describeBitwardenBrowserFailure(error, stage);
+    console.error(`[Wormhole] Bitwarden browser operation failed. code=${failure.code}`);
+    // The application log belongs to Go. Console output alone is invisible in installed builds.
+    void runBitwardenBackend('bitwarden.browser-failure', { value: failure.code }, 5_000).catch(
+      () => console.warn('[Wormhole] Could not record the Bitwarden browser failure.'),
+    );
+    return failure;
   }
 
   async closeBitwardenPopup(sessionId: string, flushStorage = true): Promise<{ open: false }> {
@@ -5489,7 +5510,9 @@ class WebSurfaceManager {
   private async synchronizeBitwardenStorageCore(
     partition: string,
     contents: Electron.WebContents,
+    options: BitwardenStorageSyncOptions = {},
   ): Promise<boolean> {
+    let stage: BitwardenBrowserStage = 'profile';
     return this.serializeBitwardenStorage(async () => {
       if (contents.isDestroyed()) return false;
       const profilePath = electronSession.fromPartition(partition).storagePath;
@@ -5497,26 +5520,46 @@ class WebSurfaceManager {
         throw new Error('Bitwarden browser profile has no persistent storage path.');
       // A temporary popup bridge may be the first context after background teardown, too.
       const initialize = !this.initializedBitwardenStorage.has(contents);
-      if (initialize) await prepareBitwardenStorageMigrations(contents);
+      if (initialize) {
+        if (contents.getType() === 'backgroundPage') {
+          stage = 'background';
+          await waitForBitwardenBackgroundStorage(contents);
+        }
+        stage = 'migrations';
+        await prepareBitwardenStorageMigrations(contents);
+      }
       await synchronizeBitwardenStorage(
         {
-          read: async () =>
-            validateBitwardenBrowserStorageSnapshot(
+          read: async () => {
+            stage = 'read';
+            return validateBitwardenBrowserStorageSnapshot(
               await runBitwardenBackend<BitwardenBrowserStorageSnapshot>(
                 'bitwarden.browser-storage-read',
                 { profilePath },
               ),
-            ),
-          capture: () => captureBitwardenExtensionStorage(contents),
+            );
+          },
+          capture: () => {
+            stage = 'capture';
+            return captureBitwardenExtensionStorage(contents);
+          },
           restore: async (snapshot, expected) => {
+            stage = 'restore';
             await restoreBitwardenExtensionStorage(contents, snapshot, expected);
             // An extension update can restore a snapshot from the previous storage schema.
-            if (initialize) await prepareBitwardenStorageMigrations(contents, true);
+            if (initialize) {
+              stage = 'migrations';
+              await prepareBitwardenStorageMigrations(contents, true);
+            }
           },
           hydrated: () => this.initializedBitwardenStorage.add(contents),
-          markRevision: (revision) => markBitwardenStorageRevision(contents, revision),
-          commit: async (captured, sourceRevision) =>
-            validateBitwardenBrowserStorageSnapshot(
+          markRevision: (revision) => {
+            stage = 'marker';
+            return markBitwardenStorageRevision(contents, revision);
+          },
+          commit: async (captured, sourceRevision) => {
+            stage = 'commit';
+            return validateBitwardenBrowserStorageSnapshot(
               await runBitwardenBackend<BitwardenBrowserStorageSnapshot>(
                 'bitwarden.browser-storage-capture',
                 {
@@ -5526,20 +5569,23 @@ class WebSurfaceManager {
                   sourceRevision,
                 },
               ),
-            ),
+            );
+          },
           flush: async () => {
+            stage = 'flush';
             const browserSession = electronSession.fromPartition(partition);
             browserSession.flushStorageData();
             await browserSession.cookies.flushStore();
           },
         },
         initialize,
+        options,
       );
       return true;
     }).catch((error: unknown) => {
       // Neither renderer exceptions nor backend diagnostics may expose extension secrets.
       if (error instanceof BitwardenStorageCheckpointError) throw error;
-      throw new Error('Bitwarden browser storage synchronization failed; retry required.');
+      throw describeBitwardenBrowserFailure(error, stage);
     });
   }
 
@@ -5614,18 +5660,13 @@ class WebSurfaceManager {
       const backgroundContents = this.bitwardenBackgroundContents(partition, extensionId);
       if (backgroundContents) {
         try {
-          const memoryReady = await withBitwardenBrowserTimeout(
-            backgroundContents.executeJavaScript(
-              'Boolean(chrome.storage.session || globalThis.bitwardenMain?.memoryStorageForStateProviders?.store)',
-            ),
-            bitwardenExtensionReadyTimeoutMs,
-            'Bitwarden background storage readiness timed out.',
-          );
-          if (memoryReady) {
-            if (await this.synchronizeBitwardenStorageCore(partition, backgroundContents)) return;
-          }
+          await waitForBitwardenBackgroundStorage(backgroundContents);
+          if (await this.synchronizeBitwardenStorageCore(partition, backgroundContents)) return;
         } catch (error) {
-          if (!backgroundContents.isDestroyed()) throw error;
+          if (!backgroundContents.isDestroyed()) {
+            if (error instanceof BitwardenStorageCheckpointError) throw error;
+            throw describeBitwardenBrowserFailure(error, 'background');
+          }
           // The MV2 background page can disappear while waiting behind another profile's storage
           // transaction. Continue with a fresh extension page in the same persistent partition.
         }
@@ -5655,6 +5696,9 @@ class WebSurfaceManager {
         if (!(await this.synchronizeBitwardenStorageCore(partition, bridge.webContents))) {
           throw new Error('Bitwarden browser storage page closed before synchronization.');
         }
+      } catch (error) {
+        if (error instanceof BitwardenStorageCheckpointError) throw error;
+        throw describeBitwardenBrowserFailure(error, 'bridge');
       } finally {
         try {
           owner.contentView.removeChildView(bridge);
@@ -6153,26 +6197,128 @@ class WebSurfaceManager {
   async runBitwardenExtensionMutation<TResult>(
     operation: () => Promise<TResult>,
   ): Promise<TResult> {
-    this.bitwardenStoragePaused = true;
-    try {
-      return await this.bitwardenExtensionMutation.runMutation(async () => {
-        await this.bitwardenStorageTasks.waitForAllIdle();
-        await this.flushBitwardenBackgroundStorage();
-      }, operation);
-    } finally {
-      this.bitwardenStoragePaused = false;
-    }
+    return this.bitwardenExtensionMutation.runMutation(
+      async () => {
+        this.bitwardenStoragePaused = true;
+        try {
+          await this.bitwardenStorageTasks.waitForAllIdle();
+          await this.unloadBitwardenExtensionsForUpdate();
+        } catch (error) {
+          this.bitwardenStoragePaused = false;
+          throw error;
+        }
+      },
+      async () => {
+        try {
+          return await operation();
+        } finally {
+          this.bitwardenStoragePaused = false;
+        }
+      },
+    );
   }
 
   private async flushBitwardenBackgroundStorage(): Promise<void> {
-    const pending: Promise<boolean>[] = [];
+    const pending: { contents: Electron.WebContents; save: Promise<boolean> }[] = [];
     for (const [partition, extensionId] of this.extensionIds) {
       const contents = this.bitwardenBackgroundContents(partition, extensionId);
-      if (contents) pending.push(this.synchronizeBitwardenStorageCore(partition, contents));
+      if (contents)
+        pending.push({
+          contents,
+          save: this.synchronizeBitwardenStorageCore(partition, contents),
+        });
     }
-    const results = await Promise.allSettled(pending);
-    if (results.some((result) => result.status === 'rejected' || !result.value)) {
-      throw new Error('Bitwarden browser storage could not be saved for every profile.');
+    const results = await Promise.allSettled(pending.map(({ save }) => save));
+    const failed = results.find(
+      (result, index) =>
+        result.status === 'rejected' || (!result.value && !pending[index].contents.isDestroyed()),
+    );
+    if (failed) {
+      const failure = this.reportBitwardenBrowserFailure(
+        failed.status === 'rejected'
+          ? failed.reason
+          : new Error('Bitwarden browser storage page closed before saving.'),
+        'checkpoint',
+      );
+      throw new Error(
+        `Bitwarden browser storage could not be saved for every profile. Diagnostic code: ${failure.code}`,
+      );
+    }
+  }
+
+  private async unloadBitwardenExtensionsForUpdate(): Promise<void> {
+    try {
+      const loaded = [...this.extensionIds];
+      if (loaded.some(([partition]) => !this.isBitwardenProfileUnused(partition))) {
+        throw new Error('Bitwarden browser profiles are still in use.');
+      }
+      for (const [partition, extensionId] of loaded) {
+        if (this.extensionIds.get(partition) !== extensionId) continue;
+        if (!(await this.checkpointAndUnloadBitwardenProfile(partition, extensionId))) {
+          throw new Error('Bitwarden browser profiles are still in use.');
+        }
+      }
+    } catch (error) {
+      const failure = this.reportBitwardenBrowserFailure(error, 'checkpoint');
+      throw new Error(
+        `Bitwarden browser profiles could not be prepared for the update. Diagnostic code: ${failure.code}`,
+      );
+    }
+  }
+
+  private async checkpointAndUnloadBitwardenProfile(
+    partition: string,
+    extensionId: string,
+  ): Promise<boolean> {
+    let stage: BitwardenBrowserStage = 'checkpoint';
+    try {
+      if (!this.isBitwardenProfileUnused(partition)) return false;
+      const contents = this.bitwardenBackgroundContents(partition, extensionId);
+      const close = (): boolean => {
+        stage = 'checkpoint';
+        if (!this.isBitwardenProfileUnused(partition)) return false;
+        const loadedId = this.extensionIds.get(partition);
+        if (!loadedId) return true;
+        const current = this.bitwardenBackgroundContents(partition, extensionId);
+        if (loadedId !== extensionId || (current && current !== contents)) {
+          throw new Error(
+            'Bitwarden background page changed during synchronization; retry required.',
+          );
+        }
+        electronSession.fromPartition(partition).extensions.removeExtension(extensionId);
+        this.extensionIds.delete(partition);
+        this.extensionLoadKeys.delete(partition);
+        this.extensionPopupPaths.delete(partition);
+        return true;
+      };
+      if (!contents || contents.isDestroyed()) {
+        return close();
+      }
+      try {
+        stage = 'background';
+        await waitForBitwardenBackgroundStorage(contents);
+        stage = 'checkpoint';
+        return await checkpointBitwardenStorageBeforeClose(
+          () => readBitwardenStorageRevision(contents),
+          async () => {
+            if (
+              !(await this.synchronizeBitwardenStorageCore(partition, contents, {
+                checkpointOnly: true,
+              }))
+            ) {
+              throw new Error('Bitwarden browser storage page closed before saving.');
+            }
+          },
+          close,
+        );
+      } catch (error) {
+        if (!contents.isDestroyed()) throw error;
+        // A dead host has no remaining runtime state; never close a replacement host.
+        return close();
+      }
+    } catch (error) {
+      if (error instanceof BitwardenStorageCheckpointError) throw error;
+      throw describeBitwardenBrowserFailure(error, stage);
     }
   }
 
@@ -6209,16 +6355,7 @@ class WebSurfaceManager {
       await this.bitwardenStorageTasks.run(partition, async () => {
         const extensionId = this.extensionIds.get(partition);
         if (!extensionId) return;
-        const background = this.bitwardenBackgroundContents(partition, extensionId);
-        if (background && !(await this.synchronizeBitwardenStorageCore(partition, background))) {
-          throw new Error('Bitwarden background closed before its storage could be saved.');
-        }
-        // Reopening can start while the protected checkpoint awaits Go. It now owns the host.
-        if (!this.isBitwardenProfileUnused(partition)) return;
-        electronSession.fromPartition(partition).extensions.removeExtension(extensionId);
-        this.extensionIds.delete(partition);
-        this.extensionLoadKeys.delete(partition);
-        this.extensionPopupPaths.delete(partition);
+        await this.checkpointAndUnloadBitwardenProfile(partition, extensionId);
       });
     } finally {
       this.retiringBitwardenProfiles.delete(partition);

@@ -325,7 +325,7 @@ func (m *vncManager) handle(command backendCommand) {
 		"bitwarden.get", "bitwarden.resolve-credential", "bitwarden.resolve-node",
 		"bitwarden.node-reference", "bitwarden.browser-storage-read",
 		"bitwarden.browser-storage-capture", "bitwarden.browser-profile-seed",
-		"bitwarden.browser-profile-register", "rdp.resolve-credential", "rdp.resolve-profile",
+		"bitwarden.browser-profile-register", "bitwarden.browser-failure", "rdp.resolve-credential", "rdp.resolve-profile",
 		"rdp.system-client-capability", "rdp.resolve-system-profile":
 		generation := m.bitwardenGeneration()
 		go m.handleBitwarden(command, generation)
@@ -1655,6 +1655,10 @@ func validateBackendCommand(command backendCommand) error {
 	case "bitwarden.browser-storage-read":
 		if !validBitwardenBrowserProfilePath(command.ProfilePath) {
 			return errors.New("Bitwarden browser profile path is invalid")
+		}
+	case "bitwarden.browser-failure":
+		if !validBitwardenBrowserFailure(command.Value) {
+			return errors.New("Bitwarden browser failure code is invalid")
 		}
 	case "bitwarden.browser-storage-capture":
 		if !validBitwardenBrowserProfilePath(command.ProfilePath) || command.SourceRevision < 0 ||

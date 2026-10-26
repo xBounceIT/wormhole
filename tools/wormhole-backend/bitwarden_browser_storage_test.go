@@ -515,6 +515,9 @@ func TestBitwardenBrowserStorageMergesLiveEditsFromStaleProfile(t *testing.T) {
 	if merged.LocalJSON != `{"account":"signed-in","theme":"dark"}` || merged.SessionJSON != newer.SessionJSON || !merged.Restore {
 		t.Fatal("stale profile edits or newer session were discarded")
 	}
+	if !merged.Durable || merged.ProfileRevision != merged.Revision {
+		t.Fatal("the durable merge did not acknowledge this profile's captured edits")
+	}
 	// The page changes again while the merged snapshot is being restored. The submitted
 	// baseline must remain distinct from the shared state until the page acknowledges it.
 	next, err := m.captureBitwardenBrowserStorage(`{"account":"signed-in","theme":"blue"}`, first.SessionJSON, merged.Revision, b)
@@ -523,6 +526,22 @@ func TestBitwardenBrowserStorageMergesLiveEditsFromStaleProfile(t *testing.T) {
 	}
 	if next.LocalJSON != `{"account":"signed-in","theme":"blue"}` || next.SessionJSON != newer.SessionJSON {
 		t.Fatal("mutation during restore lost a newer edit or revived an old token")
+	}
+}
+
+func TestBitwardenBrowserStorageDoesNotAcknowledgeAnUnknownStaleProfile(t *testing.T) {
+	root := t.TempDir()
+	m := &vncManager{databasePath: filepath.Join(root, "wormhole.db")}
+	shared, err := m.captureBitwardenBrowserStorage(`{"account":"saved"}`, `{}`, 0, filepath.Join(root, "known"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rejected, err := m.captureBitwardenBrowserStorage(`{"account":"untrusted"}`, `{}`, 0, filepath.Join(root, "unknown"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rejected.Restore || !rejected.Durable || rejected.ProfileRevision == rejected.Revision || rejected.LocalJSON != shared.LocalJSON {
+		t.Fatal("an unknown stale capture was acknowledged without reconciliation")
 	}
 }
 

@@ -14,6 +14,7 @@ import {
   prepareBitwardenStorageMigrations,
   readBitwardenStorageRevision,
   restoreBitwardenExtensionStorage,
+  waitForBitwardenBackgroundStorage,
 } from '../electron/bitwarden-storage.ts';
 
 type StorageValues = Record<string, unknown>;
@@ -106,8 +107,8 @@ class FakeExtensionContents {
   readonly returnedSnapshots: unknown[] = [];
   readonly localStates: StorageValues[] = [];
   readonly sessionStates: StorageValues[] = [];
-  readonly localListeners: (() => void)[] = [];
-  readonly sessionListeners: (() => void)[] = [];
+  readonly localListeners: ((changes: StorageValues) => void)[] = [];
+  readonly sessionListeners: ((changes: StorageValues) => void)[] = [];
 
   constructor(
     localValues: StorageValues,
@@ -131,7 +132,7 @@ class FakeExtensionContents {
       };
       return {
         onChanged: {
-          addListener: (listener: () => void) =>
+          addListener: (listener: (changes: StorageValues) => void) =>
             (values === local ? this.localListeners : this.sessionListeners).push(listener),
         },
         clear(callback: () => void) {
@@ -298,7 +299,7 @@ test('storage monitoring installs once, reports only counters, and observes MV2 
   assert.equal(memoryListeners.length, 1);
   assert.equal(contents.localListeners.length, 1);
   memoryListeners[0]();
-  contents.localListeners[0]();
+  contents.localListeners[0]({ account: {} });
   assert.equal(await readBitwardenStorageRevision(contents), 2);
 });
 
@@ -306,8 +307,23 @@ test('storage monitoring supports native session events and retries an unready M
   await assert.rejects(readBitwardenStorageRevision(new FakeExtensionContents({})), /not ready/);
   const contents = new FakeExtensionContents({}, undefined, {});
   assert.equal(await readBitwardenStorageRevision(contents), 0);
-  contents.sessionListeners[0]();
+  contents.sessionListeners[0]({ token: {} });
   assert.equal(await readBitwardenStorageRevision(contents), 1);
+});
+
+test('the logical revision ignores acknowledgement markers and retains mixed or removed account changes', async () => {
+  const contents = new FakeExtensionContents({}, undefined, {});
+  assert.equal(await readBitwardenStorageRevision(contents), 0);
+  contents.localListeners[0]({ __wormholeBitwardenProfileRevision: { newValue: 9 } });
+  contents.localListeners[0]({});
+  assert.equal(await readBitwardenStorageRevision(contents), 0);
+  contents.localListeners[0]({
+    __wormholeBitwardenProfileRevision: { newValue: 10 },
+    account: { newValue: 'new' },
+  });
+  assert.equal(await readBitwardenStorageRevision(contents), 1);
+  contents.localListeners[0]({ account: { oldValue: 'removed' } });
+  assert.equal(await readBitwardenStorageRevision(contents), 2);
 });
 
 test('MV2 popup uses its background port even when Electron exposes storage.session', async () => {
@@ -363,6 +379,49 @@ test('storage preparation waits for startup migrations and migrates a restored o
   await prepareBitwardenStorageMigrations(contents, true);
   assert.equal(await contents.executeJavaScript('globalThis.waited && globalThis.migrated'), true);
   assert.deepEqual(Array.from(contents.pendingPageKeys()), []);
+});
+
+test('background preparation waits for the MV2 memory service instead of opening a premature popup bridge', async (context) => {
+  context.mock.timers.enable({ apis: ['Date', 'setTimeout'] });
+  const contents = new FakeExtensionContents({}, undefined, {});
+  await contents.executeJavaScript('chrome.runtime.getManifest = () => ({ manifest_version: 2 })');
+  let ready = false;
+  const pending = waitForBitwardenBackgroundStorage(contents).then(() => {
+    ready = true;
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(ready, false, 'a host-provided session API cannot substitute for MV2 memory');
+  await contents.executeJavaScript(
+    'void (globalThis.bitwardenMain = { memoryStorageForStateProviders: { store: {}, save() {}, remove() {} } })',
+  );
+  context.mock.timers.tick(25);
+  await pending;
+  assert.equal(ready, true);
+  assert.deepEqual(contents.returnedSnapshots, []);
+});
+
+test('background readiness supports native session storage and bounds stopped or stalled renderers', async (context) => {
+  await waitForBitwardenBackgroundStorage(new FakeExtensionContents({}, undefined, {}));
+  await waitForBitwardenBackgroundStorage(
+    new FakeExtensionContents({}, undefined, undefined, {
+      store: {},
+      save: async () => {},
+      remove: async () => {},
+    }),
+  );
+  const closed = new FakeExtensionContents({});
+  closed.destroyed = true;
+  await assert.rejects(waitForBitwardenBackgroundStorage(closed), /page closed/);
+  context.mock.timers.enable({ apis: ['Date', 'setTimeout'] });
+  for (const stalled of [false, true]) {
+    const contents = stalled
+      ? { isDestroyed: () => false, executeJavaScript: () => new Promise<unknown>(() => {}) }
+      : new FakeExtensionContents({});
+    const rejected = assert.rejects(waitForBitwardenBackgroundStorage(contents), /timed out/);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    context.mock.timers.tick(10_000);
+    await rejected;
+  }
 });
 
 test('native revision is local to its profile, survives logout, and unchanged markers do not emit writes', async () => {
@@ -809,16 +868,21 @@ test('Electron MV2 background and reopened popups share the restored vault sessi
     writeFileSync(
       join(directory, 'background.js'),
       `
+      // Reproduce extension-ready preceding Bitwarden's asynchronous service startup.
+      setTimeout(() => {
+      const memoryListeners = [];
       const memory = {
         store: {},
+        updates$: { subscribe(listener) { memoryListeners.push(listener); } },
         mutations: 0,
         save(key, value) {
           if (value == null) return this.remove(key);
           this.mutations++;
           this.store[key] = JSON.stringify(value);
+          for (const listener of memoryListeners) listener();
           return Promise.resolve();
         },
-        remove(key) { this.mutations++; delete this.store[key]; return Promise.resolve(); },
+        remove(key) { this.mutations++; delete this.store[key]; for (const listener of memoryListeners) listener(); return Promise.resolve(); },
       };
       globalThis.bitwardenMain = { memoryStorageForStateProviders: memory };
       globalThis.accountObserver = { active: null, lost: 0, missingToken: 0 };
@@ -843,6 +907,7 @@ test('Electron MV2 background and reopened popups share the restored vault sessi
         port.postMessage({ originator: 'background', action: 'initialization', data: Object.keys(memory.store) });
       });
       globalThis.fixtureReady = true;
+      }, 200);
     `,
     );
     const harness = join(directory, 'test.cjs');
@@ -863,10 +928,14 @@ test('Electron MV2 background and reopened popups share the restored vault sessi
         const owner = new BrowserWindow({ show: false });
         try {
           const extensions = new Map();
+          const chromeApis = new Set();
           const prepared = async partition => {
             const browser = session.fromPartition(partition);
-            if (!extensions.has(partition)) {
+            if (!chromeApis.has(partition)) {
               new ElectronChromeExtensions({ session: browser, license: 'GPL-3.0' });
+              chromeApis.add(partition);
+            }
+            if (!extensions.has(partition)) {
               extensions.set(partition, await browser.extensions.loadExtension(__dirname));
             }
             const extension = extensions.get(partition);
@@ -876,11 +945,8 @@ test('Electron MV2 background and reopened popups share the restored vault sessi
             const background = webContents.getAllWebContents().find(contents =>
               contents.session === browser && contents.getType() === 'backgroundPage');
             assert.ok(background);
-            const deadline = Date.now() + 5_000;
-            while (!await background.executeJavaScript('Boolean(globalThis.fixtureReady)')) {
-              assert.ok(Date.now() < deadline, 'MV2 fixture background did not initialize');
-              await new Promise(resolve => setTimeout(resolve, 10));
-            }
+            await storage.waitForBitwardenBackgroundStorage(background);
+            assert.equal(await background.executeJavaScript('Boolean(globalThis.fixtureReady)'), true);
             return { popup, background };
           };
           const snapshot = { localJson: '{"activeAccountId":"signed-in","token":"test-only"}', sessionJson: '{"vaultStatus":"unlocked","sessionKey":"test-only"}' };
@@ -939,9 +1005,52 @@ test('Electron MV2 background and reopened popups share the restored vault sessi
           assert.deepEqual(await storage.captureBitwardenExtensionStorage(reopened.popup.webContents), { localJson: '{}', sessionJson: '{}' });
           // All values are synthetic test fixtures; production snapshots use Go's protected store.
           fs.writeFileSync(path.join(__dirname, 'synthetic-recovery.json'), JSON.stringify({ ...snapshot, sessionJson: '{}' }));
+          const logicalRevision = await storage.readBitwardenStorageRevision(first.background);
           await storage.markBitwardenStorageRevision(first.background, 7);
+          await new Promise(resolve => setTimeout(resolve, 10));
+          assert.equal(await storage.readBitwardenStorageRevision(first.background), logicalRevision, 'native markers are not vault edits');
           first.background.session.flushStorageData();
           await first.background.session.cookies.flushStore();
+          // An update needs a durable acknowledgement, not a replay of another profile's
+          // runtime memory into a background that is about to be unloaded.
+          let checkpointed = 0;
+          const retiringSession = first.background.session;
+          const retiringId = extensions.get('persist:vault-first').id;
+          let latestCheckpoint;
+          await sync.checkpointBitwardenStorageBeforeClose(
+            () => storage.readBitwardenStorageRevision(first.background),
+            () => sync.synchronizeBitwardenStorage({
+            read: async () => ({ ...snapshot, revision: 7, profileRevision: 7, restore: false, durable: true }),
+            capture: () => storage.captureBitwardenExtensionStorage(first.background),
+            restore: async () => assert.fail('update must not replay foreign runtime state'),
+            flush: async () => { first.background.session.flushStorageData(); await first.background.session.cookies.flushStore(); },
+            markRevision: async () => assert.fail('an unconsumed merge must not advance the native marker'),
+            commit: async (captured) => {
+              checkpointed++;
+              latestCheckpoint = captured;
+              assert.equal(captured.localJson, snapshot.localJson);
+              if (checkpointed === 1) await first.background.executeJavaScript('globalThis.bitwardenMain.memoryStorageForStateProviders.save("sessionKey", "test-refreshed")');
+              return { ...captured, sessionJson: '{"runtime":"merged-from-another-profile"}', revision: 8, profileRevision: 8, restore: true, durable: true };
+            },
+          }, false, { checkpointOnly: true }),
+            () => retiringSession.extensions.removeExtension(retiringId),
+          );
+          assert.equal(checkpointed, 2, 'an edit during the first save must be captured again');
+          assert.equal(JSON.parse(latestCheckpoint.sessionJson).sessionKey, 'test-refreshed');
+          assert.equal(first.background.isDestroyed(), true);
+          assert.doesNotThrow(() => retiringSession.extensions.removeExtension(retiringId), 'a concurrent native retirement is idempotent');
+          extensions.delete('persist:vault-first');
+          const manifestPath = path.join(__dirname, 'manifest.json');
+          const updatedManifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+          updatedManifest.version = '1.0.1';
+          fs.writeFileSync(manifestPath, JSON.stringify(updatedManifest));
+          const upgraded = await prepared('persist:vault-first');
+          assert.equal(extensions.get('persist:vault-first').version, '1.0.1');
+          const upgradedState = await storage.captureBitwardenExtensionStorage(upgraded.background);
+          assert.equal(upgradedState.localJson, snapshot.localJson);
+          assert.equal(upgradedState.sessionJson, '{}');
+          assert.equal(upgradedState.nativeRevision, 7);
+          console.log('A durable update checkpoint allowed native unload and bundle replacement while preserving the remembered account.');
           console.log('MV2 vault state survived popup teardown, another profile, and reopening; logout cleared it.');
         } finally { owner.destroy(); }
       }).then(() => app.quit()).catch(error => { console.error(error); app.exit(1); });
