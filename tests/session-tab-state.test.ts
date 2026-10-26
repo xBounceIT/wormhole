@@ -5,6 +5,7 @@ import { runInNewContext } from 'node:vm';
 import test from 'node:test';
 import * as React from 'react';
 import { transformWithOxc } from 'vite';
+import { SftpConnectionIcon } from '../src/components/SftpConnectionIcon.ts';
 import {
   applySessionMcpAccess,
   canDisconnectSessionAiAgent,
@@ -141,6 +142,7 @@ test('the tab menu disconnects the AI agent only for a live approved SSH session
     canDisconnectSessionAiAgent,
     canDisconnectRemoteDesktopSession: () => false,
     canOpenRdpSystemClient: () => false,
+    SftpConnectionIcon,
     ...Object.fromEntries(
       [
         'ContextMenu',
@@ -154,7 +156,6 @@ test('the tab menu disconnects the AI agent only for a live approved SSH session
         'Power',
         'Bot',
         'Monitor',
-        'FolderOpen',
         'X',
       ].map((name) => [name, name]),
     ),

@@ -59,11 +59,11 @@ async function runSftpPaneTests() {
     });
     return event;
   };
-  const localFile = panes[0].querySelectorAll('[role="option"]')[1];
+  const localFile = panes[0].querySelectorAll('[data-sftp-index]')[1];
   await drag(localFile, 'dragstart');
   assert.equal(JSON.parse(data.getData(sftpDragDataType)).items[0].sourcePath, '/local/file.txt');
   for (const pane of panes) {
-    const [folder, file] = pane.querySelectorAll('[role="option"]');
+    const [folder, file] = pane.querySelectorAll('[data-sftp-index]');
     const title = pane.querySelector('span');
     const bounds = pane.getBoundingClientRect().toJSON();
     const radius = getComputedStyle(pane).borderRadius;
@@ -176,7 +176,7 @@ async function runSftpPaneTests() {
   );
   const reopened = [...document.querySelectorAll('section')];
   const freshDrag = new DataTransfer();
-  await drag(reopened[1].querySelectorAll('[role="option"]')[1], 'dragstart', null, freshDrag);
+  await drag(reopened[1].querySelectorAll('[data-sftp-index]')[1], 'dragstart', null, freshDrag);
   await drag(reopened[0], 'dragenter', null, freshDrag);
   await drag(reopened[0], 'drop', null, freshDrag);
   assert.equal(transfers.at(-1).destination, '/local-reopened');

@@ -1,4 +1,5 @@
 import { SftpEditorSettings, SftpRecoveryNotice } from './components/SftpEditors';
+import { SftpConnectionIcon } from './components/SftpConnectionIcon';
 import {
   SftpBrowserSurface,
   type SftpPaneKind,
@@ -1083,7 +1084,7 @@ function protocolLabel(protocol: Protocol) {
 }
 
 function ProtocolIcon({ protocol, size = 15 }: { protocol: Protocol; size?: number }) {
-  if (protocol === 'sftp') return <FolderOpen size={size} />;
+  if (protocol === 'sftp') return <SftpConnectionIcon size={size} />;
   if (protocol === 'ssh') return <Terminal size={size} />;
   if (protocol === 'rdp') return <Monitor size={size} />;
   if (protocol === 'http' || protocol === 'https') return <Globe size={size} />;
@@ -1336,7 +1337,7 @@ function SessionTabContextMenu({
         ) : null}
         {session.canTransfer === true && session.status === 'connected' ? (
           <ContextMenuItem onSelect={onFileTransfer}>
-            <FolderOpen />
+            <SftpConnectionIcon />
             Open file transfer in new tab
           </ContextMenuItem>
         ) : null}
@@ -10646,12 +10647,17 @@ function SessionSurface({
   if (session.protocol === 'sftp') {
     if (!session.sftp)
       return (
-        <SshTerminalConnectionState
-          isSerial={false}
-          onReconnect={onReconnectSession}
-          onTrustHostKey={onTrustSshHostKey}
-          session={session}
-        />
+        <div
+          aria-label="SFTP connection state"
+          className="flex h-full min-h-0 min-w-0 flex-1 items-center justify-center overflow-auto bg-[#090909] px-6 py-10 text-zinc-100"
+        >
+          <SshTerminalConnectionState
+            isSerial={false}
+            onReconnect={onReconnectSession}
+            onTrustHostKey={onTrustSshHostKey}
+            session={session}
+          />
+        </div>
       );
     return (
       <SftpBrowserSurface
