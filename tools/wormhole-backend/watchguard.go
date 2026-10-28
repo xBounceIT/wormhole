@@ -523,10 +523,10 @@ func watchguardLogon(
 		return watchguardLogonResponse{}, errors.New("WatchGuard authentication returned a non-XML response")
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+	if ctx.Err() != nil {
+		return watchguardLogonResponse{}, ctx.Err()
+	}
 	if err != nil || len(body) == 1<<20 {
-		if ctx.Err() != nil {
-			return watchguardLogonResponse{}, ctx.Err()
-		}
 		return watchguardLogonResponse{}, errors.New("WatchGuard authentication response exceeded the safety limit")
 	}
 	var result watchguardLogonResponse
@@ -561,10 +561,10 @@ func downloadWatchguardBundle(
 		return nil, fmt.Errorf("WatchGuard profile download returned HTTP %d", response.StatusCode)
 	}
 	bundle, err := io.ReadAll(io.LimitReader(response.Body, watchguardMaxBundleBytes+1))
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 	if err != nil || len(bundle) > watchguardMaxBundleBytes {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
 		return nil, errors.New("WatchGuard profile bundle exceeded the safety limit")
 	}
 	return bundle, nil
