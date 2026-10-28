@@ -46,6 +46,7 @@ type watchguardLogonResponse struct {
 	Message     string `xml:"message"`
 	Error       string `xml:"errStr"`
 	SAMLEnabled string `xml:"saml_enabled"`
+	SAMLIdPName string `xml:"saml_idp_name"`
 }
 
 type watchguardBrowserCookie struct {
@@ -156,7 +157,7 @@ func prepareWatchguardProfile(
 	cacheState := providerCacheState(3, settings)
 	authMode := tunnelSettingNumber(settings, "AuthMode")
 	if watchguardUsesSingleSignOn(settings) {
-		return prepareWatchguardSAML(ctx, settings)
+		return prepareWatchguardSAML(ctx, settings, nil)
 	}
 	if authMode == 0 && (strings.TrimSpace(tunnelSettingString(settings, "Username")) == "" || tunnelSettingString(settings, "Password") == "") {
 		client, clientErr := newWatchguardHTTPClient(settings)
@@ -167,8 +168,11 @@ func prepareWatchguardProfile(
 			"action": {"sslvpn_logon"}, "style": {"fw_logon.xsl"}, "fw_logon_type": {"status"},
 		})
 		client.CloseIdleConnections()
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		if statusErr == nil && watchguardSAMLIsEnabled(status.SAMLEnabled) {
-			return prepareWatchguardSAML(ctx, settings)
+			return prepareWatchguardSAML(ctx, settings, &status)
 		}
 	}
 	profile := strings.TrimSpace(tunnelSettingString(settings, "ProfileOvpn"))
@@ -251,14 +255,8 @@ func prepareWatchguardProfile(
 		}
 	}
 	if result.Status != 1 {
-		message := strings.TrimSpace(result.Message)
-		if message == "" {
-			message = strings.TrimSpace(result.Error)
-		}
-		if message == "" {
-			message = fmt.Sprintf("credentials were rejected (status %d)", result.Status)
-		}
-		return nil, errors.New("WatchGuard authentication failed: " + message)
+		// Gateway response text can echo credentials and backend errors are logged.
+		return nil, fmt.Errorf("WatchGuard authentication failed: credentials were rejected (status %d)", result.Status)
 	}
 
 	if err := reportTunnelProgress(ctx, "downloading", ""); err != nil {
@@ -290,12 +288,29 @@ func watchguardUsesSingleSignOn(settings map[string]json.RawMessage) bool {
 func prepareWatchguardSAML(
 	ctx context.Context,
 	settings map[string]json.RawMessage,
+	status *watchguardLogonResponse,
 ) (json.RawMessage, error) {
 	client, err := newWatchguardHTTPClient(settings)
 	if err != nil {
 		return nil, err
 	}
 	defer client.CloseIdleConnections()
+	if status == nil {
+		response, err := watchguardLogon(ctx, client, settings, url.Values{
+			"action": {"sslvpn_logon"}, "style": {"fw_logon.xsl"}, "fw_logon_type": {"status"},
+		})
+		if err != nil {
+			return nil, err
+		}
+		status = &response
+	}
+	if !watchguardSAMLIsEnabled(status.SAMLEnabled) {
+		return nil, errors.New("WatchGuard gateway does not advertise SAML authentication for SSL VPN")
+	}
+	idpName := strings.TrimSpace(status.SAMLIdPName)
+	if idpName == "" || len(idpName) > 1024 || strings.ContainsAny(idpName, "\\\r\n\x00") {
+		return nil, errors.New("WatchGuard gateway did not return a valid SAML authentication domain")
+	}
 	base, err := watchguardURL(settings, "/", nil)
 	if err != nil {
 		return nil, err
@@ -320,7 +335,8 @@ func prepareWatchguardSAML(
 	}
 	var result watchguardSAMLResult
 	if json.Unmarshal([]byte(encoded), &result) != nil || strings.TrimSpace(result.Username) == "" ||
-		strings.TrimSpace(result.Token) == "" || len(result.Username) > 1024 || len(result.Token) > 16*1024 ||
+		strings.TrimSpace(result.Token) == "" || len(idpName)+1+len(result.Username) > 1024 || len(result.Token) > 16*1024 ||
+		strings.ContainsAny(result.Username, "\r\n\x00") || strings.ContainsRune(result.Token, '\x00') ||
 		len(result.Cookies) > 256 {
 		return nil, errors.New("WatchGuard SAML response is invalid")
 	}
@@ -348,7 +364,9 @@ func prepareWatchguardSAML(
 		return nil, err
 	}
 	settings["ProfileOvpn"], _ = json.Marshal(profile)
-	settings["Username"], _ = json.Marshal(strings.TrimSpace(result.Username))
+	// wgsslvpnc qualifies the SAML callback user with the gateway's saml_idp_name.
+	// The token belongs to that authentication domain, not the default Firebox-DB.
+	settings["Username"], _ = json.Marshal(idpName + "\\" + strings.TrimSpace(result.Username))
 	settings["Password"], _ = json.Marshal(result.Token)
 	delete(settings, "ChallengeResponse")
 	return json.Marshal(settings)
@@ -361,7 +379,7 @@ func finishWatchguardStoredProfile(
 ) (json.RawMessage, error) {
 	answer, err := requestTunnelPrompt(ctx, tunnelPrompt{
 		Title:   "WatchGuard two-factor authentication",
-		Message: "Enter your one-time passcode, or type 'p' to approve with a push notification.",
+		Message: "Enter your one-time passcode, type 'p' to approve with a push notification, or type '-' if your account does not use two-factor authentication.",
 		Secret:  true,
 	})
 	answer = strings.TrimSpace(answer)
@@ -377,9 +395,13 @@ func finishWatchguardStoredProfile(
 		}
 		answer = "p"
 	}
+	if answer == "-" {
+		answer = ""
+	}
 	settings["ProfileOvpn"], _ = json.Marshal(profile)
 	settings["ChallengeResponse"], _ = json.Marshal(answer)
-	if !strings.EqualFold(answer, "p") {
+	delete(settings, "_WormholeWatchguardTypedOTP")
+	if answer != "" && !strings.EqualFold(answer, "p") {
 		settings["_WormholeWatchguardTypedOTP"] = json.RawMessage("true")
 	}
 	return json.Marshal(settings)
@@ -447,6 +469,9 @@ func newWatchguardHTTPClient(settings map[string]json.RawMessage) (*http.Client,
 	return &http.Client{
 		Transport: transport, Jar: jar, Timeout: watchguardRequestTimeout,
 		CheckRedirect: func(request *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return errors.New("WatchGuard portal exceeded the redirect limit")
+			}
 			if len(via) > 0 && (request.URL.Scheme != "https" || !strings.EqualFold(request.URL.Host, via[0].URL.Host)) {
 				return errors.New("WatchGuard portal redirected outside the configured gateway")
 			}
@@ -484,6 +509,9 @@ func watchguardLogon(
 	request.Header.Set("User-Agent", "WatchGuard/wgsslvpnc.exe")
 	response, err := client.Do(request)
 	if err != nil {
+		if ctx.Err() != nil {
+			return watchguardLogonResponse{}, ctx.Err()
+		}
 		return watchguardLogonResponse{}, errors.New("could not reach the WatchGuard authentication portal")
 	}
 	defer response.Body.Close()
@@ -496,6 +524,9 @@ func watchguardLogon(
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
 	if err != nil || len(body) == 1<<20 {
+		if ctx.Err() != nil {
+			return watchguardLogonResponse{}, ctx.Err()
+		}
 		return watchguardLogonResponse{}, errors.New("WatchGuard authentication response exceeded the safety limit")
 	}
 	var result watchguardLogonResponse
@@ -520,6 +551,9 @@ func downloadWatchguardBundle(
 	request.Header.Set("User-Agent", "WatchGuard/wgsslvpnc.exe")
 	response, err := client.Do(request)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, errors.New("could not download the WatchGuard VPN profile")
 	}
 	defer response.Body.Close()
@@ -528,6 +562,9 @@ func downloadWatchguardBundle(
 	}
 	bundle, err := io.ReadAll(io.LimitReader(response.Body, watchguardMaxBundleBytes+1))
 	if err != nil || len(bundle) > watchguardMaxBundleBytes {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, errors.New("WatchGuard profile bundle exceeded the safety limit")
 	}
 	return bundle, nil
@@ -546,15 +583,15 @@ func importWatchguardBundle(bundle []byte) (string, error) {
 	archive := tar.NewReader(reader)
 	files := make(map[string]string)
 	for index := 0; ; index++ {
-		if index >= watchguardMaxEntries {
-			return "", errors.New("WatchGuard profile bundle has too many entries")
-		}
 		header, err := archive.Next()
 		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
 			return "", errors.New("WatchGuard profile bundle is invalid")
+		}
+		if index >= watchguardMaxEntries {
+			return "", errors.New("WatchGuard profile bundle has too many entries")
 		}
 		if header.Typeflag != tar.TypeReg && header.Typeflag != tar.TypeRegA {
 			continue
