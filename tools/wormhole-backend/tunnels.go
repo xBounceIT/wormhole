@@ -620,6 +620,7 @@ func providerCacheIdentity(kind int64, settings map[string]json.RawMessage) stri
 	case 3:
 		material = []string{
 			tunnelSettingString(settings, "Server"), fmt.Sprint(port), tunnelSettingString(settings, "Username"),
+			strings.TrimSpace(tunnelSettingString(settings, "Domain")),
 			boolText("TrustServerCertificate"), tunnelSettingString(settings, "CaPem"),
 		}
 	case 4:

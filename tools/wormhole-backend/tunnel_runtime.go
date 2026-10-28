@@ -1251,8 +1251,19 @@ func tunnelSidecarCommand(kind int64, raw json.RawMessage) (string, []byte, erro
 		if strings.TrimSpace(profile) == "" {
 			return "", nil, errors.New("WatchGuard did not return an OpenVPN profile")
 		}
-		config := openVPNConfig(profile, stringValue("Username"), stringValue("Password"))
-		if challenge := strings.TrimSpace(stringValue("ChallengeResponse")); challenge != "" {
+		username := strings.TrimSpace(stringValue("Username"))
+		if domain := strings.TrimSpace(stringValue("Domain")); domain != "" &&
+			!watchguardUsesSingleSignOn(settings) && !strings.Contains(username, "\\") {
+			username = domain + "\\" + username
+		}
+		password := stringValue("Password")
+		challenge := strings.TrimSpace(stringValue("ChallengeResponse"))
+		// The native OpenVPN credential API accepts NUL-terminated strings.
+		if strings.ContainsRune(username, '\x00') || strings.ContainsRune(password, '\x00') || strings.ContainsRune(challenge, '\x00') {
+			return "", nil, errors.New("WatchGuard credentials contain an invalid character")
+		}
+		config := openVPNConfig(profile, username, password)
+		if challenge != "" {
 			config["challenge_response"] = challenge
 		}
 		payload, err := encode(config)

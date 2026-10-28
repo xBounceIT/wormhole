@@ -6,13 +6,17 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestPrepareWatchguardAutomaticAuthenticatesDownloadsAndCachesProfile(t *testing.T) {
@@ -304,8 +308,14 @@ func TestPrepareWatchguardSAMLStartsProviderLoginAndDownloadsWithCookies(t *test
 		"client.ovpn": "client\nca ca.crt\ncert client.crt\nkey client.pem\nremote firebox.example.test 443 tcp\n",
 		"ca.crt":      "CA", "client.crt": "CERT", "client.pem": "KEY",
 	})
-	metadataRequests, loginRequests, providerRequests := 0, 0, 0
+	metadataRequests, loginRequests, providerRequests, statusRequests := 0, 0, 0, 0
 	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Query().Get("fw_logon_type") == "status" {
+			statusRequests++
+			writer.Header().Set("Content-Type", "application/xml")
+			_, _ = writer.Write([]byte(`<resp><saml_enabled>1</saml_enabled><saml_idp_name>Entra_ID_SAML</saml_idp_name></resp>`))
+			return
+		}
 		switch request.URL.Path {
 		case "/auth/saml":
 			// The metadata endpoint can succeed without ever starting authentication.
@@ -339,7 +349,8 @@ func TestPrepareWatchguardSAMLStartsProviderLoginAndDownloadsWithCookies(t *test
 	serverURL, _ := url.Parse(server.URL)
 	raw, _ := json.Marshal(map[string]any{
 		"Server": serverURL.Hostname(), "Port": mustTestPort(t, serverURL.Port()),
-		"AuthMode": 0, "UseSingleSignOn": true, "TrustServerCertificate": true,
+		"AuthMode": 2, "TrustServerCertificate": true,
+		"Domain": "Firebox-DB", "Username": "stale-user", "Password": "stale-password", "ChallengeResponse": "stale-otp",
 	})
 	ctx := withTunnelPromptHandler(context.Background(), func(_ context.Context, prompt tunnelPrompt) (string, error) {
 		if !prompt.Browser || len(prompt.URLs) == 0 || !prompt.IgnoreCertificateErrors {
@@ -375,11 +386,22 @@ func TestPrepareWatchguardSAMLStartsProviderLoginAndDownloadsWithCookies(t *test
 	}
 	var settings map[string]json.RawMessage
 	_ = json.Unmarshal(prepared, &settings)
-	if tunnelSettingString(settings, "Username") != "saml-user" || tunnelSettingString(settings, "Password") != "ephemeral-token" {
-		t.Fatalf("SAML credentials were not routed to OpenVPN: %s", prepared)
+	if tunnelSettingString(settings, "Username") != `Entra_ID_SAML\saml-user` || tunnelSettingString(settings, "Password") != "ephemeral-token" {
+		t.Fatal("SAML credentials were not qualified with the gateway's authentication domain")
 	}
-	if metadataRequests != 0 || loginRequests != 1 || providerRequests != 1 {
-		t.Fatalf("SAML requests: metadata=%d login=%d provider=%d, want 0/1/1", metadataRequests, loginRequests, providerRequests)
+	_, payload, err := tunnelSidecarCommand(3, prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config map[string]any
+	if err := json.Unmarshal(payload, &config); err != nil {
+		t.Fatal(err)
+	}
+	if config["username"] != `Entra_ID_SAML\saml-user` || config["password"] != "ephemeral-token" || config["challenge_response"] != nil {
+		t.Fatal("OpenVPN did not receive the domain-qualified SAML user and token without a stale OTP")
+	}
+	if metadataRequests != 0 || loginRequests != 1 || providerRequests != 1 || statusRequests != 1 {
+		t.Fatalf("SAML requests: metadata=%d login=%d provider=%d status=%d, want 0/1/1/1", metadataRequests, loginRequests, providerRequests, statusRequests)
 	}
 }
 
@@ -394,7 +416,7 @@ func TestPrepareWatchguardAutomaticUsesAdvertisedSAML(t *testing.T) {
 		case "sslvpn_logon":
 			statusRequests++
 			writer.Header().Set("Content-Type", "application/xml")
-			_, _ = writer.Write([]byte(`<resp><saml_enabled>yes</saml_enabled></resp>`))
+			_, _ = writer.Write([]byte(`<resp><saml_enabled>yes</saml_enabled><saml_idp_name>Microsoft Entra</saml_idp_name></resp>`))
 		case "sslvpn_download":
 			_, _ = writer.Write(bundle)
 		default:
@@ -414,11 +436,279 @@ func TestPrepareWatchguardAutomaticUsesAdvertisedSAML(t *testing.T) {
 		result, _ := json.Marshal(watchguardSAMLResult{Username: "saml-user", Token: "token"})
 		return string(result), nil
 	})
-	if _, err := prepareWatchguardProfile(ctx, raw); err != nil {
+	prepared, err := prepareWatchguardProfile(ctx, raw)
+	if err != nil {
 		t.Fatal(err)
+	}
+	var settings map[string]json.RawMessage
+	_ = json.Unmarshal(prepared, &settings)
+	if tunnelSettingString(settings, "Username") != `Microsoft Entra\saml-user` {
+		t.Fatal("automatic SAML lost the advertised IdP name")
 	}
 	if statusRequests != 1 {
 		t.Fatalf("status requests = %d, want 1", statusRequests)
+	}
+}
+
+func TestPrepareWatchguardSAMLRejectsInvalidGatewayDomainBeforeSignIn(t *testing.T) {
+	for _, test := range []struct {
+		name, body, want string
+		status           int
+	}{
+		{name: "disabled", body: `<resp><saml_enabled>0</saml_enabled></resp>`, want: "does not advertise SAML"},
+		{name: "missing domain", body: `<resp><saml_enabled>1</saml_enabled></resp>`, want: "valid SAML authentication domain"},
+		{name: "empty domain", body: `<resp><saml_enabled>1</saml_enabled><saml_idp_name> </saml_idp_name></resp>`, want: "valid SAML authentication domain"},
+		{name: "domain separator", body: `<resp><saml_enabled>true</saml_enabled><saml_idp_name>Entra\other</saml_idp_name></resp>`, want: "valid SAML authentication domain"},
+		{name: "control character", body: "<resp><saml_enabled>1</saml_enabled><saml_idp_name>Entra\nother</saml_idp_name></resp>", want: "valid SAML authentication domain"},
+		{name: "oversized domain", body: `<resp><saml_enabled>1</saml_enabled><saml_idp_name>` + strings.Repeat("a", 1025) + `</saml_idp_name></resp>`, want: "valid SAML authentication domain"},
+		{name: "unavailable", status: http.StatusServiceUnavailable, want: "HTTP 503"},
+		{name: "malformed status", body: `<resp>`, want: "malformed XML"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			requests := 0
+			server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				requests++
+				query := request.URL.Query()
+				if query.Get("action") != "sslvpn_logon" || query.Get("fw_logon_type") != "status" ||
+					query.Get("style") != "fw_logon.xsl" || query.Has("fw_username") || query.Has("fw_password") {
+					t.Error("SAML discovery must only request unauthenticated gateway status")
+				}
+				writer.Header().Set("Content-Type", "application/xml")
+				if test.status != 0 {
+					writer.WriteHeader(test.status)
+				}
+				_, _ = writer.Write([]byte(test.body))
+			}))
+			defer server.Close()
+			serverURL, _ := url.Parse(server.URL)
+			raw, _ := json.Marshal(map[string]any{
+				"Server": serverURL.Hostname(), "Port": mustTestPort(t, serverURL.Port()),
+				"UseSingleSignOn": true, "TrustServerCertificate": true, "Domain": "Firebox-DB",
+			})
+			ctx := withTunnelPromptHandler(context.Background(), func(_ context.Context, _ tunnelPrompt) (string, error) {
+				t.Error("invalid SAML domain must fail before opening the browser")
+				return "", context.Canceled
+			})
+			prepared, err := prepareWatchguardProfile(ctx, raw)
+			if prepared != nil || err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("prepare error = %v, want %q and no tunnel settings", err, test.want)
+			}
+			if requests != 1 {
+				t.Fatalf("gateway requests = %d, want only one status request", requests)
+			}
+		})
+	}
+}
+
+func TestPrepareWatchguardSAMLRejectsInvalidCallbacksAndPropagatesFailures(t *testing.T) {
+	valid := watchguardSAMLResult{Username: "saml-user", Token: "secret-token"}
+	for _, test := range []struct {
+		name, want        string
+		result            watchguardSAMLResult
+		promptErr         error
+		cancelProgress    bool
+		downloadStatus    int
+		wantDownloads     int
+		malformedResponse bool
+	}{
+		{name: "malformed response", malformedResponse: true, want: "response is invalid"},
+		{name: "missing user", result: watchguardSAMLResult{Token: valid.Token}, want: "response is invalid"},
+		{name: "missing token", result: watchguardSAMLResult{Username: valid.Username}, want: "response is invalid"},
+		{name: "NUL token", result: watchguardSAMLResult{Username: valid.Username, Token: "secret-token\x00suffix"}, want: "response is invalid"},
+		{name: "qualified user exceeds limit", result: watchguardSAMLResult{Username: strings.Repeat("a", 1020), Token: valid.Token}, want: "response is invalid"},
+		{name: "user control character", result: watchguardSAMLResult{Username: "saml-user\nother", Token: valid.Token}, want: "response is invalid"},
+		{name: "oversized token", result: watchguardSAMLResult{Username: valid.Username, Token: strings.Repeat("t", 16*1024+1)}, want: "response is invalid"},
+		{name: "too many cookies", result: watchguardSAMLResult{Username: valid.Username, Token: valid.Token, Cookies: make([]watchguardBrowserCookie, 257)}, want: "response is invalid"},
+		{name: "invalid cookie", result: watchguardSAMLResult{Username: valid.Username, Token: valid.Token, Cookies: []watchguardBrowserCookie{{Name: "bad=cookie"}}}, want: "invalid cookie"},
+		{name: "cancelled sign-in", promptErr: context.Canceled, want: "context canceled"},
+		{name: "cancelled download", result: valid, cancelProgress: true, want: "context canceled"},
+		{name: "rejected download", result: valid, downloadStatus: http.StatusForbidden, wantDownloads: 1, want: "HTTP 403"},
+		{name: "invalid bundle", result: valid, wantDownloads: 1, want: "bundle"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			downloads := 0
+			server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				downloads++
+				if test.downloadStatus != 0 {
+					writer.WriteHeader(test.downloadStatus)
+				}
+				_, _ = writer.Write([]byte("invalid bundle"))
+			}))
+			defer server.Close()
+			serverURL, _ := url.Parse(server.URL)
+			raw, _ := json.Marshal(map[string]any{
+				"Server": serverURL.Hostname(), "Port": mustTestPort(t, serverURL.Port()), "TrustServerCertificate": true,
+			})
+			var settings map[string]json.RawMessage
+			_ = json.Unmarshal(raw, &settings)
+			ctx := withTunnelPromptHandler(context.Background(), func(_ context.Context, _ tunnelPrompt) (string, error) {
+				if test.malformedResponse {
+					return "{", nil
+				}
+				encoded, _ := json.Marshal(test.result)
+				return string(encoded), test.promptErr
+			})
+			ctx = withTunnelProgressHandler(ctx, func(_ context.Context, _, _ string) error {
+				if test.cancelProgress {
+					return context.Canceled
+				}
+				return nil
+			})
+			prepared, err := prepareWatchguardSAML(ctx, settings, &watchguardLogonResponse{SAMLEnabled: "1", SAMLIdPName: "Entra"})
+			if prepared != nil || err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("prepare error = %v, want %q and no tunnel settings", err, test.want)
+			}
+			if strings.Contains(err.Error(), valid.Token) || strings.Contains(err.Error(), valid.Username) {
+				t.Fatal("SAML error exposed callback credentials")
+			}
+			if (test.promptErr != nil || test.cancelProgress) && !errors.Is(err, context.Canceled) {
+				t.Fatal("SAML cancellation was not propagated")
+			}
+			if downloads != test.wantDownloads {
+				t.Fatalf("downloads = %d, want %d", downloads, test.wantDownloads)
+			}
+		})
+	}
+}
+
+func TestPrepareWatchguardSAMLQualifiedUsernameByteBoundary(t *testing.T) {
+	bundle := testWatchguardBundle(t, map[string]string{
+		"client.ovpn": "client\nca ca.crt\ncert client.crt\nkey client.pem\nremote firebox.example.test 443 tcp\n",
+		"ca.crt":      "CA", "client.crt": "CERT", "client.pem": "KEY",
+	})
+	for _, test := range []struct {
+		name, username string
+		legacy, reject bool
+	}{
+		{name: "ASCII at limit", username: strings.Repeat("a", 1018)},
+		{name: "Unicode at limit", username: strings.Repeat("é", 509)},
+		{name: "ASCII over limit", username: strings.Repeat("a", 1019), reject: true},
+		{name: "Unicode over limit", username: strings.Repeat("é", 510), reject: true},
+		{name: "legacy SSO flag", username: "mário@example.test", legacy: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			downloads := 0
+			server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				if request.URL.Query().Get("fw_logon_type") == "status" {
+					writer.Header().Set("Content-Type", "application/xml")
+					_, _ = writer.Write([]byte(`<resp><saml_enabled>true</saml_enabled><saml_idp_name>Entra</saml_idp_name></resp>`))
+					return
+				}
+				downloads++
+				_, _ = writer.Write(bundle)
+			}))
+			defer server.Close()
+			serverURL, _ := url.Parse(server.URL)
+			authMode := 2
+			if test.legacy {
+				authMode = 0
+			}
+			raw, _ := json.Marshal(map[string]any{
+				"Server": serverURL.Hostname(), "Port": mustTestPort(t, serverURL.Port()),
+				"AuthMode": authMode, "UseSingleSignOn": test.legacy, "TrustServerCertificate": true,
+			})
+			const token = " token+/=&\"é "
+			ctx := withTunnelPromptHandler(context.Background(), func(_ context.Context, _ tunnelPrompt) (string, error) {
+				encoded, _ := json.Marshal(watchguardSAMLResult{Username: test.username, Token: token})
+				return string(encoded), nil
+			})
+			prepared, err := prepareWatchguardProfile(ctx, raw)
+			if test.reject {
+				if prepared != nil || err == nil || err.Error() != "WatchGuard SAML response is invalid" || downloads != 0 {
+					t.Fatalf("oversized qualified user: error=%v downloads=%d", err, downloads)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, payload, err := tunnelSidecarCommand(3, prepared)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var config map[string]any
+			if err := json.Unmarshal(payload, &config); err != nil {
+				t.Fatal(err)
+			}
+			if downloads != 1 || config["username"] != `Entra\`+test.username || config["password"] != token {
+				t.Fatal("SAML byte boundary or opaque token changed before reaching OpenVPN")
+			}
+		})
+	}
+}
+
+func TestPrepareWatchguardSAMLHTTPFailuresPreserveCancellation(t *testing.T) {
+	for _, test := range []struct {
+		phase    string
+		body     bool
+		authMode int
+	}{
+		{phase: "status", authMode: 2}, {phase: "status", body: true, authMode: 2},
+		{phase: "download", authMode: 2}, {phase: "download", body: true, authMode: 2},
+		{phase: "status"}, {phase: "status", body: true},
+		{phase: "download"}, {phase: "download", body: true},
+	} {
+		t.Run(fmt.Sprintf("%s/body=%t/mode=%d", test.phase, test.body, test.authMode), func(t *testing.T) {
+			started := make(chan struct{})
+			var prompts atomic.Int32
+			server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				status := request.URL.Query().Get("fw_logon_type") == "status"
+				if status && test.phase == "download" {
+					writer.Header().Set("Content-Type", "application/xml")
+					_, _ = writer.Write([]byte(`<resp><saml_enabled>1</saml_enabled><saml_idp_name>Entra</saml_idp_name></resp>`))
+					return
+				}
+				if test.body {
+					writer.Header().Set("Content-Type", "application/xml")
+					writer.WriteHeader(http.StatusOK)
+					writer.(http.Flusher).Flush()
+				}
+				close(started)
+				<-request.Context().Done()
+			}))
+			defer server.Close()
+			serverURL, _ := url.Parse(server.URL)
+			raw, _ := json.Marshal(map[string]any{
+				"Server": serverURL.Hostname(), "Port": mustTestPort(t, serverURL.Port()),
+				"AuthMode": test.authMode, "TrustServerCertificate": true,
+			})
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			ctx = withTunnelPromptHandler(ctx, func(_ context.Context, _ tunnelPrompt) (string, error) {
+				prompts.Add(1)
+				return `{"username":"user","token":"private-token"}`, nil
+			})
+			finished := make(chan error, 1)
+			go func() {
+				prepared, err := prepareWatchguardProfile(ctx, raw)
+				if prepared != nil {
+					finished <- errors.New("cancelled SAML request returned tunnel settings")
+					return
+				}
+				finished <- err
+			}()
+			select {
+			case <-started:
+			case <-time.After(5 * time.Second):
+				t.Fatal("SAML HTTP request did not start")
+			}
+			cancel()
+			select {
+			case err := <-finished:
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("cancellation error = %v, want context.Canceled", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("SAML HTTP cancellation did not finish")
+			}
+			wantPrompts := int32(0)
+			if test.phase == "download" {
+				wantPrompts = 1
+			}
+			if prompts.Load() != wantPrompts {
+				t.Fatalf("browser prompts = %d, want %d", prompts.Load(), wantPrompts)
+			}
+		})
 	}
 }
 
