@@ -391,10 +391,10 @@ func TestPrepareFortinetEmbeddedSamlAuthentication(t *testing.T) {
 		t.Fatalf("prepared settings = %s", prepared)
 	}
 
-	if _, err := prepareTunnelAuthentication(context.Background(), 2, json.RawMessage(`{
+	if _, err := prepareTunnelAuthentication(ctx, 2, json.RawMessage(`{
 		"Host":"vpn.example","UseSingleSignOn":true,"UseExternalBrowser":true,"Realm":"staff"
-	}`)); err == nil {
-		t.Fatal("external SAML realm was accepted")
+	}`)); err != nil {
+		t.Fatalf("legacy SAML settings did not use the dedicated window: %v", err)
 	}
 	if _, err := prepareTunnelAuthentication(context.Background(), 2, json.RawMessage(`{`)); err == nil {
 		t.Fatal("malformed Fortinet settings were accepted")

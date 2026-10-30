@@ -945,7 +945,6 @@ test('VPN authentication and certificate controls preserve their mounted section
       2,
       {
         UseSingleSignOn: 'switch',
-        UseExternalBrowser: 'switch',
         TrustServerCertificate: 'switch',
         TotpSecret: 'password',
         ServerCertSha256Pin: undefined,
@@ -1103,4 +1102,26 @@ test('SSH host-key trust delegates the retained lifecycle retry to Go', () => {
     mainSource,
     /this\.pendingConnections\.get\(request\.sessionId\) === generation[\s\S]*?this\.pendingConnections\.delete\(request\.sessionId\)/,
   );
+});
+
+test('Fortinet editor offers only the dedicated SAML window', () => {
+  const fields = sourceBetween(
+    appSource,
+    'function tunnelEditorFields',
+    'function tunnelDefaultSettings',
+  );
+  const fieldsForKind = new Function(
+    'kind',
+    fields.slice(fields.indexOf('{') + 1, fields.lastIndexOf('}')),
+  );
+  assert.ok(
+    !fieldsForKind(2).some((field: { key: string }) =>
+      ['UseExternalBrowser', 'SamlRedirectPort'].includes(field.key),
+    ),
+  );
+  const editor = sourceBetween(appSource, 'function TunnelEditorDialog', 'function TunnelsPage');
+  const fortinet = sourceBetween(editor, '{value.kind === 2 ? (', '{value.kind === 3 ? (');
+  assert.match(fortinet, /rows\('Single sign-on'\)/);
+  assert.match(fortinet, /dedicated window/);
+  assert.match(fortinet, /field.key !== 'Realm' && useFortinetSso/);
 });

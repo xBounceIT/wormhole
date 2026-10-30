@@ -137,7 +137,7 @@ test('VPN editor normalizes every numeric input and removes cleared optional val
       Mtu: '',
       PersistentKeepaliveSeconds: '   ',
     }),
-    { Port: 10443, SamlRedirectPort: 8020 },
+    { Port: 10443 },
   );
 });
 
@@ -150,13 +150,13 @@ test('VPN editor matches WinUI normalization for Fortinet and Cisco secrets', ()
       Username: 'must-go',
       Password: 'must-go',
       TotpSecret: ' ABCD EFGH ',
-      Realm: 'must-go',
+      Realm: 'staff',
       ServerCertSha256Pin: ' ab cd ',
     }),
     {
       Host: 'vpn.example.com',
       UseSingleSignOn: true,
-      UseExternalBrowser: true,
+      Realm: 'staff',
       ServerCertSha256Pin: 'abcd',
     },
   );
@@ -428,3 +428,29 @@ test('VPN diagnostics label native phases and retain a bounded timestamped log',
   assert.match(bounded[0], /Second$/);
   assert.match(bounded[1], /Third$/);
 });
+
+for (const legacy of [undefined, false, true]) {
+  test(`Fortinet SSO uses dedicated authentication with legacy browser setting ${legacy}`, () => {
+    const settings = {
+      Host: 'vpn.example.test',
+      Port: 443,
+      UseSingleSignOn: true,
+      UseExternalBrowser: legacy,
+      SamlRedirectPort: -1,
+      Realm: 'staff',
+    };
+    assert.deepEqual(missingTunnelFields({ name: 'Forti', kind: 2, settings }), []);
+    const normalized = normalizeTunnelEditorSettings(2, settings);
+    assert.equal(normalized.Realm, 'staff');
+    assert.ok(!('UseExternalBrowser' in normalized));
+    assert.ok(!('SamlRedirectPort' in normalized));
+    assert.deepEqual(
+      missingTunnelFields({
+        name: 'Forti',
+        kind: 2,
+        settings: { ...settings, ServerCertSha256Pin: 'abcd' },
+      }),
+      ['an empty server certificate pin for SSO'],
+    );
+  });
+}

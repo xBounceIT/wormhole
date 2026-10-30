@@ -3082,7 +3082,6 @@ async function runTunnelBrowserAuth(
     mcpApprovalWindowCoordinator.presentTunnelAuthWindow(authWindow),
   );
   let cookieTimer: NodeJS.Timeout | undefined;
-  let cookieFlowStarted = false;
   authWindow.once('closed', () => {
     if (cookieTimer) clearInterval(cookieTimer);
   });
@@ -3090,7 +3089,6 @@ async function runTunnelBrowserAuth(
     await clearCompletionCookie(() => !settled);
     if (!settled) {
       if (event.completion === 'cookie') {
-        cookieFlowStarted = true;
         cookieTimer = setInterval(
           () => void inspectCookie().catch(() => complete(false, '', 'session')),
           250,
@@ -3103,14 +3101,18 @@ async function runTunnelBrowserAuth(
   void initialize().catch(() => complete(false, '', 'session'));
   await finished;
   signal?.removeEventListener('abort', abort);
-  // Keep the IdP profile persistent, but never retain Fortinet's ephemeral VPN credential in
-  // Chromium's cookie store after it has crossed the one-shot Go sidecar boundary.
-  if (cookieFlowStarted) {
+  // Remove Fortinet's ephemeral VPN credential from its temporary cookie store after it
+  // has crossed the one-shot Go sidecar boundary.
+  if (event.completion === 'cookie') {
     let cleanupCurrent = true;
     let cleanupTimeout: NodeJS.Timeout | undefined;
     try {
       await Promise.race([
-        clearCompletionCookie(() => cleanupCurrent).catch(() => undefined),
+        (async () => {
+          // Startup may have issued removals before cancellation. Bound those too.
+          await cookieRemovals;
+          if (cleanupCurrent) await clearCompletionCookie(() => cleanupCurrent);
+        })().catch(() => undefined),
         new Promise<void>((resolve) => {
           cleanupTimeout = setTimeout(resolve, 1_000);
         }),
@@ -3120,9 +3122,8 @@ async function runTunnelBrowserAuth(
       if (cleanupTimeout) clearTimeout(cleanupTimeout);
     }
   }
-  // Lookup can time out without side effects. Issued removals cannot be cancelled: retain
-  // ownership until every mutation settles, including when startup was cancelled.
-  await cookieRemovals;
+  // A timed-out native removal can finish later: each Fortinet attempt owns a unique
+  // in-memory partition, so it cannot touch another login or block the global auth queue.
 }
 
 class NativeBackendProcess {

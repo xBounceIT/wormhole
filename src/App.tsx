@@ -12133,19 +12133,6 @@ function tunnelEditorFields(kind: number): TunnelField[] {
           type: 'switch',
         },
         {
-          key: 'UseExternalBrowser',
-          label: 'Use external browser for SAML authentication',
-          section: 'Single sign-on',
-          type: 'switch',
-        },
-        {
-          key: 'SamlRedirectPort',
-          label: 'SAML callback port',
-          section: 'Single sign-on',
-          type: 'number',
-          placeholder: '8020',
-        },
-        {
           key: 'TotpSecret',
           label: 'TOTP shared secret (Base32, optional)',
           section: 'Advanced',
@@ -12464,7 +12451,7 @@ function tunnelEditorFields(kind: number): TunnelField[] {
 function tunnelDefaultSettings(kind: number): Record<string, unknown> {
   switch (kind) {
     case 2:
-      return { Port: 443, UseExternalBrowser: true, SamlRedirectPort: 8020 };
+      return { Port: 443 };
     case 3:
       return {
         Port: 443,
@@ -12719,7 +12706,6 @@ function TunnelEditorDialog({
         : [],
     );
   const useFortinetSso = value.settings.UseSingleSignOn === true;
-  const useFortinetExternalBrowser = useFortinetSso && value.settings.UseExternalBrowser === true;
   const useWatchguardSso = value.kind === 3 && watchguardUsesSso(value.settings);
 
   function setSetting(key: string, next: unknown) {
@@ -13041,22 +13027,14 @@ function TunnelEditorDialog({
                 <TunnelSection title="Gateway">{rows('Gateway')}</TunnelSection>
                 <TunnelSection title="Credentials">
                   {rows('Credentials', {
-                    disabled: (field) =>
-                      field.key === 'Realm'
-                        ? useFortinetExternalBrowser &&
-                          !(typeof value.settings.Realm === 'string' && value.settings.Realm.trim())
-                        : useFortinetSso,
+                    disabled: (field) => field.key !== 'Realm' && useFortinetSso,
                   })}
                 </TunnelSection>
                 <div className="grid gap-2 rounded-lg border border-border/70 bg-muted/20 px-3 py-2">
-                  {rows('Single sign-on', {
-                    disabled: (field) => field.key === 'UseExternalBrowser' && !useFortinetSso,
-                    hidden: (field) =>
-                      field.key === 'SamlRedirectPort' && !useFortinetExternalBrowser,
-                  })}
+                  {rows('Single sign-on')}
                   <p className="text-[11px] leading-relaxed text-muted-foreground">
-                    The embedded option uses a dedicated browser profile. External-browser
-                    authentication requires the callback port configured on the FortiGate.
+                    SAML authentication opens in a dedicated window with a fresh, temporary browser
+                    profile for each sign-in, keeping different accounts separate.
                   </p>
                 </div>
                 <TunnelAdvanced label="Advanced" onOpenChange={setAdvancedOpen} open={advancedOpen}>

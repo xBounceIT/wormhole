@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 export type TunnelBrowserCompletion = 'query-token' | 'oauth-code' | 'cookie';
 export type TunnelBrowserFailure = 'load' | 'certificate' | 'timeout' | 'session' | 'response';
@@ -49,14 +49,15 @@ export type TunnelAuthPartitionRequest =
       ignoreCertificateErrors: boolean;
     };
 
-// Persisting each provider partition keeps its IdP session between connects. WatchGuard also
+// Fortinet gets a fresh in-memory profile per attempt so different accounts never share IdP
+// sessions or cached certificate decisions. WatchGuard persists its IdP session and also
 // isolates the Firebox origin and certificate policy because Chromium caches certificate verify
 // results inside the network service; an explicit trust opt-in must never affect another gateway
 // or a later connection that restores normal verification.
 export function tunnelAuthPartition(request: TunnelAuthPartitionRequest): string {
   switch (request.completion) {
     case 'cookie':
-      return 'persist:wormhole-tunnel-auth-fortinet';
+      return `wormhole-tunnel-auth-fortinet-${randomUUID()}`;
     case 'oauth-code':
       return 'persist:wormhole-tunnel-auth-azure';
     case 'query-token': {

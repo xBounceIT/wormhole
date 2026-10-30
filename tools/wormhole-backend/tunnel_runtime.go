@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -989,60 +988,7 @@ func prepareTunnelAuthentication(
 	if kind != 2 {
 		return raw, nil
 	}
-	var settings map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &settings); err != nil {
-		return nil, errors.New("VPN tunnel settings are invalid")
-	}
-	defer clearTunnelSettingsMap(settings)
-	if !tunnelSettingBool(settings, "UseSingleSignOn") {
-		return raw, nil
-	}
-	useExternalBrowser := tunnelSettingBool(settings, "UseExternalBrowser")
-	if useExternalBrowser && strings.TrimSpace(tunnelSettingString(settings, "Realm")) != "" {
-		return nil, errors.New("external-browser Fortinet single sign-on does not support realms")
-	}
-	callbackPort := int(tunnelSettingNumber(settings, "SamlRedirectPort"))
-	if callbackPort == 0 {
-		callbackPort = fortinetSAMLDefaultCallbackPort
-	}
-	port := int(tunnelSettingNumber(settings, "Port"))
-	if port == 0 {
-		port = 443
-	}
-	if !useExternalBrowser {
-		base, err := buildWebURL("https", tunnelSettingString(settings, "Host"), port)
-		if err != nil {
-			return nil, errors.New("Fortinet SAML gateway is invalid")
-		}
-		start, _ := url.Parse(base)
-		start.Path = "/remote/saml/start"
-		if realm := strings.TrimSpace(tunnelSettingString(settings, "Realm")); realm != "" {
-			start.RawQuery = url.Values{"realm": {realm}}.Encode()
-		}
-		cookie, err := requestTunnelPrompt(ctx, tunnelPrompt{
-			Title: "Fortinet SAML sign-in", Browser: true, URLs: []string{start.String()},
-			Completion: "cookie", CookieName: "SVPNCOOKIE", RequireHTTPOnly: true,
-			IgnoreCertificateErrors: tunnelSettingBool(settings, "TrustServerCertificate"),
-		})
-		if err != nil {
-			return nil, err
-		}
-		if strings.TrimSpace(cookie) == "" || len(cookie) > 16*1024 {
-			return nil, errors.New("Fortinet SAML returned no VPN cookie")
-		}
-		settings["SvpnCookie"], _ = json.Marshal(cookie)
-		return json.Marshal(settings)
-	}
-	authID, err := authenticateFortinetExternalSAML(ctx, tunnelSettingString(settings, "Host"), port, callbackPort)
-	if err != nil {
-		return nil, err
-	}
-	encodedAuthID, err := json.Marshal(authID)
-	if err != nil {
-		return nil, errors.New("Fortinet SAML response was invalid")
-	}
-	settings["SamlAuthId"] = encodedAuthID
-	return json.Marshal(settings)
+	return prepareFortinetAuthentication(ctx, raw)
 }
 
 func readTunnelReady(reader *bufio.Reader, ready chan<- string, failures chan<- error) {
