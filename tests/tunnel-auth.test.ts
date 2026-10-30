@@ -142,6 +142,8 @@ function browserAuthHarness(
     window: AuthWindow;
   }[] = [];
   const windows: AuthWindow[] = [];
+  const partitions: string[] = [];
+  const windowPartitions: string[] = [];
   const responses: { cancelled: boolean; value: string; browserFailure?: string }[] = [];
   let expire!: () => void;
   let expireCleanup: (() => void) | undefined;
@@ -216,10 +218,16 @@ function browserAuthHarness(
       routeNativeOperationProgress() {},
       routeTunnelTestProgress: () => false,
       windowCloseCoordinators: new Set(),
-      electronSession: { fromPartition: () => browserSession },
+      electronSession: {
+        fromPartition: (partition: string) => {
+          partitions.push(partition);
+          return browserSession;
+        },
+      },
       BrowserWindow: class extends AuthWindow {
-        constructor() {
+        constructor(options: { webPreferences: { partition: string } }) {
           super();
+          windowPartitions.push(options.webPreferences.partition);
           window = this;
           windows.push(this);
         }
@@ -261,6 +269,8 @@ function browserAuthHarness(
     finished,
     urls,
     windows,
+    partitions,
+    windowPartitions,
     backend,
     browserSession,
     enqueue: (overrides: Record<string, unknown>) => {
@@ -555,7 +565,7 @@ test('slow Fortinet cleanup is bounded and cannot delete a later login cookie', 
 });
 
 for (const peerFails of [false, true]) {
-  test(`Fortinet retains cleanup ownership after ${peerFails ? 'a peer failure' : 'a timeout'}`, async (t) => {
+  test(`Fortinet releases the queue despite stalled cleanup and ${peerFails ? 'a peer failure' : 'a timeout'}`, async (t) => {
     let release!: () => void;
     let reads = 0;
     let removals = 0;
@@ -585,7 +595,8 @@ for (const peerFails of [false, true]) {
       auth.expireCleanup();
       await setImmediate();
       assert.equal(removals, 2);
-      assert.equal(auth.windows.length, 1);
+      assert.equal(auth.windows.length, 2);
+      assert.notEqual(auth.partitions[0], auth.partitions[1]);
       assert.equal(auth.responses.length, 1);
     } finally {
       release();
@@ -597,7 +608,7 @@ for (const peerFails of [false, true]) {
   });
 }
 
-test('cancelling startup does not release ownership of an in-flight cookie removal', async (t) => {
+test('cancelling startup bounds an in-flight cookie removal without blocking the next login', async (t) => {
   let release!: () => void;
   let reads = 0;
   const auth = browserAuthHarness(t, fortinetEvent, {
@@ -612,8 +623,11 @@ test('cancelling startup does not release ownership of an in-flight cookie remov
   auth.emit({ type: 'tunnel.prompt-closed', sessionId: 'lease', promptId: 'prompt' });
   try {
     await setImmediate();
-    assert.equal(auth.windows.length, 1);
-    assert.equal(auth.loads.length, 0);
+    auth.expireCleanup();
+    await setImmediate();
+    assert.equal(auth.windows.length, 2);
+    assert.notEqual(auth.partitions[0], auth.partitions[1]);
+    assert.equal(auth.loads.length, 1);
     assert.deepEqual(auth.responses, []);
   } finally {
     release();
@@ -1023,11 +1037,12 @@ test('Azure callback payloads preserve OAuth results within the backend byte lim
   assert.equal(encodeTunnelOAuthCallback(oversized), undefined);
 });
 
-test('VPN browser authentication uses isolated persistent provider profiles', () => {
-  assert.equal(
-    tunnelAuthPartition({ completion: 'cookie' }),
-    'persist:wormhole-tunnel-auth-fortinet',
-  );
+test('VPN browser authentication isolates Fortinet attempts and provider profiles', () => {
+  const first = tunnelAuthPartition({ completion: 'cookie' });
+  const second = tunnelAuthPartition({ completion: 'cookie' });
+  assert.match(first, /^wormhole-tunnel-auth-fortinet-/);
+  assert.ok(!first.startsWith('persist:'));
+  assert.notEqual(first, second);
   assert.equal(
     tunnelAuthPartition({ completion: 'oauth-code' }),
     'persist:wormhole-tunnel-auth-azure',
@@ -1088,4 +1103,29 @@ test('certificate host matching normalizes DNS spelling and IPv6 brackets withou
     false,
   );
   assert.equal(isSameCertificateHostname('2001:db8::2', '[2001:db8::1]'), false);
+});
+
+test('consecutive Fortinet windows use distinct temporary profiles even for the same gateway', async (t) => {
+  const auth = browserAuthHarness(t, {
+    ...fortinetEvent,
+    title: 'Fortinet SAML sign-in',
+    urls: ['https://vpn.example.test/remote/saml/start'],
+  });
+  await setImmediate();
+  assert.equal(auth.loads[0].url, 'https://vpn.example.test/remote/saml/start');
+  auth.window.destroy();
+  await auth.finished;
+  const next = auth.enqueue({ promptId: 'second-account' });
+  await setImmediate();
+  assert.equal(auth.partitions.length, 2);
+  assert.notEqual(auth.partitions[0], auth.partitions[1]);
+  for (const partition of auth.partitions) {
+    assert.match(partition, /^wormhole-tunnel-auth-fortinet-/);
+    assert.ok(!partition.startsWith('persist:'));
+  }
+  assert.deepEqual(auth.windowPartitions, auth.partitions);
+  auth.window.destroy();
+  await next;
+  assert.equal(auth.responses.length, 2);
+  assert.ok(auth.responses.every((response) => response.cancelled));
 });

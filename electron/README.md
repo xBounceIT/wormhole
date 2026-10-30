@@ -100,13 +100,14 @@ the selected tunnel.
 
 The Tunnels page creates, edits, tests, imports, and deletes encrypted tunnel records,
 and folder/connection editors assign a route with inherit / off / selected
-tunnel semantics. WireGuard, OpenVPN, Fortinet (password, embedded SAML, or system-browser
-SAML), WatchGuard (password, imported profile, or SAML), Stormshield (automatic,
+tunnel semantics. WireGuard, OpenVPN, Fortinet (password or dedicated-window SAML), WatchGuard (password, imported profile, or SAML), Stormshield (automatic,
 imported profile, and OTP), Azure VPN with Microsoft Entra ID, and Cisco Secure Client run
 through native Go backends and bundled Go sidecars. Interactive challenges are serialized by
 the Electron main process; browser tokens and VPN cookies stay inside isolated authentication
 sessions and are handed directly to Go rather than exposed to the renderer. A failed provider
-never falls back to routing outside the tunnel.
+never falls back to routing outside the tunnel. Fortinet SAML always uses a fresh,
+in-memory browser profile per sign-in, including for saved tunnels with legacy external-browser
+settings. It never opens the system browser or reuses another account's IdP session.
 
 The connection editor offers one Browser type for HTTP and HTTPS, with a Home page
 that opens when its session starts. The home page's scheme selects the transport;

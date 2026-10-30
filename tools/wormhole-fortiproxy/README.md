@@ -22,9 +22,9 @@ stdin), the sidecar shuts down and the TLS connection tears down.
    - Credentials: `POST https://<host>:<port>/remote/logincheck` with `username`,
      `credential`, optional `realm`, `ajax=1`, and `just_logged_in=1`. If the
      response contains a 2FA challenge, echo its challenge fields with `code=<TOTP>`.
-   - External-browser SAML: exchange the ephemeral `saml_auth_id` with
+   - Legacy SAML auth-ID support: exchange the ephemeral `saml_auth_id` with
      `GET /remote/saml/auth_id?id=...` and read `SVPNCOOKIE` from the response.
-   - Embedded-WebView2 SAML: seed the cookie jar directly from the ephemeral
+   - Dedicated-window SAML (used by Wormhole): seed the cookie jar directly from the ephemeral
      `svpn_cookie` supplied by the parent.
 2. `GET /remote/fortisslvpn_xml` returns assigned IP / DNS / MTU as XML.
 3. `GET /remote/sslvpn-tunnel` (no response body — the connection upgrades to PPP-over-TLS).

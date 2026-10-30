@@ -122,7 +122,7 @@ export function normalizeTunnelEditorSettings(
       .map((item) => item.trim())
       .filter(Boolean);
   }
-  for (const key of ['Port', 'Mtu', 'PersistentKeepaliveSeconds', 'SamlRedirectPort']) {
+  for (const key of ['Port', 'Mtu', 'PersistentKeepaliveSeconds']) {
     if (typeof settings[key] !== 'string') continue;
     const value = settings[key].trim();
     if (!value) {
@@ -160,7 +160,8 @@ export function normalizeTunnelEditorSettings(
     deleteIfBlank('Password');
   } else if (kind === 2) {
     const useSso = settings.UseSingleSignOn === true;
-    const useExternalBrowser = useSso && settings.UseExternalBrowser === true;
+    delete settings.UseExternalBrowser;
+    delete settings.SamlRedirectPort;
     if (useSso) {
       delete settings.Username;
       delete settings.Password;
@@ -168,8 +169,7 @@ export function normalizeTunnelEditorSettings(
     } else {
       trimCrlf('Password');
     }
-    if (useSso && useExternalBrowser) delete settings.Realm;
-    else deleteIfBlank('Realm');
+    deleteIfBlank('Realm');
     stripAll('TotpSecret');
     stripAll('ServerCertSha256Pin');
   } else if (kind === 3) {
@@ -262,11 +262,8 @@ export function missingTunnelFields(value: {
       if (blank('Host')) missing.push('Host');
       if (!validPort('Port')) missing.push('Port (1-65535)');
       if (settings.UseSingleSignOn === true) {
-        if (settings.UseExternalBrowser === true) {
-          if (!validPort('SamlRedirectPort')) missing.push('SAML callback port (1-65535)');
-          if (!blank('Realm')) missing.push('an empty realm for external-browser SSO');
-        } else if (!blank('ServerCertSha256Pin')) {
-          missing.push('external-browser SSO or an empty server certificate pin');
+        if (!blank('ServerCertSha256Pin')) {
+          missing.push('an empty server certificate pin for SSO');
         }
       } else {
         if (blank('Username')) missing.push('Username');

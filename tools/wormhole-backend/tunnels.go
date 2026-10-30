@@ -751,12 +751,11 @@ func validateTunnelSettings(kind int64, settings map[string]json.RawMessage) err
 		}
 	}
 	if kind == 2 {
-		if err := validateOptionalTunnelPort(settings, "SamlRedirectPort"); err != nil {
-			return err
-		}
+		delete(settings, "UseExternalBrowser")
+		delete(settings, "SamlRedirectPort")
 	}
 	boolFields := map[int64][]string{
-		2: {"UseSingleSignOn", "UseExternalBrowser", "TrustServerCertificate"},
+		2: {"UseSingleSignOn", "TrustServerCertificate"},
 		3: {"UseSingleSignOn", "TrustServerCertificate"},
 		4: {"UseSingleSignOn", "UseOtp", "TrustServerCertificate"},
 		6: {"TrustServerCertificate"},
@@ -801,12 +800,8 @@ func validateTunnelSettings(kind int64, settings map[string]json.RawMessage) err
 		if !useSSO {
 			return required("Username", "Password")
 		}
-		if tunnelSettingBool(settings, "UseExternalBrowser") {
-			if strings.TrimSpace(tunnelSettingString(settings, "Realm")) != "" {
-				return errors.New("external-browser Fortinet single sign-on does not support realms")
-			}
-		} else if strings.TrimSpace(tunnelSettingString(settings, "ServerCertSha256Pin")) != "" {
-			return errors.New("embedded-browser Fortinet single sign-on cannot enforce a server certificate pin")
+		if strings.TrimSpace(tunnelSettingString(settings, "ServerCertSha256Pin")) != "" {
+			return errors.New("dedicated-browser Fortinet single sign-on cannot enforce a server certificate pin")
 		}
 	case 3:
 		if err := required("Server"); err != nil {
