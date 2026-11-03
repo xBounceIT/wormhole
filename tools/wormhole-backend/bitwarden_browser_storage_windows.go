@@ -19,5 +19,5 @@ func unprotectBitwardenBrowserStorage(path string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return unprotectDpapi(protected, bitwardenBrowserStorageEntropy)
+	return unprotectDpapiWithLegacyEntropy(protected, bitwardenBrowserStorageEntropy)
 }
