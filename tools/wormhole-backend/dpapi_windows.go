@@ -81,7 +81,7 @@ func unprotectAuthDocument(_ string, protected []byte) ([]byte, error) {
 	if len(protected) == 0 {
 		return nil, errors.New("Windows DPAPI returned an invalid protected value")
 	}
-	return unprotectDpapi(protected, appAuthenticationEntropy)
+	return unprotectDpapiWithLegacyEntropy(protected, appAuthenticationEntropy)
 }
 
 func deleteAuthProtectionKey(string) {}
@@ -101,8 +101,8 @@ func protectDpapi(value, entropy []byte) ([]byte, error) {
 	var output dataBlob
 	result, _, callErr := cryptProtectData.Call(
 		uintptr(unsafe.Pointer(&input)),
+		0, // Optional description, not entropy.
 		uintptr(unsafe.Pointer(entropyBlob)),
-		0,
 		0,
 		0,
 		0x1, // CRYPTPROTECT_UI_FORBIDDEN
@@ -135,8 +135,8 @@ func unprotectDpapi(protected, entropy []byte) ([]byte, error) {
 	var output dataBlob
 	result, _, callErr := cryptUnprotectData.Call(
 		uintptr(unsafe.Pointer(&input)),
+		0, // Optional description output; never write it into the entropy blob.
 		uintptr(unsafe.Pointer(entropyBlob)),
-		0,
 		0,
 		0,
 		0x1, // CRYPTPROTECT_UI_FORBIDDEN
@@ -153,6 +153,18 @@ func unprotectDpapi(protected, entropy []byte) ([]byte, error) {
 	}
 	defer localFree.Call(uintptr(unsafe.Pointer(output.pbData)))
 	return append([]byte(nil), unsafe.Slice(output.pbData, output.cbData)...), nil
+}
+
+// Older Wormhole versions passed entropy in the description slot and therefore
+// wrote user-scoped DPAPI ciphertext without entropy. Limit compatibility to the
+// two affected document readers; all new writes and ordinary DPAPI reads remain
+// strict. Failed reads never replace the original protected file.
+func unprotectDpapiWithLegacyEntropy(protected, entropy []byte) ([]byte, error) {
+	plaintext, err := unprotectDpapi(protected, entropy)
+	if err == nil || len(entropy) == 0 {
+		return plaintext, err
+	}
+	return unprotectDpapi(protected, nil)
 }
 
 func unprotectSecret(encoded string) ([]byte, error) {
