@@ -56,6 +56,7 @@ type workspaceSnapshot struct {
 }
 
 type appSettingsSnapshot struct {
+	SshTerminalTheme          string                        `json:"sshTerminalTheme"`
 	Theme                     applicationTheme              `json:"theme"`
 	PromptBeforeTunnelConnect bool                          `json:"promptBeforeTunnelConnect"`
 	AutoCopyOnSelect          bool                          `json:"autoCopyOnSelect"`
@@ -598,6 +599,7 @@ func runBackendCLI(args []string, input io.Reader, output io.Writer, errorOutput
 		if err == nil {
 			result = map[string]any{
 				"theme":                     settings.Theme,
+				"sshTerminalTheme":          settings.SshTerminalTheme,
 				"promptBeforeTunnelConnect": settings.PromptBeforeTunnelConnect,
 				"autoCopyOnSelect":          settings.AutoCopyOnSelect,
 				"confirmOnTabClose":         settings.ConfirmOnTabClose,
@@ -612,6 +614,17 @@ func runBackendCLI(args []string, input io.Reader, output io.Writer, errorOutput
 		}
 	case "settings-migrate":
 		result, err = persistLegacySettingsMigration(*databasePath)
+	case "settings-set-ssh-terminal-theme":
+		var request struct {
+			Theme string `json:"theme"`
+		}
+		err = decodeInput(&request)
+		if err == nil {
+			err = writeSshTerminalTheme(*databasePath, request.Theme)
+			if err == nil {
+				result = map[string]bool{"updated": true}
+			}
+		}
 	case "settings-set-theme":
 		var request struct {
 			Theme string `json:"theme"`
@@ -1116,6 +1129,7 @@ func loadAppSettingsSnapshot(databasePath string) (appSettingsSnapshot, error) {
 		return appSettingsSnapshot{}, err
 	}
 	return appSettingsSnapshot{
+		SshTerminalTheme:          settings.SshTerminalTheme,
 		Theme:                     settings.Theme,
 		PromptBeforeTunnelConnect: settings.PromptBeforeTunnelConnect,
 		AutoCopyOnSelect:          settings.AutoCopyOnSelect,

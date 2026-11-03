@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
+import type { SshTerminalTheme } from './terminal-theme-settings.js';
 import type { WebBrowserCommand, WebBrowserState } from './web-browser-tabs.js';
 import type {
   RdpBackendEvent,
@@ -320,6 +321,7 @@ const wormholeBridge = {
   readAppSettings: () =>
     ipcRenderer.invoke('settings:read') as Promise<{
       theme: 'system' | 'light' | 'dark';
+      sshTerminalTheme: SshTerminalTheme;
       promptBeforeTunnelConnect: boolean;
       autoCopyOnSelect: boolean;
       confirmOnTabClose: boolean;
@@ -332,6 +334,8 @@ const wormholeBridge = {
       skippedUpdateVersion: string | null;
     }>,
   setTheme: (theme: 'system' | 'light' | 'dark') => ipcRenderer.invoke('settings:set-theme', theme),
+  setSshTerminalTheme: (theme: SshTerminalTheme) =>
+    ipcRenderer.invoke('settings:set-ssh-terminal-theme', theme),
   setPromptBeforeTunnelConnect: (enabled: boolean) =>
     ipcRenderer.invoke('settings:set-prompt-before-tunnel', enabled),
   setAutoCopyOnSelect: (enabled: boolean) =>

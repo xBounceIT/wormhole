@@ -7,6 +7,7 @@ import {
   type SftpTransferDirection,
 } from './components/SftpBrowser';
 import { sshTerminal, retainSshTerminals } from './xterm-terminal';
+import { SshThemeSettings, useSshTerminalTheme } from './components/SshThemeSettings';
 import {
   lazy,
   createContext,
@@ -1813,6 +1814,7 @@ function backupOperationErrorMessage(error: unknown): string {
 // splitting the coordinator would duplicate the native lifecycle boundary across components.
 // react-doctor-disable-next-line react-doctor/no-giant-component, react-doctor/prefer-useReducer
 function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAppProps) {
+  const sshTheme = useSshTerminalTheme(initialSettings.sshTerminalTheme);
   const [theme, setTheme] = useState<Theme>(initialSettings.theme);
   const [systemTheme, setSystemTheme] = useState<ResolvedTheme>(getSystemTheme);
   const contextMenuOverlayOpen = useContextMenuOverlayOpen();
@@ -7364,6 +7366,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
               </SshCertificateEditorContext>
             ) : activePage === 'settings' ? (
               <SettingsPage
+                sshTheme={sshTheme}
                 autoCopyOnSelect={autoCopyOnSelect}
                 backupEncryptionRequired={backupExportRequiresEncryption(credentials)}
                 confirmOnTabClose={confirmOnTabClose}
@@ -14739,6 +14742,7 @@ function ReleaseNotesMarkdown({ markdown }: { markdown: string }) {
 // long component is an explicit composition root for those isolated settings sections.
 // react-doctor-disable-next-line react-doctor/no-giant-component, react-doctor/prefer-useReducer
 function SettingsPage({
+  sshTheme,
   autoCopyOnSelect,
   backupEncryptionRequired,
   confirmOnTabClose,
@@ -14764,6 +14768,7 @@ function SettingsPage({
 }: {
   autoCopyOnSelect: boolean;
   backupEncryptionRequired: boolean;
+  sshTheme: ReturnType<typeof useSshTerminalTheme>;
   confirmOnTabClose: boolean;
   confirmOnWindowClose: boolean;
   confirmOnWindowCloseBusy: boolean;
@@ -16113,6 +16118,12 @@ function SettingsPage({
           </SettingsSection>
 
           <SettingsSection title="Terminal">
+            <SshThemeSettings
+              theme={sshTheme.theme}
+              busy={sshTheme.busy}
+              error={sshTheme.error}
+              onChange={(value) => void sshTheme.changeTheme(value)}
+            />
             <SettingsSwitch
               checked={autoCopyOnSelect}
               description="Copy selected terminal text to the clipboard automatically."

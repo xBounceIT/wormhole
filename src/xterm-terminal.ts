@@ -4,6 +4,11 @@ import { WebglAddon } from '@xterm/addon-webgl';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
 import '@xterm/xterm/css/xterm.css';
 import { parseTerminalLink } from '../electron/terminal-link';
+import {
+  defaultSshTerminalTheme,
+  sshTerminalColors,
+  type SshTerminalTheme,
+} from './terminal-themes';
 
 export type TerminalOutput = Extract<WormholeSshEvent, { type: 'terminal-output' }>;
 
@@ -18,6 +23,12 @@ export interface TerminalActions {
 }
 
 const terminals = new Map<string, XtermSession>();
+let colorTheme: SshTerminalTheme = defaultSshTerminalTheme;
+
+export function setSshTerminalTheme(theme: SshTerminalTheme): void {
+  colorTheme = theme;
+  for (const session of terminals.values()) session.setTheme(theme);
+}
 
 export function sshTerminal(sessionId: string): XtermSession {
   let session = terminals.get(sessionId);
@@ -50,27 +61,8 @@ export class XtermSession {
     cursorBlink: true,
     cursorStyle: 'block',
     allowProposedApi: true,
-    theme: {
-      background: '#090909',
-      foreground: '#e5e7eb',
-      cursor: '#e5e7eb',
-      black: '#1d2021',
-      red: '#cc241d',
-      green: '#98971a',
-      yellow: '#d79921',
-      blue: '#458588',
-      magenta: '#b16286',
-      cyan: '#689d6a',
-      white: '#a89984',
-      brightBlack: '#928374',
-      brightRed: '#fb4934',
-      brightGreen: '#b8bb26',
-      brightYellow: '#fabd2f',
-      brightBlue: '#83a598',
-      brightMagenta: '#d3869b',
-      brightCyan: '#8ec07c',
-      brightWhite: '#ebdbb2',
-    },
+    theme: sshTerminalColors(colorTheme),
+    minimumContrastRatio: 4.5,
   });
   private fitAddon = new FitAddon();
   private host = document.createElement('div');
@@ -88,6 +80,7 @@ export class XtermSession {
     private createWebgl = () => new WebglAddon(),
   ) {
     this.host.style.cssText = 'width:100%;height:100%;overflow:hidden';
+    this.setTheme(colorTheme);
     this.terminal.options.linkHandler = {
       activate: (event, url) => {
         event.preventDefault();
@@ -148,6 +141,12 @@ export class XtermSession {
       },
       true,
     );
+  }
+
+  setTheme(theme: SshTerminalTheme): void {
+    const colors = sshTerminalColors(theme);
+    this.terminal.options.theme = colors;
+    this.host.style.backgroundColor = colors.background!;
   }
 
   configure(actions: TerminalActions): void {

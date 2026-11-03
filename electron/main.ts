@@ -49,6 +49,7 @@ import {
 } from './connection-tree-settings.js';
 import { initializeLocalCrashDiagnostics } from './crash-diagnostics.js';
 import { isAppTheme, parseThemeStartupRequest, type AppTheme } from './theme-settings.js';
+import { isSshTerminalTheme, type SshTerminalTheme } from './terminal-theme-settings.js';
 import { nativeTitlebarOverlay, syncNativeTitlebarTheme } from './native-titlebar-theme.js';
 import {
   normalizeWindowCloseConfirmation,
@@ -339,6 +340,7 @@ type BackendOperation =
   | 'settings-file-transfer-write'
   | 'settings-read'
   | 'settings-set-theme'
+  | 'settings-set-ssh-terminal-theme'
   | 'settings-set-prompt-before-tunnel'
   | 'settings-set-update-preferences'
   | 'update-check'
@@ -489,6 +491,7 @@ type MigrationResponse = {
   missing: number;
 };
 type AppSettings = {
+  sshTerminalTheme: SshTerminalTheme;
   theme: AppTheme;
   promptBeforeTunnelConnect: boolean;
   autoCopyOnSelect: boolean;
@@ -8610,6 +8613,14 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
   ipcMain.handle('settings:read', async () => {
     return serializeAuthOperation(async () => {
       return runBackend<AppSettings>('settings-read');
+    });
+  });
+
+  ipcMain.handle('settings:set-ssh-terminal-theme', async (_event, value: unknown) => {
+    if (!isSshTerminalTheme(value)) throw new Error('SSH terminal theme is invalid.');
+    return serializeAuthOperation(async () => {
+      await requireWorkspaceAuth();
+      return runBackend<{ updated: boolean }>('settings-set-ssh-terminal-theme', { theme: value });
     });
   });
 

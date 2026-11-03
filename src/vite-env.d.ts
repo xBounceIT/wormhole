@@ -696,6 +696,7 @@ interface WormholeUpdateCheckResult {
 }
 
 interface WormholeAppSettings {
+  sshTerminalTheme: import('../electron/terminal-theme-settings').SshTerminalTheme;
   theme: 'system' | 'light' | 'dark';
   promptBeforeTunnelConnect: boolean;
   autoCopyOnSelect: boolean;
@@ -1086,6 +1087,9 @@ interface Window {
     }): Promise<void>;
     readAppSettings(): Promise<WormholeAppSettings>;
     setTheme(theme: 'system' | 'light' | 'dark'): Promise<{ updated: boolean }>;
+    setSshTerminalTheme(
+      theme: import('../electron/terminal-theme-settings').SshTerminalTheme,
+    ): Promise<{ updated: boolean }>;
     setPromptBeforeTunnelConnect(enabled: boolean): Promise<{ updated: boolean }>;
     setConfirmOnTabClose(enabled: boolean): Promise<{ updated: boolean }>;
     setConfirmOnWindowClose(enabled: boolean): Promise<{ updated: boolean }>;

@@ -1,5 +1,16 @@
 import assert from 'node:assert/strict';
-import { XtermSession, sshTerminal, retainSshTerminals } from '../../src/xterm-terminal';
+import {
+  XtermSession,
+  sshTerminal,
+  retainSshTerminals,
+  setSshTerminalTheme,
+} from '../../src/xterm-terminal';
+import {
+  defaultSshTerminalTheme,
+  sshTerminalThemes,
+  sshTerminalColors,
+} from '../../src/terminal-themes';
+import { runSshThemeSettingsTests } from './ssh-theme-settings';
 import { WebglAddon } from '@xterm/addon-webgl';
 import * as React from 'react';
 import { createRoot } from 'react-dom/client';
@@ -85,6 +96,7 @@ async function run() {
     },
   };
   const runtime = sshTerminal('test');
+  assert.equal(runtime.terminal.options.theme!.background, sshTerminalColors('tango').background);
   activateLink(runtime, 'https://example.com');
   assert.equal(links.length, 0, 'unmounted terminal opened a link');
   assert.equal(sshTerminal('test'), runtime);
@@ -102,6 +114,7 @@ async function run() {
   assert.ok(surface.querySelector('.xterm'));
   assert.ok(sizes.length > 0);
   assert.equal(runtime.terminal.options.scrollback, 5000);
+  assert.equal(runtime.terminal.options.minimumContrastRatio, 4.5);
   runtime.terminal.resize(200, 24);
   await send(runtime, '\x1b[?1000h');
   const screen = runtime.terminal.element!.querySelector('.xterm-screen')!;
@@ -273,6 +286,46 @@ async function run() {
   await send(fallback, 'fallback');
   assert.equal(fallback.terminal.buffer.active.getLine(0)!.translateToString(true), 'fallback');
   await assertPainted(fallback, 'fallback');
+  const luminance = (color: string) => {
+    const channels = color
+      .match(/\d+/g)!
+      .slice(0, 3)
+      .map((channel) => {
+        const value = Number(channel) / 255;
+        return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+      });
+    return channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722;
+  };
+  for (const theme of sshTerminalThemes) {
+    fallback.setTheme(theme.id);
+    for (const style of ['34;42', '1;34;42', '32;42', '30;42']) {
+      await send(fallback, `\x1b[2J\x1b[H\x1b[${style}mshared-777/\x1b[0m`);
+      await assertPainted(fallback, 'shared-777/');
+      await new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      );
+      const spans = [
+        ...fallback.terminal.element!.querySelectorAll<HTMLElement>('.xterm-rows span'),
+      ];
+      const span = spans.find((element) => element.textContent?.includes('shared-777/'))!;
+      assert.ok(span, 'directory name did not render');
+      const css = getComputedStyle(span);
+      const a = luminance(css.color),
+        b = luminance(css.backgroundColor);
+      const contrast = (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+      assert.ok(contrast >= 4.45, `${theme.id} ${style}: contrast ${contrast}`);
+      assert.equal(fallback.terminal.buffer.active.getLine(0)!.getCell(0)!.getBgColor(), 2);
+    }
+  }
+  await send(runtime, '\x1b[2J\x1b[Hkept history');
+  runtime.terminal.select(0, 0, 4);
+  const colsBeforeTheme = runtime.terminal.cols;
+  setSshTerminalTheme('light');
+  assert.equal(runtime.terminal.options.theme!.background, sshTerminalColors('light').background);
+  assert.equal(runtime.terminal.getSelection(), 'kept');
+  assert.equal(runtime.terminal.cols, colsBeforeTheme);
+  assert.equal(runtime.terminal.buffer.active.getLine(0)!.translateToString(true), 'kept history');
+  setSshTerminalTheme(defaultSshTerminalTheme);
   fallback.dispose();
   const contextLoss = new XtermSession('context', () => {
     addon = new WebglAddon();
@@ -320,6 +373,8 @@ async function run() {
   assert.ok(addon || !gl);
   // Mount the production React surface, including lifecycle and focus behavior.
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  await runSshThemeSettingsTests();
+  setSshTerminalTheme(defaultSshTerminalTheme);
   const mounted = document.createElement('div');
   mounted.style.cssText = 'width:800px;height:400px';
   document.body.append(mounted);
