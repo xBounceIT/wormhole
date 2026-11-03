@@ -1637,8 +1637,10 @@ test('cancelled OS shutdown restores ordinary close confirmation policy', () => 
 
 test('window close always follows renderer teardown with native cleanup', () => {
   const mainSource = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
-  const start = mainSource.indexOf("if (closeReason.reason !== 'renderer-failure')");
+  const start = mainSource.indexOf("closeReason.reason !== 'renderer-failure'");
+  assert.ok(start >= 0, 'Missing renderer teardown guard');
   const failureBranch = mainSource.slice(start, start + 1_000);
+  assert.match(failureBranch, /!failedWorkspaceWindows.has\(window\)/);
   assert.match(failureBranch, /await requestRendererTeardown\(window\)/);
   assert.doesNotMatch(
     failureBranch.slice(

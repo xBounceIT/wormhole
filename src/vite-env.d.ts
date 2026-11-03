@@ -829,6 +829,7 @@ interface Window {
     loadStartup(legacyTheme?: 'system' | 'light' | 'dark'): Promise<WormholeStartupSnapshot>;
     unlockStartup(request: WormholeAuthVerificationRequest): Promise<WormholeStartupUnlock>;
     markStartupReady(): void;
+    markWorkspaceFailed(): void;
     setTitlebarTheme(theme: 'light' | 'dark'): void;
     loadWorkspace(): Promise<WormholeWorkspaceSnapshot>;
     loadWorkspaceNodeNotes(request: { nodeId: string }): Promise<{ notes: string }>;
