@@ -48,6 +48,21 @@ available to the user.
 Ctrl/Cmd+V and right-click use native clipboard paste through Go. Copy-on-select
 preserves the selection, and unrelated React updates do not steal focus.
 
+Settings > General > Terminal offers Wormhole Dark, Dracula,
+Tango (the default) and Wormhole Light, independently of the application light/dark theme.
+The preference is validated by Electron and persisted by Go in settings.json;
+missing or unsupported values use Tango, including existing installations.
+Changes recolor open and hidden SSH terminals without reconnecting or clearing
+history. Failed saves restore the previous theme and show an error.
+
+Wormhole Dark uses light blue directory names against a dark ANSI green
+background, keeping common `ls` world-writable directory styles (`34;42` and
+`1;34;42`, such as permissions 777) readable. All SSH themes and the live settings
+preview use xterm's minimum contrast ratio of 4.5 to adjust low-contrast text,
+including matching foreground/background colors. Remote ANSI attributes and
+true-color values remain intact in the buffer; dim text and background-like
+glyphs follow xterm's contrast exceptions. Serial terminals retain their palette.
+
 OSC 8 hyperlinks use Wormhole's custom confirmation dialog, showing the normalized
 destination before opening the system browser. Unicode hostnames use ASCII IDN
 encoding and paths use URL encoding, so the displayed URL matches the browser
@@ -66,7 +81,9 @@ real Chromium harness for xterm and the production React SSH surface. The harnes
 checks ANSI styles/true color, split UTF-8, CJK widths, alternate screens, keyboard
 and binary mouse input, clipboard behavior, history bounds, hidden tabs, resets,
 focus, hyperlink confirmation/cancellation/errors, WebGL context loss and software
-fallback. It measures the application terminal code with V8 block coverage and
+fallback, live theme changes, hidden/new sessions, preference save failures and
+rendered contrast for world-writable directory styles. It measures the application
+terminal code with V8 block coverage and
 enforces 80%. Third-party xterm code is excluded from that percentage.
 
 Go tests cover byte fidelity, credits, bounded queues, blocked readers, MCP replay,

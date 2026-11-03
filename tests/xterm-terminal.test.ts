@@ -93,7 +93,7 @@ test('xterm SSH presentation works in Chromium with WebGL and software fallback'
         const script = coverage.result.find(item => item.url === 'wormhole-xterm.js');
         const source = ${JSON.stringify(renderer)};
         const moduleStart = source.indexOf('function sshTerminal('), moduleEnd = source.indexOf('async function run()', moduleStart);
-        const names = ['sshTerminal', 'retainSshTerminals', 'XtermSession', 'configure', 'attach', 'detach', 'fit', 'focus', 'receive', 'acknowledge', 'drain', 'copy', 'paste', 'key', 'dispose', 'SshXtermSurface'];
+        const names = ['sshTerminal', 'setSshTerminalTheme', 'retainSshTerminals', 'XtermSession', 'setTheme', 'configure', 'attach', 'detach', 'fit', 'focus', 'receive', 'acknowledge', 'drain', 'copy', 'paste', 'key', 'dispose', 'SshXtermSurface'];
         let covered = 0, total = 0;
         for (const name of names) {
           const parent = script.functions.find(item => item.functionName === name && item.ranges[0].startOffset >= moduleStart && item.ranges[0].endOffset <= moduleEnd);
@@ -104,7 +104,7 @@ test('xterm SSH presentation works in Chromium with WebGL and software fallback'
         }
         console.log('XtermSession V8 block coverage: ' + covered + '/' + total + ' (' + (100*covered/total).toFixed(2) + '%)');
         if (100*covered/total < 80) throw new Error('XtermSession coverage below 80%');
-        for (const name of ['TerminalLinkDialog', 'useNativeSurfaceOverlay']) {
+        for (const name of ['TerminalLinkDialog', 'useNativeSurfaceOverlay', 'useSshTerminalTheme', 'SshThemeSettings', 'SshThemePreview']) {
           const parent = script.functions.find(item => item.functionName === name);
           if (!parent) throw new Error('Missing coverage: ' + name);
           const range = parent.ranges[0];

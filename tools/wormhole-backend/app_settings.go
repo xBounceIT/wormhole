@@ -404,6 +404,7 @@ func writeConnectionTreeExpansion(databasePath string, state connectionTreeExpan
 }
 
 type appSettingsValues struct {
+	SshTerminalTheme          string
 	Theme                     applicationTheme
 	PromptBeforeTunnelConnect bool
 	AutoCopyOnSelect          bool
@@ -422,6 +423,7 @@ type appSettingsValues struct {
 // plus a bounded sidebar width.
 func readAppSettings(databasePath string) (appSettingsValues, error) {
 	settings := appSettingsValues{
+		SshTerminalTheme:          defaultSshTerminalTheme,
 		Theme:                     applicationThemeSystem,
 		PromptBeforeTunnelConnect: true,
 		AutoCopyOnSelect:          true,
@@ -447,6 +449,12 @@ func readAppSettings(databasePath string) (appSettingsValues, error) {
 	if value, ok := document[themeKey]; ok {
 		if theme, valid := readApplicationTheme(value); valid {
 			settings.Theme = theme
+		}
+	}
+	if value, ok := document[sshTerminalThemeKey]; ok {
+		var theme string
+		if json.Unmarshal(value, &theme) == nil && validSshTerminalTheme(theme) {
+			settings.SshTerminalTheme = theme
 		}
 	}
 	if value, ok := document[promptBeforeTunnelConnectKey]; ok {
