@@ -1,4 +1,5 @@
 import { SharedSshRoutes } from './ssh-shared-route.js';
+import { loadShellPage } from './shell-page-load.js';
 import {
   isSftpEditRequest,
   parseSftpEditEvent,
@@ -287,6 +288,7 @@ let startupUpdateTimer: NodeJS.Timeout | undefined;
 let startupUpdateScheduled = false;
 let startupBackgroundTimer: NodeJS.Timeout | undefined;
 const startupReadyWindows = new WeakSet<BrowserWindow>();
+const failedWorkspaceWindows = new WeakSet<BrowserWindow>();
 
 type BackendOperation =
   | 'startup'
@@ -8086,10 +8088,45 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
 
   ipcMain.on('startup:ready', (event) => {
     const owner = BrowserWindow.fromWebContents(event.sender);
-    if (!owner || owner.isDestroyed()) return;
+    if (!owner || owner.isDestroyed() || failedWorkspaceWindows.has(owner)) return;
     startupReadyWindows.add(owner);
     if (owner.isVisible()) owner.setOpacity(1);
     scheduleUnlockedBackgroundWork();
+  });
+
+  ipcMain.on('workspace:failed', (event) => {
+    const owner = BrowserWindow.fromWebContents(event.sender);
+    if (
+      !owner ||
+      owner.isDestroyed() ||
+      !windowCloseCoordinators.has(owner) ||
+      failedWorkspaceWindows.has(owner)
+    )
+      return;
+    failedWorkspaceWindows.add(owner);
+    windowCloseCoordinators.get(owner)?.updateActiveCount(0);
+    startupReadyWindows.delete(owner);
+    owner.setOpacity(1);
+    void serializeAuthOperation(async () => {
+      authSession.lock();
+      await runWindowTeardown(
+        () =>
+          withBitwardenBrowserTimeout(
+            webSurfaces.flushAndCloseForWindow(owner),
+            30_000,
+            'Workspace failure cleanup timed out.',
+          ),
+        async () => {
+          try {
+            // Flush can fail before disposing surfaces. Always remove their native views,
+            // including pending opens, so they cannot cover the recovery screen.
+            webSurfaces.closeForWindow(owner);
+          } finally {
+            await shutdownNativeResources();
+          }
+        },
+      );
+    }).catch(() => console.warn('[Wormhole] Workspace failure cleanup did not finish cleanly.'));
   });
 
   ipcMain.handle('startup:load', async (_event, value: unknown) => {
@@ -10828,12 +10865,13 @@ function createWindow() {
     if (showFallbackTimer) clearTimeout(showFallbackTimer);
     if (window.isDestroyed()) return;
     window.show();
-    if (startupReadyWindows.has(window)) window.setOpacity(1);
+    if (startupReadyWindows.has(window) || failedWorkspaceWindows.has(window)) window.setOpacity(1);
   };
   window.once('ready-to-show', showWindow);
   showFallbackTimer = setTimeout(showWindow, 10_000);
 
   window.webContents.on('did-start-loading', () => {
+    failedWorkspaceWindows.delete(window);
     startupReadyWindows.delete(window);
     window.setOpacity(startupWindowOpacity);
     webSurfaces.closeForWindow(window);
@@ -10901,7 +10939,7 @@ function createWindow() {
     event.preventDefault();
     void closeCoordinator
       .request({
-        reason: closeReason.reason,
+        reason: failedWorkspaceWindows.has(window) ? 'renderer-failure' : closeReason.reason,
         confirmationEnabled: confirmOnWindowClose,
         prepare: () => sshBackend.prepareEditClose(),
         confirm: (activeCount) => requestRendererCloseConfirmation(window, activeCount, 'window'),
@@ -10919,7 +10957,10 @@ function createWindow() {
               }
             },
             async () => {
-              if (closeReason.reason !== 'renderer-failure') {
+              if (
+                closeReason.reason !== 'renderer-failure' &&
+                !failedWorkspaceWindows.has(window)
+              ) {
                 await requestRendererTeardown(window);
               }
               // The renderer can no longer enumerate or close its sessions. Dispose every native
@@ -10946,11 +10987,21 @@ function createWindow() {
   });
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
 
-  if (rendererUrl) {
-    void window.loadURL(rendererUrl);
-  } else {
-    void window.loadFile(productionRendererPath);
-  }
+  void loadShellPage({
+    load: () =>
+      rendererUrl ? window.loadURL(rendererUrl) : window.loadFile(productionRendererPath),
+    isDestroyed: () => window.isDestroyed(),
+    reportFailure: () => {
+      dialog.showErrorBox(
+        "Wormhole couldn't open",
+        'The application page could not be loaded. Try reopening Wormhole. If the problem persists, reinstall the application.',
+      );
+    },
+    close: () => {
+      closeReason.rendererFailed();
+      window.close();
+    },
+  });
 }
 
 function isTrustedRendererNavigation(targetUrl: string, productionRendererPath: string): boolean {

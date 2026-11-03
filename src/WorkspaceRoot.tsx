@@ -2,6 +2,7 @@ import { StrictMode, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import App from './App';
 import { ContextMenuOverlayProvider } from './components/ui/context-menu';
+import { WorkspaceErrorBoundary } from './WorkspaceErrorBoundary';
 
 type WorkspaceAppProps = {
   initialAuthState: WormholeAuthState;
@@ -20,9 +21,14 @@ export function mountWorkspaceApp(container: HTMLElement, props: WorkspaceAppPro
   const workspaceRoot = createRoot(container);
   workspaceRoot.render(
     <StrictMode>
-      <ContextMenuOverlayProvider>
-        <WorkspaceApp {...props} />
-      </ContextMenuOverlayProvider>
+      <WorkspaceErrorBoundary
+        onFailure={() => window.wormhole?.markWorkspaceFailed()}
+        onRetry={() => window.location.reload()}
+      >
+        <ContextMenuOverlayProvider>
+          <WorkspaceApp {...props} />
+        </ContextMenuOverlayProvider>
+      </WorkspaceErrorBoundary>
     </StrictMode>,
   );
 }
