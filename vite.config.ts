@@ -18,6 +18,9 @@ export default defineConfig({
   },
   build: {
     outDir: 'dist',
+    // public/Assets is copied first. On macOS/Windows it would absorb Vite's default
+    // assets directory with the wrong casing, which ASAR then preserves case-sensitively.
+    assetsDir: 'renderer-assets',
     emptyOutDir: true,
     sourcemap: false,
     rolldownOptions: {

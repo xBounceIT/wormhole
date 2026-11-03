@@ -67,6 +67,7 @@ const wormholeBridge = {
   unlockStartup: (request: { method: 'pin' | 'password'; secret: string }) =>
     ipcRenderer.invoke('startup:unlock', request),
   markStartupReady: () => ipcRenderer.send('startup:ready'),
+  markWorkspaceFailed: () => ipcRenderer.send('workspace:failed'),
   setTitlebarTheme: (theme: 'light' | 'dark') =>
     ipcRenderer.send('window:set-titlebar-theme', theme),
   loadWorkspace: () => ipcRenderer.invoke('workspace:load'),
