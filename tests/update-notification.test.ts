@@ -36,7 +36,7 @@ test('update notifications support startup, dismissal, installation and the chan
   const panelStart = app.indexOf('<SettingsTabPanel value="updates">');
   const panelEnd = app.indexOf('</SettingsTabPanel>', panelStart) + '</SettingsTabPanel>'.length;
   assert.ok(panelStart >= 0 && panelEnd > panelStart);
-  const header = section(app, '        <header ', '        </header>');
+  const header = section(read('../src/components/AppTitlebar.tsx'), '<header', '</header>');
   assert.ok(!header.includes('UpdateNotification') && !header.includes('handleInstallUpdate'));
   assert.ok(!header.includes('shouldOfferUpdate') && !header.includes('updateBannerVisible'));
   assert.match(app, /onInstallUpdate=\{\(\) => void handleInstallUpdate\(\)\}/);
