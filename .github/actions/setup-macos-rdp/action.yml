@@ -1,0 +1,16 @@
+name: Set up macOS RDP toolchain
+description: Build the bundled Intel and Apple Silicon FreeRDP client
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        repository: microsoft/vcpkg
+        ref: a4f7741c53c97354fc43222fea17955c657dd549
+        path: obj/rdp-vcpkg
+        persist-credentials: false
+    - shell: bash
+      run: |
+        brew install cmake ninja pkgconf
+        "$GITHUB_WORKSPACE/obj/rdp-vcpkg/bootstrap-vcpkg.sh" -disableMetrics
+        echo "WORMHOLE_RDP_VCPKG_ROOT=$GITHUB_WORKSPACE/obj/rdp-vcpkg" >> "$GITHUB_ENV"

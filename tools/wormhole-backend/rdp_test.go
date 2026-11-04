@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -541,6 +542,50 @@ func TestFreeRdpCandidatesIncludeTheMacSDLClients(t *testing.T) {
 	candidates := freeRdpCandidatesForOS("darwin")
 	if !contains(candidates, "sdl-freerdp") || !contains(candidates, "sdl-freerdp3") {
 		t.Fatalf("macOS SDL FreeRDP clients were not discovered: %#v", candidates)
+	}
+}
+
+func TestFreeRdpBundledClientPrecedesSystemClients(t *testing.T) {
+	executable := filepath.Join(t.TempDir(), "Wormhole App", "Contents", "Resources", "wormhole-backend-universal")
+	candidates := freeRdpCandidatesForExecutable("darwin", executable)
+	if candidates[0] != filepath.Join(filepath.Dir(executable), "freerdp", "sdl-freerdp") {
+		t.Fatalf("bundled client is not first: %v", candidates)
+	}
+	if !slices.Equal(candidates[1:], freeRdpCandidatesForOS("darwin")) {
+		t.Fatal("system client fallback changed")
+	}
+	for _, goos := range []string{"linux", "windows"} {
+		if !slices.Equal(freeRdpCandidatesForExecutable(goos, executable), freeRdpCandidatesForOS(goos)) {
+			t.Fatalf("bundled macOS client leaked onto %s", goos)
+		}
+	}
+	if !slices.Equal(freeRdpCandidatesForExecutable("darwin", ""), freeRdpCandidatesForOS("darwin")) {
+		t.Fatal("missing executable should retain system discovery")
+	}
+}
+
+func TestLocateFreeRdpRetainsSystemDiscoveryAndExplicitOverride(t *testing.T) {
+	directory := t.TempDir()
+	name := freeRdpCandidates()[0]
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+		t.Setenv("PATHEXT", ".EXE")
+	}
+	client := filepath.Join(directory, name)
+	if err := os.WriteFile(client, []byte("client fixture"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", directory)
+	actual, err := locateFreeRdp("")
+	if err != nil || actual != client {
+		t.Fatalf("system discovery returned %q, %v", actual, err)
+	}
+	actual, err = locateFreeRdp(os.Args[0])
+	if err != nil || actual != os.Args[0] {
+		t.Fatalf("explicit override returned %q, %v", actual, err)
+	}
+	if _, err := locateFreeRdp(filepath.Join(directory, "missing-client")); err == nil {
+		t.Fatal("missing explicit override fell back to a system client")
 	}
 }
 

@@ -282,6 +282,21 @@ jobs:
         if: matrix.backend_arch == 'universal'
         run: npm run build:backend:universal
 
+      - name: Set up macOS RDP toolchain
+        if: matrix.builder_platform == 'mac'
+        uses: ./.github/actions/setup-macos-rdp
+
+      - name: Build bundled universal macOS RDP client
+        if: matrix.builder_platform == 'mac'
+        run: npm run build:rdp:macos
+
+      - name: Verify bundled RDP command-line compatibility
+        if: matrix.builder_platform == 'mac'
+        working-directory: tools/wormhole-backend
+        env:
+          WORMHOLE_RDP_SMOKE_CLIENT: ${{ github.workspace }}/dist-electron/freerdp/sdl-freerdp
+        run: go test -run '^TestBundledMacFreeRdpCommandLine$' -count=1 .
+
       - name: Install AppImage delta tooling
         if: matrix.builder_platform == 'linux'
         run: sudo apt-get update && sudo apt-get install --no-install-recommends --yes zsync
