@@ -3444,7 +3444,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         } else {
           const promptTarget = sshCredentialPromptTarget(request, message);
           if (promptTarget === 'saved' && request.nodeId) {
-            setSshCredentialForm({ username: '', password: '' });
+            setSshCredentialForm({
+              username: findTreeNode(treeRef.current, request.nodeId)?.username ?? '',
+              password: '',
+            });
             setSshCredentialSelection(manualCredentialSelectionValue);
             setSshCredentialSave(false);
             setSshCredentialPrompt({
