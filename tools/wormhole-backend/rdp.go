@@ -20,7 +20,7 @@ import (
 
 // The RDP controller is intentionally a small process supervisor rather than an RDP
 // implementation. Windows uses the existing mstscax ActiveX host in a native helper process;
-// Linux and macOS use the FreeRDP client installed by the host OS. Keeping the supervisor in Go
+// macOS uses the bundled FreeRDP client; Linux uses the host OS client. Keeping the supervisor in Go
 // gives Electron one platform-neutral session contract and keeps process/secret handling out of
 // the renderer.
 
@@ -1057,7 +1057,8 @@ func locateFreeRdp(explicit string) (string, error) {
 		}
 		return "", errors.New("configured Remote Desktop client was not found")
 	}
-	for _, candidate := range freeRdpCandidates() {
+	executable, _ := os.Executable()
+	for _, candidate := range freeRdpCandidatesForExecutable(runtime.GOOS, executable) {
 		if path, err := exec.LookPath(candidate); err == nil {
 			return path, nil
 		}
@@ -1067,6 +1068,17 @@ func locateFreeRdp(explicit string) (string, error) {
 
 func freeRdpCandidates() []string {
 	return freeRdpCandidatesForOS(runtime.GOOS)
+}
+
+func freeRdpCandidatesForExecutable(goos, executable string) []string {
+	candidates := freeRdpCandidatesForOS(goos)
+	if goos == "darwin" && executable != "" {
+		// The Go backend and the FreeRDP directory are siblings in Contents/Resources
+		// (or dist-electron in development). Finder's PATH does not affect discovery.
+		bundled := filepath.Join(filepath.Dir(executable), "freerdp", "sdl-freerdp")
+		return append([]string{bundled}, candidates...)
+	}
+	return candidates
 }
 
 func freeRdpCandidatesForOS(goos string) []string {

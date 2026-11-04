@@ -77,11 +77,16 @@ test('packaging rejects missing resources and the macOS 2.2.1 Assets/assets regr
           : path.join(output, 'resources');
       await mkdir(resources, { recursive: true });
       await createPackage(path.join(directory, 'valid'), path.join(resources, 'app.asar'));
-      afterPack({
+      const context = {
         appOutDir: output,
         electronPlatformName: platform,
         packager: { appInfo: { productFilename: 'Wormhole' } },
-      });
+      };
+      if (platform === 'darwin') {
+        assert.throws(() => afterPack(context), /bundled macOS FreeRDP client is missing/);
+      } else {
+        afterPack(context);
+      }
       await createPackage(path.join(directory, 'case'), path.join(resources, 'app.asar'));
       assert.throws(
         () =>

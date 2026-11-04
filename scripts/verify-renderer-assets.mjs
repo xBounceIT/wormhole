@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { extractFile, listPackage, uncache } from '@electron/asar';
+import { verifyMacFreeRdp } from './build-macos-freerdp.mjs';
 
 export function verifyRendererAssets(archive) {
   // Packagers can replace an archive at the same path during a universal merge/rebuild.
@@ -35,4 +36,5 @@ export default function afterPack(context) {
         )
       : path.join(context.appOutDir, 'resources');
   verifyRendererAssets(path.join(resources, 'app.asar'));
+  if (context.electronPlatformName === 'darwin') verifyMacFreeRdp(resources);
 }

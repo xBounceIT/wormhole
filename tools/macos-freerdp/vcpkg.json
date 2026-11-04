@@ -1,0 +1,14 @@
+{
+  "name": "wormhole-macos-freerdp",
+  "version-string": "3.33.0",
+  "builtin-baseline": "a4f7741c53c97354fc43222fea17955c657dd549",
+  "overrides": [{ "name": "sdl3", "version": "3.4.18" }],
+  "dependencies": [
+    "jansson",
+    "openssl",
+    { "name": "sdl3", "default-features": false },
+    { "name": "sdl3-ttf", "default-features": false },
+    "uriparser",
+    "zlib"
+  ]
+}
