@@ -7,6 +7,8 @@ runs:
       with:
         repository: microsoft/vcpkg
         ref: a4f7741c53c97354fc43222fea17955c657dd549
+        # Version overrides need historical port trees from the registry.
+        fetch-depth: 0
         path: obj/rdp-vcpkg
         persist-credentials: false
     - shell: bash

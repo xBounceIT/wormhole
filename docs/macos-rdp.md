@@ -14,7 +14,8 @@ tunnel leases remain managed by the existing backend.
 ## Building
 
 Run `.github/actions/setup-macos-rdp/action.yml` on macOS, or prepare the vcpkg
-revision from `tools/macos-freerdp/vcpkg.json`, bootstrap it, and set
+revision from `tools/macos-freerdp/vcpkg.json` using a full clone (version overrides
+require historical port trees), bootstrap it, and set
 `WORMHOLE_RDP_VCPKG_ROOT` to that checkout. Install CMake, Ninja, and pkgconf on the
 build machine, then run `npm run build:rdp:macos` before packaging.
 
