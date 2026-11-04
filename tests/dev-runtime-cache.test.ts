@@ -27,6 +27,39 @@ import {
   runCachedDevRuntimeBuild,
 } from '../scripts/dev-runtime-cache.ts';
 import type { DevRuntimeBuildStep } from '../scripts/dev-runtime-plan.ts';
+import { createDevRuntimeBuildPlan } from '../scripts/dev-runtime-plan.ts';
+
+test('macOS runtime cache tracks native dependencies and reuses unchanged builds', (t) => {
+  const f = fixture(t);
+  const plan = createDevRuntimeBuildPlan({
+    platform: 'darwin',
+    architecture: 'arm64',
+    nodeExecutable: process.execPath,
+    scriptDirectory: path.join(f.root, 'scripts'),
+    environment: { VCPKG_ROOT: path.join(f.root, 'vcpkg') },
+  });
+  const step = plan[0];
+  // Seed bootstrap inputs so this test isolates build invalidation.
+  for (const input of step.bootstrap?.outputs ?? []) f.write(input);
+  const inputs = [
+    'vcpkg/vcpkg',
+    'vcpkg/scripts/buildsystems/vcpkg.cmake',
+    'vcpkg/triplets/arm64-osx.cmake',
+    'tools/wormhole-ovpnproxy/ovpn_shim/build/darwin-arm64/vcpkg_installed/arm64-osx/lib/liblz4.a',
+    'tools/wormhole-ovpnproxy/ovpn_shim/build/darwin-arm64/libovpn_shim.a',
+  ];
+  for (const input of inputs) f.write(input);
+  const run = () => runCachedDevRuntimeBuild({ ...f.options, plan });
+  run();
+  run();
+  assert.equal(f.builds.length, 1);
+  for (const input of inputs) {
+    const before = f.builds.length;
+    f.write(input, 'updated native dependency');
+    run();
+    assert.equal(f.builds.length, before + 1, input);
+  }
+});
 
 function fixture(t: test.TestContext) {
   const root = mkdtempSync(path.join(tmpdir(), 'wormhole-dev-runtime-'));

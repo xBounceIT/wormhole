@@ -14,6 +14,22 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  macos-openvpn:
+    name: macOS universal OpenVPN engine
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: tools/wormhole-backend/go.mod
+          cache: false
+      - uses: ./.github/actions/setup-macos-ovpn
+      - name: Build and verify both native OpenVPN slices and universal binaries
+        run: node scripts/Build-ElectronUniversalBackend.mjs
+
   linux-backend-contract:
     name: Linux credential storage contract
     runs-on: ubuntu-24.04

@@ -109,6 +109,7 @@ export function devRuntimeVcpkgInputs(root: string, vcpkgRoot: string): string[]
       'versions',
       'triplets',
       'vcpkg.exe',
+      'vcpkg',
       '.vcpkg-root',
       'vcpkg-configuration.json',
     ].map((input) => path.relative(root, path.resolve(vcpkgRoot, input))),

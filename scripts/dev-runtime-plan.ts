@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { devRuntimeVcpkgInputs } from './dev-runtime-cache.ts';
 
 export type DevRuntimeBuildStep = {
   name: string;
@@ -16,6 +17,7 @@ type DevRuntimeBuildPlanOptions = {
   architecture: NodeJS.Architecture;
   scriptDirectory: string;
   nodeExecutable: string;
+  environment?: NodeJS.ProcessEnv;
 };
 
 function windowsBuildStep(
@@ -52,6 +54,7 @@ export function createDevRuntimeBuildPlan({
   architecture,
   scriptDirectory,
   nodeExecutable,
+  environment = process.env,
 }: DevRuntimeBuildPlanOptions): DevRuntimeBuildStep[] {
   if (architecture !== 'x64' && architecture !== 'arm64') {
     throw new Error(`Unsupported development architecture '${architecture}'.`);
@@ -63,6 +66,7 @@ export function createDevRuntimeBuildPlan({
     args: [path.join(scriptDirectory, 'Build-ElectronBackend.mjs'), '--arch', architecture],
     inputs: [
       'scripts/Build-ElectronBackend.mjs',
+      'scripts/build-macos-ovpnproxy.mjs',
       'tools/internal',
       'go.work',
       'go.work.sum',
@@ -84,6 +88,40 @@ export function createDevRuntimeBuildPlan({
       'tools/wormhole-ovpnproxy/shim_buildinfo.go',
     ],
   };
+
+  if (platform === 'darwin') {
+    const vcpkgRoot = environment.VCPKG_ROOT || environment.VCPKG_INSTALLATION_ROOT;
+    if (vcpkgRoot)
+      backendStep.inputs.push(...devRuntimeVcpkgInputs(path.dirname(scriptDirectory), vcpkgRoot));
+    const build = `tools/wormhole-ovpnproxy/ovpn_shim/build/darwin-${architecture}`;
+    backendStep.generatedInputs = [
+      `${build}/vcpkg_installed`,
+      `${build}/CMakeCache.txt`,
+      `${build}/libovpn_shim.a`,
+      ...['mbedtls', 'mbedx509', 'mbedcrypto'].map(
+        (name) => `${build}/third_party_mbedtls/library/lib${name}.a`,
+      ),
+    ];
+    backendStep.bootstrap = {
+      command: 'git',
+      args: [
+        '-C',
+        path.dirname(scriptDirectory),
+        'submodule',
+        'update',
+        '--init',
+        '--recursive',
+        '--',
+        'tools/wormhole-ovpnproxy/third_party/openvpn3',
+        'tools/wormhole-ovpnproxy/third_party/mbedtls',
+      ],
+      outputs: [
+        'tools/wormhole-ovpnproxy/third_party/openvpn3/client/ovpncli.hpp',
+        'tools/wormhole-ovpnproxy/third_party/mbedtls/include/mbedtls/ssl.h',
+        'tools/wormhole-ovpnproxy/third_party/mbedtls/framework/CMakeLists.txt',
+      ],
+    };
+  }
 
   if (platform !== 'win32') return [backendStep];
 
@@ -182,12 +220,14 @@ export function devRuntimeGoBuildEnvironment(
   environment: NodeJS.ProcessEnv,
 ): NodeJS.ProcessEnv {
   const moduleName = path.basename(moduleDirectory);
+  const macOvpn = platform === 'darwin' && moduleName === 'wormhole-ovpnproxy';
   return {
     ...environment,
+    ...(macOvpn ? { CC: 'clang', CXX: 'clang++', MACOSX_DEPLOYMENT_TARGET: '12.0' } : {}),
     GOOS: platform === 'win32' ? 'windows' : platform,
     GOARCH: architecture === 'arm64' ? 'arm64' : 'amd64',
     CGO_ENABLED:
-      (platform === 'darwin' && moduleName === 'wormhole-backend') ||
+      (platform === 'darwin' && ['wormhole-backend', 'wormhole-ovpnproxy'].includes(moduleName)) ||
       (platform === 'win32' && moduleName === 'wormhole-ovpnproxy')
         ? '1'
         : '0',

@@ -2,6 +2,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync } from 'node:
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { buildMacOvpnProxy } from './build-macos-ovpnproxy.mjs';
 
 const scriptRoot = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.dirname(scriptRoot);
@@ -43,7 +44,8 @@ console.log(`OK    ${binaryPath}`);
 
 // The VPN implementations are independent Go sidecars. Build their portable variants beside
 // the native backend so Linux/macOS development builds can exercise WireGuard, Fortinet, and
-// Cisco too. On Windows, wormhole-ovpnproxy must NOT be replaced by the portable mock-only
+// Cisco too. macOS builds OpenVPN3 natively for each architecture. On Windows,
+// wormhole-ovpnproxy must NOT be replaced by the portable mock-only
 // build: the real OpenVPN3-linked binary produced by scripts/Fetch-OvpnProxy.ps1 (staged under
 // obj\ovpnproxy\<arch>) is reused when present so a plain `npm run build` can never silently
 // regress OpenVPN/WatchGuard/Stormshield tunnels to the "binding not linked" stub.
@@ -56,6 +58,10 @@ for (const name of [
 ]) {
   const source = path.join(repoRoot, 'tools', name);
   const output = path.join(stagingDir, `${name}${suffix}`);
+  if (goos === 'darwin' && name === 'wormhole-ovpnproxy') {
+    buildMacOvpnProxy({ repoRoot, architecture });
+    continue;
+  }
   rmSync(output, { force: true });
   if (goos === 'windows' && name === 'wormhole-ovpnproxy') {
     const realSource = path.join(
