@@ -110,3 +110,14 @@ cycles on the final test wiring and complete scope: no additional findings.
 - Outstanding external verification: universal macOS link/package, AppKit
   clipboard, and an actual macOS RDP connection. This Windows host cannot certify
   those results. FreeRDP provisioning remains outside this change.
+
+## CI integration correction
+
+The first native CI run found that vcpkg's ARM manifest install removed the Intel
+SDK from the shared install root. Preserve a separate dependency root per triplet
+so the later canvas build can reuse both configured FreeRDP trees. Updated license
+staging and added a regression modeling manifest synchronization across both builds.
+The 12 build tests pass, including real CMake configuration; build script coverage
+is 99.08% for the runtime and 95.35% for the canvas adapter. Reuse, efficiency, and
+quality simplify passes found no further justified changes. Native CI must validate
+the actual universal adapter link after this correction.

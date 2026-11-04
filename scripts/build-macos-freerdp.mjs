@@ -119,7 +119,9 @@ function compileMacFreeRdp({ repoRoot, vcpkgRoot, spawn }) {
   ]) {
     console.log(`Building macOS FreeRDP (${arch})`);
     const build = path.join(work, triplet);
-    const installed = path.join(work, 'installed');
+    // Manifest installs remove packages for other triplets in the same root.
+    // Keep both SDKs available for the later canvas adapter build.
+    const installed = path.join(work, 'installed', triplet);
     run(path.join(vcpkgRoot, 'vcpkg'), [
       'install',
       `--triplet=${triplet}`,
@@ -198,7 +200,7 @@ function compileMacFreeRdp({ repoRoot, vcpkgRoot, spawn }) {
   if (existsSync(path.join(source, 'NOTICE'))) {
     copyFileSync(path.join(source, 'NOTICE'), path.join(licenses, 'FreeRDP-NOTICE.txt'));
   }
-  const share = path.join(work, 'installed', 'arm64-osx', 'share');
+  const share = path.join(work, 'installed', 'arm64-osx', 'arm64-osx', 'share');
   for (const entry of readdirSync(share, { withFileTypes: true })) {
     const copyright = path.join(share, entry.name, 'copyright');
     if (entry.isDirectory() && existsSync(copyright)) {
