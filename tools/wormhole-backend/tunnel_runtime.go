@@ -20,10 +20,10 @@ import (
 )
 
 const (
-	tunnelStartTimeout             = 5 * time.Minute
-	tunnelDialTimeout              = 45 * time.Second
-	tunnelSidecarStderrLimit       = 4 * 1024
-	tunnelSidecarStderrWaitTimeout = 500 * time.Millisecond
+	tunnelStartTimeout        = 5 * time.Minute
+	tunnelDialTimeout         = 45 * time.Second
+	tunnelSidecarStderrLimit  = 4 * 1024
+	tunnelSidecarDrainTimeout = 500 * time.Millisecond
 )
 
 var physicalTransportAdapterIDsForTunnel = physicalTransportAdapterIDs
@@ -748,10 +748,13 @@ func startTunnelProcess(ctx context.Context, snapshot tunnelConfigSnapshot) (*tu
 	if err != nil {
 		return nil, errors.New("could not start VPN tunnel")
 	}
-	stderrPipe, err := command.StderrPipe()
-	if err != nil {
-		return nil, errors.New("could not start VPN tunnel")
-	}
+	// exec drains stderr until EOF and joins its copier before Wait returns.
+	// Closing a full diagnostics pipe can kill a verbose Unix sidecar with SIGPIPE.
+	diagnostics := &boundedStderrBuilder{limit: tunnelSidecarStderrLimit}
+	command.Stderr = diagnostics
+	// A descendant can inherit the pipe after the sidecar exits. Bound that
+	// final drain so process.exited still releases tunnel leases promptly.
+	command.WaitDelay = tunnelSidecarDrainTimeout
 	if err := reportTunnelProgress(ctx, "starting", ""); err != nil {
 		return nil, err
 	}
@@ -759,16 +762,6 @@ func startTunnelProcess(ctx context.Context, snapshot tunnelConfigSnapshot) (*tu
 		return nil, errors.New("could not start VPN tunnel")
 	}
 	process := &tunnelProcess{stdin: stdin, command: command, exited: make(chan struct{}), identity: snapshot.identity}
-	stderrDone := make(chan struct{})
-	diagnostics := &boundedStderrBuilder{limit: tunnelSidecarStderrLimit}
-	go func() {
-		defer close(stderrDone)
-		defer stderrPipe.Close()
-		scanner := bufio.NewScanner(stderrPipe)
-		scanner.Buffer(make([]byte, 1024), tunnelSidecarStderrLimit)
-		for scanner.Scan() && diagnostics.append(scanner.Text()) {
-		}
-	}()
 	go func() {
 		_ = command.Wait()
 		close(process.exited)
@@ -816,10 +809,6 @@ func startTunnelProcess(ctx context.Context, snapshot tunnelConfigSnapshot) (*tu
 		return nil, ctx.Err()
 	case <-process.exited:
 		process.close()
-		select {
-		case <-stderrDone:
-		case <-time.After(tunnelSidecarStderrWaitTimeout):
-		}
 		return nil, tunnelSidecarStartupFailure(snapshot, settings, executable, diagnostics.text(), process.command.ProcessState.ExitCode())
 	case err := <-readErr:
 		process.close()
@@ -827,10 +816,6 @@ func startTunnelProcess(ctx context.Context, snapshot tunnelConfigSnapshot) (*tu
 		case <-process.exited:
 			// The sidecar died before reporting readiness. Surface the classified startup
 			// failure instead of the raw pipe EOF, which would leak to the UI as "EOF".
-			select {
-			case <-stderrDone:
-			case <-time.After(tunnelSidecarStderrWaitTimeout):
-			}
 			return nil, tunnelSidecarStartupFailure(snapshot, settings, executable, diagnostics.text(), process.command.ProcessState.ExitCode())
 		default:
 			return nil, err
@@ -887,43 +872,11 @@ func tunnelSidecarStartupFailure(
 	return tunnelSidecarFailureMessage(executable, stderr, exitCode)
 }
 
-type boundedStderrBuilder struct {
-	limit   int
-	builder strings.Builder
-}
-
-func (b *boundedStderrBuilder) append(line string) bool {
-	if b.builder.Len() >= b.limit {
-		return false
-	}
-	if b.builder.Len() > 0 {
-		b.builder.WriteByte('\n')
-	}
-	remaining := b.limit - b.builder.Len()
-	if len(line) > remaining {
-		line = line[:remaining]
-	}
-	b.builder.WriteString(line)
-	return true
-}
-
-func (b *boundedStderrBuilder) text() string {
-	return b.builder.String()
-}
-
 // tunnelSidecarFailureMessage turns sidecar startup stderr into a safe, actionable error for the
-// UI. Raw diagnostics are deliberately kept out of the IPC stream: they can carry gateway
-// details, and a build that lacks the OpenVPN3 engine already tells us the one thing the user
-// needs to fix. Set WORMHOLE_TUNNEL_DEBUG=1 in the Electron environment to opt in to the raw
-// first line for one-shot support captures.
+// UI. Raw diagnostics can contain credentials or authentication cookies and must
+// never cross IPC or enter application logs. Debug mode adds process metadata only.
 func tunnelSidecarFailureMessage(executable, stderr string, exitCode int) error {
 	detail := strings.TrimSpace(stderr)
-	if debug := strings.TrimSpace(os.Getenv("WORMHOLE_TUNNEL_DEBUG")); debug != "" && debug != "0" {
-		if detail != "" {
-			return fmt.Errorf("VPN sidecar %s failed during startup: %s", executable, truncateTunnelDiagnostic(detail))
-		}
-		return fmt.Errorf("VPN sidecar %s exited during startup (exit code %d)", executable, exitCode)
-	}
 
 	lower := strings.ToLower(detail)
 	var message string
@@ -944,7 +897,8 @@ func tunnelSidecarFailureMessage(executable, stderr string, exitCode int) error 
 		message = "the VPN gateway refused the connection — it may be offline or blocking this client"
 	case strings.Contains(lower, "timeout") || strings.Contains(lower, "timed out"):
 		message = "the VPN gateway didn't respond in time — it may be unreachable or overloaded"
-	case strings.Contains(lower, "authentication") || strings.Contains(lower, "login"):
+	case strings.Contains(lower, "auth_failed") || strings.Contains(lower, "auth failed") ||
+		strings.Contains(lower, "authentication") || strings.Contains(lower, "login"):
 		if strings.Contains(lower, "fail") || strings.Contains(lower, "reject") ||
 			strings.Contains(lower, "denied") || strings.Contains(lower, "invalid") {
 			message = "the VPN gateway rejected the username, password, or authentication step"
@@ -953,18 +907,16 @@ func tunnelSidecarFailureMessage(executable, stderr string, exitCode int) error 
 		strings.Contains(lower, "profile is missing") || strings.Contains(lower, "is missing"):
 		message = "the VPN profile is incomplete or missing — check the profile and its key material"
 	}
+	var failure error
 	if message != "" {
-		return fmt.Errorf("couldn't start the VPN tunnel: %s", message)
+		failure = fmt.Errorf("couldn't start the VPN tunnel: %s", message)
+	} else {
+		failure = errors.New("couldn't start the VPN tunnel. Check the gateway settings and try again")
 	}
-	return fmt.Errorf("couldn't start the VPN tunnel. Check the gateway settings and try again")
-}
-
-func truncateTunnelDiagnostic(value string) string {
-	const max = 1024
-	if len(value) <= max {
-		return value
+	if debug := strings.TrimSpace(os.Getenv("WORMHOLE_TUNNEL_DEBUG")); debug != "" && debug != "0" {
+		return fmt.Errorf("%s (VPN sidecar %s, exit code %d)", failure, executable, exitCode)
 	}
-	return value[:max] + "…"
+	return failure
 }
 
 func prepareTunnelAuthentication(
