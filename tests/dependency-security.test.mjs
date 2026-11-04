@@ -22,6 +22,7 @@ test('every locked dependency affected by the October advisories uses a patched 
     ['follow-redirects', '1.16.1'],
     ['ip-address', '10.7.4'],
     ['hono', '4.13.11'],
+    ['glob', '14.0.3'],
   ]) {
     const entries = Object.entries(lock.packages).filter(([location]) =>
       location.endsWith(`node_modules/${dependency}`),
@@ -367,6 +368,8 @@ test('transitive consumers resolve the security backports', () => {
   for (const [consumer, dependency, fork] of [
     ['micromatch', 'braces', '@wormhole/braces'],
     ['cacheable-request', 'http-cache-semantics', '@wormhole/http-cache-semantics'],
+    ['shadcn', 'deepmerge', '@wormhole/deepmerge'],
+    ['@shadcn/registry', 'deepmerge', '@wormhole/deepmerge'],
   ]) {
     const consumerRequire = createRequire(require.resolve(consumer));
     assert.equal(consumerRequire(dependency), require(dependency));
@@ -375,7 +378,7 @@ test('transitive consumers resolve the security backports', () => {
 
   const lock = JSON.parse(readFileSync(new URL('../package-lock.json', import.meta.url), 'utf8'));
   for (const [location, metadata] of Object.entries(lock.packages)) {
-    for (const dependency of ['braces', 'http-cache-semantics']) {
+    for (const dependency of ['braces', 'http-cache-semantics', 'deepmerge']) {
       if (
         location.endsWith(`/node_modules/${dependency}`) ||
         location === `node_modules/${dependency}`
@@ -385,6 +388,196 @@ test('transitive consumers resolve the security backports', () => {
       }
     }
   }
+});
+
+test('locked minimatch versions exclude the globparts amplification advisory', () => {
+  const lock = JSON.parse(readFileSync(new URL('../package-lock.json', import.meta.url), 'utf8'));
+  const semver = require('semver');
+  const entries = Object.entries(lock.packages).filter(([location]) =>
+    location.endsWith('node_modules/minimatch'),
+  );
+  assert.ok(entries.length > 0);
+  for (const [location, metadata] of entries) {
+    assert.ok(semver.gte(metadata.version, '11.0.1'), `${location}: ${metadata.version}`);
+  }
+  for (const consumer of [
+    'glob',
+    '@electron/asar',
+    'app-builder-lib',
+    '@ts-morph/common',
+    'eslint',
+    'filelist',
+  ]) {
+    const consumerRequire = createRequire(require.resolve(consumer));
+    assert.ok(semver.gte(consumerRequire('minimatch/package.json').version, '11.0.1'), consumer);
+  }
+});
+
+test('filelist retains include and exclude glob behavior with modern minimatch', () => {
+  const { FileList } = require('filelist');
+  const files = new FileList();
+  // filelist normalizes glob separators to backslashes on Windows.
+  files.include('tests/*.test.mjs', { windowsPathsNoEscape: true });
+  files.exclude('tests/dependency-security.test.mjs');
+  const names = files.toArray();
+  assert.ok(names.includes('tests/release-packaging.test.mjs'));
+  assert.equal(names.includes('tests/dependency-security.test.mjs'), false);
+  assert.ok(names.every((name) => name.startsWith('tests/') && name.endsWith('.test.mjs')));
+});
+
+test('minimatch bounds repeated globstar parent segments and preserves packaging patterns', () => {
+  execFileSync(
+    process.execPath,
+    [
+      '--max-old-space-size=128',
+      '--input-type=commonjs',
+      '-e',
+      `const assert = require('node:assert/strict');
+       const { Minimatch, minimatch } = require('minimatch');
+       for (const count of [16, 64, 256]) {
+         const matcher = new Minimatch('**/../'.repeat(count) + '*.js', { optimizationLevel: 2 });
+         assert.ok(matcher.globParts.length <= 2);
+       }
+       const amplified = Array(12).fill('**/../a/b').join('/');
+       const bounded = new Minimatch(amplified, { optimizationLevel: 2, braceExpandMax: 64 });
+       assert.equal(bounded.set.length, 64);
+       for (const [path, pattern, matches] of [
+         ['dist/main.js', 'dist/**/*', true],
+         ['dist/assets/app.css', 'dist/**/*', true],
+         ['src/main.ts', 'dist/**/*', false],
+         ['dist-electron/wormhole-backend.exe', 'dist-electron/wormhole-*', true],
+         ['dist-electron/main.js', 'dist-electron/wormhole-*', false],
+         ['src/App.tsx', '**/*.{ts,tsx}', true],
+       ]) assert.equal(minimatch(path, pattern), matches, path);`,
+    ],
+    { timeout: 5000, stdio: 'pipe' },
+  );
+});
+
+test('glob bundled and raw entrypoints enforce minimatch preprocessing limits', () => {
+  // glob's default entrypoints bundle minimatch; resolving its dependency alone
+  // does not establish that the implementation actually executed is patched.
+  execFileSync(
+    process.execPath,
+    [
+      '--max-old-space-size=128',
+      '--input-type=module',
+      '-e',
+      `import assert from 'node:assert/strict';
+       import { createRequire } from 'node:module';
+       const require = createRequire(import.meta.url);
+       const pattern = Array(12).fill('**/../a/b').join('/');
+       for (const entrypoint of ['glob', 'glob/raw']) {
+         for (const api of [require(entrypoint), await import(entrypoint)]) {
+           const matcher = new api.Glob(pattern, { braceExpandMax: 64 });
+           assert.equal(matcher.patterns.length, 64, entrypoint);
+           const files = api.globSync('tests/*.test.mjs', {
+             posix: true, ignore: ['tests/dependency-*.test.mjs'],
+           });
+           assert.ok(files.includes('tests/release-packaging.test.mjs'), entrypoint);
+           assert.equal(files.includes('tests/dependency-security.test.mjs'), false, entrypoint);
+         }
+       }`,
+    ],
+    { timeout: 10000, stdio: 'pipe' },
+  );
+});
+
+test('electron-builder preserves the application include and exclude patterns', () => {
+  const { FileMatcher } = require('app-builder-lib/out/fileMatcher.js');
+  const { resolve } = require('node:path');
+  const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+  const matcher = new FileMatcher(
+    process.cwd(),
+    resolve('dist'),
+    (value) => value,
+    manifest.build.files,
+  );
+  const filter = matcher.createFilter();
+  for (const [name, directory, included] of [
+    ['dist/main.js', false, true],
+    ['dist-electron/main.js', false, true],
+    ['dist-electron/wormhole-backend.exe', false, false],
+    ['dist-electron/rdp-host-x64', true, false],
+    ['dist-electron/rdp-host-arm64', true, false],
+    ['Assets/icon.png', false, true],
+    ['Assets/LinuxIcons/512.png', false, false],
+    ['src/App.tsx', false, false],
+    ['package.json', false, true],
+  ]) {
+    assert.equal(filter(resolve(name), { isDirectory: () => directory }), included, name);
+  }
+});
+
+test('deepmerge cannot poison returned prototypes through either input or nested placeholders', () => {
+  const merge = require('deepmerge');
+  const payload = () => JSON.parse('{"__proto__":{"isAdmin":true},"safe":1}');
+  const assertSafe = (result) => {
+    assert.equal(Object.getPrototypeOf(result), Object.prototype);
+    assert.equal(result.isAdmin, undefined);
+    assert.equal(Object.hasOwn(result, '__proto__'), false);
+    assert.equal(result.safe, 1);
+  };
+  for (const target of [Object.create(null), {}, payload(), null, undefined, 0, false, '']) {
+    assertSafe(merge(target, payload()));
+  }
+  assertSafe(merge(payload(), {}));
+  assertSafe(merge.all([Object.create(null), payload(), { other: true }]));
+  for (const placeholder of [null, undefined, 0, false, '']) {
+    assertSafe(merge({ session: placeholder }, { session: payload() }).session);
+  }
+  assertSafe(merge([], [payload()])[0]);
+  assertSafe(merge([payload()], [])[0]);
+  assertSafe(merge({}, { nested: payload() }).nested);
+  // Forbidden keys are skipped before evaluating attacker-controlled getters.
+  const getterPayload = Object.defineProperty({ safe: 1 }, '__proto__', {
+    enumerable: true,
+    get() {
+      throw new Error('must not read a forbidden key');
+    },
+  });
+  assertSafe(merge(getterPayload, {}));
+  assertSafe(merge(Object.create(null), getterPayload));
+  assert.equal({}.isAdmin, undefined);
+});
+
+test('deepmerge preserves cloning, symbols, custom merges and invalid-input errors', () => {
+  const merge = require('deepmerge');
+  const symbol = Symbol('configuration');
+  const date = new Date(0);
+  const expression = /safe/;
+  const target = {
+    nested: { left: 1 },
+    items: [{ left: 1 }],
+    date,
+    expression,
+    [symbol]: { left: 1 },
+  };
+  const source = { nested: { right: 2 }, items: [{ right: 2 }], [symbol]: { right: 2 } };
+  const result = merge(target, source);
+  assert.deepEqual(result.nested, { left: 1, right: 2 });
+  assert.deepEqual(result.items, [{ left: 1 }, { right: 2 }]);
+  assert.deepEqual(result[symbol], { left: 1, right: 2 });
+  assert.notEqual(result.items[0], target.items[0]);
+  assert.equal(result.date, date);
+  assert.equal(result.expression, expression);
+  assert.deepEqual(target.nested, { left: 1 });
+  assert.deepEqual(source.nested, { right: 2 });
+  assert.equal(merge({}, target, { clone: false }).nested, target.nested);
+  assert.deepEqual(merge({}, [1]), [1]);
+  assert.deepEqual(merge([1], {}), {});
+  assert.deepEqual(merge([1], [2], { arrayMerge: (_target, values) => values }), [2]);
+  assert.deepEqual(
+    merge(target, source, {
+      customMerge: (key) => (key === 'items' ? (_target, values) => values : undefined),
+    }).items,
+    source.items,
+  );
+  assert.deepEqual(merge.all([{ left: 1 }, { right: 2 }]), { left: 1, right: 2 });
+  assert.throws(() => merge.all({}), /first argument should be an array/);
+  const inherited = Object.create({ inherited: true });
+  Object.defineProperty(inherited, 'hidden', { value: true });
+  assert.deepEqual(merge(inherited, { inherited: false, hidden: false, safe: 1 }), { safe: 1 });
 });
 
 const nested = (depth, open = '{', close = '}') => open.repeat(depth) + 'a' + close.repeat(depth);
