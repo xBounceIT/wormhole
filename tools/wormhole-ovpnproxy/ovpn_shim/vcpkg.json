@@ -7,7 +7,7 @@
     "asio",
     "jsoncpp",
     "lz4",
-    "tap-windows6",
+    { "name": "tap-windows6", "platform": "windows" },
     "xxhash"
   ]
 }

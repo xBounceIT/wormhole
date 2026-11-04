@@ -49,6 +49,38 @@ contract tests.
 
 ### Production (`-tags ovpn3`)
 
+#### macOS (Intel, Apple Silicon, universal)
+
+Install the Xcode command-line tools, Go, CMake, Ninja, and a bootstrapped
+[vcpkg checkout](https://github.com/microsoft/vcpkg), then set `VCPKG_ROOT` to
+that checkout. Run `npm run build:backend` for the host architecture or
+`npm run build:backend:universal` for both slices. Missing OpenVPN3 and mbedTLS
+submodules are initialized automatically. CI and releases provision the same
+pinned toolchain through `.github/actions/setup-macos-ovpn`.
+
+The builder applies the same required patches as Windows, builds static
+dependencies independently for `x64-osx` and `arm64-osx`, and links with Apple's
+libc++ and system frameworks. It rejects missing sources, mock-only binaries,
+incorrect Mach-O architectures, and non-system dynamic libraries. A local smoke
+test exercises the native profile parser without connecting to a VPN. The
+universal builder then verifies both architecture slices with `lipo`.
+
+Overlapping OpenVPN builds in one checkout are rejected before changing shared
+sources. Temporary binaries stay under `obj/macos-ovpn-build.lock`, outside the
+packaged resources. Normal completion and failures remove the lock. After a hard
+interruption, check the PID in `owner-pid` and confirm that build has stopped
+before removing the lock directory and retrying. Development cache keys include
+the vcpkg checkout, installed native dependencies, archives, and selected compilers.
+
+`node --test tests/macos-ovpn-build.test.mjs` covers build orchestration and
+failure cleanup on every host. Run it with Node's `--experimental-test-coverage`
+and `--test-coverage-include=scripts/build-macos-ovpnproxy.mjs` to measure the
+builder. CMake/CGO declarations and the process entrypoint are covered by
+contract tests and the native macOS CI build rather than JavaScript coverage.
+An actual Stormshield/OpenVPN/WatchGuard login still requires a live appliance.
+
+#### Windows
+
 Toolchain prerequisites (Windows, x64):
 
 1. **C++17 toolchain** — one of:

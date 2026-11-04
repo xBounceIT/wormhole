@@ -25,7 +25,10 @@ package main
 
 /*
 #cgo CXXFLAGS: -std=c++17 -I${SRCDIR}/ovpn_shim
-#cgo !windows LDFLAGS: -L${SRCDIR}/ovpn_shim/build -lovpn_shim -lstdc++
+#cgo !windows,!darwin LDFLAGS: -L${SRCDIR}/ovpn_shim/build -lovpn_shim -lstdc++
+#cgo darwin,amd64 LDFLAGS: -L${SRCDIR}/ovpn_shim/build/darwin-x64 -L${SRCDIR}/ovpn_shim/build/darwin-x64/third_party_mbedtls/library -L${SRCDIR}/ovpn_shim/build/darwin-x64/vcpkg_installed/x64-osx/lib
+#cgo darwin,arm64 LDFLAGS: -L${SRCDIR}/ovpn_shim/build/darwin-arm64 -L${SRCDIR}/ovpn_shim/build/darwin-arm64/third_party_mbedtls/library -L${SRCDIR}/ovpn_shim/build/darwin-arm64/vcpkg_installed/arm64-osx/lib
+#cgo darwin LDFLAGS: -lovpn_shim -lmbedtls -lmbedx509 -lmbedcrypto -llz4 -ljsoncpp -lc++ -framework CoreFoundation -framework IOKit -framework CoreServices -framework SystemConfiguration
 #cgo windows,amd64 LDFLAGS: -L${SRCDIR}/ovpn_shim/build/x64 -lovpn_shim -lstdc++
 #cgo windows,arm64 LDFLAGS: -L${SRCDIR}/ovpn_shim/build/arm64 -lovpn_shim -lc++
 // libovpn_shim.a is a thin static archive of just shim.cc + ovpncli.cpp — it does NOT

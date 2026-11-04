@@ -22,6 +22,8 @@
 cmake_minimum_required(VERSION 3.20)
 project(ovpn_shim CXX)
 
+option(WORMHOLE_REQUIRE_OPENVPN3 "Reject the development-only stub" OFF)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -93,6 +95,9 @@ if(EXISTS "${OPENVPN3_DIR}/client/ovpncli.hpp" AND EXISTS "${MBEDTLS_DIR}/includ
         ${OPENVPN3_DIR}/client/ovpncli.cpp
     )
 else()
+    if(WORMHOLE_REQUIRE_OPENVPN3)
+        message(FATAL_ERROR "OpenVPN3 and mbedTLS submodules are required for this build.")
+    endif()
     message(WARNING "ovpn_shim: openvpn3 and/or mbedtls submodules not populated; "
             "building HAVE_OPENVPN3=0 stub. Run `git submodule update --init --recursive` "
             "and rebuild to enable the real path. See README.md for the full toolchain "

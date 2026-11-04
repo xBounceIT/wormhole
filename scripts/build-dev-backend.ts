@@ -100,10 +100,7 @@ const goContexts = devRuntimeGoModuleDirectories(root, buildPlan).map((cwd) => {
     windowsHide: true,
   }).stdout;
   let compilers: unknown[] = [];
-  if (
-    process.platform === 'darwin' &&
-    cwd === fileURLToPath(new URL('../tools/wormhole-backend', import.meta.url))
-  ) {
+  if (process.platform === 'darwin' && buildEnvironment.CGO_ENABLED === '1') {
     try {
       const { CC, CXX } = JSON.parse(environment);
       compilers = [CC, CXX].map((command) => {

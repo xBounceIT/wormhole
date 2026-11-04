@@ -42,12 +42,15 @@ test('Go probes override inherited cross-compilation targets exactly as each nat
         assert.equal(environment.GOARCH, architecture === 'arm64' ? 'arm64' : 'amd64');
         assert.equal(
           environment.CGO_ENABLED,
-          (platform === 'darwin' && module === 'backend') ||
+          (platform === 'darwin' && ['backend', 'ovpnproxy'].includes(module)) ||
             (platform === 'win32' && module === 'ovpnproxy')
             ? '1'
             : '0',
         );
-        assert.equal(environment.CC, 'custom-cc');
+        assert.equal(
+          environment.CC,
+          platform === 'darwin' && module === 'ovpnproxy' ? 'clang' : 'custom-cc',
+        );
         assert.equal(environment.GOFLAGS, '-trimpath');
       }
     }
@@ -70,7 +73,7 @@ test('Go probes override inherited cross-compilation targets exactly as each nat
   });
 });
 
-test('non-Windows development builds only the portable runtime', () => {
+test('non-Windows development delegates all components to the backend builder', () => {
   for (const platform of ['linux', 'darwin'] as const) {
     const plan = createDevRuntimeBuildPlan({ ...planOptions, platform });
 
@@ -79,6 +82,7 @@ test('non-Windows development builds only the portable runtime', () => {
       ['Go backend'],
     );
     assert.equal(path.basename(plan[0].args[0]), 'Build-ElectronBackend.mjs');
+    assert.ok(plan[0].inputs.includes('scripts/build-macos-ovpnproxy.mjs'));
   }
 });
 

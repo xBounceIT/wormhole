@@ -1,0 +1,17 @@
+name: Set up macOS OpenVPN toolchain
+description: Prepare the pinned native dependencies for Intel and Apple Silicon builds
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        repository: microsoft/vcpkg
+        ref: ef7dbf94b9198bc58f45951adcf1f041fcbc5ea0 # 2025.06.13
+        path: obj/macos-vcpkg
+        persist-credentials: false
+    - shell: bash
+      run: |
+        brew install cmake ninja
+        "$GITHUB_WORKSPACE/obj/macos-vcpkg/bootstrap-vcpkg.sh" -disableMetrics
+        echo "VCPKG_ROOT=$GITHUB_WORKSPACE/obj/macos-vcpkg" >> "$GITHUB_ENV"
+        git submodule update --init --recursive -- tools/wormhole-ovpnproxy/third_party/openvpn3 tools/wormhole-ovpnproxy/third_party/mbedtls
