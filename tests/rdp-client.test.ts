@@ -3,6 +3,60 @@ import { EventEmitter } from 'node:events';
 import test from 'node:test';
 import { RdpBackendClient } from '../electron/rdp.ts';
 
+test('canvas input belongs to a live lifecycle and malformed tiles never leave main', async () => {
+  const client = new RdpBackendClient({ executable: 'unused', args: [] });
+  const internals = client as any;
+  const sent: any[] = [];
+  internals.send = async (command: any) => {
+    sent.push(command);
+    return { type: 'ack' };
+  };
+  await client.input('canvas', 'old', { kind: 'release' });
+  internals.sessionIds.add('canvas');
+  const lifecycleId = client.beginStart('canvas');
+  await client.input('canvas', 'old', { kind: 'release' });
+  assert.equal(sent.length, 0);
+  await assert.rejects(
+    client.input('canvas', lifecycleId, { kind: 'key', code: 999, down: true }),
+    /Invalid/,
+  );
+  await client.input('canvas', lifecycleId, { kind: 'release' });
+  assert.deepEqual(sent, [
+    { op: 'input', sessionId: 'canvas', lifecycleId, input: { kind: 'release' } },
+  ]);
+  const received: any[] = [];
+  client.onEvent((event) => received.push(event));
+  internals.handleLine(
+    JSON.stringify({ type: 'frame', sessionId: 'canvas', lifecycleId, frame: {} }),
+  );
+  internals.handleLine(
+    JSON.stringify({
+      type: 'frame',
+      sessionId: 'canvas',
+      lifecycleId,
+      frame: {
+        desktopWidth: 1,
+        desktopHeight: 1,
+        x: 0,
+        y: 0,
+        width: 1,
+        height: 1,
+        rgba: '/wAA/w==',
+      },
+    }),
+  );
+  assert.equal(received.length, 1);
+  await client.certificateDecision('canvas', 'old', true);
+  assert.equal(sent.length, 1);
+  await client.certificateDecision('canvas', lifecycleId, false);
+  assert.deepEqual(sent.at(-1), {
+    op: 'certificate',
+    sessionId: 'canvas',
+    lifecycleId,
+    certificateAccepted: false,
+  });
+});
+
 test('RDP cleanup is a no-op when the backend is not running', async () => {
   const client = new RdpBackendClient({ executable: 'unused', args: [] });
   await client.hideAll('window');

@@ -10,6 +10,9 @@ export type RdpSessionState = {
 
 export type RdpBackendEventForState = {
   type:
+    | 'frame'
+    | 'frameEnd'
+    | 'certificate'
     | 'started'
     | 'ready'
     | 'connected'

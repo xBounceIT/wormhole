@@ -143,6 +143,9 @@ interface WormholeWorkspaceRdpSettings {
 
 interface WormholeRdpBackendEvent {
   type:
+    | 'frame'
+    | 'frameEnd'
+    | 'certificate'
     | 'started'
     | 'ready'
     | 'connected'
@@ -157,6 +160,9 @@ interface WormholeRdpBackendEvent {
     | 'error';
   requestId?: string;
   sessionId?: string;
+  lifecycleId?: string;
+  frame?: import('../electron/rdp-framebuffer').RdpFrame;
+  paintId?: number;
   backend?: 'activex' | 'freerdp';
   external?: boolean;
   lifecycleGeneration?: number;
@@ -1301,6 +1307,11 @@ interface Window {
     onMcpApproval(listener: (event: WormholeMcpApprovalEvent) => void): () => void;
     sendVncCommand(command: WormholeVncCommand): Promise<WormholeBackendResponse>;
     onBackendEvent(listener: (event: WormholeBackendEvent) => void): () => void;
+    sendRdpInput(request: {
+      sessionId: string;
+      lifecycleId: string;
+      input: import('../electron/rdp-framebuffer').RdpInput;
+    }): Promise<void>;
     startRdpSession(request: {
       sessionId: string;
       profile: WormholeRdpProfile;

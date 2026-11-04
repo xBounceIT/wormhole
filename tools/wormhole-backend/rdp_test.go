@@ -544,7 +544,7 @@ func TestFreeRdpCandidatesIncludeTheMacSDLClients(t *testing.T) {
 	}
 }
 
-func TestFreeRdpFullscreenPolicyDoesNotSuppressMacOSFullscreen(t *testing.T) {
+func TestFreeRdpParentWindowIsOnlyAnX11Handle(t *testing.T) {
 	if !freeRdpUsesParentWindow("linux", "1234") {
 		t.Fatal("Linux should use the Electron parent window when available")
 	}
@@ -552,7 +552,7 @@ func TestFreeRdpFullscreenPolicyDoesNotSuppressMacOSFullscreen(t *testing.T) {
 		t.Fatal("Linux should not claim a missing parent window")
 	}
 	if freeRdpUsesParentWindow("darwin", "1234") {
-		t.Fatal("macOS SDL FreeRDP must remain an external window")
+		t.Fatal("macOS uses a framebuffer surface, not an X11 parent handle")
 	}
 }
 
@@ -926,6 +926,11 @@ func TestRdpNativeAndFreeRdpLaunchersSuperviseHelperProcess(t *testing.T) {
 	})
 
 	t.Run("freerdp", func(t *testing.T) {
+		if runtime.GOOS == "darwin" {
+			t.Setenv("WORMHOLE_RDP_TEST_HELPER", "")
+			t.Setenv("WORMHOLE_FRAMEBUFFER_TEST_HELPER", "1")
+			t.Setenv("WORMHOLE_FREERDP_HOST", os.Args[0])
+		}
 		controller := &rdpController{freerdpPath: os.Args[0], processes: make(map[string]*rdpProcess)}
 		controller.startFreeRdp(rdpCommand{
 			Op: "start", RequestID: "freerdp-start", SessionID: "freerdp", LifecycleID: "lifecycle",

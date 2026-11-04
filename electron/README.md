@@ -172,9 +172,13 @@ RDP follows the same split as the native client. Windows ships a separate
 forwards secret-free status events to Electron. Linux and macOS launch the
 installed `xfreerdp`, `xfreerdp3`, or macOS SDL FreeRDP client under Go
 (`WORMHOLE_FREERDP_PATH` can override discovery). X11 Linux uses FreeRDP's
-parent-window option to place the client in the Electron surface. macOS
-FreeRDP builds are launched as their native client window because an X11
-parent cannot be attached to an Electron Cocoa window.
+parent-window option to place the client in the Electron surface. macOS uses
+the windowless `wormhole-freerdp-host` adapter and draws its bounded RGBA tiles
+inside the connection canvas. Mouse, keyboard, visibility, and display size
+travel through validated preload/Go commands. The canvas acknowledges each
+paint before the adapter emits another, bounding pending display updates.
+Credentials stay on the Go/native stdin boundary. There is no fallback to an
+external SDL window if the embedded adapter is missing.
 
 The RDP credential prompt keeps credentials in memory for the current app
 session only. Build the Windows ActiveX host directly with

@@ -821,6 +821,11 @@ const wormholeBridge = {
     return () => ipcRenderer.removeListener('operation:progress', handler);
   },
   startRdpSession: (request: RdpStartRequest) => ipcRenderer.invoke('rdp:start', request),
+  sendRdpInput: (request: {
+    sessionId: string;
+    lifecycleId: string;
+    input: import('./rdp-framebuffer.js').RdpInput;
+  }) => ipcRenderer.invoke('rdp:input', request),
   getRdpSystemClientCapability: (request: RdpSystemClientCapabilityRequest) =>
     ipcRenderer.invoke('rdp:system-client-capability', request),
   openRdpInSystemClient: (request: RdpSystemClientOpenRequest) =>
