@@ -64,8 +64,11 @@ import {
   isCredentialProtocol,
   mergeCredential,
   sshAutoSudoAvailable,
+  sshAuthenticationTypeForCredential,
+  filterCredentialsByAuthentication,
   type CredentialKind,
   type CredentialSourceFilter,
+  type SshAuthenticationType,
 } from './credential-state';
 import {
   createLogLevelSaveState,
@@ -886,6 +889,13 @@ type CredentialDraft = {
 
 type CredentialWriteRequest = CredentialDraft & {
   passphrase: string;
+};
+
+type SshKeyEditorRequest = {
+  credential?: CredentialRecord;
+  username?: string;
+  fromConnection?: boolean;
+  authentication?: Exclude<SshAuthenticationType, 'password'>;
 };
 
 function emptyCredentialDraft(): CredentialDraft {
@@ -1953,11 +1963,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   const [editorError, setEditorError] = useState('');
   const [editorBusy, setEditorBusy] = useState(false);
   const [credentialDialog, setCredentialDialog] = useState<CredentialDialogState | null>(null);
-  const [sshKeyEditor, setSshKeyEditor] = useState<{
-    credential?: CredentialRecord;
-    username?: string;
-    fromConnection?: boolean;
-  } | null>(null);
+  const [sshKeyEditor, setSshKeyEditor] = useState<SshKeyEditorRequest | null>(null);
   const sshKeyEditorRef = useRef(sshKeyEditor);
   useLayoutEffect(() => {
     sshKeyEditorRef.current = authGate === 'unlocked' ? sshKeyEditor : null;
@@ -1989,6 +1995,8 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     serial: { ...defaultSerialSettings },
     rdp: { ...defaultRdpSettings },
   });
+  const [connectionAuthenticationOverride, setConnectionAuthenticationOverride] =
+    useState<SshAuthenticationType | null>(null);
   const [rdpExternalClientRequired, setRdpExternalClientRequired] = useState(false);
   const initialConnectionEditForm = useRef<typeof newConnectionForm | null>(null);
   const rdpExternalClientRequirementRequest = useRef(0);
@@ -2193,23 +2201,63 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         ? newConnectionForm.protocol
         : undefined;
   const connectionProtocolSupportsSavedCredentials = connectionCredentialProtocol !== undefined;
+  const selectedConnectionCredential = useMemo(() => {
+    const selection = newConnectionForm.credential;
+    if (selection === 'inherit' || selection === 'none') return undefined;
+    return credentialOptions[connectionCredentialProtocol ?? 'ssh'].find(
+      (credential) => credential.id === selection,
+    );
+  }, [credentialOptions, connectionCredentialProtocol, newConnectionForm.credential]);
+  const connectionSupportsSshAuthentication =
+    newConnectionForm.protocol === 'ssh' || newConnectionForm.protocol === 'sftp';
+  const connectionAuthentication =
+    connectionAuthenticationOverride ??
+    sshAuthenticationTypeForCredential(
+      newConnectionForm.useSavedCredentials ? selectedConnectionCredential : undefined,
+    );
+  const connectionInheritsAuthentication =
+    connectionSupportsSshAuthentication &&
+    newConnectionForm.useSavedCredentials &&
+    newConnectionForm.credential === 'inherit';
+  const connectionRequiresSshKey =
+    connectionSupportsSshAuthentication &&
+    !connectionInheritsAuthentication &&
+    connectionAuthentication !== 'password';
+  const connectionAuthenticationSelectionComplete =
+    !connectionRequiresSshKey ||
+    (newConnectionForm.useSavedCredentials &&
+      selectedConnectionCredential?.kind === 'sshKey' &&
+      sshAuthenticationTypeForCredential(selectedConnectionCredential) ===
+        connectionAuthentication);
   const connectionCredentialSelectionOptions = useMemo<SearchableComboboxOption[]>(() => {
     const options = connectionCredentialProtocol
       ? credentialOptions[connectionCredentialProtocol]
       : [];
-    return buildConnectionCredentialSelectionOptions(options, connectionEditorMode === 'saved');
-  }, [connectionEditorMode, connectionCredentialProtocol, credentialOptions]);
-  const connectionEditorCredentialSelectionComplete = connectionEditorCredentialSelectionIsComplete(
+    return buildConnectionCredentialSelectionOptions(
+      connectionSupportsSshAuthentication && !connectionInheritsAuthentication
+        ? filterCredentialsByAuthentication(options, connectionAuthentication)
+        : options,
+      connectionEditorMode === 'saved',
+    );
+  }, [
     connectionEditorMode,
-    connectionProtocolSupportsSavedCredentials,
-    newConnectionForm.useSavedCredentials,
-    newConnectionForm.credential,
-  );
-  const selectedConnectionCredential = useMemo(() => {
-    const selection = newConnectionForm.credential;
-    if (selection === 'inherit' || selection === 'none') return undefined;
-    return credentials.find((credential) => credential.id === selection);
-  }, [credentials, newConnectionForm.credential]);
+    connectionCredentialProtocol,
+    credentialOptions,
+    connectionSupportsSshAuthentication,
+    connectionAuthentication,
+    connectionInheritsAuthentication,
+  ]);
+  const connectionEditorCredentialSelectionComplete =
+    connectionAuthenticationSelectionComplete &&
+    connectionEditorCredentialSelectionIsComplete(
+      connectionEditorMode,
+      connectionProtocolSupportsSavedCredentials,
+      newConnectionForm.useSavedCredentials,
+      newConnectionForm.credential,
+    );
+  const connectionAuthenticationSelectionError = connectionRequiresSshKey
+    ? `Select or add ${connectionAuthentication === 'certificate' ? 'a certificate' : 'an SSH key'} before continuing.`
+    : connectionCredentialSelectionError;
   const canConfigureConnectionSshAutoSudo =
     newConnectionForm.protocol === 'ssh' &&
     sshAutoSudoAvailable(newConnectionForm.useSavedCredentials, selectedConnectionCredential?.kind);
@@ -5628,6 +5676,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   }
 
   function openQuickConnect() {
+    setConnectionAuthenticationOverride(null);
     setConnectionNotesReady(true);
     quickConnectSubmitInFlight.current = false;
     setEditingConnectionId(null);
@@ -5694,6 +5743,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   }
 
   function openNewConnection(folderId?: string | null) {
+    setConnectionAuthenticationOverride(null);
     setConnectionNotesReady(true);
     setEditingConnectionId(null);
     setConnectionEditorMode('saved');
@@ -5913,6 +5963,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
 
   function openEditConnection(node: TreeNode) {
     if (node.kind !== 'connection' || !node.protocol) return;
+    setConnectionAuthenticationOverride(null);
 
     setConnectionNotesReady(!window.wormhole || node.persisted === false);
     setConnectionEditorMode('saved');
@@ -6026,6 +6077,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
 
   function submitQuickConnect(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (!connectionAuthenticationSelectionComplete) {
+      setEditorError(connectionAuthenticationSelectionError);
+      return;
+    }
     if (quickConnectSubmitInFlight.current) return;
     quickConnectSubmitInFlight.current = true;
     const name = newConnectionForm.name.trim() || newConnectionForm.host.trim() || 'New connection';
@@ -6167,7 +6222,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     event.preventDefault();
     if (editorBusy || !connectionNotesReady) return;
     if (!connectionEditorCredentialSelectionComplete) {
-      setEditorError(connectionCredentialSelectionError);
+      setEditorError(connectionAuthenticationSelectionError);
       return;
     }
     const name = newConnectionForm.name.trim();
@@ -6789,6 +6844,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     setCredentials((current) => mergeCredential(current, credential));
     setCredentialOptions((current) => mergeCredentialOption(current, credential));
     if (sshKeyEditor?.fromConnection) {
+      if (sshKeyEditorRef.current === sshKeyEditor) setConnectionAuthenticationOverride(null);
       setNewConnectionForm((current) =>
         sshKeyEditorRef.current === sshKeyEditor
           ? {
@@ -7750,7 +7806,8 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                       <div className="grid gap-2">
                         <Label htmlFor="connection-protocol">Connection type</Label>
                         <Select
-                          onValueChange={(type: ConnectionType) =>
+                          onValueChange={(type: ConnectionType) => {
+                            setConnectionAuthenticationOverride(null);
                             setNewConnectionForm((form) => {
                               const protocol = connectionProtocolForType(
                                 type,
@@ -7773,8 +7830,8 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                                       ? 'none'
                                       : 'inherit',
                               };
-                            })
-                          }
+                            });
+                          }}
                           value={connectionTypeForProtocol(newConnectionForm.protocol)}
                         >
                           <SelectTrigger id="connection-protocol" className="w-full">
@@ -7869,42 +7926,80 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                       </div>
                     ) : null}
 
+                    {connectionSupportsSshAuthentication ? (
+                      <div className="grid max-w-[280px] gap-2">
+                        <Label htmlFor="connection-authentication">Authentication</Label>
+                        <Select
+                          value={connectionInheritsAuthentication ? '' : connectionAuthentication}
+                          onValueChange={(value: SshAuthenticationType) => {
+                            setConnectionAuthenticationOverride(value);
+                            setEditorError('');
+                            setNewConnectionForm((form) => ({
+                              ...form,
+                              useSavedCredentials: value !== 'password',
+                              credential: 'none',
+                              inlinePassword: '',
+                              removeInlinePassword: false,
+                            }));
+                          }}
+                        >
+                          <SelectTrigger id="connection-authentication" className="w-full">
+                            <SelectValue placeholder="Inherit from folder" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="password">Password</SelectItem>
+                            <SelectItem value="sshKey">SSH Key</SelectItem>
+                            <SelectItem value="certificate">Certificate</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    ) : null}
+
                     {newConnectionForm.protocol === 'ssh' ||
                     newConnectionForm.protocol === 'sftp' ||
                     newConnectionForm.protocol === 'rdp' ||
                     newConnectionForm.protocol === 'vnc' ? (
                       <div className="grid gap-4">
-                        <label className="flex items-center gap-2 text-xs">
-                          <Checkbox
-                            checked={newConnectionForm.useSavedCredentials}
-                            onCheckedChange={(checked) => {
-                              const useSavedCredentials = checked === true;
-                              setNewConnectionForm((form) => ({
-                                ...form,
-                                useSavedCredentials,
-                                credential: connectionCredentialSelectionAfterSavedToggle(
+                        {!connectionRequiresSshKey ? (
+                          <label className="flex items-center gap-2 text-xs">
+                            <Checkbox
+                              checked={newConnectionForm.useSavedCredentials}
+                              onCheckedChange={(checked) => {
+                                const useSavedCredentials = checked === true;
+                                setNewConnectionForm((form) => ({
+                                  ...form,
                                   useSavedCredentials,
-                                  connectionEditorMode,
-                                  form.credential,
-                                ),
-                              }));
-                            }}
-                          />
-                          <span>Use saved credentials</span>
-                        </label>
+                                  credential: connectionCredentialSelectionAfterSavedToggle(
+                                    useSavedCredentials,
+                                    connectionEditorMode,
+                                    form.credential,
+                                  ),
+                                }));
+                              }}
+                            />
+                            <span>Use saved credentials</span>
+                          </label>
+                        ) : null}
 
                         {newConnectionForm.useSavedCredentials ? (
                           <div className="grid max-w-[280px] gap-2">
-                            <Label htmlFor="connection-credential">Saved credentials</Label>
+                            <Label htmlFor="connection-credential">
+                              {connectionRequiresSshKey
+                                ? connectionAuthentication === 'certificate'
+                                  ? 'Certificate'
+                                  : 'SSH key'
+                                : 'Saved credentials'}
+                            </Label>
                             <SearchableCombobox
                               id="connection-credential"
                               emptyMessage="No credentials found."
-                              onValueChange={(credential) =>
+                              onValueChange={(credential) => {
+                                setConnectionAuthenticationOverride(null);
                                 setNewConnectionForm((form) => ({
                                   ...form,
                                   credential,
-                                }))
-                              }
+                                }));
+                              }}
                               options={connectionCredentialSelectionOptions}
                               placeholder="Select a credential"
                               searchPlaceholder="Search credentials…"
@@ -7912,7 +8007,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                             />
                             {!connectionEditorCredentialSelectionComplete ? (
                               <p className="text-[11px] text-destructive" role="alert">
-                                {connectionCredentialSelectionError}
+                                {connectionAuthenticationSelectionError}
                               </p>
                             ) : null}
                           </div>
@@ -7985,19 +8080,23 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                       </div>
                     ) : null}
 
-                    {newConnectionForm.protocol === 'ssh' ? (
+                    {connectionRequiresSshKey ? (
                       <Button
                         className="justify-start px-0 text-xs"
                         onClick={() =>
                           setSshKeyEditor({
                             username: newConnectionForm.username,
                             fromConnection: true,
+                            authentication:
+                              connectionAuthentication === 'certificate' ? 'certificate' : 'sshKey',
                           })
                         }
                         type="button"
                         variant="link"
                       >
-                        Use an SSH key or certificate…
+                        {connectionAuthentication === 'certificate'
+                          ? 'Add certificate…'
+                          : 'Add SSH key…'}
                       </Button>
                     ) : null}
 
@@ -10823,7 +10922,7 @@ export function CredentialsPage({
   onCreate: (draft: CredentialWriteRequest) => Promise<void>;
   onUpdate: (id: string, draft: CredentialWriteRequest) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
-  initialEditor?: { credential?: CredentialRecord; username?: string };
+  initialEditor?: SshKeyEditorRequest;
   editorOnly?: boolean;
   onEditorClose?: () => void;
   // react-doctor-disable-next-line react-doctor/prefer-useReducer
@@ -10846,6 +10945,7 @@ export function CredentialsPage({
             : {}),
         },
   );
+  const requiresSshCertificate = editorOnly && initialEditor?.authentication === 'certificate';
   const [pendingDeletion, setPendingDeletion] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [operationError, setOperationError] = useState('');
@@ -11164,6 +11264,10 @@ export function CredentialsPage({
       setOperationError('SSH and RDP credentials need a username.');
       return;
     }
+    if (requiresSshCertificate && !draft.certificateSelectionId) {
+      setOperationError('Select an SSH certificate before saving.');
+      return;
+    }
     if (draft.protocol === 'rdp' && !draft.domain) {
       setOperationError('RDP credentials need a domain.');
       return;
@@ -11469,7 +11573,9 @@ export function CredentialsPage({
               {credentialForm.kind === 'sshKey'
                 ? editingCredential
                   ? 'Update this SSH key profile or select a replacement private key. Key material never enters the renderer.'
-                  : 'Import an SSH private key into protected local storage.'
+                  : requiresSshCertificate
+                    ? 'Import an SSH private key and its OpenSSH user certificate into protected local storage.'
+                    : 'Import an SSH private key into protected local storage.'
                 : credentialForm.provider === 'Bitwarden'
                   ? 'Link this profile to a Bitwarden login. Wormhole stores only the item reference.'
                   : editingCredential
@@ -11533,7 +11639,7 @@ export function CredentialsPage({
               <div className="grid gap-2">
                 <Label htmlFor="credential-kind">Authentication</Label>
                 <Select
-                  disabled={Boolean(editingCredential)}
+                  disabled={Boolean(editingCredential) || Boolean(initialEditor?.authentication)}
                   onValueChange={(value) => {
                     const kind = value as CredentialDraft['kind'];
                     if (kind === 'password') {
@@ -11661,7 +11767,9 @@ export function CredentialsPage({
                   </div>
                   <p className="text-[11px] leading-relaxed text-muted-foreground">
                     OpenSSH, PEM and PKCS#8 (including encrypted) private keys up to 1 MB.
-                    Optionally attach an OpenSSH user certificate (*-cert.pub).
+                    {requiresSshCertificate
+                      ? 'Attach an OpenSSH user certificate (*-cert.pub).'
+                      : 'Optionally attach an OpenSSH user certificate (*-cert.pub).'}
                   </p>
                   {privateKeySelectionRetryRequired ? (
                     <p className="text-[11px] leading-relaxed text-destructive">
@@ -11670,7 +11778,7 @@ export function CredentialsPage({
                   ) : null}
                 </div>
                 <div className="grid gap-2" role="group" aria-label="SSH certificate">
-                  <Label>Certificate (optional)</Label>
+                  <Label>{requiresSshCertificate ? 'Certificate' : 'Certificate (optional)'}</Label>
                   <div className="flex min-w-0 items-center justify-between gap-2 rounded-md border border-input bg-background px-3 py-2">
                     <span className="min-w-0 truncate text-xs">
                       {credentialForm.certificateFileName || 'No certificate attached'}

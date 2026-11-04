@@ -13,6 +13,28 @@ type CredentialSelectionOption = {
 };
 
 export type CredentialKind = 'password' | 'sshKey' | 'unsupported';
+export type SshAuthenticationType = 'password' | 'sshKey' | 'certificate';
+
+export function sshAuthenticationTypeForCredential(credential?: {
+  kind: CredentialKind;
+  hasCertificate?: boolean;
+}): SshAuthenticationType {
+  return credential?.kind === 'sshKey'
+    ? credential.hasCertificate
+      ? 'certificate'
+      : 'sshKey'
+    : 'password';
+}
+
+export function filterCredentialsByAuthentication<
+  T extends { kind: CredentialKind; hasCertificate?: boolean },
+>(credentials: ReadonlyArray<T>, authentication: SshAuthenticationType): T[] {
+  return credentials.filter(
+    (credential) =>
+      credential.kind !== 'unsupported' &&
+      sshAuthenticationTypeForCredential(credential) === authentication,
+  );
+}
 export type CredentialProtocol = 'ssh' | 'rdp' | 'vnc';
 export type CredentialSourceFilter = 'all' | 'Local' | 'Bitwarden';
 export type SshAutoSudoMode = 'inherit' | 'on' | 'off';

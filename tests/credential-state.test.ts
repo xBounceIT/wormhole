@@ -19,6 +19,8 @@ import {
   isCredentialProtocol,
   mergeCredential,
   sshAutoSudoAvailable,
+  sshAuthenticationTypeForCredential,
+  filterCredentialsByAuthentication,
 } from '../src/credential-state.ts';
 import { hasValidCredentialSecretLength } from '../electron/credential-secret-length.ts';
 import {
@@ -32,6 +34,31 @@ import {
 } from '../src/bitwarden-cli-view.ts';
 
 const appSource = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+
+test('SSH authentication distinguishes passwords, bare keys and certificates', () => {
+  const credentials = [
+    { kind: 'password', id: 'password' },
+    { kind: 'sshKey', id: 'key' },
+    { kind: 'sshKey', hasCertificate: false, id: 'bare-key' },
+    { kind: 'sshKey', hasCertificate: true, id: 'certificate' },
+    { kind: 'unsupported', id: 'unsupported' },
+  ] as const;
+  assert.equal(sshAuthenticationTypeForCredential(), 'password');
+  assert.equal(sshAuthenticationTypeForCredential(credentials[0]), 'password');
+  assert.equal(sshAuthenticationTypeForCredential(credentials[1]), 'sshKey');
+  assert.equal(sshAuthenticationTypeForCredential(credentials[3]), 'certificate');
+  for (const [authentication, expected] of [
+    ['password', ['password']],
+    ['sshKey', ['key', 'bare-key']],
+    ['certificate', ['certificate']],
+  ] as const) {
+    assert.deepEqual(
+      filterCredentialsByAuthentication(credentials, authentication).map(({ id }) => id),
+      expected,
+    );
+    assert.deepEqual(filterCredentialsByAuthentication([], authentication), []);
+  }
+});
 
 test('SSH key selection cleanup is shared and tolerates absent or rejected native requests', async () => {
   const source = appSource.match(/^function discardPrivateKeySelection\([^]*?^\}/m)?.[0];
@@ -151,7 +178,7 @@ test('saved connection form blocks missing credential selections before workspac
   );
   assert.match(
     credentialFieldSource,
-    /!connectionEditorCredentialSelectionComplete[\s\S]*?connectionCredentialSelectionError/,
+    /!connectionEditorCredentialSelectionComplete[\s\S]*?connectionAuthenticationSelectionError/,
   );
 });
 
