@@ -7618,7 +7618,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           }}
           open={newConnectionOpen}
         >
-          <DialogContent className="flex h-[min(36rem,calc(100vh-2rem))] max-h-[calc(100vh-2rem)] flex-col overflow-hidden border-border/70 bg-card text-card-foreground sm:max-w-2xl">
+          <DialogContent
+            className="flex h-[min(36rem,calc(100vh-2rem))] max-h-[calc(100vh-2rem)] flex-col overflow-hidden border-border/70 bg-card text-card-foreground sm:max-w-2xl"
+            onInteractOutside={(event) => event.preventDefault()}
+          >
             <DialogHeader>
               <DialogTitle>
                 {connectionEditorMode === 'quick'
@@ -12848,7 +12851,10 @@ function TunnelEditorDialog({
 
   return (
     <Dialog onOpenChange={onOpenChange} open={open}>
-      <DialogContent className="flex max-h-[calc(100dvh-2rem)] w-full max-w-[min(48rem,calc(100vw-2rem))] flex-col overflow-hidden border-border/70 bg-card sm:max-w-[min(48rem,calc(100vw-2rem))]">
+      <DialogContent
+        className="flex max-h-[calc(100dvh-2rem)] w-full max-w-[min(48rem,calc(100vw-2rem))] flex-col overflow-hidden border-border/70 bg-card sm:max-w-[min(48rem,calc(100vw-2rem))]"
+        onInteractOutside={(event) => event.preventDefault()}
+      >
         <DialogHeader>
           <DialogTitle>{value.id ? 'Edit VPN tunnel' : 'Add VPN tunnel'}</DialogTitle>
           <DialogDescription>
