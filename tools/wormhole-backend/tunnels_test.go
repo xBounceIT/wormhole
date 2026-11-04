@@ -12,6 +12,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -32,6 +33,64 @@ func init() {
 		os.Exit(3)
 	}
 	switch mode {
+	case "verbose-after-ready":
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			os.Exit(8)
+		}
+		fmt.Fprintf(os.Stdout, "READY %d\n", listener.Addr().(*net.TCPAddr).Port)
+		connection, err := listener.Accept()
+		if err != nil {
+			os.Exit(9)
+		}
+		for i := 0; i < 128; i++ {
+			if _, err := fmt.Fprintln(os.Stderr, strings.Repeat("x", 1024)); err != nil {
+				os.Exit(5)
+			}
+		}
+		fmt.Fprintln(connection, "drained")
+		connection.Close()
+		listener.Close()
+		io.Copy(io.Discard, os.Stdin)
+		os.Exit(0)
+	case "inherited-stderr":
+		child := exec.Command(os.Args[0])
+		child.Env = append(os.Environ(), "WORMHOLE_TUNNEL_TEST_HELPER=hold-stderr")
+		child.Stdin = strings.NewReader("\n")
+		child.Stdout = os.Stdout
+		child.Stderr = os.Stderr
+		if err := child.Start(); err != nil {
+			os.Exit(6)
+		}
+		fmt.Fprintln(os.Stderr, "AUTH_FAILED fixture-sensitive")
+		os.Exit(2)
+	case "hold-stderr":
+		// The test releases the inherited handles even when the assertion fails.
+		deadline := time.Now().Add(20 * time.Second)
+		for time.Now().Before(deadline) {
+			if _, err := os.Stat(os.Getenv("WORMHOLE_TUNNEL_TEST_HOLD")); err != nil {
+				os.Exit(0)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		os.Exit(7)
+	case "verbose-ready", "verbose-failure", "long-line-ready":
+		line := strings.Repeat("x", 1024) + "\n"
+		if mode == "long-line-ready" {
+			line = strings.Repeat("x", 128*1024) + "\n"
+		}
+		for i := 0; i < 128; i++ {
+			if _, err := io.WriteString(os.Stderr, line); err != nil {
+				os.Exit(5)
+			}
+		}
+		if mode == "verbose-failure" {
+			fmt.Fprintln(os.Stderr, "AUTH_FAILED fixture-sensitive")
+			os.Exit(2)
+		}
+		fmt.Fprintln(os.Stdout, "READY 32123")
+		io.Copy(io.Discard, os.Stdin)
+		os.Exit(0)
 	case "ready":
 		_, _ = fmt.Fprintln(os.Stdout, "READY 32123")
 		_, _ = io.Copy(io.Discard, os.Stdin)
@@ -98,6 +157,89 @@ func TestStartTunnelProcessClassifiesFailureAndInvalidReadiness(t *testing.T) {
 	t.Setenv("WORMHOLE_TUNNEL_TEST_HELPER", "invalid")
 	if _, err := startTunnelProcess(context.Background(), tunnelConfigSnapshot{kind: 0, settings: settings()}); err == nil {
 		t.Fatalf("invalid readiness failure = %v", err)
+	}
+}
+
+func TestStartTunnelProcessDrainsVerboseDiagnostics(t *testing.T) {
+	for _, mode := range []string{"verbose-ready", "long-line-ready", "verbose-failure"} {
+		t.Run(mode, func(t *testing.T) {
+			t.Setenv("WORMHOLE_WGPROXY_PATH", os.Args[0])
+			t.Setenv("WORMHOLE_TUNNEL_TEST_HELPER", mode)
+			t.Setenv("WORMHOLE_TUNNEL_DEBUG", "")
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			process, err := startTunnelProcess(ctx, tunnelConfigSnapshot{
+				kind:     0,
+				settings: json.RawMessage(`{"InterfacePrivateKey":"private","PeerPublicKey":"public"}`),
+			})
+			if mode == "verbose-failure" {
+				if err == nil || !strings.Contains(err.Error(), "rejected the username") || strings.Contains(err.Error(), "fixture-sensitive") {
+					t.Fatalf("final authentication failure was lost or exposed: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("verbose sidecar could not reach readiness: %v", err)
+			}
+			defer process.close()
+			if !process.alive() || process.socks != "127.0.0.1:32123" {
+				t.Fatal("verbose sidecar did not stay alive with its SOCKS endpoint")
+			}
+		})
+	}
+}
+
+func TestStartTunnelProcessBoundsInheritedDiagnosticHandles(t *testing.T) {
+	hold := filepath.Join(t.TempDir(), "hold")
+	if err := os.WriteFile(hold, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Remove(hold) })
+	t.Setenv("WORMHOLE_TUNNEL_TEST_HOLD", hold)
+	t.Setenv("WORMHOLE_WGPROXY_PATH", os.Args[0])
+	t.Setenv("WORMHOLE_TUNNEL_TEST_HELPER", "inherited-stderr")
+	t.Setenv("WORMHOLE_TUNNEL_DEBUG", "")
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	process, err := startTunnelProcess(ctx, tunnelConfigSnapshot{
+		kind:     0,
+		settings: json.RawMessage(`{"InterfacePrivateKey":"private","PeerPublicKey":"public"}`),
+	})
+	if process != nil {
+		process.close()
+		t.Fatal("failed sidecar reported readiness")
+	}
+	if err == nil || !strings.Contains(err.Error(), "rejected the username") {
+		t.Fatalf("inherited handles prevented the final failure from being reported: %v", err)
+	}
+}
+
+func TestStartTunnelProcessDrainsDiagnosticsAfterReadiness(t *testing.T) {
+	t.Setenv("WORMHOLE_WGPROXY_PATH", os.Args[0])
+	t.Setenv("WORMHOLE_TUNNEL_TEST_HELPER", "verbose-after-ready")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	process, err := startTunnelProcess(ctx, tunnelConfigSnapshot{
+		kind:     0,
+		settings: json.RawMessage(`{"InterfacePrivateKey":"private","PeerPublicKey":"public"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer process.close()
+	connection, err := net.DialTimeout("tcp", process.socks, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	connection.SetDeadline(time.Now().Add(5 * time.Second))
+	ack, err := bufio.NewReader(connection).ReadString('\n')
+	if err != nil || ack != "drained\n" || !process.alive() {
+		t.Fatalf("diagnostics interrupted the ready sidecar: ack=%q err=%v", ack, err)
+	}
+	process.close()
+	if process.alive() {
+		t.Fatal("verbose sidecar did not stop after its lease was closed")
 	}
 }
 
@@ -401,14 +543,7 @@ func TestPrepareFortinetEmbeddedSamlAuthentication(t *testing.T) {
 	}
 }
 
-func TestBoundedTunnelDiagnosticsAndNilRuntimeHelpers(t *testing.T) {
-	builder := &boundedStderrBuilder{limit: 8}
-	if !builder.append("abc") || !builder.append("defghijk") || builder.append("ignored") {
-		t.Fatal("bounded stderr append state was incorrect")
-	}
-	if len(builder.text()) != 8 {
-		t.Fatalf("bounded stderr = %q", builder.text())
-	}
+func TestNilTunnelRuntimeHelpers(t *testing.T) {
 	var runtime *tunnelRuntime
 	if runtime.socksEndpoint() != "" {
 		t.Fatal("nil runtime exposed a SOCKS endpoint")
@@ -672,15 +807,15 @@ func TestStormshieldDataPlaneFailureRequiresANewOTP(t *testing.T) {
 	}
 }
 
-func TestTunnelSidecarFailureMessageDebugOptInShowsBoundedDetail(t *testing.T) {
+func TestTunnelSidecarFailureMessageDebugOptInShowsOnlyProcessMetadata(t *testing.T) {
 	t.Setenv("WORMHOLE_TUNNEL_DEBUG", "1")
 	long := strings.Repeat("x", 2000)
 	err := tunnelSidecarFailureMessage("wormhole-fortiproxy", "fatal: "+long, 1)
-	if err == nil || !strings.Contains(err.Error(), "failed during startup") {
+	if err == nil || !strings.Contains(err.Error(), "VPN sidecar wormhole-fortiproxy, exit code 1") {
 		t.Fatalf("error = %v", err)
 	}
-	if len(err.Error()) > 1200 {
-		t.Fatalf("debug detail was not bounded: %d bytes", len(err.Error()))
+	if strings.Contains(err.Error(), "xxx") {
+		t.Fatal("debug mode exposed raw diagnostics")
 	}
 }
 
