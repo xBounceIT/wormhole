@@ -23,6 +23,8 @@ declare function RuntimeCredentialsHarness(props: {
   protocol: 'ssh' | 'rdp';
   kind: 'saved' | 'quick';
   busy?: boolean;
+  configuredUsername?: string;
+  missingNode?: boolean;
   onSubmit: (credentials: { username: string; password: string }, save: boolean) => void;
 }): import('react').ReactElement;
 declare function AppCloseHarness(props: Record<string, unknown>): import('react').ReactElement;
@@ -2316,6 +2318,84 @@ async function runRuntimeCredentialPasswordTests() {
         await React.act(async () => document.getElementById('runtime-reopen').click());
         assert.equal(input().type, 'password');
         assert.equal(input().value, '');
+      }
+    }
+    for (const scenario of [
+      { configuredUsername: 'syncsec', expected: 'syncsec' },
+      {
+        configuredUsername: '運用-équipe\\user@example.org',
+        expected: '運用-équipe\\user@example.org',
+      },
+      { configuredUsername: '', expected: '' },
+      { configuredUsername: '   ', expected: '   ' },
+      { configuredUsername: undefined, expected: '' },
+      { configuredUsername: 'other-account', missingNode: true, expected: '' },
+    ]) {
+      const submissions: Array<{ username: string; password: string; save: boolean }> = [];
+      await React.act(async () => {
+        root.render(
+          <RuntimeCredentialsHarness
+            key={++mountKey}
+            protocol="ssh"
+            kind="saved"
+            {...scenario}
+            onSubmit={(credentials, save) => submissions.push({ ...credentials, save })}
+          />,
+        );
+      });
+      await fill('ssh-username', 'previous-user');
+      await fill('ssh-password', 'previous-secret');
+      await React.act(async () => {
+        document.querySelector<HTMLInputElement>('[role="dialog"] input[type="checkbox"]').click();
+      });
+      assert.equal(
+        document.querySelector<HTMLInputElement>('[role="dialog"] input[type="checkbox"]').checked,
+        true,
+      );
+      const selection = document.getElementById('ssh-runtime-credential') as HTMLSelectElement;
+      await React.act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(
+          selection,
+          'saved',
+        );
+        selection.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+      assert.equal(selection.value, 'saved');
+      assert.equal(document.getElementById('ssh-username'), null);
+      await React.act(async () => {
+        document.getElementById('runtime-saved-ssh').click();
+      });
+      assert.equal(
+        (document.getElementById('ssh-username') as HTMLInputElement).value,
+        scenario.expected,
+        'the fallback must prefill the saved connection username, including nested connections',
+      );
+      assert.equal((document.getElementById('ssh-password') as HTMLInputElement).value, '');
+      assert.equal(
+        document.querySelector<HTMLInputElement>('[role="dialog"] input[type="checkbox"]').checked,
+        false,
+      );
+      assert.equal(
+        (document.getElementById('ssh-runtime-credential') as HTMLSelectElement).value,
+        'manual',
+      );
+      assert.equal(
+        document.querySelector<HTMLButtonElement>('[role="dialog"] button[type="submit"]').disabled,
+        !scenario.expected.trim(),
+      );
+      if (scenario.expected.trim()) {
+        await fill('ssh-password', 'new-secret');
+        await React.act(async () => {
+          document.querySelector<HTMLFormElement>('[role="dialog"] form').requestSubmit();
+        });
+        assert.deepEqual(submissions, [
+          { username: scenario.expected, password: 'new-secret', save: false },
+        ]);
+        await fill('ssh-username', 'edited-user');
+        assert.equal(
+          (document.getElementById('ssh-username') as HTMLInputElement).value,
+          'edited-user',
+        );
       }
     }
   } finally {

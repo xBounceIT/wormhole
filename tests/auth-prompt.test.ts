@@ -225,10 +225,15 @@ test('authentication prompts, window-close controls, and RDP surface layout work
     function Checkbox({ checked, onCheckedChange }) {
       return <input type="checkbox" checked={checked} onChange={event => onCheckedChange(event.target.checked)} />;
     }
-    function RuntimeCredentialsHarness({ protocol, kind, busy = false, onSubmit }) {
+    ${slice('function findTreeNode(', 'function matchesMcpOpenConnectionApproval(')}
+    function RuntimeCredentialsHarness({ protocol, kind, busy = false, onSubmit, configuredUsername, missingNode = false }) {
       const manualCredentialSelectionValue = 'manual';
       const runtimeCredentialSelectionOptions = { ssh: [], rdp: [] };
       const sessionsRef = useRef([{ id: 'rdp-session', nodeId: kind === 'saved' ? 'node' : null }]);
+      const treeRef = useRef([{ id: 'folder', username: 'folder-account', children: [
+        { id: 'other-node', username: 'other-account' },
+        ...(missingNode ? [] : [{ id: 'node', username: configuredUsername }]),
+      ] }]);
       const sshPrompt = kind === 'saved'
         ? { kind, backendSessionId: 'ssh-backend-session', nodeId: 'node' }
         : { kind, sessionId: 'ssh-session' };
@@ -243,8 +248,15 @@ test('authentication prompts, window-close controls, and RDP surface layout work
       const sshCredentialPromptBusy = busy, rdpCredentialPromptBusy = busy;
       const submitSshCredentials = event => { event.preventDefault(); onSubmit(sshCredentialForm, sshCredentialSave); };
       const submitRdpCredentials = event => { event.preventDefault(); onSubmit(rdpCredentialForm, rdpCredentialSave); };
+      function requestSavedSshCredentials() {
+        const promptTarget = 'saved';
+        const request = { nodeId: 'node', sessionId: 'ssh-backend-session' };
+        ${slice("          if (promptTarget === 'saved' && request.nodeId) {", "          } else if (promptTarget === 'quick') {")}
+        }
+      }
       return <TooltipProvider>
         ${runtimeDialogs.join('\n')}
+        <button id="runtime-saved-ssh" onClick={requestSavedSshCredentials}>Retry saved SSH</button>
         <button id="runtime-reopen" onClick={() => {
           if (protocol === 'ssh') setSshCredentialPrompt(sshPrompt);
           else setRdpCredentialPrompt('rdp-session');
@@ -488,7 +500,7 @@ test('authentication prompts, window-close controls, and RDP surface layout work
           const coverage = await window.webContents.debugger.sendCommand('Profiler.takePreciseCoverage');
           const script = coverage.result.find(item => item.url === 'wormhole-auth-prompt.js');
           if (!script) throw new Error('Missing authentication renderer coverage.');
-          for (const name of ['AuthPrompt', 'IdleLockHarness', 'renderCard', 'showUnlock', 'setPasswordVisible', 'AppCloseHarness', 'DialogContent', 'useDialogOpen', 'PasswordInput', 'BitwardenCliDialog', 'BitwardenSettingsHarness', 'BitwardenAccessPrompt', 'BitwardenStartupHarness', 'CredentialsSearchHarness', 'ConnectionNotesHarness', 'ConnectionDismissalHarness', 'TunnelDismissalHarness', 'RuntimeCredentialPasswordInput', 'RuntimeCredentialsHarness', 'RdpSurface']) {
+          for (const name of ['AuthPrompt', 'IdleLockHarness', 'renderCard', 'showUnlock', 'setPasswordVisible', 'AppCloseHarness', 'DialogContent', 'useDialogOpen', 'PasswordInput', 'BitwardenCliDialog', 'BitwardenSettingsHarness', 'BitwardenAccessPrompt', 'BitwardenStartupHarness', 'CredentialsSearchHarness', 'ConnectionNotesHarness', 'ConnectionDismissalHarness', 'TunnelDismissalHarness', 'RuntimeCredentialPasswordInput', 'RuntimeCredentialsHarness', 'requestSavedSshCredentials', 'RdpSurface']) {
             const parent = script.functions.find(item => item.functionName === name);
             if (!parent) throw new Error('Missing coverage for ' + name);
             const range = parent.ranges[0];
