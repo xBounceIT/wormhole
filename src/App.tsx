@@ -35,7 +35,8 @@ import { authenticationIdleSeconds } from './auth-idle';
 import { McpApprovalDialog } from './components/McpApprovalDialog';
 import { TerminalLinkDialog } from './components/TerminalLinkDialog';
 import { UpdateNotification } from './components/UpdateNotification';
-import { SidebarLayout, SidebarPinButton } from './components/SidebarLayout';
+import { AppTitlebar } from './components/AppTitlebar';
+import { SidebarLayout } from './components/SidebarLayout';
 import {
   SidebarNavigation,
   sidebarNavigationItems,
@@ -7119,12 +7120,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         <SidebarLayout
           header={
             <>
-              <header className="relative flex h-12 shrink-0 items-center border-b border-border bg-background px-1 text-foreground [-webkit-app-region:drag]">
-                <div className="flex min-w-0 items-center gap-2.5 [-webkit-app-region:no-drag]">
-                  <SidebarPinButton />
-                  <span className="select-none text-sm font-semibold tracking-tight">Wormhole</span>
-                </div>
-              </header>
+              <AppTitlebar platform={window.wormhole?.platform} />
               {updateNotificationVisible && updateResult ? (
                 <UpdateNotification
                   busy={updateBusy}

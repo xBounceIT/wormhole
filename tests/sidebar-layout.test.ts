@@ -62,7 +62,7 @@ test('sidebar pin IPC validates input and requires workspace authentication', as
   const layout = app.slice(app.indexOf('<SidebarLayout'), app.indexOf('</SidebarLayout>'));
   assert.match(layout, /initialPinned=\{initialSettings.sidebarPinned !== false\}/);
   assert.match(layout, /await window.wormhole.setSidebarPinned\(pinned\)/);
-  assert.match(layout, /<SidebarPinButton \/>/);
+  assert.match(layout, /<AppTitlebar platform=\{window\.wormhole\?\.platform\} \/>/);
   assert.match(layout, /onOverlayOpenChange=\{setSidebarOverlayOpen\}/);
   assert.match(layout, /isWebSurfaceVisible=\{[\s\S]*!sidebarOverlayOpen/);
 });
@@ -186,7 +186,7 @@ test('pinned and auto-hide sidebars preserve layout, focus, menus and saved pref
           const coverage = await window.webContents.debugger.sendCommand('Profiler.takePreciseCoverage');
           const script = coverage.result.find(item => item.url === 'wormhole-sidebar-layout.js');
           if (!script) throw new Error('Missing sidebar renderer coverage');
-          for (const name of nativeScale === 1 ? ['SidebarLayout', 'SidebarPinButton', 'SidebarNavigation', 'ContextMenuOverlayProvider'] : []) {
+          for (const name of nativeScale === 1 ? ['AppTitlebar', 'SidebarLayout', 'SidebarPinButton', 'SidebarNavigation', 'ContextMenuOverlayProvider'] : []) {
             const parent = script.functions.find(item => item.functionName === name);
             if (!parent) throw new Error('Missing coverage for ' + name);
             const range = parent.ranges[0];
