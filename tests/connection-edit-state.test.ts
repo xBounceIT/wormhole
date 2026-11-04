@@ -259,7 +259,8 @@ function editorHarness(
         form.credential,
       );
     },
-    connectionCredentialSelectionError: 'Choose saved credentials.',
+    connectionAuthenticationSelectionError: 'Choose saved credentials.',
+    setConnectionAuthenticationOverride: () => {},
     editorBusy: false,
     canConfigureConnectionSshAutoSudo: false,
     defaultRdpSettings,

@@ -13,7 +13,7 @@ import { coverageThreshold } from '../scripts/test-coverage.ts';
 
 const require = createRequire(import.meta.url);
 
-test('SSH certificate editor renews independently and the connection shortcut selects the saved key', async (context) => {
+test('SSH authentication layouts support quick connect, saved create/edit and certificate renewal', async (context) => {
   const result = await build({
     configFile: false,
     logLevel: 'silent',
@@ -57,13 +57,22 @@ test('SSH certificate editor renews independently and the connection shortcut se
           const coverage=await window.webContents.debugger.sendCommand('Profiler.takePreciseCoverage');
           const script=coverage.result.find(item=>item.url==='wormhole-ssh-certificate-ui.js');
           if(!script)throw new Error('Missing SSH certificate renderer coverage');
-          for(const name of ['selectPrivateKey','selectCertificate','credentialDraftFor']){
+          for(const name of ['selectPrivateKey','selectCertificate','credentialDraftFor','sshAuthenticationTypeForCredential','filterCredentialsByAuthentication']){
             const functions=script.functions.filter(item=>item.functionName===name);
             const ranges=functions.flatMap(item=>item.ranges);
             const percent=100*ranges.filter(item=>item.count>0).length/ranges.length;
             console.log(name+': V8 block coverage '+percent.toFixed(2)+'%');
             if(!(percent>=${coverageThreshold}))throw new Error(name+' coverage below ${coverageThreshold}%');
           }
+          const marker=${renderer.indexOf('setConnectionAuthenticationOverride(value);')};
+          const callback=script.functions.filter(item=>item.ranges[0].startOffset<=marker&&item.ranges[0].endOffset>marker)
+            .sort((left,right)=>(left.ranges[0].endOffset-left.ranges[0].startOffset)-(right.ranges[0].endOffset-right.ranges[0].startOffset))[0];
+          if(!callback||marker<0)throw new Error('Missing authentication change callback coverage');
+          const scope=callback.ranges[0];
+          const ranges=script.functions.filter(item=>item.ranges[0].startOffset>=scope.startOffset&&item.ranges[0].endOffset<=scope.endOffset).flatMap(item=>item.ranges);
+          const percent=100*ranges.filter(item=>item.count>0).length/ranges.length;
+          console.log('Authentication change: V8 block coverage '+percent.toFixed(2)+'%');
+          if(!(percent>=${coverageThreshold}))throw new Error('Authentication change coverage below ${coverageThreshold}%');
         }finally{window.destroy();}app.quit();
       }).catch(error=>{console.error(error);app.exit(1);});`,
     );

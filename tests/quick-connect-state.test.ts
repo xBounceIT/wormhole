@@ -105,6 +105,7 @@ test('shared connection fields show Browser and Home page in create, edit and Qu
     const Label = 'label', Input = 'input';
     function Harness({ mode, initial }) {
       const connectionEditorMode = mode;
+      const [, setConnectionAuthenticationOverride] = useState(null);
       const [newConnectionForm, setNewConnectionForm] = useState({ protocol: 'ssh', host: '', port: '22', credential: 'existing', ...initial });
       state = newConnectionForm;
       return <div key={${tabsKey}}>${source.slice(start, end)}</div>;

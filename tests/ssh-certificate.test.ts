@@ -33,6 +33,7 @@ test('a completed credential creation selects only the connection editor that re
       inlinePassword: 'new-input',
     };
     let form = originalForm;
+    let authentication: string | null = 'certificate';
     let complete: (value: unknown) => void = () => {};
     const pending = new Promise((resolve) => {
       complete = resolve;
@@ -43,6 +44,9 @@ test('a completed credential creation selects only the connection editor that re
       sshKeyEditorRef: currentEditor,
       setCredentials: () => {},
       setCredentialOptions: () => {},
+      setConnectionAuthenticationOverride: (value: null) => {
+        authentication = value;
+      },
       setNewConnectionForm: (update: (current: typeof form) => typeof form) => {
         form = update(form);
       },
@@ -54,6 +58,7 @@ test('a completed credential creation selects only the connection editor that re
     await saved;
     if (replaced) assert.equal(form, originalForm, 'an old save changed the new connection draft');
     else assert.equal(form.credential, uuid);
+    assert.equal(authentication, replaced ? 'certificate' : null);
   }
 });
 

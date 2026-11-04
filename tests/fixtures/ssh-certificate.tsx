@@ -16,17 +16,35 @@ window.runCertificateTests = async () => {
   const assert = window.certificateAssert;
   const root = createRoot(document.getElementById('root')!);
   const tick = () => React.act(async () => new Promise((resolve) => setTimeout(resolve, 25)));
-  const dialog = () => [...document.querySelectorAll<HTMLElement>('[role="dialog"]')].at(-1)!;
+  const dialog = () =>
+    [...document.querySelectorAll<HTMLElement>('[role="dialog"]')]
+      .filter((element) => element.querySelector('form'))
+      .at(-1)!;
   const button = (label: string, scope: ParentNode = dialog()) => {
     const result = [...scope.querySelectorAll<HTMLButtonElement>('button')].find(
       (element) => element.textContent?.trim() === label,
     );
-    assert.ok(result, `Missing button: ${label}`);
+    assert.ok(result, `Missing button: ${label} in ${scope.textContent}`);
     return result;
   };
   const click = async (element: HTMLElement) => {
     await React.act(async () => element.click());
     await tick();
+  };
+  const select = async (id: string, label: string) => {
+    const trigger = document.getElementById(id);
+    assert.ok(trigger, `Missing select ${id}`);
+    await React.act(async () =>
+      trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true })),
+    );
+    await tick();
+    const options = [...document.querySelectorAll<HTMLElement>('[role="option"]')];
+    const option = options.find((item) => item.textContent?.trim() === label);
+    assert.ok(option, `Missing option ${label}: ${options.map((item) => item.textContent)}`);
+    await click(option);
+    await React.act(async () => new Promise((resolve) => setTimeout(resolve, 200)));
+    assert.equal(document.getElementById(id)!.textContent?.trim(), label);
+    return options.map((item) => item.textContent?.trim());
   };
   const input = async (id: string, value: string) => {
     const element = document.getElementById(id) as HTMLInputElement;
@@ -307,6 +325,23 @@ window.runCertificateTests = async () => {
   // Mount the real connection editor: creation must leave the connection open,
   // select the newly saved credential and preserve the user's target fields.
   const appRoot = createRoot(document.getElementById('root')!);
+  const bareKey: WormholeWorkspaceCredential = {
+    ...saved,
+    id: '44444444-4444-4444-8444-444444444444',
+    name: 'Bare key',
+    hasCertificate: false,
+    certificate: undefined,
+    certificateFileName: undefined,
+  };
+  const passwordProfile: WormholeWorkspaceCredential = {
+    ...bareKey,
+    id: '55555555-5555-4555-8555-555555555555',
+    name: 'Saved password',
+    kind: 'password',
+    privateKeyFileName: undefined,
+  };
+  let workspaceTree: WormholeWorkspaceSnapshot['tree'] = [];
+  const nodeWrites: any[] = [];
   window.wormhole = undefined;
   await React.act(async () =>
     appRoot.render(
@@ -324,8 +359,8 @@ window.runCertificateTests = async () => {
           }}
           initialWorkspace={{
             tree: [],
-            credentials: [],
-            credentialOptions: { ssh: [], rdp: [], vnc: [] },
+            credentials: [bareKey, passwordProfile],
+            credentialOptions: { ssh: [bareKey, passwordProfile], rdp: [], vnc: [] },
             tunnels: [],
           }}
           initialSettings={{
@@ -346,30 +381,66 @@ window.runCertificateTests = async () => {
     ),
   );
   await tick();
-  await click(button('Quick Connect', document));
+  await click(document.querySelector<HTMLElement>('[aria-keyshortcuts="Control+K Meta+K"]')!);
   await input('connection-host', 'server.example.test');
-  await click(button('Use an SSH key or certificate…'));
+  assert.match(document.getElementById('connection-authentication')!.textContent!, /Password/);
+  const methods = await select('connection-authentication', 'SSH Key');
+  assert.deepEqual(methods, ['Password', 'SSH Key', 'Certificate']);
+  assert.equal(document.getElementById('connection-inline-password'), null);
+  assert.doesNotMatch(dialog().textContent!, /Use saved credentials/);
+  assert.match(dialog().textContent!, /Select or add an SSH key/);
+  await submit();
+  assert.match(dialog().textContent!, /Quick Connect/);
+  await click(button('Add SSH key…'));
+  await click(button('Cancel'));
+  await select('connection-authentication', 'Password');
+  assert.ok(document.getElementById('connection-inline-password'));
+  assert.ok(document.getElementById('connection-username'));
+  await input('connection-inline-password', 'discard-on-method-change');
+  await select('connection-authentication', 'Certificate');
+  assert.equal(document.getElementById('connection-inline-password'), null);
+  assert.match(dialog().textContent!, /Select or add a certificate/);
+  await click(button('Add certificate…'));
+  assert.equal((document.getElementById('credential-kind') as HTMLButtonElement).disabled, true);
   window.wormhole = {
     ...bridge,
     createCredential: async (request) => {
       requests.push(request);
       return saved;
     },
-    getWorkspace: async () => ({
-      tree: [],
-      credentials: [saved],
-      credentialOptions: { ssh: [saved], rdp: [], vnc: [] },
+    loadWorkspace: async () => ({
+      tree: workspaceTree,
+      credentials: [saved, bareKey, passwordProfile],
+      credentialOptions: { ssh: [saved, bareKey, passwordProfile], rdp: [], vnc: [] },
       tunnels: [],
     }),
+    createWorkspaceNode: async (request) => {
+      nodeWrites.push(request);
+      workspaceTree = [
+        { ...request, port: request.port || undefined, id: 'saved-node', persisted: false },
+      ];
+      return { nodeId: 'saved-node' };
+    },
+    updateWorkspaceNode: async (request) => {
+      nodeWrites.push(request);
+      workspaceTree = [{ ...request, port: request.port || undefined, persisted: false }];
+      return { updated: true };
+    },
     openSshSession: async () => {
       throw new Error('SSH certificate expired on 2026-10-24 14:00 UTC; replace the certificate');
     },
     reportActiveSessionCount: async () => {},
+    rdpExternalClientRequirement: async () => ({ required: false }),
   } as unknown as NonNullable<Window['wormhole']>;
-  keySelection = { ...key, suggestedCertificate: certificate };
+  keySelection = key;
   await input('credential-name', 'Shortcut key');
   await input('credential-username', 'operator');
   await click(button('Select…', certificateRow().previousElementSibling!));
+  const requestsBeforeCertificate = requests.length;
+  await submit();
+  assert.equal(requests.length, requestsBeforeCertificate, 'certificate mode accepted a bare key');
+  assert.match(dialog().textContent!, /Select an SSH certificate/);
+  await click(button('Select…', certificateRow()));
   await submit();
   assert.match(dialog().textContent!, /Quick Connect/);
   assert.equal(
@@ -377,6 +448,8 @@ window.runCertificateTests = async () => {
     'server.example.test',
   );
   assert.match(document.getElementById('connection-credential')!.textContent!, /CA login/);
+  assert.match(document.getElementById('connection-authentication')!.textContent!, /Certificate/);
+  assert.equal(document.getElementById('connection-inline-password'), null);
   assert.equal(requests.at(-1).kind, 'sshKey');
   assert.equal(requests.at(-1).certificateSelectionId, certificate.selectionId);
   await click(button('Connect'));
@@ -393,6 +466,86 @@ window.runCertificateTests = async () => {
   await click(button('Replace certificate…', document));
   assert.match(dialog().textContent!, /Edit credential/);
   assert.match(certificateRow().textContent!, /vault-key/);
+  await click(button('Cancel'));
+
+  // Saved create/edit share the selector, its filters, validation and persistence.
+  await click(document.querySelector<HTMLElement>('[aria-label="New connection"]')!);
+  assert.match(
+    document.getElementById('connection-authentication')!.textContent!,
+    /Inherit from folder/,
+  );
+  await input('connection-name', 'Saved certificate target');
+  await input('connection-host', 'saved.example.test');
+  await select('connection-authentication', 'SSH Key');
+  const keyOptions = await select('connection-credential', 'Bare key · Local');
+  assert.deepEqual(keyOptions, ['Inherit from folder', 'Bare key · Local']);
+  assert.equal((button('Save connection') as HTMLButtonElement).disabled, false);
+  await select('connection-authentication', 'Certificate');
+  assert.equal((button('Save connection') as HTMLButtonElement).disabled, true);
+  await submit();
+  assert.equal(nodeWrites.length, 0);
+  const certificateOptions = await select('connection-credential', 'CA login · Local');
+  assert.deepEqual(certificateOptions, ['Inherit from folder', 'CA login · Local']);
+  await click(button('Save connection'));
+  assert.equal(nodeWrites.at(-1).credentialId, saved.id);
+  assert.equal(nodeWrites.at(-1).credentialMode, 2);
+  assert.equal(nodeWrites.at(-1).inlinePasswordAction, 'clear');
+  const editSaved = async () => {
+    const row = button('Saved certificate target', document);
+    await React.act(async () =>
+      row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, button: 2 })),
+    );
+    await tick();
+    const edit = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(
+      (item) => item.textContent?.trim() === 'Edit',
+    );
+    assert.ok(edit);
+    await click(edit);
+  };
+  await editSaved();
+  assert.match(document.getElementById('connection-authentication')!.textContent!, /Certificate/);
+  assert.match(document.getElementById('connection-credential')!.textContent!, /CA login/);
+  assert.equal(document.getElementById('connection-inline-password'), null);
+  await select('connection-authentication', 'SSH Key');
+  await select('connection-credential', 'Bare key · Local');
+  assert.equal(
+    (button('Save changes') as HTMLButtonElement).disabled,
+    false,
+    dialog().textContent!,
+  );
+  await click(button('Save changes'));
+  assert.equal(nodeWrites.length, 2, dialog()?.textContent);
+  assert.equal(nodeWrites.at(-1).credentialId, bareKey.id);
+  await editSaved();
+  assert.match(document.getElementById('connection-authentication')!.textContent!, /SSH Key/);
+  await select('connection-credential', 'Inherit from folder');
+  assert.match(
+    document.getElementById('connection-authentication')!.textContent!,
+    /Inherit from folder/,
+  );
+  assert.equal(document.getElementById('connection-inline-password'), null);
+  await click(button('Save changes'));
+  assert.equal(nodeWrites.at(-1).credentialMode, 0);
+  assert.equal(nodeWrites.at(-1).credentialId, '');
+  await editSaved();
+  assert.match(
+    document.getElementById('connection-authentication')!.textContent!,
+    /Inherit from folder/,
+  );
+  await select('connection-authentication', 'Password');
+  assert.equal(
+    (document.getElementById('connection-inline-password') as HTMLInputElement).value,
+    '',
+  );
+  await click(button('Cancel'));
+  await click(document.querySelector<HTMLElement>('[aria-keyshortcuts="Control+K Meta+K"]')!);
+  assert.match(document.getElementById('connection-authentication')!.textContent!, /Password/);
+  await select('connection-protocol', 'SFTP');
+  await select('connection-authentication', 'SSH Key');
+  await select('connection-credential', 'Bare key · Local');
+  await select('connection-protocol', 'RDP');
+  assert.equal(document.getElementById('connection-authentication'), null);
+  await click(button('Cancel'));
   window.wormhole = undefined;
   await React.act(async () => appRoot.unmount());
 };
