@@ -277,8 +277,9 @@ test('release, native CI, resource inclusion, and dependency pins stay connected
     /dist-electron\/freerdp\/sdl-freerdp$/,
   );
   const setup = parse(read('.github/actions/setup-macos-rdp/action.yml'));
-  assert.equal(
-    setup.runs.steps[0].with.ref,
-    JSON.parse(read('tools/macos-freerdp/vcpkg.json'))['builtin-baseline'],
-  );
+  const manifest = JSON.parse(read('tools/macos-freerdp/vcpkg.json'));
+  // FreeRDP 3.33.0 references unavailable SDL events when headers report 3.4.20.
+  // A native CI build must validate any change to this compatibility pair.
+  assert.deepEqual(manifest.overrides, [{ name: 'sdl3', version: '3.4.18' }]);
+  assert.equal(setup.runs.steps[0].with.ref, manifest['builtin-baseline']);
 });

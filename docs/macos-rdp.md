@@ -20,6 +20,9 @@ build machine, then run `npm run build:rdp:macos` before packaging.
 
 The build pins FreeRDP 3.33.0 to its source commit, builds static dependencies for
 both architectures, and merges the clients into a universal executable. It ships
+SDL 3.4.18 explicitly: FreeRDP 3.33.0 incorrectly enables event names absent from
+SDL 3.4.20. Keep this compatibility override until a newer FreeRDP build passes
+the native CI checks with the newer SDL headers. The bundle includes
 third-party license notices beside the client. The build and packaging checks
 reject missing slices and any non-system dynamic library dependency. CI also
 checks the ad-hoc signature and runs the relocated client without Homebrew on PATH.
