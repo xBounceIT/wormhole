@@ -1,0 +1,14 @@
+{
+  "name": "@wormhole/deepmerge",
+  "version": "4.3.1-wormhole.1",
+  "private": true,
+  "description": "Local security backport of deepmerge 4.3.1",
+  "author": "James Halliday (http://substack.net)",
+  "license": "MIT",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": ["index.js", "index.d.ts", "LICENSE", "README.md"],
+  "engines": {
+    "node": ">=0.10.0"
+  }
+}
