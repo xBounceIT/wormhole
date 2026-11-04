@@ -36,11 +36,11 @@ function readPngDimensions(data) {
   return { width: data.readUInt32BE(16), height: data.readUInt32BE(20) };
 }
 
-function readIcnsChunkTypes(icon) {
+function readIcnsChunks(icon) {
   assert.equal(icon.subarray(0, 4).toString('ascii'), 'icns');
   assert.equal(icon.readUInt32BE(4), icon.length);
 
-  const chunkTypes = new Set();
+  const chunks = new Map();
   let offset = 8;
   while (offset < icon.length) {
     assert.ok(offset + 8 <= icon.length, 'ICNS chunk header is truncated');
@@ -48,12 +48,13 @@ function readIcnsChunkTypes(icon) {
     const size = icon.readUInt32BE(offset + 4);
     assert.ok(size >= 8, `ICNS chunk ${type} has an invalid size`);
     assert.ok(offset + size <= icon.length, `ICNS chunk ${type} is truncated`);
-    chunkTypes.add(type);
+    assert.ok(!chunks.has(type), `ICNS chunk ${type} is duplicated`);
+    chunks.set(type, icon.subarray(offset + 8, offset + size));
     offset += size;
   }
 
   assert.equal(offset, icon.length);
-  return chunkTypes;
+  return chunks;
 }
 
 test('dependency lock excludes the Nano ID zero-size generator vulnerability', () => {
@@ -215,9 +216,63 @@ test('electron-builder resolves every reviewed Linux icon asset', async () => {
 test('electron-builder produces the supported macOS installer', () => {
   assert.equal(packageJson.build.mac.target, 'dmg');
   assert.equal(packageJson.build.mac.icon, 'Assets/Wormhole.icns');
-  const iconChunkTypes = readIcnsChunkTypes(macIcon);
-  assert.ok(iconChunkTypes.has('ic09'), 'macOS icon must include a 512px representation');
-  assert.ok(iconChunkTypes.has('ic10'), 'macOS icon must include a 1024px representation');
+  const chunks = readIcnsChunks(macIcon);
+  for (const [type, size] of [
+    ['ic07', 128],
+    ['ic08', 256],
+    ['ic09', 512],
+    ['ic10', 1024],
+    ['ic11', 32],
+    ['ic12', 64],
+    ['ic13', 256],
+    ['ic14', 512],
+  ]) {
+    assert.ok(chunks.has(type), `macOS icon must include ${type}`);
+    assert.deepEqual(readPngDimensions(chunks.get(type)), { width: size, height: size }, type);
+  }
+});
+
+test('macOS small icons use decodable ARGB instead of PNG chunks that Finder renders as noise', () => {
+  // https://github.com/electron-userland/electron-builder-binaries/blob/master/packages/icons/CHANGELOG.md
+  // Asset-only fix: validate the committed binary and its original pixels; no runtime code changes.
+  const chunks = readIcnsChunks(macIcon);
+  for (const type of ['icp4', 'icp5', 'icp6']) {
+    assert.ok(!chunks.has(type), `${type} is unsafe for small Finder/DMG icons`);
+  }
+  // SHA-256 of the original small PNGs decoded into straight A,R,G,B planes.
+  for (const [type, size, pixelHash] of [
+    ['ic04', 16, '17310795e8ee51de6bbd1ec169614f8de71a48682ac624090e2a11805292f628'],
+    ['ic05', 32, '0c9e0b4998201587627e18a59272b645c7018aab0f007235f431c8f612997f0a'],
+  ]) {
+    const data = chunks.get(type);
+    assert.ok(data, `macOS icon must include ${type}`);
+    assert.equal(data.toString('ascii', 0, 4), 'ARGB');
+    let offset = 4;
+    const planes = [];
+    for (let channel = 0; channel < 4; channel++) {
+      const plane = [];
+      while (plane.length < size * size) {
+        assert.ok(offset < data.length, `${type} has a truncated channel`);
+        const control = data[offset++];
+        const count = control < 128 ? control + 1 : control - 125;
+        assert.ok(plane.length + count <= size * size, `${type} channel overflows`);
+        assert.ok(offset + (control < 128 ? count : 1) <= data.length);
+        if (control < 128) {
+          plane.push(...data.subarray(offset, offset + count));
+          offset += count;
+        } else {
+          plane.push(...Array(count).fill(data[offset++]));
+        }
+      }
+      planes.push(Buffer.from(plane));
+    }
+    assert.equal(offset, data.length, `${type} has trailing channel data`);
+    assert.equal(
+      createHash('sha256').update(Buffer.concat(planes)).digest('hex'),
+      pixelHash,
+      `${type} must preserve the original colors and alpha`,
+    );
+  }
 });
 
 test('the desktop window uses an icon format supported by the current platform', async () => {
