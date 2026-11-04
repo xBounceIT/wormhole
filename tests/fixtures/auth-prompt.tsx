@@ -17,6 +17,8 @@ declare function ConnectionNotesHarness(props: {
   nodeId?: string;
   open?: boolean;
 }): import('react').ReactElement;
+declare function ConnectionDismissalHarness(): import('react').ReactElement;
+declare function TunnelDismissalHarness(): import('react').ReactElement;
 declare function RuntimeCredentialsHarness(props: {
   protocol: 'ssh' | 'rdp';
   kind: 'saved' | 'quick';
@@ -1839,6 +1841,83 @@ async function runIdleConfirmationTests() {
   }
 }
 
+async function runEditorDismissalTests() {
+  const root = createRoot(document.getElementById('root'));
+  const clickOutside = async () => {
+    await React.act(async () => {
+      // Radix defers outside dismissal until click, so pointerdown alone is insufficient.
+      const clicked = new Promise<void>((resolve) => {
+        document.addEventListener('click', () => resolve(), { once: true, capture: true });
+      });
+      await require('electron').ipcRenderer.invoke('test:mouse', 'mouseDown', 1, 1);
+      await require('electron').ipcRenderer.invoke('test:mouse', 'mouseUp', 1, 1);
+      await clicked;
+    });
+  };
+  try {
+    // Negative control: the same complete click must dismiss an ordinary dialog.
+    await React.act(async () => {
+      root.render(
+        <Dialog defaultOpen>
+          <DialogContent aria-describedby={undefined}>
+            <DialogTitle>Dismissible dialog</DialogTitle>
+          </DialogContent>
+        </Dialog>,
+      );
+    });
+    await React.act(async () => new Promise((resolve) => setTimeout(resolve, 100)));
+    assert.ok(document.querySelector('[role="dialog"][data-state="open"]'));
+    await clickOutside();
+    assert.ok(
+      !document.querySelector('[role="dialog"][data-state="open"]'),
+      'ordinary dialogs must still dismiss on outside clicks',
+    );
+    await React.act(async () => root.render(null));
+    for (const Editor of [ConnectionDismissalHarness, TunnelDismissalHarness]) {
+      for (const closeWith of ['Close', 'Cancel', 'Escape', 'Save']) {
+        await React.act(async () => root.render(<Editor key={closeWith} />));
+        // Radix installs its outside-pointer listener after the opening event.
+        await React.act(async () => new Promise((resolve) => setTimeout(resolve, 100)));
+        const input = document.querySelector<HTMLInputElement>('input[aria-label="Draft name"]');
+        input.value = 'Unfinished configuration';
+        await clickOutside();
+        await clickOutside();
+        await React.act(async () => {
+          window.dispatchEvent(new Event('blur'));
+          document.body.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+          window.dispatchEvent(new Event('focus'));
+          input.focus();
+        });
+        assert.ok(input.isConnected, `${Editor.name}: an outside interaction discarded the draft`);
+        assert.ok(
+          input.closest('[role="dialog"][data-state="open"]'),
+          `${Editor.name}: an outside interaction closed the editor`,
+        );
+        assert.equal(input.value, 'Unfinished configuration');
+        assert.ok(document.activeElement === input, 'the draft field must accept focus on return');
+        if (closeWith === 'Escape') {
+          await React.act(async () => {
+            document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+          });
+        } else {
+          const button = [...document.querySelectorAll('button')].find(
+            (item) => item.textContent === closeWith,
+          );
+          assert.ok(button, `Missing explicit ${closeWith} control`);
+          await React.act(async () => button.click());
+        }
+        assert.ok(
+          !document.querySelector('[role="dialog"][data-state="open"]'),
+          `${closeWith} must close`,
+        );
+        await React.act(async () => root.render(null));
+      }
+    }
+  } finally {
+    await React.act(async () => root.unmount());
+  }
+}
+
 async function runConnectionNotesTests() {
   const root = createRoot(document.getElementById('root'));
   try {
@@ -2375,6 +2454,7 @@ async function runSharedPasswordInputTests() {
 }
 
 runSharedPasswordInputTests()
+  .then(runEditorDismissalTests)
   .then(runRuntimeCredentialPasswordTests)
   .then(runConnectionNotesTests)
   .then(runAuthPromptTests)

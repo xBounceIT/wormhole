@@ -26,6 +26,36 @@ test('authentication prompts, window-close controls, and RDP surface layout work
     assert.ok(first >= 0 && last > first, `Missing app section: ${from}`);
     return source.slice(first, last);
   };
+  // Mount each editor's production content props with the real Radix dialog.
+  // Keep draft fields local so an accidental dismissal would lose the input.
+  const editorDismissalHarnesses = (
+    [
+      ['ConnectionDismissalHarness', source.indexOf('open={newConnectionOpen}')],
+      ['TunnelDismissalHarness', source.indexOf('function TunnelEditorDialog(')],
+    ] as const
+  )
+    .map(([name, anchor]) => {
+      const contentStart = source.indexOf('<DialogContent', anchor);
+      const contentEnd = source.indexOf('<DialogHeader>', contentStart);
+      assert.ok(anchor >= 0 && contentStart > anchor && contentEnd > contentStart);
+      return `
+        function ${name}() {
+          const [open, setOpen] = React.useState(true);
+          return <Dialog open={open} onOpenChange={setOpen}>
+            ${source.slice(contentStart, contentEnd)}
+              <DialogTitle>Editor draft</DialogTitle>
+              <DialogDescription>Draft persistence regression</DialogDescription>
+              <form onSubmit={event => { event.preventDefault(); setOpen(false); }}>
+                <input aria-label="Draft name" defaultValue="" />
+                <button type="button" onClick={() => setOpen(false)}>Cancel</button>
+                <button type="submit">Save</button>
+              </form>
+            </DialogContent>
+          </Dialog>;
+        }
+      `;
+    })
+    .join('\n');
   const notesLabel = source.indexOf('<Label htmlFor="connection-notes">');
   const notesStart = source.lastIndexOf("{connectionEditorMode === 'saved' ? (", notesLabel);
   const notesEnd = source.indexOf(') : null}', notesLabel) + ') : null}'.length;
@@ -302,6 +332,7 @@ test('authentication prompts, window-close controls, and RDP surface layout work
       bitwardenHarness +
       runtimeCredentialHarness +
       notesHarness +
+      editorDismissalHarnesses +
       bitwardenStartupHarness +
       readFileSync(new URL('../electron/web-session-attempt.ts', import.meta.url), 'utf8').replace(
         /^export /gm,
@@ -457,7 +488,7 @@ test('authentication prompts, window-close controls, and RDP surface layout work
           const coverage = await window.webContents.debugger.sendCommand('Profiler.takePreciseCoverage');
           const script = coverage.result.find(item => item.url === 'wormhole-auth-prompt.js');
           if (!script) throw new Error('Missing authentication renderer coverage.');
-          for (const name of ['AuthPrompt', 'IdleLockHarness', 'renderCard', 'showUnlock', 'setPasswordVisible', 'AppCloseHarness', 'DialogContent', 'useDialogOpen', 'PasswordInput', 'BitwardenCliDialog', 'BitwardenSettingsHarness', 'BitwardenAccessPrompt', 'BitwardenStartupHarness', 'CredentialsSearchHarness', 'ConnectionNotesHarness', 'RuntimeCredentialPasswordInput', 'RuntimeCredentialsHarness', 'RdpSurface']) {
+          for (const name of ['AuthPrompt', 'IdleLockHarness', 'renderCard', 'showUnlock', 'setPasswordVisible', 'AppCloseHarness', 'DialogContent', 'useDialogOpen', 'PasswordInput', 'BitwardenCliDialog', 'BitwardenSettingsHarness', 'BitwardenAccessPrompt', 'BitwardenStartupHarness', 'CredentialsSearchHarness', 'ConnectionNotesHarness', 'ConnectionDismissalHarness', 'TunnelDismissalHarness', 'RuntimeCredentialPasswordInput', 'RuntimeCredentialsHarness', 'RdpSurface']) {
             const parent = script.functions.find(item => item.functionName === name);
             if (!parent) throw new Error('Missing coverage for ' + name);
             const range = parent.ranges[0];
