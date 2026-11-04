@@ -3,6 +3,7 @@ import { ExternalLink, Monitor, RefreshCcw, ShieldAlert, Wifi } from 'lucide-rea
 import { Button } from '@/components/ui/button';
 import { ConnectionStepper, type TunnelProgress } from './ConnectionStepper';
 import type { RdpUiStatus } from '../rdp-state';
+import { RdpCanvas } from './RdpCanvas';
 
 export type { RdpUiStatus } from '../rdp-state';
 
@@ -101,6 +102,10 @@ export function RdpSurface({
         data-rdp-native-surface-region
         ref={surfaceRef}
       >
+        <RdpCanvas
+          sessionId={sessionId}
+          enabled={isConnected && !external && isActive && isAuthorized}
+        />
         {isConnected && external ? (
           <div className="relative z-10 flex max-w-sm flex-col items-center px-6 text-center text-white">
             <div className="mb-4 grid size-14 place-items-center rounded-full border border-white/10 bg-white/[0.06] text-white/75">

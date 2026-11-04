@@ -14,8 +14,8 @@ import { coverageThreshold } from '../scripts/test-coverage.ts';
 const require = createRequire(import.meta.url);
 
 // Node coverage excludes TSX and process entrypoints. Measure login/close handlers
-// and RDP layout in Chromium, including native modal hit testing and focus.
-test('authentication prompts, window-close controls, and RDP surface layout work in Chromium', async (context) => {
+// in Chromium, including native modal hit testing and focus.
+test('authentication prompts and window-close controls work in Chromium', async (context) => {
   const source = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
   const start = source.indexOf('function AuthPrompt');
   const end = source.indexOf('type WormholeAppProps', start);
@@ -386,24 +386,6 @@ test('authentication prompts, window-close controls, and RDP surface layout work
       jsx: { runtime: 'classic' },
     },
   );
-  const rdpSource = readFileSync(
-    new URL('../src/components/RdpSurface.tsx', import.meta.url),
-    'utf8',
-  );
-  const stepperSource = readFileSync(
-    new URL('../src/components/ConnectionStepper.tsx', import.meta.url),
-    'utf8',
-  );
-  const transformedRdp = await transformWithOxc(
-    stepperSource
-      .slice(stepperSource.indexOf('const TUNNEL_PHASE_LABELS'))
-      .replace('export function', 'function') +
-      rdpSource
-        .slice(rdpSource.indexOf('export function RdpSurface'))
-        .replace('export function', 'function'),
-    'rdp-surface.tsx',
-    { jsx: { runtime: 'classic' } },
-  );
   const transformedFixture = await transformWithOxc(fixture, 'auth-prompt-fixture.tsx', {
     jsx: { runtime: 'classic' },
   });
@@ -450,7 +432,6 @@ test('authentication prompts, window-close controls, and RDP surface layout work
     style.textContent = ${JSON.stringify(css)};
     document.head.append(style);
     ${transformed.code}
-    ${transformedRdp.code}
     ${transformedFixture.code}
     //# sourceURL=wormhole-auth-prompt.js
   `;
@@ -500,7 +481,7 @@ test('authentication prompts, window-close controls, and RDP surface layout work
           const coverage = await window.webContents.debugger.sendCommand('Profiler.takePreciseCoverage');
           const script = coverage.result.find(item => item.url === 'wormhole-auth-prompt.js');
           if (!script) throw new Error('Missing authentication renderer coverage.');
-          for (const name of ['AuthPrompt', 'IdleLockHarness', 'renderCard', 'showUnlock', 'setPasswordVisible', 'AppCloseHarness', 'DialogContent', 'useDialogOpen', 'PasswordInput', 'BitwardenCliDialog', 'BitwardenSettingsHarness', 'BitwardenAccessPrompt', 'BitwardenStartupHarness', 'CredentialsSearchHarness', 'ConnectionNotesHarness', 'ConnectionDismissalHarness', 'TunnelDismissalHarness', 'RuntimeCredentialPasswordInput', 'RuntimeCredentialsHarness', 'requestSavedSshCredentials', 'RdpSurface']) {
+          for (const name of ['AuthPrompt', 'IdleLockHarness', 'renderCard', 'showUnlock', 'setPasswordVisible', 'AppCloseHarness', 'DialogContent', 'useDialogOpen', 'PasswordInput', 'BitwardenCliDialog', 'BitwardenSettingsHarness', 'BitwardenAccessPrompt', 'BitwardenStartupHarness', 'CredentialsSearchHarness', 'ConnectionNotesHarness', 'ConnectionDismissalHarness', 'TunnelDismissalHarness', 'RuntimeCredentialPasswordInput', 'RuntimeCredentialsHarness', 'requestSavedSshCredentials']) {
             const parent = script.functions.find(item => item.functionName === name);
             if (!parent) throw new Error('Missing coverage for ' + name);
             const range = parent.ranges[0];

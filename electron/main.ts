@@ -1,4 +1,6 @@
 import { SharedSshRoutes } from './ssh-shared-route.js';
+import { assertRdpSurfaceOwner, isRdpInput } from './rdp-framebuffer.js';
+import { confirmRdpCertificate } from './rdp-certificate.js';
 import { loadShellPage } from './shell-page-load.js';
 import {
   isSftpEditRequest,
@@ -10085,6 +10087,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     const request = parseRdpStartRequest(value);
     const ownerWindow = BrowserWindow.fromWebContents(event.sender);
     if (!ownerWindow) throw new Error('RDP owner window is unavailable.');
+    assertRdpSurfaceOwner(ownerWindow, rdpSurfacePlacements.get(request.sessionId)?.owner);
     if (request.bounds) rememberRdpSurfacePlacement(ownerWindow, request.sessionId, request.bounds);
     return rdpStartOperations.runExclusive(
       request.sessionId,
@@ -10307,6 +10310,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     let ownsLifecycle = false;
     const ownerWindow = BrowserWindow.fromWebContents(event.sender);
     if (!ownerWindow) throw new Error('RDP owner window is unavailable.');
+    assertRdpSurfaceOwner(ownerWindow, rdpSurfacePlacements.get(request.sessionId)?.owner);
     let lifecycleId: string | undefined;
 
     try {
@@ -10411,10 +10415,25 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     }
   });
 
+  ipcMain.handle('rdp:input', async (event, value: unknown) => {
+    const request = parseRdpCommandRequest(value);
+    const lifecycleId = valueAsString(value, 'lifecycleId');
+    const input = valueAsObject(value, 'input');
+    if (!isRdpInput(input)) throw new Error('Invalid RDP input.');
+    await ensureAuthSession();
+    authSession.requireUnlocked();
+    const owner = BrowserWindow.fromWebContents(event.sender);
+    if (!owner || rdpSurfacePlacements.get(request.sessionId)?.owner !== owner) {
+      throw new Error('RDP session belongs to another window.');
+    }
+    await getRdpClient().input(request.sessionId, lifecycleId, input);
+  });
+
   ipcMain.handle('rdp:resize', async (event, value: unknown) => {
     const request = parseRdpCommandRequest(value);
     const ownerWindow = BrowserWindow.fromWebContents(event.sender);
     if (!ownerWindow) throw new Error('RDP owner window is unavailable.');
+    assertRdpSurfaceOwner(ownerWindow, rdpSurfacePlacements.get(request.sessionId)?.owner);
     // Geometry is high-frequency, non-secret state. Checking the current auth snapshot keeps it
     // off the global auth-operation queue, where native resize acknowledgements would otherwise
     // serialize every animation frame and make the overlay trail the BrowserWindow.
@@ -10439,6 +10458,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     }
     const ownerWindow = BrowserWindow.fromWebContents(event.sender);
     if (!ownerWindow) throw new Error('RDP owner window is unavailable.');
+    assertRdpSurfaceOwner(ownerWindow, rdpSurfacePlacements.get(request.sessionId)?.owner);
     if (request.bounds) rememberRdpSurfacePlacement(ownerWindow, request.sessionId, request.bounds);
     const bounds = request.bounds ? toScreenBounds(ownerWindow, request.bounds) : undefined;
     const client = getRdpClient();
@@ -10497,6 +10517,34 @@ function getRdpClient(): RdpBackendClient {
       event.lifecycleGeneration !== undefined &&
       !rdpSessionAttempts.isCurrent(event.sessionId, event.lifecycleGeneration)
     ) {
+      return;
+    }
+    if (event.type === 'certificate') {
+      const owner = event.sessionId ? rdpSurfacePlacements.get(event.sessionId)?.owner : undefined;
+      void confirmRdpCertificate(event, {
+        available: () => authSession.isAccessAllowed && Boolean(owner && !owner.isDestroyed()),
+        prompt: async (certificate) => {
+          const result = await showCoordinatedMessageBox(owner!, {
+            type: 'warning',
+            title: 'Remote Desktop certificate',
+            message: 'The remote desktop certificate could not be verified.',
+            detail: `Server: ${certificate.host}\nFingerprint: ${certificate.fingerprint}\n\nConnect only if you trust this server and have verified its fingerprint.`,
+            buttons: ['Cancel', 'Connect once'],
+            defaultId: 0,
+            cancelId: 0,
+          });
+          return result.response === 1;
+        },
+        reply: async (sessionId, lifecycleId, accepted) => {
+          await rdpClient?.certificateDecision(sessionId, lifecycleId, accepted);
+        },
+      });
+      return;
+    }
+    if (event.type === 'frame' || event.type === 'frameEnd') {
+      if (!authSession.isAccessAllowed || !event.sessionId) return;
+      const owner = rdpSurfacePlacements.get(event.sessionId)?.owner;
+      if (owner && !owner.isDestroyed()) owner.webContents.send('rdp:event', event);
       return;
     }
     // Native reveal/resize acknowledgements and reconnect events can raise the owned
@@ -10587,6 +10635,7 @@ function rememberRdpSurfacePlacement(
   sessionId: string,
   rendererBounds: RdpSurfaceRect,
 ): void {
+  assertRdpSurfaceOwner(owner, rdpSurfacePlacements.get(sessionId)?.owner);
   rdpSurfacePlacements.set(sessionId, {
     owner,
     rendererBounds: { ...rendererBounds },

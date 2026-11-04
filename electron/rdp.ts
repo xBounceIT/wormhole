@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { isRdpFrame, isRdpInput, type RdpInput } from './rdp-framebuffer.ts';
 import { spawn, type ChildProcess, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import type {
   RdpBackendEvent,
@@ -9,7 +10,16 @@ import type {
 } from './rdp-contract.js';
 
 type RdpWireCommand = {
-  op: 'start' | 'resize' | 'show' | 'hide' | 'focus' | 'disconnect' | 'shutdown';
+  op:
+    | 'start'
+    | 'resize'
+    | 'show'
+    | 'hide'
+    | 'focus'
+    | 'disconnect'
+    | 'shutdown'
+    | 'input'
+    | 'certificate';
   requestId: string;
   sessionId?: string;
   lifecycleId?: string;
@@ -17,6 +27,8 @@ type RdpWireCommand = {
   bounds?: RdpSurfaceRect;
   profile?: RdpProfile;
   lifecycleGeneration?: number;
+  input?: RdpInput;
+  certificateAccepted?: boolean;
 };
 
 type RdpBackendClientOptions = {
@@ -223,6 +235,21 @@ export class RdpBackendClient {
       ownerWindow,
       bounds: request.bounds ? this.bounds.get(request.sessionId) : undefined,
     });
+  }
+
+  async input(sessionId: string, lifecycleId: string, input: RdpInput): Promise<void> {
+    if (!isRdpInput(input)) throw new Error('Invalid RDP input.');
+    if (!this.sessionIds.has(sessionId) || this.lifecycleIds.get(sessionId) !== lifecycleId) return;
+    await this.send({ op: 'input', sessionId, lifecycleId, input });
+  }
+
+  async certificateDecision(
+    sessionId: string,
+    lifecycleId: string,
+    accepted: boolean,
+  ): Promise<void> {
+    if (!this.sessionIds.has(sessionId) || this.lifecycleIds.get(sessionId) !== lifecycleId) return;
+    await this.send({ op: 'certificate', sessionId, lifecycleId, certificateAccepted: accepted });
   }
 
   async command(
@@ -444,6 +471,7 @@ export class RdpBackendClient {
       return;
     }
     if (!event || typeof event.type !== 'string') return;
+    if (event.type === 'frame' && !isRdpFrame(event.frame)) return;
     const requestId = event.requestId;
     if (requestId) {
       const request = this.pending.get(requestId);

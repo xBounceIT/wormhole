@@ -28,6 +28,8 @@ jobs:
           cache: false
       - uses: ./.github/actions/setup-macos-rdp
       - run: npm run build:rdp:macos
+      - name: Build the embedded RDP canvas adapter
+        run: npm run build:rdp-canvas
       - name: Verify relocated client without Homebrew on PATH
         shell: bash
         run: |

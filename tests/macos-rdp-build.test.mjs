@@ -36,9 +36,9 @@ function fixture(t) {
       stdout = `${args.at(-1)}:\n\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0)\n\t/System/Library/Frameworks/AppKit.framework/Versions/C/AppKit (compatibility version 1.0.0)\n`;
     return { status: 0, stdout, stderr: '' };
   };
-  write('obj/macos-freerdp/installed/arm64-osx/share/sdl3/copyright', 'SDL license');
-  write('obj/macos-freerdp/installed/arm64-osx/share/no-license/config');
-  write('obj/macos-freerdp/installed/arm64-osx/share/not-a-directory');
+  write('obj/macos-freerdp/installed/arm64-osx/arm64-osx/share/sdl3/copyright', 'SDL license');
+  write('obj/macos-freerdp/installed/arm64-osx/arm64-osx/share/no-license/config');
+  write('obj/macos-freerdp/installed/arm64-osx/arm64-osx/share/not-a-directory');
   return {
     root,
     write,
@@ -82,6 +82,31 @@ test('builds and verifies both static slices and ships a relocatable signed clie
   buildMacFreeRdp(f.options);
   assert.ok(!f.calls.some(({ args }) => args[0] === 'clone'));
   assert.ok(!existsSync(path.join(path.dirname(binary), 'licenses', 'FreeRDP-NOTICE.txt')));
+});
+
+test('both SDKs survive manifest installs for later canvas adapter builds', (t) => {
+  const f = fixture(t);
+  const installedTriplets = new Map();
+  const configuredSdks = [];
+  const option = (args, prefix) => args.find((arg) => arg.startsWith(prefix))?.slice(prefix.length);
+  const spawn = (command, args, options) => {
+    if (command.endsWith('vcpkg') && args[0] === 'install') {
+      // vcpkg manifest mode synchronizes each install root to the current triplet.
+      installedTriplets.set(option(args, '--x-install-root='), option(args, '--triplet='));
+    }
+    if (command === 'cmake' && args[0] === '-S') {
+      const root = option(args, '-DVCPKG_INSTALLED_DIR=');
+      const triplet = option(args, '-DVCPKG_TARGET_TRIPLET=');
+      assert.equal(installedTriplets.get(root), triplet);
+      configuredSdks.push({ root, triplet });
+    }
+    return f.spawn(command, args, options);
+  };
+  buildMacFreeRdp({ ...f.options, spawn });
+  assert.equal(configuredSdks.length, 2);
+  for (const { root, triplet } of configuredSdks) {
+    assert.equal(installedTriplets.get(root), triplet, `${triplet} SDK must remain available`);
+  }
 });
 
 test('rejects unsupported hosts and missing toolchains before building', (t) => {

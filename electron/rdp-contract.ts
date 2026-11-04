@@ -1,3 +1,5 @@
+import type { RdpFrame } from './rdp-framebuffer.js';
+
 export type RdpSurfaceRect = {
   x: number;
   y: number;
@@ -182,6 +184,9 @@ export type RdpSystemClientCapability = {
 
 export type RdpBackendEvent = {
   type:
+    | 'frame'
+    | 'frameEnd'
+    | 'certificate'
     | 'started'
     | 'ready'
     | 'connected'
@@ -207,6 +212,9 @@ export type RdpBackendEvent = {
   message?: string;
   /** Go-classified ActiveX logon failure for which transient credentials can help. */
   credentialFailure?: boolean;
+  frame?: RdpFrame;
+  paintId?: number;
+  certificate?: { host: string; fingerprint: string };
 };
 
 export function isRdpLifecycleEvent(event: Pick<RdpBackendEvent, 'requestId'>): boolean {

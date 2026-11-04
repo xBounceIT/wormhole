@@ -99,24 +99,29 @@ type rdpCommand struct {
 	OwnerWindow         string     `json:"ownerWindow,omitempty"`
 	Bounds              rdpBounds  `json:"bounds,omitempty"`
 	Profile             rdpProfile `json:"profile,omitempty"`
+	Input               *rdpInput  `json:"input,omitempty"`
+	CertificateAccepted bool       `json:"certificateAccepted,omitempty"`
 	LifecycleGeneration uint64     `json:"lifecycleGeneration,omitempty"`
 	tunnel              *tunnelRuntime
 	forwarder           *tunnelForwarder
 }
 
 type rdpEvent struct {
-	Type                string `json:"type"`
-	RequestID           string `json:"requestId,omitempty"`
-	SessionID           string `json:"sessionId,omitempty"`
-	LifecycleID         string `json:"lifecycleId,omitempty"`
-	Backend             string `json:"backend,omitempty"`
-	Code                int    `json:"code,omitempty"`
-	Attempt             int    `json:"attempt,omitempty"`
-	Max                 int    `json:"max,omitempty"`
-	Message             string `json:"message,omitempty"`
-	CredentialFailure   bool   `json:"credentialFailure,omitempty"`
-	External            bool   `json:"external"`
-	LifecycleGeneration uint64 `json:"lifecycleGeneration,omitempty"`
+	Type                string          `json:"type"`
+	RequestID           string          `json:"requestId,omitempty"`
+	SessionID           string          `json:"sessionId,omitempty"`
+	LifecycleID         string          `json:"lifecycleId,omitempty"`
+	Backend             string          `json:"backend,omitempty"`
+	Code                int             `json:"code,omitempty"`
+	Attempt             int             `json:"attempt,omitempty"`
+	Max                 int             `json:"max,omitempty"`
+	Message             string          `json:"message,omitempty"`
+	CredentialFailure   bool            `json:"credentialFailure,omitempty"`
+	External            bool            `json:"external"`
+	LifecycleGeneration uint64          `json:"lifecycleGeneration,omitempty"`
+	Frame               *rdpFrame       `json:"frame,omitempty"`
+	PaintID             uint32          `json:"paintId,omitempty"`
+	Certificate         *rdpCertificate `json:"certificate,omitempty"`
 }
 
 type rdpSystemClientCapability struct {
@@ -163,6 +168,7 @@ type rdpProcess struct {
 	terminal            bool
 	disconnectRequested bool
 	external            bool
+	framebuffer         bool
 	lifecycleGeneration uint64
 	tunnel              *tunnelRuntime
 	forwarder           *tunnelForwarder
@@ -214,7 +220,7 @@ func (c *rdpController) handle(command rdpCommand) {
 		c.start(command)
 	case "resize":
 		c.forward(command)
-	case "show", "hide", "focus", "disconnect":
+	case "show", "hide", "focus", "disconnect", "input", "certificate":
 		c.forward(command)
 	case "shutdown":
 		c.closeAll()
@@ -787,6 +793,10 @@ func isWindowsRdpCredentialFailure(code int) bool {
 }
 
 func (c *rdpController) startFreeRdp(command rdpCommand) {
+	if runtime.GOOS == "darwin" {
+		c.startFramebufferRdp(command)
+		return
+	}
 	handoff := false
 	defer func() {
 		if !handoff {
@@ -914,6 +924,11 @@ func (c *rdpController) forward(command rdpCommand) {
 		if command.Op == "disconnect" {
 			c.markProcessDisconnectRequested(process)
 			c.stop(command.SessionID)
+		} else if process.framebuffer {
+			if err := process.writeFramebuffer(command); err != nil {
+				writeRdpEvent(rdpEvent{Type: "error", RequestID: command.RequestID, SessionID: command.SessionID, LifecycleID: command.LifecycleID, Backend: process.backend, Message: "could not update the embedded RDP surface"})
+				return
+			}
 		}
 		writeRdpEvent(rdpEvent{Type: "ack", RequestID: command.RequestID, SessionID: command.SessionID, LifecycleID: command.LifecycleID, Backend: process.backend})
 		return

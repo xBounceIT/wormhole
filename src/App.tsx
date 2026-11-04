@@ -3159,7 +3159,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
 
   useEffect(() => {
     const unsubscribe = window.wormhole?.onRdpEvent((event) => {
-      if (!event.sessionId) return;
+      if (!event.sessionId || event.type === 'frame' || event.type === 'frameEnd') return;
       const savedCredentialFailure =
         rdpSavedCredentialAttempts.current.has(event.sessionId) && event.credentialFailure === true;
       if (savedCredentialFailure) {
