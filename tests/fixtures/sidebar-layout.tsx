@@ -1,7 +1,8 @@
 import * as React from 'react';
 import { createRoot } from 'react-dom/client';
 import App from '../../src/App';
-import { SidebarLayout, SidebarPinButton } from '../../src/components/SidebarLayout';
+import { AppTitlebar } from '../../src/components/AppTitlebar';
+import { SidebarLayout } from '../../src/components/SidebarLayout';
 import { SidebarNavigation, type SidebarPage } from '../../src/components/SidebarNavigation';
 import { UpdateNotification } from '../../src/components/UpdateNotification';
 import {
@@ -41,11 +42,13 @@ function Harness({
   width,
   notification = false,
   rejectImmediately = false,
+  platform,
 }: {
   pinned: boolean;
   width: number;
   notification?: boolean;
   rejectImmediately?: boolean;
+  platform?: string;
 }) {
   const menuOpen = useContextMenuOverlayOpen();
   const [dropdownOpen, setDropdownOpen] = React.useState(false);
@@ -56,12 +59,7 @@ function Harness({
       <SidebarLayout
         header={
           <>
-            <header className="flex h-12 shrink-0 items-center border-b px-1 [-webkit-app-region:drag]">
-              <div className="flex items-center gap-2.5 [-webkit-app-region:no-drag]">
-                <SidebarPinButton />
-                <span id="wormhole-title">Wormhole</span>
-              </div>
-            </header>
+            <AppTitlebar platform={platform} />
             {notification ? (
               <UpdateNotification
                 version="9.9.9"
@@ -146,7 +144,7 @@ window.runSidebarTests = async (handleOnly = false) => {
   const mount = async (
     pinned = true,
     width = 320,
-    options: { notification?: boolean; rejectImmediately?: boolean } = {},
+    options: { notification?: boolean; rejectImmediately?: boolean; platform?: string } = {},
   ) => {
     await React.act(async () =>
       root.render(
@@ -273,6 +271,31 @@ window.runSidebarTests = async (handleOnly = false) => {
 
   // Keep interaction regressions fast; exercise actual motion separately below.
   await React.act(async () => window.sidebarReducedMotion(true));
+  // Exercise the real titlebar with each platform, including browser-preview fallback.
+  for (const platform of ['darwin', 'win32', 'linux', undefined]) {
+    for (const pinned of [true, false]) {
+      await mount(pinned, 320, { platform });
+      const header = query('header');
+      const title = query('header span');
+      const content = pin().parentElement!;
+      const expectedLeft = platform === 'darwin' ? 80 : 4;
+      assert.equal(header.getBoundingClientRect().height, 48);
+      assert.equal(getComputedStyle(header).paddingLeft, expectedLeft + 'px');
+      assert.equal(content.getBoundingClientRect().left, expectedLeft);
+      assert.ok(pin().getBoundingClientRect().left >= expectedLeft);
+      assert.ok(title.getBoundingClientRect().left > pin().getBoundingClientRect().right);
+      assert.equal(title.textContent, 'Wormhole');
+      assert.equal(getComputedStyle(header).getPropertyValue('-webkit-app-region'), 'drag');
+      assert.equal(getComputedStyle(content).getPropertyValue('-webkit-app-region'), 'no-drag');
+      assert.equal(getComputedStyle(pin()).visibility, 'visible');
+      if (platform === 'darwin') {
+        // No renderer control or label can intercept the three native traffic lights.
+        for (const x of [20, 44, 68]) {
+          assert.equal(document.elementFromPoint(x, 20), header);
+        }
+      }
+    }
+  }
   await mount();
   await shown(true);
   const navigation = query('nav[aria-label="Main navigation"]');
@@ -774,7 +797,7 @@ window.runSidebarTests = async (handleOnly = false) => {
   const pinBounds = titlebarPin.getBoundingClientRect();
   assert.equal(document.querySelectorAll('[data-sidebar-pin]').length, 1);
   assert.ok(query('header').contains(titlebarPin));
-  assert.ok(pinBounds.right < query('#wormhole-title').getBoundingClientRect().left);
+  assert.ok(pinBounds.right < query('header span').getBoundingClientRect().left);
   assert.equal(query('header').querySelector('img'), null);
   assert.equal(getComputedStyle(titlebarPin).getPropertyValue('-webkit-app-region'), 'no-drag');
   assert.equal(titlebarPin.getAttribute('aria-label'), 'Pin sidebar');
