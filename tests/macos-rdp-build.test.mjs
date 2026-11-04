@@ -279,6 +279,14 @@ test('release, native CI, resource inclusion, and dependency pins stay connected
   const setup = parse(read('.github/actions/setup-macos-rdp/action.yml'));
   assert.equal(setup.runs.steps[0].with['fetch-depth'], 0);
   const manifest = JSON.parse(read('tools/macos-freerdp/vcpkg.json'));
+  for (const [triplet, architecture] of [
+    ['x64-osx', 'x86_64'],
+    ['arm64-osx', 'arm64'],
+  ]) {
+    // VCPKG_TARGET_ARCHITECTURE alone does not set CMake's macOS compiler target.
+    const config = read(`tools/macos-freerdp/triplets/${triplet}.cmake`);
+    assert.ok(config.includes(`set(VCPKG_OSX_ARCHITECTURES ${architecture})`));
+  }
   // FreeRDP 3.33.0 references unavailable SDL events when headers report 3.4.20.
   // A native CI build must validate any change to this compatibility pair.
   assert.deepEqual(manifest.overrides, [{ name: 'sdl3', version: '3.4.18' }]);
