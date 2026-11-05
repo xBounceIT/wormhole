@@ -35,12 +35,12 @@ export function filterCredentialsByAuthentication<
       sshAuthenticationTypeForCredential(credential) === authentication,
   );
 }
-export type CredentialProtocol = 'ssh' | 'rdp' | 'vnc';
+export type CredentialProtocol = 'ssh' | 'rdp' | 'vnc' | 'smb';
 export type CredentialSourceFilter = 'all' | 'Local' | 'Bitwarden';
 export type SshAutoSudoMode = 'inherit' | 'on' | 'off';
 
 export function isCredentialProtocol(protocol: string): protocol is CredentialProtocol {
-  return protocol === 'ssh' || protocol === 'rdp' || protocol === 'vnc';
+  return protocol === 'ssh' || protocol === 'rdp' || protocol === 'vnc' || protocol === 'smb';
 }
 
 type CredentialListItem = {
@@ -188,7 +188,8 @@ export function connectionInlinePasswordAction(
   hasInlineCredential: boolean | undefined,
   removeInlinePassword: boolean,
 ): 'preserve' | 'set' | 'clear' {
-  const supportsInlineCredentials = protocol === 'ssh' || protocol === 'sftp' || protocol === 'rdp';
+  const supportsInlineCredentials =
+    protocol === 'ssh' || protocol === 'sftp' || protocol === 'smb' || protocol === 'rdp';
   if (useSavedCredentials || !supportsInlineCredentials) return 'clear';
   if (removeInlinePassword) return 'clear';
   if (inlinePassword) return 'set';

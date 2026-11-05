@@ -1,0 +1,260 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/pkg/sftp"
+	"github.com/stretchr/testify/require"
+)
+
+type smbRacingFS struct {
+	smbFilesystem
+	root string
+	once *sync.Once
+}
+
+func (fs smbRacingFS) WithContext(ctx context.Context) smbFilesystem {
+	fs.smbFilesystem = fs.smbFilesystem.WithContext(ctx)
+	return fs
+}
+func (fs smbRacingFS) Lstat(name string) (os.FileInfo, error) {
+	info, err := fs.smbFilesystem.Lstat(name)
+	if name == "target.txt" && os.IsNotExist(err) {
+		fs.once.Do(func() { _ = os.WriteFile(filepath.Join(fs.root, name), []byte("other writer"), 0o600) })
+	}
+	return info, err
+}
+
+func (fs smbRacingFS) RenameNoReplace(source, destination string) error {
+	fs.once.Do(func() { _ = os.WriteFile(filepath.Join(fs.root, destination), []byte("other writer"), 0o600) })
+	return fs.smbFilesystem.RenameNoReplace(source, destination)
+}
+
+func TestSMBReviewNoReplaceSurvivesDestinationRace(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, "source.txt"), []byte("upload"), 0o600))
+	handler := smbFileHandler{fs: smbRacingFS{smbFilesystem: smbTestFS{root: root}, root: root, once: &sync.Once{}}}
+	request := sftp.NewRequest("Rename", "/source.txt")
+	request.Target = "/target.txt"
+	require.Error(t, handler.Filecmd(request))
+	data, err := os.ReadFile(filepath.Join(root, "target.txt"))
+	require.NoError(t, err)
+	require.Equal(t, "other writer", string(data))
+	require.FileExists(t, filepath.Join(root, "source.txt"))
+}
+
+type smbContextFS struct {
+	smbFilesystem
+	ctx    context.Context
+	opened chan *smbContextFile
+	list   bool
+}
+
+func (fs smbContextFS) WithContext(ctx context.Context) smbFilesystem {
+	fs.ctx = ctx
+	fs.smbFilesystem = fs.smbFilesystem.WithContext(ctx)
+	return fs
+}
+func (fs smbContextFS) OpenFile(name string, flags int, mode os.FileMode) (smbFile, error) {
+	file, err := fs.smbFilesystem.OpenFile(name, flags, mode)
+	if err != nil {
+		return nil, err
+	}
+	wrapped := &smbContextFile{smbFile: file, ctx: fs.ctx, closed: make(chan error, 1), list: fs.list}
+	fs.opened <- wrapped
+	return wrapped, nil
+}
+
+type smbContextFile struct {
+	smbFile
+	ctx    context.Context
+	closed chan error
+	list   bool
+}
+
+func (file *smbContextFile) Close() error {
+	err := file.ctx.Err()
+	if err == nil {
+		err = file.smbFile.Close()
+	}
+	file.closed <- err
+	return err
+}
+func (file *smbContextFile) CloseContext(ctx context.Context) error {
+	err := ctx.Err()
+	if err == nil {
+		err = file.smbFile.CloseContext(ctx)
+	}
+	file.closed <- err
+	return err
+}
+func (file *smbContextFile) Readdir(n int) ([]os.FileInfo, error) {
+	if !file.list {
+		return file.smbFile.Readdir(n)
+	}
+	<-file.ctx.Done()
+	return nil, file.ctx.Err()
+}
+
+func TestSMBReviewBridgeCancellationClosesOutstandingFiles(t *testing.T) {
+	transport := smbTestTransport(t, smbTestFS{root: t.TempDir()})
+	opened := make(chan *smbContextFile, 1)
+	transport.fs = smbContextFS{smbFilesystem: transport.fs, opened: opened}
+	client, err := transport.newClient(context.Background())
+	require.NoError(t, err)
+	_, err = client.OpenFile("/stage.txt", os.O_CREATE|os.O_WRONLY)
+	require.NoError(t, err)
+	file := <-opened
+	t.Cleanup(func() { _ = file.smbFile.Close() })
+	require.NoError(t, client.Close())
+	select {
+	case err := <-file.closed:
+		require.NoError(t, err, "remote handles must close even after request cancellation")
+	case <-time.After(time.Second):
+		t.Fatal("outstanding remote handle was not closed")
+	}
+}
+
+func TestSMBReviewDirectoryHonorsRequestCancellation(t *testing.T) {
+	lifetime, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	opened := make(chan *smbContextFile, 1)
+	fs := smbContextFS{smbFilesystem: smbTestFS{root: t.TempDir()}, ctx: lifetime, opened: opened, list: true}
+	handler := smbFileHandler{fs: fs}
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	finished := make(chan error, 1)
+	go func() { _, err := handler.Filelist(sftp.NewRequest("List", "/").WithContext(ctx)); finished <- err }()
+	file := <-opened
+	defer func() { cancel(); _ = file.smbFile.Close() }()
+	deadline, bounded := file.ctx.Deadline()
+	require.True(t, bounded)
+	require.LessOrEqual(t, time.Until(deadline), sshSftpListTimeout)
+	stop()
+	select {
+	case err := <-finished:
+		require.True(t, errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled), err)
+	case <-time.After(2 * time.Second):
+		cancel()
+		<-finished
+		t.Fatal("a cancelled directory request retained its SMB worker")
+	}
+}
+
+func TestSMBReviewLiteralUNCPaths(t *testing.T) {
+	for _, test := range []struct{ input, directory string }{
+		{`\\server\share\reports#2026`, "/reports#2026"},
+		{`\\server\share\100%`, "/100%"},
+		{`server/share/literal%20name`, "/literal%20name"},
+	} {
+		address, err := parseSMBAddress(test.input, 0)
+		require.NoError(t, err, test.input)
+		require.Equal(t, test.directory, address.directory)
+	}
+}
+
+func TestSMBReviewBlankPortInheritsFolderPort(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "workspace.db")
+	require.NoError(t, ensureElectronWorkspaceSchema(databasePath))
+	folderID, err := createWorkspaceNode(databasePath, workspaceNodeWriteRequest{Name: "Folder", Kind: "folder"})
+	require.NoError(t, err)
+	database, err := openDatabase(databasePath, false)
+	require.NoError(t, err)
+	defer database.Close()
+	_, err = database.Exec("UPDATE Nodes SET Protocol=8, Port=1445 WHERE Id=?", folderID)
+	require.NoError(t, err)
+	id, err := createWorkspaceNode(databasePath, workspaceNodeWriteRequest{ParentID: folderID, Name: "Share", Kind: "connection", Protocol: "smb", Host: "server/share", Username: "user"})
+	require.NoError(t, err)
+	nodes, err := loadSSHNodes(database)
+	require.NoError(t, err)
+	endpoint, err := resolveFileNodeEndpoint(nodes, id, true)
+	require.NoError(t, err)
+	require.Equal(t, 1445, endpoint.port)
+	for _, item := range []struct {
+		host           string
+		port, expected int
+	}{
+		{"server/share", 445, 445},
+		{"smb://server:2445/share", 0, 2445},
+	} {
+		next, err := createWorkspaceNode(databasePath, workspaceNodeWriteRequest{ParentID: folderID, Name: "Explicit", Kind: "connection", Protocol: "smb", Host: item.host, Port: item.port, Username: "user"})
+		require.NoError(t, err)
+		nodes, err = loadSSHNodes(database)
+		require.NoError(t, err)
+		resolved, err := resolveFileNodeEndpoint(nodes, next, true)
+		require.NoError(t, err)
+		require.Equal(t, item.expected, resolved.port)
+	}
+}
+
+type smbFailedCloseFile struct{ smbFile }
+
+func (file smbFailedCloseFile) CloseContext(context.Context) error { return os.ErrPermission }
+
+func TestSMBReviewFailedHandleCleanupRetiresTransport(t *testing.T) {
+	transport := smbTestTransport(t, smbTestFS{root: t.TempDir()})
+	client, err := transport.newClient(context.Background())
+	require.NoError(t, err)
+	base, err := transport.fs.OpenFile("file", os.O_CREATE|os.O_WRONLY, 0o600)
+	require.NoError(t, err)
+	defer base.Close()
+	file := &smbCleanupFile{smbFile: smbFailedCloseFile{smbFile: base}, onFailure: transport.close}
+	require.ErrorIs(t, file.Close(), os.ErrPermission)
+	require.ErrorIs(t, transport.ctx.Err(), context.Canceled)
+	require.Error(t, client.Wait())
+}
+
+func TestSMBReviewRequestsCannotReviveCancelledContexts(t *testing.T) {
+	for _, cancelOwner := range []bool{false, true} {
+		owner, cancel := context.WithCancel(context.Background())
+		requestCtx, cancelRequest := context.WithCancel(context.Background())
+		if cancelOwner {
+			cancel()
+		} else {
+			cancelRequest()
+		}
+		handler := smbFileHandler{fs: smbTestFS{root: t.TempDir()}, ctx: owner}
+		operation, release := handler.forRequest(sftp.NewRequest("Mkdir", "/new").WithContext(requestCtx))
+		err := operation.fs.(smbTestFS).ctx.Err()
+		release()
+		cancel()
+		cancelRequest()
+		require.ErrorIs(t, err, context.Canceled, "an already cancelled context must be inherited synchronously")
+	}
+}
+
+func TestSMBReviewCancelledPathOperationsRetireUnknownHandles(t *testing.T) {
+	for _, cancelled := range []bool{false, true} {
+		transport := smbTestTransport(t, smbTestFS{root: t.TempDir()})
+		client, err := transport.newClient(context.Background())
+		require.NoError(t, err)
+		defer client.Close()
+		handler := smbFileHandler{fs: transport.fs, ctx: transport.ctx, closeTransport: transport.close}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		_, release := handler.forRequest(sftp.NewRequest("Mkdir", "/new").WithContext(ctx))
+		if cancelled {
+			cancel()
+		}
+		release()
+		if cancelled {
+			require.ErrorIs(t, transport.ctx.Err(), context.Canceled)
+		} else {
+			require.NoError(t, transport.ctx.Err(), "successful requests must not retire the shared session")
+			cancel()
+			require.NoError(t, transport.ctx.Err(), "request cleanup must detach retirement callbacks")
+		}
+	}
+	transport := smbTestTransport(t, smbTestFS{root: t.TempDir()})
+	handler := smbFileHandler{fs: transport.fs, closeTransport: transport.close}
+	handler.retireUncertainOpen(os.ErrPermission)
+	require.NoError(t, transport.ctx.Err())
+	handler.retireUncertainOpen(context.Canceled)
+	require.ErrorIs(t, transport.ctx.Err(), context.Canceled)
+}

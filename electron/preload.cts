@@ -105,7 +105,7 @@ const wormholeBridge = {
     name: string;
     notes?: string;
     kind: 'folder' | 'connection';
-    protocol: '' | 'ssh' | 'sftp' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial';
+    protocol: '' | 'ssh' | 'sftp' | 'smb' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial';
     host: string;
     port: number;
     username: string;
@@ -130,7 +130,7 @@ const wormholeBridge = {
     name: string;
     notes?: string;
     kind: 'folder' | 'connection';
-    protocol: '' | 'ssh' | 'sftp' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial';
+    protocol: '' | 'ssh' | 'sftp' | 'smb' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial';
     host: string;
     port: number;
     username: string;
@@ -157,7 +157,7 @@ const wormholeBridge = {
   }) => ipcRenderer.invoke('rdp:external-client-requirement', request),
   createCredential: (request: {
     name: string;
-    protocol: 'ssh' | 'rdp' | 'vnc';
+    protocol: 'ssh' | 'rdp' | 'vnc' | 'smb';
     kind: 'password' | 'sshKey';
     username: string;
     domain: string;
@@ -172,7 +172,7 @@ const wormholeBridge = {
   updateCredential: (request: {
     id: string;
     name: string;
-    protocol: 'ssh' | 'rdp' | 'vnc';
+    protocol: 'ssh' | 'rdp' | 'vnc' | 'smb';
     kind: 'password' | 'sshKey';
     username: string;
     domain: string;
@@ -197,7 +197,7 @@ const wormholeBridge = {
     ipcRenderer.invoke('workspace:delete-credential', request),
   updateWorkspaceNodeSshSettings: (request: { nodeId: string; sshAutoSudo: boolean | null }) =>
     ipcRenderer.invoke('workspace:update-node-ssh-settings', request),
-  listCredentialsForProtocol: (protocol: 'ssh' | 'rdp' | 'vnc') =>
+  listCredentialsForProtocol: (protocol: 'ssh' | 'rdp' | 'vnc' | 'smb') =>
     ipcRenderer.invoke('workspace:credentials-for-protocol', protocol),
   updateWorkspaceNodeCredential: (request: {
     nodeId: string;
@@ -206,7 +206,7 @@ const wormholeBridge = {
   }) => ipcRenderer.invoke('workspace:update-node-credential', request),
   updateWorkspaceNodeInlineCredential: (request: {
     nodeId: string;
-    protocol: 'ssh' | 'rdp';
+    protocol: 'ssh' | 'rdp' | 'smb';
     username: string;
     domain: string;
     password: string;
@@ -468,7 +468,7 @@ const wormholeBridge = {
   logoutBitwardenCli: () => ipcRenderer.invoke('bitwarden:logout'),
   syncBitwardenCli: () => ipcRenderer.invoke('bitwarden:sync'),
   searchBitwardenItems: (query: string) => ipcRenderer.invoke('bitwarden:search-items', query),
-  nodeUsesBitwarden: (request: { nodeId: string; protocol: 'ssh' | 'rdp' | 'vnc' }) =>
+  nodeUsesBitwarden: (request: { nodeId: string; protocol: 'ssh' | 'rdp' | 'vnc' | 'smb' }) =>
     ipcRenderer.invoke('bitwarden:node-uses-vault', request),
   openBitwardenPopup: (request: {
     sessionId: string;
@@ -485,7 +485,7 @@ const wormholeBridge = {
     return () => ipcRenderer.removeListener('web:bitwarden-popup-state', handler);
   },
   openSshSession: (request: {
-    mode?: 'terminal' | 'sftp';
+    mode?: 'terminal' | 'sftp' | 'smb';
     sessionId: string;
     nodeId?: string;
     host?: string;

@@ -1527,6 +1527,11 @@ func normalizeCredentialDraft(
 		if username == "" || domain == "" {
 			return normalizedCredentialDraft{}, errors.New("RDP credentials need a username and domain")
 		}
+	case "smb":
+		protocolValue = smbProtocolValue
+		if username == "" {
+			return normalizedCredentialDraft{}, errors.New("SMB credentials need a username")
+		}
 	case "vnc":
 		protocolValue = 6
 		username = ""
@@ -1534,7 +1539,7 @@ func normalizeCredentialDraft(
 	default:
 		return normalizedCredentialDraft{}, errors.New("credential protocol is invalid")
 	}
-	if protocol != "rdp" {
+	if protocol != "rdp" && protocol != "smb" {
 		domain = ""
 	}
 	return normalizedCredentialDraft{

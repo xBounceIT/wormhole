@@ -683,7 +683,7 @@ type WorkspaceCredential = {
   };
   isVirtualBitwarden?: boolean;
 };
-type CredentialProtocol = 'ssh' | 'rdp' | 'vnc';
+type CredentialProtocol = 'ssh' | 'rdp' | 'vnc' | 'smb';
 type CredentialWriteRequest = {
   name: string;
   protocol: CredentialProtocol;
@@ -733,7 +733,7 @@ type WorkspaceNodeWriteRequest = {
   name: string;
   notes?: string;
   kind: 'folder' | 'connection';
-  protocol: '' | 'ssh' | 'sftp' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial';
+  protocol: '' | 'ssh' | 'sftp' | 'smb' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial';
   host: string;
   port: number;
   username: string;
@@ -793,7 +793,7 @@ type WorkspaceNodeCredentialSettingsRequest = {
 };
 type WorkspaceNodeInlineCredentialRequest = {
   nodeId: string;
-  protocol: 'ssh' | 'rdp';
+  protocol: 'ssh' | 'rdp' | 'smb';
   username: string;
   domain: string;
   password: string;
@@ -1121,7 +1121,7 @@ type SshBackendEvent =
     };
 
 type SshOpenRequest = {
-  mode?: 'terminal' | 'sftp';
+  mode?: 'terminal' | 'sftp' | 'smb';
   sessionId: string;
   nodeId?: string;
   host?: string;
@@ -1192,7 +1192,7 @@ type McpApprovalEvent = {
   executionPreview?: { content: string; truncated: boolean; redacted: boolean };
   connectionId?: string;
   connectionFolder?: string;
-  protocol?: 'ssh' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial';
+  protocol?: 'ssh' | 'smb' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial';
   path?: string;
 };
 
@@ -1483,7 +1483,10 @@ function isSshOpenRequest(value: unknown): value is SshOpenRequest {
   if (
     !isRecord(value) ||
     !isSshSessionId(value.sessionId) ||
-    (value.mode !== undefined && value.mode !== 'terminal' && value.mode !== 'sftp') ||
+    (value.mode !== undefined &&
+      value.mode !== 'terminal' &&
+      value.mode !== 'sftp' &&
+      value.mode !== 'smb') ||
     typeof value.columns !== 'number' ||
     !Number.isInteger(value.columns) ||
     value.columns < 0 ||
@@ -1650,7 +1653,7 @@ function parseCredentialWriteRequest(value: unknown, updating = false): Credenti
         bitwardenItemName.length !== 0 ||
         (clearPassphrase && (!updating || passphrase.length !== 0)) ||
         (!updating && privateKeySelectionId === undefined))) ||
-    (protocol !== 'ssh' && protocol !== 'rdp' && protocol !== 'vnc')
+    (protocol !== 'ssh' && protocol !== 'rdp' && protocol !== 'vnc' && protocol !== 'smb')
   ) {
     throw new Error('Credential details are invalid.');
   }
@@ -1720,6 +1723,7 @@ function parseWorkspaceNodeWriteRequest(
     protocol === '' ||
     protocol === 'ssh' ||
     protocol === 'sftp' ||
+    protocol === 'smb' ||
     protocol === 'rdp' ||
     protocol === 'http' ||
     protocol === 'https' ||
@@ -1755,6 +1759,7 @@ function parseWorkspaceNodeWriteRequest(
     (inlinePasswordAction === 'set' ? inlinePassword.length === 0 : inlinePassword.length !== 0) ||
     (protocol !== 'ssh' &&
       protocol !== 'sftp' &&
+      protocol !== 'smb' &&
       protocol !== 'rdp' &&
       inlinePasswordAction !== 'clear')
   ) {
@@ -1824,7 +1829,7 @@ function isWorkspaceNodeInlineCredentialRequest(
   return (
     isRecord(value) &&
     isSshSessionId(value.nodeId) &&
-    (value.protocol === 'ssh' || value.protocol === 'rdp') &&
+    (value.protocol === 'ssh' || value.protocol === 'rdp' || value.protocol === 'smb') &&
     typeof value.username === 'string' &&
     value.username.trim().length > 0 &&
     value.username.length <= credentialMaxUsernameLength &&
@@ -2500,9 +2505,10 @@ function isMcpRequestId(value: unknown): value is string {
 
 function isMcpConnectionProtocol(
   value: unknown,
-): value is 'ssh' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial' {
+): value is 'ssh' | 'smb' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial' {
   return (
     value === 'ssh' ||
+    value === 'smb' ||
     value === 'rdp' ||
     value === 'http' ||
     value === 'https' ||
@@ -7186,8 +7192,11 @@ class NativeSshBackend {
         bitwardenCredential = await runBitwardenBackend<BitwardenResolvedCredential>(
           request.credentialId ? 'bitwarden.resolve-credential' : 'bitwarden.resolve-node',
           request.credentialId
-            ? { credentialId: request.credentialId, protocol: 'ssh' }
-            : { nodeId: request.nodeId, protocol: 'ssh' },
+            ? {
+                credentialId: request.credentialId,
+                protocol: request.mode === 'smb' ? 'smb' : 'ssh',
+              }
+            : { nodeId: request.nodeId, protocol: request.mode === 'smb' ? 'smb' : 'ssh' },
         );
       } catch (error) {
         const message = error instanceof Error ? error.message : 'The vault could not be read.';
@@ -7257,7 +7266,7 @@ class NativeSshBackend {
     return await this.waitForConnection(request.sessionId, () => {
       this.write({
         type: 'open',
-        terminal_stream: request.mode !== 'sftp',
+        terminal_stream: request.mode !== 'sftp' && request.mode !== 'smb',
         mode: request.mode ?? 'terminal',
         session_id: request.sessionId,
         node_id: request.nodeId,
@@ -8953,7 +8962,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
   });
 
   ipcMain.handle('workspace:credentials-for-protocol', async (_event, protocol: unknown) => {
-    if (protocol !== 'ssh' && protocol !== 'rdp' && protocol !== 'vnc') {
+    if (protocol !== 'ssh' && protocol !== 'rdp' && protocol !== 'vnc' && protocol !== 'smb') {
       throw new Error('Credential protocol is invalid.');
     }
     return runAuthorizedOperation(async () => {
@@ -9118,7 +9127,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     if (!isSshSessionId(value.nodeId)) throw new Error('Connection id is invalid.');
     const nodeId = value.nodeId;
     const protocol = value.protocol;
-    if (protocol !== 'ssh' && protocol !== 'rdp' && protocol !== 'vnc') {
+    if (protocol !== 'ssh' && protocol !== 'rdp' && protocol !== 'vnc' && protocol !== 'smb') {
       throw new Error('Bitwarden connection protocol is invalid.');
     }
     return serializeAuthOperation(async () => {

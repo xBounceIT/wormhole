@@ -17,7 +17,7 @@ import { ConnectionStepper, type TunnelProgress } from './ConnectionStepper';
 
 type WebSessionSurface = {
   id: string;
-  protocol: 'sftp' | 'ssh' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial';
+  protocol: 'sftp' | 'smb' | 'ssh' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial';
   host: string;
   port?: number;
   status: 'connecting' | 'connected' | 'failed' | 'closed' | 'placeholder';

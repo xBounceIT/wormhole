@@ -159,6 +159,13 @@ test('shared connection fields show Browser and Home page in create, edit and Qu
         await choose('serial');
         assert.equal(document.querySelector('label[for="connection-host"]').textContent, 'Serial line');
         assert.equal(document.getElementById('connection-host').placeholder, 'COM1');
+        await choose('smb');
+        assert.equal(state.protocol, 'smb');
+        assert.equal(document.querySelector('label[for="connection-host"]').textContent, 'Share address');
+        assert.equal(document.getElementById('connection-host').placeholder, 'smb://server/share');
+        await address('smb://files.test/shared');
+        assert.equal(state.protocol, 'smb');
+        assert.equal(state.host, 'smb://files.test/shared');
       }
       await mount('quick', { host: 'http://pasted.test/start' });
       await choose('browser');
@@ -170,6 +177,10 @@ test('shared connection fields show Browser and Home page in create, edit and Qu
       assert.equal(state.protocol, 'http');
       assert.equal(state.port, '8080');
       assert.equal(state.credential, 'existing');
+      await mount('saved', { protocol: 'smb', host: 'smb://files.test/share/folder', port: '1445' });
+      assert.equal(document.querySelector('select').value, 'smb');
+      assert.equal(document.getElementById('connection-host').value, 'smb://files.test/share/folder');
+      assert.equal(state.port, '1445');
       await React.act(async () => root.unmount());
     })();
     //# sourceURL=wormhole-browser-fields.js

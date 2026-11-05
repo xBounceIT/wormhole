@@ -594,7 +594,9 @@ export async function runSftpSessionTests() {
     [1180, 700],
     [520, 450],
   ]) {
-    for (const status of ['connecting', 'failed', 'closed'] as const) {
+    for (const [protocol, status] of (['sftp', 'smb'] as const).flatMap((protocol) =>
+      (['connecting', 'failed', 'closed'] as const).map((status) => [protocol, status] as const),
+    )) {
       for (const tunnelProgress of status === 'connecting'
         ? [undefined, { phase: 'starting' }, { phase: 'ready' }]
         : [undefined]) {
@@ -607,8 +609,8 @@ export async function runSftpSessionTests() {
             >
               <SessionSurface
                 session={{
-                  id: 'sftp-connecting',
-                  protocol: 'sftp',
+                  id: `${protocol}-connecting`,
+                  protocol,
                   status,
                   host: 'server',
                   error: status === 'failed' ? 'Permission denied' : undefined,
@@ -643,7 +645,8 @@ export async function runSftpSessionTests() {
       }
     }
   }
-  assert.deepEqual(reconnects, Array(4).fill('sftp-connecting'));
+  assert.equal(reconnects.filter((id) => id === 'sftp-connecting').length, 4);
+  assert.equal(reconnects.filter((id) => id === 'smb-connecting').length, 4);
   const listeners = new Set<(event: WormholeSshEvent) => void>();
   const transfers: unknown[][] = [],
     navigations: string[] = [],
@@ -867,6 +870,7 @@ export async function runSftpSessionTests() {
     host = 'server',
     backendId: string | null = 'native',
     title = 'File transfer',
+    protocol = 'sftp',
   ) => {
     await React.act(async () =>
       root.render(
@@ -875,6 +879,7 @@ export async function runSftpSessionTests() {
             <SftpBrowserSurface
               session={{
                 id: 'tab',
+                protocol,
                 title,
                 host,
                 backendSessionId: backendId ?? undefined,
@@ -1509,5 +1514,19 @@ export async function runSftpSessionTests() {
   assert.ok(document.body.textContent?.includes('Settings unavailable'));
   window.wormhole!.readSftpEditorSettings = originalReadSettings;
   window.wormhole!.sftpEdit = originalEdit;
+  await render(browser, 'smb://server/share', 'native', 'SMB share', 'smb');
+  assert.ok(document.querySelector('[aria-label="SMB browser"]'));
+  assert.equal(
+    document.querySelectorAll('[aria-label="SMB browser"] [role="columnheader"]').length > 0,
+    true,
+  );
+  await render(
+    { ...browser, status: 'closing' },
+    'smb://server/share',
+    'native',
+    'SMB share',
+    'smb',
+  );
+  assert.ok(document.body.textContent?.includes('Closing SMB browser'));
   await React.act(async () => root.unmount());
 }

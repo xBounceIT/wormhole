@@ -219,6 +219,9 @@ func (native *sshNativeSession) readSftpTree(command sshWireCommand, client *sft
 }
 
 func newSharedSftpClient(ctx context.Context, source *sshNativeSession) (*sftp.Client, error) {
+	if source.smb != nil {
+		return source.smb.newClient(ctx)
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}

@@ -29,7 +29,7 @@ export async function runSftpKeyboardScopeTests(
             {['first', 'second'].map((connection) => (
               <div
                 key={connection}
-                aria-label="SFTP browser"
+                aria-label={connection === 'second' ? 'SMB browser' : 'SFTP browser'}
                 data-test-connection={connection}
                 className="flex min-w-0 gap-2"
               >

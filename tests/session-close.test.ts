@@ -19,7 +19,7 @@ test('middle-click closes tabs without waiting for native teardown or restoring 
     assert.ok(start >= 0 && end > start, `Missing production section: ${from}`);
     return app.slice(start, end);
   };
-  const modules = ['session-layout', 'session-lifecycle', 'session-tab-state']
+  const modules = ['session-layout', 'session-lifecycle', 'session-tab-state', 'file-protocol']
     .map((name) => readFileSync(new URL(`../src/${name}.ts`, import.meta.url), 'utf8'))
     .join('\n')
     .replaceAll('export ', '');

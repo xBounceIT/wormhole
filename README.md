@@ -32,10 +32,11 @@ scoped native compatibility helpers; shared domain behavior remains in Go.
 
 - Saved connection trees with folders, search, drag-reorder, and folder-level
   inheritance for credentials, ports, connection settings, and VPN tunnels.
-- Tabbed SSH, RDP, VNC, HTTP/HTTPS web, and Serial sessions.
+- Tabbed SSH, SFTP, SMB, RDP, VNC, HTTP/HTTPS web, and Serial sessions.
 - Go-owned SSH and serial terminal sessions with validated terminal frames and
   bounded scrollback delivered to the renderer.
 - SFTP file transfer from connected SSH sessions.
+- [SMB2/3 shares](docs/smb-file-transfer.md) with an internal file browser and transfers.
 - VNC connections with no-auth and classic password authentication.
 - HTTP/HTTPS appliance sessions in isolated Electron Chromium surfaces.
 - Native app authentication and protected credential storage owned by Go.
@@ -74,7 +75,7 @@ The providers are:
 - Azure VPN with Microsoft Entra ID
 - Cisco Secure Client / AnyConnect
 
-SSH, SFTP, VNC, RDP, and HTTP/HTTPS sessions use the tunnel selected by the
+SSH, SFTP, SMB, VNC, RDP, and HTTP/HTTPS sessions use the tunnel selected by the
 effective inherited profile. Serial sessions are local COM-port sessions and
 do not use VPN routing.
 

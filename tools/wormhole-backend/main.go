@@ -181,6 +181,7 @@ type credentialBindingMetadata struct {
 
 type credentialMetadataQueryer interface {
 	QueryRow(query string, args ...any) *sql.Row
+	Query(query string, args ...any) (*sql.Rows, error)
 }
 
 type tunnelRecord struct {
@@ -1493,7 +1494,7 @@ func loadWorkspace(databasePath string) (workspaceSnapshot, error) {
 		return workspaceSnapshot{}, err
 	}
 	credentialOptions := emptyCredentialOptions()
-	for _, protocol := range []string{"ssh", "rdp", "vnc"} {
+	for _, protocol := range []string{"ssh", "rdp", "vnc", "smb"} {
 		credentialOptions[protocol], err = loadCredentialsForProtocolFromDatabase(
 			database,
 			databasePath,
@@ -1520,6 +1521,7 @@ func emptyCredentialOptions() map[string][]credentialRecord {
 		"ssh": {},
 		"rdp": {},
 		"vnc": {},
+		"smb": {},
 	}
 }
 
@@ -2074,7 +2076,7 @@ func updateWorkspaceNodeInlineCredential(
 	protocol, ok := workspaceProtocolValue(request.Protocol)
 	username := strings.TrimSpace(request.Username)
 	domain := strings.TrimSpace(request.Domain)
-	if !validCredentialID(nodeID) || !ok || (protocol != 0 && protocol != rdpProtocolValue) ||
+	if !validCredentialID(nodeID) || !ok || (protocol != 0 && protocol != rdpProtocolValue && protocol != smbProtocolValue) ||
 		username == "" || utf8.RuneCountInString(username) > 512 || strings.ContainsAny(username, "\r\n\x00") ||
 		utf8.RuneCountInString(domain) > 512 || strings.ContainsAny(domain, "\r\n\x00") ||
 		request.Password == "" || utf8.RuneCountInString(request.Password) > 4096 {
@@ -2166,6 +2168,15 @@ FROM BitwardenCredentialCache
 WHERE lower(SshCredentialId) = ? OR lower(RdpCredentialId) = ? OR lower(VncCredentialId) = ?
 LIMIT 1;`, credentialID, credentialID, credentialID).Scan(&sshID, &rdpID, &vncID, &username)
 	if errors.Is(err, sql.ErrNoRows) || (err != nil && strings.Contains(strings.ToLower(err.Error()), "no such table")) {
+		entries, cacheErr := loadBitwardenCredentialCacheFromQueryer(queryer)
+		if cacheErr != nil {
+			return credentialBindingMetadata{}, false, cacheErr
+		}
+		for _, entry := range entries {
+			if normalizeID(entry.SmbCredentialID) == credentialID {
+				return credentialBindingMetadata{protocol: smbProtocolValue, username: entry.Username}, true, nil
+			}
+		}
 		return credentialBindingMetadata{}, false, nil
 	}
 	if err != nil {
@@ -2314,7 +2325,7 @@ FROM CredentialProfiles ORDER BY Name, Id;`)
 
 func loadCredentialsForProtocol(databasePath, protocol string) ([]credentialRecord, error) {
 	protocol = strings.ToLower(strings.TrimSpace(protocol))
-	if protocol != "ssh" && protocol != "rdp" && protocol != "vnc" {
+	if protocol != "ssh" && protocol != "rdp" && protocol != "vnc" && protocol != "smb" {
 		return nil, errors.New("credential protocol is invalid")
 	}
 	database, err := openDatabase(databasePath, true)
@@ -2339,6 +2350,8 @@ func loadCredentialsForProtocolFromDatabase(
 		protocolValue = 1
 	case "vnc":
 		protocolValue = 6
+	case "smb":
+		protocolValue = smbProtocolValue
 	}
 	storedCredentials, _, err := loadStoredCredentials(database)
 	if err != nil {
@@ -2372,6 +2385,8 @@ func loadCredentialsForProtocolFromDatabase(
 			credentialID = entry.RdpCredentialID
 		} else if protocolValue == 6 {
 			credentialID = entry.VncCredentialID
+		} else if protocolValue == smbProtocolValue {
+			credentialID = entry.SmbCredentialID
 		}
 		profiles = append(profiles, credentialRecord{
 			ID:                 credentialID,
@@ -2492,6 +2507,8 @@ func protocolName(value sql.NullInt64) string {
 		return "vnc"
 	case 7:
 		return "sftp"
+	case smbProtocolValue:
+		return "smb"
 	default:
 		return "ssh"
 	}
