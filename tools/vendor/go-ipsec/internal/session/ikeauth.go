@@ -83,12 +83,12 @@ func (s *Session) ikeAuthPSK(ctx context.Context) error {
 	// IDi, the shared-key AUTH, the ESP proposals (one per enabled suite),
 	// full-tunnel selectors and the CFG request — everything the EAP path
 	// spreads across several messages, in one request because PSK needs no EAP
-	// round-trip. The child proposals still advertise both DH groups for a
-	// strict-PFS server (see ikeAuthEAP).
+	// round-trip. The initial Child SA uses the IKE SA's key material, with no
+	// separate DH exchange (RFC 7296 section 1.2).
 	first := ikemsg.Payloads{
 		&ikemsg.IDiPayload{IDType: ikemsg.IDType(s.cfg.LocalID.Type), Data: s.cfg.LocalID.Data},
 		&ikemsg.AuthPayload{Method: auth.MethodSharedKeyMIC, Data: s.computeInitiatorAuth(s.cfg.PSK)},
-		&ikemsg.SAPayload{Proposals: buildProposals(spi, s.enabledESPSuites(), preferredDHGroups...)},
+		&ikemsg.SAPayload{Proposals: buildProposals(spi, s.enabledESPSuites())},
 	}
 	appendTrafficSelectors(&first, s.cfg.RequestIPv6)
 	buildCPRequest(&first, s.cfg.RequestIPv6)
@@ -116,15 +116,12 @@ func (s *Session) ikeAuthEAP(ctx context.Context) error {
 	}
 
 	// --- Message 3: IDi, SA2, TSi, TSr, CP(request); no AUTH → request EAP. ---
-	// The first Child SA carries no KE (it is keyed from the IKE SA, no PFS), but a
-	// strict-PFS server (esp=...-curve25519!) requires the child PROPOSAL to
-	// advertise the DH group so it can narrow to its required group. Offer both
-	// (x25519 preferred, MODP-2048 fallback); a server without strict PFS ignores
-	// the unused DH transforms. One proposal per enabled ESP suite, in our
-	// preference order.
+	// The first Child SA is keyed from the IKE SA and carries no separate KE or
+	// DH transforms (RFC 7296 section 1.2). One proposal per enabled ESP suite,
+	// in our preference order. PFS is negotiated in CREATE_CHILD_SA instead.
 	first := ikemsg.Payloads{
 		&ikemsg.IDiPayload{IDType: ikemsg.IDType(s.cfg.LocalID.Type), Data: s.cfg.LocalID.Data},
-		&ikemsg.SAPayload{Proposals: buildProposals(spi, s.enabledESPSuites(), preferredDHGroups...)},
+		&ikemsg.SAPayload{Proposals: buildProposals(spi, s.enabledESPSuites())},
 	}
 	appendTrafficSelectors(&first, s.cfg.RequestIPv6)
 	buildCPRequest(&first, s.cfg.RequestIPv6)
@@ -304,6 +301,8 @@ func (s *Session) handleFinalAuthResponse(payloads ikemsg.Payloads, secret []byt
 			authP = v
 		case *ikemsg.SAPayload:
 			saP = v
+		case *ikemsg.KEPayload:
+			return errors.New("session: final IKE_AUTH cannot include a key exchange")
 		case *ikemsg.ConfigPayload:
 			cp = v
 		case *ikemsg.TSiPayload:
@@ -340,6 +339,11 @@ func (s *Session) handleFinalAuthResponse(payloads ikemsg.Payloads, secret []byt
 		return errors.New("session: final IKE_AUTH missing the responder's ESP proposal")
 	}
 	prop := saP.Proposals[0]
+	for _, dh := range prop.ByType(ikemsg.TransformDH) {
+		if dh.ID != 0 {
+			return errors.New("session: initial Child SA cannot select a DH group")
+		}
+	}
 	suite, ok := selectedSuite(prop, s.enabledESPSuites())
 	if !ok {
 		return fmt.Errorf("session: responder selected an unsupported or ambiguous ESP proposal (%s)", describeProposals(saP))

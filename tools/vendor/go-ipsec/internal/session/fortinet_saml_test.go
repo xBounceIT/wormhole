@@ -18,7 +18,7 @@ import (
 )
 
 func TestFortinetSAMLOfflineHandshake(t *testing.T) {
-	for _, mode := range []string{"success", "success-mschap", "mschap-final-msk", "mschap-extended-success", "mschap-early-success", "mschap-bad-proof", "mschap-switch-to-gtc", "switch-to-mschap", "success-ecp256", "success-ecp384", "wrong-psk", "wrong-id", "no-auth", "bad-method", "missing-eap", "bad-token-method", "failure", "early-success", "missing-next-eap", "too-many-rounds", "bad-final-auth", "changed-final-id", "closed-first", "closed-eap", "closed-final"} {
+	for _, mode := range []string{"success", "success-mschap", "mschap-final-msk", "mschap-extended-success", "mschap-early-success", "mschap-bad-proof", "mschap-switch-to-gtc", "switch-to-mschap", "success-ecp256", "success-ecp384", "success-final-dh-none", "wrong-psk", "wrong-id", "no-auth", "bad-method", "missing-eap", "bad-token-method", "failure", "early-success", "missing-next-eap", "too-many-rounds", "bad-final-auth", "final-dh", "final-ke", "changed-final-id", "closed-first", "closed-eap", "closed-final"} {
 		t.Run(mode, func(t *testing.T) {
 			client, server := transport.MemoryPair()
 			defer client.Close()
@@ -105,6 +105,9 @@ func fortinetTestResponder(conn transport.Conn, mode string) error {
 	}
 	header, inner, err := rs.decodeSK(raw)
 	if err != nil {
+		return err
+	}
+	if err := validateInitialChildSA(inner); err != nil {
 		return err
 	}
 	var idi *ikemsg.IDiPayload
@@ -295,6 +298,17 @@ func fortinetTestResponder(conn transport.Conn, mode string) error {
 	spi := make([]byte, 4)
 	binary.BigEndian.PutUint32(spi, 12345)
 	payloads = ikemsg.Payloads{&ikemsg.AuthPayload{Method: auth.MethodSharedKeyMIC, Data: responderAuth}, &ikemsg.SAPayload{Proposals: []ikemsg.Proposal{buildProposalForSuite(1, cbcSuite(), spi)}}}
+	if mode == "final-dh" || mode == "success-final-dh-none" {
+		group := uint16(19)
+		if mode == "success-final-dh-none" {
+			group = 0
+		}
+		sa := payloads[1].(*ikemsg.SAPayload)
+		sa.Proposals[0].Transforms = append(sa.Proposals[0].Transforms, ikemsg.Transform{Type: ikemsg.TransformDH, ID: group})
+	}
+	if mode == "final-ke" {
+		payloads = append(payloads, &ikemsg.KEPayload{Group: 19, Data: make([]byte, 64)})
+	}
 	if mode == "changed-final-id" {
 		payloads = append(payloads, &ikemsg.IDrPayload{IDType: 2, Data: []byte("other.test")})
 	}

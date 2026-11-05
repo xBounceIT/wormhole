@@ -20,7 +20,7 @@ func (s *Session) ikeAuthFortinetSAML(ctx context.Context) error {
 	}
 	first := ikemsg.Payloads{
 		&ikemsg.IDiPayload{IDType: ikemsg.IDType(s.cfg.LocalID.Type), Data: s.cfg.LocalID.Data},
-		&ikemsg.SAPayload{Proposals: buildProposals(spi, s.enabledESPSuites(), preferredDHGroups...)},
+		&ikemsg.SAPayload{Proposals: buildProposals(spi, s.enabledESPSuites())},
 	}
 	appendTrafficSelectors(&first, s.cfg.RequestIPv6)
 	buildCPRequest(&first, s.cfg.RequestIPv6)

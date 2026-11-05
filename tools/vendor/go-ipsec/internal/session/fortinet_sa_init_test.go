@@ -2,12 +2,36 @@ package session
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"testing"
 
 	"github.com/n0madic/go-ipsec/internal/ikemsg"
 	"github.com/n0madic/go-ipsec/internal/ikesa"
 )
+
+// The first Child SA is keyed from the IKE SA. RFC 7296 section 1.2 excludes
+// a separate key exchange and non-NONE DH transforms from IKE_AUTH.
+func validateInitialChildSA(payloads ikemsg.Payloads) error {
+	var sawSA bool
+	for _, payload := range payloads {
+		switch payload := payload.(type) {
+		case *ikemsg.SAPayload:
+			sawSA = len(payload.Proposals) > 0
+			for _, proposal := range payload.Proposals {
+				if len(proposal.ByType(ikemsg.TransformDH)) != 0 {
+					return errors.New("initial Child SA must omit DH transforms")
+				}
+			}
+		case *ikemsg.KEPayload:
+			return errors.New("initial Child SA must not include a key exchange")
+		}
+	}
+	if !sawSA {
+		return errors.New("initial Child SA proposal missing")
+	}
+	return nil
+}
 
 func TestFortinetSAInitAdvertisesSupportedDHGroups(t *testing.T) {
 	for _, group := range []uint16{31, 14, 19, 20} {

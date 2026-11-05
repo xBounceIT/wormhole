@@ -167,6 +167,9 @@ func runResponder(t *testing.T, conn transport.Conn, username, password string, 
 	if err != nil {
 		return fail(err)
 	}
+	if err := validateInitialChildSA(inner3); err != nil {
+		return fail(err)
+	}
 	var idi *ikemsg.IDiPayload
 	for _, p := range inner3 {
 		if v, ok := p.(*ikemsg.IDiPayload); ok {
@@ -530,6 +533,9 @@ func runResponderPSK(conn transport.Conn, psk []byte, suite espSuite, mangle fun
 	}
 	hdr3, inner3, err := rs.decodeSK(raw3)
 	if err != nil {
+		return fail(err)
+	}
+	if err := validateInitialChildSA(inner3); err != nil {
 		return fail(err)
 	}
 	var (

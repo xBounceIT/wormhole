@@ -11,6 +11,10 @@ P-256/P-384 DH groups (19/20). Standard PSK and certificate/MSCHAPv2 paths remai
 covered by the upstream offline handshake and crypto tests.
 All supported DH groups are advertised in initial and retry IKE_SA_INIT proposals;
 offline responders reject selection of a group absent from the client's offer.
+Initial Child SA proposals omit DH transforms as required by RFC 7296 section 1.2,
+across Fortinet SAML, PSK and certificate/EAP authentication. IKE_AUTH responses
+with a separate KE or non-NONE DH selection are rejected. CREATE_CHILD_SA retains
+its separate PFS negotiation and key derivation.
 
 The explicit Fortinet PSK/EAP path uses SK_pi/SK_pr for post-EAP AUTH even after
 MSCHAPv2, while still verifying its current server proof. EAP notifications are
