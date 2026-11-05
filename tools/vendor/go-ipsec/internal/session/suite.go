@@ -336,9 +336,9 @@ func selectProposal[ID suiteID](sa *ikemsg.SAPayload, enabled []transformSuite[I
 }
 
 // preferredDHGroups lists the DH groups internal/ikesa can run, most-preferred
-// first: Curve25519 (group 31), with MODP-2048 (group 14) as the fallback for
-// servers that only run modp. It drives both the multi-group offers we build and
-// the group we pick from a peer's offer.
+// first: Curve25519 (group 31), MODP-2048 (group 14), P-256 (group 19), and P-384
+// (group 20). It drives both the multi-group offers we build and the group we
+// pick from a peer's offer.
 var preferredDHGroups = []uint16{ikemsg.DH_X25519, ikemsg.DH_MODP2048, 19, 20}
 
 // supportedDHGroup reports whether g is a DH group we can run.

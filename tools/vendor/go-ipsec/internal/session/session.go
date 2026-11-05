@@ -211,8 +211,8 @@ func (s *Session) IKESAInit(ctx context.Context) error {
 	if s.initiatorSPI, err = randUint64(); err != nil {
 		return err
 	}
-	// Prefer x25519 (group 31); fall back to MODP-2048 if the responder demands it
-	// via INVALID_KE_PAYLOAD below.
+	// Prefer x25519 (group 31); switch to another supported group if the
+	// responder requests it via INVALID_KE_PAYLOAD below.
 	if s.dh, err = ikesa.NewDH(ikemsg.DH_X25519); err != nil {
 		return err
 	}
@@ -237,9 +237,8 @@ func (s *Session) IKESAInit(ctx context.Context) error {
 	}
 	// RFC 7296 §1.2 / §3.10.1: the responder may require a different DH group than
 	// our KEi and answer with N(INVALID_KE_PAYLOAD) carrying the group it wants.
-	// Retry once with that group (we offer both x25519 and MODP-2048, so a single
-	// retry exhausts our choices). Re-echo the cookie if the responder is still
-	// challenging.
+	// Retry once with the requested supported group. Re-echo the cookie if the
+	// responder is still challenging.
 	if g, ok := saInitInvalidKE(rspBytes); ok {
 		if !supportedDHGroup(g) || g == s.dh.Group {
 			return fmt.Errorf("session: responder requires DH group %d (INVALID_KE_PAYLOAD); no mutually-supported DH group", g)
@@ -327,11 +326,11 @@ func (s *Session) buildSAInit(cookie []byte) (*ikemsg.Message, []byte, error) {
 	if len(cookie) > 0 {
 		m.Payloads = append(m.Payloads, &ikemsg.NotifyPayload{Type: ikemsg.NotifyCookie, Data: cookie})
 	}
-	// Offer one proposal per enabled IKE suite, each advertising both groups
-	// (x25519 preferred, MODP-2048 fallback); the KE carries our current group,
-	// which the INVALID_KE_PAYLOAD retry may switch.
+	// Offer one proposal per enabled IKE suite, each advertising all supported
+	// DH groups. The KE carries our current group, which the INVALID_KE_PAYLOAD
+	// retry may switch.
 	m.Payloads = append(m.Payloads,
-		&ikemsg.SAPayload{Proposals: buildProposals(nil, s.enabledIKESuites(), ikemsg.DH_X25519, ikemsg.DH_MODP2048)},
+		&ikemsg.SAPayload{Proposals: buildProposals(nil, s.enabledIKESuites(), preferredDHGroups...)},
 		&ikemsg.KEPayload{Group: s.dh.Group, Data: s.dh.Public},
 		&ikemsg.NoncePayload{Data: s.nonceI},
 	)

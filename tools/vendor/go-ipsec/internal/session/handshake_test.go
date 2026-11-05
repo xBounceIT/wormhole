@@ -427,14 +427,28 @@ func respondSAInit(ctx context.Context, conn transport.Conn, rs *Session, nr []b
 	}
 	var keiData []byte
 	var keiGroup uint16
+	var offer *ikemsg.SAPayload
 	for _, p := range m1.Payloads {
 		switch v := p.(type) {
+		case *ikemsg.SAPayload:
+			offer = v
 		case *ikemsg.KEPayload:
 			keiData = v.Data
 			keiGroup = v.Group
 		case *ikemsg.NoncePayload:
 			ni = v.Data
 		}
+	}
+	var offered bool
+	if offer != nil {
+		for _, proposal := range offer.Proposals {
+			if suiteMatches(ike, proposal) && proposalHasDHGroup(proposal, keiGroup) {
+				offered = true
+			}
+		}
+	}
+	if !offered {
+		return nil, nil, nil, errFail("responder cannot select an unoffered IKE suite or DH group")
 	}
 	respDH, err := ikesa.NewDH(keiGroup)
 	if err != nil {

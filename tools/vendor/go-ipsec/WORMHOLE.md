@@ -9,6 +9,8 @@ Local extensions are explicitly opt-in: Fortinet SAML EAP-MSCHAPv2/EAP-GTC, inde
 responder PSK authentication, owner notification on peer death, and RFC 5903
 P-256/P-384 DH groups (19/20). Standard PSK and certificate/MSCHAPv2 paths remain
 covered by the upstream offline handshake and crypto tests.
+All supported DH groups are advertised in initial and retry IKE_SA_INIT proposals;
+offline responders reject selection of a group absent from the client's offer.
 
 The explicit Fortinet PSK/EAP path uses SK_pi/SK_pr for post-EAP AUTH even after
 MSCHAPv2, while still verifying its current server proof. EAP notifications are
