@@ -16,6 +16,7 @@ type bitwardenCredentialCacheEntry struct {
 	SshCredentialID string
 	RdpCredentialID string
 	VncCredentialID string
+	SmbCredentialID string
 	Name            string
 	Username        string
 	RevisionDate    string
@@ -149,12 +150,19 @@ func loadBitwardenCredentialCache(database *sql.DB) ([]bitwardenCredentialCacheE
 	if err != nil || !exists {
 		return []bitwardenCredentialCacheEntry{}, err
 	}
+	return loadBitwardenCredentialCacheFromQueryer(database)
+}
+
+func loadBitwardenCredentialCacheFromQueryer(database credentialMetadataQueryer) ([]bitwardenCredentialCacheEntry, error) {
 	rows, err := database.Query(`
 SELECT ItemId, SshCredentialId, RdpCredentialId, VncCredentialId,
        Name, Username, RevisionDate, LastSeenSyncUtc, UpdatedAtUtc
 FROM BitwardenCredentialCache
 ORDER BY Name, ItemId;`)
 	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "no such table") {
+			return nil, nil
+		}
 		return nil, fmt.Errorf("cannot read the Bitwarden credential cache: %w", err)
 	}
 	defer rows.Close()
@@ -176,6 +184,7 @@ ORDER BY Name, ItemId;`)
 			return nil, fmt.Errorf("cannot read a Bitwarden credential cache entry: %w", err)
 		}
 		entry.Username = nullableString(username)
+		entry.SmbCredentialID = bitwardenVirtualCredentialID(entry.ItemID, smbProtocolValue)
 		entry.RevisionDate = nullableString(revision)
 		entries = append(entries, entry)
 	}
@@ -195,6 +204,8 @@ func bitwardenVirtualCredentialID(itemID string, protocol int64) string {
 		protocolName = "Rdp"
 	case 6:
 		protocolName = "Vnc"
+	case smbProtocolValue:
+		protocolName = "Smb"
 	}
 	material := fmt.Sprintf(
 		"%s:%s:%s",
@@ -271,6 +282,18 @@ func resolveBitwardenCredentialReference(
 		return bitwardenCredentialReference{}, false, err
 	}
 	credentialColumn := "SshCredentialId"
+	if protocol == smbProtocolValue {
+		entries, err := loadBitwardenCredentialCache(database)
+		if err != nil {
+			return bitwardenCredentialReference{}, false, err
+		}
+		for _, entry := range entries {
+			if normalizeID(entry.SmbCredentialID) == id {
+				return bitwardenCredentialReference{ItemID: entry.ItemID, ItemName: entry.Name, Username: strings.TrimSpace(entry.Username), Protocol: protocol, Virtual: true}, true, nil
+			}
+		}
+		return bitwardenCredentialReference{}, false, nil
+	}
 	switch protocol {
 	case 1:
 		credentialColumn = "RdpCredentialId"

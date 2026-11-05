@@ -68,6 +68,7 @@ export function createDevRuntimeBuildPlan({
       'scripts/Build-ElectronBackend.mjs',
       'scripts/build-macos-ovpnproxy.mjs',
       'tools/internal',
+      'vendor/go-smb2',
       'go.work',
       'go.work.sum',
       'tools/vendor/go-ipsec',

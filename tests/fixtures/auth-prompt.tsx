@@ -19,7 +19,7 @@ declare function ConnectionNotesHarness(props: {
 declare function ConnectionDismissalHarness(): import('react').ReactElement;
 declare function TunnelDismissalHarness(): import('react').ReactElement;
 declare function RuntimeCredentialsHarness(props: {
-  protocol: 'ssh' | 'rdp';
+  protocol: 'ssh' | 'rdp' | 'smb';
   kind: 'saved' | 'quick';
   busy?: boolean;
   configuredUsername?: string;
@@ -2020,7 +2020,8 @@ async function runRuntimeCredentialPasswordTests() {
   };
   let mountKey = 0;
   try {
-    for (const protocol of ['ssh', 'rdp'] as const) {
+    for (const protocol of ['ssh', 'rdp', 'smb'] as const) {
+      const fieldProtocol = protocol === 'smb' ? 'ssh' : protocol;
       for (const kind of ['saved', 'quick'] as const) {
         const submissions: Array<{ username: string; password: string; save: boolean }> = [];
         const mount = async (busy = false, remount = true) => {
@@ -2038,11 +2039,12 @@ async function runRuntimeCredentialPasswordTests() {
           });
         };
         await mount();
-        const passwordId = `${protocol}-password`;
+        const passwordId = `${fieldProtocol}-password`;
         const input = () => document.getElementById(passwordId) as HTMLInputElement;
         const toggle = () =>
           document.querySelector<HTMLButtonElement>(`button[aria-controls="${passwordId}"]`);
         const dialog = () => document.querySelector<HTMLElement>('[role="dialog"]');
+        assert.ok(dialog().textContent.includes(`${protocol.toUpperCase()} credentials`));
         const connect = () =>
           [...dialog().querySelectorAll('button')].find((button) =>
             /Connect/.test(button.textContent),
@@ -2055,7 +2057,7 @@ async function runRuntimeCredentialPasswordTests() {
         assert.equal(toggle().getAttribute('aria-pressed'), 'false');
         assert.equal(toggle().type, 'button');
         assert.equal(connect().disabled, true);
-        await fill(`${protocol}-username`, 'runtime-user');
+        await fill(`${fieldProtocol}-username`, 'runtime-user');
         await fill(passwordId, 'runtime-test-secret');
         assert.equal(connect().disabled, false);
         await React.act(async () => {
@@ -2124,7 +2126,11 @@ async function runRuntimeCredentialPasswordTests() {
         assert.equal(connect().disabled, true);
         assert.equal(connect().textContent, 'Connecting…');
         await mount(false, false);
-        const selection = document.getElementById(`${protocol}-runtime-credential`);
+        const selection = document.getElementById(`${fieldProtocol}-runtime-credential`);
+        assert.equal(
+          selection.querySelector('option[value="saved"]').textContent,
+          `${protocol.toUpperCase()} account`,
+        );
         await React.act(async () => {
           Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(
             selection,

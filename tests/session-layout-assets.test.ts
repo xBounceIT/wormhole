@@ -555,7 +555,7 @@ test('native overlays hide during drag or resize and return when resizing ends',
   assert.match(webSurface, /isAuthorized=\{isAuthorized\}/);
   assert.match(webSurface, /isOccluded=\{!nativeSurfaceActive\}/);
   assert.match(appSource, /<RdpSurface[\s\S]*isActive=\{nativeSurfaceActive\}/);
-  assert.match(appSource, /session\.protocol === 'sftp'/);
+  assert.match(appSource, /isFileBrowserProtocol\(session\.protocol\)/);
   assert.match(appSource, /return \(\s*<SftpBrowserSurface/);
 
   // The native view must leave the six-pixel split handle reachable before resizing starts.

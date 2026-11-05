@@ -25,6 +25,7 @@ import {
 import { connectionProtocolSupportsTunnel } from '../src/quick-connect-state.ts';
 import { browserHomePageForEditor, savedConnectionAddressForEditor } from '../src/web-address.ts';
 import { tunnelValueFor } from '../src/tunnel-state.ts';
+import { fileSessionMode, isFileBrowserProtocol } from '../src/file-protocol.ts';
 import { parseWorkspaceRdpSettings } from '../electron/workspace-rdp-contract.ts';
 
 const original: ConnectionEditForm = {
@@ -225,7 +226,10 @@ function editorHarness(
     title: node.name,
     protocol,
     status: protocol === 'rdp' ? 'placeholder' : 'connected',
-    backendSessionId: protocol === 'ssh' || protocol === 'serial' ? 'native-original' : undefined,
+    backendSessionId:
+      protocol === 'ssh' || protocol === 'smb' || protocol === 'serial'
+        ? 'native-original'
+        : undefined,
     mcpAccessible: true,
     terminalFrame: { text: 'existing scrollback' },
     sftp: { path: '/home/alice' },
@@ -241,6 +245,8 @@ function editorHarness(
   let open = true;
   const context: Record<string, any> = {
     Error,
+    fileSessionMode,
+    isFileBrowserProtocol,
     tree: [node],
     sessions,
     sessionsRef: { current: sessions },
@@ -254,7 +260,7 @@ function editorHarness(
       const form = context.newConnectionForm;
       return connectionEditorCredentialSelectionIsComplete(
         'saved',
-        ['ssh', 'rdp', 'vnc'].includes(form.protocol),
+        ['ssh', 'rdp', 'vnc', 'smb'].includes(form.protocol),
         form.useSavedCredentials,
         form.credential,
       );
@@ -375,7 +381,7 @@ function editorHarness(
   };
 }
 
-for (const protocol of ['ssh', 'rdp', 'vnc']) {
+for (const protocol of ['ssh', 'rdp', 'vnc', 'smb']) {
   test(`${protocol}: invalid saved credential selections cannot persist or restart sessions`, async () => {
     for (const credential of ['', ' ', 'none']) {
       const harness = editorHarness(protocol);
@@ -485,7 +491,7 @@ for (const protocol of ['ssh', 'rdp', 'vnc']) {
   });
 }
 
-for (const protocol of ['ssh', 'rdp']) {
+for (const protocol of ['ssh', 'rdp', 'smb']) {
   test(`${protocol}: editing inline credentials preserves the running session and the correct secret action`, async () => {
     for (const { change, action, password } of [
       { change: { username: 'bob' }, action: 'preserve', password: '' },
@@ -548,7 +554,7 @@ test('credential save and refresh failures do not release active sessions', asyn
   }
 });
 
-for (const protocol of ['ssh', 'rdp', 'vnc', 'serial', 'http', 'https']) {
+for (const protocol of ['ssh', 'smb', 'rdp', 'vnc', 'serial', 'http', 'https']) {
   test(`${protocol}: the real editor save updates the title without releasing or restarting the session`, async () => {
     const harness = editorHarness(protocol);
     const unrelated = harness.sessions[1];
@@ -586,7 +592,7 @@ for (const protocol of ['ssh', 'rdp', 'vnc', 'serial', 'http', 'https']) {
     else
       assert.ok(
         harness.effects.includes(
-          `start ${protocol === 'http' || protocol === 'https' ? 'web' : protocol}`,
+          `start ${protocol === 'http' || protocol === 'https' ? 'web' : protocol === 'smb' ? 'ssh' : protocol}`,
         ),
       );
   });

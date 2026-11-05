@@ -608,7 +608,7 @@ type mcpConnectionTargetResolver struct {
 
 func (resolver *mcpConnectionTargetResolver) resolve(connection mcpConnectionInfo) (mcpConnectionInfo, error) {
 	switch connection.Protocol {
-	case "ssh":
+	case "ssh", "smb":
 		if !resolver.sshLoaded {
 			nodes, err := loadSSHNodes(resolver.database)
 			if err != nil {
@@ -616,7 +616,7 @@ func (resolver *mcpConnectionTargetResolver) resolve(connection mcpConnectionInf
 			}
 			resolver.sshNodes, resolver.sshLoaded = nodes, true
 		}
-		endpoint, err := resolveSSHNodeEndpoint(resolver.sshNodes, connection.ID)
+		endpoint, err := resolveFileNodeEndpoint(resolver.sshNodes, connection.ID, connection.Protocol == "smb")
 		if err != nil {
 			return mcpConnectionInfo{}, err
 		}

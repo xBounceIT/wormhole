@@ -596,6 +596,8 @@ func bitwardenProtocolValue(protocol string) int64 {
 		return 1
 	case "vnc":
 		return 6
+	case "smb":
+		return smbProtocolValue
 	default:
 		return -1
 	}
@@ -837,7 +839,7 @@ func resolveNodeCredentialID(database *sql.DB, nodeID string, protocol int64) (s
 			value := storedProtocol.Int64
 			resolvedProtocol = &value
 		}
-		if leaf && inlinePassword.Valid && inlinePassword.Int64 != 0 && (protocol == 0 || protocol == 1) {
+		if leaf && inlinePassword.Valid && inlinePassword.Int64 != 0 && (protocol == 0 || protocol == 1 || protocol == smbProtocolValue) {
 			credentialResolved = true
 		}
 		if !credentialResolved {

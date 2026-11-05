@@ -250,6 +250,7 @@ type sshNode struct {
 }
 
 type sshTarget struct {
+	credentialProtocol   int64
 	sftpOnly             bool
 	nodeTrustContext     map[string]sshNode
 	credentialID         string
@@ -269,6 +270,7 @@ type sshTarget struct {
 }
 
 type sshCredentialRow struct {
+	Domain         sql.NullString
 	Username       sql.NullString
 	Kind           sql.NullInt64
 	Protocol       sql.NullInt64
@@ -277,6 +279,7 @@ type sshCredentialRow struct {
 }
 
 type sshNativeSession struct {
+	smb              *smbTransport
 	sftpEditRoute    string
 	fingerprint      string
 	sftpOnly         bool
@@ -603,7 +606,7 @@ func (server *sshServer) prepareSessionForLock(sessionID string) {
 }
 
 func (server *sshServer) open(command sshWireCommand) {
-	if command.Mode != "" && command.Mode != "terminal" && command.Mode != "sftp" {
+	if command.Mode != "" && command.Mode != "terminal" && command.Mode != "sftp" && command.Mode != "smb" {
 		server.writeError(command.SessionID, "SSH session mode is invalid")
 		return
 	}
@@ -1483,7 +1486,7 @@ func (native *sshNativeSession) finishShellExit() {
 }
 
 func (native *sshNativeSession) keepAlive() {
-	if native.client == nil || native.done == nil {
+	if (native.client == nil && native.smb == nil) || native.done == nil {
 		return
 	}
 	ticker := time.NewTicker(sshKeepAliveInterval)
@@ -1491,7 +1494,13 @@ func (native *sshNativeSession) keepAlive() {
 	for {
 		select {
 		case <-ticker.C:
-			if _, _, err := native.client.SendRequest("keepalive@openssh.com", true, nil); err != nil {
+			var err error
+			if native.smb != nil {
+				err = native.smb.checkAlive()
+			} else {
+				_, _, err = native.client.SendRequest("keepalive@openssh.com", true, nil)
+			}
+			if err != nil {
 				native.close(true)
 				return
 			}
@@ -1871,6 +1880,9 @@ func (native *sshNativeSession) close(notify bool) {
 		if native.inputQueue != nil {
 			native.inputQueue.stop()
 		}
+		if native.smb != nil {
+			native.smb.close()
+		}
 		native.closeSftp(false)
 		native.terminalOutputMu.Lock()
 		defer native.terminalOutputMu.Unlock()
@@ -2121,7 +2133,13 @@ func (native *sshNativeSession) startSftpOpen(requestID string) {
 }
 
 func (native *sshNativeSession) openSftp(generation uint64, requestID string) {
-	client, err := sftp.NewClient(native.client)
+	var client *sftp.Client
+	var err error
+	if native.smb != nil {
+		client, err = native.smb.newClient(native.smb.ctx)
+	} else {
+		client, err = sftp.NewClient(native.client)
+	}
 	if err != nil {
 		native.sftpMu.Lock()
 		current := native.sftpGeneration == generation
@@ -3565,6 +3583,15 @@ func resolveDirectSSHTarget(command sshWireCommand) (sshTarget, error) {
 		return sshTarget{}, errors.New("SSH password is too long")
 	}
 	port := command.Port
+	credentialProtocol := int64(0)
+	if command.Mode == "smb" {
+		address, err := parseSMBAddress(host, port)
+		if err != nil {
+			return sshTarget{}, err
+		}
+		port = address.port
+		credentialProtocol = smbProtocolValue
+	}
 	if port == 0 {
 		port = 22
 	}
@@ -3576,13 +3603,14 @@ func resolveDirectSSHTarget(command sshWireCommand) (sshTarget, error) {
 		return sshTarget{}, errors.New("SSH VPN tunnel is invalid")
 	}
 	return sshTarget{
-		title:          host,
-		host:           host,
-		port:           port,
-		username:       username,
-		password:       command.Password,
-		autoSudo:       command.AutoSudo,
-		tunnelConfigID: tunnelConfigID,
+		credentialProtocol: credentialProtocol,
+		title:              host,
+		host:               host,
+		port:               port,
+		username:           username,
+		password:           command.Password,
+		autoSudo:           command.AutoSudo,
+		tunnelConfigID:     tunnelConfigID,
 	}, nil
 }
 
@@ -3604,6 +3632,7 @@ func openNativeSSH(
 	rows uint32,
 	modes ...string,
 ) (*sshNativeSession, sshTarget, error) {
+	isSMB := len(modes) > 0 && modes[0] == "smb"
 	if err := ctx.Err(); err != nil {
 		return nil, sshTarget{}, err
 	}
@@ -3639,7 +3668,7 @@ func openNativeSSH(
 			return nil, sshTarget{}, errors.New("SSH username is required")
 		}
 	} else if nodeID != "" {
-		target, err = loadSSHTargetWithCredentialOverrides(
+		target, err = loadFileTargetWithCredentialOverrides(
 			databasePath,
 			nodeID,
 			usernameOverride,
@@ -3647,6 +3676,7 @@ func openNativeSSH(
 			credentialOverride,
 			usernameOverrideAuthoritative,
 			directCredentialID,
+			isSMB,
 			electronUserDataPath,
 		)
 	} else {
@@ -3654,6 +3684,9 @@ func openNativeSSH(
 	}
 	if err != nil {
 		return nil, sshTarget{}, err
+	}
+	if (target.credentialProtocol == smbProtocolValue) != isSMB {
+		return nil, sshTarget{}, errors.New("connection protocol does not match the requested session")
 	}
 	defer clearBytes(target.privateKey)
 	defer clearBytes(target.certificate)
@@ -3676,6 +3709,16 @@ func openNativeSSH(
 		if err != nil {
 			return nil, sshTarget{}, err
 		}
+	}
+	if isSMB {
+		native, err := dialNativeSMB(ctx, target, tunnel)
+		if err != nil {
+			tunnel.close()
+			return nil, sshTarget{}, err
+		}
+		native.tunnel = tunnel
+		native.sftpEditRoute = editRoute
+		return native, target, nil
 	}
 	target.sftpOnly = len(modes) > 0 && modes[0] == "sftp"
 	native, fingerprint, err := dialNativeSSH(ctx, target, columns, rows, tunnel)
@@ -3955,6 +3998,10 @@ type sshNodeEndpoint struct {
 }
 
 func resolveSSHNodeEndpoint(nodes map[string]*sshNode, nodeID string) (sshNodeEndpoint, error) {
+	return resolveFileNodeEndpoint(nodes, nodeID, false)
+}
+
+func resolveFileNodeEndpoint(nodes map[string]*sshNode, nodeID string, smb bool) (sshNodeEndpoint, error) {
 	current := nodes[normalizeID(nodeID)]
 	if current == nil || current.kind == 0 {
 		return sshNodeEndpoint{}, errors.New("SSH connection was not found")
@@ -3997,7 +4044,7 @@ func resolveSSHNodeEndpoint(nodes map[string]*sshNode, nodeID string) (sshNodeEn
 	if !protocolSet {
 		return sshNodeEndpoint{}, errors.New("SSH connection has no protocol")
 	}
-	if protocol != 0 && protocol != 7 {
+	if (!smb && protocol != 0 && protocol != 7) || (smb && protocol != smbProtocolValue) {
 		return sshNodeEndpoint{}, errors.New("the selected connection is not an SSH connection")
 	}
 	if host == "" {
@@ -4008,6 +4055,16 @@ func resolveSSHNodeEndpoint(nodes map[string]*sshNode, nodeID string) (sshNodeEn
 	}
 	if port <= 0 || port > 65535 {
 		port = 22
+		if smb {
+			port = 0
+		}
+	}
+	if smb {
+		address, err := parseSMBAddress(host, int(port))
+		if err != nil {
+			return sshNodeEndpoint{}, err
+		}
+		port = int64(address.port)
 	}
 	return sshNodeEndpoint{protocol: protocol, host: host, port: int(port)}, nil
 }
@@ -4031,6 +4088,17 @@ func loadSSHTargetWithCredentialOverrides(
 	credentialIDOverride string,
 	electronUserDataPath ...string,
 ) (sshTarget, error) {
+	return loadFileTargetWithCredentialOverrides(databasePath, nodeID, usernameOverride, passwordOverride,
+		credentialOverride, usernameOverrideAuthoritative, credentialIDOverride, false, electronUserDataPath...)
+}
+
+func loadFileTargetWithCredentialOverrides(
+	databasePath, nodeID, usernameOverride, passwordOverride string,
+	credentialOverride, usernameOverrideAuthoritative bool,
+	credentialIDOverride string,
+	smb bool,
+	electronUserDataPath ...string,
+) (sshTarget, error) {
 	database, err := openDatabase(databasePath, false)
 	if err != nil {
 		return sshTarget{}, err
@@ -4045,7 +4113,7 @@ func loadSSHTargetWithCredentialOverrides(
 	if root == nil || root.kind == 0 {
 		return sshTarget{}, errors.New("SSH connection was not found")
 	}
-	endpoint, err := resolveSSHNodeEndpoint(nodes, root.id)
+	endpoint, err := resolveFileNodeEndpoint(nodes, root.id, smb)
 	if err != nil {
 		return sshTarget{}, err
 	}
@@ -4125,6 +4193,7 @@ func loadSSHTargetWithCredentialOverrides(
 	}
 
 	target := sshTarget{
+		credentialProtocol:   sshCredentialProtocol(endpoint.protocol),
 		nodeTrustContext:     trustContext,
 		credentialID:         credentialID,
 		nodeID:               root.id,
@@ -4336,10 +4405,10 @@ func loadSSHCredential(
 	}
 	var row sshCredentialRow
 	err = database.QueryRow(
-		"SELECT "+expression("Username")+", "+expression("Kind")+", "+expression("Protocol")+", "+expression("SecretProvider")+", "+expression("SshCertificate")+
+		"SELECT "+expression("Username")+", "+expression("Kind")+", "+expression("Protocol")+", "+expression("SecretProvider")+", "+expression("SshCertificate")+", "+expression("Domain")+
 			" FROM CredentialProfiles WHERE lower(Id) = ? LIMIT 1;",
 		normalizeID(credentialID),
-	).Scan(&row.Username, &row.Kind, &row.Protocol, &row.SecretProvider, &row.Certificate)
+	).Scan(&row.Username, &row.Kind, &row.Protocol, &row.SecretProvider, &row.Certificate, &row.Domain)
 	if errors.Is(err, sql.ErrNoRows) {
 		// Virtual Bitwarden credentials intentionally exist only in the cache. The long-lived Go
 		// vault backend resolves them and Electron forwards the values directly to this separate
@@ -4373,11 +4442,19 @@ func loadSSHCredential(
 		}
 		return nil
 	}
-	if row.Protocol.Valid && row.Protocol.Int64 != 0 {
+	if row.Protocol.Valid && row.Protocol.Int64 != target.credentialProtocol {
 		return errors.New("the selected credential is not an SSH credential")
 	}
 	if target.username == "" {
 		target.username = strings.TrimSpace(nullableString(row.Username))
+	}
+	if target.credentialProtocol == smbProtocolValue {
+		if !row.Kind.Valid || row.Kind.Int64 != 0 {
+			return errors.New("SMB requires a password credential")
+		}
+		if domain := strings.TrimSpace(nullableString(row.Domain)); domain != "" && !strings.ContainsAny(target.username, `\@`) {
+			target.username = domain + `\` + target.username
+		}
 	}
 
 	if row.Kind.Valid && row.Kind.Int64 == 1 {
