@@ -356,6 +356,16 @@ func normalizeWorkspaceNodeWrite(
 			return normalizedWorkspaceNode{}, errors.New("workspace connection port is invalid")
 		}
 		switch protocol {
+		case smbProtocolValue:
+			address, err := parseSMBAddress(host, request.Port)
+			if err != nil {
+				return normalizedWorkspaceNode{}, err
+			}
+			if address.explicitPort {
+				node.port = sql.NullInt64{Int64: int64(address.port), Valid: true}
+			}
+			node.sshAutoSudo = nil
+			node.httpIgnoreCertErrors = nil
 		case 3, 4:
 			parsedHost, parsedPort, parsedPath, err := parseWebAddressTarget(host)
 			if err != nil {
@@ -428,14 +438,14 @@ func normalizeWorkspaceNodeWrite(
 		if utf8.RuneCountInString(username) > maxCredentialUsernameLength || strings.ContainsAny(username, "\r\n\x00") {
 			return normalizedWorkspaceNode{}, errors.New("workspace connection username is invalid")
 		}
-		if protocol == 0 || protocol == 7 || protocol == 1 {
+		if protocol == 0 || protocol == 7 || protocol == 1 || protocol == smbProtocolValue {
 			node.username = nullableWorkspaceNodeString(username)
 		} else {
 			node.username = nil
 			node.inlinePasswordAction = "clear"
 		}
 		if node.inlinePasswordAction == "set" || node.inlinePasswordAction == "preserve" {
-			if protocol != 0 && protocol != 7 && protocol != 1 {
+			if protocol != 0 && protocol != 7 && protocol != 1 && protocol != smbProtocolValue {
 				return normalizedWorkspaceNode{}, errors.New("inline passwords are supported only for SSH and RDP")
 			}
 			node.useInlinePassword = int64(1)
@@ -629,6 +639,8 @@ func workspaceProtocolValue(protocol string) (int64, bool) {
 		return 0, true
 	case "sftp":
 		return 7, true
+	case "smb":
+		return smbProtocolValue, true
 	case "rdp":
 		return 1, true
 	case "http":

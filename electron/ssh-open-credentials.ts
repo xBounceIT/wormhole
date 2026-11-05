@@ -1,4 +1,5 @@
 type SshCredentialRequest = {
+  mode?: 'terminal' | 'sftp' | 'smb';
   nodeId?: string;
   credentialId?: string;
   manualCredentials?: boolean;
@@ -10,11 +11,16 @@ type SshVaultCredential = {
   bitwarden: boolean;
   username?: string;
   password?: string;
+  domain?: string;
 };
 
 // Map the resolved Go credential to the SSH process's direct or saved wire format.
 // Secrets are transient process input and must never be logged or persisted here.
 export function sshOpenCredentialFields(request: SshCredentialRequest, vault: SshVaultCredential) {
+  const username =
+    request.mode === 'smb' && vault.domain && !/[\\@]/.test(vault.username ?? '')
+      ? `${vault.domain}\\${vault.username ?? ''}`
+      : vault.username;
   const saved = request.nodeId !== undefined;
   if (
     vault.bitwarden &&
@@ -25,13 +31,13 @@ export function sshOpenCredentialFields(request: SshCredentialRequest, vault: Ss
   }
   return {
     credential_id: vault.bitwarden ? undefined : request.credentialId,
-    username: saved ? undefined : vault.bitwarden ? vault.username : request.username,
+    username: saved ? undefined : vault.bitwarden ? username : request.username,
     password: saved ? undefined : vault.bitwarden ? vault.password : request.password,
     username_override: saved
       ? request.manualCredentials
         ? request.username?.trim()
         : vault.bitwarden
-          ? vault.username
+          ? username
           : undefined
       : undefined,
     username_override_authoritative:

@@ -52,7 +52,7 @@ type WormholeSftpEditEvent = {
   edits: WormholeSftpEditView[];
   error?: string;
 };
-type WormholeProtocol = 'ssh' | 'sftp' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial';
+type WormholeProtocol = 'ssh' | 'sftp' | 'smb' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial';
 type WormholeWebBrowserState = import('../electron/web-browser-tabs').WebBrowserState;
 
 interface WormholeRdpSurfaceRect {
@@ -244,7 +244,7 @@ interface WormholeTunnelDetails {
 interface WormholeWorkspaceSnapshot {
   tree: WormholeWorkspaceNode[];
   credentials: WormholeWorkspaceCredential[];
-  credentialOptions: Record<'ssh' | 'rdp' | 'vnc', WormholeWorkspaceCredential[]>;
+  credentialOptions: Record<'ssh' | 'rdp' | 'vnc' | 'smb', WormholeWorkspaceCredential[]>;
   tunnels: WormholeWorkspaceTunnel[];
 }
 
@@ -674,7 +674,7 @@ interface WormholeMcpApproval {
   executionPreview?: { content: string; truncated: boolean; redacted: boolean };
   connectionId?: string;
   connectionFolder?: string;
-  protocol?: 'ssh' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial';
+  protocol?: 'ssh' | 'smb' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial';
   path?: string;
 }
 
@@ -767,7 +767,7 @@ interface WormholeMRemoteImportPlan {
   preview: Array<{
     name: string;
     kind: 'folder' | 'connection';
-    protocol?: 'ssh' | 'rdp' | 'vnc';
+    protocol?: 'ssh' | 'rdp' | 'vnc' | 'smb';
     depth: number;
   }>;
   previewTruncated: boolean;
@@ -927,7 +927,7 @@ interface Window {
     }): Promise<{ required: boolean }>;
     createCredential(request: {
       name: string;
-      protocol: 'ssh' | 'rdp' | 'vnc';
+      protocol: 'ssh' | 'rdp' | 'vnc' | 'smb';
       kind: 'password' | 'sshKey';
       username: string;
       domain: string;
@@ -942,7 +942,7 @@ interface Window {
     updateCredential(request: {
       id: string;
       name: string;
-      protocol: 'ssh' | 'rdp' | 'vnc';
+      protocol: 'ssh' | 'rdp' | 'vnc' | 'smb';
       kind: 'password' | 'sshKey';
       username: string;
       domain: string;
@@ -975,7 +975,7 @@ interface Window {
       sshAutoSudo: boolean | null;
     }): Promise<{ updated: boolean }>;
     listCredentialsForProtocol(
-      protocol: 'ssh' | 'rdp' | 'vnc',
+      protocol: 'ssh' | 'rdp' | 'vnc' | 'smb',
     ): Promise<WormholeWorkspaceCredential[]>;
     updateWorkspaceNodeCredential(request: {
       nodeId: string;
@@ -984,7 +984,7 @@ interface Window {
     }): Promise<{ updated: boolean }>;
     updateWorkspaceNodeInlineCredential(request: {
       nodeId: string;
-      protocol: 'ssh' | 'rdp';
+      protocol: 'ssh' | 'rdp' | 'smb';
       username: string;
       domain: string;
       password: string;
@@ -1175,7 +1175,7 @@ interface Window {
     searchBitwardenItems(query: string): Promise<{ items: WormholeBitwardenLoginItem[] }>;
     nodeUsesBitwarden(request: {
       nodeId: string;
-      protocol: 'ssh' | 'rdp' | 'vnc';
+      protocol: 'ssh' | 'rdp' | 'vnc' | 'smb';
     }): Promise<{ bitwarden: boolean }>;
     openBitwardenPopup(request: {
       sessionId: string;
@@ -1186,7 +1186,7 @@ interface Window {
       listener: (state: { sessionId: string; open: boolean }) => void,
     ): () => void;
     openSshSession(request: {
-      mode?: 'terminal' | 'sftp';
+      mode?: 'terminal' | 'sftp' | 'smb';
       sessionId: string;
       nodeId?: string;
       host?: string;

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { stripTypeScriptTypes } from 'node:module';
 import test from 'node:test';
+import { fileSessionMode, isFileBrowserProtocol } from '../src/file-protocol.ts';
 import { runInNewContext } from 'node:vm';
 
 const main = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
@@ -421,6 +422,8 @@ test('concurrent automatic opens reuse the new SSH tab before React has rendered
       setActivePage: () => {},
       newSessionToken: () => `backend-${started.length}`,
       savedConnectionAddressForEditor: (_protocol: string, host: string) => host,
+      fileSessionMode,
+      isFileBrowserProtocol,
       sessionResourceReleaseGate: { current: { reset: () => {} } },
       sessionCloseGate: { current: { reopenAfterClose: () => false } },
       setSessions: (update: (current: typeof sessions) => typeof sessions) => {
@@ -442,4 +445,16 @@ test('concurrent automatic opens reuse the new SSH tab before React has rendered
   assert.equal(sessions.length, 1);
   assert.equal(started.length, 1);
   assert.equal(sessionsRef.current[0], sessions[0]);
+  const share = {
+    ...node,
+    id: 'saved-smb',
+    protocol: 'smb',
+    host: 'smb://server/share',
+    port: 445,
+  };
+  open(share);
+  open(share);
+  assert.equal(sessions.length, 2);
+  assert.equal(started.length, 2);
+  assert.equal((started[1] as { mode: string }).mode, 'smb');
 });

@@ -84,6 +84,7 @@ import {
 } from '../sftp-dnd';
 import { type ReactNode, type ComponentProps } from 'react';
 type SftpBrowserSession = {
+  protocol?: string;
   id: string;
   title: string;
   host: string;
@@ -449,7 +450,7 @@ export function SftpFilePane({
         if (action === 'switch') {
           event.preventDefault();
           event.currentTarget
-            .closest('[aria-label="SFTP browser"]')
+            .closest('[aria-label="SFTP browser"], [aria-label="SMB browser"]')
             ?.querySelector<HTMLElement>(
               `[data-sftp-panel="${pane === 'local' ? 'remote' : 'local'}"]`,
             )
@@ -1296,7 +1297,7 @@ export function SftpBrowserSurface({
 
   return (
     <div
-      aria-label="SFTP browser"
+      aria-label={session.protocol === 'smb' ? 'SMB browser' : 'SFTP browser'}
       className="relative flex h-full min-h-0 flex-col gap-3 overflow-hidden bg-background p-3"
       data-wormhole-shortcuts-disabled
     >
@@ -1328,7 +1329,7 @@ export function SftpBrowserSurface({
       {closing ? (
         <div className="absolute inset-0 z-30 grid place-items-center bg-background/80 text-sm text-muted-foreground backdrop-blur-sm">
           <LoaderCircle className="mr-2 size-4 animate-spin" />
-          Closing SFTP browser…
+          Closing {session.protocol === 'smb' ? 'SMB' : 'SFTP'} browser…
         </div>
       ) : null}
 

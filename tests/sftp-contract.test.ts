@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { stripTypeScriptTypes } from 'node:module';
+import { isFileBrowserProtocol } from '../src/file-protocol.ts';
 import { parseWorkspaceNotes } from '../electron/workspace-notes.ts';
 import { parseWorkspaceRdpSettings } from '../electron/workspace-rdp-contract.ts';
 
@@ -156,6 +157,7 @@ test('SFTP reconnect waits for edit confirmation and close, rejecting duplicates
   let answer!: (value: boolean) => void;
   let failClose = false;
   const reconnect = new Function(
+    'isFileBrowserProtocol',
     'sessionsRef',
     'sftpReconnectPending',
     'restartSession',
@@ -163,6 +165,7 @@ test('SFTP reconnect waits for edit confirmation and close, rejecting duplicates
     'window',
     stripTypeScriptTypes(source.slice(start, end)) + ';return reconnectSession;',
   )(
+    isFileBrowserProtocol,
     sessionsRef,
     pending,
     () => calls.push('restart'),
@@ -271,6 +274,26 @@ test('Electron accepts SFTP connection creation, editing and subsystem-only open
   assert.equal(validators.parseWorkspaceNodeWriteRequest(draft, false).protocol, 'sftp');
   assert.equal(
     validators.parseWorkspaceNodeWriteRequest(
+      { ...draft, protocol: 'smb', host: 'smb://server/share', port: 445 },
+      false,
+    ).protocol,
+    'smb',
+  );
+  assert.equal(
+    validators.parseWorkspaceNodeWriteRequest(
+      {
+        ...draft,
+        id: 'smb-node',
+        protocol: 'smb',
+        inlinePasswordAction: 'preserve',
+        inlinePassword: '',
+      },
+      true,
+    ).inlinePasswordAction,
+    'preserve',
+  );
+  assert.equal(
+    validators.parseWorkspaceNodeWriteRequest(
       { ...draft, id: 'node', inlinePasswordAction: 'preserve', inlinePassword: '' },
       true,
     ).inlinePasswordAction,
@@ -302,6 +325,20 @@ test('Electron accepts SFTP connection creation, editing and subsystem-only open
     rows: 24,
   };
   assert.equal(validators.isSshOpenRequest(direct), true);
+  assert.equal(
+    validators.isSshOpenRequest({ ...direct, mode: 'smb', host: 'smb://server/share', port: 445 }),
+    true,
+  );
+  assert.equal(
+    validators.isSshOpenRequest({
+      sessionId: 'smb',
+      nodeId: 'saved-smb',
+      mode: 'smb',
+      columns: 0,
+      rows: 0,
+    }),
+    true,
+  );
   assert.equal(validators.isSshOpenRequest({ ...direct, mode: 'terminal' }), true);
   assert.equal(validators.isSshOpenRequest({ ...direct, mode: 'shell-command' }), false);
   assert.equal(

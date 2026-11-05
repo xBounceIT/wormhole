@@ -43,6 +43,8 @@ import { SftpBrowserSurface } from '@/components/SftpBrowser';
 import { ConnectionStepper } from '@/components/ConnectionStepper';
 import { Button } from '@/components/ui/button';
 import { requiresSshCertificateReplacement } from '@/runtime-credential-errors';
+import { isFileBrowserProtocol } from '@/file-protocol';
+${app.slice(app.indexOf('function protocolLabel('), app.indexOf('function ProtocolIcon('))}
 const SshCertificateEditorContext = createContext(null);
 ${connectionState}
 export ${sessionSurface}`;
@@ -165,13 +167,13 @@ app.whenReady().then(async () => {
     assert.ok(paneRange.count > 0, 'The checkbox grid must render');
     assert.deepEqual(failures, []);
     // The changed return block is measured separately from unchanged protocol dispatch branches.
-    const stateOffset = source.indexOf('SFTP connection state');
+    const stateOffset = source.indexOf(' connection state');
     assert.ok(stateOffset >= 0);
     const stateBlock = script.functions.flatMap(item => item.ranges)
       .filter(range => range.startOffset <= stateOffset && range.endOffset > stateOffset)
       .sort((left, right) => (left.endOffset - left.startOffset) - (right.endOffset - right.startOffset))[0];
-    assert.ok(stateBlock?.count > 0, 'SFTP connection placeholder must execute');
-    console.log('SFTP connection placeholder: V8 block coverage 100.00%');
+    assert.ok(stateBlock?.count > 0, 'File connection placeholder must execute');
+    console.log('SFTP/SMB connection placeholder: V8 block coverage 100.00%');
     // Test tooltip hover, focus and dismissal separately from session lifecycle coverage.
     await window.webContents.executeJavaScript('SftpSessionTests.runSftpToolbarTooltipTests()');
   } finally {

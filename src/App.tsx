@@ -1,3 +1,4 @@
+import { fileSessionMode, isFileBrowserProtocol } from './file-protocol';
 import { SftpEditorSettings, SftpRecoveryNotice } from './components/SftpEditors';
 import { SftpConnectionIcon } from './components/SftpConnectionIcon';
 import {
@@ -378,7 +379,7 @@ const WebSurface = lazy(() =>
 );
 
 type Protocol = QuickConnectProtocol;
-type CredentialProtocol = Extract<Protocol, 'ssh' | 'rdp' | 'vnc'>;
+type CredentialProtocol = Extract<Protocol, 'ssh' | 'rdp' | 'vnc' | 'smb'>;
 type AutoSudoMode = 'inherit' | 'on' | 'off';
 type CredentialSelection = 'inherit' | 'none' | string;
 type FolderForm = {
@@ -735,7 +736,7 @@ type SshCredentials = {
 };
 
 type SshStartRequest = {
-  mode?: 'terminal' | 'sftp';
+  mode?: 'terminal' | 'sftp' | 'smb';
   sessionId: string;
   nodeId?: string;
   host?: string;
@@ -794,6 +795,9 @@ function workspaceCredentialOptions(workspace: WormholeWorkspaceSnapshot): Crede
     rdp: (workspace.credentialOptions.rdp as CredentialRecord[]).filter((credential) =>
       credentialCanUseProtocol(credential.kind, 'rdp'),
     ),
+    smb: ((workspace.credentialOptions.smb ?? []) as CredentialRecord[]).filter((credential) =>
+      credentialCanUseProtocol(credential.kind, 'smb'),
+    ),
     vnc: (workspace.credentialOptions.vnc as CredentialRecord[]).filter((credential) =>
       credentialCanUseProtocol(credential.kind, 'vnc'),
     ),
@@ -807,6 +811,7 @@ function mergeCredentialOption(
   const next = {
     ssh: groups.ssh.filter((candidate) => candidate.id !== credential.id),
     rdp: groups.rdp.filter((candidate) => candidate.id !== credential.id),
+    smb: groups.smb.filter((candidate) => candidate.id !== credential.id),
     vnc: groups.vnc.filter((candidate) => candidate.id !== credential.id),
   };
   if (
@@ -871,7 +876,7 @@ function CredentialProviderIcon({
 
 type CredentialDraft = {
   name: string;
-  protocol: 'ssh' | 'rdp' | 'vnc';
+  protocol: 'ssh' | 'rdp' | 'vnc' | 'smb';
   kind: Extract<CredentialKind, 'password' | 'sshKey'>;
   username: string;
   domain: string;
@@ -1087,6 +1092,7 @@ function protocolLabel(protocol: Protocol) {
   return {
     ssh: 'SSH',
     sftp: 'SFTP',
+    smb: 'SMB',
     rdp: 'RDP',
     http: 'Browser',
     https: 'Browser',
@@ -1096,6 +1102,7 @@ function protocolLabel(protocol: Protocol) {
 }
 
 function ProtocolIcon({ protocol, size = 15 }: { protocol: Protocol; size?: number }) {
+  if (protocol === 'smb') return <FolderOpen size={size} />;
   if (protocol === 'sftp') return <SftpConnectionIcon size={size} />;
   if (protocol === 'ssh') return <Terminal size={size} />;
   if (protocol === 'rdp') return <Monitor size={size} />;
@@ -1108,6 +1115,7 @@ function protocolTone(protocol: Protocol) {
   return {
     ssh: 'text-foreground',
     sftp: 'text-foreground',
+    smb: 'text-foreground',
     rdp: 'text-muted-foreground',
     http: 'text-foreground/70',
     https: 'text-foreground/80',
@@ -2263,7 +2271,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     sshAutoSudoAvailable(newConnectionForm.useSavedCredentials, selectedConnectionCredential?.kind);
   const folderCredentialOptions = useMemo(() => {
     const byID = new Map<string, CredentialRecord>();
-    for (const protocol of ['ssh', 'rdp', 'vnc'] as const) {
+    for (const protocol of ['ssh', 'rdp', 'vnc', 'smb'] as const) {
       for (const credential of credentialOptions[protocol]) byID.set(credential.id, credential);
     }
     return [...byID.values()].sort((left, right) => left.name.localeCompare(right.name));
@@ -2280,9 +2288,16 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     [folderCredentialOptions],
   );
   const runtimeCredentialSelectionOptions = useMemo<
-    Record<'ssh' | 'rdp', SearchableComboboxOption[]>
+    Record<'ssh' | 'rdp' | 'smb', SearchableComboboxOption[]>
   >(
     () => ({
+      smb: [
+        { value: manualCredentialSelectionValue, label: 'Enter manually' },
+        ...credentialOptions.smb.map((credential) => ({
+          value: credential.id,
+          label: credential.name,
+        })),
+      ],
       ssh: [
         { value: manualCredentialSelectionValue, label: 'Enter manually' },
         ...credentialOptions.ssh.map((credential) => ({
@@ -2302,6 +2317,15 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   );
   const selectedSession =
     sessions.find((session) => session.id === selectedSessionId) ?? sessions[0];
+  const fileCredentialProtocol =
+    sessions.find(
+      (session) =>
+        sshCredentialPrompt?.sessionId === session.id ||
+        (sshCredentialPrompt?.backendSessionId !== undefined &&
+          sshCredentialPrompt.backendSessionId === session.backendSessionId),
+    )?.protocol === 'smb'
+      ? 'smb'
+      : 'ssh';
   const resolvedTheme = theme === 'system' ? systemTheme : theme;
 
   useLayoutEffect(() => {
@@ -2584,7 +2608,8 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       if (event.type === 'connected') {
         const fileTab = sessionsRef.current.find(
           (candidate) =>
-            candidate.backendSessionId === event.sessionId && candidate.protocol === 'sftp',
+            candidate.backendSessionId === event.sessionId &&
+            isFileBrowserProtocol(candidate.protocol),
         );
         if (fileTab) window.setTimeout(() => initializeFileTransfer(fileTab.id), 0);
       }
@@ -3470,7 +3495,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         candidate.id === request.frontendSessionId,
     );
     const { frontendSessionId, ...nativeRequest } = request;
-    nativeRequest.mode ??= target?.protocol === 'sftp' ? 'sftp' : 'terminal';
+    nativeRequest.mode ??= fileSessionMode(target?.protocol);
     void api
       .openSshSession({
         ...nativeRequest,
@@ -3567,7 +3592,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       if (prompt.kind === 'saved' && prompt.nodeId && sshCredentialSave) {
         await saveRuntimeConnectionCredential(
           prompt.nodeId,
-          'ssh',
+          fileCredentialProtocol,
           selectedCredentialID,
           credentials,
         );
@@ -4117,7 +4142,11 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
 
   function requestSshCredentials(sessionId: string) {
     const session = sessions.find((candidate) => candidate.id === sessionId);
-    if (!session || (session.protocol !== 'ssh' && session.protocol !== 'sftp') || session.nodeId)
+    if (
+      !session ||
+      (session.protocol !== 'ssh' && !isFileBrowserProtocol(session.protocol)) ||
+      session.nodeId
+    )
       return;
     sshCredentialSubmitInFlight.current = false;
     setSshCredentialForm({ username: '', password: '' });
@@ -4134,7 +4163,11 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     credentialId?: string,
   ) {
     const session = sessions.find((candidate) => candidate.id === sessionId);
-    if (!session || (session.protocol !== 'ssh' && session.protocol !== 'sftp') || session.nodeId)
+    if (
+      !session ||
+      (session.protocol !== 'ssh' && !isFileBrowserProtocol(session.protocol)) ||
+      session.nodeId
+    )
       return;
 
     const backendSessionId = newSessionToken();
@@ -4160,7 +4193,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       sessionId: backendSessionId,
       host: session.host,
       port: session.port,
-      mode: session.protocol === 'sftp' ? 'sftp' : 'terminal',
+      mode: fileSessionMode(session.protocol),
       credentialId,
       username: credentialId ? undefined : username,
       password: credentialId ? undefined : credentials.password,
@@ -4199,7 +4232,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     }
 
     const backendSessionId =
-      node.protocol === 'ssh' || node.protocol === 'sftp' || node.protocol === 'serial'
+      node.protocol === 'ssh' || isFileBrowserProtocol(node.protocol) || node.protocol === 'serial'
         ? newSessionToken()
         : undefined;
     const serialSettings = node.protocol === 'serial' ? serialSettingsFromNode(node) : undefined;
@@ -4214,7 +4247,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       backendSessionId,
       status:
         node.protocol === 'ssh' ||
-        node.protocol === 'sftp' ||
+        isFileBrowserProtocol(node.protocol) ||
         node.protocol === 'vnc' ||
         node.protocol === 'serial' ||
         node.protocol === 'http' ||
@@ -4238,11 +4271,14 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     setSessions((current) => [...current, session]);
     setSelectedSessionId(session.id);
     setActivePage('sessions');
-    if (backendSessionId && (session.protocol === 'ssh' || session.protocol === 'sftp')) {
+    if (
+      backendSessionId &&
+      (session.protocol === 'ssh' || isFileBrowserProtocol(session.protocol))
+    ) {
       startSshSession({
         sessionId: backendSessionId,
         nodeId: node.id,
-        mode: node.protocol === 'sftp' ? 'sftp' : 'terminal',
+        mode: fileSessionMode(node.protocol),
       });
     }
     if (backendSessionId && session.protocol === 'serial') {
@@ -4323,7 +4359,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     const currentSessions = sessionsRef.current;
     const closing = currentSessions.find((session) => session.id === id);
     if (!closing) return;
-    if (closing.protocol === 'sftp' && closing.backendSessionId) {
+    if (isFileBrowserProtocol(closing.protocol) && closing.backendSessionId) {
       if (!(await window.wormhole?.prepareSftpEditClose(closing.backendSessionId))) return;
     }
     // Retire the tab synchronously. Native disconnects may outlive the tab, and must
@@ -4491,7 +4527,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   const sftpReconnectPending = useRef(new Set<string>());
   async function reconnectSession(id: string) {
     const source = sessionsRef.current.find((session) => session.id === id);
-    if (source?.protocol !== 'sftp' || !source.backendSessionId) {
+    if (!source || !isFileBrowserProtocol(source.protocol) || !source.backendSessionId) {
       restartSession(id);
       return;
     }
@@ -4573,7 +4609,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         });
     }
     clearSftpCancelRequestsForBrowser(sftpCancelRequests.current, source.sftp);
-    if (source.nodeId && (source.protocol === 'ssh' || source.protocol === 'sftp')) {
+    if (source.nodeId && (source.protocol === 'ssh' || isFileBrowserProtocol(source.protocol))) {
       const backendSessionId = newSessionToken();
       setSessions((current) =>
         current.map((session) =>
@@ -4594,9 +4630,12 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       startSshSession({
         sessionId: backendSessionId,
         nodeId: source.nodeId,
-        mode: source.protocol === 'sftp' ? 'sftp' : 'terminal',
+        mode: fileSessionMode(source.protocol),
       });
-    } else if ((source.protocol === 'ssh' || source.protocol === 'sftp') && source.credentialId) {
+    } else if (
+      (source.protocol === 'ssh' || isFileBrowserProtocol(source.protocol)) &&
+      source.credentialId
+    ) {
       const backendSessionId = newSessionToken();
       setSessions((current) =>
         current.map((session) =>
@@ -4623,9 +4662,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         autoSudo: source.sshAutoSudo,
         tunnelConfigId: source.tunnelConfigId,
         frontendSessionId: source.id,
-        mode: source.protocol === 'sftp' ? 'sftp' : 'terminal',
+        mode: fileSessionMode(source.protocol),
       });
-    } else if (source.protocol === 'ssh' || source.protocol === 'sftp') {
+    } else if (source.protocol === 'ssh' || isFileBrowserProtocol(source.protocol)) {
       setSessions((current) =>
         current.map((session) =>
           session.id === id
@@ -4689,17 +4728,19 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       title: `${source.title} (copy)`,
       mcpAccessible: false,
       backendSessionId:
-        ((source.protocol === 'ssh' || source.protocol === 'sftp') &&
+        ((source.protocol === 'ssh' || isFileBrowserProtocol(source.protocol)) &&
           (source.nodeId || source.credentialId)) ||
         source.protocol === 'serial'
           ? newSessionToken()
           : undefined,
       status:
-        (source.protocol === 'ssh' || source.protocol === 'sftp') &&
+        (source.protocol === 'ssh' || isFileBrowserProtocol(source.protocol)) &&
         !source.nodeId &&
         !source.credentialId
           ? 'placeholder'
-          : source.protocol === 'ssh' || source.protocol === 'sftp' || source.protocol === 'serial'
+          : source.protocol === 'ssh' ||
+              isFileBrowserProtocol(source.protocol) ||
+              source.protocol === 'serial'
             ? 'connecting'
             : 'placeholder',
       terminalFrame: undefined,
@@ -4731,18 +4772,18 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     if (
       duplicate.backendSessionId &&
       duplicate.nodeId &&
-      (duplicate.protocol === 'ssh' || duplicate.protocol === 'sftp')
+      (duplicate.protocol === 'ssh' || isFileBrowserProtocol(duplicate.protocol))
     ) {
       startSshSession({
         sessionId: duplicate.backendSessionId,
         nodeId: duplicate.nodeId,
-        mode: duplicate.protocol === 'sftp' ? 'sftp' : 'terminal',
+        mode: fileSessionMode(duplicate.protocol),
       });
     }
     if (
       duplicate.backendSessionId &&
       duplicate.credentialId &&
-      (duplicate.protocol === 'ssh' || duplicate.protocol === 'sftp')
+      (duplicate.protocol === 'ssh' || isFileBrowserProtocol(duplicate.protocol))
     ) {
       startSshSession({
         sessionId: duplicate.backendSessionId,
@@ -4752,11 +4793,11 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         autoSudo: duplicate.sshAutoSudo,
         tunnelConfigId: duplicate.tunnelConfigId,
         frontendSessionId: duplicate.id,
-        mode: duplicate.protocol === 'sftp' ? 'sftp' : 'terminal',
+        mode: fileSessionMode(duplicate.protocol),
       });
     }
     if (
-      (duplicate.protocol === 'ssh' || duplicate.protocol === 'sftp') &&
+      (duplicate.protocol === 'ssh' || isFileBrowserProtocol(duplicate.protocol)) &&
       !duplicate.nodeId &&
       !duplicate.credentialId
     ) {
@@ -4787,8 +4828,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     const tab: Session = {
       ...source,
       id: `session-sftp-${newSessionToken()}`,
-      title:
-        source.protocol === 'sftp' ? `${source.title} (copy)` : `File transfer · ${source.title}`,
+      title: isFileBrowserProtocol(source.protocol)
+        ? `${source.title} (copy)`
+        : `File transfer · ${source.title}`,
       protocol: 'sftp',
       backendSessionId: newSessionToken(),
       status: 'connecting',
@@ -4824,7 +4866,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     const session = sessionsRef.current.find((candidate) => candidate.id === id);
     if (
       !session ||
-      (session.protocol !== 'ssh' && session.protocol !== 'sftp') ||
+      (session.protocol !== 'ssh' && !isFileBrowserProtocol(session.protocol)) ||
       !session.backendSessionId
     ) {
       return;
@@ -4929,7 +4971,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   }
 
   function closeSftpBrowser(id: string) {
-    if (sessionsRef.current.find((session) => session.id === id)?.protocol === 'sftp') {
+    if (isFileBrowserProtocol(sessionsRef.current.find((session) => session.id === id)?.protocol)) {
       void closeSession(id);
       return;
     }
@@ -4975,7 +5017,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     const session = sessions.find((candidate) => candidate.id === sessionId);
     if (
       !session?.backendSessionId ||
-      (session.protocol !== 'ssh' && session.protocol !== 'sftp') ||
+      (session.protocol !== 'ssh' && !isFileBrowserProtocol(session.protocol)) ||
       !session.sftp ||
       session.sftp.status === 'closing'
     ) {
@@ -5056,7 +5098,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     const session = sessions.find((candidate) => candidate.id === sessionId);
     if (
       !session?.backendSessionId ||
-      (session.protocol !== 'ssh' && session.protocol !== 'sftp') ||
+      (session.protocol !== 'ssh' && !isFileBrowserProtocol(session.protocol)) ||
       !session.sftp ||
       session.sftp.status === 'closing'
     ) {
@@ -6039,7 +6081,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
 
   async function saveRuntimeConnectionCredential(
     nodeId: string,
-    protocol: 'ssh' | 'rdp',
+    protocol: 'ssh' | 'rdp' | 'smb',
     selectedCredentialId: string,
     credentials: { username: string; domain?: string; password: string },
   ): Promise<void> {
@@ -6109,7 +6151,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         'off',
       ) === 'on';
     if (
-      (newConnectionForm.protocol === 'ssh' || newConnectionForm.protocol === 'sftp') &&
+      (newConnectionForm.protocol === 'ssh' || isFileBrowserProtocol(newConnectionForm.protocol)) &&
       !credentialId &&
       !newConnectionForm.useSavedCredentials &&
       !newConnectionForm.username.trim()
@@ -6125,7 +6167,8 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       credentialId,
     );
     const backendSessionId =
-      ((newConnectionForm.protocol === 'ssh' || newConnectionForm.protocol === 'sftp') &&
+      ((newConnectionForm.protocol === 'ssh' ||
+        isFileBrowserProtocol(newConnectionForm.protocol)) &&
         startsImmediately) ||
       newConnectionForm.protocol === 'serial'
         ? newSessionToken()
@@ -6172,7 +6215,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     setActivePage('sessions');
     setNewConnectionForm((form) => ({ ...form, inlinePassword: '' }));
     setNewConnectionOpen(false);
-    if (newConnectionForm.protocol === 'ssh' || newConnectionForm.protocol === 'sftp') {
+    if (newConnectionForm.protocol === 'ssh' || isFileBrowserProtocol(newConnectionForm.protocol)) {
       if (backendSessionId && credentialId) {
         startSshSession({
           sessionId: backendSessionId,
@@ -6182,14 +6225,14 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           autoSudo: quickAutoSudo,
           tunnelConfigId,
           frontendSessionId: id,
-          mode: newConnectionForm.protocol === 'sftp' ? 'sftp' : 'terminal',
+          mode: fileSessionMode(newConnectionForm.protocol),
         });
       } else if (backendSessionId && !newConnectionForm.useSavedCredentials) {
         startSshSession({
           sessionId: backendSessionId,
           host,
           port,
-          mode: newConnectionForm.protocol === 'sftp' ? 'sftp' : 'terminal',
+          mode: fileSessionMode(newConnectionForm.protocol),
           frontendSessionId: id,
           username: newConnectionForm.username,
           password: newConnectionForm.inlinePassword,
@@ -6254,7 +6297,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         : 'off';
       const connectionCredential: CredentialSelection =
         newConnectionForm.protocol === 'ssh' ||
-        newConnectionForm.protocol === 'sftp' ||
+        isFileBrowserProtocol(newConnectionForm.protocol) ||
         newConnectionForm.protocol === 'rdp' ||
         newConnectionForm.protocol === 'vnc'
           ? newConnectionForm.credential
@@ -6280,7 +6323,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         username:
           !newConnectionForm.useSavedCredentials &&
           (newConnectionForm.protocol === 'ssh' ||
-            newConnectionForm.protocol === 'sftp' ||
+            isFileBrowserProtocol(newConnectionForm.protocol) ||
             newConnectionForm.protocol === 'rdp')
             ? newConnectionForm.username
             : '',
@@ -6374,7 +6417,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           applyEditedSession &&
           restartEditedSession &&
           (newConnectionForm.protocol === 'ssh' ||
-            newConnectionForm.protocol === 'sftp' ||
+            isFileBrowserProtocol(newConnectionForm.protocol) ||
             newConnectionForm.protocol === 'serial')
             ? newSessionToken()
             : undefined;
@@ -6394,7 +6437,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                   status: !restartEditedSession
                     ? 'closed'
                     : newConnectionForm.protocol === 'ssh' ||
-                        newConnectionForm.protocol === 'sftp' ||
+                        isFileBrowserProtocol(newConnectionForm.protocol) ||
                         newConnectionForm.protocol === 'vnc' ||
                         newConnectionForm.protocol === 'serial' ||
                         newConnectionForm.protocol === 'http' ||
@@ -6439,12 +6482,13 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         );
         if (
           backendSessionId &&
-          (newConnectionForm.protocol === 'ssh' || newConnectionForm.protocol === 'sftp')
+          (newConnectionForm.protocol === 'ssh' ||
+            isFileBrowserProtocol(newConnectionForm.protocol))
         ) {
           startSshSession({
             sessionId: backendSessionId,
             nodeId: editingId,
-            mode: newConnectionForm.protocol === 'sftp' ? 'sftp' : 'terminal',
+            mode: fileSessionMode(newConnectionForm.protocol),
           });
         }
         if (backendSessionId && newConnectionForm.protocol === 'serial') {
@@ -6883,6 +6927,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     setCredentialOptions((current) => ({
       ssh: current.ssh.filter((credential) => credential.id !== id),
       rdp: current.rdp.filter((credential) => credential.id !== id),
+      smb: current.smb.filter((credential) => credential.id !== id),
       vnc: current.vnc.filter((credential) => credential.id !== id),
     }));
     void refreshWorkspaceCredentials().catch(() => {
@@ -7840,6 +7885,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                           <SelectContent>
                             <SelectItem value="ssh">SSH</SelectItem>
                             <SelectItem value="sftp">SFTP</SelectItem>
+                            <SelectItem value="smb">SMB</SelectItem>
                             <SelectItem value="rdp">RDP</SelectItem>
                             <SelectItem value="browser">Browser</SelectItem>
                             <SelectItem value="vnc">VNC</SelectItem>
@@ -7851,9 +7897,11 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                         <Label htmlFor="connection-host">
                           {newConnectionForm.protocol === 'serial'
                             ? 'Serial line'
-                            : connectionTypeForProtocol(newConnectionForm.protocol) === 'browser'
-                              ? 'Home page'
-                              : 'Host or address'}
+                            : newConnectionForm.protocol === 'smb'
+                              ? 'Share address'
+                              : connectionTypeForProtocol(newConnectionForm.protocol) === 'browser'
+                                ? 'Home page'
+                                : 'Host or address'}
                         </Label>
                         <Input
                           id="connection-host"
@@ -7870,9 +7918,12 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                           placeholder={
                             newConnectionForm.protocol === 'serial'
                               ? 'COM1'
-                              : connectionTypeForProtocol(newConnectionForm.protocol) === 'browser'
-                                ? 'https://example.com'
-                                : 'hostname or IP address'
+                              : newConnectionForm.protocol === 'smb'
+                                ? 'smb://server/share'
+                                : connectionTypeForProtocol(newConnectionForm.protocol) ===
+                                    'browser'
+                                  ? 'https://example.com'
+                                  : 'hostname or IP address'
                           }
                           required
                           value={newConnectionForm.host}
@@ -7956,7 +8007,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                     ) : null}
 
                     {newConnectionForm.protocol === 'ssh' ||
-                    newConnectionForm.protocol === 'sftp' ||
+                    isFileBrowserProtocol(newConnectionForm.protocol) ||
                     newConnectionForm.protocol === 'rdp' ||
                     newConnectionForm.protocol === 'vnc' ? (
                       <div className="grid gap-4">
@@ -8017,7 +8068,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
 
                     {!newConnectionForm.useSavedCredentials &&
                     (newConnectionForm.protocol === 'ssh' ||
-                      newConnectionForm.protocol === 'sftp' ||
+                      isFileBrowserProtocol(newConnectionForm.protocol) ||
                       newConnectionForm.protocol === 'rdp') ? (
                       <div className="grid gap-4 sm:grid-cols-2">
                         <div className="grid gap-2">
@@ -8912,7 +8963,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         >
           <DialogContent className="border-border/70 bg-card text-card-foreground sm:max-w-md">
             <DialogHeader>
-              <DialogTitle>SSH credentials</DialogTitle>
+              <DialogTitle>
+                {fileCredentialProtocol === 'smb' ? 'SMB' : 'SSH'} credentials
+              </DialogTitle>
               <DialogDescription>
                 Choose another saved credential or enter account credentials for this connection.
               </DialogDescription>
@@ -8922,11 +8975,11 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                 <Label htmlFor="ssh-runtime-credential">Credential</Label>
                 <SearchableCombobox
                   id="ssh-runtime-credential"
-                  emptyMessage="No SSH credentials found."
+                  emptyMessage="No credentials found."
                   onValueChange={setSshCredentialSelection}
-                  options={runtimeCredentialSelectionOptions.ssh}
+                  options={runtimeCredentialSelectionOptions[fileCredentialProtocol]}
                   placeholder="Select a credential"
-                  searchPlaceholder="Search SSH credentials…"
+                  searchPlaceholder="Search credentials…"
                   value={sshCredentialSelection}
                 />
               </div>
@@ -9516,26 +9569,29 @@ function SshTerminalConnectionState({
   const replaceCertificate = useContext(SshCertificateEditorContext);
   const isConnecting = session.status === 'connecting';
   const isFailed = session.status === 'failed';
+  const nativeProtocol = session.protocol === 'smb' ? 'SMB' : 'SSH';
   const hostKeyMismatch = !isSerial && isFailed ? session.hostKeyMismatch : undefined;
   const showTunnelStepper = isConnecting && !isSerial && Boolean(session.tunnelProgress);
   const title = isConnecting
     ? isSerial
       ? 'Opening serial port'
-      : 'Connecting to SSH'
+      : `Connecting to ${nativeProtocol}`
     : isFailed
       ? isSerial
         ? 'Serial connection failed'
-        : 'SSH connection failed'
+        : `${nativeProtocol} connection failed`
       : isSerial
         ? 'Serial session closed'
-        : 'SSH session closed';
+        : `${nativeProtocol} session closed`;
   const message = hostKeyMismatch
     ? 'The server identity changed. Verify the new fingerprint before trusting it.'
     : session.error ||
       (isConnecting
         ? isSerial
           ? 'Opening the local serial line.'
-          : 'Opening a secure shell session.'
+          : session.protocol === 'smb'
+            ? 'Opening an SMB file transfer session.'
+            : 'Opening a secure shell session.'
         : isSerial
           ? 'The serial port closed the session.'
           : 'The remote host closed the connection.');
@@ -9560,7 +9616,7 @@ function SshTerminalConnectionState({
         )}
       </div>
       <p className="font-mono text-[9px] uppercase tracking-[0.16em] text-zinc-500">
-        {isSerial ? 'Serial terminal' : 'Secure shell'}
+        {isSerial ? 'Serial terminal' : session.protocol === 'smb' ? 'SMB files' : 'Secure shell'}
       </p>
       <h3 className="mt-2 text-sm font-semibold text-zinc-100">{title}</h3>
       <p className="mt-2 max-w-xl break-words text-sm leading-relaxed text-zinc-400">{message}</p>
@@ -10748,11 +10804,11 @@ function SessionSurface({
   onTrustSshHostKey: (sessionId: string, mismatch: NonNullable<Session['hostKeyMismatch']>) => void;
   onVncStatusChange: (sessionId: string, status: Session['status']) => void;
 }) {
-  if (session.protocol === 'sftp') {
+  if (isFileBrowserProtocol(session.protocol)) {
     if (!session.sftp)
       return (
         <div
-          aria-label="SFTP connection state"
+          aria-label={`${protocolLabel(session.protocol)} connection state`}
           className="flex h-full min-h-0 min-w-0 flex-1 items-center justify-center overflow-auto bg-[#090909] px-6 py-10 text-zinc-100"
         >
           <SshTerminalConnectionState
@@ -11215,7 +11271,8 @@ export function CredentialsPage({
           ? ''
           : credentialForm.username.trim(),
       domain:
-        credentialForm.kind === 'password' && credentialForm.protocol === 'rdp'
+        credentialForm.kind === 'password' &&
+        (credentialForm.protocol === 'rdp' || credentialForm.protocol === 'smb')
           ? credentialForm.domain.trim()
           : '',
       password: credentialForm.kind === 'password' ? credentialForm.password : '',
@@ -11631,6 +11688,7 @@ export function CredentialsPage({
                 <SelectContent>
                   <SelectItem value="ssh">SSH</SelectItem>
                   <SelectItem value="rdp">RDP</SelectItem>
+                  <SelectItem value="smb">SMB</SelectItem>
                   <SelectItem value="vnc">VNC</SelectItem>
                 </SelectContent>
               </Select>
@@ -11724,7 +11782,7 @@ export function CredentialsPage({
                 />
               </div>
             ) : null}
-            {credentialForm.protocol === 'rdp' ? (
+            {credentialForm.protocol === 'rdp' || credentialForm.protocol === 'smb' ? (
               <div className="grid gap-2">
                 <Label htmlFor="credential-domain">Domain</Label>
                 <Input
@@ -11737,7 +11795,7 @@ export function CredentialsPage({
                     }))
                   }
                   placeholder="CORP"
-                  required
+                  required={credentialForm.protocol === 'rdp'}
                   value={credentialForm.domain}
                 />
               </div>
@@ -16396,7 +16454,7 @@ function SettingsPage({
             <SettingsSection title="Credential vault">
               <SettingsSwitch
                 checked={bitwardenEnabled}
-                description="Manage the Bitwarden vault used by SSH, RDP, and VNC credentials."
+                description="Manage the Bitwarden vault used by SSH, RDP, VNC, and SMB credentials."
                 disabled={bitwardenBusy}
                 label="Enable Bitwarden Password Manager"
                 onCheckedChange={(enabled) => void handleBitwardenCliEnabledChange(enabled)}

@@ -111,6 +111,7 @@ test('cache dependencies cover native sources and architecture-specific outputs'
       const backend = plan.find((step) => step.name === 'Go backend')!;
       assert.ok(backend.inputs.includes('tools/wormhole-backend'));
       assert.ok(backend.inputs.includes('tools/internal'));
+      assert.ok(backend.inputs.includes('vendor/go-smb2'));
       for (const provider of ['wgproxy', 'fortiproxy', 'ciscoproxy', 'sshproxy']) {
         assert.ok(backend.inputs.includes(`tools/wormhole-${provider}`));
       }
