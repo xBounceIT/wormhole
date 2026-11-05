@@ -39,7 +39,7 @@ test('tunnel write IPC distinguishes Forcepoint and SSH and restricts pin reset 
     { ...jump, name: '' },
     { ...jump, name: 'x'.repeat(129) },
     { ...jump, kind: -1 },
-    { ...jump, kind: 9 },
+    { ...jump, kind: 10 },
     { ...jump, kind: 1.5 },
     { ...jump, settings: [] },
     { ...jump, settings: forcepoint.settings },

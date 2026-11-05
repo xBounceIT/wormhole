@@ -928,6 +928,9 @@ func prepareTunnelAuthentication(
 	if kind == 7 {
 		return prepareForcepointAuthentication(ctx, raw, snapshots...)
 	}
+	if kind == 9 {
+		return prepareFortinetIPsecAuthentication(ctx, raw)
+	}
 	if kind == 4 {
 		return prepareStormshieldProfile(ctx, raw, snapshots...)
 	}
@@ -1126,6 +1129,16 @@ func tunnelSidecarCommand(kind int64, raw json.RawMessage) (string, []byte, erro
 	case 1:
 		payload, err := encode(openVPNConfig(stringValue("ProfileOvpn"), stringValue("Username"), stringValue("Password")))
 		return "wormhole-ovpnproxy", payload, err
+	case 9:
+		if stringValue("SamlUid") == "" || stringValue("SamlToken") == "" {
+			return "", nil, errors.New("Fortinet IPsec requires SAML authentication")
+		}
+		payload, err := encode(map[string]any{
+			"host": stringValue("Host"), "port": numberValue("Port", 500),
+			"pre_shared_key": stringValue("PreSharedKey"), "local_id": stringValue("LocalId"), "remote_id": stringValue("RemoteId"),
+			"saml_uid": stringValue("SamlUid"), "saml_token": stringValue("SamlToken"),
+		})
+		return "wormhole-fortiipsecproxy", payload, err
 	case 2:
 		useSSO := tunnelSettingBool(settings, "UseSingleSignOn")
 		if useSSO && strings.TrimSpace(stringValue("SamlAuthId")) == "" && strings.TrimSpace(stringValue("SvpnCookie")) == "" {

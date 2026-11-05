@@ -73,6 +73,12 @@ func tunnelEndpointSummary(kind int64, raw json.RawMessage) string {
 	switch kind {
 	case 0:
 		return normalizeTunnelEndpoint(tunnelSettingString(settings, "PeerEndpoint"))
+	case 9:
+		port := tunnelSettingNumber(settings, "Port")
+		if port == 0 {
+			port = 500
+		}
+		return hostPort(tunnelSettingString(settings, "Host"), port)
 	case 1:
 		return profileEndpoint()
 	case 2, 6, 7:
@@ -227,6 +233,13 @@ func writeTunnel(databasePath string, request tunnelWriteRequest, create bool) (
 		return tunnelDetails{}, errors.New("the Wormhole database schema does not support VPN tunnels")
 	}
 	importedAzureKey := ""
+	if request.Kind == 9 {
+		request.Settings, err = resolveFortinetIPsecWriteSettings(database, databasePath, request.ID, request.Settings, create)
+		if err != nil {
+			return tunnelDetails{}, err
+		}
+		defer clearBytes(request.Settings)
+	}
 	if request.Kind == 5 {
 		request.Settings, importedAzureKey, err = resolveAzureVPNServerSecret(database, databasePath, request.Settings)
 		if err != nil {
@@ -237,7 +250,7 @@ func writeTunnel(databasePath string, request tunnelWriteRequest, create bool) (
 	if err := preserveSSHJumpTrust(database, databasePath, &request); err != nil {
 		return tunnelDetails{}, err
 	}
-	editorSettings, err := azureVPNEditorSettings(request.Kind, request.ID, request.Settings)
+	editorSettings, err := tunnelEditorSettings(request.Kind, request.ID, request.Settings)
 	if err != nil {
 		return tunnelDetails{}, err
 	}
@@ -378,11 +391,11 @@ func readTunnel(databasePath string, request tunnelReadRequest) (tunnelDetails, 
 	tunnelMutationMu.RLock()
 	defer tunnelMutationMu.RUnlock()
 	details, err := readTunnelUnlocked(databasePath, request)
-	if err != nil || details.Kind != 5 {
+	if err != nil || (details.Kind != 5 && details.Kind != 9) {
 		return details, err
 	}
 	defer clearBytes(details.Settings)
-	details.Settings, err = azureVPNEditorSettings(details.Kind, details.ID, details.Settings)
+	details.Settings, err = tunnelEditorSettings(details.Kind, details.ID, details.Settings)
 	return details, err
 }
 
@@ -707,7 +720,7 @@ func validateTunnelWriteRequest(request *tunnelWriteRequest, requireID bool) err
 	if request.Name == "" || len([]rune(request.Name)) > 128 {
 		return errors.New("VPN tunnel name is required and must be 128 characters or fewer")
 	}
-	if request.Kind < 0 || request.Kind > 8 {
+	if request.Kind < 0 || request.Kind > 9 {
 		return errors.New("VPN tunnel type is invalid")
 	}
 	if request.ForgetJumpHostKeySha256 != "" && (request.Kind != 8 || !requireID || !validSSHFingerprint(request.ForgetJumpHostKeySha256)) {
@@ -722,7 +735,12 @@ func validateTunnelWriteRequest(request *tunnelWriteRequest, requireID bool) err
 	if err != nil || settings == nil {
 		return errors.New("VPN tunnel settings must be a JSON object")
 	}
-	if err := validateTunnelSettings(request.Kind, settings); err != nil {
+	if request.Kind == 9 {
+		err = validateFortinetIPsecWriteSettings(settings)
+	} else {
+		err = validateTunnelSettings(request.Kind, settings)
+	}
+	if err != nil {
 		return err
 	}
 	canonical, err := json.Marshal(settings)
@@ -734,6 +752,9 @@ func validateTunnelWriteRequest(request *tunnelWriteRequest, requireID bool) err
 }
 
 func validateTunnelSettings(kind int64, settings map[string]json.RawMessage) error {
+	if kind == 9 {
+		return validateFortinetIPsecSettings(settings)
+	}
 	if kind == 8 {
 		return validateSSHJumpSettings(settings)
 	}

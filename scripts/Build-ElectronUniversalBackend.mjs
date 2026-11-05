@@ -12,6 +12,7 @@ const sidecarNames = [
   'wormhole-wgproxy',
   'wormhole-ovpnproxy',
   'wormhole-fortiproxy',
+  'wormhole-fortiipsecproxy',
   'wormhole-ciscoproxy',
   'wormhole-sshproxy',
 ];

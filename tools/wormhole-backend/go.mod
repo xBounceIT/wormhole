@@ -1,6 +1,6 @@
 module github.com/xBounceIT/wormhole/tools/wormhole-backend
 
-go 1.25.0
+go 1.26.10
 
 require (
 	github.com/cloudsoda/go-smb2 v0.0.0-20260918041005-0c5d69b69701

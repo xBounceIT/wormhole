@@ -1,3 +1,8 @@
+import {
+  missingFortinetIPsecFields,
+  normalizeFortinetIPsecSettings,
+} from './fortinet-ipsec-state.ts';
+
 export function normalizeSSHJumpSettings(input: Record<string, unknown>): Record<string, unknown> {
   const keys =
     input.Mode === 'connection'
@@ -108,6 +113,7 @@ export function normalizeTunnelEditorSettings(
   input: Record<string, unknown>,
 ): Record<string, unknown> {
   if (kind === 8) return normalizeSSHJumpSettings(input);
+  if (kind === 9) return normalizeFortinetIPsecSettings(input);
   let settings = { ...input };
   for (const key of ['AllowedIps', 'Dns']) {
     if (typeof settings[key] === 'string') {
@@ -249,6 +255,9 @@ export function missingTunnelFields(value: {
   const missing: string[] = [];
   if (!value.name.trim()) missing.push('Name');
   switch (value.kind) {
+    case 9:
+      missing.push(...missingFortinetIPsecFields(settings));
+      break;
     case 0:
       if (blank('InterfacePrivateKey')) missing.push('Interface private key');
       if (blank('InterfaceAddress')) missing.push('Interface address');

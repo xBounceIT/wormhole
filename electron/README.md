@@ -100,7 +100,7 @@ the selected tunnel.
 
 The Tunnels page creates, edits, tests, imports, and deletes encrypted tunnel records,
 and folder/connection editors assign a route with inherit / off / selected
-tunnel semantics. WireGuard, OpenVPN, Fortinet (password or dedicated-window SAML), WatchGuard (password, imported profile, or SAML), Stormshield (automatic,
+tunnel semantics. WireGuard, OpenVPN, Fortinet SSL (password or dedicated-window SAML), Fortinet IPsec (IKEv2 with a gateway PSK and dedicated-window SAML), WatchGuard (password, imported profile, or SAML), Stormshield (automatic,
 imported profile, and OTP), Azure VPN with Microsoft Entra ID, and Cisco Secure Client run
 through native Go backends and bundled Go sidecars. Interactive challenges are serialized by
 the Electron main process; browser tokens and VPN cookies stay inside isolated authentication

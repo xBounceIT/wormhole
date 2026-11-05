@@ -436,8 +436,17 @@ test('macOS backend delegates OpenVPN to the native builder and never runs its p
   });
   assert.equal(native.length, 1);
   assert.equal(native[0].architecture, 'arm64');
-  assert.equal(calls.length, 5);
-  assert.ok(calls.every((call) => !call.options.cwd.endsWith('wormhole-ovpnproxy')));
+  assert.deepEqual(
+    calls.map((call) => path.basename(call.options.cwd)),
+    [
+      'wormhole-backend',
+      'wormhole-wgproxy',
+      'wormhole-fortiproxy',
+      'wormhole-fortiipsecproxy',
+      'wormhole-ciscoproxy',
+      'wormhole-sshproxy',
+    ],
+  );
 });
 
 test('release and CI provision native dependencies before building universal macOS binaries', () => {

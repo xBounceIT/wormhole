@@ -2544,6 +2544,8 @@ func tunnelName(value int64) string {
 		return "OpenVPN"
 	case 2:
 		return "Fortinet"
+	case 9:
+		return "Fortinet IPsec"
 	case 3:
 		return "WatchGuard"
 	case 4:

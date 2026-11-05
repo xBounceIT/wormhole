@@ -33,13 +33,14 @@ export function parseTunnelWriteRequest(value: unknown, requiresID: boolean): Tu
     typeof input.kind !== 'number' ||
     !Number.isInteger(input.kind) ||
     input.kind < 0 ||
-    input.kind > 8 ||
+    input.kind > 9 ||
     !isRecord(input.settings)
   ) {
     throw new Error('VPN tunnel settings are invalid.');
   }
   if (requiresID && !isTunnelIdentifier(input.id)) throw new Error('VPN tunnel id is invalid.');
   if (input.kind === 8) parseSSHJumpSettings(input.settings);
+  if (input.kind === 9) parseFortinetIPsecPublicSettings(input.settings, true);
   if (
     input.forgetJumpHostKeySha256 !== undefined &&
     (input.kind !== 8 ||
@@ -106,12 +107,13 @@ export function parseTunnelDetailsResponse(value: unknown): TunnelDetailsRespons
     typeof value.kind !== 'number' ||
     !Number.isInteger(value.kind) ||
     value.kind < 0 ||
-    value.kind > 8 ||
+    value.kind > 9 ||
     !isRecord(value.settings)
   ) {
     throw new Error('The VPN service returned invalid tunnel details.');
   }
   if (value.kind === 8) parseSSHJumpSettings(value.settings);
+  if (value.kind === 9) parseFortinetIPsecPublicSettings(value.settings, false);
   if (
     value.jumpHostKeySha256 !== undefined &&
     (typeof value.jumpHostKeySha256 !== 'string' ||
@@ -127,6 +129,30 @@ export function parseTunnelDetailsResponse(value: unknown): TunnelDetailsRespons
     endpoint: parseTunnelEndpoint(value.endpoint),
     settings: value.settings,
   };
+}
+
+function parseFortinetIPsecPublicSettings(
+  settings: Record<string, unknown>,
+  writing: boolean,
+): void {
+  const allowed = new Set([
+    'Host',
+    'Port',
+    'SamlPort',
+    'LocalId',
+    'RemoteId',
+    'TrustServerCertificate',
+    'HasPreSharedKey',
+    ...(writing ? ['ReplacePreSharedKey'] : []),
+  ]);
+  if (
+    Object.keys(settings).some((key) => !allowed.has(key)) ||
+    ['HasPreSharedKey', 'ReplacePreSharedKey'].some(
+      (key) => settings[key] !== undefined && typeof settings[key] !== 'boolean',
+    )
+  ) {
+    throw new Error('Fortinet IPsec editor settings must not contain secrets.');
+  }
 }
 
 export function parseSSHJumpSettings(value: unknown): Record<string, unknown> {
