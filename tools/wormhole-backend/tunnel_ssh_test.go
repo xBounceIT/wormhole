@@ -154,7 +154,7 @@ func TestSSHJumpValidation(t *testing.T) {
 			t.Fatal("accepted invalid connection mode")
 		}
 	}
-	request := tunnelWriteRequest{Name: "Jump", Kind: 9, Settings: []byte(`{}`)}
+	request := tunnelWriteRequest{Name: "Jump", Kind: 10, Settings: []byte(`{}`)}
 	if validateTunnelWriteRequest(&request, false) == nil {
 		t.Fatal("unknown tunnel kind accepted")
 	}

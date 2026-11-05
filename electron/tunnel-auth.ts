@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 
-export type TunnelBrowserCompletion = 'query-token' | 'oauth-code' | 'cookie';
+export type TunnelBrowserCompletion = 'query-token' | 'oauth-code' | 'cookie' | 'fortinet-ipsec';
 export type TunnelBrowserFailure = 'load' | 'certificate' | 'timeout' | 'session' | 'response';
 export const tunnelPromptValueMaxBytes = 16 * 1024;
 
@@ -42,7 +42,7 @@ export class TunnelBrowserPromptTracker {
 }
 
 export type TunnelAuthPartitionRequest =
-  | { completion: 'cookie' | 'oauth-code' }
+  | { completion: 'cookie' | 'oauth-code' | 'fortinet-ipsec' }
   | {
       completion: 'query-token';
       origin: string;
@@ -57,6 +57,7 @@ export type TunnelAuthPartitionRequest =
 export function tunnelAuthPartition(request: TunnelAuthPartitionRequest): string {
   switch (request.completion) {
     case 'cookie':
+    case 'fortinet-ipsec':
       return `wormhole-tunnel-auth-fortinet-${randomUUID()}`;
     case 'oauth-code':
       return 'persist:wormhole-tunnel-auth-azure';
@@ -75,6 +76,34 @@ function normalizeCertificateHostname(hostname: string): string {
     return normalized.slice(1, -1);
   }
   return normalized.endsWith('.') ? normalized.slice(0, -1) : normalized;
+}
+
+export function isFortinetIPsecRedirect(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  try {
+    const url = new URL(value);
+    return (
+      url.protocol === 'http:' &&
+      url.hostname === '127.0.0.1' &&
+      /^\d+$/.test(url.port) &&
+      Number(url.port) > 0 &&
+      Number(url.port) <= 65535 &&
+      url.pathname === '/' &&
+      !url.search &&
+      !url.hash &&
+      !url.username &&
+      !url.password
+    );
+  } catch {
+    return false;
+  }
+}
+
+export function fortinetIPsecCallbackToken(url: URL): string | undefined {
+  const tokens = url.searchParams.getAll('tokenid');
+  return tokens.length === 1 && /^[a-fA-F0-9]{32}$/.test(tokens[0]) && !url.hash
+    ? tokens[0]
+    : undefined;
 }
 
 export function isSameCertificateHostname(candidate: string, expected: string): boolean {

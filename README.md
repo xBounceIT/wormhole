@@ -109,7 +109,7 @@ available only while Wormhole is unlocked.
 Electron and Go are the primary application runtimes:
 
 - Node.js and npm.
-- Go 1.25 or newer, matching tools/wormhole-backend/go.mod.
+- Go 1.26.10 or newer, matching tools/wormhole-backend/go.mod.
 - The Electron runtime downloaded by npm for the desktop shell.
 - The .NET 10 SDK on Windows, only for the separate ActiveX RDP host used by
   Electron.

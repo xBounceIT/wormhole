@@ -360,6 +360,7 @@ import {
   type TunnelMode,
 } from './tunnel-state';
 import { SshTunnelFields } from './components/SshTunnelFields';
+import { fortinetIPsecDefaults, fortinetIPsecFields } from './fortinet-ipsec-state';
 
 const MRemoteImportDialog = lazy(() =>
   import('./components/MRemoteImportDialog').then((module) => ({
@@ -12047,6 +12048,7 @@ const tunnelKinds = [
   { value: 0, label: 'WireGuard' },
   { value: 1, label: 'OpenVPN' },
   { value: 2, label: 'Fortinet' },
+  { value: 9, label: 'Fortinet IPsec (SAML)' },
   { value: 3, label: 'WatchGuard' },
   { value: 4, label: 'Stormshield' },
   { value: 5, label: 'Azure VPN' },
@@ -12140,6 +12142,7 @@ function TunnelRouteField({
 }
 
 function tunnelEditorFields(kind: number): TunnelField[] {
+  if (kind === 9) return fortinetIPsecFields;
   switch (kind) {
     case 0:
       return [
@@ -12563,6 +12566,8 @@ function tunnelEditorFields(kind: number): TunnelField[] {
 
 function tunnelDefaultSettings(kind: number): Record<string, unknown> {
   switch (kind) {
+    case 9:
+      return { ...fortinetIPsecDefaults };
     case 2:
       return { Port: 443 };
     case 3:
@@ -13241,6 +13246,19 @@ function TunnelEditorDialog({
                     client-certificate authentication are not supported.
                   </p>
                   {rows('Two-factor & advanced')}
+                </TunnelAdvanced>
+              </>
+            ) : null}
+            {value.kind === 9 ? (
+              <>
+                <TunnelSection title="Gateway">{rows('Gateway')}</TunnelSection>
+                <TunnelSection title="Authentication">{rows('Authentication')}</TunnelSection>
+                <p className="text-[11px] leading-relaxed text-muted-foreground">
+                  IKEv2 IPsec with SAML sign-in in a dedicated window. Requires a gateway PSK, UDP
+                  access to IKE and NAT-T (4500), and the FortiGate SAML HTTPS port.
+                </p>
+                <TunnelAdvanced label="Advanced" onOpenChange={setAdvancedOpen} open={advancedOpen}>
+                  {rows('Advanced')}
                 </TunnelAdvanced>
               </>
             ) : null}

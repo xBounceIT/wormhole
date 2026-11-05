@@ -73,6 +73,12 @@ func tunnelEndpointSummary(kind int64, raw json.RawMessage) string {
 	switch kind {
 	case 0:
 		return normalizeTunnelEndpoint(tunnelSettingString(settings, "PeerEndpoint"))
+	case 9:
+		port := tunnelSettingNumber(settings, "Port")
+		if port == 0 {
+			port = 500
+		}
+		return hostPort(tunnelSettingString(settings, "Host"), port)
 	case 1:
 		return profileEndpoint()
 	case 2, 6, 7:
@@ -707,7 +713,7 @@ func validateTunnelWriteRequest(request *tunnelWriteRequest, requireID bool) err
 	if request.Name == "" || len([]rune(request.Name)) > 128 {
 		return errors.New("VPN tunnel name is required and must be 128 characters or fewer")
 	}
-	if request.Kind < 0 || request.Kind > 8 {
+	if request.Kind < 0 || request.Kind > 9 {
 		return errors.New("VPN tunnel type is invalid")
 	}
 	if request.ForgetJumpHostKeySha256 != "" && (request.Kind != 8 || !requireID || !validSSHFingerprint(request.ForgetJumpHostKeySha256)) {
@@ -734,6 +740,9 @@ func validateTunnelWriteRequest(request *tunnelWriteRequest, requireID bool) err
 }
 
 func validateTunnelSettings(kind int64, settings map[string]json.RawMessage) error {
+	if kind == 9 {
+		return validateFortinetIPsecSettings(settings)
+	}
 	if kind == 8 {
 		return validateSSHJumpSettings(settings)
 	}

@@ -10,6 +10,8 @@ import { coverageThreshold } from '../scripts/test-coverage.ts';
 import { TunnelFailureRegistry } from '../electron/tunnel-failure.ts';
 import {
   encodeTunnelOAuthCallback,
+  isFortinetIPsecRedirect,
+  fortinetIPsecCallbackToken,
   isMatchingOAuthRedirect,
   isSameCertificateHostname,
   tunnelPromptValueMaxBytes,
@@ -210,6 +212,8 @@ function browserAuthHarness(
       isSameCertificateHostname,
       isMatchingOAuthRedirect,
       encodeTunnelOAuthCallback,
+      isFortinetIPsecRedirect,
+      fortinetIPsecCallbackToken,
       tunnelPromptValueMaxBytes,
       tunnelBrowserLoadFailure,
       TunnelBrowserPromptTracker,
@@ -405,6 +409,115 @@ test('SAML authentication timeout reports an error instead of a user cancellatio
 });
 
 const fortinetEvent = { completion: 'cookie', cookieName: 'SVPNCOOKIE', requireHttpOnly: true };
+
+test('Fortinet IPsec accepts only an exact reserved loopback callback', async (t) => {
+  const callback = 'http://127.0.0.1:41001/';
+  const token = 'a1'.repeat(16);
+  const auth = browserAuthHarness(t, { completion: 'fortinet-ipsec', redirectPrefix: callback });
+  await setImmediate();
+  for (const destination of [
+    'http://127.0.0.1:41002/',
+    'http://localhost:41001/',
+    callback + 'other',
+  ]) {
+    auth.window.webContents.emit('will-redirect', {
+      isMainFrame: true,
+      url: destination + '?tokenid=' + token,
+      preventDefault() {
+        assert.fail('blocked unrelated navigation');
+      },
+    });
+  }
+  assert.deepEqual(auth.responses, []);
+  let prevented = false;
+  auth.window.webContents.emit('will-redirect', {
+    isMainFrame: true,
+    url: callback + '?tokenid=' + token + '&username=private-user',
+    preventDefault() {
+      prevented = true;
+    },
+  });
+  await auth.finished;
+  assert.equal(prevented, true);
+  assert.equal(auth.responses.length, 1);
+  assert.equal(auth.responses[0].value, token);
+  assert.equal(auth.window.isDestroyed(), true);
+});
+
+test('Fortinet IPsec rejects invalid tokens and isolates every sign-in', async (t) => {
+  const callback = 'http://127.0.0.1:41001/';
+  const auth = browserAuthHarness(t, { completion: 'fortinet-ipsec', redirectPrefix: callback });
+  await setImmediate();
+  auth.window.webContents.emit('will-navigate', {
+    isMainFrame: true,
+    url: callback + '?tokenid=private-invalid',
+    preventDefault() {},
+  });
+  await auth.finished;
+  assert.equal(auth.responses[0].value, '');
+  assert.equal(auth.responses[0].browserFailure, 'response');
+  assert.notEqual(
+    tunnelAuthPartition({ completion: 'fortinet-ipsec' }),
+    tunnelAuthPartition({ completion: 'fortinet-ipsec' }),
+  );
+});
+
+test('Fortinet IPsec callback parsing bounds ports and prevents ambiguous tokens', () => {
+  assert.equal(isFortinetIPsecRedirect('http://127.0.0.1:41001/'), true);
+  for (const value of [
+    null,
+    42,
+    'bad',
+    'https://127.0.0.1:41001/',
+    'http://localhost:41001/',
+    'http://127.0.0.1/',
+    'http://127.0.0.1:0/',
+    'http://127.0.0.1:65536/',
+    'http://user@127.0.0.1:4000/',
+    'http://127.0.0.1:4000/path',
+    'http://127.0.0.1:4000/?state=x',
+    'http://127.0.0.1:4000/#x',
+  ])
+    assert.equal(isFortinetIPsecRedirect(value), false);
+  const base = 'http://127.0.0.1:41001/';
+  assert.equal(
+    fortinetIPsecCallbackToken(new URL(base + '?tokenid=' + 'A1'.repeat(16))),
+    'A1'.repeat(16),
+  );
+  for (const query of [
+    '',
+    '?tokenid=bad',
+    '?tokenid=' + 'a'.repeat(33),
+    '?tokenid=' + 'a'.repeat(32) + '&tokenid=' + 'b'.repeat(32),
+    '?tokenid=' + 'a'.repeat(32) + '#x',
+  ])
+    assert.equal(fortinetIPsecCallbackToken(new URL(base + query)), undefined);
+});
+
+test('native browser events accept only a bounded Fortinet IPsec loopback target', () => {
+  const start = mainSource.indexOf('function parseTunnelBrowserEvent(');
+  const end = mainSource.indexOf('let tunnelBrowserAuthQueue:', start);
+  const parse = runInNewContext(
+    stripTypeScriptTypes(mainSource.slice(start, end)) + '\nparseTunnelBrowserEvent',
+    { URL, isFortinetIPsecRedirect },
+  );
+  const event = {
+    sessionId: 'lease',
+    promptId: 'prompt',
+    title: 'Fortinet IPsec SAML sign-in',
+    urls: ['https://vpn.test:1001/saml?request=1'],
+    completion: 'fortinet-ipsec',
+    redirectPrefix: 'http://127.0.0.1:45001/',
+  };
+  assert.equal(parse(event).completion, 'fortinet-ipsec');
+  for (const redirectPrefix of [
+    'http://evil.test:45001/',
+    'http://127.0.0.1:45001/other',
+    undefined,
+  ])
+    assert.equal(parse({ ...event, redirectPrefix }), undefined);
+  assert.equal(parse({ ...event, urls: ['http://vpn.test/saml'] }), undefined);
+});
 
 test('backend prompt closure ends active and queued SAML prompts with matching ownership', async (t) => {
   const auth = browserAuthHarness(t);

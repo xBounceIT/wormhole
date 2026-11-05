@@ -33,7 +33,7 @@ export function parseTunnelWriteRequest(value: unknown, requiresID: boolean): Tu
     typeof input.kind !== 'number' ||
     !Number.isInteger(input.kind) ||
     input.kind < 0 ||
-    input.kind > 8 ||
+    input.kind > 9 ||
     !isRecord(input.settings)
   ) {
     throw new Error('VPN tunnel settings are invalid.');
@@ -106,7 +106,7 @@ export function parseTunnelDetailsResponse(value: unknown): TunnelDetailsRespons
     typeof value.kind !== 'number' ||
     !Number.isInteger(value.kind) ||
     value.kind < 0 ||
-    value.kind > 8 ||
+    value.kind > 9 ||
     !isRecord(value.settings)
   ) {
     throw new Error('The VPN service returned invalid tunnel details.');

@@ -140,6 +140,8 @@ import {
 } from './tunnel-test-contract.js';
 import {
   encodeTunnelOAuthCallback,
+  isFortinetIPsecRedirect,
+  fortinetIPsecCallbackToken,
   isSameCertificateHostname,
   isMatchingOAuthRedirect,
   tunnelPromptValueMaxBytes,
@@ -2721,7 +2723,11 @@ function parseTunnelBrowserEvent(value: object): TunnelBrowserEvent | undefined 
     urls.length === 0 ||
     urls.length > 5 ||
     !urls.every((url) => typeof url === 'string' && url.length <= 4096) ||
-    (completion !== 'query-token' && completion !== 'oauth-code' && completion !== 'cookie') ||
+    (completion !== 'query-token' &&
+      completion !== 'oauth-code' &&
+      completion !== 'cookie' &&
+      completion !== 'fortinet-ipsec') ||
+    (completion === 'fortinet-ipsec' && !isFortinetIPsecRedirect(redirectPrefix)) ||
     (completion === 'oauth-code' &&
       (typeof redirectPrefix !== 'string' ||
         redirectPrefix !== 'http://localhost:2023' ||
@@ -2913,7 +2919,8 @@ async function runTunnelBrowserAuth(
     nativeConnectionTimeoutMs - 5_000,
   );
   const matchesOAuthRedirect = (current: URL) =>
-    event.completion === 'oauth-code' && isMatchingOAuthRedirect(current, event.redirectPrefix!);
+    (event.completion === 'oauth-code' || event.completion === 'fortinet-ipsec') &&
+    isMatchingOAuthRedirect(current, event.redirectPrefix!);
   const nextCandidate = (failure: TunnelBrowserFailure) => {
     if (settled) return;
     candidate++;
@@ -2929,6 +2936,12 @@ async function runTunnelBrowserAuth(
     try {
       current = new URL(rawURL);
     } catch {
+      return;
+    }
+    if (event.completion === 'fortinet-ipsec') {
+      if (!matchesOAuthRedirect(current)) return;
+      const token = fortinetIPsecCallbackToken(current);
+      await complete(false, token ?? '', token ? undefined : 'response');
       return;
     }
     if (event.completion === 'oauth-code') {
@@ -3048,7 +3061,7 @@ async function runTunnelBrowserAuth(
     navigationEvent: Electron.Event<{ isMainFrame: boolean; url: string }>,
   ) => {
     if (!navigationEvent.isMainFrame) return;
-    if (event.completion === 'oauth-code') {
+    if (event.completion === 'oauth-code' || event.completion === 'fortinet-ipsec') {
       try {
         if (matchesOAuthRedirect(new URL(navigationEvent.url))) {
           navigationEvent.preventDefault();

@@ -14,6 +14,7 @@ New-Item -ItemType Directory -Path $destination -Force | Out-Null
 
 & (Join-Path $scriptRoot 'Fetch-WgProxy.ps1') -Arch $Arch -Quiet
 & (Join-Path $scriptRoot 'Fetch-FortiProxy.ps1') -Arch $Arch -Quiet
+& (Join-Path $scriptRoot 'Fetch-FortiIpsecProxy.ps1') -Arch $Arch
 & (Join-Path $scriptRoot 'Fetch-CiscoProxy.ps1') -Arch $Arch -Quiet
 & (Join-Path $scriptRoot 'Fetch-SshProxy.ps1') -Arch $Arch
 if ($RequireRealOvpn) {
@@ -25,6 +26,7 @@ if ($RequireRealOvpn) {
 $sources = @(
     @{ Directory = "obj\wgproxy\$Arch"; Name = 'wormhole-wgproxy.exe' },
     @{ Directory = "obj\fortiproxy\$Arch"; Name = 'wormhole-fortiproxy.exe' },
+    @{ Directory = "obj\fortiipsecproxy\$Arch"; Name = 'wormhole-fortiipsecproxy.exe' },
     @{ Directory = "obj\ovpnproxy\$Arch"; Name = 'wormhole-ovpnproxy.exe' },
     @{ Directory = "obj\ciscoproxy\$Arch"; Name = 'wormhole-ciscoproxy.exe' },
     @{ Directory = "obj\sshproxy\$Arch"; Name = 'wormhole-sshproxy.exe' }

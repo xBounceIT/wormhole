@@ -293,7 +293,7 @@ func TestSSHTerminalEmulatorPreservesChunkedLargeOutput(t *testing.T) {
 		t.Fatalf("large output published the wrong scrollback size: got %d want %d", len(frame.Scrollback), sshTerminalMaxScrollbackLines)
 	}
 	if scrollbackLineText(frame.Scrollback[0]) != "large-output-00997" || scrollbackLineText(frame.Scrollback[len(frame.Scrollback)-1]) != "large-output-05996" {
-		t.Fatalf("large output lost or duplicated rows: first=%q last=%q", frame.Scrollback[0], frame.Scrollback[len(frame.Scrollback)-1])
+		t.Fatalf("large output lost or duplicated rows: first=%q last=%q", scrollbackLineText(frame.Scrollback[0]), scrollbackLineText(frame.Scrollback[len(frame.Scrollback)-1]))
 	}
 	if len(frame.Scrollback[0].Runs) == 0 || frame.Scrollback[0].Runs[0].Foreground != uint16(vt10x.Red) {
 		t.Fatalf("large output lost its color during history rebase: %#v", frame.Scrollback[0])
