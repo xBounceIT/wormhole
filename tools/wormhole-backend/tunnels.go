@@ -233,6 +233,13 @@ func writeTunnel(databasePath string, request tunnelWriteRequest, create bool) (
 		return tunnelDetails{}, errors.New("the Wormhole database schema does not support VPN tunnels")
 	}
 	importedAzureKey := ""
+	if request.Kind == 9 {
+		request.Settings, err = resolveFortinetIPsecWriteSettings(database, databasePath, request.ID, request.Settings, create)
+		if err != nil {
+			return tunnelDetails{}, err
+		}
+		defer clearBytes(request.Settings)
+	}
 	if request.Kind == 5 {
 		request.Settings, importedAzureKey, err = resolveAzureVPNServerSecret(database, databasePath, request.Settings)
 		if err != nil {
@@ -243,7 +250,7 @@ func writeTunnel(databasePath string, request tunnelWriteRequest, create bool) (
 	if err := preserveSSHJumpTrust(database, databasePath, &request); err != nil {
 		return tunnelDetails{}, err
 	}
-	editorSettings, err := azureVPNEditorSettings(request.Kind, request.ID, request.Settings)
+	editorSettings, err := tunnelEditorSettings(request.Kind, request.ID, request.Settings)
 	if err != nil {
 		return tunnelDetails{}, err
 	}
@@ -384,11 +391,11 @@ func readTunnel(databasePath string, request tunnelReadRequest) (tunnelDetails, 
 	tunnelMutationMu.RLock()
 	defer tunnelMutationMu.RUnlock()
 	details, err := readTunnelUnlocked(databasePath, request)
-	if err != nil || details.Kind != 5 {
+	if err != nil || (details.Kind != 5 && details.Kind != 9) {
 		return details, err
 	}
 	defer clearBytes(details.Settings)
-	details.Settings, err = azureVPNEditorSettings(details.Kind, details.ID, details.Settings)
+	details.Settings, err = tunnelEditorSettings(details.Kind, details.ID, details.Settings)
 	return details, err
 }
 
@@ -728,7 +735,12 @@ func validateTunnelWriteRequest(request *tunnelWriteRequest, requireID bool) err
 	if err != nil || settings == nil {
 		return errors.New("VPN tunnel settings must be a JSON object")
 	}
-	if err := validateTunnelSettings(request.Kind, settings); err != nil {
+	if request.Kind == 9 {
+		err = validateFortinetIPsecWriteSettings(settings)
+	} else {
+		err = validateTunnelSettings(request.Kind, settings)
+	}
+	if err != nil {
 		return err
 	}
 	canonical, err := json.Marshal(settings)

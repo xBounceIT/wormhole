@@ -23,6 +23,10 @@ browser callback flow. Gateway HTTPS certificates are verified by default; the
 explicit trust switch applies only to the SAML HTTPS flow, while IKE still verifies
 the PSK. UDP NAT-T port 4500 must be reachable.
 
+The PSK is entered in a separate, isolated native window when saving. The editor
+receives only a key-presence marker; ordinary edits preserve the stored key, and
+the replacement option requests a new native entry without revealing the old key.
+
 Supported proposals: AES-256-GCM, AES-256-CBC/SHA-256, ChaCha20-Poly1305; SHA-256
 PRF; DH groups 14, 19, 20, 31. Supported authentication: PSK-authenticated gateway
 with SAML-token EAP-MSCHAPv2 or EAP-GTC client. IKEv1, certificate-authenticated IKE gateways,

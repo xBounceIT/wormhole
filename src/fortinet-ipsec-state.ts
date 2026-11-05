@@ -4,7 +4,7 @@ export const fortinetIPsecFields: {
   key: string;
   label: string;
   section: string;
-  type?: 'number' | 'password' | 'switch';
+  type?: 'number' | 'switch';
   hint?: string;
   placeholder?: string;
   fullWidth?: boolean;
@@ -12,13 +12,6 @@ export const fortinetIPsecFields: {
   { key: 'Host', label: 'Host', section: 'Gateway', placeholder: 'vpn.example.com' },
   { key: 'Port', label: 'IKE port (UDP)', section: 'Gateway', type: 'number' },
   { key: 'SamlPort', label: 'SAML port (HTTPS)', section: 'Gateway', type: 'number' },
-  {
-    key: 'PreSharedKey',
-    label: 'Gateway pre-shared key (PSK)',
-    section: 'Authentication',
-    type: 'password',
-    fullWidth: true,
-  },
   {
     key: 'LocalId',
     label: 'Local IKE identity (optional)',
@@ -44,12 +37,16 @@ export function normalizeFortinetIPsecSettings(
   input: Record<string, unknown>,
 ): Record<string, unknown> {
   const result: Record<string, unknown> = {};
-  for (const { key } of fortinetIPsecFields) {
+  for (const key of [
+    ...fortinetIPsecFields.map((field) => field.key),
+    'HasPreSharedKey',
+    'ReplacePreSharedKey',
+  ]) {
     let value = input[key];
     if (value === undefined || value === '') continue;
     if (key === 'Port' || key === 'SamlPort') {
       if (typeof value === 'string' && /^\d+$/.test(value.trim())) value = Number(value);
-    } else if (typeof value === 'string' && key !== 'PreSharedKey') value = value.trim();
+    } else if (typeof value === 'string') value = value.trim();
     result[key] = value;
   }
   return result;
@@ -57,12 +54,7 @@ export function normalizeFortinetIPsecSettings(
 
 export function missingFortinetIPsecFields(settings: Record<string, unknown>): string[] {
   const missing: string[] = [];
-  for (const [key, label] of [
-    ['Host', 'Host'],
-    ['PreSharedKey', 'Gateway pre-shared key (PSK)'],
-  ]) {
-    if (typeof settings[key] !== 'string' || !settings[key].trim()) missing.push(label);
-  }
+  if (typeof settings.Host !== 'string' || !settings.Host.trim()) missing.push('Host');
   for (const key of ['Port', 'SamlPort']) {
     const value = settings[key];
     if (

@@ -151,6 +151,7 @@ import {
   type TunnelBrowserCompletion,
   type TunnelBrowserFailure,
 } from './tunnel-auth.js';
+import { prepareFortinetIPsecWrite, promptFortinetIPsecSecret } from './fortinet-ipsec-secret.js';
 import {
   SerialBackendClient,
   isSerialInput,
@@ -8080,6 +8081,40 @@ function parseMcpApproval(value: unknown): {
   return { requestId, approved: value.approved };
 }
 
+async function saveTunnelWithNativeSecret(
+  operation: 'tunnel-create' | 'tunnel-update',
+  request: ReturnType<typeof parseTunnelWriteRequest>,
+) {
+  const epoch = authSession.authorizationEpoch;
+  const native = await prepareFortinetIPsecWrite(request, () => {
+    const pending = tunnelBrowserAuthQueue
+      .catch(() => undefined)
+      .then(() => {
+        const parent = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
+        return promptFortinetIPsecSecret({
+          createWindow: (options) => new BrowserWindow(options),
+          ipc: ipcMain,
+          preload: path.join(__dirname, 'fortinet-ipsec-secret-preload.cjs'),
+          parent: parent && !parent.isDestroyed() ? parent : undefined,
+          isAuthorized: () => isAuthorizationEpochCurrent(epoch),
+          present: (window) => mcpApprovalWindowCoordinator.presentTunnelAuthWindow(window),
+          forget: (window) => mcpApprovalWindowCoordinator.forgetTunnelAuthWindow(window),
+        });
+      });
+    tunnelBrowserAuthQueue = pending.then(
+      () => undefined,
+      () => undefined,
+    );
+    return pending;
+  });
+  try {
+    requireAuthorizationEpoch(epoch);
+    return parseTunnelDetailsResponse(await runBackend<unknown>(operation, native));
+  } finally {
+    if (native.kind === 9) delete native.settings.PreSharedKey;
+  }
+}
+
 function registerIpcHandlers(sshBackend: NativeSshBackend): void {
   ipcMain.on('lifecycle:close-confirmation-ready', (event) => {
     const owner = BrowserWindow.fromWebContents(event.sender);
@@ -9185,7 +9220,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     const request = parseTunnelWriteRequest(value, false);
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
-      return parseTunnelDetailsResponse(await runBackend<unknown>('tunnel-create', request));
+      return saveTunnelWithNativeSecret('tunnel-create', request);
     });
   });
 
@@ -9207,7 +9242,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     const request = parseTunnelWriteRequest(value, true);
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
-      return parseTunnelDetailsResponse(await runBackend<unknown>('tunnel-update', request));
+      return saveTunnelWithNativeSecret('tunnel-update', request);
     });
   });
 

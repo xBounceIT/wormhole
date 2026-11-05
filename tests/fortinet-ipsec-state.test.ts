@@ -13,9 +13,9 @@ import {
   parseTunnelDetailsResponse,
 } from '../electron/tunnel-test-contract.ts';
 
-const settings = { ...fortinetIPsecDefaults, Host: 'vpn.test', PreSharedKey: ' key with spaces ' };
+const settings = { ...fortinetIPsecDefaults, Host: 'vpn.test', HasPreSharedKey: true };
 
-test('IPsec editor preserves PSK and strips SSL and ephemeral SAML credentials', () => {
+test('IPsec editor keeps only key presence and strips PSK, SSL and ephemeral credentials', () => {
   const normalized = normalizeFortinetIPsecSettings({
     ...settings,
     Host: ' vpn.test ',
@@ -28,6 +28,7 @@ test('IPsec editor preserves PSK and strips SSL and ephemeral SAML credentials',
     Password: 'ignored',
     SamlUid: 'ignored',
     SamlToken: 'ignored',
+    PreSharedKey: 'must-never-enter-editor-state',
   });
   assert.deepEqual(normalized, { ...settings, LocalId: 'client', TrustServerCertificate: false });
   assert.deepEqual(normalizeTunnelEditorSettings(9, settings), settings);
@@ -40,11 +41,11 @@ test('IPsec editor preserves PSK and strips SSL and ephemeral SAML credentials',
   });
 });
 
-test('shared create/edit validation requires gateway, PSK and both transport ports', () => {
+test('shared create/edit validation requires gateway and ports; the native save flow owns PSK input', () => {
   assert.deepEqual(missingFortinetIPsecFields(settings), []);
   assert.deepEqual(missingTunnelFields({ name: 'IPsec', kind: 9, settings }), []);
   assert.deepEqual(missingTunnelFields({ name: '', kind: 9, settings }), ['Name']);
-  for (const key of ['Host', 'PreSharedKey']) {
+  for (const key of ['Host']) {
     for (const value of ['', ' ', null, 42])
       assert.ok(missingFortinetIPsecFields({ ...settings, [key]: value }).length);
   }
@@ -56,8 +57,11 @@ test('shared create/edit validation requires gateway, PSK and both transport por
   }
 });
 
-test('IPsec settings use password masking and the shared editor in create and edit', () => {
-  assert.equal(fortinetIPsecFields.find((field) => field.key === 'PreSharedKey')?.type, 'password');
+test('IPsec editor exposes only key presence/replacement and uses the shared form', () => {
+  assert.equal(
+    fortinetIPsecFields.some((field) => field.key === 'PreSharedKey'),
+    false,
+  );
   assert.ok(fortinetIPsecFields.some((field) => field.key === 'SamlPort'));
   assert.equal(
     fortinetIPsecFields.some((field) => /token|uid|username|password|cookie/i.test(field.key)),
@@ -69,8 +73,10 @@ test('IPsec settings use password masking and the shared editor in create and ed
   assert.match(app, /case 9:\s*return \{ \.\.\.fortinetIPsecDefaults \}/);
   const start = app.indexOf('{value.kind === 9 ? (');
   const surface = app.slice(start, app.indexOf('{value.kind === 7 ? (', start));
-  for (const section of ['Gateway', 'Authentication', 'Advanced'])
-    assert.ok(surface.includes(`rows('${section}')`));
+  for (const section of ['Gateway', 'Advanced']) assert.ok(surface.includes(`rows('${section}')`));
+  assert.match(surface, /HasPreSharedKey/);
+  assert.match(surface, /ReplacePreSharedKey/);
+  assert.match(surface, /separate secure window when you save/);
   assert.match(surface, /SAML sign-in in a dedicated window/);
 });
 
@@ -81,6 +87,19 @@ test('IPC admits the persisted IPsec kind and rejects unknown provider numbers',
   assert.equal(parseTunnelDetailsResponse(details).kind, 9);
   assert.throws(() => parseTunnelWriteRequest({ ...request, kind: 10 }, false));
   assert.throws(() => parseTunnelDetailsResponse({ ...details, kind: 10 }));
+  for (const key of ['PreSharedKey', 'SamlToken', 'SamlUid']) {
+    assert.throws(() =>
+      parseTunnelWriteRequest({ ...request, settings: { ...settings, [key]: 'secret' } }, false),
+    );
+    assert.throws(() =>
+      parseTunnelDetailsResponse({ ...details, settings: { ...settings, [key]: 'secret' } }),
+    );
+  }
+  for (const key of ['HasPreSharedKey', 'ReplacePreSharedKey']) {
+    assert.throws(() =>
+      parseTunnelWriteRequest({ ...request, settings: { ...settings, [key]: 'true' } }, false),
+    );
+  }
 });
 
 test('release and development plans include the IPsec sidecar on every platform', () => {

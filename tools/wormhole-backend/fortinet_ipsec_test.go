@@ -32,8 +32,8 @@ func TestFortinetIPsecPersistenceAndProvider(t *testing.T) {
 		t.Fatal("invalid provider metadata")
 	}
 	details, err := readTunnel(path, tunnelReadRequest{ID: created.ID})
-	if err != nil || !bytes.Contains(details.Settings, []byte("fixture-psk")) {
-		t.Fatal("protected settings did not round-trip", err)
+	if err != nil || bytes.Contains(details.Settings, []byte("fixture-psk")) || !bytes.Contains(details.Settings, []byte(`"HasPreSharedKey":true`)) {
+		t.Fatal("editor exposed the stored gateway key", err)
 	}
 	list, err := loadTunnelSummaries(path)
 	if err != nil || len(list) != 1 || list[0].Kind != "Fortinet IPsec" {
