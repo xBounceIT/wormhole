@@ -675,7 +675,7 @@ func TestWorkspaceActionHelpersNormalizeDatabaseValuesAndSecrets(t *testing.T) {
 			t.Fatalf("invalid workspace integer %T(%v) was accepted", value, value)
 		}
 	}
-	for _, protocol := range []int64{0, 1, 6} {
+	for _, protocol := range []int64{0, 1, 6, smbProtocolValue} {
 		if !workspaceProtocolCredentialValue(protocol) || !workspaceCredentialProtocolMatches(protocol, protocol) {
 			t.Fatalf("credential protocol %d was not supported", protocol)
 		}

@@ -217,9 +217,10 @@ test('authentication prompts and window-close controls work in Chromium', async 
     return source.slice(first, last);
   });
   const runtimeCredentialHarness = `
-    function SearchableCombobox({ id, value, onValueChange }) {
+    function SearchableCombobox({ id, value, onValueChange, options }) {
       return <select id={id} value={value} onChange={event => onValueChange(event.target.value)}>
-        <option value="manual">Enter manually</option><option value="saved">Saved credential</option>
+        <option value="manual">Enter manually</option>
+        {options.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
       </select>;
     }
     function Checkbox({ checked, onCheckedChange }) {
@@ -228,7 +229,9 @@ test('authentication prompts and window-close controls work in Chromium', async 
     ${slice('function findTreeNode(', 'function matchesMcpOpenConnectionApproval(')}
     function RuntimeCredentialsHarness({ protocol, kind, busy = false, onSubmit, configuredUsername, missingNode = false }) {
       const manualCredentialSelectionValue = 'manual';
-      const runtimeCredentialSelectionOptions = { ssh: [], rdp: [] };
+      const runtimeCredentialSelectionOptions = Object.fromEntries(['ssh', 'rdp', 'smb'].map(protocol =>
+        [protocol, [{ value: 'saved', label: protocol.toUpperCase() + ' account' }]]));
+      const sessions = [{ id: 'ssh-session', backendSessionId: 'ssh-backend-session', protocol }];
       const sessionsRef = useRef([{ id: 'rdp-session', nodeId: kind === 'saved' ? 'node' : null }]);
       const treeRef = useRef([{ id: 'folder', username: 'folder-account', children: [
         { id: 'other-node', username: 'other-account' },
@@ -237,8 +240,9 @@ test('authentication prompts and window-close controls work in Chromium', async 
       const sshPrompt = kind === 'saved'
         ? { kind, backendSessionId: 'ssh-backend-session', nodeId: 'node' }
         : { kind, sessionId: 'ssh-session' };
-      const [sshCredentialPrompt, setSshCredentialPrompt] = useState(protocol === 'ssh' ? sshPrompt : null);
+      const [sshCredentialPrompt, setSshCredentialPrompt] = useState(protocol !== 'rdp' ? sshPrompt : null);
       const [rdpCredentialPrompt, setRdpCredentialPrompt] = useState(protocol === 'rdp' ? 'rdp-session' : null);
+      ${slice('  const fileCredentialProtocol =', '  const resolvedTheme =')}
       const [sshCredentialForm, setSshCredentialForm] = useState({ username: '', password: '' });
       const [rdpCredentialForm, setRdpCredentialForm] = useState({ username: '', domain: '', password: '' });
       const [sshCredentialSelection, setSshCredentialSelection] = useState('manual');
@@ -258,7 +262,7 @@ test('authentication prompts and window-close controls work in Chromium', async 
         ${runtimeDialogs.join('\n')}
         <button id="runtime-saved-ssh" onClick={requestSavedSshCredentials}>Retry saved SSH</button>
         <button id="runtime-reopen" onClick={() => {
-          if (protocol === 'ssh') setSshCredentialPrompt(sshPrompt);
+          if (protocol !== 'rdp') setSshCredentialPrompt(sshPrompt);
           else setRdpCredentialPrompt('rdp-session');
         }}>Open credentials</button>
       </TooltipProvider>;

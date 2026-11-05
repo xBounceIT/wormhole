@@ -2302,7 +2302,7 @@ FROM CredentialProfiles ORDER BY Name, Id;`)
 			Domain:   nullableString(row.Domain),
 			Provider: providerName(row.Provider),
 			CanEdit: (row.Kind == 0 && (row.Provider == 0 || row.Provider == 1) &&
-				(row.Protocol == 0 || row.Protocol == 1 || row.Protocol == 6)) ||
+				(row.Protocol == 0 || row.Protocol == 1 || row.Protocol == 6 || row.Protocol == smbProtocolValue)) ||
 				(row.Kind == 1 && row.Provider == 0 && row.Protocol == 0),
 			CanDelete:          (row.Kind == 0 || row.Kind == 1) && (row.Provider == 0 || row.Provider == 1),
 			BitwardenItemID:    strings.TrimSpace(nullableString(itemID)),

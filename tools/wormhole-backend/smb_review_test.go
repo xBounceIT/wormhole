@@ -258,3 +258,93 @@ func TestSMBReviewCancelledPathOperationsRetireUnknownHandles(t *testing.T) {
 	handler.retireUncertainOpen(context.Canceled)
 	require.ErrorIs(t, transport.ctx.Err(), context.Canceled)
 }
+
+func TestSMBReviewStoredPasswordProfilesRemainEditable(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "workspace.db")
+	require.NoError(t, ensureElectronWorkspaceSchema(databasePath))
+	draft := credentialCreateRequest{Name: "SMB account", Protocol: "smb", Kind: "password", Username: "user", Domain: "CORP", Password: "original-secret", Provider: "Local"}
+	credential, err := createCredential(databasePath, draft)
+	require.NoError(t, err)
+	workspace, err := loadWorkspace(databasePath)
+	require.NoError(t, err)
+	require.Len(t, workspace.Credentials, 1)
+	require.True(t, workspace.Credentials[0].CanEdit, "reloaded SMB profiles must keep the Edit action")
+
+	draft.Name, draft.Username, draft.Domain, draft.Password = "Renamed SMB", "updated-user", "UPDATED", ""
+	updated, err := updateCredential(databasePath, credentialUpdateRequest{ID: credential.ID, credentialCreateRequest: draft})
+	require.NoError(t, err)
+	require.True(t, updated.CanEdit)
+	workspace, err = loadWorkspace(databasePath)
+	require.NoError(t, err)
+	require.Equal(t, draft.Name, workspace.Credentials[0].Name)
+	require.True(t, workspace.Credentials[0].CanEdit)
+	nodeID, err := createWorkspaceNode(databasePath, workspaceNodeWriteRequest{Name: "Share", Kind: "connection", Protocol: "smb", Host: "server/share", CredentialMode: 2, CredentialID: credential.ID})
+	require.NoError(t, err)
+	target, err := loadFileTargetWithCredentialOverrides(databasePath, nodeID, "", "", false, false, "", true)
+	require.NoError(t, err)
+	require.Equal(t, `UPDATED\updated-user`, target.username)
+	require.Equal(t, "original-secret", target.password, "metadata edits preserve the protected password")
+	draft.Password = "updated-secret"
+	_, err = updateCredential(databasePath, credentialUpdateRequest{ID: credential.ID, credentialCreateRequest: draft})
+	require.NoError(t, err)
+	target, err = loadFileTargetWithCredentialOverrides(databasePath, nodeID, "", "", false, false, "", true)
+	require.NoError(t, err)
+	require.Equal(t, draft.Password, target.password)
+}
+
+func TestSMBReviewWorkspaceCredentialReveals(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "workspace.db")
+	require.NoError(t, ensureElectronWorkspaceSchema(databasePath))
+	credential, err := createCredential(databasePath, credentialCreateRequest{Name: "SMB account", Protocol: "smb", Kind: "password", Username: "user", Domain: "CORP", Password: "profile-secret", Provider: "Local"})
+	require.NoError(t, err)
+	folderID, err := createWorkspaceNode(databasePath, workspaceNodeWriteRequest{Name: "Folder", Kind: "folder", CredentialMode: 2, CredentialID: credential.ID})
+	require.NoError(t, err)
+	var savedID, inlineID string
+	for _, item := range []struct {
+		name, parent, credentialID, username, password string
+		mode                                           int
+	}{
+		{"Saved", "", credential.ID, "", "", 2},
+		{"Inherited", folderID, "", "", "", 0},
+		{"Inline", "", "", `LOCAL\inline-user`, "inline-secret", 1},
+	} {
+		action := "clear"
+		if item.password != "" {
+			action = "set"
+		}
+		id, err := createWorkspaceNode(databasePath, workspaceNodeWriteRequest{Name: item.name, Kind: "connection", Protocol: "smb", Host: "server/share", ParentID: item.parent, CredentialMode: item.mode, CredentialID: item.credentialID, Username: item.username, InlinePasswordAction: action, InlinePassword: item.password})
+		require.NoError(t, err)
+		result, err := showWorkspaceNodeCredentials(databasePath, workspaceNodeRequest{NodeID: id}, filepath.Dir(databasePath))
+		require.NoError(t, err)
+		require.True(t, result.Found, item.name)
+		require.Equal(t, "Password", result.SecretLabel)
+		if item.password == "" {
+			require.Equal(t, "profile-secret", result.Secret)
+			require.Equal(t, "user", result.Username)
+			require.Equal(t, "CORP", result.Domain)
+			savedID = id
+		} else {
+			require.Equal(t, item.password, result.Secret)
+			require.Equal(t, item.username, result.Username)
+			inlineID = id
+		}
+	}
+	database, err := openDatabase(databasePath, false)
+	require.NoError(t, err)
+	defer database.Close()
+	for _, item := range []struct{ name, query, nodeID string }{
+		{"wrong credential protocol", "UPDATE CredentialProfiles SET Protocol=0", savedID},
+		{"vault-owned secret", "UPDATE CredentialProfiles SET Protocol=8, SecretProvider=1", savedID},
+		{"unsupported key kind", "UPDATE CredentialProfiles SET SecretProvider=0, Kind=1", savedID},
+		{"unsupported connection protocol", "UPDATE Nodes SET Protocol=99 WHERE UseInlinePassword=1", inlineID},
+	} {
+		t.Run(item.name, func(t *testing.T) {
+			_, err := database.Exec(item.query)
+			require.NoError(t, err)
+			result, err := showWorkspaceNodeCredentials(databasePath, workspaceNodeRequest{NodeID: item.nodeID}, filepath.Dir(databasePath))
+			require.NoError(t, err)
+			require.False(t, result.Found)
+			require.Empty(t, result.Secret)
+		})
+	}
+}
