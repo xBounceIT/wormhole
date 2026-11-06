@@ -75,7 +75,7 @@ export ${sessionSurface}`;
     .map((item) => (item.type === 'asset' ? String(item.source) : ''))
     .join('\n');
   assert.ok(css.length > 0);
-  const renderer = `globalThis.assert = require('node:assert/strict'); globalThis.crypto.randomUUID = require('node:crypto').randomUUID; globalThis.pressSftpSessionKey = key => require('electron').ipcRenderer.invoke('sftp-test-key', key); globalThis.setSftpSearchActive = (selector, active) => require('electron').ipcRenderer.invoke('sftp-test-active', selector, active);${bundle}\nSftpSessionTests.runSftpSessionTests().catch(error => { for (const item of error.errors ?? [error]) console.error(item.stack ?? item); throw error; });\n//# sourceURL=wormhole-sftp-session.js`;
+  const renderer = `globalThis.assert = require('node:assert/strict'); globalThis.crypto.randomUUID = require('node:crypto').randomUUID; globalThis.pressSftpSessionKey = key => require('electron').ipcRenderer.invoke('sftp-test-key', key); globalThis.moveSftpSessionPointer = (x, y) => require('electron').ipcRenderer.invoke('sftp-test-pointer', x, y); globalThis.setSftpSearchActive = (selector, active) => require('electron').ipcRenderer.invoke('sftp-test-active', selector, active);${bundle}\nSftpSessionTests.runSftpSessionTests().catch(error => { for (const item of error.errors ?? [error]) console.error(item.stack ?? item); throw error; });\n//# sourceURL=wormhole-sftp-session.js`;
   const directory = mkdtempSync(join(tmpdir(), 'wormhole-sftp-session-'));
   try {
     const harness = join(directory, 'session.cjs');
@@ -104,6 +104,11 @@ app.whenReady().then(async () => {
     assert.equal(await window.webContents.executeJavaScript('document.hasFocus()'), true);
     await window.webContents.debugger.sendCommand('DOM.enable');
     await window.webContents.debugger.sendCommand('CSS.enable');
+    ipcMain.handle('sftp-test-pointer', async (_event, x, y) => {
+      await window.webContents.debugger.sendCommand('Input.dispatchMouseEvent', {
+        type: 'mouseMoved', x, y,
+      });
+    });
     ipcMain.handle('sftp-test-key', async (_event, key) => {
       const code = key === ' ' ? 'Space' : key;
       const windowsVirtualKeyCode = key === ' ' ? 32 : 13;
@@ -174,8 +179,21 @@ app.whenReady().then(async () => {
       .sort((left, right) => (left.endOffset - left.startOffset) - (right.endOffset - right.startOffset))[0];
     assert.ok(stateBlock?.count > 0, 'File connection placeholder must execute');
     console.log('SFTP/SMB connection placeholder: V8 block coverage 100.00%');
-    // Test tooltip hover, focus and dismissal separately from session lifecycle coverage.
+    // Measure hover, blur, scroll dismissal and refocus separately from session coverage.
+    await window.webContents.debugger.sendCommand('Profiler.startPreciseCoverage', { callCount: true, detailed: true });
     await window.webContents.executeJavaScript('SftpSessionTests.runSftpToolbarTooltipTests()');
+    const tooltipCoverage = await window.webContents.debugger.sendCommand('Profiler.takePreciseCoverage');
+    await window.webContents.debugger.sendCommand('Profiler.stopPreciseCoverage');
+    const tooltipScript = tooltipCoverage.result.find(item => item.url === 'wormhole-sftp-session.js');
+    // Measure the changed interactions; pane setup callbacks are intentionally inert here.
+    const tooltipInteraction = tooltipScript?.functions.find(item => item.functionName === 'expectTooltip');
+    assert.ok(tooltipInteraction, 'Missing toolbar tooltip interaction coverage');
+    const tooltipRange = tooltipInteraction.ranges[0];
+    const tooltipRanges = tooltipScript.functions.flatMap(item => item.ranges)
+      .filter(range => range.startOffset >= tooltipRange.startOffset && range.endOffset <= tooltipRange.endOffset);
+    const tooltipPercent = 100 * tooltipRanges.filter(range => range.count > 0).length / tooltipRanges.length;
+    console.log('SFTP toolbar tooltip lifecycle: V8 block coverage ' + tooltipPercent.toFixed(2) + '%');
+    assert.ok(tooltipPercent >= coverageThreshold);
   } finally {
     window.destroy();
   }
@@ -189,7 +207,7 @@ app.whenReady().then(async () => {
     const result = await promisify(execFile)(
       needsDisplay ? 'xvfb-run' : electron,
       needsDisplay ? ['--auto-servernum', electron, '--no-sandbox', harness] : [harness],
-      { env: { ...environment, NODE_ENV: 'test' }, windowsHide: true, timeout: 60000 },
+      { env: { ...environment, NODE_ENV: 'test' }, windowsHide: true, timeout: 90000 },
     );
     context.diagnostic(result.stdout.trim());
   } finally {
