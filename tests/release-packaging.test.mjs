@@ -25,6 +25,12 @@ const releaseWorkflow = await readFile(
 const ciWorkflow = await readFile(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
 const releaseConfig = parse(releaseWorkflow);
 const releaseJobs = releaseConfig.jobs;
+const windowsOvpnSetup = parse(
+  await readFile(
+    new URL('../.github/actions/setup-windows-ovpn/action.yml', import.meta.url),
+    'utf8',
+  ),
+);
 const linuxIconSizes = [16, 24, 32, 48, 64, 96, 128, 256, 512, 1024];
 const projectDir = fileURLToPath(new URL('..', import.meta.url));
 const macIcon = await readFile(new URL('../Assets/Wormhole.icns', import.meta.url));
@@ -423,6 +429,152 @@ test('release Go toolchains satisfy every native module requirement', async () =
     }
   }
 });
+
+test('Windows OpenVPN setup checks out the manifest baseline independently of the runner registry', async () => {
+  // Workflow configuration is outside Node/Go coverage. Validate the actual action and execute
+  // its bootstrap below, including a stale runner registry and a failed bootstrap.
+  const manifest = JSON.parse(
+    await readFile(
+      new URL('../tools/wormhole-ovpnproxy/ovpn_shim/vcpkg.json', import.meta.url),
+      'utf8',
+    ),
+  );
+  const [checkout, bootstrap, x64, arm64] = windowsOvpnSetup.runs.steps;
+  assert.equal(windowsOvpnSetup.runs.using, 'composite');
+  assert.equal(windowsOvpnSetup.inputs.architecture.required, true);
+  assert.ok(checkout.uses.startsWith('actions/checkout@'));
+  assert.equal(checkout.if, undefined);
+  assert.equal(checkout.with.repository, 'microsoft/vcpkg');
+  assert.match(checkout.with.ref, /^[a-f0-9]{40}$/);
+  assert.equal(checkout.with.ref, manifest['builtin-baseline']);
+  assert.equal(checkout.with['fetch-depth'], 0);
+  assert.equal(checkout.with['persist-credentials'], false);
+  assert.equal(checkout.with.path, 'obj/windows-vcpkg');
+  assert.equal(bootstrap.if, undefined);
+  assert.equal(bootstrap.shell, 'pwsh');
+  assert.ok(bootstrap.run.includes(checkout.with.path));
+  assert.equal(x64.if, "inputs.architecture == 'x64'");
+  assert.match(x64.run, /choco install mingw/);
+  assert.equal(arm64.if, "inputs.architecture == 'arm64'");
+  assert.match(arm64.run, /WORMHOLE_OVPN_CMAKE_GENERATOR=Ninja/);
+  assert.match(arm64.run, /SHA-256 mismatch/);
+  assert.ok(!JSON.stringify(windowsOvpnSetup).includes('VCPKG_INSTALLATION_ROOT'));
+  assert.ok(!releaseWorkflow.includes('VCPKG_INSTALLATION_ROOT'));
+});
+
+test('Windows release and CI use the same OpenVPN setup before real builds on both architectures', () => {
+  const ci = parse(ciWorkflow).jobs['windows-openvpn'];
+  for (const [job, nativeBuildName] of [
+    [releaseJobs.build, 'Build real VPN sidecars'],
+    [ci, 'Build and verify real OpenVPN sidecar'],
+  ]) {
+    assert.match(job['runs-on'], /^windows-/);
+    assert.deepEqual([...job.strategy.matrix.platform].sort(), ['arm64', 'x64']);
+    assert.equal(job.strategy['fail-fast'], false);
+    const setups = job.steps.filter((step) => step.uses === './.github/actions/setup-windows-ovpn');
+    assert.equal(setups.length, 1);
+    const [setup] = setups;
+    assert.equal(setup.if, undefined);
+    assert.equal(setup.with.architecture, '${{ matrix.platform }}');
+    const checkoutIndex = job.steps.findIndex((step) => step.uses?.startsWith('actions/checkout@'));
+    const setupIndex = job.steps.indexOf(setup);
+    const buildIndex = job.steps.findIndex((step) => step.name === nativeBuildName);
+    assert.ok(checkoutIndex >= 0 && setupIndex > checkoutIndex && buildIndex > setupIndex);
+    assert.equal(job.steps[checkoutIndex].with.submodules, 'recursive');
+    assert.match(job.steps[buildIndex].run, /-RequireReal(?:Ovpn)?\b/);
+    assert.equal(job.steps[buildIndex].env.PLATFORM, '${{ matrix.platform }}');
+  }
+  assert.match(ci.steps.at(-1).run, /Fetch-OvpnProxy\.ps1/);
+});
+
+for (const exitCode of [0, 17]) {
+  test(
+    `Windows OpenVPN bootstrap uses the pinned checkout and handles exit ${exitCode}`,
+    { skip: process.platform !== 'win32' },
+    async () => {
+      const workDir = await mkdtemp(join(tmpdir(), 'wormhole ovpn setup-'));
+      const vcpkgRoot = join(workDir, 'obj', 'windows-vcpkg');
+      const envFile = join(workDir, 'github-env');
+      const script = join(workDir, 'bootstrap.ps1');
+      try {
+        await mkdir(vcpkgRoot, { recursive: true });
+        await writeFile(
+          join(vcpkgRoot, 'bootstrap-vcpkg.bat'),
+          '@echo off\r\n> "%GITHUB_WORKSPACE%\\bootstrap-arguments.txt" echo %*\r\n' +
+            'exit /b %WORMHOLE_TEST_BOOTSTRAP_EXIT%\r\n',
+        );
+        await writeFile(envFile, 'EXISTING=value\n');
+        await writeFile(script, windowsOvpnSetup.runs.steps[1].run);
+        const result = spawnSync('pwsh', ['-NoProfile', '-File', script], {
+          encoding: 'utf8',
+          windowsHide: true,
+          env: {
+            ...process.env,
+            GITHUB_WORKSPACE: workDir,
+            GITHUB_ENV: envFile,
+            VCPKG_ROOT: join(workDir, 'stale-runner-vcpkg'),
+            VCPKG_INSTALLATION_ROOT: join(workDir, 'stale-runner-vcpkg'),
+            WORMHOLE_TEST_BOOTSTRAP_EXIT: String(exitCode),
+          },
+        });
+        assert.ifError(result.error);
+        assert.equal(
+          (await readFile(join(workDir, 'bootstrap-arguments.txt'), 'utf8')).trim(),
+          '-disableMetrics',
+        );
+        const publishedEnv = (await readFile(envFile, 'utf8')).replaceAll('\r\n', '\n');
+        if (exitCode === 0) {
+          assert.equal(result.status, 0, result.stderr);
+          assert.equal(publishedEnv, `EXISTING=value\nVCPKG_ROOT=${vcpkgRoot}\n`);
+        } else {
+          assert.notEqual(result.status, 0);
+          assert.match(result.stderr, /vcpkg bootstrap failed with exit 17/);
+          assert.equal(publishedEnv, 'EXISTING=value\n');
+        }
+      } finally {
+        await rm(workDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test(
+    `Windows OpenVPN setup handles MinGW installation exit ${exitCode}`,
+    { skip: process.platform !== 'win32' },
+    async () => {
+      const workDir = await mkdtemp(join(tmpdir(), 'wormhole mingw setup-'));
+      try {
+        const script = join(workDir, 'install.ps1');
+        await writeFile(
+          join(workDir, 'choco.cmd'),
+          `@echo off\r\n> "%GITHUB_WORKSPACE%\\choco-arguments.txt" echo %*\r\nexit /b ${exitCode}\r\n`,
+        );
+        await writeFile(script, windowsOvpnSetup.runs.steps[2].run);
+        const result = spawnSync('pwsh', ['-NoProfile', '-File', script], {
+          encoding: 'utf8',
+          windowsHide: true,
+          env: {
+            ...process.env,
+            GITHUB_WORKSPACE: workDir,
+            PATH: `${workDir};${process.env.PATH}`,
+          },
+        });
+        assert.ifError(result.error);
+        assert.equal(
+          (await readFile(join(workDir, 'choco-arguments.txt'), 'utf8')).trim(),
+          'install mingw -y --no-progress',
+        );
+        if (exitCode === 0) {
+          assert.equal(result.status, 0, result.stderr);
+        } else {
+          assert.notEqual(result.status, 0);
+          assert.match(result.stderr, /MinGW installation failed with exit 17/);
+        }
+      } finally {
+        await rm(workDir, { recursive: true, force: true });
+      }
+    },
+  );
+}
 
 test('release matrices build and upload every supported platform and package format', () => {
   assert.match(releaseJobs.build['runs-on'], /^windows-/);

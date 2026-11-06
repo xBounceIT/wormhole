@@ -1,0 +1,53 @@
+name: Set up Windows OpenVPN toolchain
+description: Prepare pinned OpenVPN dependencies and the target MinGW compiler
+inputs:
+  architecture:
+    description: Target architecture (x64 or arm64)
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        repository: microsoft/vcpkg
+        ref: 054bd01bec7f31492ec9ac063740cc984a0fe59e # Must match the OpenVPN manifest baseline
+        # Port version entries can reference historical registry trees.
+        fetch-depth: 0
+        path: obj/windows-vcpkg
+        persist-credentials: false
+    - name: Bootstrap pinned vcpkg
+      shell: pwsh
+      run: |
+        $vcpkgRoot = Join-Path $env:GITHUB_WORKSPACE 'obj/windows-vcpkg'
+        & (Join-Path $vcpkgRoot 'bootstrap-vcpkg.bat') -disableMetrics
+        if ($LASTEXITCODE -ne 0) { throw "vcpkg bootstrap failed with exit $LASTEXITCODE" }
+        "VCPKG_ROOT=$vcpkgRoot" | Out-File -FilePath $env:GITHUB_ENV -Append
+    - name: Install x64 compiler
+      if: inputs.architecture == 'x64'
+      shell: pwsh
+      run: |
+        choco install mingw -y --no-progress
+        if ($LASTEXITCODE -ne 0) { throw "MinGW installation failed with exit $LASTEXITCODE" }
+    - name: Install ARM64 cross compiler
+      if: inputs.architecture == 'arm64'
+      shell: pwsh
+      run: |
+        $version = "20261104"
+        $archive = "$env:RUNNER_TEMP\llvm-mingw.zip"
+        $destination = "$env:RUNNER_TEMP\llvm-mingw"
+        $url = "https://github.com/mstorsjo/llvm-mingw/releases/download/$version/llvm-mingw-$version-ucrt-x86_64.zip"
+        $expectedSha256 = "552191b5754c49a5a20723276a6fc56541ea1922c4c50b7b669022333fc1b40f"
+        Invoke-WebRequest -Uri $url -OutFile $archive
+        $actualSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
+        if ($actualSha256 -ne $expectedSha256) {
+          throw "llvm-mingw SHA-256 mismatch: expected $expectedSha256, got $actualSha256"
+        }
+        Expand-Archive -LiteralPath $archive -DestinationPath $destination
+        $toolchain = Get-ChildItem -LiteralPath $destination -Directory | Select-Object -First 1
+        if (-not $toolchain) { throw "llvm-mingw archive did not contain a toolchain directory" }
+        $bin = Join-Path $toolchain.FullName "bin"
+        if (-not (Test-Path (Join-Path $bin "aarch64-w64-mingw32-clang.exe"))) {
+          throw "llvm-mingw archive is missing the aarch64 cross compiler"
+        }
+        $bin | Out-File -FilePath $env:GITHUB_PATH -Append
+        "WORMHOLE_OVPN_CMAKE_GENERATOR=Ninja" | Out-File -FilePath $env:GITHUB_ENV -Append
