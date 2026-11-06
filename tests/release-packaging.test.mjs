@@ -1,14 +1,14 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { closeSync, existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { glob, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join, relative, resolve } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
-import { prerelease, satisfies, valid } from 'semver';
+import { coerce, prerelease, satisfies, valid } from 'semver';
 import { parse } from 'yaml';
 
 const require = createRequire(import.meta.url);
@@ -366,6 +366,45 @@ test('universal backend builds verify both architectures and set executable perm
     ['lipo', 'backend-universal', '-verify_arch', 'x86_64', 'arm64'],
     ['chmod', 'backend-universal', 0o755],
   ]);
+});
+
+test('release Go toolchains satisfy every native module requirement', async () => {
+  // Workflow configuration is outside Node/Go coverage; check it against the actual modules.
+  const modules = [];
+  for await (const modulePath of glob(['tools/**/go.mod', 'vendor/**/go.mod'], {
+    cwd: projectDir,
+  })) {
+    const source = await readFile(join(projectDir, modulePath), 'utf8');
+    const version = source.match(/^go (\d+\.\d+(?:\.\d+)?)\s*$/m)?.[1];
+    assert.ok(version, `${modulePath} must declare its Go version`);
+    modules.push({ modulePath, version: coerce(version).version });
+  }
+  assert.ok(modules.length > 0, 'native Go modules are missing');
+
+  for (const [job, nativeBuildName] of [
+    [releaseJobs.build, 'Build real VPN sidecars'],
+    [releaseJobs.packages, 'Build native Go components'],
+  ]) {
+    const setups = job.steps.filter((step) => step.uses?.startsWith('actions/setup-go@'));
+    assert.equal(setups.length, 1, `${job.name} must install exactly one Go toolchain`);
+    const [setup] = setups;
+    assert.equal(setup.if, undefined, `${job.name} must install Go for every architecture`);
+    const nativeBuildIndex = job.steps.findIndex((step) => step.name === nativeBuildName);
+    assert.ok(
+      nativeBuildIndex > job.steps.indexOf(setup),
+      `${job.name} must install Go before ${nativeBuildName}`,
+    );
+    assert.equal(setup.with['go-version-file'], 'tools/wormhole-backend/go.mod');
+    assert.equal(setup.with['go-version'], undefined);
+    const source = await readFile(join(projectDir, setup.with['go-version-file']), 'utf8');
+    const configuredVersion = coerce(source.match(/^go (\S+)/m)?.[1]).version;
+    for (const { modulePath, version } of modules) {
+      assert.ok(
+        satisfies(configuredVersion, `>=${version}`),
+        `${job.name} installs Go ${configuredVersion}, but ${modulePath} requires ${version}`,
+      );
+    }
+  }
 });
 
 test('release matrices build and upload every supported platform and package format', () => {
