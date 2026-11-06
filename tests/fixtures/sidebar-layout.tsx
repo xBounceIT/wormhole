@@ -690,6 +690,30 @@ window.runSidebarTests = async (handleOnly = false) => {
     assert.ok(left() >= aside().getBoundingClientRect().right);
     assert.match(query('[role="alert"]').textContent!, /couldn't save/);
   });
+  await reviewCase(
+    'pinning a saved maximum width respects the current panel constraints',
+    async () => {
+      await move(1000);
+      await mount(false, 600);
+      await move(6);
+      await React.act(async () => pin().click());
+      await settle();
+      await shown(true);
+      await waitFor(
+        () => query('#native-visible').textContent === 'true',
+        'Pin restoration did not finish',
+      );
+      const width = aside().getBoundingClientRect().width;
+      assert.ok(
+        width >= 256 && width < 600,
+        'The narrow viewport must constrain the saved maximum width',
+      );
+      assert.ok(
+        aside().getBoundingClientRect().right <= left() + 1,
+        'The pinned sidebar must not overlap unoccluded native content',
+      );
+    },
+  );
   await reviewCase('deferred pin protects native surfaces on success and rollback', async () => {
     for (const fail of [false, true]) {
       await move(1000);

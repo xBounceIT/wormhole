@@ -6,6 +6,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as ResEdit from 'resedit';
+import { renameElectronWerHelper } from './rename-electron-wer.mjs';
 
 const scriptRoot = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.dirname(scriptRoot);
@@ -103,4 +104,5 @@ try {
   await fs.rm(temporaryPath, { force: true });
 }
 
+await renameElectronWerHelper(inputPath);
 console.log(`OK    patched ${inputPath} (icon + version ${version})`);

@@ -116,7 +116,11 @@ test('pinned and auto-hide sidebars preserve layout, focus, menus and saved pref
           webPreferences: {
           nodeIntegration: true, contextIsolation: false, backgroundThrottling: false,
         } });
-        ipcMain.handle('test:input', (_event, input) => window.webContents.sendInputEvent(input));
+        ipcMain.handle('test:input', async (_event, input) => {
+          // Commit the hidden window's current hit-test regions before native hover input.
+          if (input.type === 'mouseMove') await window.webContents.capturePage();
+          window.webContents.sendInputEvent(input);
+        });
         ipcMain.handle('test:observe', async (_event, stage) => {
           console.log('Sidebar App: ' + stage);
           const checkHandle = stage.startsWith('pinned-');
@@ -131,13 +135,16 @@ test('pinned and auto-hide sidebars preserve layout, focus, menus and saved pref
                 }
                 await window.webContents.capturePage();
                 await window.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
-                const capture = await window.webContents.capturePage();
+                let capture = await window.webContents.capturePage();
                 if (process.env.WORMHOLE_TEST_SCREENSHOTS) {
                   const suffix = (nativeScale === 1 ? '' : '-native-' + nativeScale) + (scale === null || scale === 1 ? '' : '-' + scale);
                   require('node:fs').writeFileSync(require('node:path').join(process.env.WORMHOLE_TEST_SCREENSHOTS, 'sidebar-' + stage + suffix + '.png'), capture.toPNG());
                 }
                 if (checkHandle) {
                   const bounds = await window.webContents.executeJavaScript('(() => { const separator = document.querySelector("[data-slot=resizable-handle]").getBoundingClientRect(); const grip = document.querySelector("[data-slot=resizable-handle] > div").getBoundingClientRect(); return { left: separator.left, centerX: separator.left + separator.width / 2, centerY: grip.top + grip.height / 2 }; })()');
+                  // Hidden-window captures can precede the compositor's updated frame.
+                  // Retry rendering, while retaining every physical-pixel assertion.
+                  for (let paint = 0; ; paint++) {
                   const size = capture.getSize(1);
                   const scaleX = size.width / viewport.width;
                   const scaleY = size.height / viewport.height;
@@ -157,10 +164,20 @@ test('pinned and auto-hide sidebars preserve layout, focus, menus and saved pref
                   const assert = require('node:assert/strict');
                   assert.ok(Math.abs(scaleX - nativeScale) < 0.01, 'The native capture must exercise the selected physical pixel scale');
                   assert.equal(pixels.length, size.width * size.height * 4);
-                  assert.ok(borderPixels.length > 0 && gripPixels.length > borderPixels.length, 'The grip must visibly extend beyond the divider');
                   // Opposite pixel-width parity permits only the nearest half-pixel center.
                   const centerDelta = Math.abs(gripPixels[0] + gripPixels.at(-1) - borderPixels[0] - borderPixels.at(-1));
+                  const extendsDivider = borderPixels.length > 0 && gripPixels.length > borderPixels.length;
+                  const centered = centerDelta <= (gripPixels.length + borderPixels.length) % 2;
+                  if ((!extendsDivider || !centered) && paint < 5) {
+                    await window.webContents.capturePage();
+                    await window.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+                    capture = await window.webContents.capturePage();
+                    continue;
+                  }
+                  assert.ok(extendsDivider, 'The grip must visibly extend beyond the divider in ' + stage + ' at ' + scale + 'x: border=' + borderPixels + ', grip=' + gripPixels);
                   assert.ok(centerDelta <= (gripPixels.length + borderPixels.length) % 2, 'Painted grip pixels must be centered on the complete divider in ' + stage + ' at ' + scale + 'x');
+                  break;
+                  }
                 }
               }
             } finally {

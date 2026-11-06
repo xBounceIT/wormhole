@@ -133,17 +133,21 @@ $env:PATH = "C:\llvm-mingw\bin;$env:PATH"
 ## OpenVPN3 compatibility patches
 
 `Fetch-OvpnProxy.ps1` applies the files in `patches/` before compiling and restores
-the submodule afterward. Patch `0003` loads mbedTLS's OID definitions before checking
-the compatibility fallback, avoiding macro redefinitions with mbedTLS 3.6. The existing
-legacy fallback remains unchanged to preserve upstream certificate-policy behavior.
+the submodule afterward. OpenVPN3 3.11.8 removes the incorrect extended-key-usage
+fallback upstream, so the former OID include backport is no longer required.
+The hostname, CBC padding, and dynamic tls-crypt exporter patches remain required.
 
-Run `node --test tests/ovpn-mbedtls-compat.test.mjs` to check patch application and
-reversal, both header orders, and native/legacy extension masks. These tests also run
-in `npm run test:packaging`. Patch application and reversal checks always run. The
-compile scenarios require a GCC/Clang-compatible C++ compiler (`CXX`, or `g++` on
-Windows / `c++` elsewhere) and skip when it is unavailable. Patch `0003`
-changes only preprocessor directives, which Node/Go statement coverage cannot measure;
-the compile checks exercise both fallback branches with warnings treated as errors.
+The shim links its pinned mbedTLS 3.6.7 target directly, avoiding discovery of a
+different system TLS library through pkg-config. Its factory explicitly declines
+epoch data to preserve the existing DATA_V2 negotiation until provider integration
+coverage is available.
+
+Run `node --test tests/ovpn-mbedtls-compat.test.mjs` to compile the current upstream
+header with both include orders and check distinct KU/EKU masks for mbedTLS 2.x/3.6.
+The same suite exercises the new virtual factory capability and measures its line
+coverage with GCC/gcov when available. These tests also run in `npm run test:packaging`.
+Native compile scenarios require a GCC/Clang-compatible C++ compiler (`CXX`, or
+`g++` on Windows / `c++` elsewhere) and skip when it is unavailable.
 
 ## Why a Go sidecar?
 

@@ -4,20 +4,10 @@
 //               packet encryption, packet authentication, and
 //               packet compression.
 //
-//    Copyright (C) 2012-2022 OpenVPN Inc.
+//    Copyright (C) 2012- OpenVPN Inc.
 //
-//    This program is free software: you can redistribute it and/or modify
-//    it under the terms of the GNU Affero General Public License Version 3
-//    as published by the Free Software Foundation.
+//    SPDX-License-Identifier: MPL-2.0 OR AGPL-3.0-only WITH openvpn3-openssl-exception
 //
-//    This program is distributed in the hope that it will be useful,
-//    but WITHOUT ANY WARRANTY; without even the implied warranty of
-//    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-//    GNU Affero General Public License for more details.
-//
-//    You should have received a copy of the GNU Affero General Public License
-//    along with this program in the COPYING file.
-//    If not, see <http://www.gnu.org/licenses/>.
 //
 
 #pragma once
@@ -29,10 +19,6 @@
 
 #if not defined(MBEDTLS_ERR_SSL_BAD_PROTOCOL_VERSION)
 #define MBEDTLS_ERR_SSL_BAD_PROTOCOL_VERSION MBEDTLS_ERR_SSL_BAD_HS_PROTOCOL_VERSION
-#endif
-
-#if not defined(MBEDTLS_OID_X509_EXT_EXTENDED_KEY_USAGE)
-#define MBEDTLS_OID_X509_EXT_EXTENDED_KEY_USAGE MBEDTLS_X509_EXT_KEY_USAGE
 #endif
 
 #if MBEDTLS_VERSION_NUMBER < 0x03000000

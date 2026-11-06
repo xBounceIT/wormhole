@@ -1,6 +1,6 @@
 # Local http-cache-semantics security backport
 
-Based on the npm `http-cache-semantics@4.2.0` runtime file, with the original
+Based on the npm `http-cache-semantics@4.3.0` runtime file, with the original
 BSD-2-Clause license. The local package name identifies this as a Wormhole fork,
 not an upstream release.
 
@@ -29,8 +29,9 @@ instead of a regex that can backtrack quadratically on long whitespace sequences
 and wildcards inside field lists; matching and reuse checks share one field parser.
 
 The root npm override replaces all transitive installations with this package.
-Remove the override and this directory once a reviewed upstream release includes
-the fix. Do not replace it with unpatched `4.2.0`.
+Retain the override until a reviewed upstream release also includes the additional
+hardening described here. Version 4.3.0 adds cached response status and own-property Vary
+matching, but does not include these local stale-reuse restrictions.
 
 Regression and consumer integration tests are in `tests/dependency-security.test.mjs`.
 Coverage uses Node's native test/V8 tooling. Unchanged upstream runtime code is

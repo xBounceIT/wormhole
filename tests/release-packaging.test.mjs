@@ -75,9 +75,26 @@ test('dependency lock excludes the Nano ID zero-size generator vulnerability', (
   }
 });
 
-test('dependency lock does not install deprecated packages', () => {
+test('dependency lock rejects deprecated packages outside the reviewed Sentry development dependency', () => {
   const deprecated = Object.entries(packageLock.packages)
-    .filter(([, metadata]) => metadata.deprecated)
+    .filter(([location, metadata]) => {
+      if (!metadata.deprecated) return false;
+      // Sentry 10 still requires the v2 API; its v3 replacement is not compatible.
+      // This is development-only through react-doctor, and must be reviewed on update.
+      if (
+        location === 'node_modules/@opentelemetry/sdk-trace-base' &&
+        metadata.version === '2.12.0'
+      ) {
+        assert.equal(metadata.dev, true);
+        assert.ok(
+          packageLock.packages['node_modules/@sentry/node'].dependencies[
+            '@opentelemetry/sdk-trace-base'
+          ],
+        );
+        return false;
+      }
+      return true;
+    })
     .map(([location]) => location);
   assert.deepEqual(deprecated, []);
 });

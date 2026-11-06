@@ -1,10 +1,11 @@
 # Wormhole compatibility patch
 
-Source: CloudSoda/go-smb2 `v0.0.0-20260918041005-0c5d69b69701`.
+Source: CloudSoda/go-smb2 `v0.0.0-20261105190815-95be04a983b8`.
 `UPSTREAM.json` records the source version and SHA-256 hashes before patching.
 The upstream license is preserved in `LICENSE`.
 
-Only `client.go` is changed. `Share.RenameNoReplace` sends
+Local runtime changes are limited to `client.go`. The module manifests also use
+Wormhole's Go security floor and refreshed dependency versions. `Share.RenameNoReplace` sends
 `FileRenameInformation.ReplaceIfExists=0`, preventing collisions atomically.
 Existing `Share.Rename` keeps its replacement behavior. `File.CloseContext`
 allows bounded cleanup after an operation context has been cancelled, retaining

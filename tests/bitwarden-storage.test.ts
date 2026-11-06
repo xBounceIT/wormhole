@@ -932,7 +932,7 @@ test('Electron MV2 background and reopened popups share the restored vault sessi
           const prepared = async partition => {
             const browser = session.fromPartition(partition);
             if (!chromeApis.has(partition)) {
-              new ElectronChromeExtensions({ session: browser, license: 'GPL-3.0' });
+              new ElectronChromeExtensions({ session: browser });
               chromeApis.add(partition);
             }
             if (!extensions.has(partition)) {

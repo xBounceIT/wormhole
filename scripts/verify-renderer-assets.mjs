@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { extractFile, listPackage, uncache } from '@electron/asar';
 import { verifyMacFreeRdp } from './build-macos-freerdp.mjs';
+import { renameElectronWerHelper } from './rename-electron-wer.mjs';
 
 export function verifyRendererAssets(archive) {
   // Packagers can replace an archive at the same path during a universal merge/rebuild.
@@ -37,4 +38,9 @@ export default function afterPack(context) {
       : path.join(context.appOutDir, 'resources');
   verifyRendererAssets(path.join(resources, 'app.asar'));
   if (context.electronPlatformName === 'darwin') verifyMacFreeRdp(resources);
+  if (context.electronPlatformName === 'win32') {
+    return renameElectronWerHelper(
+      path.join(context.appOutDir, `${context.packager.appInfo.productFilename}.exe`),
+    );
+  }
 }

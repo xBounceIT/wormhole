@@ -341,6 +341,7 @@ test('SSH clipboard IPC forwards paste identity to Go and validates its type', a
   const handlers = new Map<string, (...args: unknown[]) => Promise<unknown>>();
   const calls: unknown[][] = [];
   let clipboardText = 'first\r\nsecond';
+  let clipboardError: Error | undefined;
   let authorized = true;
   new Function(
     'ipcMain',
@@ -348,6 +349,8 @@ test('SSH clipboard IPC forwards paste identity to Go and validates its type', a
     'isSshInput',
     'serializeAuthOperation',
     'requireWorkspaceAuth',
+    'authSession',
+    'requireAuthorizationEpoch',
     'sshBackend',
     'encodeTerminalClipboardText',
     'clipboard',
@@ -363,9 +366,18 @@ test('SSH clipboard IPC forwards paste identity to Go and validates its type', a
     async () => {
       if (!authorized) throw new Error('locked');
     },
+    { authorizationEpoch: 0 },
+    () => {
+      if (!authorized) throw new Error('locked');
+    },
     { sendInput: (...args: unknown[]) => calls.push(args) },
     encodeTerminalClipboardText,
-    { readText: () => clipboardText },
+    {
+      readText: async () => {
+        if (clipboardError) throw clipboardError;
+        return clipboardText;
+      },
+    },
   );
   const input = handlers.get('ssh:input')!;
   const clipboard = handlers.get('ssh:paste-clipboard')!;
@@ -389,6 +401,10 @@ test('SSH clipboard IPC forwards paste identity to Go and validates its type', a
   await assert.rejects(input(null, 'session', largePaste), /invalid/);
   clipboardText = '';
   assert.deepEqual(await clipboard(null, 'session'), { pasted: false });
+  clipboardError = new Error('clipboard unavailable');
+  await assert.rejects(clipboard(null, 'session'), /clipboard unavailable/);
+  assert.equal(calls.length, 5);
+  clipboardError = undefined;
   await assert.rejects(input(null, 'session', 'YQ==', 'true'), /invalid/);
   await assert.rejects(input(null, 'session', 'bad'), /invalid/);
   await assert.rejects(input(null, 'invalid', 'YQ==', true), /invalid/);

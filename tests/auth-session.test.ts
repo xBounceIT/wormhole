@@ -7,6 +7,7 @@ import { EventEmitter } from 'node:events';
 import { Session } from 'node:inspector/promises';
 import { coverageThreshold } from '../scripts/test-coverage.ts';
 import { AuthSession } from '../electron/auth-session.ts';
+import { encodeTerminalClipboardText, isEncodedSshInput } from '../electron/terminal-clipboard.ts';
 import { authenticationIdleSeconds } from '../src/auth-idle.ts';
 
 // main.ts is a process entrypoint, so measure its isolated production handlers
@@ -48,6 +49,129 @@ async function measureHandlerCoverage(
     await session.post('Profiler.stopPreciseCoverage');
   };
 }
+
+test(
+  'SSH clipboard commits preserve input order and reject stale authorization',
+  { timeout: 5000 },
+  async (context) => {
+    const source = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8').replace(
+      /\r\n/g,
+      '\n',
+    );
+    const serialization = source.slice(
+      source.indexOf('function serializeAuthOperation'),
+      source.indexOf('function serializeAuthStateMutation'),
+    );
+    const authorization = source.slice(
+      source.indexOf('function isAuthorizationEpochCurrent'),
+      source.indexOf('async function clearBitwardenSessionAfterAuthorizationLoss'),
+    );
+    const handlerSource = source.slice(
+      source.indexOf("ipcMain.handle(\n    'ssh:input'"),
+      source.indexOf("ipcMain.handle('ssh:open-link'"),
+    );
+    const code = stripTypeScriptTypes(
+      `let authOperationQueue = Promise.resolve();\n${serialization}\n${authorization}\n${handlerSource}\nserializeAuthOperation;`,
+    );
+    const filename = 'wormhole-clipboard-authorization.js';
+    const verifyCoverage = await measureHandlerCoverage(context, filename, {
+      start: code.indexOf('ipcMain.handle('),
+      end: code.lastIndexOf('\nserializeAuthOperation;'),
+    });
+    const session = new AuthSession();
+    session.remember({ configured: true }, true);
+    let paste!: (_event: unknown, id: unknown) => Promise<{ pasted: boolean }>;
+    let input!: (_event: unknown, id: unknown, data: unknown, paste?: unknown) => Promise<void>;
+    let read: () => Promise<string> = async () => 'mock clipboard';
+    const inputs: unknown[][] = [];
+    const enqueue = runInNewContext(
+      code,
+      {
+        ipcMain: {
+          handle: (name: string, handler: typeof paste & typeof input) => {
+            if (name === 'ssh:paste-clipboard') paste = handler;
+            else input = handler;
+          },
+        },
+        isSshSessionId: (id: unknown) => id === 'session',
+        isSshInput: isEncodedSshInput,
+        authSession: session,
+        requireWorkspaceAuth: async () => session.requireUnlocked(),
+        clipboard: { readText: () => read() },
+        encodeTerminalClipboardText,
+        sshBackend: { sendInput: (...args: unknown[]) => inputs.push(args) },
+      },
+      { filename },
+    ) as (operation: () => Promise<unknown>) => Promise<unknown>;
+
+    await assert.rejects(paste(null, 'invalid'), /invalid/);
+    await assert.rejects(input(null, 'invalid', 'DQ=='), /invalid/);
+    await assert.rejects(input(null, 'session', 'DQ==', 'true'), /invalid/);
+    await assert.rejects(input(null, 'session', 'bad'), /invalid/);
+    assert.equal((await paste(null, 'session')).pasted, true);
+    read = async () => '';
+    assert.equal((await paste(null, 'session')).pasted, false);
+    read = async () => {
+      throw new Error('clipboard unavailable');
+    };
+    await assert.rejects(paste(null, 'session'), /clipboard unavailable/);
+    read = async () => 'x'.repeat(2 * 1024 * 1024 + 1);
+    await assert.rejects(paste(null, 'session'), /too large/);
+
+    const beginRead = async () => {
+      let started!: () => void;
+      let resolve!: (text: string) => void;
+      const ready = new Promise<void>((done) => {
+        started = done;
+      });
+      const clipboard = new Promise<string>((done) => {
+        resolve = done;
+      });
+      read = () => {
+        started();
+        return clipboard;
+      };
+      const pending = paste(null, 'session');
+      await ready;
+      return { pending, resolve };
+    };
+    for (const unlockAgain of [false, true]) {
+      const { pending, resolve } = await beginRead();
+      session.lock();
+      if (unlockAgain) session.markUnlocked();
+      resolve('stale clipboard');
+      await assert.rejects(pending, /Authentication is required/);
+      assert.equal(inputs.length, 1, 'A pre-lock clipboard read must never send input');
+      if (!session.isAccessAllowed) session.markUnlocked();
+    }
+    const { pending, resolve } = await beginRead();
+    const enter = input(null, 'session', 'DQ==');
+    read = async () => 'second clipboard';
+    const secondPaste = paste(null, 'session');
+    let progressed = false;
+    const queued = enqueue(async () => {
+      progressed = true;
+    });
+    await new Promise(setImmediate);
+    assert.equal(inputs.length, 1, 'Typing and a second paste must wait for the first paste');
+    assert.equal(progressed, false);
+    resolve('current clipboard');
+    assert.equal((await pending).pasted, true);
+    await enter;
+    assert.equal((await secondPaste).pasted, true);
+    await queued;
+    assert.equal(progressed, true);
+    assert.deepEqual(inputs.slice(1), [
+      ['session', Buffer.from('current clipboard').toString('base64'), true],
+      ['session', 'DQ==', false],
+      ['session', Buffer.from('second clipboard').toString('base64'), true],
+    ]);
+    session.lock();
+    await assert.rejects(paste(null, 'session'), /Authentication is required/);
+    await assert.rejects(input(null, 'session', 'DQ=='), /Authentication is required/);
+    await verifyCoverage();
+  },
+);
 
 test('backend keeps idle-lock Hello alive until native completion or owner cancellation', async (context) => {
   const filename = 'wormhole-auth-backend-runner.js';
