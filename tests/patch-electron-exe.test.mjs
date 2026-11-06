@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import * as ResEdit from 'resedit';
+import { renameElectronWerHelper } from '../scripts/rename-electron-wer.mjs';
 
 const execFileAsync = promisify(execFile);
 const testRoot = path.dirname(fileURLToPath(import.meta.url));
@@ -23,6 +24,40 @@ const runtimeDependenciesManifest = path.join(
   'electron-runtime-dependencies.json',
 );
 const iconPath = path.join(repoRoot, 'Assets', 'Wormhole.ico');
+
+test('renamed Electron runtimes keep the matching WER helper and support repeated staging', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'wormhole-wer-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const source = path.join(directory, 'electron_wer.dll');
+  const destination = path.join(directory, 'Wormhole_wer.dll');
+  await writeFile(source, 'current helper');
+  await writeFile(destination, 'old helper');
+  await renameElectronWerHelper(path.join(directory, 'Wormhole.exe'));
+  assert.equal(await readFile(destination, 'utf8'), 'current helper');
+  await assert.rejects(readFile(source), { code: 'ENOENT' });
+  await renameElectronWerHelper(path.join(directory, 'Wormhole.exe'));
+  assert.equal(await readFile(destination, 'utf8'), 'current helper');
+});
+
+test('unrenamed and older Electron runtimes preserve their existing files', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'wormhole-wer-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  await renameElectronWerHelper(path.join(directory, 'Wormhole.exe'));
+  const source = path.join(directory, 'electron_wer.dll');
+  await writeFile(source, 'original helper');
+  await renameElectronWerHelper(path.join(directory, 'electron.exe'));
+  assert.equal(await readFile(source, 'utf8'), 'original helper');
+});
+
+test('WER staging failures remain visible and retain the source helper', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'wormhole-wer-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const source = path.join(directory, 'electron_wer.dll');
+  await writeFile(source, 'original helper');
+  await mkdir(path.join(directory, 'Wormhole_wer.dll'));
+  await assert.rejects(renameElectronWerHelper(path.join(directory, 'Wormhole.exe')));
+  assert.equal(await readFile(source, 'utf8'), 'original helper');
+});
 
 async function collectRuntimeDependencyClosure(packageName, dependencyNames = new Set()) {
   if (dependencyNames.has(packageName)) return dependencyNames;
@@ -96,6 +131,7 @@ test('patches prerelease metadata and icons idempotently', async (context) => {
   const exePath = path.join(temporaryDirectory, 'Wormhole.exe');
   const version = '2.0.0-beta.1+build.7';
   await createExecutableFixture(exePath);
+  await writeFile(path.join(temporaryDirectory, 'electron_wer.dll'), 'matching runtime helper');
 
   await execFileAsync(process.execPath, [patchScript, exePath, version, iconPath]);
 
@@ -118,7 +154,14 @@ test('patches prerelease metadata and icons idempotently', async (context) => {
   await execFileAsync(process.execPath, [patchScript, exePath, version, iconPath]);
 
   assert.deepEqual(await readFile(exePath), firstOutput);
-  assert.deepEqual(await readdir(temporaryDirectory), ['Wormhole.exe']);
+  assert.equal(
+    await readFile(path.join(temporaryDirectory, 'Wormhole_wer.dll'), 'utf8'),
+    'matching runtime helper',
+  );
+  assert.deepEqual((await readdir(temporaryDirectory)).sort(), [
+    'Wormhole.exe',
+    'Wormhole_wer.dll',
+  ]);
 });
 
 test('leaves the executable unchanged when required version resources are missing', async (context) => {

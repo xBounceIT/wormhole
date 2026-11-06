@@ -190,7 +190,8 @@ export function SidebarLayout({
               maxSize={`${maxSidebarWidth}px`}
               minSize={`${minSidebarWidth}px`}
               onResize={(size, _id, previous) => {
-                if (pinned && size.inPixels >= minSidebarWidth) {
+                // Constraint updates briefly report the minimum before the saved width is restored.
+                if (pinned && !pinResizePending && size.inPixels >= minSidebarWidth) {
                   const nextWidth = normalizeSidebarWidth(size.inPixels);
                   setWidth(nextWidth);
                   if (previous) onWidthChange(nextWidth);

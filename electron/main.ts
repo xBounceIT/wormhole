@@ -5772,7 +5772,6 @@ class WebSurfaceManager {
     let instance!: ElectronChromeExtensions;
     instance = new ElectronChromeExtensions({
       session,
-      license: 'GPL-3.0',
       createTab: async (details) => this.openExtensionTabInSession(partition, details),
       selectTab: (contents) => {
         for (const [sessionId, record] of this.surfaces) {
@@ -9859,7 +9858,11 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     if (!isSshSessionId(sessionId)) throw new Error('SSH paste request is invalid.');
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
-      const data = encodeTerminalClipboardText(clipboard.readText());
+      const epoch = authSession.authorizationEpoch;
+      // Preserve input order while the native clipboard is read. Locking bypasses this queue.
+      const text = await clipboard.readText();
+      requireAuthorizationEpoch(epoch);
+      const data = encodeTerminalClipboardText(text);
       if (!data) return { pasted: false };
       sshBackend.sendInput(sessionId, data, true);
       return { pasted: true };

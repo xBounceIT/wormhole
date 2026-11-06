@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, rm, readdir } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, rm, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -85,7 +85,38 @@ test('packaging rejects missing resources and the macOS 2.2.1 Assets/assets regr
       if (platform === 'darwin') {
         assert.throws(() => afterPack(context), /bundled macOS FreeRDP client is missing/);
       } else {
-        afterPack(context);
+        await afterPack(context);
+        if (platform === 'win32') {
+          for (const productFilename of ['Wormhole', 'Wormhole Preview Ω']) {
+            await writeFile(path.join(output, 'electron_wer.dll'), 'matching WER helper');
+            const renamed = { ...context, packager: { appInfo: { productFilename } } };
+            await afterPack(renamed);
+            assert.equal(
+              await readFile(path.join(output, `${productFilename}_wer.dll`), 'utf8'),
+              'matching WER helper',
+            );
+            await assert.rejects(readFile(path.join(output, 'electron_wer.dll')), {
+              code: 'ENOENT',
+            });
+            await afterPack(renamed);
+          }
+          await mkdir(path.join(output, 'Blocked_wer.dll'));
+          await writeFile(path.join(output, 'electron_wer.dll'), 'retain on failure');
+          await assert.rejects(
+            afterPack({ ...context, packager: { appInfo: { productFilename: 'Blocked' } } }),
+          );
+          assert.equal(
+            await readFile(path.join(output, 'electron_wer.dll'), 'utf8'),
+            'retain on failure',
+          );
+        } else {
+          await writeFile(path.join(output, 'electron_wer.dll'), 'not a Windows runtime');
+          await afterPack(context);
+          assert.equal(
+            await readFile(path.join(output, 'electron_wer.dll'), 'utf8'),
+            'not a Windows runtime',
+          );
+        }
       }
       await createPackage(path.join(directory, 'case'), path.join(resources, 'app.asar'));
       assert.throws(

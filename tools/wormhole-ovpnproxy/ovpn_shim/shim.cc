@@ -349,6 +349,9 @@ class WormholeTunFactory : public openvpn::TunClientFactory {
   WormholeTunFactory(openvpn::Frame::Ptr frame, WormholeClient* owner)
       : frame_(std::move(frame)), owner_(owner) {}
 
+  // Preserve DATA_V2 negotiation until epoch data has provider interoperability coverage.
+  bool supports_epoch_data() override { return false; }
+
   openvpn::TunClient::Ptr new_tun_client_obj(
       openvpn_io::io_context& io_context,
       openvpn::TunClientParent& parent,

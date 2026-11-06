@@ -6,7 +6,7 @@ runs:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
         repository: microsoft/vcpkg
-        ref: ef7dbf94b9198bc58f45951adcf1f041fcbc5ea0 # 2025.06.13
+        ref: 054bd01bec7f31492ec9ac063740cc984a0fe59e # 2026-11-06 registry
         path: obj/macos-vcpkg
         persist-credentials: false
     - shell: bash

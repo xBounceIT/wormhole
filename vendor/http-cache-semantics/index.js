@@ -362,6 +362,7 @@ module.exports = class CachePolicy {
         return {
             response: {
                 headers: this.responseHeaders(),
+                status: this._status,
             },
             revalidation,
         };
@@ -521,7 +522,9 @@ module.exports = class CachePolicy {
         }
 
         for (const name of fields) {
-            if (req.headers[name] !== this._reqHeaders[name]) return false;
+            const newReq = Object.prototype.hasOwnProperty.call(req.headers, name) && req.headers[name];
+            const cachedReq = Object.prototype.hasOwnProperty.call(this._reqHeaders, name) && this._reqHeaders[name];
+            if (newReq !== cachedReq) return false;
         }
         return true;
     }
@@ -581,6 +584,11 @@ module.exports = class CachePolicy {
         headers.age = `${Math.round(age)}`;
         headers.date = new Date(this.now()).toUTCString();
         return headers;
+    }
+
+    /** Returns the status code of the cached response. */
+    status() {
+        return this._status;
     }
 
     /**

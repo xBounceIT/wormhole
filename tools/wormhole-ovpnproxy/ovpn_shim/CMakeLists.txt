@@ -8,8 +8,8 @@
 #   - vcpkg (recommended) OR manual installs of asio, jsoncpp, lz4, mbedtls, xxhash,
 #     tap-windows6 (header-only, used unconditionally by OpenVPN3 even when we bypass
 #     the TAP driver via ExternalTun::Factory)
-#   - third_party/openvpn3 populated (release/3.9 submodule)
-#   - third_party/mbedtls populated (v3.6.6 LTS submodule, with `framework/` recurse-init)
+#   - third_party/openvpn3 populated (release/3.11.8 submodule)
+#   - third_party/mbedtls populated (v3.6.7 LTS submodule, with `framework/` recurse-init)
 #
 # Build flags are delegated to OpenVPN3's own `add_core_dependencies()` macro in
 # cmake/findcoredeps.cmake — that's the canonical source of truth for what every
@@ -68,6 +68,13 @@ if(EXISTS "${OPENVPN3_DIR}/client/ovpncli.hpp" AND EXISTS "${MBEDTLS_DIR}/includ
     # tap-windows component id, MinGW big-obj flag, Windows system libs, etc.
     list(APPEND CMAKE_MODULE_PATH ${OPENVPN3_DIR}/cmake)
     include(${OPENVPN3_DIR}/cmake/findcoredeps.cmake)
+
+    # OpenVPN3 3.11 searches system TLS libraries through pkg-config. The shim
+    # already owns the pinned mbedTLS build, including its architecture and flags.
+    function(add_ssl_library target)
+        target_compile_definitions(${target} PRIVATE USE_MBEDTLS)
+        target_link_libraries(${target} mbedTLS::mbedTLS)
+    endfunction()
 
     add_core_dependencies(ovpn_shim)
     add_json_library(ovpn_shim)
