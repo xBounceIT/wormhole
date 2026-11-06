@@ -17,6 +17,7 @@ import '../../src/index.css';
 import { SessionSurface } from 'virtual:sftp-session-surface';
 declare const assert: typeof import('node:assert/strict');
 declare function pressSftpSessionKey(key: string): Promise<void>;
+declare function moveSftpSessionPointer(x: number, y: number): Promise<void>;
 
 async function runSftpTreeRequestTests(root: ReturnType<typeof createRoot>) {
   const original = window.wormhole;
@@ -175,7 +176,7 @@ export async function runSftpToolbarTooltipTests() {
   document.head.append(animations);
   const tick = async () => React.act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
   const click = async (element: Element) => React.act(async () => (element as HTMLElement).click());
-  const expectTooltip = async (control: HTMLElement, label: string) => {
+  const expectTooltip = async (control: HTMLButtonElement, label: string) => {
     assert.equal(
       control.getAttribute('title'),
       null,
@@ -183,18 +184,13 @@ export async function runSftpToolbarTooltipTests() {
     );
     const bounds = control.getBoundingClientRect();
     await React.act(async () =>
-      control.dispatchEvent(
-        new PointerEvent('pointermove', {
-          bubbles: true,
-          pointerType: 'mouse',
-          clientX: bounds.x + bounds.width / 2,
-          clientY: bounds.y + bounds.height / 2,
-        }),
-      ),
+      moveSftpSessionPointer(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2),
     );
     const description = () =>
       document.getElementById(control.getAttribute('aria-describedby') ?? '');
     const checkDescription = async (phase: string) => {
+      // Let native input and layout finish before checking the portal's final state.
+      await tick();
       let content = description();
       for (let attempt = 0; attempt < 20 && !content; attempt++) {
         await tick();
@@ -219,19 +215,11 @@ export async function runSftpToolbarTooltipTests() {
         !document.getElementById(id),
         `Tooltip must finish dismissing: ${label}, state=${control.getAttribute('data-state')}`,
       );
+      assert.equal(control.getAttribute('data-state'), 'closed');
+      assert.equal(control.getAttribute('aria-describedby'), null);
     };
-    await checkDescription('hover');
-    await dismiss(async () => {
-      await React.act(async () => {
-        control.focus();
-        control.blur();
-      });
-    });
-    await React.act(async () => control.focus());
-    assert.equal(document.activeElement === control, true, `${label} must receive keyboard focus`);
-    await checkDescription('focus');
-    await dismiss(async () => {
-      await React.act(async () =>
+    const escape = async () =>
+      React.act(async () =>
         control.dispatchEvent(
           new KeyboardEvent('keydown', {
             key: 'Escape',
@@ -240,17 +228,38 @@ export async function runSftpToolbarTooltipTests() {
           }),
         ),
       );
-    });
-    await React.act(async () => {
-      control.blur();
-      control.dispatchEvent(
-        new PointerEvent('pointerout', {
-          bubbles: true,
-          pointerType: 'mouse',
-          relatedTarget: document.body,
-        }),
+    await checkDescription('hover');
+    await React.act(async () => control.focus({ preventScroll: true }));
+    await checkDescription('focus during hover');
+    await dismiss(async () => React.act(async () => control.blur()));
+    // End hover with real pointer leave events before testing keyboard focus.
+    await React.act(async () =>
+      moveSftpSessionPointer(window.innerWidth - 1, window.innerHeight - 1),
+    );
+    await React.act(async () => control.focus({ preventScroll: true }));
+    assert.equal(document.activeElement === control, true, `${label} must receive keyboard focus`);
+    await checkDescription('focus');
+    // Radix intentionally dismisses a focused tooltip when an ancestor scrolls.
+    await dismiss(async () => {
+      await React.act(async () =>
+        control.closest('[data-sftp-panel]')!.dispatchEvent(new Event('scroll')),
       );
     });
+    assert.equal(document.activeElement, control, 'Scroll dismissal must preserve keyboard focus');
+    await React.act(async () => control.blur());
+    // Re-enter from a fully closed state; never batch focus and blur in one act.
+    await React.act(async () => control.focus({ preventScroll: true }));
+    await checkDescription('refocus');
+    await dismiss(escape);
+    // Escape also clears pane selection, so check it after all focus assertions.
+    assert.equal(
+      control.disabled,
+      label === 'Delete selected',
+      `${label}: unexpected disabled state after Escape`,
+    );
+    if (!control.disabled)
+      assert.equal(document.activeElement, control, 'Escape must preserve keyboard focus');
+    await React.act(async () => control.blur());
   };
   try {
     await React.act(async () =>
@@ -294,10 +303,10 @@ export async function runSftpToolbarTooltipTests() {
       );
       for (const label of [`Go up in ${kind} files`, 'Home', 'Refresh', 'New folder', 'New file'])
         await expectTooltip(
-          pane.querySelector<HTMLElement>(`button[aria-label="${label}"]`)!,
+          pane.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`)!,
           label,
         );
-      const tree = pane.querySelector<HTMLElement>('button[aria-pressed]')!;
+      const tree = pane.querySelector<HTMLButtonElement>('button[aria-pressed]')!;
       assert.ok(
         tree.querySelector('svg.lucide-folder-tree'),
         'Tree must use its dedicated folder icon',
