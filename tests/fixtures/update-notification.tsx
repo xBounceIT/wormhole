@@ -34,6 +34,7 @@ async function runUpdateNotificationTests() {
     const progressListeners = new Set<(value: unknown) => void>();
     let resolveStatus: (value: unknown) => void;
     let finishDownload: () => void;
+    let finishInstall: () => void;
     const snapshot = { currentVersion: '2.1.5', result: options.result ?? release() };
     if (options.result === null) snapshot.result = null;
     const status = options.deferStatus
@@ -50,6 +51,7 @@ async function runUpdateNotificationTests() {
       downloadFailure: false,
       downloadErrorMessage: 'download offline',
       installFailure: false,
+      installErrorMessage: 'installer unavailable',
       checkFailure: false,
       checkResult: release(),
       updateStatus: () => (options.statusFailure ? Promise.reject(new Error('offline')) : status),
@@ -66,6 +68,7 @@ async function runUpdateNotificationTests() {
         progressListeners.forEach((listener) => listener({ downloaded, total })),
       resolveStatus: (value = snapshot) => resolveStatus(value),
       finishDownload: () => finishDownload(),
+      finishInstall: () => finishInstall(),
       readAppSettings: async () => ({ lastUpdateCheck: '2026-10-23T10:00:00Z' }),
       checkForUpdates: async () => {
         api.checks++;
@@ -86,8 +89,12 @@ async function runUpdateNotificationTests() {
       },
       installUpdate: async (path) => {
         api.installations.push(path);
-        if (api.installFailure) throw new Error('installer unavailable');
-        return { appWillQuit: api.platform === 'win32' };
+        if (options.deferInstall)
+          await new Promise<void>((resolve) => {
+            finishInstall = resolve;
+          });
+        if (api.installFailure) throw new Error(api.installErrorMessage);
+        return { appWillQuit: api.platform === 'win32' || api.platform === 'darwin' };
       },
     };
     window.wormhole = options.noBridge ? undefined : api;
@@ -266,17 +273,34 @@ async function runUpdateNotificationTests() {
     assert.equal(popup().querySelector('[role="progressbar"]'), null);
     await React.act(async () => api.finishDownload());
     assert.deepEqual(api.installations, ['verified-installer']);
-    if (platform !== 'win32') {
+    if (platform === 'linux') {
       assert.equal(button('Update now').disabled, false);
-      assert.ok(
-        popup().textContent.includes(
-          platform === 'linux' ? 'AppImage downloaded.' : 'Installer opened.',
-        ),
-      );
+      assert.ok(popup().textContent.includes('AppImage downloaded.'));
+    } else {
+      assert.equal(button('Update now').disabled, true, 'quit keeps installation disabled');
+      await React.act(async () => updateTestControls.install());
+      assert.equal(api.downloads.length, 1, 'waiting for quit must not launch a second update');
+      assert.deepEqual(api.installations, ['verified-installer']);
     }
     await click('Close update notification');
     assert.equal(popup(), null, 'dismissal also works during installation');
   }
+
+  api = await mount({ platform: 'darwin', deferInstall: true });
+  await click('Update now');
+  assert.equal(button('Update now').disabled, true, 'the native quit decision is still pending');
+  await React.act(async () => updateTestControls.install());
+  assert.deepEqual(api.installations, ['verified-installer']);
+  api.installFailure = true;
+  api.installErrorMessage = 'Update cancelled because pending file edits must be kept.';
+  await React.act(async () => api.finishInstall());
+  assert.ok(popup().textContent.includes('Install failed: Update cancelled'));
+  assert.equal(button('Update now').disabled, false, 'cancelled quit must release the busy state');
+  api.installFailure = false;
+  await click('Update now');
+  await React.act(async () => api.finishInstall());
+  assert.equal(button('Update now').disabled, true);
+  assert.deepEqual(api.installations, ['verified-installer', 'verified-installer']);
 
   api = await mount({ platform: 'linux' });
   await click('View changes');
