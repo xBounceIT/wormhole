@@ -23,10 +23,21 @@ import { SshXtermSurface } from 'virtual:ssh-surface';
 
 const sleep = (delay = 30) => new Promise((resolve) => setTimeout(resolve, delay));
 
+function webglContext(runtime: XtermSession): WebGL2RenderingContext {
+  // xterm also has a 2D link-layer canvas, so the first canvas is not necessarily WebGL.
+  const gl = [...runtime.terminal.element!.querySelectorAll('canvas')]
+    .map((canvas) => canvas.getContext('webgl2'))
+    .find((context) => context);
+  assert.ok(gl, 'terminal requires a WebGL2 canvas');
+  return gl;
+}
+
 async function assertPainted(runtime: XtermSession, text: string): Promise<void> {
-  const rows = runtime.terminal.element!.querySelector('.xterm-rows')!;
-  for (let retry = 0; retry < 100 && !rows.textContent!.includes(text); retry++) await sleep(10);
-  assert.ok(rows.textContent!.includes(text), 'fallback did not paint terminal text');
+  const isPainted = () =>
+    runtime.terminal.element!.querySelector('.xterm-rows')?.textContent?.includes(text);
+  // Context loss notifies the addon after its three-second restoration window.
+  for (let retry = 0; retry < 100 && !isPainted(); retry++) await sleep(50);
+  assert.ok(isPainted(), 'fallback did not paint terminal text');
 }
 
 async function assertWebglFonts(): Promise<void> {
@@ -55,6 +66,14 @@ async function assertWebglFonts(): Promise<void> {
   try {
     runtime.attach(surface);
     assert.ok(addon.textureAtlas, 'font regression requires real WebGL, not the DOM fallback');
+    const gl = webglContext(runtime);
+    const rendererInfo = gl.getExtension('WEBGL_debug_renderer_info');
+    assert.ok(rendererInfo, 'WebGL renderer diagnostics unavailable');
+    assert.match(
+      gl.getParameter(rendererInfo.UNMASKED_RENDERER_WEBGL),
+      /SwiftShader/i,
+      'font regression must use the explicit software WebGL backend',
+    );
     await new Promise<void>((resolve) =>
       runtime.terminal.write(
         'regular \x1b[1mbold \x1b[3mbold-italic \x1b[22mitalic\x1b[0m',
@@ -349,12 +368,12 @@ async function run() {
   surface.style.width = '800px';
   runtime.fit();
 
-  let addon: WebglAddon | undefined;
   const fallback = new XtermSession('fallback', () => {
     throw new Error('WebGL unavailable');
   });
   fallback.configure(actions);
   fallback.attach(surface);
+  assert.throws(() => webglContext(fallback), /terminal requires a WebGL2 canvas/);
   await send(fallback, 'fallback');
   assert.equal(fallback.terminal.buffer.active.getLine(0)!.translateToString(true), 'fallback');
   await assertPainted(fallback, 'fallback');
@@ -399,24 +418,21 @@ async function run() {
   assert.equal(runtime.terminal.buffer.active.getLine(0)!.translateToString(true), 'kept history');
   setSshTerminalTheme(defaultSshTerminalTheme);
   fallback.dispose();
-  const contextLoss = new XtermSession('context', () => {
-    addon = new WebglAddon();
-    return addon;
-  });
+  const contextLoss = new XtermSession('context');
   contextLoss.configure(actions);
   contextLoss.attach(surface);
-  const canvas = contextLoss.terminal.element!.querySelector('canvas');
-  const gl = canvas?.getContext('webgl2');
-  if (gl) {
-    gl.getExtension('WEBGL_lose_context')?.loseContext();
-    await sleep(100);
-  }
+  const gl = webglContext(contextLoss);
+  const loseContext = gl.getExtension('WEBGL_lose_context');
+  assert.ok(loseContext, 'context-loss regression requires WEBGL_lose_context');
+  loseContext.loseContext();
+  for (let retry = 0; retry < 100 && !gl.isContextLost(); retry++) await sleep(10);
+  assert.ok(gl.isContextLost(), 'WebGL context was not lost');
   await send(contextLoss, 'after context loss');
   assert.equal(
     contextLoss.terminal.buffer.active.getLine(0)!.translateToString(true),
     'after context loss',
   );
-  if (gl?.isContextLost()) await assertPainted(contextLoss, 'after context loss');
+  await assertPainted(contextLoss, 'after context loss');
   contextLoss.dispose();
   runtime.receive({
     type: 'terminal-output',
@@ -442,7 +458,6 @@ async function run() {
   assert.notEqual(replacement, runtime);
   retainSshTerminals(new Set(['test']));
   retainSshTerminals(new Set());
-  assert.ok(addon || !gl);
   // Mount the production React surface, including lifecycle and focus behavior.
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   await runSshThemeSettingsTests();

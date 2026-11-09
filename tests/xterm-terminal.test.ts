@@ -110,6 +110,11 @@ test('xterm SSH presentation works in Chromium with WebGL and software fallback'
     harness,
     `
     const { app, BrowserWindow } = require('electron');
+    // Exercise real WebGL through SwiftShader even on GPU-less CI runners.
+    // These switches apply only to this trusted, local test harness.
+    app.commandLine.appendSwitch('use-gl', 'angle');
+    app.commandLine.appendSwitch('use-angle', 'swiftshader');
+    app.commandLine.appendSwitch('enable-unsafe-swiftshader');
     app.setPath('userData', ${JSON.stringify(directory)}); app.setPath('sessionData', ${JSON.stringify(directory)});
     app.whenReady().then(async () => {
       const window = new BrowserWindow({show:false,width:1000,height:700,webPreferences:{nodeIntegration:true,contextIsolation:false,backgroundThrottling:false,offscreen:true}});
@@ -135,7 +140,7 @@ test('xterm SSH presentation works in Chromium with WebGL and software fallback'
         }
         console.log('XtermSession V8 block coverage: ' + covered + '/' + total + ' (' + (100*covered/total).toFixed(2) + '%)');
         if (100*covered/total < 80) throw new Error('XtermSession coverage below 80%');
-        for (const name of ['TerminalLinkDialog', 'useNativeSurfaceOverlay', 'useSshTerminalTheme', 'SshThemeSettings', 'SshThemePreview']) {
+        for (const name of ['webglContext', 'assertPainted', 'assertWebglFonts', 'TerminalLinkDialog', 'useNativeSurfaceOverlay', 'useSshTerminalTheme', 'SshThemeSettings', 'SshThemePreview']) {
           const parent = script.functions.find(item => item.functionName === name);
           if (!parent) throw new Error('Missing coverage: ' + name);
           const range = parent.ranges[0];
