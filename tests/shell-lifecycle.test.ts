@@ -1165,19 +1165,60 @@ test('cancelled update quit rejects the handoff, restores confirmation, and perm
   assert.equal(harness.events.filter((event) => event === 'exited').length, 1);
 });
 
-test('update quit failures reject instead of reporting success and leave confirmation enabled', async () => {
-  for (const failure of [
-    'prepareFailure',
-    'finishFailure',
-    'shutdownFailure',
-    'quitFailure',
-  ] as const) {
+test('update quit preparation failures preserve a usable app and permit retry', async () => {
+  for (const failure of ['prepareFailure', 'finishFailure', 'quitFailure'] as const) {
     const harness = updateQuitHarness();
     harness.controls[failure] = true;
     await assert.rejects(harness.install('installer.dmg'), /close|quit/i);
     assert.equal(harness.events.includes('exited'), false);
-    assert.equal(harness.state().skipQuitConfirmation, false);
+    assert.deepEqual(harness.state(), {
+      isQuitting: false,
+      skipQuitConfirmation: false,
+      quitCleanupStarted: false,
+    });
+    harness.controls[failure] = false;
+    assert.deepEqual(await harness.install('installer.dmg'), { appWillQuit: true });
+    assert.equal(harness.events.filter((event) => event === 'exited').length, 1);
   }
+});
+
+test('native cleanup failures complete update quit after preserving file edits', async () => {
+  for (const platform of ['darwin', 'win32']) {
+    const harness = updateQuitHarness(platform);
+    harness.controls.shutdownFailure = true;
+    assert.deepEqual(await harness.install('installer'), { appWillQuit: true });
+    assert.deepEqual(harness.events, [
+      platform === 'darwin' ? 'open' : 'spawn',
+      'quit-request',
+      'prepare',
+      'finish',
+      'flush',
+      'shutdown',
+      'warning',
+      'quit-request',
+      'exited',
+    ]);
+    assert.equal(harness.state().isQuitting, true);
+  }
+});
+
+test('ordinary quit also completes after native cleanup fails', async () => {
+  const harness = updateQuitHarness();
+  harness.controls.shutdownFailure = true;
+  harness.controls.activeCount = 1;
+  harness.app.quit();
+  await new Promise(setImmediate);
+  assert.deepEqual(harness.events, [
+    'quit-request',
+    'prepare',
+    'confirm',
+    'finish',
+    'flush',
+    'shutdown',
+    'warning',
+    'quit-request',
+    'exited',
+  ]);
 });
 
 test('concurrent update requests cannot launch twice and completion waits for cleanup', async () => {

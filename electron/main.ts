@@ -11292,7 +11292,13 @@ app.on('before-quit', (event) => {
       await Promise.allSettled(
         BrowserWindow.getAllWindows().map((window) => requestRendererTeardown(window)),
       );
-      await shutdownNativeResources();
+      try {
+        await shutdownNativeResources();
+      } catch {
+        // File-edit journals are finalized and native services may already be partially
+        // stopped. Finish exiting instead of leaving an unusable workspace.
+        console.warn('[Wormhole] Native resource shutdown did not finish cleanly.');
+      }
       quitCleanupComplete = true;
       app.quit();
       settleUpdateQuit();
