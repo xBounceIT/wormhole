@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"sync/atomic"
 
@@ -86,7 +87,10 @@ var ErrSeqExhausted = errors.New("esp: outbound sequence number space exhausted,
 // inbound from the peer). It owns the outbound sequence counter and the inbound
 // anti-replay window. Encrypt/Decrypt are safe for concurrent use.
 type SA struct {
-	suite Suite
+	suite    Suite
+	hash     func() hash.Hash
+	icvLen   int
+	noReplay bool
 
 	outSPI uint32 // peer's SPI: goes in packets we send
 	inSPI  uint32 // our SPI: expected in packets we receive
@@ -125,7 +129,8 @@ func NewSA(suite Suite, outSPI, inSPI uint32, outEncr, outInteg, inEncr, inInteg
 
 func newSA(suite Suite, outSPI, inSPI uint32, outEncr, outInteg, inEncr, inInteg []byte, replayWindow uint32) (*SA, error) {
 	sa := &SA{
-		suite:  suite,
+		suite: suite,
+		hash:  sha256.New, icvLen: 16,
 		outSPI: outSPI,
 		inSPI:  inSPI,
 		replay: NewReplayWindow(replayWindow),
@@ -225,7 +230,7 @@ func (sa *SA) Encrypt(inner []byte) ([]byte, error) {
 			break
 		}
 	}
-	if sa.suite == SuiteAESCBC256SHA256 {
+	if sa.outBlock != nil {
 		return sa.encryptCBC(inner, seq)
 	}
 	return sa.encryptAEAD(inner, seq), nil
@@ -234,28 +239,28 @@ func (sa *SA) Encrypt(inner []byte) ([]byte, error) {
 func (sa *SA) encryptCBC(inner []byte, seq uint32) ([]byte, error) {
 	// RFC 4303 §2.4 padding: monotonic 1,2,3,... so that the plaintext
 	// (inner | pad | padLen(1) | nextHdr(1)) is a multiple of the block size.
-	padLen := (espBlock - (len(inner)+2)%espBlock) % espBlock
+	padLen := (sa.outBlock.BlockSize() - (len(inner)+2)%sa.outBlock.BlockSize()) % sa.outBlock.BlockSize()
 	plainLen := len(inner) + padLen + 2
 
-	out := make([]byte, espHeaderLen+cbcIVLen+plainLen+espICVLen)
+	out := make([]byte, espHeaderLen+sa.outBlock.BlockSize()+plainLen+sa.icvLen)
 	binary.BigEndian.PutUint32(out[0:4], sa.outSPI)
 	binary.BigEndian.PutUint32(out[4:8], seq)
 
-	iv := out[espHeaderLen : espHeaderLen+cbcIVLen]
+	iv := out[espHeaderLen : espHeaderLen+sa.outBlock.BlockSize()]
 	if _, err := io.ReadFull(rand.Reader, iv); err != nil {
 		return nil, err
 	}
 
 	// Assemble plaintext in place at the ciphertext position, then encrypt it.
-	ctStart := espHeaderLen + cbcIVLen
+	ctStart := espHeaderLen + sa.outBlock.BlockSize()
 	plain := out[ctStart : ctStart+plainLen]
 	fillTrailer(plain, inner, padLen)
 	cipher.NewCBCEncrypter(sa.outBlock, iv).CryptBlocks(plain, plain)
 
 	// ICV over SPI | Seq | IV | ciphertext.
-	mac := hmac.New(sha256.New, sa.outInteg)
+	mac := hmac.New(sa.hash, sa.outInteg)
 	mac.Write(out[:ctStart+plainLen])
-	icv := mac.Sum(nil)[:espICVLen]
+	icv := mac.Sum(nil)[:sa.icvLen]
 	copy(out[ctStart+plainLen:], icv)
 	return out, nil
 }
@@ -317,14 +322,14 @@ func nextHeaderFor(inner []byte) byte {
 // Decrypt verifies and decrypts an inbound ESP packet, returning the inner IP
 // datagram (IPv4 or IPv6). The returned slice never aliases pkt.
 func (sa *SA) Decrypt(pkt []byte) ([]byte, error) {
-	if sa.suite == SuiteAESCBC256SHA256 {
+	if sa.inBlock != nil {
 		return sa.decryptCBC(pkt)
 	}
 	return sa.decryptAEAD(pkt)
 }
 
 func (sa *SA) decryptCBC(pkt []byte) ([]byte, error) {
-	if len(pkt) < espHeaderLen+cbcIVLen+espBlock+espICVLen {
+	if len(pkt) < espHeaderLen+sa.inBlock.BlockSize()+sa.inBlock.BlockSize()+sa.icvLen {
 		return nil, errors.New("esp: packet too short")
 	}
 	if spi := binary.BigEndian.Uint32(pkt[0:4]); spi != sa.inSPI {
@@ -333,19 +338,19 @@ func (sa *SA) decryptCBC(pkt []byte) ([]byte, error) {
 	seq := binary.BigEndian.Uint32(pkt[4:8])
 
 	// Verify ICV before doing anything else with the contents.
-	icvStart := len(pkt) - espICVLen
-	mac := hmac.New(sha256.New, sa.inInteg)
+	icvStart := len(pkt) - sa.icvLen
+	mac := hmac.New(sa.hash, sa.inInteg)
 	mac.Write(pkt[:icvStart])
-	if !hmac.Equal(mac.Sum(nil)[:espICVLen], pkt[icvStart:]) {
+	if !hmac.Equal(mac.Sum(nil)[:sa.icvLen], pkt[icvStart:]) {
 		return nil, errors.New("esp: ICV verification failed")
 	}
-	if !sa.replay.Accept(seq) {
+	if !sa.noReplay && !sa.replay.Accept(seq) {
 		return nil, ErrReplay
 	}
 
-	iv := pkt[espHeaderLen : espHeaderLen+cbcIVLen]
-	ct := pkt[espHeaderLen+cbcIVLen : icvStart]
-	if len(ct) == 0 || len(ct)%espBlock != 0 {
+	iv := pkt[espHeaderLen : espHeaderLen+sa.inBlock.BlockSize()]
+	ct := pkt[espHeaderLen+sa.inBlock.BlockSize() : icvStart]
+	if len(ct) == 0 || len(ct)%sa.inBlock.BlockSize() != 0 {
 		return nil, errors.New("esp: ciphertext not block-aligned")
 	}
 	plain := make([]byte, len(ct))
@@ -376,7 +381,7 @@ func (sa *SA) decryptAEAD(pkt []byte) ([]byte, error) {
 	}
 	// The invariant "only authenticated packets move the replay window" holds:
 	// Open verified the tag above.
-	if !sa.replay.Accept(seq) {
+	if !sa.noReplay && !sa.replay.Accept(seq) {
 		return nil, ErrReplay
 	}
 	return parseTrailer(plain)

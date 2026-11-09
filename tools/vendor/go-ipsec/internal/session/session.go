@@ -8,11 +8,13 @@ package session
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/n0madic/go-ipsec/internal/esp"
@@ -38,18 +40,21 @@ type WireID struct {
 // (toSessionConfig allocates them fresh, inside secretmem.Do) and wipes them
 // on Close — a string would be unwipeable for the process lifetime.
 type Config struct {
-	FortinetSAML bool
-	ServerPSK    []byte
-	Server       string
-	LocalID      WireID
-	RemoteID     WireID
-	EAPUser      string
-	EAPPass      []byte
-	PSK          []byte
-	RootCAs      *x509.CertPool
-	Dialer       transport.DialFunc
-	MTU          uint32
-	Logger       *slog.Logger
+	ClientCertificate *tls.Certificate
+	DHGroups          []uint16
+	DisableDPD        bool
+	FortinetSAML      bool
+	ServerPSK         []byte
+	Server            string
+	LocalID           WireID
+	RemoteID          WireID
+	EAPUser           string
+	EAPPass           []byte
+	PSK               []byte
+	RootCAs           *x509.CertPool
+	Dialer            transport.DialFunc
+	MTU               uint32
+	Logger            *slog.Logger
 
 	KeepAlive        time.Duration
 	DPDTimeout       time.Duration
@@ -213,7 +218,11 @@ func (s *Session) IKESAInit(ctx context.Context) error {
 	}
 	// Prefer x25519 (group 31); switch to another supported group if the
 	// responder requests it via INVALID_KE_PAYLOAD below.
-	if s.dh, err = ikesa.NewDH(ikemsg.DH_X25519); err != nil {
+	group := uint16(ikemsg.DH_X25519)
+	if len(s.cfg.DHGroups) > 0 {
+		group = s.cfg.DHGroups[0]
+	}
+	if s.dh, err = ikesa.NewDH(group); err != nil {
 		return err
 	}
 	if s.nonceI, err = randBytes(nonceLen); err != nil {
@@ -240,7 +249,7 @@ func (s *Session) IKESAInit(ctx context.Context) error {
 	// Retry once with the requested supported group. Re-echo the cookie if the
 	// responder is still challenging.
 	if g, ok := saInitInvalidKE(rspBytes); ok {
-		if !supportedDHGroup(g) || g == s.dh.Group {
+		if !supportedDHGroup(g) || g == s.dh.Group || len(s.cfg.DHGroups) > 0 && !slices.Contains(s.cfg.DHGroups, g) {
 			return fmt.Errorf("session: responder requires DH group %d (INVALID_KE_PAYLOAD); no mutually-supported DH group", g)
 		}
 		s.log.Debug("IKE_SA_INIT INVALID_KE_PAYLOAD, retrying with the responder's DH group", "group", g)
@@ -330,7 +339,7 @@ func (s *Session) buildSAInit(cookie []byte) (*ikemsg.Message, []byte, error) {
 	// DH groups. The KE carries our current group, which the INVALID_KE_PAYLOAD
 	// retry may switch.
 	m.Payloads = append(m.Payloads,
-		&ikemsg.SAPayload{Proposals: buildProposals(nil, s.enabledIKESuites(), preferredDHGroups...)},
+		&ikemsg.SAPayload{Proposals: buildProposals(nil, s.enabledIKESuites(), s.configuredDHGroups()...)},
 		&ikemsg.KEPayload{Group: s.dh.Group, Data: s.dh.Public},
 		&ikemsg.NoncePayload{Data: s.nonceI},
 	)

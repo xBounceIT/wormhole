@@ -1130,14 +1130,29 @@ func tunnelSidecarCommand(kind int64, raw json.RawMessage) (string, []byte, erro
 		payload, err := encode(openVPNConfig(stringValue("ProfileOvpn"), stringValue("Username"), stringValue("Password")))
 		return "wormhole-ovpnproxy", payload, err
 	case 9:
-		if stringValue("SamlUid") == "" || stringValue("SamlToken") == "" {
+		if fortinetUserAuth(settings) == 3 && (stringValue("SamlUid") == "" || stringValue("SamlToken") == "") {
 			return "", nil, errors.New("Fortinet IPsec requires SAML authentication")
 		}
-		payload, err := encode(map[string]any{
+		config := map[string]any{
 			"host": stringValue("Host"), "port": numberValue("Port", 500),
 			"pre_shared_key": stringValue("PreSharedKey"), "local_id": stringValue("LocalId"), "remote_id": stringValue("RemoteId"),
-			"saml_uid": stringValue("SamlUid"), "saml_token": stringValue("SamlToken"),
-		})
+			"options": fortinetIPsecPublicOptions(settings),
+		}
+		if fortinetUserAuth(settings) == 3 {
+			config["saml_uid"] = stringValue("SamlUid")
+			config["saml_token"] = stringValue("SamlToken")
+		}
+		if fortinetUserAuth(settings) == 1 || fortinetUserAuth(settings) == 2 {
+			config["username"] = stringValue("Username")
+			config["password"] = stringValue("Password")
+		}
+		if tunnelSettingNumber(settings, "AuthMethod") == 1 {
+			delete(config, "pre_shared_key")
+			config["client_cert"] = stringValue("ClientCert")
+			config["client_key"] = stringValue("ClientKey")
+			config["ca_cert"] = stringValue("CaCert")
+		}
+		payload, err := encode(config)
 		return "wormhole-fortiipsecproxy", payload, err
 	case 2:
 		useSSO := tunnelSettingBool(settings, "UseSingleSignOn")

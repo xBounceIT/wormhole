@@ -532,6 +532,9 @@ func (s *Session) detectSuspend(ctx context.Context, now time.Time) {
 // exchange so a missing ack eventually declares the peer dead. A fast probe uses
 // the tightened post-suspend schedule (fastDPDBase/fastDPDTries).
 func (s *Session) initiateDPD(ctx context.Context, fast bool) error {
+	if s.cfg.DisableDPD {
+		return nil
+	}
 	msgID := s.messageID
 	raw, err := s.encodeSKEmpty(ikemsg.ExchangeInformational, ikeRoleBit(s.ikeSA.Role), msgID)
 	if err != nil {

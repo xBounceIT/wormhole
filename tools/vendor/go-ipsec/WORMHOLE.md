@@ -30,6 +30,43 @@ Fortinet protocol references:
 
 Run `go test ./... -coverprofile=coverage.out` here as well as the sidecar and
 backend suites. Third-party unchanged code is excluded from changed-code coverage;
-local extensions and the integration are tested explicitly. IKEv1, Fortinet TCP
+local extensions and the integration are tested explicitly. Fortinet TCP
 encapsulation, SAML over a shared IKE TCP port, and EAP-TTLS are not implemented.
 Real FortiGate/IdP interoperability still requires an integration environment.
+
+## Configurable Fortinet authentication and IKEv1
+
+The IKEv1 exchange implementation under `internal/ikev1` and the small shared
+DH/PRF primitives under `internal/legacycrypto` originate from MIT-licensed
+`github.com/xen0bit/veepin`, commit `bcac1789f0a7eaa7687b2777d6d6765fb87158e0`.
+`LICENSE-ikev1` preserves its license. Upstream exchange tests are retained;
+the original logging adapter is replaced by a silent adapter so protocol
+messages, usernames, banners and credentials cannot reach diagnostics.
+
+Local additions include explicit IKE/ESP proposals, AES-128/192/256 and 3DES,
+MD5/SHA-1/SHA-256/384/512, RFC 2409/3526 MODP groups and RFC 5903 ECP groups,
+RSA certificate authentication, XAuth with PSK or RSA, manual addressing,
+replay policy, Quick Mode PFS, authenticated cookie/message-id checks, and
+Child SA renewal. The adapter exposes the same isolated userspace network as
+IKEv2, keeps DNS inside ESP, and closes on failure or IKE SA expiry. Phase 1
+reauthentication currently requires reconnecting; it never reuses expired keys.
+
+The IKEv2 path additionally supports client certificates (RSA or ECDSA) and
+ordinary PSK/EAP passwords without a SAML browser. Existing SAML profiles keep
+automatic proposals when opened and saved. Explicit IKEv2 proposals currently
+require AES-256/SHA-256; configurable DH groups are 14/19/20 and Child PFS is
+group 14. IKEv1 permits the legacy proposals shown in the editor.
+
+Remaining capability limits are explicit connection errors: DHCP over IPsec,
+disabled NAT-T/raw ESP, local-LAN bypass, IKEv2 certificate-plus-EAP, and IKEv2
+volume lifetimes or disabled replay/time lifetimes. SSL-VPN failover is not
+implemented. Additional gateways are tried in order, with independent startup
+attempts; SAML credentials remain bound to the gateway that issued them.
+
+Validation uses Go's statement coverage and Node's native loaded-module
+coverage. Unchanged imported third-party source is excluded from changed-code
+coverage. React TSX layout and the Electron process entrypoint follow the
+project's source-contract/native-fixture coverage convention rather than being
+counted as directly loaded Node unit modules. OS allocation failures and
+`crypto/rand` failures are not fault-injected. No live FortiGate, external IdP
+or real provider certificate is needed by the offline suites.

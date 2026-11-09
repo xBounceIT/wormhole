@@ -341,6 +341,13 @@ func selectProposal[ID suiteID](sa *ikemsg.SAPayload, enabled []transformSuite[I
 // pick from a peer's offer.
 var preferredDHGroups = []uint16{ikemsg.DH_X25519, ikemsg.DH_MODP2048, 19, 20}
 
+func (s *Session) configuredDHGroups() []uint16 {
+	if len(s.cfg.DHGroups) > 0 {
+		return s.cfg.DHGroups
+	}
+	return preferredDHGroups
+}
+
 // supportedDHGroup reports whether g is a DH group we can run.
 func supportedDHGroup(g uint16) bool {
 	return slices.Contains(preferredDHGroups, g)

@@ -56,6 +56,9 @@ func (s *Session) IKEAuth(ctx context.Context) error {
 	if len(s.cfg.PSK) > 0 {
 		return s.ikeAuthPSK(ctx)
 	}
+	if s.cfg.ClientCertificate != nil {
+		return s.ikeAuthCertificate(ctx)
+	}
 	return s.ikeAuthEAP(ctx)
 }
 
@@ -330,9 +333,25 @@ func (s *Session) handleFinalAuthResponse(payloads ikemsg.Payloads, secret []byt
 	}
 	// Verify the responder's shared-secret AUTH over the responder signed octets.
 	respSigned := s.responderSignedOctets(ikemsg.MarshalIDBody(ikemsg.IDType(s.remoteIDr.Type), s.remoteIDr.Data))
-	want := auth.SharedSecretAuth(s.ikeSA.PRF, secret, respSigned)
-	if authP.Method != auth.MethodSharedKeyMIC || !constTimeEqual(authP.Data, want) {
-		return errors.New("session: responder AUTH verification failed")
+	if s.cfg.ClientCertificate != nil {
+		var certs [][]byte
+		for _, p := range payloads {
+			if cert, ok := p.(*ikemsg.CertPayload); ok {
+				certs = append(certs, cert.Data)
+			}
+		}
+		leaf, err := auth.VerifyServerChain(certs, s.cfg.RootCAs, s.peerName(), time.Now())
+		if err != nil {
+			return err
+		}
+		if err := auth.VerifyCertAuth(authP.Method, authP.Data, respSigned, leaf); err != nil {
+			return errors.New("session: responder certificate AUTH failed")
+		}
+	} else {
+		want := auth.SharedSecretAuth(s.ikeSA.PRF, secret, respSigned)
+		if authP.Method != auth.MethodSharedKeyMIC || !constTimeEqual(authP.Data, want) {
+			return errors.New("session: responder AUTH verification failed")
+		}
 	}
 
 	if saP == nil || len(saP.Proposals) == 0 {

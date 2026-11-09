@@ -1,6 +1,7 @@
 package ipsec
 
 import (
+	"crypto/tls"
 	"crypto/x509"
 	"errors"
 	"fmt"
@@ -54,6 +55,11 @@ const (
 // x25519 (group 31, preferred) or MODP-2048 (group 14, fallback), negotiated
 // at IKE_SA_INIT.
 type Config struct {
+	FortinetOptions   *FortinetOptions
+	NATTPort          int // Optional peer NAT-T port; zero uses UDP/4500.
+	DHGroups          []uint16
+	DisableDPD        bool
+	ClientCertificate *tls.Certificate
 	// Wormhole: Fortinet's SAML token is EAP-GTC; the responder is authenticated
 	// independently with ServerPSK. This opt-in never changes standard EAP.
 	FortinetSAML bool
@@ -262,10 +268,13 @@ func (c *Config) validate() error {
 	// password; supplying both PSK and EAP (or neither) is a configuration error.
 	hasPSK := c.PSK != ""
 	hasEAP := c.EAP.Username != "" || c.EAP.Password != ""
+	if c.ClientCertificate != nil && (hasPSK || hasEAP) {
+		return errors.New("ipsec: client certificate authentication must be configured independently of PSK/EAP")
+	}
 	switch {
 	case hasPSK && hasEAP:
 		return errors.New("ipsec: set either Config.PSK or Config.EAP, not both")
-	case !hasPSK && !hasEAP:
+	case !hasPSK && !hasEAP && c.ClientCertificate == nil:
 		return errors.New("ipsec: authentication credentials required: set Config.PSK or Config.EAP")
 	case hasEAP:
 		if c.EAP.Username == "" {
@@ -280,6 +289,9 @@ func (c *Config) validate() error {
 	// deep in IKE_AUTH. With EAP an unset LocalID defaults to the EAP username;
 	// with PSK the identity keys the peer's PSK lookup and must be explicit.
 	if c.LocalID.IsZero() {
+		if c.ClientCertificate != nil {
+			return errors.New("ipsec: local identity is required for certificate authentication")
+		}
 		if hasPSK {
 			return errors.New("ipsec: Config.LocalID is required with PSK authentication")
 		}

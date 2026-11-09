@@ -17,10 +17,14 @@ func tunnelEditorSettings(kind int64, id string, raw json.RawMessage) (json.RawM
 		return nil, errors.New("Fortinet IPsec settings are invalid")
 	}
 	defer clearTunnelSettingsMap(settings)
-	hasKey := tunnelSettingString(settings, "PreSharedKey") != ""
-	clearBytes(settings["PreSharedKey"])
-	delete(settings, "PreSharedKey")
-	settings["HasPreSharedKey"], _ = json.Marshal(hasKey)
+	for _, key := range fortinetIPsecSecretKeys {
+		has := tunnelSettingString(settings, key) != ""
+		clearBytes(settings[key])
+		delete(settings, key)
+		if has || key == "PreSharedKey" && tunnelSettingNumber(settings, "AuthMethod") != 1 {
+			settings["Has"+key], _ = json.Marshal(has)
+		}
+	}
 	return json.Marshal(settings)
 }
 
@@ -29,15 +33,17 @@ func validateFortinetIPsecWriteSettings(settings map[string]json.RawMessage) err
 	for key, value := range settings {
 		check[key] = value
 	}
-	if marker, present := check["HasPreSharedKey"]; present {
-		var hasKey *bool
-		if json.Unmarshal(marker, &hasKey) != nil || hasKey == nil || !*hasKey || check["PreSharedKey"] != nil {
-			return errors.New("Fortinet IPsec stored key marker is invalid")
+	for _, key := range fortinetIPsecSecretKeys {
+		if marker, present := check["Has"+key]; present {
+			var hasKey *bool
+			if json.Unmarshal(marker, &hasKey) != nil || hasKey == nil || !*hasKey || check[key] != nil {
+				return errors.New("Fortinet IPsec stored key marker is invalid")
+			}
+			delete(check, "Has"+key)
+			check[key] = json.RawMessage(`"preserved"`)
 		}
-		delete(check, "HasPreSharedKey")
-		check["PreSharedKey"] = json.RawMessage(`"preserved"`)
 	}
-	return validateFortinetIPsecSettings(check)
+	return validateFortinetIPsecConfiguration(check, false)
 }
 
 func resolveFortinetIPsecWriteSettings(database *sql.DB, databasePath, id string, raw json.RawMessage, create bool) (json.RawMessage, error) {
@@ -49,21 +55,23 @@ func resolveFortinetIPsecWriteSettings(database *sql.DB, databasePath, id string
 	if err := validateFortinetIPsecWriteSettings(settings); err != nil {
 		return nil, err
 	}
-	if _, preserve := settings["HasPreSharedKey"]; preserve {
-		var kind int64
-		if create || database.QueryRow("SELECT Kind FROM TunnelConfigs WHERE lower(Id) = lower(?);", id).Scan(&kind) != nil || kind != 9 {
-			return nil, errors.New("the stored Fortinet IPsec gateway key is unavailable")
+	for _, key := range fortinetIPsecSecretKeys {
+		if _, preserve := settings["Has"+key]; preserve {
+			var kind int64
+			if create || database.QueryRow("SELECT Kind FROM TunnelConfigs WHERE lower(Id) = lower(?);", id).Scan(&kind) != nil || kind != 9 {
+				return nil, errors.New("the stored Fortinet IPsec gateway key is unavailable")
+			}
+			previous, err := readTunnelSettings(database, databasePath, id)
+			defer clearBytes(previous)
+			var stored map[string]json.RawMessage
+			unmarshalErr := json.Unmarshal(previous, &stored)
+			defer clearTunnelSettingsMap(stored)
+			if err != nil || unmarshalErr != nil || tunnelSettingString(stored, key) == "" {
+				return nil, errors.New("the stored Fortinet IPsec gateway key is unavailable")
+			}
+			settings[key] = append(json.RawMessage(nil), stored[key]...)
+			delete(settings, "Has"+key)
 		}
-		previous, err := readTunnelSettings(database, databasePath, id)
-		defer clearBytes(previous)
-		var stored map[string]json.RawMessage
-		unmarshalErr := json.Unmarshal(previous, &stored)
-		defer clearTunnelSettingsMap(stored)
-		if err != nil || unmarshalErr != nil || tunnelSettingString(stored, "PreSharedKey") == "" {
-			return nil, errors.New("the stored Fortinet IPsec gateway key is unavailable")
-		}
-		settings["PreSharedKey"] = append(json.RawMessage(nil), stored["PreSharedKey"]...)
-		delete(settings, "HasPreSharedKey")
 	}
 	if err := validateFortinetIPsecSettings(settings); err != nil {
 		return nil, err

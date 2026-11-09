@@ -361,7 +361,12 @@ import {
   type TunnelMode,
 } from './tunnel-state';
 import { SshTunnelFields } from './components/SshTunnelFields';
-import { fortinetIPsecDefaults, fortinetIPsecFields } from './fortinet-ipsec-state';
+import {
+  fortinetIPsecDefaults,
+  fortinetIPsecFields,
+  fortinetIPsecEditorSettings,
+  fortinetIPsecFieldVisible,
+} from './fortinet-ipsec-state';
 
 const MRemoteImportDialog = lazy(() =>
   import('./components/MRemoteImportDialog').then((module) => ({
@@ -12106,7 +12111,7 @@ const tunnelKinds = [
   { value: 0, label: 'WireGuard' },
   { value: 1, label: 'OpenVPN' },
   { value: 2, label: 'Fortinet' },
-  { value: 9, label: 'Fortinet IPsec (SAML)' },
+  { value: 9, label: 'Fortinet IPsec' },
   { value: 3, label: 'WatchGuard' },
   { value: 4, label: 'Stormshield' },
   { value: 5, label: 'Azure VPN' },
@@ -12661,9 +12666,11 @@ function blankTunnelEditor(): TunnelEditorValue {
 
 function tunnelEditorFromDetails(details: WormholeTunnelDetails): TunnelEditorValue {
   const settings =
-    details.kind === 3
-      ? watchguardEditorSettingsFromDetails(tunnelDefaultSettings(details.kind), details.settings)
-      : { ...tunnelDefaultSettings(details.kind), ...details.settings };
+    details.kind === 9
+      ? fortinetIPsecEditorSettings(details.settings)
+      : details.kind === 3
+        ? watchguardEditorSettingsFromDetails(tunnelDefaultSettings(details.kind), details.settings)
+        : { ...tunnelDefaultSettings(details.kind), ...details.settings };
   return {
     jumpHostKeySha256: details.jumpHostKeySha256,
     id: details.id,
@@ -13311,29 +13318,58 @@ function TunnelEditorDialog({
               <>
                 <TunnelSection title="Gateway">{rows('Gateway')}</TunnelSection>
                 <TunnelSection title="Authentication">
+                  {rows('Authentication', {
+                    hidden: (field) => !fortinetIPsecFieldVisible(field.key, value.settings),
+                  })}
                   <p className="text-[11px] text-muted-foreground md:col-span-2">
-                    {value.settings.HasPreSharedKey === true
-                      ? 'A gateway PSK is stored securely. Its value is kept outside this editor.'
-                      : 'You will enter the gateway PSK in a separate secure window when you save.'}
+                    Enter keys, certificates and saved passwords in a separate secure window when
+                    you save.
                   </p>
-                  {value.settings.HasPreSharedKey === true ? (
-                    <Label className="flex items-center gap-2 md:col-span-2">
-                      <Checkbox
-                        checked={value.settings.ReplacePreSharedKey === true}
-                        onCheckedChange={(checked) =>
-                          setSetting('ReplacePreSharedKey', checked === true)
-                        }
-                      />
-                      Replace stored gateway PSK when saving
-                    </Label>
-                  ) : null}
+                  {(value.settings.AuthMethod === 1
+                    ? ['ClientCert', 'ClientKey', 'CaCert']
+                    : ['PreSharedKey']
+                  )
+                    .concat(value.settings.UserAuth === 2 ? ['Password'] : [])
+                    .map((secret) =>
+                      value.settings[`Has${secret}`] === true || secret === 'CaCert' ? (
+                        <Label key={secret} className="flex items-center gap-2 md:col-span-2">
+                          <Checkbox
+                            checked={value.settings[`Replace${secret}`] === true}
+                            onCheckedChange={(checked) =>
+                              setSetting(`Replace${secret}`, checked === true)
+                            }
+                          />
+                          {secret === 'CaCert' ? 'Configure' : 'Replace stored'}{' '}
+                          {secret === 'PreSharedKey'
+                            ? 'gateway PSK'
+                            : secret === 'ClientCert'
+                              ? 'client certificate'
+                              : secret === 'ClientKey'
+                                ? 'private key'
+                                : secret === 'CaCert'
+                                  ? 'CA certificate'
+                                  : 'password'}{' '}
+                          when saving
+                        </Label>
+                      ) : null,
+                    )}
                 </TunnelSection>
-                <p className="text-[11px] leading-relaxed text-muted-foreground">
-                  IKEv2 IPsec with SAML sign-in in a dedicated window. Requires a gateway PSK, UDP
-                  access to IKE and NAT-T (4500), and the FortiGate SAML HTTPS port.
-                </p>
+                <TunnelSection title="VPN settings">
+                  {rows('VPN settings', {
+                    hidden: (field) => !fortinetIPsecFieldVisible(field.key, value.settings),
+                  })}
+                </TunnelSection>
                 <TunnelAdvanced label="Advanced" onOpenChange={setAdvancedOpen} open={advancedOpen}>
-                  {rows('Advanced')}
+                  <TunnelSection className="col-span-full" title="Phase 1">
+                    {rows('Phase 1', {
+                      hidden: (field) => !fortinetIPsecFieldVisible(field.key, value.settings),
+                    })}
+                  </TunnelSection>
+                  <TunnelSection className="col-span-full" title="Phase 2">
+                    {rows('Phase 2', {
+                      hidden: (field) => !fortinetIPsecFieldVisible(field.key, value.settings),
+                    })}
+                  </TunnelSection>
                 </TunnelAdvanced>
               </>
             ) : null}

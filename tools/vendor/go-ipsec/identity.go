@@ -85,7 +85,7 @@ func (id Identity) check() error {
 		if len(id.Data) != 16 {
 			return fmt.Errorf("ID_IPV6_ADDR needs 16 data bytes, got %d", len(id.Data))
 		}
-	case IDKindFQDN, IDKindEmail, IDKindKeyID:
+	case IDKindFQDN, IDKindEmail, IDKindKeyID, 9:
 		if len(id.Data) == 0 {
 			return errors.New("empty identity data")
 		}
