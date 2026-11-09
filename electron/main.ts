@@ -177,7 +177,11 @@ import {
   type WebBrowserState,
 } from './web-browser-tabs.js';
 import { webTargetURLMatchesEndpoint } from './web-target-validation.js';
-import { isSafeUpdateInstallerPath, launchDownloadedUpdate } from './update-installer.js';
+import {
+  isSafeUpdateInstallerPath,
+  launchDownloadedUpdate,
+  updateInstallAction,
+} from './update-installer.js';
 import { parseWorkspaceRdpSettings, type WorkspaceRdpSettings } from './workspace-rdp-contract.js';
 import type {
   RdpBackendEvent,
@@ -291,7 +295,9 @@ let latestUpdateCheck: UpdateCheckResult | undefined;
 let updateCheckInFlight: Promise<UpdateCheckResult> | undefined;
 let updateDownloadChild: ChildProcessWithoutNullStreams | undefined;
 const updateInstallTasks = new KeyedSingleFlight<string>();
-let pendingUpdateQuit: { resolve(): void; reject(error: Error): void } | undefined;
+let pendingUpdateQuit:
+  | { launch(): Promise<void>; resolve(): void; reject(error: Error): void }
+  | undefined;
 let startupUpdateTimer: NodeJS.Timeout | undefined;
 let startupUpdateScheduled = false;
 let startupBackgroundTimer: NodeJS.Timeout | undefined;
@@ -4321,40 +4327,48 @@ async function handleDownloadedUpdate(installerPath: string): Promise<{ appWillQ
   if (quitCleanupStarted || isQuitting) throw new Error('Wormhole is already closing.');
   return updateInstallTasks.runExclusive(
     'install',
-    () =>
-      launchDownloadedUpdate(installerPath, process.platform, {
-        execute: async (installerPath) => {
-          // Detached + unref lets Inno Setup survive the immediate exit. /RESTARTAPP relaunches the
-          // newly installed Windows build when present.
-          await new Promise<void>((resolve, reject) => {
-            const child = spawn(installerPath, ['/SILENT', '/RESTARTAPP'], {
-              detached: true,
-              stdio: 'ignore',
-              windowsHide: true,
+    async () => {
+      const launch = () =>
+        launchDownloadedUpdate(installerPath, process.platform, {
+          execute: async (installerPath) => {
+            // Detached + unref lets Inno Setup survive the immediate exit. /RESTARTAPP relaunches the
+            // newly installed Windows build when present.
+            await new Promise<void>((resolve, reject) => {
+              const child = spawn(installerPath, ['/SILENT', '/RESTARTAPP'], {
+                detached: true,
+                stdio: 'ignore',
+                windowsHide: true,
+              });
+              child.once('error', reject);
+              child.once('spawn', () => {
+                child.removeListener('error', reject);
+                child.unref();
+                resolve();
+              });
             });
-            child.once('error', reject);
-            child.once('spawn', () => {
-              child.removeListener('error', reject);
-              child.unref();
-              resolve();
-            });
-          });
-        },
-        openPath: (installerPath) => shell.openPath(installerPath),
-        showItemInFolder: (installerPath) => shell.showItemInFolder(installerPath),
-        quit: () => requestUpdateQuit(),
-      }),
+          },
+          openPath: (installerPath) => shell.openPath(installerPath),
+          showItemInFolder: (installerPath) => shell.showItemInFolder(installerPath),
+        });
+      const action = updateInstallAction(process.platform);
+      if (action === 'execute' || action === 'open') {
+        await requestUpdateQuit(launch);
+        return { appWillQuit: true };
+      }
+      await launch();
+      return { appWillQuit: false };
+    },
     'An update installation is already in progress.',
   );
 }
 
-function requestUpdateQuit(): Promise<void> {
+function requestUpdateQuit(launch: () => Promise<void>): Promise<void> {
   if (quitCleanupStarted || isQuitting)
     return Promise.reject(new Error('Wormhole is already closing.'));
   return new Promise((resolve, reject) => {
     // app.quit() is asynchronous and before-quit can cancel it. Keep the IPC pending until
     // cleanup succeeds, or reject it so the renderer can offer another update attempt.
-    pendingUpdateQuit = { resolve, reject };
+    pendingUpdateQuit = { launch, resolve, reject };
     skipQuitConfirmation = true;
     try {
       app.quit();
@@ -11270,6 +11284,18 @@ app.on('before-quit', (event) => {
 
     await sshBackend.finishEditClose();
     isQuitting = true;
+    try {
+      // Complete every cancellable step before opening a DMG or starting a detached installer.
+      await pendingUpdateQuit?.launch();
+    } catch (error) {
+      // Native services are still running, so a failed handoff can safely return to the app.
+      isQuitting = false;
+      quitCleanupStarted = false;
+      settleUpdateQuit(
+        error instanceof Error ? error : new Error('The installer could not be opened.'),
+      );
+      return;
+    }
     if (startupUpdateTimer) clearTimeout(startupUpdateTimer);
     startupUpdateTimer = undefined;
     if (startupBackgroundTimer) clearTimeout(startupBackgroundTimer);

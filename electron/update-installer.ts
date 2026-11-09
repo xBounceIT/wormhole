@@ -51,31 +51,26 @@ type UpdateInstallerRuntime = {
   execute(installerPath: string): Promise<void>;
   openPath(installerPath: string): Promise<string>;
   showItemInFolder(installerPath: string): void;
-  quit(): void | Promise<void>;
 };
 
 export async function launchDownloadedUpdate(
   installerPath: string,
   platform: string,
   runtime: UpdateInstallerRuntime,
-): Promise<{ appWillQuit: boolean }> {
+): Promise<void> {
   switch (updateInstallAction(platform)) {
     case 'execute':
       await runtime.execute(installerPath);
-      break;
+      return;
     case 'open': {
       const error = await runtime.openPath(installerPath);
       if (error) throw new Error(error);
-      break;
+      return;
     }
     case 'reveal':
       runtime.showItemInFolder(installerPath);
-      return { appWillQuit: false };
+      return;
     default:
       throw new Error('Updates are not supported on this platform.');
   }
-  // A mounted DMG can launch a second copy of Wormhole. Close the running app before
-  // the user replaces it, using the same session cleanup as the Windows installer.
-  await runtime.quit();
-  return { appWillQuit: true };
 }

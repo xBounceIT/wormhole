@@ -944,14 +944,11 @@ test('update installers use verified platform-specific cache and launch contract
   assert.match(installerHandler, /child\.once\('spawn'/);
   assert.match(installerHandler, /launchDownloadedUpdate\(installerPath, process\.platform/);
   assert.match(installerHandler, /openPath: \(installerPath\) => shell\.openPath\(installerPath\)/);
-  assert.match(installerHandler, /quit: \(\) => requestUpdateQuit\(\)/);
+  assert.match(installerHandler, /await requestUpdateQuit\(launch\)/);
   assert.match(installerHandler, /skipQuitConfirmation = true;\s*try\s*\{\s*app\.quit\(\)/);
-  assert.ok(
-    installerHandler.indexOf("child.once('spawn'") < installerHandler.indexOf('app.quit()'),
-  );
 });
 
-test('Windows and macOS updates quit only after the installer successfully opens', async () => {
+test('Windows and macOS installer handoffs await native launch completion', async () => {
   for (const platform of ['win32', 'darwin']) {
     const launch = Promise.withResolvers<string>();
     const events: string[] = [];
@@ -965,39 +962,28 @@ test('Windows and macOS updates quit only after the installer successfully opens
         return launch.promise;
       },
       showItemInFolder: () => assert.fail('An installer should open, not be revealed.'),
-      quit: () => {
-        events.push('quit');
-      },
     });
     const opening = `${platform === 'win32' ? 'execute' : 'open'}:verified-installer`;
-    assert.deepEqual(events, [opening], 'quit must wait for successful handoff');
+    assert.deepEqual(events, [opening]);
     launch.resolve('');
-    assert.deepEqual(await installing, { appWillQuit: true });
-    assert.deepEqual(events, [opening, 'quit']);
+    assert.equal(await installing, undefined);
+    assert.deepEqual(events, [opening]);
   }
 });
 
-test('failed installer launches preserve the app and allow another attempt', async () => {
+test('failed installer launches reject and allow another attempt', async () => {
   for (const platform of ['win32', 'darwin']) {
     let failure = true;
-    let quits = 0;
     const runtime = {
       execute: async () => {
         if (failure) throw new Error('launch failed');
       },
       openPath: async () => (failure ? 'launch failed' : ''),
       showItemInFolder: () => assert.fail('Unexpected reveal'),
-      quit: () => {
-        quits++;
-      },
     };
     await assert.rejects(launchDownloadedUpdate('installer', platform, runtime), /launch failed/);
-    assert.equal(quits, 0);
     failure = false;
-    assert.deepEqual(await launchDownloadedUpdate('installer', platform, runtime), {
-      appWillQuit: true,
-    });
-    assert.equal(quits, 1);
+    assert.equal(await launchDownloadedUpdate('installer', platform, runtime), undefined);
   }
   await assert.rejects(
     launchDownloadedUpdate('installer', 'darwin', {
@@ -1006,13 +992,12 @@ test('failed installer launches preserve the app and allow another attempt', asy
         throw new Error('open rejected');
       },
       showItemInFolder: () => assert.fail('Unexpected reveal'),
-      quit: () => assert.fail('A failed open must not quit'),
     }),
     /open rejected/,
   );
 });
 
-test('AppImage reveal keeps the app running and unsupported platforms do nothing', async () => {
+test('AppImage handoff reveals the download and rejects unsupported platforms', async () => {
   const revealed: string[] = [];
   const runtime = {
     execute: async () => assert.fail('Unexpected execute'),
@@ -1023,11 +1008,8 @@ test('AppImage reveal keeps the app running and unsupported platforms do nothing
     showItemInFolder: (installerPath: string) => {
       revealed.push(installerPath);
     },
-    quit: () => assert.fail('Unexpected quit'),
   };
-  assert.deepEqual(await launchDownloadedUpdate('verified.AppImage', 'linux', runtime), {
-    appWillQuit: false,
-  });
+  assert.equal(await launchDownloadedUpdate('verified.AppImage', 'linux', runtime), undefined);
   assert.deepEqual(revealed, ['verified.AppImage']);
   await assert.rejects(
     launchDownloadedUpdate('installer', 'freebsd', runtime),
@@ -1052,10 +1034,13 @@ function updateQuitHarness(platform = 'darwin') {
     prepareFailure: false,
     finishFailure: false,
     shutdownFailure: false,
+    spawnFailure: false,
     openError: '',
     activeCount: 0,
     confirmResult: true,
     quitFailure: false,
+    prepare: async () => {},
+    finish: async () => {},
     open: async () => {},
     flush: async () => {},
   };
@@ -1073,7 +1058,7 @@ function updateQuitHarness(platform = 'darwin') {
   };
   const harness = new Function(
     stripTypeScriptTypes(`function makeHarness(dependencies) {
-    const { app, events, controls, launchDownloadedUpdate, KeyedSingleFlight, process } = dependencies;
+    const { app, events, controls, launchDownloadedUpdate, updateInstallAction, KeyedSingleFlight, process } = dependencies;
     let isQuitting = false;
     let skipQuitConfirmation = false;
     let pendingUpdateQuit;
@@ -1096,11 +1081,13 @@ function updateQuitHarness(platform = 'darwin') {
     const sshBackend = {
       prepareEditClose: async () => {
         events.push('prepare');
+        await controls.prepare();
         if (controls.prepareFailure) throw new Error('prepare failed');
         return controls.prepareResult;
       },
       finishEditClose: async () => {
         events.push('finish');
+        await controls.finish();
         if (controls.finishFailure) throw new Error('finish failed');
       },
     };
@@ -1112,7 +1099,9 @@ function updateQuitHarness(platform = 'darwin') {
       events.push('spawn');
       const child = new dependencies.EventEmitter();
       child.unref = () => {};
-      queueMicrotask(() => child.emit('spawn'));
+      queueMicrotask(() => controls.spawnFailure
+        ? child.emit('error', new Error('Installer unavailable'))
+        : child.emit('spawn'));
       return child;
     };
     const webSurfaces = { flushAndCloseAll: async () => { events.push('flush'); await controls.flush(); } };
@@ -1132,6 +1121,7 @@ function updateQuitHarness(platform = 'darwin') {
     events,
     controls,
     launchDownloadedUpdate,
+    updateInstallAction,
     KeyedSingleFlight,
     process: { platform },
     EventEmitter,
@@ -1182,16 +1172,54 @@ test('update quit preparation failures preserve a usable app and permit retry', 
   }
 });
 
+test('cancelled or failed edit preparation never hands off an installer', async () => {
+  for (const platform of ['darwin', 'win32']) {
+    for (const failure of ['cancel', 'prepareFailure', 'finishFailure'] as const) {
+      const harness = updateQuitHarness(platform);
+      if (failure === 'cancel') harness.controls.prepareResult = false;
+      else harness.controls[failure] = true;
+      await assert.rejects(harness.install('installer'), /cancel|close/i);
+      assert.equal(harness.events.includes('open'), false);
+      assert.equal(harness.events.includes('spawn'), false);
+      assert.equal(harness.events.includes('exited'), false);
+    }
+  }
+});
+
+test('installer handoff waits for both edit-close preparation and finalization', async () => {
+  for (const platform of ['darwin', 'win32']) {
+    const harness = updateQuitHarness(platform);
+    const prepared = Promise.withResolvers<void>();
+    const finalized = Promise.withResolvers<void>();
+    harness.controls.prepare = () => prepared.promise;
+    harness.controls.finish = () => finalized.promise;
+    const installing = harness.install('installer');
+    await new Promise(setImmediate);
+    assert.deepEqual(harness.events, ['quit-request', 'prepare']);
+    prepared.resolve();
+    await new Promise(setImmediate);
+    assert.deepEqual(harness.events, ['quit-request', 'prepare', 'finish']);
+    finalized.resolve();
+    assert.deepEqual(await installing, { appWillQuit: true });
+    assert.deepEqual(harness.events.slice(0, 4), [
+      'quit-request',
+      'prepare',
+      'finish',
+      platform === 'darwin' ? 'open' : 'spawn',
+    ]);
+  }
+});
+
 test('native cleanup failures complete update quit after preserving file edits', async () => {
   for (const platform of ['darwin', 'win32']) {
     const harness = updateQuitHarness(platform);
     harness.controls.shutdownFailure = true;
     assert.deepEqual(await harness.install('installer'), { appWillQuit: true });
     assert.deepEqual(harness.events, [
-      platform === 'darwin' ? 'open' : 'spawn',
       'quit-request',
       'prepare',
       'finish',
+      platform === 'darwin' ? 'open' : 'spawn',
       'flush',
       'shutdown',
       'warning',
@@ -1245,17 +1273,31 @@ test('concurrent update requests cannot launch twice and completion waits for cl
   }
 });
 
-test('failed DMG opens release the native install gate without requesting quit', async () => {
-  const harness = updateQuitHarness();
-  harness.controls.openError = 'DMG unavailable';
-  await assert.rejects(harness.install('installer.dmg'), /DMG unavailable/);
-  assert.deepEqual(harness.events, ['open']);
-  assert.equal(harness.state().skipQuitConfirmation, false);
-  harness.controls.openError = '';
-  assert.deepEqual(await harness.install('installer.dmg'), { appWillQuit: true });
+test('failed installer handoffs preserve native services and permit retry', async () => {
+  for (const platform of ['darwin', 'win32']) {
+    const harness = updateQuitHarness(platform);
+    if (platform === 'darwin') harness.controls.openError = 'Installer unavailable';
+    else harness.controls.spawnFailure = true;
+    await assert.rejects(harness.install('installer'), /Installer unavailable/);
+    assert.deepEqual(harness.events, [
+      'quit-request',
+      'prepare',
+      'finish',
+      platform === 'darwin' ? 'open' : 'spawn',
+    ]);
+    assert.deepEqual(harness.state(), {
+      isQuitting: false,
+      skipQuitConfirmation: false,
+      quitCleanupStarted: false,
+    });
+    harness.controls.openError = '';
+    harness.controls.spawnFailure = false;
+    assert.deepEqual(await harness.install('installer'), { appWillQuit: true });
+    assert.equal(harness.events.filter((event) => event === 'exited').length, 1);
+  }
 });
 
-test('an ordinary quit during DMG opening cannot start another quit transaction', async () => {
+test('an ordinary quit during DMG opening joins the prepared update shutdown', async () => {
   const harness = updateQuitHarness();
   const opening = Promise.withResolvers<void>();
   const cleanup = Promise.withResolvers<void>();
@@ -1266,11 +1308,22 @@ test('an ordinary quit during DMG opening cannot start another quit transaction'
   harness.app.quit();
   await new Promise(setImmediate);
   opening.resolve();
-  await assert.rejects(installing, /already closing/);
-  assert.equal(harness.state().skipQuitConfirmation, false);
-  cleanup.resolve();
   await new Promise(setImmediate);
+  assert.equal(harness.events.filter((event) => event === 'prepare').length, 1);
+  assert.equal(harness.events.filter((event) => event === 'open').length, 1);
+  cleanup.resolve();
+  assert.deepEqual(await installing, { appWillQuit: true });
   assert.deepEqual(harness.events.slice(-3), ['shutdown', 'quit-request', 'exited']);
+});
+
+test('ordinary quit wins a race before the update operation starts', async () => {
+  const harness = updateQuitHarness();
+  const installing = harness.install('installer.dmg');
+  harness.app.quit();
+  await assert.rejects(installing, /already closing/);
+  await new Promise(setImmediate);
+  assert.equal(harness.events.includes('open'), false);
+  assert.equal(harness.events.filter((event) => event === 'exited').length, 1);
 });
 
 test('Linux reveal and unsupported platforms never request main-process quit', async () => {
