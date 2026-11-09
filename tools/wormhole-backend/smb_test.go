@@ -399,6 +399,37 @@ func TestSMBWorkspaceCredentialsAndBitwarden(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestSMBCredentialProtocolMismatchAndRetry(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "workspace.db")
+	require.NoError(t, ensureElectronWorkspaceSchema(databasePath))
+	smbCredential, err := createCredential(databasePath, credentialCreateRequest{Name: "Share", Protocol: "smb", Kind: "password", Username: "user", Domain: "CORP", Password: "test-password", Provider: "Local"})
+	require.NoError(t, err)
+	sshCredential, err := createCredential(databasePath, credentialCreateRequest{Name: "Shell", Protocol: "ssh", Kind: "password", Username: "shell", Password: "ssh-password", Provider: "Local"})
+	require.NoError(t, err)
+	id, err := createWorkspaceNode(databasePath, workspaceNodeWriteRequest{Name: "Share", Kind: "connection", Protocol: "smb", Host: "server/share", CredentialMode: 2, CredentialID: smbCredential.ID})
+	require.NoError(t, err)
+	// An explicit runtime selection must still enforce SMB's credential protocol.
+	_, err = loadFileTargetWithCredentialOverrides(databasePath, id, "", "", false, false, sshCredential.ID, true)
+	require.EqualError(t, err, "the selected credential is not an SMB credential")
+	// Older/imported nodes can also retain an incompatible saved binding.
+	database, err := openDatabase(databasePath, false)
+	require.NoError(t, err)
+	defer database.Close()
+	_, err = database.Exec("UPDATE Nodes SET CredentialId=? WHERE Id=?", sshCredential.ID, id)
+	require.NoError(t, err)
+	_, err = loadFileTargetWithCredentialOverrides(databasePath, id, "", "", false, false, "", true)
+	require.EqualError(t, err, "the selected credential is not an SMB credential")
+	// A replacement SMB profile recovers the same node without altering its binding.
+	target, err := loadFileTargetWithCredentialOverrides(databasePath, id, "", "", false, false, smbCredential.ID, true)
+	require.NoError(t, err)
+	require.Equal(t, `CORP\user`, target.username)
+	require.Equal(t, "test-password", target.password)
+	require.Equal(t, smbProtocolValue, target.credentialProtocol)
+	// SSH must continue rejecting SMB profiles instead of accepting their password.
+	err = loadSSHCredential(database, databasePath, smbCredential.ID, &sshTarget{}, "", "", false, false)
+	require.EqualError(t, err, "the selected credential is not an SSH credential")
+}
+
 func TestSMBBackupAndCredentialInheritance(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "source.db")
 	require.NoError(t, ensureElectronWorkspaceSchema(databasePath))

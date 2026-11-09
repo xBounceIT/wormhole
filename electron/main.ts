@@ -2203,7 +2203,7 @@ function parseSshBackendEvent(line: string): SshBackendEvent | undefined {
     value.port > 0 &&
     value.port <= 65535 &&
     typeof value.username === 'string' &&
-    typeof value.fingerprint === 'string'
+    (value.fingerprint === undefined || typeof value.fingerprint === 'string')
   ) {
     return {
       type: 'connected',
@@ -2211,7 +2211,8 @@ function parseSshBackendEvent(line: string): SshBackendEvent | undefined {
       host: value.host,
       port: value.port,
       username: value.username,
-      fingerprint: value.fingerprint,
+      // SMB has no SSH host key; Go omits the empty fingerprint on the wire.
+      fingerprint: value.fingerprint ?? '',
     };
   }
   if (value.type === 'terminal-output') return parseSshTerminalOutput(value);
