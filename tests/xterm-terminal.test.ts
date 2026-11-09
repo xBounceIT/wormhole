@@ -8,7 +8,7 @@ import test from 'node:test';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { build } from 'vite';
-import tailwindcss from '@tailwindcss/vite';
+import rendererConfig from '../vite.config.ts';
 
 const require = createRequire(import.meta.url);
 
@@ -25,7 +25,7 @@ test('xterm SSH presentation works in Chromium with WebGL and software fallback'
     define: { 'process.env.NODE_ENV': '"development"' },
     resolve: { alias: { '@': fileURLToPath(new URL('../src', import.meta.url)) } },
     plugins: [
-      tailwindcss(),
+      ...rendererConfig.plugins,
       {
         name: 'terminal-component-harness',
         resolveId(id) {
@@ -73,6 +73,37 @@ test('xterm SSH presentation works in Chromium with WebGL and software fallback'
   const renderer = `(async () => { const terminalAssert = require('node:assert/strict');
     const style = document.createElement('style'); style.textContent = ${JSON.stringify(css)}; document.head.append(style);
     ${js}
+    const { webFrame } = require('electron');
+    // Hold atlas warmups until the next DPR. Disposing an xterm atlas does not
+    // cancel its queued work, so callbacks from both scales can overlap.
+    const originalTimer = globalThis.setTimeout;
+    const pendingWarmups = [];
+    let replayWarmups = false, replayedWarmups = 0;
+    globalThis.setTimeout = (callback, delay, ...args) => {
+      if (typeof callback === 'function' && callback.toString().includes('_createDeadline')) {
+        if (replayWarmups) {
+          const previous = pendingWarmups.splice(0);
+          replayedWarmups += previous.length;
+          for (const pending of previous) pending();
+        }
+        pendingWarmups.push(callback);
+        return -1;
+      }
+      return originalTimer(callback, delay, ...args);
+    };
+    try {
+      for (const zoom of [1, 2]) {
+        replayWarmups = zoom === 2;
+        webFrame.setZoomFactor(zoom);
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        await window.runTerminalFontTests();
+      }
+      terminalAssert.ok(replayedWarmups > 0, 'delayed atlas warmups were not exercised');
+    } finally {
+      globalThis.setTimeout = originalTimer;
+      for (const pending of pendingWarmups.splice(0)) pending();
+      webFrame.setZoomFactor(1);
+    }
     await window.runTerminalTests().catch(error => { console.error(error.stack); throw error; }); })();
     //# sourceURL=wormhole-xterm.js`;
   writeFileSync(

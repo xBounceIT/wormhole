@@ -4,6 +4,15 @@ SSH uses `@xterm/xterm` with the WebGL, Fit and Unicode 11 addons. Chromium's
 default renderer is the fallback when WebGL initialization fails or its context
 is lost. React attaches the terminal container and controls connection states;
 it does not retain output bytes, rebuild terminal cells or drive screen updates.
+
+The terminal font remains Cascadia Mono, Consolas, monospace at 13 px with an
+18 px line height. Electron 45.2.3 rejects leading whitespace in canvas font
+strings, causing xterm's non-italic WebGL glyphs to fall back to 10 px sans-serif.
+The Vite font compatibility plugin trims the two addon font templates during
+production builds and development dependency optimization. It leaves font
+settings unchanged and fails the build if a dependency update changes those
+templates. See [xterm issue 6297](https://github.com/xtermjs/xterm.js/issues/6297).
+
 The xterm instance survives page and tab switches and is disposed when its
 session is removed. Scrollback is limited to 5,000 lines.
 
