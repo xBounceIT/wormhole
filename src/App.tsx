@@ -2437,9 +2437,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       const installation = await window.wormhole.installUpdate(installerPath);
       if (installation.appWillQuit) return;
       setUpdateStatus(
-        platform === 'darwin'
-          ? 'Installer opened. Drag Wormhole to Applications to finish the update.'
-          : 'AppImage downloaded. Replace your current AppImage with the verified download.',
+        'AppImage downloaded. Replace your current AppImage with the verified download.',
       );
       setUpdateBusy(false);
       setUpdateDownloadProgress(null);

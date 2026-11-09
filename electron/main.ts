@@ -177,7 +177,7 @@ import {
   type WebBrowserState,
 } from './web-browser-tabs.js';
 import { webTargetURLMatchesEndpoint } from './web-target-validation.js';
-import { isSafeUpdateInstallerPath, updateInstallAction } from './update-installer.js';
+import { isSafeUpdateInstallerPath, launchDownloadedUpdate } from './update-installer.js';
 import { parseWorkspaceRdpSettings, type WorkspaceRdpSettings } from './workspace-rdp-contract.js';
 import type {
   RdpBackendEvent,
@@ -290,6 +290,8 @@ let serialBackend: SerialBackendClient | undefined;
 let latestUpdateCheck: UpdateCheckResult | undefined;
 let updateCheckInFlight: Promise<UpdateCheckResult> | undefined;
 let updateDownloadChild: ChildProcessWithoutNullStreams | undefined;
+const updateInstallTasks = new KeyedSingleFlight<string>();
+let pendingUpdateQuit: { resolve(): void; reject(error: Error): void } | undefined;
 let startupUpdateTimer: NodeJS.Timeout | undefined;
 let startupUpdateScheduled = false;
 let startupBackgroundTimer: NodeJS.Timeout | undefined;
@@ -4316,37 +4318,62 @@ function downloadUpdateInstaller(
 }
 
 async function handleDownloadedUpdate(installerPath: string): Promise<{ appWillQuit: boolean }> {
-  const action = updateInstallAction(process.platform);
-  if (action === 'execute') {
-    // Detached + unref lets Inno Setup survive the immediate exit. /RESTARTAPP relaunches the
-    // newly installed Windows build when present.
-    await new Promise<void>((resolve, reject) => {
-      const child = spawn(installerPath, ['/SILENT', '/RESTARTAPP'], {
-        detached: true,
-        stdio: 'ignore',
-        windowsHide: true,
-      });
-      child.once('error', reject);
-      child.once('spawn', () => {
-        child.removeListener('error', reject);
-        child.unref();
-        resolve();
-      });
-    });
+  if (quitCleanupStarted || isQuitting) throw new Error('Wormhole is already closing.');
+  return updateInstallTasks.runExclusive(
+    'install',
+    () =>
+      launchDownloadedUpdate(installerPath, process.platform, {
+        execute: async (installerPath) => {
+          // Detached + unref lets Inno Setup survive the immediate exit. /RESTARTAPP relaunches the
+          // newly installed Windows build when present.
+          await new Promise<void>((resolve, reject) => {
+            const child = spawn(installerPath, ['/SILENT', '/RESTARTAPP'], {
+              detached: true,
+              stdio: 'ignore',
+              windowsHide: true,
+            });
+            child.once('error', reject);
+            child.once('spawn', () => {
+              child.removeListener('error', reject);
+              child.unref();
+              resolve();
+            });
+          });
+        },
+        openPath: (installerPath) => shell.openPath(installerPath),
+        showItemInFolder: (installerPath) => shell.showItemInFolder(installerPath),
+        quit: () => requestUpdateQuit(),
+      }),
+    'An update installation is already in progress.',
+  );
+}
+
+function requestUpdateQuit(): Promise<void> {
+  if (quitCleanupStarted || isQuitting)
+    return Promise.reject(new Error('Wormhole is already closing.'));
+  return new Promise((resolve, reject) => {
+    // app.quit() is asynchronous and before-quit can cancel it. Keep the IPC pending until
+    // cleanup succeeds, or reject it so the renderer can offer another update attempt.
+    pendingUpdateQuit = { resolve, reject };
     skipQuitConfirmation = true;
-    app.quit();
-    return { appWillQuit: true };
+    try {
+      app.quit();
+    } catch {
+      settleUpdateQuit(new Error('Wormhole could not close for the update.'));
+    }
+  });
+}
+
+function settleUpdateQuit(error?: Error): void {
+  const pending = pendingUpdateQuit;
+  if (!pending) return;
+  pendingUpdateQuit = undefined;
+  if (error) {
+    skipQuitConfirmation = false;
+    pending.reject(error);
+  } else {
+    pending.resolve();
   }
-  if (action === 'open') {
-    const error = await shell.openPath(installerPath);
-    if (error) throw new Error(error);
-    return { appWillQuit: false };
-  }
-  if (action === 'reveal') {
-    shell.showItemInFolder(installerPath);
-    return { appWillQuit: false };
-  }
-  throw new Error('Updates are not supported on this platform.');
 }
 
 function scheduleStartupUpdateCheck(settings: AppSettings): void {
@@ -11219,6 +11246,9 @@ app.on('before-quit', (event) => {
   void (async () => {
     if (!(await sshBackend.prepareEditClose())) {
       quitCleanupStarted = false;
+      settleUpdateQuit(
+        new Error('Update cancelled because Wormhole could not close pending file edits.'),
+      );
       return;
     }
     if (!skipQuitConfirmation && confirmOnWindowClose) {
@@ -11265,9 +11295,13 @@ app.on('before-quit', (event) => {
       await shutdownNativeResources();
       quitCleanupComplete = true;
       app.quit();
+      settleUpdateQuit();
     }
   })().catch(() => {
     quitCleanupStarted = false;
+    settleUpdateQuit(
+      new Error('Wormhole could not close for the update. File editing copies are retained.'),
+    );
     console.warn('[Wormhole] Close did not finish; file editing copies are retained.');
   });
 });
