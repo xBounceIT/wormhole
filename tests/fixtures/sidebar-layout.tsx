@@ -278,12 +278,28 @@ window.runSidebarTests = async (handleOnly = false) => {
       const header = query('header');
       const title = query('header span');
       const content = pin().parentElement!;
-      const expectedLeft = platform === 'darwin' ? 80 : 4;
-      assert.equal(header.getBoundingClientRect().height, 48);
-      assert.equal(getComputedStyle(header).paddingLeft, expectedLeft + 'px');
-      assert.equal(content.getBoundingClientRect().left, expectedLeft);
-      assert.ok(pin().getBoundingClientRect().left >= expectedLeft);
-      assert.ok(title.getBoundingClientRect().left > pin().getBoundingClientRect().right);
+      const nativeTitlebarHeight = platform === 'darwin' ? 28 : 0;
+      const headerBounds = header.getBoundingClientRect();
+      const pinBounds = pin().getBoundingClientRect();
+      const titleBounds = title.getBoundingClientRect();
+      assert.equal(headerBounds.height, 48 + nativeTitlebarHeight);
+      assert.equal(getComputedStyle(header).paddingTop, nativeTitlebarHeight + 'px');
+      assert.equal(getComputedStyle(header).paddingLeft, '4px');
+      assert.equal(content.getBoundingClientRect().left, 4);
+      assert.equal(pinBounds.left, 4);
+      assert.ok(pinBounds.top >= headerBounds.top + nativeTitlebarHeight);
+      assert.ok(titleBounds.top >= headerBounds.top + nativeTitlebarHeight);
+      assert.ok(titleBounds.left > pinBounds.right);
+      assert.equal(layout().getBoundingClientRect().top, headerBounds.bottom);
+      assert.ok(
+        pin().contains(
+          document.elementFromPoint(
+            pinBounds.left + pinBounds.width / 2,
+            pinBounds.top + pinBounds.height / 2,
+          ),
+        ),
+        'The titlebar sidebar button must remain clickable below the native controls',
+      );
       assert.equal(title.textContent, 'Wormhole');
       assert.equal(getComputedStyle(header).getPropertyValue('-webkit-app-region'), 'drag');
       assert.equal(getComputedStyle(content).getPropertyValue('-webkit-app-region'), 'no-drag');
