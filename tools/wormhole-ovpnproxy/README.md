@@ -93,8 +93,14 @@ Toolchain prerequisites (Windows, x64):
    C:\vcpkg\bootstrap-vcpkg.bat
    [Environment]::SetEnvironmentVariable("VCPKG_ROOT", "C:\vcpkg", "User")
    ```
-3. **Git access to the OpenVPN3 + mbedTLS submodules**. The build script initializes
-   these pinned sources automatically when a real sidecar is required.
+3. **Git access to the OpenVPN3 + mbedTLS submodules**. When a real sidecar is
+   required, the build script synchronizes both submodules (including populated
+   checkouts) to the repository's pinned revisions, recursively. This prevents
+   stale headers after a pull from breaking required patches. Git preserves local
+   edits and stops the build if they conflict with the update; no forced checkout
+   is used. The checkout strategy overrides local `submodule.update` policies
+   (`none`, `merge`, `rebase`). Missing Git stops a required real build and removes
+   a stale staged sidecar.
 
 Then build:
 
@@ -146,6 +152,13 @@ Run `node --test tests/ovpn-mbedtls-compat.test.mjs` to compile the current upst
 header with both include orders and check distinct KU/EKU masks for mbedTLS 2.x/3.6.
 The same suite exercises the new virtual factory capability and measures its line
 coverage with GCC/gcov when available. These tests also run in `npm run test:packaging`.
+On Windows it runs the production PowerShell bootstrap against local Git submodule
+fixtures: stale and empty checkouts, repeated runs with local edits, conflicting
+updates and missing Git that remove stale binaries, local update policies, and
+optional builds that skip synchronization.
+PowerShell is excluded from the project's Node/V8 coverage percentage because V8
+cannot instrument it; these integration cases exercise both outcomes of the
+changed `RequireReal` guard and its error path.
 Native compile scenarios require a GCC/Clang-compatible C++ compiler (`CXX`, or
 `g++` on Windows / `c++` elsewhere) and skip when it is unavailable.
 

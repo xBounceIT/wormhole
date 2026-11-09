@@ -307,9 +307,11 @@ $haveOvpn3Src = (Test-Path $openvpn3) -and (Test-Path $mbedtls)
 
 # A normal Electron development run requires the real sidecar. Make a fresh clone/worktree
 # self-bootstrapping instead of asking every developer to initialize these pinned sources by
-# hand. Keep the non-RequireReal path offline-friendly: it may intentionally build the mock-only
-# sidecar without fetching native sources.
-if ($RequireReal -and -not $haveOvpn3Src) {
+# hand. Synchronize populated checkouts too: headers can exist at an older revision after a
+# git pull, while the shim and required patches already target the new gitlink. Do not force
+# checkout: Git must preserve local edits or fail before we build against incompatible sources.
+# Keep the non-RequireReal path offline-friendly; it may intentionally build the mock sidecar.
+if ($RequireReal) {
     $git = Get-Command git -ErrorAction SilentlyContinue
     if ($git) {
         Write-Info "INIT  OpenVPN3 + mbedTLS submodules"
@@ -319,7 +321,8 @@ if ($RequireReal -and -not $haveOvpn3Src) {
         $submoduleExitCode = -1
         $submoduleArgs = @(
             "-C", $repoRoot,
-            "submodule", "update", "--init", "--recursive", "--",
+            # Override update=none/merge/rebase: a successful build needs the gitlink revision.
+            "submodule", "update", "--init", "--recursive", "--checkout", "--",
             "tools/wormhole-ovpnproxy/third_party/openvpn3",
             "tools/wormhole-ovpnproxy/third_party/mbedtls"
         )
@@ -340,6 +343,9 @@ if ($RequireReal -and -not $haveOvpn3Src) {
         }
 
         $haveOvpn3Src = (Test-Path $openvpn3) -and (Test-Path $mbedtls)
+    } else {
+        Remove-StagedBinary
+        throw "Git is required to synchronize the pinned OpenVPN3/mbedTLS submodules, but 'git' is not on PATH."
     }
 }
 $compilerPair = Get-OvpnCompilerPair
