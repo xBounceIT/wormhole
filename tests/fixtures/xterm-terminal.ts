@@ -29,6 +29,78 @@ async function assertPainted(runtime: XtermSession, text: string): Promise<void>
   assert.ok(rows.textContent!.includes(text), 'fallback did not paint terminal text');
 }
 
+async function assertWebglFonts(): Promise<void> {
+  const descriptor = Object.getOwnPropertyDescriptor(CanvasRenderingContext2D.prototype, 'font')!;
+  const reference = document.createElement('canvas').getContext('2d')!;
+  const fonts: { requested: string; actual: string; expected: string }[] = [];
+  const surface = document.createElement('div');
+  surface.style.cssText = 'width:800px;height:300px';
+  document.body.append(surface);
+  const addon = new WebglAddon();
+  const runtime = new XtermSession('font-regression', () => addon);
+  Object.defineProperty(CanvasRenderingContext2D.prototype, 'font', {
+    ...descriptor,
+    set(value: string) {
+      descriptor.set!.call(this, value);
+      if (value.includes('Cascadia Mono')) {
+        descriptor.set!.call(reference, value.trimStart());
+        fonts.push({
+          requested: value,
+          actual: descriptor.get!.call(this),
+          expected: descriptor.get!.call(reference),
+        });
+      }
+    },
+  });
+  try {
+    runtime.attach(surface);
+    assert.ok(addon.textureAtlas, 'font regression requires real WebGL, not the DOM fallback');
+    await new Promise<void>((resolve) =>
+      runtime.terminal.write(
+        'regular \x1b[1mbold \x1b[3mbold-italic \x1b[22mitalic\x1b[0m',
+        resolve,
+      ),
+    );
+    runtime.terminal.refresh(0, runtime.terminal.rows - 1);
+    for (
+      let retry = 0;
+      retry < 100 && !fonts.some(({ actual }) => actual.includes('italic'));
+      retry++
+    )
+      await sleep(10);
+    assert.ok(
+      fonts.some(({ actual }) => actual.includes('italic')),
+      'italic font was not rendered',
+    );
+    assert.ok(
+      fonts.some(({ actual }) => /bold|700/.test(actual)),
+      'bold font was not rendered',
+    );
+    descriptor.set!.call(
+      reference,
+      `${13 * devicePixelRatio}px "Cascadia Mono", "Consolas", monospace`,
+    );
+    assert.ok(
+      fonts.some(({ actual }) => actual === descriptor.get!.call(reference)),
+      'original regular font was not rendered at the current DPR',
+    );
+    for (const { requested, actual, expected } of fonts) {
+      // An older atlas may still finish its queued warmup after a DPI change.
+      assert.equal(actual, expected, `canvas rejected the requested font: ${requested}`);
+      assert.ok(
+        actual.includes('Cascadia Mono'),
+        `canvas lost the original font family: ${actual}`,
+      );
+      assert.ok(!/^\s/.test(requested), `canvas font starts with whitespace: ${requested}`);
+    }
+    console.log(`Original terminal font rendered with WebGL at DPR ${devicePixelRatio}`);
+  } finally {
+    Object.defineProperty(CanvasRenderingContext2D.prototype, 'font', descriptor);
+    runtime.dispose();
+    surface.remove();
+  }
+}
+
 async function run() {
   window.confirm = () => {
     throw new Error('Native confirmation must not be used');
@@ -656,3 +728,5 @@ async function run() {
 }
 
 (window as unknown as { runTerminalTests: () => Promise<void> }).runTerminalTests = run;
+(window as unknown as { runTerminalFontTests: () => Promise<void> }).runTerminalFontTests =
+  assertWebglFonts;

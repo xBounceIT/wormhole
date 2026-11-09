@@ -2,10 +2,14 @@ import { fileURLToPath } from 'node:url';
 import tailwindcss from '@tailwindcss/vite';
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
+import { xtermWebglFontFix } from './scripts/xterm-webgl-font.ts';
 
 export default defineConfig({
   base: './',
-  plugins: [react(), tailwindcss()],
+  plugins: [xtermWebglFontFix(), react(), tailwindcss()],
+  optimizeDeps: {
+    rolldownOptions: { plugins: [xtermWebglFontFix()] },
+  },
   resolve: {
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),
