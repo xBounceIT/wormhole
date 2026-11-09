@@ -1103,8 +1103,7 @@ function protocolLabel(protocol: Protocol) {
 }
 
 function ProtocolIcon({ protocol, size = 15 }: { protocol: Protocol; size?: number }) {
-  if (protocol === 'smb') return <FolderOpen size={size} />;
-  if (protocol === 'sftp') return <SftpConnectionIcon size={size} />;
+  if (protocol === 'smb' || protocol === 'sftp') return <SftpConnectionIcon size={size} />;
   if (protocol === 'ssh') return <Terminal size={size} />;
   if (protocol === 'rdp') return <Monitor size={size} />;
   if (protocol === 'http' || protocol === 'https') return <Globe size={size} />;

@@ -29,6 +29,7 @@ export function requiresSshCredentialPrompt(message: string): boolean {
     value.includes('ssh connection has no username') ||
     value.includes('connection has no usable ssh credential') ||
     value.includes('selected credential is not an ssh credential') ||
+    value.includes('selected credential is not an smb credential') ||
     value.includes('stored ssh secret is missing') ||
     value.includes('smb authentication or negotiation failed')
   );

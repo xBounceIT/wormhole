@@ -4443,6 +4443,9 @@ func loadSSHCredential(
 		return nil
 	}
 	if row.Protocol.Valid && row.Protocol.Int64 != target.credentialProtocol {
+		if target.credentialProtocol == smbProtocolValue {
+			return errors.New("the selected credential is not an SMB credential")
+		}
 		return errors.New("the selected credential is not an SSH credential")
 	}
 	if target.username == "" {
