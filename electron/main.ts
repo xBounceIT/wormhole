@@ -177,7 +177,11 @@ import {
   type WebBrowserState,
 } from './web-browser-tabs.js';
 import { webTargetURLMatchesEndpoint } from './web-target-validation.js';
-import { isSafeUpdateInstallerPath, updateInstallAction } from './update-installer.js';
+import {
+  isSafeUpdateInstallerPath,
+  launchDownloadedUpdate,
+  updateInstallAction,
+} from './update-installer.js';
 import { parseWorkspaceRdpSettings, type WorkspaceRdpSettings } from './workspace-rdp-contract.js';
 import type {
   RdpBackendEvent,
@@ -290,6 +294,10 @@ let serialBackend: SerialBackendClient | undefined;
 let latestUpdateCheck: UpdateCheckResult | undefined;
 let updateCheckInFlight: Promise<UpdateCheckResult> | undefined;
 let updateDownloadChild: ChildProcessWithoutNullStreams | undefined;
+const updateInstallTasks = new KeyedSingleFlight<string>();
+let pendingUpdateQuit:
+  | { launch(): Promise<void>; resolve(): void; reject(error: Error): void }
+  | undefined;
 let startupUpdateTimer: NodeJS.Timeout | undefined;
 let startupUpdateScheduled = false;
 let startupBackgroundTimer: NodeJS.Timeout | undefined;
@@ -2203,7 +2211,7 @@ function parseSshBackendEvent(line: string): SshBackendEvent | undefined {
     value.port > 0 &&
     value.port <= 65535 &&
     typeof value.username === 'string' &&
-    typeof value.fingerprint === 'string'
+    (value.fingerprint === undefined || typeof value.fingerprint === 'string')
   ) {
     return {
       type: 'connected',
@@ -2211,7 +2219,8 @@ function parseSshBackendEvent(line: string): SshBackendEvent | undefined {
       host: value.host,
       port: value.port,
       username: value.username,
-      fingerprint: value.fingerprint,
+      // SMB has no SSH host key; Go omits the empty fingerprint on the wire.
+      fingerprint: value.fingerprint ?? '',
     };
   }
   if (value.type === 'terminal-output') return parseSshTerminalOutput(value);
@@ -4316,37 +4325,70 @@ function downloadUpdateInstaller(
 }
 
 async function handleDownloadedUpdate(installerPath: string): Promise<{ appWillQuit: boolean }> {
-  const action = updateInstallAction(process.platform);
-  if (action === 'execute') {
-    // Detached + unref lets Inno Setup survive the immediate exit. /RESTARTAPP relaunches the
-    // newly installed Windows build when present.
-    await new Promise<void>((resolve, reject) => {
-      const child = spawn(installerPath, ['/SILENT', '/RESTARTAPP'], {
-        detached: true,
-        stdio: 'ignore',
-        windowsHide: true,
-      });
-      child.once('error', reject);
-      child.once('spawn', () => {
-        child.removeListener('error', reject);
-        child.unref();
-        resolve();
-      });
-    });
+  if (quitCleanupStarted || isQuitting) throw new Error('Wormhole is already closing.');
+  return updateInstallTasks.runExclusive(
+    'install',
+    async () => {
+      const launch = () =>
+        launchDownloadedUpdate(installerPath, process.platform, {
+          execute: async (installerPath) => {
+            // Detached + unref lets Inno Setup survive the immediate exit. /RESTARTAPP relaunches the
+            // newly installed Windows build when present.
+            await new Promise<void>((resolve, reject) => {
+              const child = spawn(installerPath, ['/SILENT', '/RESTARTAPP'], {
+                detached: true,
+                stdio: 'ignore',
+                windowsHide: true,
+              });
+              child.once('error', reject);
+              child.once('spawn', () => {
+                child.removeListener('error', reject);
+                child.unref();
+                resolve();
+              });
+            });
+          },
+          openPath: (installerPath) => shell.openPath(installerPath),
+          showItemInFolder: (installerPath) => shell.showItemInFolder(installerPath),
+        });
+      const action = updateInstallAction(process.platform);
+      if (action === 'execute' || action === 'open') {
+        await requestUpdateQuit(launch);
+        return { appWillQuit: true };
+      }
+      await launch();
+      return { appWillQuit: false };
+    },
+    'An update installation is already in progress.',
+  );
+}
+
+function requestUpdateQuit(launch: () => Promise<void>): Promise<void> {
+  if (quitCleanupStarted || isQuitting)
+    return Promise.reject(new Error('Wormhole is already closing.'));
+  return new Promise((resolve, reject) => {
+    // app.quit() is asynchronous and before-quit can cancel it. Keep the IPC pending until
+    // cleanup succeeds, or reject it so the renderer can offer another update attempt.
+    pendingUpdateQuit = { launch, resolve, reject };
     skipQuitConfirmation = true;
-    app.quit();
-    return { appWillQuit: true };
+    try {
+      app.quit();
+    } catch {
+      settleUpdateQuit(new Error('Wormhole could not close for the update.'));
+    }
+  });
+}
+
+function settleUpdateQuit(error?: Error): void {
+  const pending = pendingUpdateQuit;
+  if (!pending) return;
+  pendingUpdateQuit = undefined;
+  if (error) {
+    skipQuitConfirmation = false;
+    pending.reject(error);
+  } else {
+    pending.resolve();
   }
-  if (action === 'open') {
-    const error = await shell.openPath(installerPath);
-    if (error) throw new Error(error);
-    return { appWillQuit: false };
-  }
-  if (action === 'reveal') {
-    shell.showItemInFolder(installerPath);
-    return { appWillQuit: false };
-  }
-  throw new Error('Updates are not supported on this platform.');
 }
 
 function scheduleStartupUpdateCheck(settings: AppSettings): void {
@@ -11222,6 +11264,9 @@ app.on('before-quit', (event) => {
   void (async () => {
     if (!(await sshBackend.prepareEditClose())) {
       quitCleanupStarted = false;
+      settleUpdateQuit(
+        new Error('Update cancelled because Wormhole could not close pending file edits.'),
+      );
       return;
     }
     if (!skipQuitConfirmation && confirmOnWindowClose) {
@@ -11243,6 +11288,18 @@ app.on('before-quit', (event) => {
 
     await sshBackend.finishEditClose();
     isQuitting = true;
+    try {
+      // Complete every cancellable step before opening a DMG or starting a detached installer.
+      await pendingUpdateQuit?.launch();
+    } catch (error) {
+      // Native services are still running, so a failed handoff can safely return to the app.
+      isQuitting = false;
+      quitCleanupStarted = false;
+      settleUpdateQuit(
+        error instanceof Error ? error : new Error('The installer could not be opened.'),
+      );
+      return;
+    }
     if (startupUpdateTimer) clearTimeout(startupUpdateTimer);
     startupUpdateTimer = undefined;
     if (startupBackgroundTimer) clearTimeout(startupBackgroundTimer);
@@ -11265,12 +11322,22 @@ app.on('before-quit', (event) => {
       await Promise.allSettled(
         BrowserWindow.getAllWindows().map((window) => requestRendererTeardown(window)),
       );
-      await shutdownNativeResources();
+      try {
+        await shutdownNativeResources();
+      } catch {
+        // File-edit journals are finalized and native services may already be partially
+        // stopped. Finish exiting instead of leaving an unusable workspace.
+        console.warn('[Wormhole] Native resource shutdown did not finish cleanly.');
+      }
       quitCleanupComplete = true;
       app.quit();
+      settleUpdateQuit();
     }
   })().catch(() => {
     quitCleanupStarted = false;
+    settleUpdateQuit(
+      new Error('Wormhole could not close for the update. File editing copies are retained.'),
+    );
     console.warn('[Wormhole] Close did not finish; file editing copies are retained.');
   });
 });

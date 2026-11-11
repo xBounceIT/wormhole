@@ -46,3 +46,31 @@ export function updateInstallAction(platform: string): UpdateInstallAction | und
       return undefined;
   }
 }
+
+type UpdateInstallerRuntime = {
+  execute(installerPath: string): Promise<void>;
+  openPath(installerPath: string): Promise<string>;
+  showItemInFolder(installerPath: string): void;
+};
+
+export async function launchDownloadedUpdate(
+  installerPath: string,
+  platform: string,
+  runtime: UpdateInstallerRuntime,
+): Promise<void> {
+  switch (updateInstallAction(platform)) {
+    case 'execute':
+      await runtime.execute(installerPath);
+      return;
+    case 'open': {
+      const error = await runtime.openPath(installerPath);
+      if (error) throw new Error(error);
+      return;
+    }
+    case 'reveal':
+      runtime.showItemInFolder(installerPath);
+      return;
+    default:
+      throw new Error('Updates are not supported on this platform.');
+  }
+}

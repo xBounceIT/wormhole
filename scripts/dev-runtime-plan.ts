@@ -152,6 +152,7 @@ export function createDevRuntimeBuildPlan({
           'update',
           '--init',
           '--recursive',
+          '--checkout',
           '--',
           'tools/wormhole-ovpnproxy/third_party/openvpn3',
           'tools/wormhole-ovpnproxy/third_party/mbedtls',
