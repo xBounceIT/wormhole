@@ -17,6 +17,24 @@ import {
 
 const settings = { ...fortinetIPsecDefaults, Host: 'vpn.test', HasPreSharedKey: true };
 
+test('SSL fallback survives shared create/edit and its public IPC contract', () => {
+  const id = '2f833fa1-93a6-44eb-a9ca-4d43cc16185e';
+  const normalized = normalizeFortinetIPsecSettings({ ...settings, FallbackTunnelId: ` ${id} ` });
+  assert.equal(normalized.FallbackTunnelId, id);
+  assert.equal(fortinetIPsecEditorSettings(normalized).FallbackTunnelId, id);
+  assert.doesNotThrow(() =>
+    parseTunnelWriteRequest({ name: 'VPN', kind: 9, settings: normalized }, false),
+  );
+  assert.equal(
+    normalizeFortinetIPsecSettings({ ...normalized, FallbackTunnelId: '' }).FallbackTunnelId,
+    undefined,
+  );
+  const source = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  assert.match(source, /id="ipsec-ssl-fallback"/);
+  assert.match(source, /tunnel.kind === 'Fortinet'/);
+  assert.match(source, /setSetting\('FallbackTunnelId'/);
+});
+
 test('IPsec editor keeps only key presence and strips PSK, SSL and ephemeral credentials', () => {
   const normalized = normalizeFortinetIPsecSettings({
     ...settings,
@@ -158,11 +176,7 @@ test('advanced fields, errors and credential markers survive the shared editor c
       'SAML requires IKEv2',
     ),
   );
-  assert.ok(
-    missingFortinetIPsecFields({ ...settings, UserAuth: 3, AuthMethod: 1 }).includes(
-      'SAML requires PSK',
-    ),
-  );
+  assert.deepEqual(missingFortinetIPsecFields({ ...settings, UserAuth: 3, AuthMethod: 1 }), []);
   for (const [key, value] of [
     ['IkeVersion', 4],
     ['Phase1Lifetime', 0],

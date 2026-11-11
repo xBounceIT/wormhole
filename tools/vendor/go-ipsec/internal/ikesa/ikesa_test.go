@@ -306,7 +306,7 @@ func TestX25519DHRoundTrip(t *testing.T) {
 
 // TestNewDHUnsupportedGroup: NewDH rejects a group the client cannot run.
 func TestNewDHUnsupportedGroup(t *testing.T) {
-	for _, g := range []uint16{0, 1, 18, 30, 32} {
+	for _, g := range []uint16{0, 3, 13, 30, 32} {
 		if _, err := NewDH(g); err == nil {
 			t.Fatalf("NewDH(%d) accepted an unsupported group", g)
 		}

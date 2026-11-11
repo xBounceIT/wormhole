@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -88,12 +89,7 @@ func readConfig(reader *bufio.Reader) (config, error) {
 	if cfg.Port == 0 {
 		cfg.Port = 500
 	}
-	if strings.HasPrefix(cfg.Host, "[") && strings.HasSuffix(cfg.Host, "]") {
-		candidate := strings.TrimSuffix(strings.TrimPrefix(cfg.Host, "["), "]")
-		if ip := net.ParseIP(candidate); ip != nil && strings.Contains(candidate, ":") {
-			cfg.Host = candidate
-		}
-	}
+	cfg.Host = gatewayHost(cfg.Host)
 	if cfg.Host == "" || len(cfg.Host) > 253 || strings.ContainsAny(cfg.Host, "/\\?#@ \t\r\n\x00") || cfg.Port < 1 || cfg.Port > 65535 || (cfg.PreSharedKey == "" && (cfg.Options == nil || cfg.Options.AuthMethod != 1)) || len(cfg.PreSharedKey) > 4096 || len(cfg.LocalID) > 4096 || len(cfg.RemoteID) > 4096 || len(cfg.Username) > 4096 || len(cfg.Password) > 4096 || len(cfg.ClientCert) > 131072 || len(cfg.ClientKey) > 131072 || len(cfg.CaCert) > 131072 {
 		return cfg, errors.New("invalid Fortinet IPsec gateway or PSK")
 	}
@@ -147,7 +143,19 @@ func clientConfig(cfg config, cancel context.CancelFunc) ipsec.Config {
 	}
 }
 
+// Normalize each attempt, including additional gateways selected after readConfig.
+func gatewayHost(host string) string {
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		candidate := strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+		if ip := net.ParseIP(candidate); ip != nil && strings.Contains(candidate, ":") {
+			return candidate
+		}
+	}
+	return host
+}
+
 func prepareClientConfig(cfg config, cancel context.CancelFunc) (ipsec.Config, error) {
+	cfg.Host = gatewayHost(cfg.Host)
 	c := clientConfig(cfg, cancel)
 	if cfg.Options == nil {
 		return c, nil
@@ -240,17 +248,32 @@ func run(ctx context.Context, input io.Reader, output io.Writer, connect connect
 	var client tunnelClient
 	for _, host := range gateways {
 		cfg.Host = host
-		prepared, prepareErr := prepareClientConfig(cfg, cancel)
+		attempt, stopAttempt := context.WithTimeout(startup, 90*time.Second/time.Duration(len(gateways)))
+		var committed atomic.Bool
+		prepared, prepareErr := prepareClientConfig(cfg, func() {
+			stopAttempt()
+			if committed.Load() {
+				cancel()
+			}
+		})
 		if prepareErr != nil {
+			stopAttempt()
 			stopStartup()
 			return prepareErr
 		}
-		attempt, stopAttempt := context.WithTimeout(startup, 90*time.Second/time.Duration(len(gateways)))
 		client, err = connect(attempt, prepared)
-		stopAttempt()
+		if err == nil && attempt.Err() != nil {
+			err = attempt.Err()
+		}
 		if err == nil {
+			committed.Store(true)
+			if attempt.Err() != nil {
+				cancel()
+			}
+			stopAttempt()
 			break
 		}
+		stopAttempt()
 		if client != nil {
 			client.Close()
 			client = nil
@@ -261,6 +284,9 @@ func run(ctx context.Context, input io.Reader, output io.Writer, connect connect
 	}
 	stopStartup()
 	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		return errors.New("Fortinet IPsec authentication failed; verify credentials, identities, UDP ports and gateway proposals")
 	}
 	defer client.Close()

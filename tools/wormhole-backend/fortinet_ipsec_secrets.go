@@ -55,24 +55,35 @@ func resolveFortinetIPsecWriteSettings(database *sql.DB, databasePath, id string
 	if err := validateFortinetIPsecWriteSettings(settings); err != nil {
 		return nil, err
 	}
+	if err := validateFortinetFallback(database, tunnelSettingString(settings, "FallbackTunnelId")); err != nil {
+		return nil, err
+	}
+
+	var stored map[string]json.RawMessage
+	defer func() { clearTunnelSettingsMap(stored) }()
 	for _, key := range fortinetIPsecSecretKeys {
-		if _, preserve := settings["Has"+key]; preserve {
+		if _, preserve := settings["Has"+key]; !preserve {
+			continue
+		}
+		if stored == nil {
 			var kind int64
-			if create || database.QueryRow("SELECT Kind FROM TunnelConfigs WHERE lower(Id) = lower(?);", id).Scan(&kind) != nil || kind != 9 {
+			if create || database == nil || database.QueryRow("SELECT Kind FROM TunnelConfigs WHERE lower(Id) = lower(?);", id).Scan(&kind) != nil || kind != 9 {
 				return nil, errors.New("the stored Fortinet IPsec gateway key is unavailable")
 			}
 			previous, err := readTunnelSettings(database, databasePath, id)
-			defer clearBytes(previous)
-			var stored map[string]json.RawMessage
 			unmarshalErr := json.Unmarshal(previous, &stored)
-			defer clearTunnelSettingsMap(stored)
-			if err != nil || unmarshalErr != nil || tunnelSettingString(stored, key) == "" {
+			clearBytes(previous)
+			if err != nil || unmarshalErr != nil || stored == nil {
 				return nil, errors.New("the stored Fortinet IPsec gateway key is unavailable")
 			}
-			settings[key] = append(json.RawMessage(nil), stored[key]...)
-			delete(settings, "Has"+key)
 		}
+		if tunnelSettingString(stored, key) == "" {
+			return nil, errors.New("the stored Fortinet IPsec gateway key is unavailable")
+		}
+		settings[key] = append(json.RawMessage(nil), stored[key]...)
+		delete(settings, "Has"+key)
 	}
+
 	if err := validateFortinetIPsecSettings(settings); err != nil {
 		return nil, err
 	}

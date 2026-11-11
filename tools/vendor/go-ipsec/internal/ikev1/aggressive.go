@@ -97,7 +97,7 @@ func (s *Session) sendAM1() error {
 		{typ: payloadKE, body: s.localPub},
 		{typ: payloadNonce, body: s.ni},
 		{typ: payloadID, body: s.idI},
-	}, natTVendorPayloads()...)
+	}, s.natTVendorPayloads()...)
 	return s.transmit(marshalMessage(s.mmHeader(exchangeAggressive, 0, 0), payloads))
 }
 
@@ -129,8 +129,8 @@ func (s *Session) initHandleAM2(h header, first uint8, rest []byte) error {
 		return fmt.Errorf("ikev1: responder chose group %d after AM1 offered %d", prop.group, s.prop.group)
 	}
 	s.prop = prop
-	s.peerNATT = peerSupportsNATT(payloads)
-	if !s.peerNATT {
+	s.peerNATT = !s.cfg.DisableNATT && peerSupportsNATT(payloads)
+	if !s.peerNATT && !s.cfg.DisableNATT {
 		return errNoNATT
 	}
 
@@ -200,8 +200,8 @@ func (s *Session) respHandleAM1(h header, first uint8, rest []byte) error {
 		return fmt.Errorf("ikev1: no acceptable IKE proposal offered")
 	}
 	s.prop, s.propNum = prop, num
-	s.peerNATT = peerSupportsNATT(payloads)
-	if !s.peerNATT {
+	s.peerNATT = !s.cfg.DisableNATT && peerSupportsNATT(payloads)
+	if !s.peerNATT && !s.cfg.DisableNATT {
 		return errNoNATT
 	}
 
@@ -248,7 +248,7 @@ func (s *Session) respHandleAM1(h header, first uint8, rest []byte) error {
 	}
 	am2 = append(am2, proof...)
 	am2 = append(am2, s.natdPayloads()...)
-	am2 = append(am2, natTVendorPayloads()...)
+	am2 = append(am2, s.natTVendorPayloads()...)
 
 	s.state = stWaitAM3
 	if err := s.transmit(marshalMessage(s.mmHeader(exchangeAggressive, 0, 0), am2)); err != nil {

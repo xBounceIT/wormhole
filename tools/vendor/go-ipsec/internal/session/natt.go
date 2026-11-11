@@ -47,6 +47,9 @@ func (s *Session) recvDatagram(ctx context.Context) ([]byte, error) {
 // appendNATDetection adds NAT_DETECTION_SOURCE_IP and NAT_DETECTION_DESTINATION_IP
 // notifies (RFC 7296 §2.23). The request header carries SPIr = 0.
 func (s *Session) appendNATDetection(c *ikemsg.Payloads) {
+	if s.cfg.DisableNATT {
+		return
+	}
 	localIP, localPort := addrPort(s.conn.LocalAddr())
 	remoteIP, remotePort := addrPort(s.conn.RemoteAddr())
 	src := natt.DetectionHash(s.initiatorSPI, s.responderSPI, localIP, localPort)
@@ -88,6 +91,9 @@ func (s *Session) processNATDetection(notifies []*ikemsg.NotifyPayload) {
 // cannot send raw ESP, so it always uses UDP-encapsulation — migration happens
 // whether or not a NAT was detected, but the detection result is logged.
 func (s *Session) migrateNATT() {
+	if s.cfg.DisableNATT {
+		return
+	}
 	if m, ok := s.conn.(transport.PortMigrator); ok {
 		m.MigrateToPort(natt.Port4500)
 		s.nattMode = true

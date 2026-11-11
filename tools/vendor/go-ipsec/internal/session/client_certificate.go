@@ -30,7 +30,9 @@ func (s *Session) ikeAuthCertificate(ctx context.Context) error {
 	}
 	first = append(first, &ikemsg.AuthPayload{Method: method, Data: signature}, &ikemsg.SAPayload{Proposals: buildProposals(spi, s.enabledESPSuites())})
 	appendTrafficSelectors(&first, s.cfg.RequestIPv6)
-	buildCPRequest(&first, s.cfg.RequestIPv6)
+	if s.cfg.AddressAssignment == 0 {
+		buildCPRequest(&first, s.cfg.RequestIPv6)
+	}
 	response, err := s.exchangeSK(ctx, ikemsg.ExchangeIKEAuth, s.messageID, first)
 	if err != nil {
 		return err

@@ -3,6 +3,8 @@ package session
 import (
 	"bytes"
 	"context"
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/binary"
 	"errors"
 	"log/slog"
@@ -63,7 +65,12 @@ func TestFortinetNotificationAcknowledgement(t *testing.T) {
 	}
 }
 
-func fortinetTestResponder(conn transport.Conn, mode string) error {
+type fortinetCertFixture struct {
+	leaf *x509.Certificate
+	key  *rsa.PrivateKey
+}
+
+func fortinetTestResponder(conn transport.Conn, mode string, certificates ...fortinetCertFixture) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	rs := New(Config{Logger: slog.New(slog.DiscardHandler)})
@@ -135,6 +142,28 @@ func fortinetTestResponder(conn transport.Conn, mode string) error {
 	payloads := ikemsg.Payloads{&ikemsg.IDrPayload{IDType: 2, Data: id}}
 	if mode != "no-auth" {
 		payloads = append(payloads, authPayload)
+	}
+	if len(certificates) > 0 {
+		certificate := certificates[0]
+		signature, err := signRFC7427(certificate.key, signed)
+		if err != nil {
+			return err
+		}
+		authPayload.Method = 14
+		authPayload.Data = signature
+		payloads = append(payloads, &ikemsg.CertPayload{Encoding: 4, Data: certificate.leaf.Raw})
+		found := false
+		for _, p := range inner {
+			if cert, ok := p.(*ikemsg.CertPayload); ok && bytes.Equal(cert.Data, certificate.leaf.Raw) {
+				found = true
+			}
+			if _, ok := p.(*ikemsg.AuthPayload); ok {
+				return errors.New("Fortinet certificate precheck must precede EAP")
+			}
+		}
+		if !found {
+			return errors.New("client certificate was not sent before EAP")
+		}
 	}
 	request := eap.Packet{Code: eap.CodeRequest, Identifier: 1, Type: eap.TypeIdentity}
 	if mode == "early-success" {

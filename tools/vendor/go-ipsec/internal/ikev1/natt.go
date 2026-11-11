@@ -151,7 +151,17 @@ func (s *Session) detectNAT(payloads []payload) (localBehind, peerBehind bool) {
 // float switches this session onto the NAT-T port for every subsequent message.
 // Both ends do it after the NAT-D exchange, so MM5 onward — and all ESP — ride
 // UDP/4500 behind the non-ESP marker.
+func (s *Session) natTVendorPayloads() []payload {
+	if s.cfg.DisableNATT {
+		return nil
+	}
+	return natTVendorPayloads()
+}
+
 func (s *Session) float(payloads []payload) {
+	if s.cfg.DisableNATT {
+		return
+	}
 	localBehind, peerBehind := s.detectNAT(payloads)
 	s.floated = true
 	s.logger.Printf("ikev1: NAT-T: floating to UDP/%d (nat detected: local=%v peer=%v)",

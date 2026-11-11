@@ -76,6 +76,15 @@ func afterHash(plain []byte, payloads []payload, consumed int) []byte {
 // finish derives the ESP keying material for both directions and reports the SA
 // to the handler.
 func (s *Session) finish() {
+	if s.quickCompleted == nil {
+		s.quickCompleted = make(map[uint32]struct{})
+	}
+	if len(s.quickCompleted) >= maxQuickExchanges && !s.quickCompletedID(s.qmMsgID) {
+		s.failLocked(fmt.Errorf("IKEv1 exchange history exhausted; reconnect required"))
+		return
+	}
+	s.quickCompleted[s.qmMsgID] = struct{}{}
+	s.quickEstablished = true
 	encrID, keyLn, integID := espResultIDs(s.esp)
 	encKeyLen := int(keyLn) / 8
 	total := encKeyLen + integKeyLen(integID)
@@ -112,13 +121,13 @@ func (s *Session) defaultESPProposals() []espProposal {
 				transform = 3
 				bits = 192
 			}
-			out = append(out, espProposal{group: s.cfg.PFS, transformID: transform, keyBits: bits, authAlg: p.Hash, encap: encapUDPTunnel, lifeSeconds: s.cfg.ESPLifetime, lifeKb: s.cfg.ESPLifetimeKb})
+			out = append(out, espProposal{group: s.cfg.PFS, transformID: transform, keyBits: bits, authAlg: p.Hash, encap: s.tunnelEncapsulation(), lifeSeconds: s.cfg.ESPLifetime, lifeKb: s.cfg.ESPLifetimeKb})
 		}
 		return out
 	}
 	encap := uint16(encapUDPTransport)
 	if s.cfg.Phase2 == Phase2RemoteAccess {
-		encap = encapUDPTunnel
+		encap = s.tunnelEncapsulation()
 	}
 	return []espProposal{
 		{transformID: espTransformAES, keyBits: 256, authAlg: authHMACSHA2256, encap: encap, lifeSeconds: 3600},
@@ -227,6 +236,13 @@ func (s *Session) supportedESP(p espProposal) bool {
 	} else {
 		okEncap = p.encap == encapUDPTransport || p.encap == encapTransport || p.encap == encapUDPTransportDraft
 	}
+	if s.cfg.DisableNATT {
+		if s.cfg.Phase2 == Phase2RemoteAccess {
+			okEncap = p.encap == encapTunnel
+		} else {
+			okEncap = p.encap == encapTransport
+		}
+	}
 	for _, offered := range s.defaultESPProposals() {
 		if p.group == offered.group && p.transformID == offered.transformID && p.keyBits == offered.keyBits && p.authAlg == offered.authAlg && okEncap {
 			return true
@@ -253,9 +269,19 @@ func (s *Session) phase2Selectors() (local, remote identity, err error) {
 	if s.cfg.Phase2 != Phase2RemoteAccess {
 		return l2tpSelector(s.cfg.LocalIP), l2tpSelector(s.cfg.PeerIP), nil
 	}
+	if s.cfg.DHCP {
+		return anySubnetID(), anySubnetID(), nil
+	}
 	inner := s.assignedIP()
 	if inner == nil {
 		return identity{}, identity{}, fmt.Errorf("ikev1: no inner address for the phase-2 selector")
 	}
 	return ipv4ID(inner), anySubnetID(), nil
+}
+
+func (s *Session) tunnelEncapsulation() uint16 {
+	if s.cfg.DisableNATT {
+		return encapTunnel
+	}
+	return encapUDPTunnel
 }

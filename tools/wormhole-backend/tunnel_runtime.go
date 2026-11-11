@@ -50,6 +50,7 @@ type tunnelProcess struct {
 }
 
 type tunnelConfigSnapshot struct {
+	fallbackIdentity      string
 	configurationIdentity string
 	identity              string
 	chain                 []string
@@ -311,7 +312,7 @@ func startTunnelRuntimeScoped(ctx context.Context, databasePath, id, scope strin
 			return nil, err
 		}
 	} else if processTunnelPool.loadSettings {
-		snapshot.identity = sshJumpSnapshotIdentity(snapshot, nil, "", true)
+		snapshot.identity = sshJumpSnapshotIdentity(snapshot, nil, "", true) + snapshot.fallbackIdentity
 	}
 	snapshot.chain = append(append([]string(nil), chain...), snapshot.id)
 	absoluteDatabasePath, err := filepath.Abs(databasePath)
@@ -364,6 +365,9 @@ func loadTunnelSnapshotSettings(snapshot tunnelConfigSnapshot) (tunnelConfigSnap
 	}
 	defer database.Close()
 	snapshot.settings, err = readTunnelSettings(database, snapshot.databasePath, snapshot.id)
+	if err == nil {
+		return pinFortinetFallback(snapshot)
+	}
 	return snapshot, err
 }
 
@@ -686,7 +690,7 @@ func (pool *tunnelRuntimePool) release(entry *sharedTunnelEntry) {
 	}
 }
 
-func startTunnelProcess(ctx context.Context, snapshot tunnelConfigSnapshot) (*tunnelProcess, error) {
+func startSingleTunnelProcess(ctx context.Context, snapshot tunnelConfigSnapshot) (*tunnelProcess, error) {
 	if err := reportTunnelProgress(ctx, "preparing", ""); err != nil {
 		return nil, err
 	}

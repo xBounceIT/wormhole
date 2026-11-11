@@ -28,7 +28,7 @@ func (s *Session) sendMM1() error {
 	s.saBodyI = buildPhase1SA(s.ikeProposals())
 	// The SA payload is what HASH_I/HASH_R authenticate; the Vendor IDs that
 	// follow it announce NAT-T support and are outside that hash.
-	payloads := append([]payload{{typ: payloadSA, body: s.saBodyI}}, natTVendorPayloads()...)
+	payloads := append([]payload{{typ: payloadSA, body: s.saBodyI}}, s.natTVendorPayloads()...)
 	msg := marshalMessage(s.mmHeader(exchangeMain, 0, 0), payloads)
 	return s.transmit(msg)
 }
@@ -73,8 +73,8 @@ func (s *Session) initHandleMM2(h header, first uint8, rest []byte) error {
 		return fmt.Errorf("ikev1: responder chose an unsupported IKE proposal")
 	}
 	s.prop = prop
-	s.peerNATT = peerSupportsNATT(payloads)
-	if !s.peerNATT {
+	s.peerNATT = !s.cfg.DisableNATT && peerSupportsNATT(payloads)
+	if !s.peerNATT && !s.cfg.DisableNATT {
 		return errNoNATT
 	}
 	s.advance()
@@ -158,7 +158,20 @@ func (s *Session) initHandleMM6(first uint8, rest []byte) error {
 func (s *Session) startQuickMode() error {
 	s.qmDH = nil
 	s.qmShared = nil
-	s.qmMsgID = randSPI() // any nonzero message ID
+	if len(s.quickCompleted) >= maxQuickExchanges {
+		return fmt.Errorf("IKEv1 exchange history exhausted; reconnect required")
+	}
+	found := false
+	for attempt := 0; attempt < 16; attempt++ {
+		s.qmMsgID = randSPI()
+		if !s.quickCompletedID(s.qmMsgID) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("could not allocate a fresh IKEv1 exchange ID")
+	}
 	s.qmIV = s.keys.quickModeIV(s.qmMsgID)
 	s.qmNi = nonce()
 	s.inSPI = randSPI()
@@ -299,8 +312,8 @@ func (s *Session) respHandleMM1(h header, first uint8, rest []byte) error {
 	}
 	s.prop = prop
 	s.propNum = num
-	s.peerNATT = peerSupportsNATT(payloads)
-	if !s.peerNATT {
+	s.peerNATT = !s.cfg.DisableNATT && peerSupportsNATT(payloads)
+	if !s.peerNATT && !s.cfg.DisableNATT {
 		return errNoNATT
 	}
 
@@ -309,7 +322,7 @@ func (s *Session) respHandleMM1(h header, first uint8, rest []byte) error {
 	if s.peerNATT {
 		// Echo NAT-T support only if the initiator offered it, so a peer that
 		// cannot float is not told we expect it to.
-		mm2 = append(mm2, natTVendorPayloads()...)
+		mm2 = append(mm2, s.natTVendorPayloads()...)
 	}
 	msg := marshalMessage(s.mmHeader(exchangeMain, 0, 0), mm2)
 	s.state = stWaitMM3

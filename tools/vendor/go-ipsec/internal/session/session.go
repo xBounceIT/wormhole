@@ -40,21 +40,26 @@ type WireID struct {
 // (toSessionConfig allocates them fresh, inside secretmem.Do) and wipes them
 // on Close — a string would be unwipeable for the process lifetime.
 type Config struct {
-	ClientCertificate *tls.Certificate
-	DHGroups          []uint16
-	DisableDPD        bool
-	FortinetSAML      bool
-	ServerPSK         []byte
-	Server            string
-	LocalID           WireID
-	RemoteID          WireID
-	EAPUser           string
-	EAPPass           []byte
-	PSK               []byte
-	RootCAs           *x509.CertPool
-	Dialer            transport.DialFunc
-	MTU               uint32
-	Logger            *slog.Logger
+	ClientCertificate        *tls.Certificate
+	DHGroups                 []uint16
+	DisableDPD               bool
+	DisableNATT              bool
+	RekeyMaxBytes            uint64
+	ChildPFSGroup            uint16
+	AddressAssignment        int
+	ManualAddress, ManualDNS string
+	FortinetSAML             bool
+	ServerPSK                []byte
+	Server                   string
+	LocalID                  WireID
+	RemoteID                 WireID
+	EAPUser                  string
+	EAPPass                  []byte
+	PSK                      []byte
+	RootCAs                  *x509.CertPool
+	Dialer                   transport.DialFunc
+	MTU                      uint32
+	Logger                   *slog.Logger
 
 	KeepAlive        time.Duration
 	DPDTimeout       time.Duration
@@ -63,6 +68,7 @@ type Config struct {
 	ReplayWindow     uint32
 	RekeyMaxPackets  uint32
 	ChildSAPFS       bool
+	StrictChildPFS   bool
 
 	// ESPSuites restricts and orders the ESP suites offered for Child SAs, in
 	// preference order. nil/empty offers the full built-in table. Resolved from
@@ -90,7 +96,8 @@ type Session struct {
 	cfg Config
 	log *slog.Logger
 
-	conn transport.Conn
+	conn   transport.Conn
+	rawESP transport.Conn
 
 	// IKE SA identifiers and crypto state.
 	initiatorSPI uint64
@@ -191,7 +198,7 @@ func New(cfg Config) *Session {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	return &Session{cfg: cfg, log: log, childPFS: cfg.ChildSAPFS}
+	return &Session{cfg: cfg, log: log, childPFS: cfg.ChildSAPFS, childPFSGroup: cfg.ChildPFSGroup}
 }
 
 // dialDefault is the network used for the underlying socket.
@@ -210,6 +217,12 @@ func (s *Session) IKESAInit(ctx context.Context) error {
 			return err
 		}
 		s.conn = conn
+		if s.cfg.DisableNATT {
+			s.rawESP, err = transport.DialESP(ctx, conn.RemoteAddr())
+			if err != nil {
+				return err
+			}
+		}
 	}
 
 	var err error
@@ -492,6 +505,9 @@ func (s *Session) Close() error {
 	secretmem.Wipe(s.cfg.PSK)
 	secretmem.Wipe(s.cfg.ServerPSK)
 	secretmem.Wipe(s.cfg.EAPPass)
+	if s.rawESP != nil {
+		_ = s.rawESP.Close()
+	}
 	if s.conn != nil {
 		return s.conn.Close()
 	}
@@ -525,10 +541,23 @@ func (s *Session) RecvRaw(ctx context.Context) ([]byte, error) { return s.conn.R
 
 // SendESP transmits a raw ESP datagram to the peer (UDP-encapsulated on 4500,
 // no non-ESP marker).
-func (s *Session) SendESP(ctx context.Context, pkt []byte) error { return s.conn.Send(ctx, pkt) }
+func (s *Session) SendESP(ctx context.Context, pkt []byte) error {
+	if s.cfg.DisableNATT {
+		if s.rawESP == nil {
+			return transport.ErrClosed
+		}
+		return s.rawESP.Send(ctx, pkt)
+	}
+	return s.conn.Send(ctx, pkt)
+}
+func (s *Session) RecvESP(ctx context.Context) ([]byte, error) { return s.rawESP.Recv(ctx) }
+func (s *Session) RawESP() bool                                { return s.cfg.DisableNATT }
 
 // SendKeepalive sends a NAT keepalive (a single 0xFF) to keep the mapping open.
 func (s *Session) SendKeepalive(ctx context.Context) error {
+	if s.cfg.DisableNATT {
+		return nil
+	}
 	return s.conn.Send(ctx, []byte{0xFF})
 }
 

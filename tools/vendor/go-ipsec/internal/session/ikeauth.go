@@ -94,7 +94,9 @@ func (s *Session) ikeAuthPSK(ctx context.Context) error {
 		&ikemsg.SAPayload{Proposals: buildProposals(spi, s.enabledESPSuites())},
 	}
 	appendTrafficSelectors(&first, s.cfg.RequestIPv6)
-	buildCPRequest(&first, s.cfg.RequestIPv6)
+	if s.cfg.AddressAssignment == 0 {
+		buildCPRequest(&first, s.cfg.RequestIPv6)
+	}
 
 	resp, err := s.exchangeSK(ctx, ikemsg.ExchangeIKEAuth, s.messageID, first)
 	if err != nil {
@@ -127,7 +129,9 @@ func (s *Session) ikeAuthEAP(ctx context.Context) error {
 		&ikemsg.SAPayload{Proposals: buildProposals(spi, s.enabledESPSuites())},
 	}
 	appendTrafficSelectors(&first, s.cfg.RequestIPv6)
-	buildCPRequest(&first, s.cfg.RequestIPv6)
+	if s.cfg.AddressAssignment == 0 {
+		buildCPRequest(&first, s.cfg.RequestIPv6)
+	}
 
 	respPayloads, err := s.exchangeSK(ctx, ikemsg.ExchangeIKEAuth, s.messageID, first)
 	if err != nil {
@@ -241,8 +245,11 @@ func (s *Session) handleAuthResponse(payloads ikemsg.Payloads) (eap.Packet, erro
 	}
 	s.remoteIDr = WireID{Type: uint8(idr.IDType), Data: append([]byte(nil), idr.Data...)}
 
+	if s.cfg.RemoteID.Type != 0 && (s.cfg.RemoteID.Type != uint8(idr.IDType) || !constTimeEqual(s.cfg.RemoteID.Data, idr.Data)) {
+		return eap.Packet{}, errors.New("session: responder identity mismatch")
+	}
 	// Verify the certificate chain and bind it to the exchange via the cert AUTH.
-	if s.cfg.FortinetSAML {
+	if s.cfg.FortinetSAML && s.cfg.ClientCertificate == nil {
 		if authP == nil || authP.Method != auth.MethodSharedKeyMIC || len(s.cfg.ServerPSK) == 0 {
 			return eap.Packet{}, errors.New("session: Fortinet responder PSK authentication missing")
 		}
@@ -331,9 +338,12 @@ func (s *Session) handleFinalAuthResponse(payloads ikemsg.Payloads, secret []byt
 	if s.remoteIDr.Type == 0 && len(s.remoteIDr.Data) == 0 {
 		return errors.New("session: IKE_AUTH response missing IDr")
 	}
+	if len(s.cfg.PSK) > 0 && s.cfg.RemoteID.Type != 0 && (s.cfg.RemoteID.Type != s.remoteIDr.Type || !constTimeEqual(s.cfg.RemoteID.Data, s.remoteIDr.Data)) {
+		return errors.New("session: PSK responder identity mismatch")
+	}
 	// Verify the responder's shared-secret AUTH over the responder signed octets.
 	respSigned := s.responderSignedOctets(ikemsg.MarshalIDBody(ikemsg.IDType(s.remoteIDr.Type), s.remoteIDr.Data))
-	if s.cfg.ClientCertificate != nil {
+	if s.cfg.ClientCertificate != nil && !s.cfg.FortinetSAML {
 		var certs [][]byte
 		for _, p := range payloads {
 			if cert, ok := p.(*ikemsg.CertPayload); ok {

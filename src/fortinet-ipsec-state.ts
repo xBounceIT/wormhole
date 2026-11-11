@@ -103,6 +103,7 @@ export const fortinetIPsecFields: {
   {
     key: 'AddressAssignment',
     label: 'Address assignment',
+    hint: 'For FortiGate IKEv2 DHCP proxy, choose Mode Config. DHCP over IPsec sends DHCP packets inside ESP for legacy relay configurations.',
     section: 'VPN settings',
     type: 'select',
     options: [
@@ -188,6 +189,7 @@ export const fortinetIPsecFields: {
   {
     key: 'NatTraversal',
     label: 'NAT traversal',
+    hint: 'When disabled, ESP uses IP protocol 50 and requires administrator/root privileges. The gateway and network must allow ESP.',
     section: 'Phase 1',
     type: 'switch',
     fullWidth: true,
@@ -284,6 +286,7 @@ export function normalizeFortinetIPsecSettings(
   const result: Record<string, unknown> = {};
   for (const key of [
     ...fortinetIPsecFields.map((field) => field.key),
+    'FallbackTunnelId',
     ...fortinetIPsecSecrets.flatMap((key) => [`Has${key}`, `Replace${key}`]),
   ]) {
     let value = input[key];
@@ -342,6 +345,6 @@ export function missingFortinetIPsecFields(settings: Record<string, unknown>): s
   )
     missing.push('Client IPv4 address');
   if (settings.UserAuth === 3 && settings.IkeVersion === 1) missing.push('SAML requires IKEv2');
-  if (settings.UserAuth === 3 && settings.AuthMethod === 1) missing.push('SAML requires PSK');
+
   return missing;
 }

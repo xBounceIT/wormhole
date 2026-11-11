@@ -13354,10 +13354,37 @@ function TunnelEditorDialog({
                       ) : null,
                     )}
                 </TunnelSection>
-                <TunnelSection title="VPN settings">
+                <TunnelSection title="VPN settings" contentClassName="items-start md:grid-cols-2">
                   {rows('VPN settings', {
                     hidden: (field) => !fortinetIPsecFieldVisible(field.key, value.settings),
                   })}
+                  <div className="grid gap-1.5 md:col-span-2">
+                    <Label htmlFor="ipsec-ssl-fallback">Fallback SSL VPN</Label>
+                    <Select
+                      value={String(value.settings.FallbackTunnelId || 'none')}
+                      onValueChange={(id) =>
+                        setSetting('FallbackTunnelId', id === 'none' ? '' : id)
+                      }
+                    >
+                      <SelectTrigger id="ipsec-ssl-fallback" className="w-full">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="none">None</SelectItem>
+                        {tunnels
+                          .filter((tunnel) => tunnel.kind === 'Fortinet')
+                          .map((tunnel) => (
+                            <SelectItem key={tunnel.id} value={tunnel.id}>
+                              {tunnel.name}
+                            </SelectItem>
+                          ))}
+                      </SelectContent>
+                    </Select>
+                    <p className="text-[11px] text-muted-foreground">
+                      If IPsec cannot connect, use this Fortinet SSL profile and its authentication
+                      settings.
+                    </p>
+                  </div>
                 </TunnelSection>
                 <TunnelAdvanced label="Advanced" onOpenChange={setAdvancedOpen} open={advancedOpen}>
                   <TunnelSection className="col-span-full" title="Phase 1">

@@ -165,7 +165,7 @@ func TestFortinetOptionsRejectUnsupportedOrMalformedProfiles(t *testing.T) {
 	if _, err := ConfigureFortinet(Config{}, defaults, "", "", ""); err != nil {
 		t.Fatal(err)
 	}
-	for _, mutate := range []func(*FortinetOptions){func(o *FortinetOptions) { o.IkeVersion = 3 }, func(o *FortinetOptions) { o.AuthMethod = 2 }, func(o *FortinetOptions) { o.UserAuth = 4 }, func(o *FortinetOptions) { o.ExchangeMode = 2 }, func(o *FortinetOptions) { o.AddressAssignment = 3 }, func(o *FortinetOptions) { o.Phase1Encryption = 4 }, func(o *FortinetOptions) { o.Phase1Authentication = 5 }, func(o *FortinetOptions) { o.Phase1Lifetime = 0 }, func(o *FortinetOptions) { o.Phase2Lifetime = 0 }, func(o *FortinetOptions) { o.Phase2LifetimeKb = 0 }, func(o *FortinetOptions) { o.AddressAssignment = 2 }, func(o *FortinetOptions) { o.DhGroups = "bad" }, func(o *FortinetOptions) { o.DhGroups = "2" }, func(o *FortinetOptions) { o.Phase1Encryption = 3 }, func(o *FortinetOptions) { o.Phase2Encryption = 3 }, func(o *FortinetOptions) { o.Pfs = true; o.PfsGroup = 2 }, func(o *FortinetOptions) { o.ReplayDetection = false }, func(o *FortinetOptions) { o.AuthMethod = 1 }} {
+	for _, mutate := range []func(*FortinetOptions){func(o *FortinetOptions) { o.IkeVersion = 3 }, func(o *FortinetOptions) { o.AuthMethod = 2 }, func(o *FortinetOptions) { o.UserAuth = 4 }, func(o *FortinetOptions) { o.ExchangeMode = 2 }, func(o *FortinetOptions) { o.AddressAssignment = 3 }, func(o *FortinetOptions) { o.Phase1Encryption = 4 }, func(o *FortinetOptions) { o.Phase1Authentication = 5 }, func(o *FortinetOptions) { o.Phase1Lifetime = 0 }, func(o *FortinetOptions) { o.Phase2Lifetime = 0 }, func(o *FortinetOptions) { o.Phase2LifetimeKb = 0 }, func(o *FortinetOptions) { o.DhGroups = "bad" }, func(o *FortinetOptions) { o.AuthMethod = 1 }} {
 		value := defaults
 		mutate(&value)
 		if _, err := ConfigureFortinet(Config{}, value, "invalid", "invalid", ""); err == nil {
@@ -189,7 +189,7 @@ func TestFortinetOptionsRejectUnsupportedOrMalformedProfiles(t *testing.T) {
 	}
 	options := defaults
 	options.IkeVersion = 1
-	for _, mutate := range []func(*FortinetOptions){func(o *FortinetOptions) { o.NatTraversal = false }, func(o *FortinetOptions) { o.AddressAssignment = 2 }, func(o *FortinetOptions) { o.EnableLocalLan = true }, func(o *FortinetOptions) { o.DhGroups = "bad" }} {
+	for _, mutate := range []func(*FortinetOptions){func(o *FortinetOptions) { o.NatTraversal = false }, func(o *FortinetOptions) { o.EnableLocalLan = true }, func(o *FortinetOptions) { o.DhGroups = "bad" }} {
 		value := options
 		mutate(&value)
 		if _, err := dialLegacy(context.Background(), Config{Server: "127.0.0.1:500", PSK: "secret", FortinetOptions: &value}); err == nil {

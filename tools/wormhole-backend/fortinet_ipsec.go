@@ -53,7 +53,7 @@ func fortinetIPsecPublicOptions(settings map[string]json.RawMessage) map[string]
 }
 
 func validateFortinetIPsecConfiguration(settings map[string]json.RawMessage, checkCertificate bool) error {
-	stringsAllowed := map[string]bool{"Host": true, "PreSharedKey": true, "LocalId": true, "RemoteId": true, "RemoteGateways": true, "Description": true, "Username": true, "Password": true, "ClientCert": true, "ClientKey": true, "CaCert": true, "ManualAddress": true, "ManualDns": true, "DhGroups": true}
+	stringsAllowed := map[string]bool{"FallbackTunnelId": true, "Host": true, "PreSharedKey": true, "LocalId": true, "RemoteId": true, "RemoteGateways": true, "Description": true, "Username": true, "Password": true, "ClientCert": true, "ClientKey": true, "CaCert": true, "ManualAddress": true, "ManualDns": true, "DhGroups": true}
 	numbers := map[string][2]int64{"Port": {1, 65535}, "SamlPort": {1, 65535}, "AuthMethod": {0, 1}, "UserAuth": {0, 3}, "IkeVersion": {1, 2}, "ExchangeMode": {0, 1}, "AddressAssignment": {0, 2}, "Phase1Lifetime": {1, 2147483647}, "Phase2Lifetime": {1, 2147483647}, "Phase2LifetimeKb": {1, 2147483647}, "PfsGroup": {1, 21}}
 	for _, phase := range []string{"Phase1", "Phase2"} {
 		for _, suffix := range []string{"", "2"} {
@@ -87,6 +87,9 @@ func validateFortinetIPsecConfiguration(settings map[string]json.RawMessage, che
 		} else {
 			return errors.New("Fortinet IPsec setting is unsupported")
 		}
+	}
+	if id := tunnelSettingString(settings, "FallbackTunnelId"); id != "" && normalizeTunnelID(id) == "" {
+		return errors.New("invalid SSL fallback tunnel id")
 	}
 	required := []string{"Host"}
 	if tunnelSettingNumber(settings, "AuthMethod") == 1 {
@@ -141,8 +144,8 @@ func validateFortinetIPsecConfiguration(settings map[string]json.RawMessage, che
 	if _, ok := settings["PfsGroup"]; ok && !groups[int(tunnelSettingNumber(settings, "PfsGroup"))] {
 		return errors.New("Fortinet IPsec PFS group is invalid")
 	}
-	if fortinetUserAuth(settings) == 3 && (tunnelSettingNumber(settings, "AuthMethod") == 1 || tunnelSettingNumber(settings, "IkeVersion") == 1) {
-		return errors.New("Fortinet IPsec SAML requires IKEv2 and a gateway PSK")
+	if fortinetUserAuth(settings) == 3 && tunnelSettingNumber(settings, "IkeVersion") == 1 {
+		return errors.New("Fortinet IPsec SAML requires IKEv2")
 	}
 	if tunnelSettingNumber(settings, "AddressAssignment") == 1 {
 		if net.ParseIP(tunnelSettingString(settings, "ManualAddress")).To4() == nil {

@@ -2,6 +2,7 @@ package ipsec
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"net"
 	"net/netip"
@@ -9,8 +10,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/n0madic/go-ipsec/internal/dhcp"
 	"github.com/n0madic/go-ipsec/internal/esp"
 	"github.com/n0madic/go-ipsec/internal/ikev1"
+	"github.com/n0madic/go-ipsec/internal/transport"
 	"github.com/n0madic/go-ipsec/internal/tunnel"
 	tun2net "github.com/n0madic/go-tun2net"
 )
@@ -18,7 +21,11 @@ import (
 // DialFortinet keeps both IKE versions behind the same userspace-only API.
 func DialFortinet(ctx context.Context, cfg Config) (FortinetClient, error) {
 	if cfg.FortinetOptions != nil && cfg.FortinetOptions.IkeVersion == 1 {
-		return dialLegacy(ctx, cfg)
+		client, err := dialLegacy(ctx, cfg)
+		if err != nil {
+			return nil, err
+		}
+		return withLocalLAN(client, cfg.FortinetOptions.EnableLocalLan), nil
 	}
 	client, err := Dial(ctx, cfg)
 	if err != nil {
@@ -28,12 +35,13 @@ func DialFortinet(ctx context.Context, cfg Config) (FortinetClient, error) {
 		client.Close()
 		return nil, err
 	}
-	return client, nil
+	return withLocalLAN(client, cfg.FortinetOptions != nil && cfg.FortinetOptions.EnableLocalLan), nil
 }
 
 type legacyClient struct {
 	cfg           Config
 	conn          *net.UDPConn
+	rawESP        transport.Conn
 	peer          *net.UDPAddr
 	nattPort      int
 	session       *ikev1.Session
@@ -49,20 +57,15 @@ type legacyClient struct {
 	tun           *tunnel.Tunnel
 	stack         *tun2net.Net
 	dns           []netip.Addr
+	dialContext   context.Context
 	volume        uint64
+	dhcp          *dhcp.Client
+	lease         *dhcp.Lease
+	leaseCancel   context.CancelFunc
 }
 
 func dialLegacy(ctx context.Context, cfg Config) (*legacyClient, error) {
 	o := cfg.FortinetOptions
-	if !o.NatTraversal {
-		return nil, errors.New("the userspace IKEv1 engine requires NAT traversal")
-	}
-	if o.AddressAssignment == 2 {
-		return nil, errors.New("DHCP over IPsec is not available in this engine; use Mode Config or a manual address")
-	}
-	if o.EnableLocalLan {
-		return nil, errors.New("local LAN bypass is not available for isolated application tunnels")
-	}
 	groups, err := fortinetGroups(o.DhGroups)
 	if err != nil {
 		return nil, err
@@ -82,6 +85,15 @@ func dialLegacy(ctx context.Context, cfg Config) (*legacyClient, error) {
 		return nil, err
 	}
 	c := &legacyClient{cfg: cfg, conn: conn, peer: peer, ready: make(chan ikev1.Result, 1), failed: make(chan error, 1), done: make(chan struct{})}
+	if !o.NatTraversal {
+		c.rawESP, err = transport.DialESP(ctx, peer)
+		if err != nil {
+			conn.Close()
+			return nil, err
+		}
+		go c.receiveRaw()
+	}
+	c.dialContext = ctx
 	c.rekey = make(chan struct{}, 1)
 	c.nattPort = cfg.NATTPort
 	if c.nattPort == 0 {
@@ -103,6 +115,8 @@ func dialLegacy(ctx context.Context, cfg Config) (*legacyClient, error) {
 		remoteID = cfg.RemoteID.String()
 	}
 	sc := ikev1.Config{Role: ikev1.Initiator, Mode: ikev1.Mode(o.ExchangeMode), Phase2: ikev1.Phase2RemoteAccess, PSK: []byte(psk), GroupName: localID, RemoteID: remoteID, Groups: groups, Lifetime: uint32(o.Phase1Lifetime), ESPLifetime: uint32(o.Phase2Lifetime), LocalIP: local, PeerIP: peer.IP, LocalPort: uint16(conn.LocalAddr().(*net.UDPAddr).Port), PeerPort: uint16(peer.Port), ModeCfg: o.AddressAssignment == 0, Handler: c, Send: c.sendIKE}
+	sc.DisableNATT = !o.NatTraversal
+	sc.DHCP = o.AddressAssignment == 2
 	sc.Certificate = cfg.ClientCertificate
 	if !o.Phase2TimeLifetime {
 		sc.ESPLifetime = 0
@@ -145,6 +159,24 @@ func dialLegacy(ctx context.Context, cfg Config) (*legacyClient, error) {
 	case <-ctx.Done():
 		c.Close()
 		return nil, ctx.Err()
+	}
+	if c.dhcp != nil {
+		leaseCtx, cancel := context.WithCancel(context.Background())
+		c.leaseCancel = cancel
+		d, l := c.dhcp, *c.lease
+		go func() {
+			err := d.Maintain(leaseCtx, l, func(next dhcp.Lease) {
+				c.mu.Lock()
+				c.lease = &next
+				c.dns = next.DNS
+				tun := c.tun
+				c.mu.Unlock()
+				tun.UpdateConfig(leaseConfig(next, 1400))
+			})
+			if err != nil && leaseCtx.Err() == nil {
+				c.Failed(errors.New("DHCP lease expired or revoked"))
+			}
+		}()
 	}
 	go c.lifecycle()
 	return c, nil
@@ -196,18 +228,7 @@ func (c *legacyClient) receive() {
 			c.session.HandleInbound(packet[4:])
 			continue
 		}
-		c.mu.RLock()
-		sa, tun, previous, until := c.sa, c.tun, c.previousSA, c.previousUntil
-		c.mu.RUnlock()
-		if sa != nil && tun != nil {
-			plain, err := sa.Decrypt(packet)
-			if err != nil && previous != nil && time.Now().Before(until) {
-				plain, err = previous.Decrypt(packet)
-			}
-			if err == nil {
-				tun.DeliverInbound(plain)
-			}
-		}
+		c.deliverESP(packet)
 	}
 }
 
@@ -221,6 +242,15 @@ func (c *legacyClient) install(r ikev1.Result) error {
 		return err
 	}
 	o := c.cfg.FortinetOptions
+	ttl := time.Duration(0)
+	if o.Phase2TimeLifetime {
+		ttl = time.Duration(o.Phase2Lifetime) * time.Second
+	}
+	max := uint64(0)
+	if o.Phase2ByteLifetime {
+		max = uint64(o.Phase2LifetimeKb) * 1024
+	}
+	sa.ConfigurePolicy(o.ReplayDetection, ttl, max)
 	address := netip.Addr{}
 	var dns []netip.Addr
 	if r.ModeCfg != nil {
@@ -237,6 +267,49 @@ func (c *legacyClient) install(r ikev1.Result) error {
 			if addr, err := netip.ParseAddr(strings.TrimSpace(ip)); err == nil {
 				dns = append(dns, addr)
 			}
+		}
+	}
+	if o.AddressAssignment == 2 {
+		c.mu.RLock()
+		existing := c.tun
+		currentLease := c.lease
+		c.mu.RUnlock()
+		if existing != nil && currentLease != nil {
+			address = currentLease.IP
+			dns = currentLease.DNS
+		} else {
+			c.mu.Lock()
+			c.sa = sa
+			c.mu.Unlock()
+			d, err := dhcp.New(func(ctx context.Context, plain []byte) error {
+				c.mu.RLock()
+				current := c.sa
+				c.mu.RUnlock()
+				p, err := current.Encrypt(plain)
+				if err != nil {
+					return err
+				}
+				return c.sendESP(ctx, p)
+			})
+			if err != nil {
+				return err
+			}
+			c.mu.Lock()
+			c.dhcp = d
+			c.mu.Unlock()
+			bounded, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			stop := context.AfterFunc(c.dialContext, cancel)
+			l, err := d.Acquire(bounded)
+			stop()
+			cancel()
+			if err != nil {
+				return errors.New("DHCP over IPsec did not assign an address")
+			}
+			address = l.IP
+			dns = l.DNS
+			c.mu.Lock()
+			c.lease = &l
+			c.mu.Unlock()
 		}
 	}
 	if !address.IsValid() {
@@ -262,8 +335,6 @@ func (c *legacyClient) install(r ikev1.Result) error {
 			return net.ErrClosed
 		default:
 		}
-		peer := *c.peer
-		peer.Port = c.nattPort
 		c.mu.Lock()
 		c.volume += uint64(len(p))
 		volume := c.volume
@@ -278,13 +349,21 @@ func (c *legacyClient) install(r ikev1.Result) error {
 			default:
 			}
 		}
-		_, err := c.conn.WriteToUDP(p, &peer)
-		return err
+		c.mu.RLock()
+		l := c.lease
+		c.mu.RUnlock()
+		if l != nil && !time.Now().Before(l.Expires) {
+			return net.ErrClosed
+		}
+		return c.sendESP(ctx, p)
 	}, tc)
 	stack, err := tun2net.New(tun, nil)
 	if err != nil {
 		tun.Close()
 		return err
+	}
+	if c.lease != nil {
+		tun.UpdateConfig(leaseConfig(*c.lease, 1400))
 	}
 	c.mu.Lock()
 	c.sa = sa
@@ -367,7 +446,9 @@ func (c *legacyClient) lifecycle() {
 		case <-ticker.C:
 			peer := *c.peer
 			peer.Port = c.nattPort
-			_, _ = c.conn.WriteToUDP([]byte{255}, &peer)
+			if o.NatTraversal {
+				_, _ = c.conn.WriteToUDP([]byte{255}, &peer)
+			}
 			c.mu.RLock()
 			volume := c.volume
 			c.mu.RUnlock()
@@ -415,7 +496,13 @@ func (c *legacyClient) Resolver(server string) *net.Resolver {
 func (c *legacyClient) Close() error {
 	c.once.Do(func() {
 		close(c.done)
+		if c.leaseCancel != nil {
+			c.leaseCancel()
+		}
 		c.conn.Close()
+		if c.rawESP != nil {
+			c.rawESP.Close()
+		}
 		if c.session != nil {
 			c.session.Close()
 		}
@@ -430,4 +517,56 @@ func (c *legacyClient) Close() error {
 		}
 	})
 	return nil
+}
+
+func (c *legacyClient) receiveRaw() {
+	for {
+		packet, err := c.rawESP.Recv(context.Background())
+		if err != nil {
+			c.Failed(errors.New("ESP transport closed"))
+			return
+		}
+		c.deliverESP(packet)
+	}
+}
+func (c *legacyClient) deliverESP(packet []byte) {
+	c.mu.RLock()
+	sa, previous, until := c.sa, c.previousSA, c.previousUntil
+	c.mu.RUnlock()
+	if sa == nil {
+		return
+	}
+	if len(packet) < 4 {
+		return
+	}
+	current := binary.BigEndian.Uint32(packet[:4]) == sa.InSPI()
+	if !current {
+		if previous == nil || !time.Now().Before(until) || binary.BigEndian.Uint32(packet[:4]) != previous.InSPI() {
+			return
+		}
+		sa = previous
+	}
+	plain, err := sa.Decrypt(packet)
+	if err == nil {
+		if current && c.cfg.FortinetOptions.Phase2ByteLifetime && sa.Bytes() >= uint64(c.cfg.FortinetOptions.Phase2LifetimeKb)*1024*9/10 {
+			select {
+			case c.rekey <- struct{}{}:
+			default:
+			}
+		}
+		c.deliverIP(plain)
+	} else if current && errors.Is(err, esp.ErrLifetimeExpired) {
+		c.Failed(errors.New("IPsec key lifetime expired"))
+	}
+
+}
+
+func (c *legacyClient) sendESP(ctx context.Context, p []byte) error {
+	if c.rawESP != nil {
+		return c.rawESP.Send(ctx, p)
+	}
+	peer := *c.peer
+	peer.Port = c.nattPort
+	_, err := c.conn.WriteToUDP(p, &peer)
+	return err
 }

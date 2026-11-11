@@ -22,8 +22,15 @@ func (s *Session) ikeAuthFortinetSAML(ctx context.Context) error {
 		&ikemsg.IDiPayload{IDType: ikemsg.IDType(s.cfg.LocalID.Type), Data: s.cfg.LocalID.Data},
 		&ikemsg.SAPayload{Proposals: buildProposals(spi, s.enabledESPSuites())},
 	}
+	if s.cfg.ClientCertificate != nil {
+		for _, cert := range s.cfg.ClientCertificate.Certificate {
+			first = append(first, &ikemsg.CertPayload{Encoding: 4, Data: cert})
+		}
+	}
 	appendTrafficSelectors(&first, s.cfg.RequestIPv6)
-	buildCPRequest(&first, s.cfg.RequestIPv6)
+	if s.cfg.AddressAssignment == 0 {
+		buildCPRequest(&first, s.cfg.RequestIPv6)
+	}
 	payloads, err := s.exchangeSK(ctx, ikemsg.ExchangeIKEAuth, s.messageID, first)
 	if err != nil {
 		return err

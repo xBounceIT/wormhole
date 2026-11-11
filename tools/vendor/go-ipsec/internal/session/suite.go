@@ -2,6 +2,7 @@ package session
 
 import (
 	"fmt"
+	"github.com/n0madic/go-ipsec/internal/cryptosuite"
 	"slices"
 	"strings"
 
@@ -32,6 +33,7 @@ type suiteID interface {
 // espSuite/ikeSuite aliases below pin the id type per layer.
 type transformSuite[ID suiteID] struct {
 	id     ID
+	prfID  uint16
 	encrID uint16 // ENCR transform ID
 	// keyBits is the Key Length attribute value on the ENCR transform; 0 means
 	// the attribute is ABSENT (ChaCha20-Poly1305, RFC 7634 §2 — its key size is
@@ -73,6 +75,13 @@ func (s transformSuite[ID]) protocol() ikemsg.ProtocolID {
 }
 
 // aead reports whether the suite is a combined-mode (AEAD) cipher.
+func (s transformSuite[ID]) prfTransform() uint16 {
+	if s.prfID != 0 {
+		return s.prfID
+	}
+	return ikemsg.PRF_HMAC_SHA2_256
+}
+
 func (s transformSuite[ID]) aead() bool { return s.integID == 0 }
 
 // spiLen is the SPI size the suite's protocol carries in a proposal: 8 bytes for
@@ -109,6 +118,9 @@ var ikeSuites = []ikeSuite{
 
 // suiteByID returns the table row for a suite id.
 func suiteByID[ID suiteID](id ID, table []transformSuite[ID]) (transformSuite[ID], bool) {
+	if p, ok := cryptosuite.Lookup(uint8(id)); ok && uint8(id) >= cryptosuite.FirstCBC {
+		return transformSuite[ID]{id: id, prfID: p.PRF, encrID: p.Encryption, keyBits: p.KeyBits, encrKeyLen: p.EncryptionBytes, integID: p.Integrity, integKeyLen: p.IntegrityBytes}, true
+	}
 	for _, s := range table {
 		if s.id == id {
 			return s, true
@@ -180,7 +192,7 @@ func buildProposalForSuite[ID suiteID](number uint8, s transformSuite[ID], spi [
 		p.SPI = append([]byte(nil), spi...)
 	}
 	if s.protocol() == ikemsg.ProtocolIKE {
-		p.Transforms = append(p.Transforms, ikemsg.Transform{Type: ikemsg.TransformPRF, ID: ikemsg.PRF_HMAC_SHA2_256})
+		p.Transforms = append(p.Transforms, ikemsg.Transform{Type: ikemsg.TransformPRF, ID: s.prfTransform()})
 	}
 	if !s.aead() {
 		p.Transforms = append(p.Transforms, ikemsg.Transform{Type: ikemsg.TransformInteg, ID: s.integID})
@@ -254,7 +266,7 @@ func suiteMatches[ID suiteID](s transformSuite[ID], p ikemsg.Proposal) bool {
 		return false
 	}
 	if s.protocol() == ikemsg.ProtocolIKE &&
-		!hasTransform(p.ByType(ikemsg.TransformPRF), ikemsg.PRF_HMAC_SHA2_256, nil) {
+		!hasTransform(p.ByType(ikemsg.TransformPRF), s.prfTransform(), nil) {
 		return false
 	}
 	integs := p.ByType(ikemsg.TransformInteg)
@@ -350,7 +362,7 @@ func (s *Session) configuredDHGroups() []uint16 {
 
 // supportedDHGroup reports whether g is a DH group we can run.
 func supportedDHGroup(g uint16) bool {
-	return slices.Contains(preferredDHGroups, g)
+	return slices.Contains([]uint16{1, 2, 5, 14, 15, 16, 17, 18, 19, 20, 21, 31}, g)
 }
 
 // proposalHasDHGroup reports whether a proposal offers the given DH group. A

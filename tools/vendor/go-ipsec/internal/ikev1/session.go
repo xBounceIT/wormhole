@@ -165,7 +165,9 @@ type Config struct {
 	XAuth *XAuthConfig
 	// ModeCfg enables the Mode-Config exchange between XAuth and Quick Mode. An
 	// initiator pulls its address with it; a responder answers from Assign.
-	ModeCfg bool
+	DisableNATT bool
+	DHCP        bool
+	ModeCfg     bool
 	// Assign supplies what the responder pushes in the Mode-Config reply. It is
 	// called once per session, after XAuth has succeeded.
 	Assign  func() (ModeCfgReply, error)
@@ -263,14 +265,18 @@ type Session struct {
 	floated  bool // IKE (and ESP) have moved to the NAT-T port
 
 	// Quick Mode.
-	esp        espProposal
-	qmMsgID    uint32
-	qmIV       []byte
-	qmNi, qmNr []byte
-	qmDH       cryptoutil.DHGroup
-	qmShared   []byte
-	inSPI      uint32 // our inbound ESP SPI
-	outSPI     uint32 // peer's inbound ESP SPI (stamped on our outbound ESP)
+	quickEstablished bool
+	quickCompleted   map[uint32]struct{}
+	quickReplies     [4]quickReply
+	quickReplyIndex  uint8
+	esp              espProposal
+	qmMsgID          uint32
+	qmIV             []byte
+	qmNi, qmNr       []byte
+	qmDH             cryptoutil.DHGroup
+	qmShared         []byte
+	inSPI            uint32 // our inbound ESP SPI
+	outSPI           uint32 // peer's inbound ESP SPI (stamped on our outbound ESP)
 
 	// Retransmission of the last message we sent. lastSentNATT pins it to the
 	// port it originally went out on: the responder floats immediately after
@@ -351,6 +357,19 @@ func (s *Session) HandleInbound(pkt []byte) (authenticated bool) {
 		return false
 	}
 	if h.exchange == exchangeQuick && (s.state == stDone || s.state == stWaitQM2 || s.state == stWaitQM3) {
+		if s.repeatQuickReply(pkt, h.messageID) {
+			return true
+		}
+		if s.quickCompletedID(h.messageID) {
+			return false
+		}
+		if s.state != stDone && h.messageID != s.qmMsgID {
+			return false
+		}
+		if s.quickEstablished && !s.authenticateQuick(h, first, rest) {
+			return false
+		}
+		before := s.state
 		var err error
 		switch s.state {
 		case stDone:
@@ -370,6 +389,9 @@ func (s *Session) HandleInbound(pkt []byte) (authenticated bool) {
 			s.failLocked(err)
 			return false
 		}
+		if s.state == stWaitQM3 || before == stWaitQM2 && s.state == stDone {
+			s.rememberQuickReply(pkt)
+		}
 		return true
 	}
 	// An established session still has one live exchange: the Informational one
@@ -386,6 +408,8 @@ func (s *Session) HandleInbound(pkt []byte) (authenticated bool) {
 	}
 	if err := s.dispatch(h, first, rest); err != nil {
 		s.failLocked(err)
+	} else if h.exchange == exchangeQuick && s.state == stWaitQM3 {
+		s.rememberQuickReply(pkt)
 	}
 	return false
 }

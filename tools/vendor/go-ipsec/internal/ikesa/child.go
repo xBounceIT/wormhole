@@ -49,7 +49,7 @@ func (s *IKESA) deriveChildKeys(dhShared, nonceI, nonceR []byte, encrLen, integL
 		seed = append(seed, dhShared...)
 		seed = append(seed, nonceI...)
 		seed = append(seed, nonceR...)
-		ks := prfPlus(s.SKd, seed, 2*(encrLen+integLen))
+		ks := s.Suite.plus(s.SKd, seed, 2*(encrLen+integLen))
 
 		var off int
 		take := func(n int) []byte {

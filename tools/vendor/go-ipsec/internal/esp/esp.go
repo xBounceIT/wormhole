@@ -9,9 +9,11 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"github.com/n0madic/go-ipsec/internal/cryptosuite"
 	"hash"
 	"io"
 	"sync/atomic"
+	"time"
 
 	"golang.org/x/crypto/chacha20poly1305"
 
@@ -40,6 +42,9 @@ const (
 // String implements fmt.Stringer with the conventional (strongSwan-style)
 // transform names, for diagnostics.
 func (s Suite) String() string {
+	if p, ok := cryptosuite.Lookup(uint8(s)); ok && uint8(s) >= cryptosuite.FirstCBC {
+		return p.Name
+	}
 	switch s {
 	case SuiteAESCBC256SHA256:
 		return "aes256-sha256"
@@ -91,6 +96,9 @@ type SA struct {
 	hash     func() hash.Hash
 	icvLen   int
 	noReplay bool
+	expires  time.Time
+	maxBytes uint64
+	bytes    atomic.Uint64
 
 	outSPI uint32 // peer's SPI: goes in packets we send
 	inSPI  uint32 // our SPI: expected in packets we receive
@@ -128,6 +136,14 @@ func NewSA(suite Suite, outSPI, inSPI uint32, outEncr, outInteg, inEncr, inInteg
 }
 
 func newSA(suite Suite, outSPI, inSPI uint32, outEncr, outInteg, inEncr, inInteg []byte, replayWindow uint32) (*SA, error) {
+	if p, ok := cryptosuite.Lookup(uint8(suite)); ok && uint8(suite) >= cryptosuite.FirstCBC {
+		sa, err := NewLegacySA(p.Encryption, p.Integrity, outSPI, inSPI, outEncr, outInteg, inEncr, inInteg, true)
+		if err == nil {
+			sa.suite = suite
+			sa.replay = NewReplayWindow(replayWindow)
+		}
+		return sa, err
+	}
 	sa := &SA{
 		suite: suite,
 		hash:  sha256.New, icvLen: 16,
@@ -212,6 +228,16 @@ func (sa *SA) Seq() uint32 { return sa.seq.Load() }
 // nextHdr) | ICV(16). AEAD framing: SPI | Seq | IV(8) | AEAD(inner | pad |
 // padLen | nextHdr) | Tag(16), with SPI | Seq as the associated data.
 func (sa *SA) Encrypt(inner []byte) ([]byte, error) {
+	block, iv, icv := 4, aeadIVLen, espICVLen
+	if sa.outBlock != nil {
+		block = sa.outBlock.BlockSize()
+		iv = block
+		icv = sa.icvLen
+	}
+	size := espHeaderLen + iv + ((len(inner)+2+block-1)/block)*block + icv
+	if !sa.reserve(uint64(size)) {
+		return nil, ErrLifetimeExpired
+	}
 	// Allocate the next sequence number with a CAS loop so concurrent Encrypt
 	// callers can never observe the same value: a two-step Add+Store could let a
 	// second goroutine read the wrapped 0 before the pin lands. First packet is
@@ -322,10 +348,17 @@ func nextHeaderFor(inner []byte) byte {
 // Decrypt verifies and decrypts an inbound ESP packet, returning the inner IP
 // datagram (IPv4 or IPv6). The returned slice never aliases pkt.
 func (sa *SA) Decrypt(pkt []byte) ([]byte, error) {
+	var plain []byte
+	var err error
 	if sa.inBlock != nil {
-		return sa.decryptCBC(pkt)
+		plain, err = sa.decryptCBC(pkt)
+	} else {
+		plain, err = sa.decryptAEAD(pkt)
 	}
-	return sa.decryptAEAD(pkt)
+	if err == nil && !sa.reserve(uint64(len(pkt))) {
+		return nil, ErrLifetimeExpired
+	}
+	return plain, err
 }
 
 func (sa *SA) decryptCBC(pkt []byte) ([]byte, error) {
@@ -344,7 +377,7 @@ func (sa *SA) decryptCBC(pkt []byte) ([]byte, error) {
 	if !hmac.Equal(mac.Sum(nil)[:sa.icvLen], pkt[icvStart:]) {
 		return nil, errors.New("esp: ICV verification failed")
 	}
-	if !sa.noReplay && !sa.replay.Accept(seq) {
+	if seq == 0 || !sa.noReplay && !sa.replay.Accept(seq) {
 		return nil, ErrReplay
 	}
 
@@ -381,7 +414,7 @@ func (sa *SA) decryptAEAD(pkt []byte) ([]byte, error) {
 	}
 	// The invariant "only authenticated packets move the replay window" holds:
 	// Open verified the tag above.
-	if !sa.noReplay && !sa.replay.Accept(seq) {
+	if seq == 0 || !sa.noReplay && !sa.replay.Accept(seq) {
 		return nil, ErrReplay
 	}
 	return parseTrailer(plain)
@@ -414,4 +447,33 @@ func parseTrailer(plain []byte) ([]byte, error) {
 		return nil, fmt.Errorf("esp: unexpected next header %d", nh)
 	}
 	return plain[:len(plain)-padLen-2], nil
+}
+
+var ErrLifetimeExpired = errors.New("esp: key lifetime expired")
+
+// ConfigurePolicy must run before publishing an SA to workers.
+func (sa *SA) ConfigurePolicy(replay bool, lifetime time.Duration, maxBytes uint64) {
+	sa.noReplay = !replay
+	sa.maxBytes = maxBytes
+	if lifetime > 0 {
+		sa.expires = time.Now().Add(lifetime)
+	}
+}
+func (sa *SA) Bytes() uint64 { return sa.bytes.Load() }
+func (sa *SA) Expired() bool {
+	return !sa.expires.IsZero() && !time.Now().Before(sa.expires) || sa.maxBytes > 0 && sa.bytes.Load() >= sa.maxBytes
+}
+func (sa *SA) reserve(size uint64) bool {
+	if !sa.expires.IsZero() && !time.Now().Before(sa.expires) {
+		return false
+	}
+	for {
+		current := sa.bytes.Load()
+		if size > ^uint64(0)-current || sa.maxBytes > 0 && (current >= sa.maxBytes || size > sa.maxBytes-current) {
+			return false
+		}
+		if sa.bytes.CompareAndSwap(current, current+size) {
+			return true
+		}
+	}
 }

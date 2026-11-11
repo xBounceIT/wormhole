@@ -78,8 +78,8 @@ func TestFortinetCertificateConfiguration(t *testing.T) {
 			t.Fatal("invalid CA accepted")
 		}
 		options.UserAuth = 2
-		if _, err := ConfigureFortinet(Config{}, options, cert, secret, ""); err == nil {
-			t.Fatal("unsupported certificate EAP accepted")
+		if configured, err := ConfigureFortinet(Config{}, options, cert, secret, ""); err != nil || !configured.FortinetSAML {
+			t.Fatal("certificate EAP configuration rejected", err)
 		}
 		options.IkeVersion = 1
 		_, err = ConfigureFortinet(Config{}, options, cert, secret, "")

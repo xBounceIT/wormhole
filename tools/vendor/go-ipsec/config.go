@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"github.com/n0madic/go-ipsec/internal/cryptosuite"
 	"log/slog"
 	"time"
 
@@ -55,11 +56,18 @@ const (
 // x25519 (group 31, preferred) or MODP-2048 (group 14, fallback), negotiated
 // at IKE_SA_INIT.
 type Config struct {
-	FortinetOptions   *FortinetOptions
-	NATTPort          int // Optional peer NAT-T port; zero uses UDP/4500.
-	DHGroups          []uint16
-	DisableDPD        bool
-	ClientCertificate *tls.Certificate
+	FortinetOptions          *FortinetOptions
+	NATTPort                 int // Optional peer NAT-T port; zero uses UDP/4500.
+	DHGroups                 []uint16
+	DisableDPD               bool
+	DisableNATT              bool
+	DisableReplay            bool
+	DisableChildTimeLifetime bool
+	RekeyMaxBytes            uint64
+	ChildPFSGroup            uint16
+	AddressAssignment        int
+	ManualAddress, ManualDNS string
+	ClientCertificate        *tls.Certificate
 	// Wormhole: Fortinet's SAML token is EAP-GTC; the responder is authenticated
 	// independently with ServerPSK. This opt-in never changes standard EAP.
 	FortinetSAML bool
@@ -190,6 +198,9 @@ const (
 // espSuite maps the public constant to the internal ESP suite id; ok is false
 // for values outside the defined set.
 func (cs CipherSuite) espSuite() (esp.Suite, bool) {
+	if _, ok := cryptosuite.Lookup(uint8(cs)); ok && uint8(cs) >= cryptosuite.FirstCBC {
+		return esp.Suite(cs), true
+	}
 	switch cs {
 	case CipherSuiteAESGCM256:
 		return esp.SuiteAESGCM256, true
@@ -205,6 +216,9 @@ func (cs CipherSuite) espSuite() (esp.Suite, bool) {
 // ikeSuite maps the public constant to the internal IKE SA suite id; ok is
 // false for values outside the defined set.
 func (cs CipherSuite) ikeSuite() (ikesa.Suite, bool) {
+	if _, ok := cryptosuite.Lookup(uint8(cs)); ok && uint8(cs) >= cryptosuite.FirstCBC {
+		return ikesa.Suite(cs), true
+	}
 	switch cs {
 	case CipherSuiteAESGCM256:
 		return ikesa.SuiteAESGCM256, true
@@ -258,8 +272,11 @@ func (c *Config) validate() error {
 	if !c.FortinetSAML && c.ServerPSK != "" {
 		return errors.New("ipsec: server PSK requires Fortinet SAML mode")
 	}
-	if c.FortinetSAML && (c.ServerPSK == "" || c.EAP.Username == "" || c.EAP.Password == "" || c.PSK != "") {
+	if c.FortinetSAML && (c.ServerPSK == "" && c.ClientCertificate == nil || c.EAP.Username == "" || c.EAP.Password == "" || c.PSK != "") {
 		return errors.New("ipsec: Fortinet SAML requires a server PSK and temporary EAP credentials")
+	}
+	if c.DisableNATT && c.Transport != nil {
+		return errors.New("ipsec: custom outer transport does not support raw ESP")
 	}
 	if c.Server == "" {
 		return errors.New("ipsec: Config.Server is required")
@@ -268,7 +285,7 @@ func (c *Config) validate() error {
 	// password; supplying both PSK and EAP (or neither) is a configuration error.
 	hasPSK := c.PSK != ""
 	hasEAP := c.EAP.Username != "" || c.EAP.Password != ""
-	if c.ClientCertificate != nil && (hasPSK || hasEAP) {
+	if c.ClientCertificate != nil && (hasPSK || hasEAP && !c.FortinetSAML) {
 		return errors.New("ipsec: client certificate authentication must be configured independently of PSK/EAP")
 	}
 	switch {
@@ -332,7 +349,9 @@ func (c *Config) validate() error {
 	if c.DPDTimeout <= 0 {
 		c.DPDTimeout = DefaultDPDTimeout
 	}
-	if c.RekeyLifetime <= 0 {
+	if c.DisableChildTimeLifetime {
+		c.RekeyLifetime = 0
+	} else if c.RekeyLifetime <= 0 {
 		c.RekeyLifetime = DefaultRekeyLifetime
 	}
 	if c.IKERekeyLifetime <= 0 {

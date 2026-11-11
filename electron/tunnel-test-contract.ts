@@ -33,6 +33,7 @@ const fortinetIPsecPublicKeys = [
   'Phase2Lifetime',
   'Phase2ByteLifetime',
   'Phase2LifetimeKb',
+  'FallbackTunnelId',
   'ReplayDetection',
   'Pfs',
   'PfsGroup',

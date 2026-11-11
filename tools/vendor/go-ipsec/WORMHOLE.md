@@ -51,17 +51,53 @@ Child SA renewal. The adapter exposes the same isolated userspace network as
 IKEv2, keeps DNS inside ESP, and closes on failure or IKE SA expiry. Phase 1
 reauthentication currently requires reconnecting; it never reuses expired keys.
 
-The IKEv2 path additionally supports client certificates (RSA or ECDSA) and
-ordinary PSK/EAP passwords without a SAML browser. Existing SAML profiles keep
-automatic proposals when opened and saved. Explicit IKEv2 proposals currently
-require AES-256/SHA-256; configurable DH groups are 14/19/20 and Child PFS is
-group 14. IKEv1 permits the legacy proposals shown in the editor.
+The IKEv2 path supports PSK or RSA/ECDSA client certificates, with user
+authentication disabled, prompted/saved EAP credentials, or SAML. SAML is an
+explicit user-authentication choice, not a requirement. Fortinet certificate/EAP
+sends the certificate chain for the gateway's pre-EAP certificate check, verifies
+the responder's trusted certificate and AUTH before sending user credentials,
+then uses Fortinet's SK_pi/SK_pr final AUTH. This is the Fortinet EAP extension,
+not a claim of RFC 4739 multiple-auth interoperability with arbitrary gateways.
+The gateway must enable its corresponding certificate/EAP policy.
 
-Remaining capability limits are explicit connection errors: DHCP over IPsec,
-disabled NAT-T/raw ESP, local-LAN bypass, IKEv2 certificate-plus-EAP, and IKEv2
-volume lifetimes or disabled replay/time lifetimes. SSL-VPN failover is not
-implemented. Additional gateways are tried in order, with independent startup
-attempts; SAML credentials remain bound to the gateway that issued them.
+Explicit IKEv2 proposals support the full editor matrix: AES-128/192/256 or
+3DES with MD5/SHA-1/SHA-256/384/512, independently for IKE and ESP. The negotiated
+PRF drives AUTH, key expansion and rekeys; an IKE rekey uses the old PRF for
+SKEYSEED and the new PRF for its key expansion. DH groups 1/2/5/14-21 and the
+selected Child PFS group are honored. A Fortinet profile cannot silently remove
+required PFS or change its group during a server-initiated rekey. Existing SAML
+profiles retain automatic proposals when opened and saved.
+
+Addressing supports Mode Config, a manual IPv4 address/DNS, and DHCP packets
+carried inside authenticated ESP. DHCP validates the transaction/client/server,
+packet bounds/checksums and lease options, renews at T1, rebinds at T2, and fails
+closed on NAK or expiry. On FortiGate, IKEv1 DHCP relay uses DHCP over IPsec;
+IKEv2 DHCP proxy assigns its DHCP address through Mode Config, so choose Mode
+Config for that gateway configuration:
+https://community.fortinet.com/fortigate-3/technical-tip-how-to-configure-ipsec-dialup-vpn-using-ikev2-with-dhcp-proxy-and-giaddr-93875
+
+Disabling NAT-T uses a separate raw IP protocol 50 socket for ESP and plain UDP
+for IKE, without NAT notifies, port floating, or NAT keepalives. Creating that
+socket requires an elevated Windows token, root, or CAP_NET_RAW, and the path
+must permit ESP. Permission failures never re-enable UDP encapsulation. Raw ESP
+cannot use a custom outer PacketDialer. The native socket adapter is portable;
+its read, write, source filtering, errors and cancellation are unit tested.
+
+Local LAN is an explicit bypass for currently connected interface prefixes;
+prefixes are refreshed on every dial. DNS still resolves inside ESP. Errors do
+not enable bypass, and closing the VPN closes its tracked LAN sockets too.
+Replay detection and time/byte lifetimes are independently configurable. Hard
+limits prevent further encryption/decryption, even while renewal is pending.
+DHCP readdressing updates only the layer-3 configuration, preserving a concurrent
+SA rekey. Additional gateways are tried in order; SAML tokens stay bound to their
+issuer.
+
+SSL fallback references an existing Fortinet SSL profile in the protected
+backend. Failed IPsec startup may start that profile's own authentication flow;
+user cancellation aborts both attempts. The shared lease identity includes the
+fallback configuration fingerprint, and the fingerprint is rechecked before
+starting SSL. Existing application streams fail closed when a live tunnel dies;
+fallback is performed during tunnel establishment, not by rerouting live streams.
 
 Validation uses Go's statement coverage and Node's native loaded-module
 coverage. Unchanged imported third-party source is excluded from changed-code
@@ -70,3 +106,16 @@ project's source-contract/native-fixture coverage convention rather than being
 counted as directly loaded Node unit modules. OS allocation failures and
 `crypto/rand` failures are not fault-injected. No live FortiGate, external IdP
 or real provider certificate is needed by the offline suites.
+
+Validation after adversarial review: 84.49% of changed Go statements (1100/1302),
+using Go coverage blocks and the threshold/parser in scripts/test-coverage.ts.
+Cross-package profiles are merged by source block before counting. The shared
+Fortinet state helper has 100% line/function and 97.73% branch coverage.
+The full backend suite, IPSec suite with the race detector, sidecar tests,
+142 UI/authentication contract tests and the real sandboxed credential-window
+fixture pass. Sidecar compilation passes on Windows amd64/arm64, Linux amd64
+and Darwin arm64. Live gateway/IdP behavior and privileged raw ESP on each
+operating system remain integration checks; compilation is not interoperability.
+
+The completed adversarial finding ledger, clean-cycle evidence and final
+verification are recorded in `REVIEW.md`.

@@ -105,7 +105,7 @@ func TestGatewayFailoverClosesFailedAttempts(t *testing.T) {
 	}
 }
 
-func TestUnsupportedOptionsFailBeforeConnecting(t *testing.T) {
+func TestDisabledNATTraversalReachesRawESPTransport(t *testing.T) {
 	options := ipsec.DefaultFortinetOptions()
 	options.NatTraversal = false
 	cfg := fixtureConfig()
@@ -115,9 +115,11 @@ func TestUnsupportedOptionsFailBeforeConnecting(t *testing.T) {
 	done := make(chan error, 1)
 	var output bytes.Buffer
 	go func() {
-		done <- run(context.Background(), input, &output, func(context.Context, ipsec.Config) (tunnelClient, error) {
-			t.Error("unsupported configuration reached network")
-			return nil, nil
+		done <- run(context.Background(), input, &output, func(_ context.Context, prepared ipsec.Config) (tunnelClient, error) {
+			if !prepared.DisableNATT {
+				t.Error("disabled NAT-T was ignored")
+			}
+			return nil, errors.New("raw ESP unavailable in fixture")
 		})
 	}()
 	fmt.Fprint(writer, configLine(cfg))
