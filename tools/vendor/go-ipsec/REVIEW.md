@@ -129,3 +129,11 @@ passes, as do five isolated repetitions of that test and fifteen repetitions
 with the race detector. The cause of the full-run-only failure is unconfirmed;
 no timeout or assertion has been relaxed. PR #530 remains draft and reports the
 complete suite as failing, rather than treating isolated passes as closure.
+
+## Codex PR review iteration 1
+
+- [P1 / PRRT_kwDOSi63As62JZbM](https://github.com/xBounceIT/wormhole/pull/530#discussion_r4537299211): replace IKEv1 phase 1 before its hard lifetime without rebuilding the data plane. Reproduced by one TCP stream failing at the original one-second deadline. The regression now carries that same connection through repeated phase-1 replacements, including an initially failed attempt and disabled Child time lifetime. Existing hard-expiry tests still fail closed when replacement is unavailable.
+- Per-generation event queues, independently owned PSK copies and cookie checks keep retired callbacks out of a replacement. Address changes reject the replacement. Closing before the lifecycle goroutine starts is covered by a dedicated regression.
+- Simplify pass: reuse the existing IKE Session/configuration and ESP cutover (reuse); retain one UDP socket/netstack and bounded event queues (efficiency); retain the closed control snapshot to avoid a startup/close nil race and erase unused queued keys (quality/bugs). No unrelated cleanup accepted.
+- CI also exposed a native-fixture race: form submission could destroy its frame before executeJavaScript returned. The fixture now awaits all assertions before submitting through a test-only preload message. The production sandbox is unchanged, and the test passes repeatedly under native Node coverage.
+- Full IPsec engine race/coverage tests, targeted repeat runs and Go vet pass. The new phase-1 lifecycle module has 81.01% statement coverage (128/158); the native secret helper retains 100% lines/functions and 96.20% branches. GitHub thread state is the durable resolution record.

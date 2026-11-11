@@ -301,7 +301,8 @@ test('real sandboxed Chromium fits PSK/PEM controls and exposes no application b
       stripTypeScriptTypes(preload).replace(
         "import { ipcRenderer } from 'electron';",
         "const { ipcRenderer } = require('electron');",
-      ),
+      ) +
+        "\nipcRenderer.on('wormhole-test-submit', () => document.querySelector('form').requestSubmit());\n",
     );
     const harness = join(directory, 'main.cjs');
     writeFileSync(
@@ -322,8 +323,10 @@ app.whenReady().then(async () => {
         if (window.wormhole !== undefined || window.require !== undefined) throw Error('privileged bridge exposed');
         if (document.querySelector('footer').getBoundingClientRect().bottom > window.innerHeight) throw Error('credential buttons are clipped');
         document.querySelector('#secret').value = '-----BEGIN FIXTURE-----';
-        document.querySelector('form').requestSubmit();
-      \`).catch(error => { console.error(error.message); app.exit(1); }));
+      \`).then(() => {
+        // Receive the assertion result before submission destroys the frame.
+        window.webContents.send('wormhole-test-submit');
+      }).catch(error => { console.error(error.message); app.exit(1); }));
       return window;
     },
     ipc: ipcMain, preload: ${JSON.stringify(join(directory, 'preload.cjs'))},

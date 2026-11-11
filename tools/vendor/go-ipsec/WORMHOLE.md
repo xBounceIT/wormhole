@@ -49,7 +49,10 @@ RSA certificate authentication, XAuth with PSK or RSA, manual addressing,
 replay policy, Quick Mode PFS, authenticated cookie/message-id checks, and
 Child SA renewal. The adapter exposes the same isolated userspace network as
 IKEv2, keeps DNS inside ESP, and closes on failure or IKE SA expiry. Phase 1
-reauthentication currently requires reconnecting; it never reuses expired keys.
+reauthentication starts before expiry while the current ESP tunnel remains active.
+Each IKE generation owns its events and credential copy; a successful replacement
+swaps keys without rebuilding the netstack. Failed attempts retry within the old
+hard lifetime. A changed client address is rejected, and hard expiry fails closed.
 
 The IKEv2 path supports PSK or RSA/ECDSA client certificates, with user
 authentication disabled, prompted/saved EAP credentials, or SAML. SAML is an

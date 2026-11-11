@@ -26,7 +26,7 @@ func (h legacyTestHandler) Failed(err error) {
 	}
 }
 
-func legacyTestGateway(t *testing.T) (string, int, <-chan ikev1.Result, <-chan []byte) {
+func legacyTestGateway(t *testing.T, renew ...bool) (string, int, <-chan ikev1.Result, <-chan []byte, func([]byte) error) {
 	t.Helper()
 	ike, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
@@ -37,15 +37,14 @@ func legacyTestGateway(t *testing.T) (string, int, <-chan ikev1.Result, <-chan [
 		ike.Close()
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { ike.Close(); natt.Close() })
 	ready := make(chan ikev1.Result, 8)
 	failure := make(chan error, 1)
 	packets := make(chan []byte, 128)
 	var mu sync.Mutex
 	var client *net.UDPAddr
-	session := ikev1.NewSession(ikev1.Config{Role: ikev1.Responder, Mode: ikev1.ModeAggressive, Phase2: ikev1.Phase2RemoteAccess, PSK: []byte("legacy-secret"), ModeCfg: true, LocalIP: net.IPv4(127, 0, 0, 1), PeerIP: net.IPv4(127, 0, 0, 1), LocalPort: uint16(ike.LocalAddr().(*net.UDPAddr).Port), Assign: func() (ikev1.ModeCfgReply, error) {
-		return ikev1.ModeCfgReply{Address: net.IPv4(10, 42, 0, 2).To4(), DNS: []net.IP{net.IPv4(10, 42, 0, 1).To4()}}, nil
-	}, Handler: legacyTestHandler{ready, failure}, Send: func(p []byte, floated bool) error {
+	sessions := make(map[[8]byte]*ikev1.Session)
+	closed := false
+	send := func(p []byte, floated bool) error {
 		mu.Lock()
 		peer := client
 		mu.Unlock()
@@ -56,8 +55,26 @@ func legacyTestGateway(t *testing.T) (string, int, <-chan ikev1.Result, <-chan [
 		}
 		_, err := socket.WriteToUDP(p, peer)
 		return err
-	}})
-	t.Cleanup(session.Close)
+	}
+	newSession := func() *ikev1.Session {
+		return ikev1.NewSession(ikev1.Config{Role: ikev1.Responder, Mode: ikev1.ModeAggressive, Phase2: ikev1.Phase2RemoteAccess, PSK: []byte("legacy-secret"), ModeCfg: true, LocalIP: net.IPv4(127, 0, 0, 1), PeerIP: net.IPv4(127, 0, 0, 1), LocalPort: uint16(ike.LocalAddr().(*net.UDPAddr).Port), Assign: func() (ikev1.ModeCfgReply, error) {
+			return ikev1.ModeCfgReply{Address: net.IPv4(10, 42, 0, 2).To4(), DNS: []net.IP{net.IPv4(10, 42, 0, 1).To4()}}, nil
+		}, Handler: legacyTestHandler{ready, failure}, Send: send})
+	}
+	t.Cleanup(func() {
+		ike.Close()
+		natt.Close()
+		mu.Lock()
+		closed = true
+		snapshot := make([]*ikev1.Session, 0, len(sessions))
+		for _, session := range sessions {
+			snapshot = append(snapshot, session)
+		}
+		mu.Unlock()
+		for _, session := range snapshot {
+			session.Close()
+		}
+	})
 	for _, socket := range []*net.UDPConn{ike, natt} {
 		go func(conn *net.UDPConn) {
 			buffer := make([]byte, 65536)
@@ -67,27 +84,54 @@ func legacyTestGateway(t *testing.T) (string, int, <-chan ikev1.Result, <-chan [
 					return
 				}
 				p := append([]byte(nil), buffer[:n]...)
-				mu.Lock()
-				client = from
-				mu.Unlock()
-				if conn == ike {
-					session.HandleInbound(p)
-				} else if n >= 4 && binary.BigEndian.Uint32(p) == 0 {
-					session.HandleInbound(p[4:])
-				} else if n > 1 {
-					select {
-					case packets <- p:
-					default:
+				if conn == natt {
+					if n >= 4 && binary.BigEndian.Uint32(p) == 0 {
+						p = p[4:]
+					} else {
+						if n > 1 {
+							select {
+							case packets <- p:
+							default:
+							}
+						}
+						continue
 					}
 				}
+				cookie, ok := ikev1.InitiatorCookie(p)
+				if !ok {
+					continue
+				}
+				mu.Lock()
+				if closed {
+					mu.Unlock()
+					return
+				}
+				client = from
+				session := sessions[cookie]
+				if session == nil {
+					if len(sessions) > 0 && (len(renew) == 0 || !renew[0]) {
+						mu.Unlock()
+						continue
+					}
+					session = newSession()
+					sessions[cookie] = session
+				}
+				mu.Unlock()
+				session.HandleInbound(p)
 			}
 		}(socket)
 	}
-	return ike.LocalAddr().String(), natt.LocalAddr().(*net.UDPAddr).Port, ready, packets
+	return ike.LocalAddr().String(), natt.LocalAddr().(*net.UDPAddr).Port, ready, packets, func(p []byte) error {
+		mu.Lock()
+		peer := client
+		mu.Unlock()
+		_, err := natt.WriteToUDP(p, peer)
+		return err
+	}
 }
 
 func TestLegacyFortinetUserspaceTunnel(t *testing.T) {
-	gateway, natPort, ready, packets := legacyTestGateway(t)
+	gateway, natPort, ready, packets, _ := legacyTestGateway(t)
 	options := DefaultFortinetOptions()
 	options.IkeVersion = 1
 	options.ExchangeMode = 1

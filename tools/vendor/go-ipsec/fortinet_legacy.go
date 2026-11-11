@@ -44,8 +44,9 @@ type legacyClient struct {
 	rawESP        transport.Conn
 	peer          *net.UDPAddr
 	nattPort      int
-	session       *ikev1.Session
-	ready         chan ikev1.Result
+	control       *legacyControl
+	renewing      *legacyControl
+	controlConfig ikev1.Config
 	failed        chan error
 	done          chan struct{}
 	once          sync.Once
@@ -84,7 +85,7 @@ func dialLegacy(ctx context.Context, cfg Config) (*legacyClient, error) {
 	if err != nil {
 		return nil, err
 	}
-	c := &legacyClient{cfg: cfg, conn: conn, peer: peer, ready: make(chan ikev1.Result, 1), failed: make(chan error, 1), done: make(chan struct{})}
+	c := &legacyClient{cfg: cfg, conn: conn, peer: peer, failed: make(chan error, 1), done: make(chan struct{})}
 	if !o.NatTraversal {
 		c.rawESP, err = transport.DialESP(ctx, peer)
 		if err != nil {
@@ -114,7 +115,7 @@ func dialLegacy(ctx context.Context, cfg Config) (*legacyClient, error) {
 	if !cfg.RemoteID.IsZero() {
 		remoteID = cfg.RemoteID.String()
 	}
-	sc := ikev1.Config{Role: ikev1.Initiator, Mode: ikev1.Mode(o.ExchangeMode), Phase2: ikev1.Phase2RemoteAccess, PSK: []byte(psk), GroupName: localID, RemoteID: remoteID, Groups: groups, Lifetime: uint32(o.Phase1Lifetime), ESPLifetime: uint32(o.Phase2Lifetime), LocalIP: local, PeerIP: peer.IP, LocalPort: uint16(conn.LocalAddr().(*net.UDPAddr).Port), PeerPort: uint16(peer.Port), ModeCfg: o.AddressAssignment == 0, Handler: c, Send: c.sendIKE}
+	sc := ikev1.Config{Role: ikev1.Initiator, Mode: ikev1.Mode(o.ExchangeMode), Phase2: ikev1.Phase2RemoteAccess, PSK: []byte(psk), GroupName: localID, RemoteID: remoteID, Groups: groups, Lifetime: uint32(o.Phase1Lifetime), ESPLifetime: uint32(o.Phase2Lifetime), LocalIP: local, PeerIP: peer.IP, LocalPort: uint16(conn.LocalAddr().(*net.UDPAddr).Port), PeerPort: uint16(peer.Port), ModeCfg: o.AddressAssignment == 0, Send: c.sendIKE}
 	sc.DisableNATT = !o.NatTraversal
 	sc.DHCP = o.AddressAssignment == 2
 	sc.Certificate = cfg.ClientCertificate
@@ -144,15 +145,19 @@ func dialLegacy(ctx context.Context, cfg Config) (*legacyClient, error) {
 			return nil, errors.New("invalid manual IPv4 address")
 		}
 	}
-	c.session = ikev1.NewSession(sc)
+	c.controlConfig = sc
+	c.control = newLegacyControl(sc)
 	go c.receive()
-	c.session.Start()
+	c.control.session.Start()
 	select {
-	case r := <-c.ready:
+	case r := <-c.control.ready:
 		if err = c.install(r); err != nil {
 			c.Close()
 			return nil, err
 		}
+	case err = <-c.control.failed:
+		c.Close()
+		return nil, err
 	case err = <-c.failed:
 		c.Close()
 		return nil, err
@@ -182,12 +187,6 @@ func dialLegacy(ctx context.Context, cfg Config) (*legacyClient, error) {
 	return c, nil
 }
 
-func (c *legacyClient) Established(r ikev1.Result) {
-	select {
-	case c.ready <- r:
-	case <-c.done:
-	}
-}
 func (c *legacyClient) Failed(err error) {
 	select {
 	case c.failed <- err:
@@ -221,11 +220,11 @@ func (c *legacyClient) receive() {
 			continue
 		}
 		if from.Port == c.peer.Port {
-			c.session.HandleInbound(packet)
+			c.handleIKE(packet)
 			continue
 		}
 		if n >= 4 && packet[0] == 0 && packet[1] == 0 && packet[2] == 0 && packet[3] == 0 {
-			c.session.HandleInbound(packet[4:])
+			c.handleIKE(packet[4:])
 			continue
 		}
 		c.deliverESP(packet)
@@ -233,10 +232,7 @@ func (c *legacyClient) receive() {
 }
 
 func (c *legacyClient) install(r ikev1.Result) error {
-	defer clear(r.OutEncKey)
-	defer clear(r.InEncKey)
-	defer clear(r.OutIntegKey)
-	defer clear(r.InIntegKey)
+	defer clearLegacyResult(r)
 	sa, err := esp.NewLegacySA(r.EncrID, r.IntegID, r.OutSPI, r.InSPI, r.OutEncKey, r.OutIntegKey, r.InEncKey, r.InIntegKey, c.cfg.FortinetOptions.ReplayDetection)
 	if err != nil {
 		return err
@@ -315,6 +311,12 @@ func (c *legacyClient) install(r ikev1.Result) error {
 	if !address.IsValid() {
 		return errors.New("IPsec gateway did not assign an IPv4 address")
 	}
+	c.mu.RLock()
+	existingTunnel := c.tun
+	c.mu.RUnlock()
+	if existingTunnel != nil && existingTunnel.Config().LocalIP != address {
+		return errors.New("IPsec renewal changed the client address")
+	}
 	tc := tun2net.TunConfig{LocalIP: address, Netmask: netip.MustParseAddr("255.255.255.255"), DNS: dns, MTU: 1400}
 	c.mu.Lock()
 	if c.tun != nil {
@@ -374,107 +376,6 @@ func (c *legacyClient) install(r ikev1.Result) error {
 	return nil
 }
 
-func (c *legacyClient) lifecycle() {
-	o := c.cfg.FortinetOptions
-	ticker := time.NewTicker(20 * time.Second)
-	defer ticker.Stop()
-	var expiry <-chan time.Time
-	seconds := o.Phase1Lifetime
-	if seconds > 0 {
-		timer := time.NewTimer(time.Duration(seconds) * time.Second)
-		defer timer.Stop()
-		expiry = timer.C
-	}
-	soft := time.NewTimer(time.Hour)
-	hard := time.NewTimer(time.Hour)
-	defer soft.Stop()
-	defer hard.Stop()
-	var softCh, hardCh <-chan time.Time
-	resetChild := func() {
-		if o.Phase2TimeLifetime {
-			ttl := time.Duration(o.Phase2Lifetime) * time.Second
-			soft.Reset(ttl * 9 / 10)
-			hard.Reset(ttl)
-			softCh = soft.C
-			hardCh = hard.C
-		} else {
-			soft.Stop()
-			hard.Stop()
-			softCh = nil
-			hardCh = nil
-		}
-	}
-	resetChild()
-	pending := false
-	requestRekey := func() error {
-		if pending {
-			return nil
-		}
-		pending = true
-		return c.session.Rekey()
-	}
-	defer func() {
-		c.Close()
-		if c.cfg.OnDead != nil {
-			c.cfg.OnDead()
-		}
-	}()
-	for {
-		select {
-		case <-c.done:
-			return
-		case <-c.failed:
-			return
-		case <-expiry:
-			return
-		case <-hardCh:
-			return
-		case <-softCh:
-			if err := requestRekey(); err != nil {
-				return
-			}
-		case <-c.rekey:
-			if err := requestRekey(); err != nil {
-				return
-			}
-		case result := <-c.ready:
-			if err := c.install(result); err != nil {
-				return
-			}
-			pending = false
-			resetChild()
-		case <-ticker.C:
-			peer := *c.peer
-			peer.Port = c.nattPort
-			if o.NatTraversal {
-				_, _ = c.conn.WriteToUDP([]byte{255}, &peer)
-			}
-			c.mu.RLock()
-			volume := c.volume
-			c.mu.RUnlock()
-			if o.Phase2ByteLifetime && volume >= uint64(o.Phase2LifetimeKb)*1024 {
-				return
-			}
-			if o.DeadPeerDetection {
-				ack, err := c.session.Ping()
-				if err != nil {
-					return
-				}
-				timer := time.NewTimer(15 * time.Second)
-				select {
-				case <-ack:
-					timer.Stop()
-				case <-timer.C:
-					return
-				case <-c.done:
-					timer.Stop()
-					return
-				}
-			}
-		}
-	}
-}
-
 func (c *legacyClient) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
 	select {
 	case <-c.done:
@@ -503,12 +404,14 @@ func (c *legacyClient) Close() error {
 		if c.rawESP != nil {
 			c.rawESP.Close()
 		}
-		if c.session != nil {
-			c.session.Close()
-		}
 		c.mu.Lock()
+		control, renewing := c.control, c.renewing
+		c.renewing = nil
+		clear(c.controlConfig.PSK)
 		stack, tun := c.stack, c.tun
 		c.mu.Unlock()
+		control.close()
+		renewing.close()
 		if stack != nil {
 			stack.Close()
 		}
