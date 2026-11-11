@@ -145,7 +145,8 @@ type Config struct {
 	ESPLifetime   uint32
 	ESPLifetimeKb uint32
 	ManualIP      net.IP
-	RemoteID      string
+	RemoteIDType  uint8
+	RemoteIDData  []byte
 	PFS           uint16
 	// Mode is the phase-1 exchange; the zero value is Main Mode.
 	Mode Mode

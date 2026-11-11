@@ -67,6 +67,9 @@ type legacyClient struct {
 
 func dialLegacy(ctx context.Context, cfg Config) (*legacyClient, error) {
 	o := cfg.FortinetOptions
+	if err := cfg.RemoteID.check(); err != nil {
+		return nil, err
+	}
 	groups, err := fortinetGroups(o.DhGroups)
 	if err != nil {
 		return nil, err
@@ -108,14 +111,11 @@ func dialLegacy(ctx context.Context, cfg Config) (*legacyClient, error) {
 	if psk == "" {
 		psk = cfg.ServerPSK
 	}
-	localID, remoteID := "", ""
+	localID := ""
 	if !cfg.LocalID.IsZero() {
 		localID = cfg.LocalID.String()
 	}
-	if !cfg.RemoteID.IsZero() {
-		remoteID = cfg.RemoteID.String()
-	}
-	sc := ikev1.Config{Role: ikev1.Initiator, Mode: ikev1.Mode(o.ExchangeMode), Phase2: ikev1.Phase2RemoteAccess, PSK: []byte(psk), GroupName: localID, RemoteID: remoteID, Groups: groups, Lifetime: uint32(o.Phase1Lifetime), ESPLifetime: uint32(o.Phase2Lifetime), LocalIP: local, PeerIP: peer.IP, LocalPort: uint16(conn.LocalAddr().(*net.UDPAddr).Port), PeerPort: uint16(peer.Port), ModeCfg: o.AddressAssignment == 0, Send: c.sendIKE}
+	sc := ikev1.Config{Role: ikev1.Initiator, Mode: ikev1.Mode(o.ExchangeMode), Phase2: ikev1.Phase2RemoteAccess, PSK: []byte(psk), GroupName: localID, RemoteIDType: uint8(cfg.RemoteID.Kind), RemoteIDData: append([]byte(nil), cfg.RemoteID.Data...), Groups: groups, Lifetime: uint32(o.Phase1Lifetime), ESPLifetime: uint32(o.Phase2Lifetime), LocalIP: local, PeerIP: peer.IP, LocalPort: uint16(conn.LocalAddr().(*net.UDPAddr).Port), PeerPort: uint16(peer.Port), ModeCfg: o.AddressAssignment == 0, Send: c.sendIKE}
 	sc.DisableNATT = !o.NatTraversal
 	sc.DHCP = o.AddressAssignment == 2
 	sc.Certificate = cfg.ClientCertificate

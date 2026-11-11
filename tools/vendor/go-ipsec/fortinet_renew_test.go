@@ -20,10 +20,10 @@ import (
 func TestLegacyPhase1RenewalPreservesTCPStream(t *testing.T) {
 	gateway, natPort, ready, packets, send := legacyTestGateway(t, true)
 	o := DefaultFortinetOptions()
-	o.IkeVersion, o.ExchangeMode, o.Phase1Lifetime, o.Phase2Lifetime = 1, 1, 1, 60
+	o.IkeVersion, o.ExchangeMode, o.Phase1Lifetime, o.Phase2Lifetime = 1, 1, 3, 60
 	o.DhGroups = "14"
 	o.Phase2TimeLifetime = false
-	ctx, cancel := context.WithTimeout(t.Context(), 8*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 12*time.Second)
 	defer cancel()
 	client, err := dialLegacy(ctx, Config{Server: gateway, NATTPort: natPort, PSK: "legacy-secret", FortinetOptions: &o})
 	if err != nil {
@@ -110,7 +110,7 @@ func TestLegacyPhase1RenewalPreservesTCPStream(t *testing.T) {
 	}
 	defer conn.Close()
 	originalStack := client.stack
-	deadline := time.Now().Add(2400 * time.Millisecond)
+	deadline := time.Now().Add(7200 * time.Millisecond)
 	for sequence := byte(1); time.Now().Before(deadline); sequence++ {
 		_ = conn.SetDeadline(time.Now().Add(time.Second))
 		if _, err := conn.Write([]byte{sequence}); err != nil {
@@ -121,6 +121,9 @@ func TestLegacyPhase1RenewalPreservesTCPStream(t *testing.T) {
 			t.Fatalf("phase-1 renewal interrupted echo: %v", err)
 		}
 		time.Sleep(50 * time.Millisecond)
+	}
+	if !rejected.Load() {
+		t.Fatal("replacement failure was not exercised")
 	}
 	if len(updates) < 2 {
 		t.Fatal("phase 1 was not renewed repeatedly before expiry")
@@ -226,4 +229,16 @@ func TestLegacyCloseBeforeLifecycleStarts(t *testing.T) {
 	// A caller may close immediately after Dial returns, before its lifecycle
 	// goroutine has been scheduled. Retain the retired control for that snapshot.
 	c.lifecycle()
+}
+
+func TestLegacySoftLifetimeHonorsProfileBounds(t *testing.T) {
+	for _, tc := range []struct{ lifetime, want time.Duration }{
+		{time.Second, 900 * time.Millisecond},
+		{2147483647 * time.Second, 1932735282300 * time.Millisecond},
+	} {
+		got := legacySoftLifetime(tc.lifetime)
+		if got != tc.want || got <= 0 || got >= tc.lifetime {
+			t.Fatalf("soft lifetime %s is invalid for %s", got, tc.lifetime)
+		}
+	}
 }

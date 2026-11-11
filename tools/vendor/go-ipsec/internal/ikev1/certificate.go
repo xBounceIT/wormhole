@@ -5,7 +5,6 @@ import (
 	"crypto/rsa"
 	"errors"
 	"fmt"
-	"net"
 	"net/netip"
 	"time"
 
@@ -40,16 +39,9 @@ func (s *Session) authenticationPayloads(hash []byte) ([]payload, error) {
 }
 
 func (s *Session) verifyAuthentication(payloads []payload, want, proof []byte) error {
-	if s.cfg.Role == Initiator && s.cfg.Certificate == nil && s.cfg.RemoteID != "" {
+	if s.cfg.Role == Initiator && (s.cfg.RemoteIDType != 0 || len(s.cfg.RemoteIDData) != 0) {
 		id := s.idR
-		if len(id) < 4 {
-			return ErrAuth
-		}
-		match := string(id[4:]) == s.cfg.RemoteID
-		if ip := net.ParseIP(s.cfg.RemoteID); ip != nil {
-			match = ip.Equal(net.IP(id[4:]))
-		}
-		if !match {
+		if len(id) < 4 || s.cfg.RemoteIDType == 0 || id[0] != s.cfg.RemoteIDType || !constEq(id[4:], s.cfg.RemoteIDData) {
 			return fmt.Errorf("%w: remote identity mismatch", ErrAuth)
 		}
 	}
@@ -65,15 +57,7 @@ func (s *Session) verifyAuthentication(payloads []payload, want, proof []byte) e
 			certs = append(certs, p.body[1:])
 		}
 	}
-	name := auth.PeerName{}
-	if s.cfg.RemoteID != "" {
-		if ip, err := netip.ParseAddr(s.cfg.RemoteID); err == nil {
-			name.IP = ip
-		} else {
-			name.DNS = s.cfg.RemoteID
-		}
-	}
-	leaf, err := auth.VerifyServerChain(certs, s.cfg.RootCAs, name, time.Now())
+	leaf, err := auth.VerifyServerChain(certs, s.cfg.RootCAs, s.peerName(), time.Now())
 	if err != nil {
 		return fmt.Errorf("%w: peer certificate rejected", ErrAuth)
 	}
@@ -82,4 +66,29 @@ func (s *Session) verifyAuthentication(payloads []payload, want, proof []byte) e
 		return fmt.Errorf("%w: peer signature rejected", ErrAuth)
 	}
 	return nil
+}
+
+// Preserve the configured wire type when matching certificate identities.
+// Opaque or malformed identities cannot downgrade to chain-only trust.
+func (s *Session) peerName() auth.PeerName {
+	data := s.cfg.RemoteIDData
+	switch s.cfg.RemoteIDType {
+	case 2:
+		if len(data) > 0 {
+			return auth.PeerName{DNS: string(data)}
+		}
+	case 3:
+		if len(data) > 0 {
+			return auth.PeerName{Email: string(data)}
+		}
+	case 1, 5:
+		if ip, ok := netip.AddrFromSlice(data); ok && ((s.cfg.RemoteIDType == 1 && ip.Is4()) || (s.cfg.RemoteIDType == 5 && ip.Is6() && !ip.Is4In6())) {
+			return auth.PeerName{IP: ip}
+		}
+	case 9:
+		if len(data) > 0 {
+			return auth.PeerName{DN: data}
+		}
+	}
+	return auth.PeerName{Unverifiable: s.cfg.RemoteIDType != 0 || len(data) != 0}
 }

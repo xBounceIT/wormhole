@@ -122,7 +122,7 @@ export const fortinetIPsecFields: {
     key: 'ManualDns',
     label: 'DNS servers',
     section: 'VPN settings',
-    hint: 'Comma-separated IP addresses; queries travel inside the tunnel.',
+    hint: 'Comma-separated IPv4 addresses; queries travel inside the tunnel.',
   },
   ...([1, 2] as const).flatMap((phase) =>
     [1, 2].flatMap((proposal) => [

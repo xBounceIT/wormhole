@@ -150,7 +150,7 @@ func TestFortinetIPsecAdvancedValidation(t *testing.T) {
 	valid := ipsecTestSettings()
 	valid["UserAuth"] = 0
 	valid["IkeVersion"] = 1
-	for key, value := range map[string]any{"AuthMethod": 0, "ExchangeMode": 1, "AddressAssignment": 1, "ManualAddress": "10.1.0.2", "ManualDns": "10.1.0.1,2001:db8::1", "RemoteGateways": "backup.test,192.0.2.1", "DhGroups": "1,2,5,14,15,16,17,18,19,20,21", "Phase1Encryption": 3, "Phase1Authentication": 0, "Phase2Encryption": 3, "Phase2Authentication": 1, "Phase1Lifetime": 2800, "Phase2Lifetime": 3600, "Phase2LifetimeKb": 5120, "Pfs": true, "PfsGroup": 2, "ReplayDetection": false, "NatTraversal": true, "EnableLocalLan": false, "DeadPeerDetection": false, "Phase2TimeLifetime": true, "Phase2ByteLifetime": true, "Description": "Legacy profile"} {
+	for key, value := range map[string]any{"AuthMethod": 0, "ExchangeMode": 1, "AddressAssignment": 1, "ManualAddress": "10.1.0.2", "ManualDns": "10.1.0.1, 10.1.0.53", "RemoteGateways": "backup.test,192.0.2.1", "DhGroups": "1,2,5,14,15,16,17,18,19,20,21", "Phase1Encryption": 3, "Phase1Authentication": 0, "Phase2Encryption": 3, "Phase2Authentication": 1, "Phase1Lifetime": 2800, "Phase2Lifetime": 3600, "Phase2LifetimeKb": 5120, "Pfs": true, "PfsGroup": 2, "ReplayDetection": false, "NatTraversal": true, "EnableLocalLan": false, "DeadPeerDetection": false, "Phase2TimeLifetime": true, "Phase2ByteLifetime": true, "Description": "Legacy profile"} {
 		valid[key] = value
 	}
 	validate := func(value map[string]any) error {

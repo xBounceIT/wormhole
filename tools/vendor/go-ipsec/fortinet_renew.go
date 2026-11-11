@@ -120,10 +120,17 @@ func (c *legacyClient) promotePhase1Renewal(control *legacyControl) bool {
 	return true
 }
 
+// Subtracting the margin avoids overflowing time.Duration at the admitted
+// 2147483647-second profile bound (multiplying that duration by nine wraps).
+func legacySoftLifetime(lifetime time.Duration) time.Duration {
+	return lifetime - lifetime/10
+}
+
 func (c *legacyClient) lifecycle() {
 	o := c.cfg.FortinetOptions
 	phase1Lifetime := time.Duration(o.Phase1Lifetime) * time.Second
-	phase1Soft := time.NewTimer(jitterDuration(phase1Lifetime * 9 / 10))
+	phase1Soft := time.NewTimer(jitterDuration(legacySoftLifetime(phase1Lifetime)))
+	phase1Expires := time.Now().Add(phase1Lifetime)
 	phase1Hard := time.NewTimer(phase1Lifetime)
 	defer phase1Soft.Stop()
 	defer phase1Hard.Stop()
@@ -136,7 +143,7 @@ func (c *legacyClient) lifecycle() {
 	resetChild := func() {
 		if o.Phase2TimeLifetime {
 			ttl := time.Duration(o.Phase2Lifetime) * time.Second
-			childSoft.Reset(ttl * 9 / 10)
+			childSoft.Reset(legacySoftLifetime(ttl))
 			childHard.Reset(ttl)
 			softCh, hardCh = childSoft.C, childHard.C
 		} else {
@@ -163,7 +170,7 @@ func (c *legacyClient) lifecycle() {
 	clearPending := func() {
 		c.discardPhase1Renewal(renewing)
 		renewing, pendingReady, pendingFailed = nil, nil, nil
-		phase1Soft.Reset(retry)
+		phase1Soft.Reset(max(time.Millisecond, min(retry, time.Until(phase1Expires)/2)))
 	}
 	// DPD must not block the lifecycle loop while a replacement finishes or a
 	// hard lifetime expires. Its acknowledgements have the same select priority.
@@ -215,8 +222,9 @@ func (c *legacyClient) lifecycle() {
 			active = renewing
 			renewing, pendingReady, pendingFailed = nil, nil, nil
 			old.close()
+			phase1Expires = time.Now().Add(phase1Lifetime)
 			phase1Hard.Reset(phase1Lifetime)
-			phase1Soft.Reset(jitterDuration(phase1Lifetime * 9 / 10))
+			phase1Soft.Reset(jitterDuration(legacySoftLifetime(phase1Lifetime)))
 			pendingChild = false
 			resetChild()
 			clearDPD()

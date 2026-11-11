@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 	"time"
@@ -64,6 +65,20 @@ func ConfigureFortinet(c Config, o FortinetOptions, certPEM, keyPEM, caPEM strin
 	}
 	if o.Phase1Lifetime < 1 || o.Phase2Lifetime < 1 || o.Phase2LifetimeKb < 1 || o.Phase1Lifetime > 2147483647 || o.Phase2Lifetime > 2147483647 || o.Phase2LifetimeKb > 2147483647 {
 		return c, errors.New("invalid IPsec key lifetime")
+	}
+	if o.AddressAssignment == 1 {
+		ip, err := netip.ParseAddr(o.ManualAddress)
+		if err != nil || !ip.Is4() {
+			return c, errors.New("invalid manual IPv4 address")
+		}
+	}
+	if o.ManualDns != "" {
+		for _, value := range strings.Split(o.ManualDns, ",") {
+			ip, err := netip.ParseAddr(strings.TrimSpace(value))
+			if err != nil || ip.Zone() != "" || (o.AddressAssignment == 1 && !ip.Is4()) {
+				return c, errors.New("invalid IPsec DNS server; manual addressing requires IPv4")
+			}
+		}
 	}
 	c.FortinetOptions = &o
 	if o.AuthMethod == 1 {
@@ -141,12 +156,6 @@ func ConfigureFortinet(c Config, o FortinetOptions, certPEM, keyPEM, caPEM strin
 	c.AddressAssignment = o.AddressAssignment
 	c.ManualAddress = o.ManualAddress
 	c.ManualDNS = o.ManualDns
-	if o.AddressAssignment == 1 {
-		ip := net.ParseIP(o.ManualAddress)
-		if ip.To4() == nil {
-			return c, errors.New("invalid manual IPv4 address")
-		}
-	}
 
 	return c, nil
 }

@@ -13,6 +13,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -148,13 +149,15 @@ func validateFortinetIPsecConfiguration(settings map[string]json.RawMessage, che
 		return errors.New("Fortinet IPsec SAML requires IKEv2")
 	}
 	if tunnelSettingNumber(settings, "AddressAssignment") == 1 {
-		if net.ParseIP(tunnelSettingString(settings, "ManualAddress")).To4() == nil {
+		ip, err := netip.ParseAddr(tunnelSettingString(settings, "ManualAddress"))
+		if err != nil || !ip.Is4() {
 			return errors.New("Fortinet IPsec manual IPv4 address is invalid")
 		}
 	}
 	if dns := tunnelSettingString(settings, "ManualDns"); dns != "" {
-		for _, ip := range strings.Split(dns, ",") {
-			if net.ParseIP(strings.TrimSpace(ip)) == nil {
+		for _, value := range strings.Split(dns, ",") {
+			ip, err := netip.ParseAddr(strings.TrimSpace(value))
+			if err != nil || ip.Zone() != "" || (tunnelSettingNumber(settings, "AddressAssignment") == 1 && !ip.Is4()) {
 				return errors.New("Fortinet IPsec DNS server is invalid")
 			}
 		}
