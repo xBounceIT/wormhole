@@ -64,7 +64,8 @@ diagnostic. On the final implementation the following local cycles completed:
 | Simplify 2 | Reuse: shared create/edit settings and public IPC contract. Efficiency: connected-prefix refresh, callback/cancellation ownership, per-attempt timeouts. Quality/bugs: primary/backup IPv6 parity, SAML issuer binding, SSL fingerprint rechecks and native authorization cleanup. | Clean 2/3 |
 | Simplify 3 | Reuse: existing session/ESP rekey and tunnel lease mechanisms. Efficiency: cache bounds and hot-path allocation/I/O review. Quality/bugs: old-SA grace, hard limits, DPD-disabled RX death, race-detector results, false-positive fixture resistance and the final diff. | Clean 3/3 |
 
-No implementation change followed the last clean cycles. Speculative broad
+The protocol review closed before the later provider-scoped alignment fix,
+which has separate native layout coverage. Speculative broad
 abstractions across TS and Go, caching LAN prefixes (would retain stale routes),
 and caching/de-duplicating SAML and IKE gateway attempts (different token issuer
 contracts) were rejected. Existing library metadata getters after Close do not
@@ -96,8 +97,27 @@ streams; changing their general lifetime semantics is outside this review.
   prevent diff checks or tests. The Chromium fixture passed with sandboxing
   enabled after restoring read/execute ACLs on the local Electron runtime.
 - `git diff --check`: passed. Temporary scripts, profiles, logs and binaries
-  removed. No commit, push or publication requested or performed.
+  removed. At that review stage, no commit, push or publication was requested.
 
 Live FortiGate/IdP interoperability, proprietary certificate/EAP policy and
 privileged raw ESP on actual operating systems remain manual integration
 checks. Offline peers and cross-compilation do not establish those results.
+
+## PR preparation
+
+The publication branch integrates main through `9ec0e48d` without conflicts.
+The resulting PR diff contains only Fortinet implementation, tests and docs;
+upstream release, shutdown, SMB and OpenVPN fixes remain intact.
+
+Complete-PR Go coverage against `origin/main...HEAD`, including imported IKEv1
+source blocks rather than excluding them: **84.10% (2809/3340)**. The same
+source-block merge and project threshold gate described above are used. The
+84.49% measurement above describes the narrower post-snapshot extension/review
+delta, not the entire PR.
+
+The later Fortinet VPN-settings alignment fix is provider-scoped. Its real
+Chromium fixture verifies equal label/control tops at 1024px and 800px, stacked
+fields at 600px, hint/fallback separation, and 100% execution coverage of the
+modified mounted section. Renderer/Electron TypeScript checks, renderer build,
+Go race tests, formatting/lint and cross-platform sidecar builds were repeated
+after integrating main. Full-suite results are listed in the PR description.
