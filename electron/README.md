@@ -100,7 +100,7 @@ the selected tunnel.
 
 The Tunnels page creates, edits, tests, imports, and deletes encrypted tunnel records,
 and folder/connection editors assign a route with inherit / off / selected
-tunnel semantics. WireGuard, OpenVPN, Fortinet SSL (password or dedicated-window SAML), Fortinet IPsec (IKEv2 with a gateway PSK and dedicated-window SAML), WatchGuard (password, imported profile, or SAML), Stormshield (automatic,
+tunnel semantics. WireGuard, OpenVPN, Fortinet SSL (password or dedicated-window SAML), Fortinet IPsec (IKEv1/IKEv2, PSK, optional user authentication, client certificates, or dedicated-window SAML), WatchGuard (password, imported profile, or SAML), Stormshield (automatic,
 imported profile, and OTP), Azure VPN with Microsoft Entra ID, and Cisco Secure Client run
 through native Go backends and bundled Go sidecars. Interactive challenges are serialized by
 the Electron main process; browser tokens and VPN cookies stay inside isolated authentication
@@ -108,6 +108,14 @@ sessions and are handed directly to Go rather than exposed to the renderer. A fa
 never falls back to routing outside the tunnel. Fortinet SAML always uses a fresh,
 in-memory browser profile per sign-in, including for saved tunnels with legacy external-browser
 settings. It never opens the system browser or reuses another account's IdP session.
+
+Fortinet IPsec separates gateway authentication (PSK or client certificate) from
+user authentication (disabled, prompt, saved password or SAML). Keys, PEM client
+certificates, private keys and optional CA certificates are entered in an isolated
+native window and stored by Go; the editor receives presence/replacement markers.
+The shared form includes VPN, Phase 1 and Phase 2 settings. See
+[`tools/vendor/go-ipsec/WORMHOLE.md`](../tools/vendor/go-ipsec/WORMHOLE.md) for the
+supported combinations, remaining capability limits and offline verification.
 
 The connection editor offers one Browser type for HTTP and HTTPS, with a Home page
 that opens when its session starts. The home page's scheme selects the transport;

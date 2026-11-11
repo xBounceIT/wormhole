@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -26,18 +27,24 @@ import (
 )
 
 type config struct {
-	Host         string `json:"host"`
-	Port         int    `json:"port"`
-	PreSharedKey string `json:"pre_shared_key"`
-	LocalID      string `json:"local_id"`
-	RemoteID     string `json:"remote_id"`
-	SamlUID      string `json:"saml_uid"`
-	SamlToken    string `json:"saml_token"`
+	Options      *ipsec.FortinetOptions `json:"options"`
+	Username     string                 `json:"username"`
+	Password     string                 `json:"password"`
+	ClientCert   string                 `json:"client_cert"`
+	ClientKey    string                 `json:"client_key"`
+	CaCert       string                 `json:"ca_cert"`
+	Host         string                 `json:"host"`
+	Port         int                    `json:"port"`
+	PreSharedKey string                 `json:"pre_shared_key"`
+	LocalID      string                 `json:"local_id"`
+	RemoteID     string                 `json:"remote_id"`
+	SamlUID      string                 `json:"saml_uid"`
+	SamlToken    string                 `json:"saml_token"`
 }
 
 // Three admitted 4096-byte strings can expand sixfold under JSON escaping.
 // Keep the input bounded while covering the backend's complete settings schema.
-const maxConfigBytes = 96 * 1024
+const maxConfigBytes = 1024 * 1024
 
 type tunnelClient interface {
 	DialContext(context.Context, string, string) (net.Conn, error)
@@ -82,19 +89,28 @@ func readConfig(reader *bufio.Reader) (config, error) {
 	if cfg.Port == 0 {
 		cfg.Port = 500
 	}
-	if strings.HasPrefix(cfg.Host, "[") && strings.HasSuffix(cfg.Host, "]") {
-		candidate := strings.TrimSuffix(strings.TrimPrefix(cfg.Host, "["), "]")
-		if ip := net.ParseIP(candidate); ip != nil && strings.Contains(candidate, ":") {
-			cfg.Host = candidate
-		}
-	}
-	if cfg.Host == "" || len(cfg.Host) > 253 || strings.ContainsAny(cfg.Host, "/\\?#@ \t\r\n\x00") || cfg.Port < 1 || cfg.Port > 65535 || cfg.PreSharedKey == "" || len(cfg.PreSharedKey) > 4096 || len(cfg.LocalID) > 4096 || len(cfg.RemoteID) > 4096 {
+	cfg.Host = gatewayHost(cfg.Host)
+	if cfg.Host == "" || len(cfg.Host) > 253 || strings.ContainsAny(cfg.Host, "/\\?#@ \t\r\n\x00") || cfg.Port < 1 || cfg.Port > 65535 || (cfg.PreSharedKey == "" && (cfg.Options == nil || cfg.Options.AuthMethod != 1)) || len(cfg.PreSharedKey) > 4096 || len(cfg.LocalID) > 4096 || len(cfg.RemoteID) > 4096 || len(cfg.Username) > 4096 || len(cfg.Password) > 4096 || len(cfg.ClientCert) > 131072 || len(cfg.ClientKey) > 131072 || len(cfg.CaCert) > 131072 {
 		return cfg, errors.New("invalid Fortinet IPsec gateway or PSK")
 	}
-	for _, value := range []string{cfg.SamlUID, cfg.SamlToken} {
-		decoded, err := hex.DecodeString(value)
-		if err != nil || len(decoded) != 16 {
-			return cfg, errors.New("invalid Fortinet IPsec SAML credentials")
+	if cfg.Options == nil || cfg.Options.UserAuth == 3 {
+		for _, value := range []string{cfg.SamlUID, cfg.SamlToken} {
+			decoded, err := hex.DecodeString(value)
+			if err != nil || len(decoded) != 16 {
+				return cfg, errors.New("invalid Fortinet IPsec SAML credentials")
+			}
+		}
+	}
+	if cfg.Options != nil && cfg.Options.RemoteGateways != "" {
+		hosts := strings.Split(cfg.Options.RemoteGateways, ",")
+		if len(hosts) > 8 {
+			return cfg, errors.New("too many Fortinet IPsec gateways")
+		}
+		for _, host := range hosts {
+			host = strings.TrimSpace(host)
+			if host == "" || len(host) > 253 || strings.ContainsAny(host, "/\\?#@ \t\r\n\x00") {
+				return cfg, errors.New("invalid Fortinet IPsec gateway")
+			}
 		}
 	}
 	return cfg, nil
@@ -125,6 +141,42 @@ func clientConfig(cfg config, cancel context.CancelFunc) ipsec.Config {
 		EAP:           ipsec.EAPMSCHAPv2{Username: cfg.SamlUID, Password: cfg.SamlToken},
 		AutoReconnect: &reconnect, OnDead: cancel,
 	}
+}
+
+// Normalize each attempt, including additional gateways selected after readConfig.
+func gatewayHost(host string) string {
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		candidate := strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+		if ip := net.ParseIP(candidate); ip != nil && strings.Contains(candidate, ":") {
+			return candidate
+		}
+	}
+	return host
+}
+
+func prepareClientConfig(cfg config, cancel context.CancelFunc) (ipsec.Config, error) {
+	cfg.Host = gatewayHost(cfg.Host)
+	c := clientConfig(cfg, cancel)
+	if cfg.Options == nil {
+		return c, nil
+	}
+	o := cfg.Options
+	c.FortinetSAML = o.UserAuth == 3 || o.AuthMethod == 0 && (o.UserAuth == 1 || o.UserAuth == 2)
+	if o.UserAuth != 3 {
+		c.EAP = ipsec.EAPMSCHAPv2{Username: cfg.Username, Password: cfg.Password}
+	}
+	if o.UserAuth == 0 {
+		c.PSK = cfg.PreSharedKey
+		c.ServerPSK = ""
+		c.EAP = ipsec.EAPMSCHAPv2{}
+		if c.LocalID.IsZero() && o.IkeVersion == 2 {
+			c.LocalID = ipsec.FQDN("wormhole")
+		}
+	}
+	if o.AuthMethod == 1 && c.RemoteID.IsZero() {
+		c.RemoteID = identity(cfg.Host)
+	}
+	return ipsec.ConfigureFortinet(c, *o, cfg.ClientCert, cfg.ClientKey, cfg.CaCert)
 }
 
 // No diagnostics from the protocol or SOCKS dialer are forwarded: their error
@@ -183,10 +235,59 @@ func run(ctx context.Context, input io.Reader, output io.Writer, connect connect
 	defer cancel()
 	go func() { _, _ = io.Copy(io.Discard, reader); cancel() }()
 	startup, stopStartup := context.WithTimeout(ctx, 90*time.Second)
-	client, err := connect(startup, clientConfig(cfg, cancel))
+	gateways := []string{cfg.Host}
+	if cfg.Options != nil && cfg.Options.UserAuth != 3 && cfg.Options.RemoteGateways != "" {
+		for _, host := range strings.Split(cfg.Options.RemoteGateways, ",") {
+			gateways = append(gateways, strings.TrimSpace(host))
+		}
+	}
+	if len(gateways) > 9 {
+		stopStartup()
+		return errors.New("too many Fortinet IPsec gateways")
+	}
+	var client tunnelClient
+	for _, host := range gateways {
+		cfg.Host = host
+		attempt, stopAttempt := context.WithTimeout(startup, 90*time.Second/time.Duration(len(gateways)))
+		var committed atomic.Bool
+		prepared, prepareErr := prepareClientConfig(cfg, func() {
+			stopAttempt()
+			if committed.Load() {
+				cancel()
+			}
+		})
+		if prepareErr != nil {
+			stopAttempt()
+			stopStartup()
+			return prepareErr
+		}
+		client, err = connect(attempt, prepared)
+		if err == nil && attempt.Err() != nil {
+			err = attempt.Err()
+		}
+		if err == nil {
+			committed.Store(true)
+			if attempt.Err() != nil {
+				cancel()
+			}
+			stopAttempt()
+			break
+		}
+		stopAttempt()
+		if client != nil {
+			client.Close()
+			client = nil
+		}
+		if startup.Err() != nil {
+			break
+		}
+	}
 	stopStartup()
 	if err != nil {
-		return errors.New("Fortinet IPsec IKEv2 authentication failed; verify PSK, identities, UDP ports and gateway proposals")
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return errors.New("Fortinet IPsec authentication failed; verify credentials, identities, UDP ports and gateway proposals")
 	}
 	defer client.Close()
 	if ctx.Err() != nil {
@@ -208,13 +309,8 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := run(ctx, os.Stdin, os.Stdout, func(ctx context.Context, cfg ipsec.Config) (tunnelClient, error) {
-		client, err := ipsec.Dial(ctx, cfg)
+		client, err := ipsec.DialFortinet(ctx, cfg)
 		if err != nil {
-			return nil, err
-		}
-		// Validate the assigned userspace network before reporting readiness.
-		if _, err := client.Net(); err != nil {
-			client.Close()
 			return nil, err
 		}
 		return client, nil

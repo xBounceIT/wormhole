@@ -14,7 +14,7 @@ import { coverageThreshold } from '../scripts/test-coverage.ts';
 const require = createRequire(import.meta.url);
 const read = (path: string) => readFileSync(new URL(path, import.meta.url), 'utf8');
 
-test('Forcepoint aligns paired controls and displays certificate confirmation over its tester', async (context) => {
+test('VPN editors align paired controls and Forcepoint displays certificate confirmation over its tester', async (context) => {
   const app = read('../src/App.tsx');
   const section = (source: string, from: string, to: string) => {
     const start = source.indexOf(from);
@@ -23,6 +23,15 @@ test('Forcepoint aligns paired controls and displays certificate confirmation ov
     return source.slice(start, end);
   };
   const mounted = section(app, '            {value.kind === 7 ? (', '            ) : null}');
+  const fortinet = section(
+    app,
+    '            {value.kind === 9 ? (',
+    '            {value.kind === 7 ? (',
+  );
+  const fortinetVpnSettings = fortinet.match(
+    /<TunnelSection\b[^>]*title="VPN settings"[\s\S]*?(?=<TunnelAdvanced)/,
+  )?.[0];
+  assert.ok(fortinetVpnSettings, 'Missing mounted Fortinet VPN settings');
   const confirmationFixture = JSON.parse(read('fixtures/forcepoint-certificate-prompt.json'));
   const promptOpen = app.indexOf('        open={tunnelPrompts.length > 0}');
   const promptStart = app.lastIndexOf('      <Dialog', promptOpen);
@@ -31,7 +40,7 @@ test('Forcepoint aligns paired controls and displays certificate confirmation ov
   const promptHandlerStart = app.indexOf("      if (event.type === 'tunnel.prompt-closed'");
   const promptHandlerEnd = app.indexOf('\n    });', promptHandlerStart);
   assert.ok(promptHandlerStart > 0 && promptHandlerEnd > promptHandlerStart);
-  const controls = ['input', 'label', 'collapsible', 'button', 'dialog']
+  const controls = ['input', 'label', 'collapsible', 'button', 'dialog', 'select']
     .map((name) =>
       read(`../src/components/ui/${name}.tsx`)
         .replace(/^import .*;\r?\n/gm, '')
@@ -43,6 +52,7 @@ test('Forcepoint aligns paired controls and displays certificate confirmation ov
     `
     ${read('../src/dialog-lifecycle.ts').replace(/^export /gm, '')}
     ${controls}
+    ${read('../src/fortinet-ipsec-state.ts').replace(/^export /gm, '')}
     ${section(app, 'function tunnelEditorFields(', 'function tunnelDefaultSettings(')}
     ${section(app, 'function tunnelSettingText(', '// Provider-specific tunnel fields')}
     const PasswordInput = (props) => <Input {...props} type="password" />;
@@ -55,6 +65,17 @@ test('Forcepoint aligns paired controls and displays certificate confirmation ov
       return <div className="grid gap-6" style={{ maxWidth: 760, margin: 16, padding: 16 }}>
         ${mounted}
             ) : null}
+      </div>;
+    }
+    function FortinetVpnSettingsHarness() {
+      const value = { kind: 9, settings: { ...fortinetIPsecDefaults } };
+      const tunnels = [];
+      const setSetting = () => {};
+      const rows = (section, options) => fortinetIPsecFields
+        .filter(field => field.section === section && !options?.hidden?.(field))
+        .map(field => <TunnelFieldRow key={field.key} field={field} value={value.settings} onChange={setSetting} />);
+      return <div style={{ maxWidth: 760, margin: 16, padding: 16 }}>
+        ${fortinetVpnSettings}
       </div>;
     }
     let certificateControls;
@@ -120,6 +141,26 @@ test('Forcepoint aligns paired controls and displays certificate confirmation ov
         assert.equal(certificateControls.count, 0, 'backend cancellation did not close the prompt');
       }
     }
+    async function checkFortinetAlignment(root) {
+      await React.act(async () => { root.render(<FortinetVpnSettingsHarness />); });
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      const ike = document.querySelector('#tunnel-IkeVersion').getBoundingClientRect();
+      const address = document.querySelector('#tunnel-AddressAssignment').getBoundingClientRect();
+      const ikeLabel = document.querySelector('label[for="tunnel-IkeVersion"]').getBoundingClientRect();
+      const addressLabel = document.querySelector('label[for="tunnel-AddressAssignment"]').getBoundingClientRect();
+      const hint = document.querySelector('#tunnel-AddressAssignment').parentElement.querySelector('p').getBoundingClientRect();
+      assert.ok(hint.top >= address.bottom, 'address hint overlaps its control');
+      const fallback = document.querySelector('#ipsec-ssl-fallback').getBoundingClientRect();
+      assert.ok(fallback.top > hint.bottom, 'SSL fallback overlaps the addressing hint');
+      if (innerWidth >= 768) {
+        assert.ok(Math.abs(ike.top - address.top) < 1, 'Fortinet select tops differ');
+        assert.ok(Math.abs(ikeLabel.top - addressLabel.top) < 1, 'Fortinet label tops differ');
+        assert.ok(address.left > ike.right, 'Fortinet fields lost their separate columns');
+      } else {
+        assert.ok(addressLabel.top > ike.bottom, 'Fortinet fields do not stack on narrow windows');
+        assert.ok(Math.abs(ike.left - address.left) < 1, 'Fortinet stacked fields have different insets');
+      }
+    }
     async function runForcepointEditorTests() {
       const root = createRoot(document.getElementById('root'));
       await React.act(async () => { root.render(<ForcepointEditorHarness />); });
@@ -151,7 +192,12 @@ test('Forcepoint aligns paired controls and displays certificate confirmation ov
       assert.ok(document.getElementById('tunnel-Mtu'));
       await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     }
-    runForcepointEditorTests();
+    async function runVpnEditorTests() {
+      await runForcepointEditorTests();
+      const root = createRoot(document.getElementById('fortinet-root'));
+      await checkFortinetAlignment(root);
+    }
+    runVpnEditorTests();
   `,
     'forcepoint-editor.tsx',
     { jsx: { runtime: 'classic' } },
@@ -175,8 +221,8 @@ test('Forcepoint aligns paired controls and displays certificate confirmation ov
     const assert = require('node:assert/strict');
     const React = require(${JSON.stringify(require.resolve('react'))});
     const { createRoot } = require(${JSON.stringify(require.resolve('react-dom/client'))});
-    const { Label: LabelPrimitive, Collapsible: CollapsiblePrimitive, Dialog: DialogPrimitive, Slot } = require(${JSON.stringify(require.resolve('radix-ui'))});
-    const { ChevronDown, XIcon } = require(${JSON.stringify(require.resolve('lucide-react'))});
+    const { Label: LabelPrimitive, Collapsible: CollapsiblePrimitive, Dialog: DialogPrimitive, Select: SelectPrimitive, Slot } = require(${JSON.stringify(require.resolve('radix-ui'))});
+    const { ChevronDown, ChevronDownIcon, ChevronUpIcon, CheckIcon, XIcon } = require(${JSON.stringify(require.resolve('lucide-react'))});
     const { cva } = require(${JSON.stringify(require.resolve('class-variance-authority'))});
     const { clsx } = require(${JSON.stringify(require.resolve('clsx'))});
     const { twMerge } = require(${JSON.stringify(require.resolve('tailwind-merge'))});
@@ -207,7 +253,7 @@ test('Forcepoint aligns paired controls and displays certificate confirmation ov
           const window = new BrowserWindow({ show: false, width, height, useContentSize: true,
             webPreferences: { nodeIntegration: true, contextIsolation: false, backgroundThrottling: false } });
           try {
-            await window.loadURL('data:text/html,<html class="dark"><div id="root"></div></html>');
+            await window.loadURL('data:text/html,<html class="dark"><div id="root"></div><div id="fortinet-root"></div></html>');
             window.webContents.debugger.attach('1.3');
             await window.webContents.debugger.sendCommand('Profiler.enable');
             await window.webContents.debugger.sendCommand('Profiler.startPreciseCoverage', { callCount: true, detailed: true });
@@ -226,6 +272,9 @@ test('Forcepoint aligns paired controls and displays certificate confirmation ov
             const handlerBlocks = script.functions.filter(item => item.ranges[0].startOffset >= handlerRange.startOffset && item.ranges[0].endOffset <= handlerRange.endOffset).flatMap(item => item.ranges);
             const handlerPercent = 100 * handlerBlocks.filter(item => item.count > 0).length / handlerBlocks.length;
             if (handlerPercent < ${coverageThreshold}) throw new Error('Tunnel prompt handler coverage below project threshold: ' + handlerPercent.toFixed(2));
+            const fortinetHarness = script.functions.find(item => item.functionName === 'FortinetVpnSettingsHarness');
+            if (!fortinetHarness || fortinetHarness.ranges.some(item => item.count === 0)) throw new Error('Modified Fortinet section was not fully covered.');
+            console.log(width + 'x' + height + ': Fortinet labels and controls aligned; modified section coverage 100%');
             console.log(width + 'x' + height + ': paired labels and inputs aligned; TunnelAdvanced coverage ' + percent.toFixed(2) + '%');
             console.log(width + 'x' + height + ': Go certificate event shown over tester; prompt handler coverage ' + handlerPercent.toFixed(2) + '%');
             const target = ${JSON.stringify(artifactDirectory ?? '')};

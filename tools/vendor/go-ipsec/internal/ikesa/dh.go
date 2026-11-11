@@ -15,6 +15,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"github.com/n0madic/go-ipsec/internal/legacycrypto"
 	"math/big"
 
 	"github.com/n0madic/go-ipsec/internal/secretmem"
@@ -73,6 +74,7 @@ func init() {
 type DH struct {
 	// Group is the IANA DH-group transform ID (DHGroup14 or DHGroup31).
 	Group uint16
+	extra cryptoutil.DHGroup
 	// Public is the local public value, ready to drop into a KE payload: g^priv
 	// mod p left-padded to modp2048Len bytes for group 14, or the 32-byte
 	// Curve25519 public for group 31.
@@ -93,6 +95,18 @@ func NewDH(group uint16) (*DH, error) {
 }
 
 func newDH(group uint16) (*DH, error) {
+	switch group {
+	case 1, 2, 5, 15, 16, 17, 18, 21:
+		extra, err := cryptoutil.NewGroup(group)
+		if err != nil {
+			return nil, err
+		}
+		pub, err := extra.Generate()
+		if err != nil {
+			return nil, err
+		}
+		return &DH{Group: group, extra: extra, Public: pub}, nil
+	}
 	switch group {
 	case DHGroup14:
 		// rand.Int yields [0, p-2); shift into [2, p-2].
@@ -139,6 +153,12 @@ func (d *DH) Shared(peerPublic []byte) ([]byte, error) {
 }
 
 func (d *DH) shared(peerPublic []byte) ([]byte, error) {
+	if d.extra != nil {
+		if len(peerPublic) != len(d.Public) {
+			return nil, errors.New("ikesa: invalid DH public value length")
+		}
+		return d.extra.ComputeSecret(peerPublic)
+	}
 	switch d.Group {
 	case DHGroup19, DHGroup20:
 		curve := ecdh.P256()

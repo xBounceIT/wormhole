@@ -25,6 +25,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/n0madic/go-ipsec/internal/dhcp"
 	"github.com/n0madic/go-ipsec/internal/esp"
 	"github.com/n0madic/go-ipsec/internal/ikesa"
 	"github.com/n0madic/go-ipsec/internal/secretmem"
@@ -43,7 +44,9 @@ type PacketDialer interface {
 
 // Client is an established (or establishing) IKEv2 tunnel.
 type Client struct {
-	cfg Config
+	cfg       Config
+	dhcp      atomic.Pointer[dhcp.Client]
+	dhcpLease atomic.Pointer[dhcp.Lease]
 
 	// session is the live IKE session for the current generation. The supervisor
 	// swaps it on reconnect; hot-path readers (sendESP, rxDemux) load it lock-free
@@ -133,6 +136,14 @@ func Dial(ctx context.Context, cfg Config) (*Client, error) {
 		c.superCancel()
 		return nil, err
 	}
+	if err := c.acquireDHCP(ctx); err != nil {
+		c.Close()
+		return nil, err
+	}
+	if c.cfg.autoReconnectEnabled() {
+		c.superWG.Add(1)
+		go c.supervise()
+	}
 	return c, nil
 }
 
@@ -148,6 +159,9 @@ func (c *Client) defaultDialSession(ctx context.Context) (*session.Session, erro
 	if err := sess.IKEAuth(ctx); err != nil {
 		_ = sess.Close()
 		return nil, err
+	}
+	if c.cfg.AddressAssignment == 1 {
+		sess.SetAssigned(manualAssignment(c.cfg.ManualAddress, c.cfg.ManualDNS))
 	}
 	return sess, nil
 }
@@ -220,6 +234,13 @@ func (c *Client) LocalIP() netip.Addr {
 // payload. After a reconnect it reflects the current session's assignment; it is
 // empty before the first handshake / after Close.
 func (c *Client) DNS() []netip.Addr {
+	if c.cfg.AddressAssignment == 2 {
+		lease := c.dhcpLease.Load()
+		if lease == nil || !time.Now().Before(lease.Expires) {
+			return nil
+		}
+		return slices.Clone(lease.DNS)
+	}
 	s := c.curSession()
 	if s == nil {
 		return nil
@@ -324,27 +345,37 @@ func (c *Client) Close() error {
 // credential copies and may wipe them on Close without affecting the next one.
 func toSessionConfig(cfg Config) session.Config {
 	sc := session.Config{
-		FortinetSAML:     cfg.FortinetSAML,
-		Server:           cfg.Server,
-		LocalID:          session.WireID{Type: cfg.LocalID.idType(), Data: cfg.LocalID.idData()},
-		RemoteID:         session.WireID{Type: cfg.RemoteID.idType(), Data: cfg.RemoteID.idData()},
-		EAPUser:          cfg.EAP.Username,
-		RootCAs:          cfg.RootCAs,
-		MTU:              cfg.MTU,
-		Logger:           cfg.Logger,
-		KeepAlive:        cfg.KeepAlive,
-		DPDTimeout:       cfg.DPDTimeout,
-		RekeyLifetime:    cfg.RekeyLifetime,
-		IKERekeyLifetime: cfg.IKERekeyLifetime,
-		ReplayWindow:     cfg.ReplayWindow,
-		RekeyMaxPackets:  cfg.RekeyMaxPackets,
-		ChildSAPFS:       cfg.ChildSAPFS,
-		ESPSuites:        espSuitesFromConfig(cfg.ESPCipherSuites),
-		IKESuites:        ikeSuitesFromConfig(cfg.IKECipherSuites),
-		RequestIPv6:      cfg.requestIPv6Enabled(),
-		RetransmitBase:   DefaultRetransmitBase,
-		RetransmitMax:    DefaultRetransmitMax,
-		RetransmitTries:  DefaultRetransmitTries,
+		ClientCertificate: cfg.ClientCertificate,
+		DHGroups:          cfg.DHGroups,
+		DisableDPD:        cfg.DisableDPD,
+		DisableNATT:       cfg.DisableNATT,
+		RekeyMaxBytes:     cfg.RekeyMaxBytes,
+		ChildPFSGroup:     cfg.ChildPFSGroup,
+		AddressAssignment: cfg.AddressAssignment,
+		ManualAddress:     cfg.ManualAddress,
+		ManualDNS:         cfg.ManualDNS,
+		FortinetSAML:      cfg.FortinetSAML,
+		Server:            cfg.Server,
+		LocalID:           session.WireID{Type: cfg.LocalID.idType(), Data: cfg.LocalID.idData()},
+		RemoteID:          session.WireID{Type: cfg.RemoteID.idType(), Data: cfg.RemoteID.idData()},
+		EAPUser:           cfg.EAP.Username,
+		RootCAs:           cfg.RootCAs,
+		MTU:               cfg.MTU,
+		Logger:            cfg.Logger,
+		KeepAlive:         cfg.KeepAlive,
+		DPDTimeout:        cfg.DPDTimeout,
+		RekeyLifetime:     cfg.RekeyLifetime,
+		IKERekeyLifetime:  cfg.IKERekeyLifetime,
+		ReplayWindow:      cfg.ReplayWindow,
+		RekeyMaxPackets:   cfg.RekeyMaxPackets,
+		ChildSAPFS:        cfg.ChildSAPFS,
+		StrictChildPFS:    cfg.FortinetOptions != nil,
+		ESPSuites:         espSuitesFromConfig(cfg.ESPCipherSuites),
+		IKESuites:         ikeSuitesFromConfig(cfg.IKECipherSuites),
+		RequestIPv6:       cfg.requestIPv6Enabled(),
+		RetransmitBase:    DefaultRetransmitBase,
+		RetransmitMax:     DefaultRetransmitMax,
+		RetransmitTries:   DefaultRetransmitTries,
 	}
 	// Copy the credentials inside secretmem.Do: the session's long-lived
 	// byte copies are then runtime-tracked (erased by the GC once the session

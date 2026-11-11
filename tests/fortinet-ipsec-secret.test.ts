@@ -284,7 +284,7 @@ test('native save rechecks authorization and clears the transient PSK on success
   assert.match(main, /saveTunnelWithNativeSecret\('tunnel-update', request\)/);
 });
 
-test('real sandboxed Chromium submits a native PSK without exposing the application bridge', async () => {
+test('real sandboxed Chromium fits PSK/PEM controls and exposes no application bridge', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'wormhole-ipsec-key-'));
   try {
     const helper = readFileSync(
@@ -301,7 +301,8 @@ test('real sandboxed Chromium submits a native PSK without exposing the applicat
       stripTypeScriptTypes(preload).replace(
         "import { ipcRenderer } from 'electron';",
         "const { ipcRenderer } = require('electron');",
-      ),
+      ) +
+        "\nipcRenderer.on('wormhole-test-submit', () => document.querySelector('form').requestSubmit());\n",
     );
     const harness = join(directory, 'main.cjs');
     writeFileSync(
@@ -310,26 +311,33 @@ test('real sandboxed Chromium submits a native PSK without exposing the applicat
 const { app, BrowserWindow, ipcMain } = require('electron');
 const assert = require('node:assert/strict');
 app.setPath('userData', ${JSON.stringify(directory)});
+app.on('window-all-closed', () => {});
 app.whenReady().then(async () => {
   const { promptFortinetIPsecSecret } = await import(${JSON.stringify(pathToFileURL(join(directory, 'helper.mjs')).href)});
+  for (const kind of ['PreSharedKey', 'ClientKey']) {
   const key = await promptFortinetIPsecSecret({
+    kind,
     createWindow(options) {
       const window = new BrowserWindow(options);
       window.webContents.once('did-finish-load', () => window.webContents.executeJavaScript(\`
         if (window.wormhole !== undefined || window.require !== undefined) throw Error('privileged bridge exposed');
-        document.querySelector('#secret').value = 'fixture-native-key';
-        document.querySelector('form').requestSubmit();
-      \`).catch(() => app.exit(1)));
+        if (document.querySelector('footer').getBoundingClientRect().bottom > window.innerHeight) throw Error('credential buttons are clipped');
+        document.querySelector('#secret').value = '-----BEGIN FIXTURE-----';
+      \`).then(() => {
+        // Receive the assertion result before submission destroys the frame.
+        window.webContents.send('wormhole-test-submit');
+      }).catch(error => { console.error(error.message); app.exit(1); }));
       return window;
     },
     ipc: ipcMain, preload: ${JSON.stringify(join(directory, 'preload.cjs'))},
     isAuthorized: () => true, present() {}, forget() {},
   });
-  assert.equal(key, 'fixture-native-key');
+  assert.equal(key, '-----BEGIN FIXTURE-----');
   assert.equal(BrowserWindow.getAllWindows().length, 0);
+  }
   console.log('Native key isolation passed');
   app.quit();
-}).catch(() => app.exit(1));`,
+}).catch(error => { console.error(error.message); app.exit(1); });`,
     );
     const electron = createRequire(import.meta.url)('electron') as string;
     const { ELECTRON_RUN_AS_NODE: _runAsNode, ...environment } = process.env;
@@ -343,5 +351,59 @@ app.whenReady().then(async () => {
   } finally {
     assert.equal(dirname(resolve(directory)), resolve(tmpdir()));
     rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('PSK/password and certificate save flows collect only active secrets outside the editor', async () => {
+  const request = { name: 'IPsec', kind: 9, settings: { AuthMethod: 0, UserAuth: 2 } };
+  const asked: string[] = [];
+  const saved = await prepareFortinetIPsecWrite(request, async (kind) => {
+    asked.push(kind!);
+    return 'native-secret';
+  });
+  assert.deepEqual(asked, ['PreSharedKey', 'Password']);
+  assert.equal(saved.settings.Password, 'native-secret');
+  const certificate = await prepareFortinetIPsecWrite(
+    { ...request, settings: { AuthMethod: 1, UserAuth: 0 } },
+    async (kind) => (kind === 'CaCert' ? '' : '-----BEGIN FIXTURE-----'),
+  );
+  assert.equal(certificate.settings.PreSharedKey, undefined);
+  assert.equal(certificate.settings.ClientKey, '-----BEGIN FIXTURE-----');
+  const preserved = await prepareFortinetIPsecWrite(
+    {
+      ...request,
+      id: 'saved',
+      settings: {
+        AuthMethod: 1,
+        UserAuth: 2,
+        HasClientCert: true,
+        HasClientKey: true,
+        HasCaCert: true,
+        HasPassword: true,
+        HasPreSharedKey: true,
+      },
+    },
+    async () => {
+      throw Error('unexpected prompt');
+    },
+  );
+  assert.equal(preserved.settings.HasPreSharedKey, undefined);
+  assert.equal(preserved.settings.HasPassword, true);
+  const systemCa = await prepareFortinetIPsecWrite(
+    {
+      ...request,
+      id: 'saved',
+      settings: { AuthMethod: 1, UserAuth: 0, HasClientCert: true, HasClientKey: true },
+    },
+    async () => {
+      throw Error('unexpected CA prompt');
+    },
+  );
+  assert.equal(systemCa.settings.CaCert, '');
+  assert.equal(validFortinetIPsecSecret('', 'CaCert'), true);
+  for (const kind of ['ClientCert', 'ClientKey', 'CaCert']) {
+    assert.equal(validFortinetIPsecSecret('wrong', kind), false);
+    assert.equal(validFortinetIPsecSecret('-----BEGIN ' + 'a'.repeat(131072), kind), false);
+    assert.equal(validFortinetIPsecSecret(null, kind), false);
   }
 });

@@ -111,11 +111,24 @@ func (c *Client) reconnect() {
 	// (6) Re-address the netstack in place (force-closing stale connections) and
 	// fire the reconnect hooks. Always Reconfigure, never SwapSA: the server
 	// session is new even when our assigned IP is unchanged.
-	c.tun.Reconfigure(sa, c.tunConfig())
+	if c.cfg.AddressAssignment == 2 {
+		c.tun.SwapSA(sa)
+	} else {
+		c.tun.Reconfigure(sa, c.tunConfig())
+	}
 	c.fireRekey()
 
 	// (7) Start the new generation's workers.
+	if err := c.prepareDHCP(); err != nil {
+		sess.Close()
+		c.signalDeath()
+		return
+	}
 	c.startWorkers(sess)
+	if err := c.acquireDHCP(c.superCtx); err != nil {
+		c.signalDeath()
+		return
+	}
 	log.Info("reconnect complete", "localIP", c.LocalIP())
 }
 

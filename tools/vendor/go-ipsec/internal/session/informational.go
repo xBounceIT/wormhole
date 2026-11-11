@@ -364,6 +364,14 @@ func (s *Session) handleInboundChildDelete(ctx context.Context, d *ikemsg.Delete
 // initiate rekey before the soft lifetime, and probe with DPD when idle.
 func (s *Session) housekeeping(ctx context.Context, onDead func()) (exit bool) {
 	now := time.Now()
+	if !s.ikeInstalledAt.IsZero() && s.ikeRekeyLifetime() > 0 && !now.Before(s.ikeInstalledAt.Add(s.ikeRekeyLifetime())) {
+		onDead()
+		return true
+	}
+	if limits, ok := s.dataPlane.(interface{ ChildSAExpired() bool }); ok && limits.ChildSAExpired() {
+		onDead()
+		return true
+	}
 	s.detectSuspend(ctx, now)
 	if s.oldIKE != nil && now.After(s.oldIKEUntil) {
 		s.oldIKE = nil
@@ -450,7 +458,7 @@ func (s *Session) housekeeping(ctx context.Context, onDead func()) (exit bool) {
 	// s.child then references a peer-DELETEd SA, so a normal rekey would carry
 	// N(REKEY_SA) for a gone SPI and draw CHILD_SA_NOT_FOUND.
 	if s.dataPlane != nil && !s.childReestablish && now.After(s.nextVolumeRekey) &&
-		s.dataPlane.ChildSAVolume() >= s.rekeyMaxPackets() {
+		(s.dataPlane.ChildSAVolume() >= s.rekeyMaxPackets() || s.byteRekeyDue()) {
 		s.nextVolumeRekey = now.Add(rekeyRetryInterval)
 		if err := s.initiateChildRekey(ctx, false); err != nil {
 			s.log.Warn("driver: volume-based Child rekey failed", "err", err)
@@ -459,7 +467,7 @@ func (s *Session) housekeeping(ctx context.Context, onDead func()) (exit bool) {
 	}
 
 	// Initiate rekey (IKE rekey takes priority over Child rekey).
-	if s.dataPlane != nil && s.cfg.RekeyLifetime > 0 {
+	if s.dataPlane != nil {
 		if !s.nextIKERekey.IsZero() && now.After(s.nextIKERekey) {
 			s.nextIKERekey = now.Add(rekeyRetryInterval)
 			if err := s.initiateIKERekey(ctx); err != nil {
@@ -532,6 +540,9 @@ func (s *Session) detectSuspend(ctx context.Context, now time.Time) {
 // exchange so a missing ack eventually declares the peer dead. A fast probe uses
 // the tightened post-suspend schedule (fastDPDBase/fastDPDTries).
 func (s *Session) initiateDPD(ctx context.Context, fast bool) error {
+	if s.cfg.DisableDPD {
+		return nil
+	}
 	msgID := s.messageID
 	raw, err := s.encodeSKEmpty(ikemsg.ExchangeInformational, ikeRoleBit(s.ikeSA.Role), msgID)
 	if err != nil {
@@ -662,4 +673,9 @@ func randFraction() float64 {
 		return 0.5
 	}
 	return float64(uint16(b[0])<<8|uint16(b[1])) / 65536.0
+}
+
+func (s *Session) byteRekeyDue() bool {
+	volume, ok := s.dataPlane.(interface{ ChildSABytes() uint64 })
+	return ok && s.cfg.RekeyMaxBytes > 0 && volume.ChildSABytes() >= s.cfg.RekeyMaxBytes*9/10
 }

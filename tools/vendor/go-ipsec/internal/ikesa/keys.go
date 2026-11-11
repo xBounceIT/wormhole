@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"github.com/n0madic/go-ipsec/internal/cryptosuite"
 	"sync/atomic"
 
 	"github.com/n0madic/go-ipsec/internal/secretmem"
@@ -42,6 +43,9 @@ const (
 // String implements fmt.Stringer with the conventional (strongSwan-style)
 // transform names, matching esp.Suite for consistent diagnostics.
 func (s Suite) String() string {
+	if p, ok := cryptosuite.Lookup(uint8(s)); ok && uint8(s) >= cryptosuite.FirstCBC {
+		return p.Name
+	}
 	switch s {
 	case SuiteAESCBC256SHA256:
 		return "aes256-sha256"
@@ -66,12 +70,13 @@ func (s Suite) keyLens() (encr, integ int) {
 	if s.aead() {
 		return aeadEncrKeyLen, 0
 	}
-	return encrKeyLen, integKeyLen
+	p := s.cbc()
+	return p.EncryptionBytes, p.IntegrityBytes
 }
 
 // minNonceLen is the RFC 7296 §2.10 floor: nonces must be at least 128 bits
-// and at least half the key size of the negotiated PRF (16 bytes for
-// PRF_HMAC_SHA2_256, the only PRF this client offers). A shorter peer nonce
+// and at least half the key size of the negotiated PRF. nonceFloor raises
+// this minimum for SHA-384 and SHA-512. A shorter peer nonce
 // weakens the freshness the nonces contribute to SKEYSEED and the AUTH signed
 // octets, so key derivation fails closed on it.
 const minNonceLen = 16
@@ -115,8 +120,8 @@ type IKESA struct {
 // SK_a* lengths per RFC 5282 §7). nonceI/nonceR are the initiator/responder
 // nonces, dhShared the DH shared secret, and spii/spir the negotiated SPIs.
 func (s *IKESA) Derive(suite Suite, role Role, spii, spir uint64, nonceI, nonceR, dhShared []byte) error {
-	if len(nonceI) < minNonceLen || len(nonceR) < minNonceLen {
-		return errors.New("ikesa: nonce shorter than the RFC 7296 §2.10 minimum of 16 bytes")
+	if !suite.validNonce(nonceI) || !suite.validNonce(nonceR) {
+		return errors.New("ikesa: nonce length outside the negotiated PRF and RFC 7296 bounds")
 	}
 	if len(dhShared) == 0 {
 		return errors.New("ikesa: empty DH shared secret")
@@ -128,7 +133,7 @@ func (s *IKESA) Derive(suite Suite, role Role, spii, spir uint64, nonceI, nonceR
 	var derr error
 	secretmem.Do(func() {
 		// Initial SKEYSEED = prf(Ni | Nr, g^ir) (RFC 7296 §2.14).
-		skeyseed := prf(concat(nonceI, nonceR), dhShared)
+		skeyseed := suite.prf(concat(nonceI, nonceR), dhShared)
 		derr = s.deriveFromSKEYSEED(suite, role, spii, spir, nonceI, nonceR, skeyseed)
 	})
 	return derr
@@ -142,12 +147,16 @@ func (s *IKESA) Derive(suite Suite, role Role, spii, spir uint64, nonceI, nonceR
 //
 // suite is the suite negotiated for the NEW SA (a rekey may change it) and
 // oldSKd the SK_d of the IKE SA being rekeyed.
-func DeriveRekeyIKE(suite Suite, oldSKd []byte, role Role, spii, spir uint64, nonceI, nonceR, dhShared []byte) (*IKESA, error) {
+func DeriveRekeyIKE(suite Suite, oldSKd []byte, role Role, spii, spir uint64, nonceI, nonceR, dhShared []byte, oldSuites ...Suite) (*IKESA, error) {
+	oldSuite := suite
+	if len(oldSuites) > 0 {
+		oldSuite = oldSuites[0]
+	}
 	if len(oldSKd) == 0 {
 		return nil, errors.New("ikesa: empty old SK_d")
 	}
-	if len(nonceI) < minNonceLen || len(nonceR) < minNonceLen {
-		return nil, errors.New("ikesa: rekey nonce shorter than the RFC 7296 §2.10 minimum of 16 bytes")
+	if !suite.validNonce(nonceI) || !suite.validNonce(nonceR) || !oldSuite.validNonce(nonceI) || !oldSuite.validNonce(nonceR) {
+		return nil, errors.New("ikesa: rekey nonce length outside the negotiated PRF and RFC 7296 bounds")
 	}
 	if len(dhShared) == 0 {
 		return nil, errors.New("ikesa: empty rekey DH shared secret")
@@ -159,7 +168,7 @@ func DeriveRekeyIKE(suite Suite, oldSKd []byte, role Role, spii, spir uint64, no
 		seed = append(seed, dhShared...)
 		seed = append(seed, nonceI...)
 		seed = append(seed, nonceR...)
-		skeyseed := prf(oldSKd, seed)
+		skeyseed := oldSuite.prf(oldSKd, seed)
 
 		s = &IKESA{}
 		derr = s.deriveFromSKEYSEED(suite, role, spii, spir, nonceI, nonceR, skeyseed)
@@ -186,8 +195,9 @@ func (s *IKESA) deriveFromSKEYSEED(suite Suite, role Role, spii, spir uint64, no
 	seed = appendUint64(seed, spir)
 
 	encrLen, integLen := suite.keyLens()
-	total := prfKeyLen + 2*integLen + 2*encrLen + 2*prfKeyLen
-	ks := prfPlus(skeyseed, seed, total)
+	prfLen := suite.prfBytes()
+	total := prfLen + 2*integLen + 2*encrLen + 2*prfLen
+	ks := suite.plus(skeyseed, seed, total)
 
 	var off int
 	// Copy each key into its own slice rather than aliasing the shared prf+
@@ -199,13 +209,13 @@ func (s *IKESA) deriveFromSKEYSEED(suite Suite, role Role, spii, spir uint64, no
 		off += n
 		return b
 	}
-	s.SKd = take(prfKeyLen)
+	s.SKd = take(prfLen)
 	s.SKai = take(integLen)
 	s.SKar = take(integLen)
 	s.SKei = take(encrLen)
 	s.SKer = take(encrLen)
-	s.SKpi = take(prfKeyLen)
-	s.SKpr = take(prfKeyLen)
+	s.SKpi = take(prfLen)
+	s.SKpr = take(prfLen)
 
 	if !suite.aead() {
 		return nil
@@ -278,7 +288,8 @@ func (s *IKESA) EncryptToSK(plaintext []byte) ([]byte, error) {
 	}
 	// RFC 7296 §3.14 self-describing padding: append padLen pad octets then a
 	// one-octet Pad Length, making the total a multiple of the block size.
-	padLen := (aesBlock - (len(plaintext)+1)%aesBlock) % aesBlock
+	size := s.Suite.cbc().BlockBytes
+	padLen := (size - (len(plaintext)+1)%size) % size
 	padded := make([]byte, 0, len(plaintext)+padLen+1)
 	padded = append(padded, plaintext...)
 	for i := 1; i <= padLen; i++ {
@@ -286,11 +297,11 @@ func (s *IKESA) EncryptToSK(plaintext []byte) ([]byte, error) {
 	}
 	padded = append(padded, byte(padLen))
 
-	ivCT, err := aesCBCEncrypt(s.outboundEncrKey(), padded)
+	ivCT, err := s.Suite.encryptCBC(s.outboundEncrKey(), padded)
 	if err != nil {
 		return nil, err
 	}
-	return append(ivCT, make([]byte, integICVLen)...), nil
+	return append(ivCT, make([]byte, s.Suite.cbc().ICVBytes)...), nil
 }
 
 // FinalizeSK completes the SK{} protection of a fully encoded message whose
@@ -360,11 +371,12 @@ func (s *IKESA) OpenSK(raw, skData []byte) (plaintext []byte, icvOK bool, err er
 // decryptSK reverses the CBC branch of EncryptToSK for an inbound SK{} body.
 // OpenSK verifies the message ICV before calling this.
 func (s *IKESA) decryptSK(skData []byte) ([]byte, error) {
-	if len(skData) < integICVLen+aesBlock {
+	icvLen := s.Suite.cbc().ICVBytes
+	if len(skData) < icvLen+s.Suite.cbc().BlockBytes {
 		return nil, errors.New("ikesa: SK payload too short")
 	}
-	ivCT := skData[:len(skData)-integICVLen]
-	padded, err := aesCBCDecrypt(s.inboundEncrKey(), ivCT)
+	ivCT := skData[:len(skData)-icvLen]
+	padded, err := s.Suite.decryptCBC(s.inboundEncrKey(), ivCT)
 	if err != nil {
 		return nil, err
 	}
@@ -378,27 +390,29 @@ func (s *IKESA) decryptSK(skData []byte) ([]byte, error) {
 // checksum computes the CBC-suite message ICV over msg[:len-ICV] with the
 // outbound integrity key and writes it into the trailing ICV bytes in place.
 func (s *IKESA) checksum(msg []byte) error {
-	if len(msg) < integICVLen {
+	icvLen := s.Suite.cbc().ICVBytes
+	if len(msg) < icvLen {
 		return errors.New("ikesa: message shorter than ICV")
 	}
-	mac := integ(s.outboundIntegKey(), msg[:len(msg)-integICVLen])
-	copy(msg[len(msg)-integICVLen:], mac)
+	mac := s.Suite.cbc().MAC(s.outboundIntegKey(), msg[:len(msg)-icvLen])[:icvLen]
+	copy(msg[len(msg)-icvLen:], mac)
 	return nil
 }
 
 // verifyChecksum recomputes the CBC-suite ICV over an inbound message with the
 // inbound integrity key and constant-time compares it to the trailing ICV.
 func (s *IKESA) verifyChecksum(msg []byte) bool {
-	if len(msg) < integICVLen {
+	icvLen := s.Suite.cbc().ICVBytes
+	if len(msg) < icvLen {
 		return false
 	}
-	want := msg[len(msg)-integICVLen:]
-	got := integ(s.inboundIntegKey(), msg[:len(msg)-integICVLen])
+	want := msg[len(msg)-icvLen:]
+	got := s.Suite.cbc().MAC(s.inboundIntegKey(), msg[:len(msg)-icvLen])[:icvLen]
 	return hmac.Equal(want, got)
 }
 
 // PRF exposes the negotiated PRF for the AUTH machinery (signed octets).
-func (s *IKESA) PRF(key, data []byte) []byte { return prf(key, data) }
+func (s *IKESA) PRF(key, data []byte) []byte { return s.Suite.prf(key, data) }
 
 // concat returns a || b in a fresh slice.
 func concat(a, b []byte) []byte {

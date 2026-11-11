@@ -8127,12 +8127,13 @@ async function saveTunnelWithNativeSecret(
   request: ReturnType<typeof parseTunnelWriteRequest>,
 ) {
   const epoch = authSession.authorizationEpoch;
-  const native = await prepareFortinetIPsecWrite(request, () => {
+  const native = await prepareFortinetIPsecWrite(request, (kind) => {
     const pending = tunnelBrowserAuthQueue
       .catch(() => undefined)
       .then(() => {
         const parent = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
         return promptFortinetIPsecSecret({
+          kind,
           createWindow: (options) => new BrowserWindow(options),
           ipc: ipcMain,
           preload: path.join(__dirname, 'fortinet-ipsec-secret-preload.cjs'),
@@ -8152,7 +8153,9 @@ async function saveTunnelWithNativeSecret(
     requireAuthorizationEpoch(epoch);
     return parseTunnelDetailsResponse(await runBackend<unknown>(operation, native));
   } finally {
-    if (native.kind === 9) delete native.settings.PreSharedKey;
+    if (native.kind === 9)
+      for (const key of ['PreSharedKey', 'Password', 'ClientCert', 'ClientKey', 'CaCert'])
+        delete native.settings[key];
   }
 }
 

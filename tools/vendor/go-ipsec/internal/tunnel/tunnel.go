@@ -102,6 +102,11 @@ func (t *Tunnel) OutboundSeq() uint32 { return t.conn.sa.load().Seq() }
 // (reconnect / MOBIKE), not for a plain SA rekey.
 func (t *Tunnel) Reconfigure(sa *esp.SA, cfg tun2net.TunConfig) {
 	t.conn.swapSA(sa)
+	t.UpdateConfig(cfg)
+}
+
+// UpdateConfig changes only the lease/address; a concurrent rekey keeps its SA.
+func (t *Tunnel) UpdateConfig(cfg tun2net.TunConfig) {
 	t.mu.Lock()
 	t.cfg = cfg
 	hooks := make([]func(tun2net.TunConfig), 0, len(t.reconfigure))
@@ -263,3 +268,8 @@ var (
 	_ tun2net.PacketTunnel       = (*Tunnel)(nil)
 	_ interface{ Close() error } = (*Tunnel)(nil)
 )
+
+func (t *Tunnel) SABytes() uint64 { return t.conn.sa.load().Bytes() }
+func (t *Tunnel) SAExpired() bool { return t.conn.sa.load().Expired() }
+
+func (t *Tunnel) EncryptControl(plain []byte) ([]byte, error) { return t.conn.sa.load().Encrypt(plain) }

@@ -52,7 +52,7 @@ func TestOfflineHandshake(t *testing.T) {
 	}
 }
 
-func testOfflineHandshake(t *testing.T, suite espSuite, ike ikeSuite) {
+func testOfflineHandshake(t *testing.T, suite espSuite, ike ikeSuite, configured ...bool) {
 	const username, password = "User", "clientPass"
 	initConn, respConn := transport.MemoryPair()
 
@@ -71,6 +71,10 @@ func testOfflineHandshake(t *testing.T, suite espSuite, ike ikeSuite) {
 		RetransmitBase:  2 * time.Second,
 		RetransmitMax:   4 * time.Second,
 		RetransmitTries: 3,
+	}
+	if len(configured) > 0 && configured[0] {
+		initCfg.ESPSuites = []esp.Suite{suite.id}
+		initCfg.IKESuites = []ikesa.Suite{ike.id}
 	}
 	initSess := New(initCfg)
 	initSess.conn = initConn

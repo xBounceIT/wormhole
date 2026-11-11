@@ -39,12 +39,8 @@ func (c *Client) startDataPlane() error {
 	// a reconnect can swap the session without rebuilding the tunnel.
 	c.tun = tunnel.New(sa, c.sendESP, c.tunConfig())
 
-	// Launch the supervisor before the workers so it is ready to consume a death
-	// signal (the cap-1 deathSig would buffer one anyway, but this keeps intent
-	// clear). Legacy mode (AutoReconnect disabled) runs no supervisor.
-	if c.cfg.autoReconnectEnabled() {
-		c.superWG.Add(1)
-		go c.supervise()
+	if err := c.prepareDHCP(); err != nil {
+		return err
 	}
 	c.startWorkers(sess)
 	return nil
@@ -53,13 +49,17 @@ func (c *Client) startDataPlane() error {
 // espSAFromChild builds the bidirectional ESP SA for a Child SA, oriented for the
 // initiator (we send to ResponderSPI, the peer sends to InitiatorSPI).
 func (c *Client) espSAFromChild(child *session.ChildSA) (*esp.SA, error) {
-	return esp.NewSA(
+	sa, err := esp.NewSA(
 		child.Suite,
 		child.ResponderSPI, child.InitiatorSPI,
 		child.Keys.EncrIR, child.Keys.IntegIR,
 		child.Keys.EncrRI, child.Keys.IntegRI,
 		c.cfg.ReplayWindow,
 	)
+	if err == nil {
+		c.configureSA(sa)
+	}
+	return sa, err
 }
 
 // startWorkers wires the session's data plane and starts one generation of
@@ -113,9 +113,27 @@ func (c *Client) startWorkers(sess *session.Session) {
 			c.cfg.Logger.Error("worker rejected by a shut-down manager", "worker", name)
 		}
 	}
-	start("rx-demux", func(ctx context.Context) { c.rxDemux(ctx, inbox) })
+	start("rx-demux", func(ctx context.Context) {
+		if err := c.rxDemux(ctx, inbox); err != nil && ctx.Err() == nil {
+			onDead()
+		}
+	})
 	start("ike-driver", func(ctx context.Context) { sess.Driver(ctx, inbox, onDead) })
-	if c.cfg.KeepAlive > 0 {
+	if sess.RawESP() {
+		start("raw-esp", func(ctx context.Context) {
+			for {
+				packet, err := sess.RecvESP(ctx)
+				if err != nil {
+					if ctx.Err() == nil {
+						onDead()
+					}
+					return
+				}
+				c.deliverESP(packet)
+			}
+		})
+	}
+	if c.cfg.KeepAlive > 0 && !sess.RawESP() {
 		start("nat-keepalive", c.keepaliveLoop)
 	}
 }
@@ -124,6 +142,12 @@ func (c *Client) startWorkers(sess *session.Session) {
 // this indirection (rather than a session method bound at build time) so a
 // reconnect can swap the session in place.
 func (c *Client) sendESP(ctx context.Context, pkt []byte) error {
+	if c.cfg.AddressAssignment == 2 {
+		l := c.dhcpLease.Load()
+		if l == nil || !time.Now().Before(l.Expires) {
+			return net.ErrClosed
+		}
+	}
 	s := c.curSession()
 	if s == nil {
 		return net.ErrClosed
@@ -177,39 +201,27 @@ func (c *Client) tunConfig() tun2net.TunConfig {
 // that, during a rekey cutover, both the old and new Child SAs decrypt. Inbound
 // ESP is lossy — a lookup/decrypt/replay failure drops the packet and bumps a
 // counter, never blocking the reader. IKE datagrams go to the session driver.
-func (c *Client) rxDemux(ctx context.Context, inbox chan<- []byte) {
+func (c *Client) rxDemux(ctx context.Context, inbox chan<- []byte) error {
 	for {
 		// Load the session once per iteration: a reconnect stops this worker before
 		// swapping the session, but loading per-read keeps the read race-free if
 		// that ordering ever changes.
 		sess := c.curSession()
 		if sess == nil {
-			return
+			return net.ErrClosed
 		}
 		raw, err := sess.RecvRaw(ctx)
 		if err != nil {
-			return // context cancelled or transport closed
+			return err // the owner distinguishes cancellation from a failed transport
 		}
 		kind, payload := natt.Classify(raw)
+		if sess.RawESP() {
+			kind = natt.KindIKE
+			payload = raw
+		}
 		switch kind {
 		case natt.KindESP:
-			if len(payload) < 4 {
-				c.rxDrops.Add(1)
-				continue
-			}
-			spi := binary.BigEndian.Uint32(payload[:4])
-			sa := c.lookupInbound(spi)
-			if sa == nil {
-				c.rxDrops.Add(1)
-				continue
-			}
-			inner, err := sa.Decrypt(payload)
-			if err != nil {
-				c.rxDrops.Add(1)
-				continue
-			}
-			c.lastDataInbound.Store(time.Now().UnixNano())
-			c.tun.DeliverInbound(inner)
+			c.deliverESP(payload)
 		case natt.KindIKE:
 			// Hand to this generation's session driver (DPD / DELETE / rekey).
 			// Non-blocking: if the driver is busy, drop — IKE control is
@@ -284,6 +296,7 @@ func (c *Client) InstallChildSA(u session.ChildSAUpdate) {
 		c.cfg.Logger.Error("rekey: failed to build new Child SA", "err", err)
 		return
 	}
+	c.configureSA(sa)
 	// Copy-on-write add (rxDemux reads the registry lock-free). Serialize with
 	// the grace-removal timer so concurrent read-modify-writes can't lose either
 	// the add here or a removal.
@@ -365,3 +378,31 @@ func (c *Client) keepaliveLoop(ctx context.Context) {
 		}
 	}
 }
+
+func (c *Client) configureSA(sa *esp.SA) {
+	ttl := c.cfg.RekeyLifetime
+	if c.cfg.DisableChildTimeLifetime {
+		ttl = 0
+	}
+	sa.ConfigurePolicy(!c.cfg.DisableReplay, ttl, c.cfg.RekeyMaxBytes)
+}
+func (c *Client) deliverESP(packet []byte) {
+	if len(packet) < 4 {
+		c.rxDrops.Add(1)
+		return
+	}
+	sa := c.lookupInbound(binary.BigEndian.Uint32(packet[:4]))
+	if sa == nil {
+		c.rxDrops.Add(1)
+		return
+	}
+	plain, err := sa.Decrypt(packet)
+	if err != nil {
+		c.rxDrops.Add(1)
+		return
+	}
+	c.lastDataInbound.Store(time.Now().UnixNano())
+	c.deliverIP(plain)
+}
+func (c *Client) ChildSABytes() uint64 { return c.tun.SABytes() }
+func (c *Client) ChildSAExpired() bool { return c.tun.SAExpired() }

@@ -9,8 +9,11 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"github.com/n0madic/go-ipsec/internal/cryptosuite"
+	"hash"
 	"io"
 	"sync/atomic"
+	"time"
 
 	"golang.org/x/crypto/chacha20poly1305"
 
@@ -39,6 +42,9 @@ const (
 // String implements fmt.Stringer with the conventional (strongSwan-style)
 // transform names, for diagnostics.
 func (s Suite) String() string {
+	if p, ok := cryptosuite.Lookup(uint8(s)); ok && uint8(s) >= cryptosuite.FirstCBC {
+		return p.Name
+	}
 	switch s {
 	case SuiteAESCBC256SHA256:
 		return "aes256-sha256"
@@ -86,7 +92,13 @@ var ErrSeqExhausted = errors.New("esp: outbound sequence number space exhausted,
 // inbound from the peer). It owns the outbound sequence counter and the inbound
 // anti-replay window. Encrypt/Decrypt are safe for concurrent use.
 type SA struct {
-	suite Suite
+	suite    Suite
+	hash     func() hash.Hash
+	icvLen   int
+	noReplay bool
+	expires  time.Time
+	maxBytes uint64
+	bytes    atomic.Uint64
 
 	outSPI uint32 // peer's SPI: goes in packets we send
 	inSPI  uint32 // our SPI: expected in packets we receive
@@ -124,8 +136,17 @@ func NewSA(suite Suite, outSPI, inSPI uint32, outEncr, outInteg, inEncr, inInteg
 }
 
 func newSA(suite Suite, outSPI, inSPI uint32, outEncr, outInteg, inEncr, inInteg []byte, replayWindow uint32) (*SA, error) {
+	if p, ok := cryptosuite.Lookup(uint8(suite)); ok && uint8(suite) >= cryptosuite.FirstCBC {
+		sa, err := NewLegacySA(p.Encryption, p.Integrity, outSPI, inSPI, outEncr, outInteg, inEncr, inInteg, true)
+		if err == nil {
+			sa.suite = suite
+			sa.replay = NewReplayWindow(replayWindow)
+		}
+		return sa, err
+	}
 	sa := &SA{
-		suite:  suite,
+		suite: suite,
+		hash:  sha256.New, icvLen: 16,
 		outSPI: outSPI,
 		inSPI:  inSPI,
 		replay: NewReplayWindow(replayWindow),
@@ -207,6 +228,16 @@ func (sa *SA) Seq() uint32 { return sa.seq.Load() }
 // nextHdr) | ICV(16). AEAD framing: SPI | Seq | IV(8) | AEAD(inner | pad |
 // padLen | nextHdr) | Tag(16), with SPI | Seq as the associated data.
 func (sa *SA) Encrypt(inner []byte) ([]byte, error) {
+	block, iv, icv := 4, aeadIVLen, espICVLen
+	if sa.outBlock != nil {
+		block = sa.outBlock.BlockSize()
+		iv = block
+		icv = sa.icvLen
+	}
+	size := espHeaderLen + iv + ((len(inner)+2+block-1)/block)*block + icv
+	if !sa.reserve(uint64(size)) {
+		return nil, ErrLifetimeExpired
+	}
 	// Allocate the next sequence number with a CAS loop so concurrent Encrypt
 	// callers can never observe the same value: a two-step Add+Store could let a
 	// second goroutine read the wrapped 0 before the pin lands. First packet is
@@ -225,7 +256,7 @@ func (sa *SA) Encrypt(inner []byte) ([]byte, error) {
 			break
 		}
 	}
-	if sa.suite == SuiteAESCBC256SHA256 {
+	if sa.outBlock != nil {
 		return sa.encryptCBC(inner, seq)
 	}
 	return sa.encryptAEAD(inner, seq), nil
@@ -234,28 +265,28 @@ func (sa *SA) Encrypt(inner []byte) ([]byte, error) {
 func (sa *SA) encryptCBC(inner []byte, seq uint32) ([]byte, error) {
 	// RFC 4303 §2.4 padding: monotonic 1,2,3,... so that the plaintext
 	// (inner | pad | padLen(1) | nextHdr(1)) is a multiple of the block size.
-	padLen := (espBlock - (len(inner)+2)%espBlock) % espBlock
+	padLen := (sa.outBlock.BlockSize() - (len(inner)+2)%sa.outBlock.BlockSize()) % sa.outBlock.BlockSize()
 	plainLen := len(inner) + padLen + 2
 
-	out := make([]byte, espHeaderLen+cbcIVLen+plainLen+espICVLen)
+	out := make([]byte, espHeaderLen+sa.outBlock.BlockSize()+plainLen+sa.icvLen)
 	binary.BigEndian.PutUint32(out[0:4], sa.outSPI)
 	binary.BigEndian.PutUint32(out[4:8], seq)
 
-	iv := out[espHeaderLen : espHeaderLen+cbcIVLen]
+	iv := out[espHeaderLen : espHeaderLen+sa.outBlock.BlockSize()]
 	if _, err := io.ReadFull(rand.Reader, iv); err != nil {
 		return nil, err
 	}
 
 	// Assemble plaintext in place at the ciphertext position, then encrypt it.
-	ctStart := espHeaderLen + cbcIVLen
+	ctStart := espHeaderLen + sa.outBlock.BlockSize()
 	plain := out[ctStart : ctStart+plainLen]
 	fillTrailer(plain, inner, padLen)
 	cipher.NewCBCEncrypter(sa.outBlock, iv).CryptBlocks(plain, plain)
 
 	// ICV over SPI | Seq | IV | ciphertext.
-	mac := hmac.New(sha256.New, sa.outInteg)
+	mac := hmac.New(sa.hash, sa.outInteg)
 	mac.Write(out[:ctStart+plainLen])
-	icv := mac.Sum(nil)[:espICVLen]
+	icv := mac.Sum(nil)[:sa.icvLen]
 	copy(out[ctStart+plainLen:], icv)
 	return out, nil
 }
@@ -317,14 +348,21 @@ func nextHeaderFor(inner []byte) byte {
 // Decrypt verifies and decrypts an inbound ESP packet, returning the inner IP
 // datagram (IPv4 or IPv6). The returned slice never aliases pkt.
 func (sa *SA) Decrypt(pkt []byte) ([]byte, error) {
-	if sa.suite == SuiteAESCBC256SHA256 {
-		return sa.decryptCBC(pkt)
+	var plain []byte
+	var err error
+	if sa.inBlock != nil {
+		plain, err = sa.decryptCBC(pkt)
+	} else {
+		plain, err = sa.decryptAEAD(pkt)
 	}
-	return sa.decryptAEAD(pkt)
+	if err == nil && !sa.reserve(uint64(len(pkt))) {
+		return nil, ErrLifetimeExpired
+	}
+	return plain, err
 }
 
 func (sa *SA) decryptCBC(pkt []byte) ([]byte, error) {
-	if len(pkt) < espHeaderLen+cbcIVLen+espBlock+espICVLen {
+	if len(pkt) < espHeaderLen+sa.inBlock.BlockSize()+sa.inBlock.BlockSize()+sa.icvLen {
 		return nil, errors.New("esp: packet too short")
 	}
 	if spi := binary.BigEndian.Uint32(pkt[0:4]); spi != sa.inSPI {
@@ -333,19 +371,19 @@ func (sa *SA) decryptCBC(pkt []byte) ([]byte, error) {
 	seq := binary.BigEndian.Uint32(pkt[4:8])
 
 	// Verify ICV before doing anything else with the contents.
-	icvStart := len(pkt) - espICVLen
-	mac := hmac.New(sha256.New, sa.inInteg)
+	icvStart := len(pkt) - sa.icvLen
+	mac := hmac.New(sa.hash, sa.inInteg)
 	mac.Write(pkt[:icvStart])
-	if !hmac.Equal(mac.Sum(nil)[:espICVLen], pkt[icvStart:]) {
+	if !hmac.Equal(mac.Sum(nil)[:sa.icvLen], pkt[icvStart:]) {
 		return nil, errors.New("esp: ICV verification failed")
 	}
-	if !sa.replay.Accept(seq) {
+	if seq == 0 || !sa.noReplay && !sa.replay.Accept(seq) {
 		return nil, ErrReplay
 	}
 
-	iv := pkt[espHeaderLen : espHeaderLen+cbcIVLen]
-	ct := pkt[espHeaderLen+cbcIVLen : icvStart]
-	if len(ct) == 0 || len(ct)%espBlock != 0 {
+	iv := pkt[espHeaderLen : espHeaderLen+sa.inBlock.BlockSize()]
+	ct := pkt[espHeaderLen+sa.inBlock.BlockSize() : icvStart]
+	if len(ct) == 0 || len(ct)%sa.inBlock.BlockSize() != 0 {
 		return nil, errors.New("esp: ciphertext not block-aligned")
 	}
 	plain := make([]byte, len(ct))
@@ -376,7 +414,7 @@ func (sa *SA) decryptAEAD(pkt []byte) ([]byte, error) {
 	}
 	// The invariant "only authenticated packets move the replay window" holds:
 	// Open verified the tag above.
-	if !sa.replay.Accept(seq) {
+	if seq == 0 || !sa.noReplay && !sa.replay.Accept(seq) {
 		return nil, ErrReplay
 	}
 	return parseTrailer(plain)
@@ -409,4 +447,33 @@ func parseTrailer(plain []byte) ([]byte, error) {
 		return nil, fmt.Errorf("esp: unexpected next header %d", nh)
 	}
 	return plain[:len(plain)-padLen-2], nil
+}
+
+var ErrLifetimeExpired = errors.New("esp: key lifetime expired")
+
+// ConfigurePolicy must run before publishing an SA to workers.
+func (sa *SA) ConfigurePolicy(replay bool, lifetime time.Duration, maxBytes uint64) {
+	sa.noReplay = !replay
+	sa.maxBytes = maxBytes
+	if lifetime > 0 {
+		sa.expires = time.Now().Add(lifetime)
+	}
+}
+func (sa *SA) Bytes() uint64 { return sa.bytes.Load() }
+func (sa *SA) Expired() bool {
+	return !sa.expires.IsZero() && !time.Now().Before(sa.expires) || sa.maxBytes > 0 && sa.bytes.Load() >= sa.maxBytes
+}
+func (sa *SA) reserve(size uint64) bool {
+	if !sa.expires.IsZero() && !time.Now().Before(sa.expires) {
+		return false
+	}
+	for {
+		current := sa.bytes.Load()
+		if size > ^uint64(0)-current || sa.maxBytes > 0 && (current >= sa.maxBytes || size > sa.maxBytes-current) {
+			return false
+		}
+		if sa.bytes.CompareAndSwap(current, current+size) {
+			return true
+		}
+	}
 }

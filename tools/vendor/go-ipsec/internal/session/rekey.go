@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/n0madic/go-ipsec/internal/esp"
@@ -196,6 +197,15 @@ func (s *Session) completeChildRekey(ctx context.Context, inner ikemsg.Payloads,
 	if err != nil {
 		return err
 	}
+	if !s.ikeSA.ValidNonce(nr) {
+		return errors.New("session: invalid responder Child SA nonce length")
+	}
+	if s.cfg.StrictChildPFS && s.cfg.ChildSAPFS && ke == nil {
+		return errors.New("session: responder omitted required PFS")
+	}
+	if ke != nil && !proposalHasDHGroup(prop, ke.Group) {
+		return errors.New("session: PFS KE group is absent from the selected proposal")
+	}
 	respSPI := binary.BigEndian.Uint32(prop.SPI)
 	// We initiated this exchange → Ni is ours, Nr the responder's; our outbound is
 	// the initiator→responder direction.
@@ -275,11 +285,25 @@ func (s *Session) handleChildRekeyRequest(ctx context.Context, hdr *ikemsg.Messa
 		s.sendNotifyResponse(ctx, dec, hdr.MessageID, viaOld, ikemsg.ProtocolESP, ikemsg.NotifyNoProposalChosen, nil, "child rekey: no proposal chosen")
 		return err
 	}
+	if !s.ikeSA.ValidNonce(ni) {
+		s.sendNotifyResponse(ctx, dec, hdr.MessageID, viaOld, ikemsg.ProtocolESP, ikemsg.NotifyInvalidSyntax, nil, "invalid Child SA nonce")
+		return errors.New("session: invalid initiator Child SA nonce length")
+	}
 	// A KE payload means the peer wants per-Child PFS. Honor it when the group is
 	// one we run (x25519 or MODP-2048) and it is advertised by a proposal that
 	// matches an enabled suite; otherwise tell the peer which group we accept
 	// (RFC 7296 §1.3) — this is a clean answer, not a failure, so the peer can
 	// retry with a supported group.
+	if s.cfg.StrictChildPFS {
+		if (ke != nil) != s.cfg.ChildSAPFS {
+			s.sendNotifyResponse(ctx, dec, hdr.MessageID, viaOld, ikemsg.ProtocolESP, ikemsg.NotifyNoProposalChosen, nil, "PFS policy mismatch")
+			return nil
+		}
+		if ke != nil && ke.Group != s.cfg.ChildPFSGroup {
+			s.sendInvalidKEPayload(ctx, dec, hdr.MessageID, viaOld, s.cfg.ChildPFSGroup)
+			return nil
+		}
+	}
 	var requireGroup uint16
 	if ke != nil {
 		if !supportedDHGroup(ke.Group) {
@@ -417,9 +441,16 @@ func (s *Session) handleChildRekeyRequest(ctx context.Context, hdr *ikemsg.Messa
 // most-preferred supported group, so the peer can retry with it (RFC 7296 §1.3 /
 // §2.7). The response is cached for retransmit dedup like any other server-request
 // answer.
-func (s *Session) sendInvalidKEPayload(ctx context.Context, dec *ikeCtx, msgID uint32, viaOld bool) {
+func (s *Session) sendInvalidKEPayload(ctx context.Context, dec *ikeCtx, msgID uint32, viaOld bool, requested ...uint16) {
+	preferred := preferredDHGroups[0]
+	if len(s.cfg.DHGroups) > 0 {
+		preferred = s.cfg.DHGroups[0]
+	}
+	if len(requested) > 0 {
+		preferred = requested[0]
+	}
 	var group [2]byte
-	binary.BigEndian.PutUint16(group[:], preferredDHGroups[0])
+	binary.BigEndian.PutUint16(group[:], preferred)
 	s.sendNotifyResponse(ctx, dec, msgID, viaOld, ikemsg.ProtocolNone, ikemsg.NotifyInvalidKEPayload, group[:], "INVALID_KE_PAYLOAD")
 }
 
@@ -584,7 +615,7 @@ func (s *Session) completeIKERekey(ctx context.Context, inner ikemsg.Payloads, p
 	if err != nil {
 		return fmt.Errorf("session: IKE rekey DH: %w", err)
 	}
-	newIKE, err := ikesa.DeriveRekeyIKE(suite.id, s.ikeSA.SKd, ikesa.Initiator, p.ike.newSPIi, newSPIr, p.ike.ni, nr, shared)
+	newIKE, err := ikesa.DeriveRekeyIKE(suite.id, s.ikeSA.SKd, ikesa.Initiator, p.ike.newSPIi, newSPIr, p.ike.ni, nr, shared, s.ikeSA.Suite)
 	if err != nil {
 		return err
 	}
@@ -613,7 +644,7 @@ func (s *Session) handleIKERekeyRequest(ctx context.Context, hdr *ikemsg.Message
 	// Honor the peer's KE group when we run it; otherwise tell it which group
 	// we accept (RFC 7296 §1.3) so it can retry.
 	group := kei.Group
-	if !supportedDHGroup(group) {
+	if !supportedDHGroup(group) || len(s.cfg.DHGroups) > 0 && !slices.Contains(s.cfg.DHGroups, group) {
 		s.sendInvalidKEPayload(ctx, dec, hdr.MessageID, viaOld)
 		s.log.Debug("declined server IKE rekey: unsupported KE group", "group", group)
 		return nil
@@ -659,7 +690,7 @@ func (s *Session) handleIKERekeyRequest(ctx context.Context, hdr *ikemsg.Message
 	}
 	// Key the new IKE SA from the SK_d of the SA that carried this request (RFC
 	// 7296 §2.18) — the current SA, see the function comment.
-	newIKE, err := ikesa.DeriveRekeyIKE(suite.id, dec.sa.SKd, ikesa.Responder, serverNewSPIi, newSPIr, ni, nr, shared)
+	newIKE, err := ikesa.DeriveRekeyIKE(suite.id, dec.sa.SKd, ikesa.Responder, serverNewSPIi, newSPIr, ni, nr, shared, dec.sa.Suite)
 	if err != nil {
 		s.sendTemporaryFailure(ctx, dec, hdr.MessageID, viaOld)
 		return err

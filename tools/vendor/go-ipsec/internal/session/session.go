@@ -8,11 +8,13 @@ package session
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/n0madic/go-ipsec/internal/esp"
@@ -38,18 +40,26 @@ type WireID struct {
 // (toSessionConfig allocates them fresh, inside secretmem.Do) and wipes them
 // on Close — a string would be unwipeable for the process lifetime.
 type Config struct {
-	FortinetSAML bool
-	ServerPSK    []byte
-	Server       string
-	LocalID      WireID
-	RemoteID     WireID
-	EAPUser      string
-	EAPPass      []byte
-	PSK          []byte
-	RootCAs      *x509.CertPool
-	Dialer       transport.DialFunc
-	MTU          uint32
-	Logger       *slog.Logger
+	ClientCertificate        *tls.Certificate
+	DHGroups                 []uint16
+	DisableDPD               bool
+	DisableNATT              bool
+	RekeyMaxBytes            uint64
+	ChildPFSGroup            uint16
+	AddressAssignment        int
+	ManualAddress, ManualDNS string
+	FortinetSAML             bool
+	ServerPSK                []byte
+	Server                   string
+	LocalID                  WireID
+	RemoteID                 WireID
+	EAPUser                  string
+	EAPPass                  []byte
+	PSK                      []byte
+	RootCAs                  *x509.CertPool
+	Dialer                   transport.DialFunc
+	MTU                      uint32
+	Logger                   *slog.Logger
 
 	KeepAlive        time.Duration
 	DPDTimeout       time.Duration
@@ -58,6 +68,7 @@ type Config struct {
 	ReplayWindow     uint32
 	RekeyMaxPackets  uint32
 	ChildSAPFS       bool
+	StrictChildPFS   bool
 
 	// ESPSuites restricts and orders the ESP suites offered for Child SAs, in
 	// preference order. nil/empty offers the full built-in table. Resolved from
@@ -85,7 +96,8 @@ type Session struct {
 	cfg Config
 	log *slog.Logger
 
-	conn transport.Conn
+	conn   transport.Conn
+	rawESP transport.Conn
 
 	// IKE SA identifiers and crypto state.
 	initiatorSPI uint64
@@ -186,7 +198,7 @@ func New(cfg Config) *Session {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	return &Session{cfg: cfg, log: log, childPFS: cfg.ChildSAPFS}
+	return &Session{cfg: cfg, log: log, childPFS: cfg.ChildSAPFS, childPFSGroup: cfg.ChildPFSGroup}
 }
 
 // dialDefault is the network used for the underlying socket.
@@ -205,6 +217,12 @@ func (s *Session) IKESAInit(ctx context.Context) error {
 			return err
 		}
 		s.conn = conn
+		if s.cfg.DisableNATT {
+			s.rawESP, err = transport.DialESP(ctx, conn.RemoteAddr())
+			if err != nil {
+				return err
+			}
+		}
 	}
 
 	var err error
@@ -213,7 +231,11 @@ func (s *Session) IKESAInit(ctx context.Context) error {
 	}
 	// Prefer x25519 (group 31); switch to another supported group if the
 	// responder requests it via INVALID_KE_PAYLOAD below.
-	if s.dh, err = ikesa.NewDH(ikemsg.DH_X25519); err != nil {
+	group := uint16(ikemsg.DH_X25519)
+	if len(s.cfg.DHGroups) > 0 {
+		group = s.cfg.DHGroups[0]
+	}
+	if s.dh, err = ikesa.NewDH(group); err != nil {
 		return err
 	}
 	if s.nonceI, err = randBytes(nonceLen); err != nil {
@@ -240,7 +262,7 @@ func (s *Session) IKESAInit(ctx context.Context) error {
 	// Retry once with the requested supported group. Re-echo the cookie if the
 	// responder is still challenging.
 	if g, ok := saInitInvalidKE(rspBytes); ok {
-		if !supportedDHGroup(g) || g == s.dh.Group {
+		if !supportedDHGroup(g) || g == s.dh.Group || len(s.cfg.DHGroups) > 0 && !slices.Contains(s.cfg.DHGroups, g) {
 			return fmt.Errorf("session: responder requires DH group %d (INVALID_KE_PAYLOAD); no mutually-supported DH group", g)
 		}
 		s.log.Debug("IKE_SA_INIT INVALID_KE_PAYLOAD, retrying with the responder's DH group", "group", g)
@@ -330,7 +352,7 @@ func (s *Session) buildSAInit(cookie []byte) (*ikemsg.Message, []byte, error) {
 	// DH groups. The KE carries our current group, which the INVALID_KE_PAYLOAD
 	// retry may switch.
 	m.Payloads = append(m.Payloads,
-		&ikemsg.SAPayload{Proposals: buildProposals(nil, s.enabledIKESuites(), preferredDHGroups...)},
+		&ikemsg.SAPayload{Proposals: buildProposals(nil, s.enabledIKESuites(), s.configuredDHGroups()...)},
 		&ikemsg.KEPayload{Group: s.dh.Group, Data: s.dh.Public},
 		&ikemsg.NoncePayload{Data: s.nonceI},
 	)
@@ -483,6 +505,9 @@ func (s *Session) Close() error {
 	secretmem.Wipe(s.cfg.PSK)
 	secretmem.Wipe(s.cfg.ServerPSK)
 	secretmem.Wipe(s.cfg.EAPPass)
+	if s.rawESP != nil {
+		_ = s.rawESP.Close()
+	}
 	if s.conn != nil {
 		return s.conn.Close()
 	}
@@ -516,10 +541,23 @@ func (s *Session) RecvRaw(ctx context.Context) ([]byte, error) { return s.conn.R
 
 // SendESP transmits a raw ESP datagram to the peer (UDP-encapsulated on 4500,
 // no non-ESP marker).
-func (s *Session) SendESP(ctx context.Context, pkt []byte) error { return s.conn.Send(ctx, pkt) }
+func (s *Session) SendESP(ctx context.Context, pkt []byte) error {
+	if s.cfg.DisableNATT {
+		if s.rawESP == nil {
+			return transport.ErrClosed
+		}
+		return s.rawESP.Send(ctx, pkt)
+	}
+	return s.conn.Send(ctx, pkt)
+}
+func (s *Session) RecvESP(ctx context.Context) ([]byte, error) { return s.rawESP.Recv(ctx) }
+func (s *Session) RawESP() bool                                { return s.cfg.DisableNATT }
 
 // SendKeepalive sends a NAT keepalive (a single 0xFF) to keep the mapping open.
 func (s *Session) SendKeepalive(ctx context.Context) error {
+	if s.cfg.DisableNATT {
+		return nil
+	}
 	return s.conn.Send(ctx, []byte{0xFF})
 }
 

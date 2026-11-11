@@ -1,4 +1,49 @@
 import { isIP } from 'node:net';
+export const fortinetIPsecSecrets = [
+  'PreSharedKey',
+  'Password',
+  'ClientCert',
+  'ClientKey',
+  'CaCert',
+] as const;
+const fortinetIPsecPublicKeys = [
+  'Host',
+  'Port',
+  'SamlPort',
+  'LocalId',
+  'RemoteId',
+  'AutoProposals',
+  'TrustServerCertificate',
+  'RemoteGateways',
+  'Description',
+  'AuthMethod',
+  'UserAuth',
+  'Username',
+  'IkeVersion',
+  'ExchangeMode',
+  'AddressAssignment',
+  'ManualAddress',
+  'ManualDns',
+  'DhGroups',
+  'Phase1Lifetime',
+  'DeadPeerDetection',
+  'NatTraversal',
+  'EnableLocalLan',
+  'Phase2TimeLifetime',
+  'Phase2Lifetime',
+  'Phase2ByteLifetime',
+  'Phase2LifetimeKb',
+  'FallbackTunnelId',
+  'ReplayDetection',
+  'Pfs',
+  'PfsGroup',
+  ...[1, 2].flatMap((phase) =>
+    ['', '2'].flatMap((suffix) => [
+      `Phase${phase}Encryption${suffix}`,
+      `Phase${phase}Authentication${suffix}`,
+    ]),
+  ),
+];
 
 export type TunnelTestRequest = {
   id: string;
@@ -136,23 +181,19 @@ function parseFortinetIPsecPublicSettings(
   writing: boolean,
 ): void {
   const allowed = new Set([
-    'Host',
-    'Port',
-    'SamlPort',
-    'LocalId',
-    'RemoteId',
-    'TrustServerCertificate',
-    'HasPreSharedKey',
-    ...(writing ? ['ReplacePreSharedKey'] : []),
+    ...fortinetIPsecPublicKeys,
+    ...fortinetIPsecSecrets.flatMap((key) => [`Has${key}`, ...(writing ? [`Replace${key}`] : [])]),
   ]);
   if (
     Object.keys(settings).some((key) => !allowed.has(key)) ||
-    ['HasPreSharedKey', 'ReplacePreSharedKey'].some(
-      (key) => settings[key] !== undefined && typeof settings[key] !== 'boolean',
-    )
+    fortinetIPsecSecrets
+      .flatMap((key) => [`Has${key}`, `Replace${key}`])
+      .some((key) => settings[key] !== undefined && typeof settings[key] !== 'boolean')
   ) {
     throw new Error('Fortinet IPsec editor settings must not contain secrets.');
   }
+  if (Buffer.byteLength(JSON.stringify(settings), 'utf8') > 32768)
+    throw new Error('Fortinet IPsec editor settings are too large.');
 }
 
 export function parseSSHJumpSettings(value: unknown): Record<string, unknown> {
