@@ -121,3 +121,11 @@ fields at 600px, hint/fallback separation, and 100% execution coverage of the
 modified mounted section. Renderer/Electron TypeScript checks, renderer build,
 Go race tests, formatting/lint and cross-platform sidecar builds were repeated
 after integrating main. Full-suite results are listed in the PR description.
+
+Publication verification limitation: two complete npm suite runs fail
+`TestFortinetIPsecSAMLAndNativePayload` while closing the test sidecar
+(`IPsec sidecar survived lease release`). Standalone backend `go test ./...`
+passes, as do five isolated repetitions of that test and fifteen repetitions
+with the race detector. The cause of the full-run-only failure is unconfirmed;
+no timeout or assertion has been relaxed. PR #530 remains draft and reports the
+complete suite as failing, rather than treating isolated passes as closure.
