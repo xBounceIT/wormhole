@@ -84,17 +84,18 @@ type backendCommand struct {
 }
 
 type backendResponse struct {
-	ID            string `json:"id"`
-	OK            bool   `json:"ok"`
-	Error         string `json:"error,omitempty"`
-	SocksEndpoint string `json:"socksEndpoint,omitempty"`
-	ForwardHost   string `json:"forwardHost,omitempty"`
-	ForwardPort   int    `json:"forwardPort,omitempty"`
-	TunnelActive  bool   `json:"tunnelActive,omitempty"`
-	TunnelName    string `json:"tunnelName,omitempty"`
-	TunnelKind    string `json:"tunnelKind,omitempty"`
-	LeaseID       string `json:"leaseId,omitempty"`
-	Result        any    `json:"result,omitempty"`
+	ID                 string  `json:"id"`
+	OK                 bool    `json:"ok"`
+	Error              string  `json:"error,omitempty"`
+	SocksEndpoint      string  `json:"socksEndpoint,omitempty"`
+	ForwardHost        string  `json:"forwardHost,omitempty"`
+	ForwardPort        int     `json:"forwardPort,omitempty"`
+	TunnelActive       bool    `json:"tunnelActive,omitempty"`
+	ConfiguredTunnelID *string `json:"configuredTunnelId,omitempty"`
+	TunnelName         string  `json:"tunnelName,omitempty"`
+	TunnelKind         string  `json:"tunnelKind,omitempty"`
+	LeaseID            string  `json:"leaseId,omitempty"`
+	Result             any     `json:"result,omitempty"`
 }
 
 type backendEvent struct {
@@ -467,11 +468,13 @@ func (m *vncManager) acquireTunnel(command backendCommand) {
 				return
 			}
 			if !enabled {
+				command.TunnelConfigID = ""
 				m.finishTunnelAcquire(command, start, nil, nil)
 				return
 			}
 			configID = resolvedID
 		}
+		command.TunnelConfigID = configID
 		if configID == "" {
 			m.finishTunnelAcquire(command, start, nil, errors.New("VPN tunnel is enabled but no configuration is selected"))
 			return
@@ -682,7 +685,7 @@ func (m *vncManager) finishTunnelAcquire(
 		})
 		return
 	}
-	response := backendResponse{ID: command.ID, OK: err == nil, LeaseID: command.SessionID}
+	response := backendResponse{ID: command.ID, OK: err == nil, LeaseID: command.SessionID, ConfiguredTunnelID: &command.TunnelConfigID}
 	if err != nil {
 		response.Error = publicBackendError(err)
 	} else if lease != nil {

@@ -130,6 +130,7 @@ import { RdpBackendClient, stopChildProcess } from './rdp.js';
 import { drainSshBackendSessionIds } from './ssh-backend-lifecycle.js';
 import { sshOpenCredentialFields } from './ssh-open-credentials.js';
 import { settleTunnelCleanup, TunnelLeaseRegistry } from './tunnel-lease-registry.js';
+import { assertTunnelRouteUnchanged } from './tunnel-route-snapshot.js';
 import { TunnelFailureRegistry, tunnelClosedMessage } from './tunnel-failure.js';
 import {
   isTunnelIdentifier,
@@ -472,6 +473,7 @@ type BackendResponse = {
   forwardHost?: string;
   forwardPort?: number;
   tunnelActive?: boolean;
+  configuredTunnelId?: string;
   tunnelName?: string;
   tunnelKind?: string;
   leaseId?: string;
@@ -3230,7 +3232,12 @@ class NativeBackendProcess {
     tunnelConfigId?: string;
     progressSessionId?: string;
     dedicated?: boolean;
-  }): Promise<{ active: boolean; socksEndpoint: string; tunnel?: WebBrowserState['tunnel'] }> {
+  }): Promise<{
+    active: boolean;
+    socksEndpoint: string;
+    configuredTunnelId?: string;
+    tunnel?: WebBrowserState['tunnel'];
+  }> {
     this.tunnelFailures.watch(request.leaseId, request.onExit);
     const response = await this.send(
       {
@@ -3246,6 +3253,7 @@ class NativeBackendProcess {
     if (!response.ok) throw new Error(response.error || 'Could not establish the VPN tunnel.');
     return {
       active: response.tunnelActive === true,
+      configuredTunnelId: response.configuredTunnelId,
       socksEndpoint: response.socksEndpoint ?? '',
       tunnel: {
         name: typeof response.tunnelName === 'string' ? response.tunnelName.slice(0, 256) : '',
@@ -4732,6 +4740,9 @@ class WebSurfaceManager {
         throw new Error('Web session was superseded before its target could be resolved.');
       }
       target ??= await resolveTarget();
+      if (request.nodeId) {
+        assertTunnelRouteUnchanged(tunnelRoute?.configuredTunnelId, target.tunnelConfigId ?? '');
+      }
       this.assertOpenCurrent(
         request.sessionId,
         generation,
@@ -10264,11 +10275,12 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
             rdpConnectingLifecycles.set(lifecycleId, request.sessionId);
             try {
               let socksEndpoint = '';
+              let configuredTunnelId: string | undefined;
               if (request.profile.nodeId || request.profile.tunnelConfigId) {
                 const leaseId = randomUUID();
                 rdpTunnelLeases.claim(lifecycleId, leaseId);
                 rdpTunnelLeaseSessions.set(lifecycleId, request.sessionId);
-                let route: { active: boolean; socksEndpoint: string };
+                let route: { active: boolean; socksEndpoint: string; configuredTunnelId?: string };
                 try {
                   route = await getNativeBackend().acquireTunnelRoute({
                     onExit: () => {
@@ -10309,6 +10321,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
                   throw new Error('RDP VPN tunnel returned an invalid route.');
                 }
                 socksEndpoint = route.socksEndpoint;
+                configuredTunnelId = route.configuredTunnelId;
                 assertRdpStartCurrent(request.sessionId, requestAttempt, generation);
                 if (!rdpTunnelLeases.isActive(lifecycleId, leaseId)) {
                   throw new Error('RDP connection closed while opening its VPN tunnel.');
@@ -10388,6 +10401,12 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
               }
               if (!socksEndpoint) await releaseRdpTunnel(lifecycleId);
               assertRdpStartCurrent(request.sessionId, requestAttempt, generation);
+              if (request.profile.nodeId) {
+                assertTunnelRouteUnchanged(
+                  configuredTunnelId,
+                  resolvedProfile.tunnelEnabled === true ? resolvedProfile.tunnelConfigId : '',
+                );
+              }
               const { manualCredentials: _manualCredentials, ...nativeRequest } = request;
               const response = await client.start(
                 {

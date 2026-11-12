@@ -7,6 +7,7 @@ import test, { before, after } from 'node:test';
 import { TunnelLeaseRegistry, settleTunnelCleanup } from '../electron/tunnel-lease-registry.ts';
 import { WebSessionAttemptTracker } from '../electron/web-session-attempt.ts';
 import { KeyedSingleFlight } from '../electron/keyed-single-flight.ts';
+import { assertTunnelRouteUnchanged } from '../electron/tunnel-route-snapshot.ts';
 import { sshOpenCredentialFields } from '../electron/ssh-open-credentials.ts';
 import {
   canProceedWithRdpTunnelRoute,
@@ -79,6 +80,21 @@ function deferred<T>() {
 }
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 
+test('route snapshots preserve unchanged VPN/direct choices and reject missing or changed metadata', () => {
+  for (const id of ['', 'vpn-a']) assert.doesNotThrow(() => assertTunnelRouteUnchanged(id, id));
+  for (const [acquired, resolved] of [
+    ['', 'vpn-a'],
+    ['vpn-a', 'vpn-b'],
+    ['vpn-a', ''],
+    [undefined, ''],
+    ['', undefined],
+    [null, ''],
+    [42, ''],
+    ['', {}],
+  ])
+    assert.throws(() => assertTunnelRouteUnchanged(acquired, resolved), /VPN route.*matches/);
+});
+
 function harness(protocol: 'ssh' | 'rdp', extra: Record<string, any> = {}) {
   const trace: string[] = [];
   const attempts = new WebSessionAttemptTracker();
@@ -111,7 +127,7 @@ function harness(protocol: 'ssh' | 'rdp', extra: Record<string, any> = {}) {
     acquireTunnelRoute: async (request: any) => {
       trace.push('route');
       onExit = request.onExit;
-      return { active: true, socksEndpoint: '127.0.0.1:1080' };
+      return { active: true, socksEndpoint: '127.0.0.1:1080', configuredTunnelId: 'vpn-1' };
     },
   };
   const release = async (ownerId: string) =>
@@ -167,6 +183,7 @@ function harness(protocol: 'ssh' | 'rdp', extra: Record<string, any> = {}) {
     randomUUID: () => `lease-${++sequence}`,
     tunnelClosedMessage: 'VPN closed',
     sshOpenCredentialFields,
+    assertTunnelRouteUnchanged,
     Error,
     console,
     clearTimeout,
@@ -176,7 +193,7 @@ function harness(protocol: 'ssh' | 'rdp', extra: Record<string, any> = {}) {
     },
     resolveNativeRdpProfile: async () => {
       trace.push('credentials');
-      return { nodeId: 'node', host: 'host' };
+      return { nodeId: 'node', host: 'host', tunnelEnabled: true, tunnelConfigId: 'vpn-1' };
     },
     resolveRdpExternalClientRequirement: async () => false,
     resolveNativeRdpCredential: async () => {
@@ -256,12 +273,18 @@ for (const protocol of ['ssh', 'rdp'] as const) {
     assert.ok(h.trace.includes('route'));
     assert.ok(!h.trace.includes('credentials'));
     route.resolve(
-      protocol === 'ssh' ? '127.0.0.1:1080' : { active: true, socksEndpoint: '127.0.0.1:1080' },
+      protocol === 'ssh'
+        ? '127.0.0.1:1080'
+        : { active: true, socksEndpoint: '127.0.0.1:1080', configuredTunnelId: 'vpn-1' },
     );
     await tick();
     assert.ok(h.trace.includes('credentials'));
     assert.ok(!h.trace.includes('connect'));
-    credentials.resolve(protocol === 'ssh' ? { bitwarden: false } : { nodeId: 'node' });
+    credentials.resolve(
+      protocol === 'ssh'
+        ? { bitwarden: false }
+        : { nodeId: 'node', tunnelEnabled: true, tunnelConfigId: 'vpn-1' },
+    );
     await pending;
     assert.ok(h.trace.includes('connect'));
 
@@ -429,7 +452,11 @@ test('SSH queued retries remain cancellable while the previous close is pending'
 
 test('RDP preserves direct, manual, external-client and gateway credential flows after route selection', async () => {
   const direct = harness('rdp');
-  direct.backend.acquireTunnelRoute = async () => ({ active: false, socksEndpoint: '' });
+  direct.backend.acquireTunnelRoute = async () => ({
+    active: false,
+    socksEndpoint: '',
+    configuredTunnelId: 'vpn-1',
+  });
   const result = await direct.open();
   assert.equal(result.profile.tunnelEnabled, false);
   for (const profile of [
@@ -502,4 +529,47 @@ test('RDP tears down failed or superseded native starts and ignores retired tunn
       /Gateway credential/,
     );
   }
+});
+
+test('saved RDP profiles cannot change their required VPN while the route prompt is pending', async () => {
+  for (const prior of [
+    { configuredTunnelId: '', active: false, socksEndpoint: '' },
+    { configuredTunnelId: 'vpn-old', active: false, socksEndpoint: '' },
+    { configuredTunnelId: 'vpn-old', active: true, socksEndpoint: '127.0.0.1:1080' },
+  ]) {
+    const h = harness('rdp');
+    const route = deferred<typeof prior>();
+    h.backend.acquireTunnelRoute = async () => route.promise;
+    const pending = h.open();
+    const rejected = assert.rejects(pending, /VPN route.*(changed|matches)/);
+    await tick();
+    h.sandbox.resolveNativeRdpProfile = async () => ({
+      nodeId: 'node',
+      host: 'changed.internal',
+      tunnelEnabled: true,
+      tunnelConfigId: 'vpn-new',
+    });
+    route.resolve(prior);
+    await rejected;
+    assert.ok(!h.trace.includes('connect'));
+    assert.ok(h.trace.includes('release'));
+  }
+});
+
+test('disabled saved RDP routes stay direct and missing required configurations fail closed', async () => {
+  const h = harness('rdp');
+  h.backend.acquireTunnelRoute = async () => ({
+    active: false,
+    socksEndpoint: '',
+    configuredTunnelId: '',
+  });
+  h.sandbox.resolveNativeRdpProfile = async () => ({
+    nodeId: 'node',
+    tunnelEnabled: false,
+    tunnelConfigId: 'unused-vpn',
+  });
+  const target = await h.open();
+  assert.equal(target.profile.tunnelEnabled, false);
+  h.sandbox.resolveNativeRdpProfile = async () => ({ nodeId: 'node', tunnelEnabled: true });
+  await assert.rejects(h.open(), /VPN route.*matches/);
 });
