@@ -185,9 +185,27 @@ server.
   netstack already routes all traffic to NIC 1 inside this process.
 - No DNS changes: hostnames are resolved through the tunnel via `tnet.LookupContextHost`
   against the server-pushed resolvers (`dhcp-option DNS` / `--dns server`, surfaced by
-  the shim's `ovpn_get_dns`) — never the OS resolver. If the server pushes no DNS,
-  hostname dials fail with a clear error rather than leaking lookups to the local
-  network.
+  the shim's `ovpn_get_dns`) — never the OS resolver. Stormshield enables
+  `public_dns_fallback`: if pushed DNS is absent or cannot resolve a public name,
+  Cloudflare and Google DNS are tried through the same VPN netstack, using the
+  tunnel's supported IP family. Pushed DNS answers retain priority, including
+  private answers for public domains. Single-label names, private suffixes and
+  reverse zones, `.onion` and malformed names never use the public fallback. The
+  public DNS client reads no host files or system resolver settings and performs
+  no OS route probes. It validates response IDs, questions and answer ownership,
+  retries truncated UDP answers over TCP, and closes sockets on cancellation.
+  Other OpenVPN providers keep the
+  pushed-DNS-only policy and fail closed when DNS is missing.
+
+  Pushed DNS gets up to four seconds before fallback; each public resolver gets
+  two seconds, leaving time for the resource connection within the SOCKS timeout.
+  The VPN gateway must permit reaching the public DNS servers and resource hosts.
+  No query or resource connection falls back to the host network on tunnel failure.
+
+Run `go test ./... -coverprofile=coverage.out` in this module to verify DNS policy,
+IPv4/IPv6 fallback, cancellation and tunnel failure. The DNS policy is compiled in
+the normal test build; CGO setup only binds it to the production netstack. An actual
+Stormshield login and page load require a live appliance.
 
 `ipconfig /all` is unchanged after a session starts. A diff of `netstat -anob` shows
 exactly one new entry: this binary's SOCKS5 listener on a loopback port.

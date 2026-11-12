@@ -12,6 +12,7 @@ import (
 func TestConfigDecodesPhysicalTransportPlan(t *testing.T) {
 	const payload = `{
 		"profile_ovpn":"client\nremote vpn.example.test 443 tcp\n",
+		"public_dns_fallback":true,
 		"transport_adapter_ids":["adapter-a","adapter-b"],
 		"transport_remotes":[
 			{"host":"vpn.example.test","port":"443","protocol":"tcp"},
@@ -22,6 +23,9 @@ func TestConfigDecodesPhysicalTransportPlan(t *testing.T) {
 	var cfg config
 	if err := json.Unmarshal([]byte(payload), &cfg); err != nil {
 		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	if !cfg.PublicDNSFallback {
+		t.Fatal("Stormshield public tunnel DNS policy was not decoded")
 	}
 	if len(cfg.TransportAdapterIDs) != 2 || cfg.TransportAdapterIDs[1] != "adapter-b" {
 		t.Fatalf("unexpected adapter IDs: %#v", cfg.TransportAdapterIDs)

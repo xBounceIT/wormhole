@@ -1208,6 +1208,7 @@ func tunnelSidecarCommand(kind int64, raw json.RawMessage) (string, []byte, erro
 			return "", nil, err
 		}
 		config := openVPNConfig(profile, stringValue("Username"), stringValue("Password"))
+		config["public_dns_fallback"] = true
 		if len(adapters) > 0 {
 			remotes := extractOpenVPNTransportRemotes(profile)
 			if len(remotes) == 0 {

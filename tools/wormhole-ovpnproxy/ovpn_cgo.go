@@ -261,14 +261,13 @@ func startOpenVpn(ctx context.Context, cfg config) (sockstun.Dialer, func(), err
 	// 4. Spin up a netstack TUN at the pushed address, resolving through the server-
 	//    pushed DNS (dhcp-option DNS / --dns server). Servers of a family the tunnel
 	//    can't route are dropped — netstack would burn a full query timeout on each.
-	//    With an empty list hostname targets fail closed in the dialer below (clear
-	//    error instead of netstack's misleading "cannot marshal DNS message", which is
-	//    what its zero-server resolver path degenerates to).
+	//    Stormshield may additionally resolve public names through public DNS over
+	//    this same tunnel; other profiles keep the pushed-DNS-only policy.
 	dnsAddrs := pushedDNS(client, hasV4, hasV6)
 	if len(dnsAddrs) > 0 {
 		logf("openvpn: tunnel DNS via pushed resolver(s) %v", dnsAddrs)
 	} else {
-		logf("openvpn: server pushed no usable DNS; hostname targets will fail (use IP literals or push dhcp-option DNS)")
+		logf("openvpn: server pushed no usable DNS; public tunnel DNS fallback=%v", cfg.PublicDNSFallback)
 	}
 	tunDev, tnet, err := netstack.CreateNetTUN([]netip.Addr{pfx.Addr()}, dnsAddrs, 1500)
 	if err != nil {
@@ -322,11 +321,15 @@ func startOpenVpn(ctx context.Context, cfg config) (sockstun.Dialer, func(), err
 		cleanupClient()
 	}
 
+	resolver := tunnelDNSResolver{tunnel: tnet, fallback: cfg.PublicDNSFallback, hasV4: hasV4, hasV6: hasV6}
+	if len(dnsAddrs) > 0 {
+		resolver.primary = tnet.LookupContextHost
+	}
 	return tnetDialer{
 		tnet:     tnet,
 		hasV4:    hasV4,
 		hasV6:    hasV6,
-		hasDNS:   len(dnsAddrs) > 0,
+		resolver: resolver,
 		counters: counters,
 		client:   client,
 		diag:     packetDiag,
@@ -448,35 +451,16 @@ func pumpOutbound(ctx context.Context, client *C.ovpn_client_t, dev tun.Device, 
 
 // tnetDialer wraps netstack.Net so it satisfies sockstun.Dialer.
 //
-// Resolution policy (v1): hostnames go straight to tnet.LookupContextHost (i.e. through
-// the tunnel via netstack), NOT through the OS resolver. This matters because:
+// Hostnames use pushed DNS first, with an optional public DNS fallback transported
+// by the same netstack. Neither path uses the OS resolver or direct connections.
 //
-//	(a) The OS resolver would leak the hostname to the local network in plaintext DNS
-//	    before the tunnel is engaged — same threat model "VPN" is supposed to defeat.
-//	(b) wgproxy already routes resolution through the tunnel (it passes the address
-//	    string straight to tnet.DialContext, which does internal resolution against the
-//	    DNS servers configured at CreateNetTUN); ovpnproxy must match for behavioral
-//	    parity across sidecars.
-//
-// Pushed DNS support: the shim surfaces the server-pushed resolvers (dhcp-option DNS /
-// --dns server, see ovpn_get_dns) and startOpenVpn feeds them into CreateNetTUN, so
-// LookupContextHost queries them through the tunnel. When the server pushes none,
-// hasDNS is false and hostname dials fail closed with a clear error — never a fallback
-// to the OS resolver. (Skipping LookupContextHost in that case also matters because
-// netstack's zero-server resolver path returns a bogus "cannot marshal DNS message"
-// instead of anything actionable.)
-//
-// Family-aware short-circuit: when netstack only has IPv4 (or only IPv6), dial only
-// addresses of the installed family. Without this, an OS resolver returning AAAA-first
-// (RFC 6724) on a v4-only tunnel would pay the netstack's full per-address timeout on
-// the v6 candidate before falling back to v4. Today the OS resolver isn't used at all,
-// but tnet.LookupContextHost can still return both families if the pushed DNS server
-// answers AAAA — the same penalty applies, just with different cause.
+// Dial only addresses of the installed family to avoid waiting for an unroutable
+// IPv6 candidate on an IPv4-only tunnel (and vice versa).
 type tnetDialer struct {
 	tnet     *netstack.Net
 	hasV4    bool
 	hasV6    bool
-	hasDNS   bool
+	resolver tunnelDNSResolver
 	counters *ovpnTrafficCounters
 	client   *C.ovpn_client_t
 	diag     *packetDiagHub
@@ -530,13 +514,8 @@ func (d tnetDialer) DialContext(ctx context.Context, network, address string) (c
 		return d.tnet.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
 	}
 
-	// Hostname: resolve via tnet (in-tunnel DNS), filter by installed family, dial in
-	// order. We deliberately do NOT fall back to net.DefaultResolver — that would leak
-	// the hostname to the local network in plaintext.
-	if !d.hasDNS {
-		return nil, fmt.Errorf("cannot resolve %s: the VPN server pushed no DNS servers; use an IP literal or push dhcp-option DNS in the profile", host)
-	}
-	addrs, err := d.tnet.LookupContextHost(ctx, host)
+	// Resolve and connect exclusively through this tunnel, filtering by installed family.
+	addrs, err := d.resolver.LookupContextHost(ctx, host)
 	if err != nil {
 		return nil, fmt.Errorf("resolve %s through tunnel DNS: %w", host, err)
 	}

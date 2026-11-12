@@ -54,6 +54,9 @@ type config struct {
 	// "p"/"push" to request a push notification. The sidecar connects, and if the server
 	// challenges, it reconnects carrying this response. Empty for non-2FA / non-challenge VPNs.
 	ChallengeResponse string `json:"challenge_response"`
+	// Stormshield gateways may omit DNS or push internal-only resolvers. Public
+	// lookups can then use public resolvers, still exclusively through the tunnel.
+	PublicDNSFallback bool `json:"public_dns_fallback"`
 	// Stable Windows adapter IDs and effective profile remotes for the OUTER OpenVPN
 	// transport. The native shim prefers DNS through those adapters, falls back to the
 	// system resolver when physical DNS is blocked, and refreshes the current interface
