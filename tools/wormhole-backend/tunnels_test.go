@@ -297,6 +297,13 @@ func TestTunnelSidecarCommandCoversEveryPortableProvider(t *testing.T) {
 		if err != nil || executable != test.executable || !json.Valid(payload) {
 			t.Fatalf("kind %d = executable:%q payload:%s err:%v", test.kind, executable, payload, err)
 		}
+		var config map[string]any
+		if err := json.Unmarshal(payload, &config); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := config["public_dns_fallback"]; ok {
+			t.Fatalf("kind %d unexpectedly enabled Stormshield public DNS fallback", test.kind)
+		}
 	}
 	if _, _, err := tunnelSidecarCommand(0, json.RawMessage(`{`)); err == nil {
 		t.Fatal("malformed tunnel settings were accepted")
@@ -467,6 +474,16 @@ func TestStormshieldSidecarBindsPhysicalTransportAndValidatesProfile(t *testing.
 	if remotes, ok := config["transport_remotes"].([]any); !ok || len(remotes) != 1 {
 		t.Fatalf("transport remotes missing from payload: %#v", config)
 	}
+	if config["public_dns_fallback"] != true {
+		t.Fatal("Stormshield public tunnel DNS fallback is disabled")
+	}
+	physicalTransportAdapterIDsForTunnel = func() ([]string, error) { return nil, nil }
+	_, payload, err = tunnelSidecarCommand(4, json.RawMessage(`{"ProfileOvpn":"client\nremote vpn.example.test 443 tcp\n"}`))
+	config = nil
+	if err != nil || json.Unmarshal(payload, &config) != nil || config["public_dns_fallback"] != true {
+		t.Fatalf("portable Stormshield public DNS fallback missing: %v", err)
+	}
+	physicalTransportAdapterIDsForTunnel = func() ([]string, error) { return []string{"adapter-1"}, nil }
 	if _, _, err := tunnelSidecarCommand(4, json.RawMessage(`{"ProfileOvpn":"client\n"}`)); err == nil {
 		t.Fatal("Stormshield profile without a transport remote was accepted")
 	}
