@@ -199,7 +199,8 @@ test('a rejected duplicate SSH open cannot replace the terminal owner', async ()
     stripTypeScriptTypes(`class Harness {
       ${source.slice(methodsStart, methodsEnd)}
       pendingConnections = new Map(); openWaiters = new Map(); activeSessions = new Set();
-      connectionAttempts = { begin: () => 1 };
+      connectionAttempts = { begin: () => 1, isCurrent: () => true };
+      closingConnections = { waitForIdle: async () => {} };
       async openCurrent() { return {}; }
       ${source.slice(openStart, openEnd)}
     }`) + '; return Harness;',

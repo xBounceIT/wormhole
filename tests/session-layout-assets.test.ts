@@ -409,13 +409,13 @@ test('duplicate RDP starts preserve the accepted lifecycle and VPN lease', () =>
   const exclusiveStart = startSource.indexOf('rdpStartOperations.runExclusive(');
   assert.ok(
     exclusiveStart >= 0 &&
-      profileResolution > exclusiveStart &&
-      runningCheck > profileResolution &&
+      runningCheck > exclusiveStart &&
       lifecycleBegin > runningCheck &&
       previousDisconnect > lifecycleBegin &&
       tunnelRelease > previousDisconnect &&
       lifecycleIdBegin > tunnelRelease &&
-      tunnelClaim > lifecycleIdBegin,
+      tunnelClaim > lifecycleIdBegin &&
+      profileResolution > tunnelClaim,
   );
   assert.match(startSource, /rdpStartAttempts\.begin\(request\.sessionId\)/);
   assert.match(startSource, /if \(!ownsLifecycle\) return/);
@@ -431,7 +431,10 @@ test('RDP start honors only Go-authorized direct broker routes', () => {
     mainSource.indexOf("ipcMain.handle('rdp:system-client-capability'"),
   );
   assert.match(startSource, /acquireTunnelRoute\(/);
-  assert.match(startSource, /canProceedWithRdpTunnelRoute\(resolvedProfile, route\)/);
+  const routeGuard = startSource.indexOf('canProceedWithRdpTunnelRoute(request.profile, route)');
+  const profileResolution = startSource.indexOf('await resolveNativeRdpProfile');
+  const nativeStart = startSource.indexOf('await client.start');
+  assert.ok(routeGuard >= 0 && profileResolution > routeGuard && nativeStart > profileResolution);
   assert.doesNotMatch(startSource, /!socksEndpoint && resolvedProfile\.tunnelConfigId/);
 });
 

@@ -470,6 +470,15 @@ INSERT INTO TunnelConfigs (Id, Name, Kind, CreatedAt, UpdatedAt) VALUES
 		route.ConnectionName != "Web Server" || route.TunnelName != "Office VPN" {
 		t.Fatalf("route event = %#v", route)
 	}
+	database, err = openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	// An edit after the prompt opens must not change the configuration bound to its answer.
+	if _, err := database.Exec(`UPDATE Nodes SET TunnelConfigId = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee' WHERE Id = 'node-1'`); err != nil {
+		t.Fatal(err)
+	}
 	go manager.handle(backendCommand{ID: "answer-direct", Action: "tunnel.route-response", SessionID: "lease-direct", PromptID: route.PromptID, Value: "direct"})
 	answer := readTunnelResponse(t, responses, "answer-direct")
 	if !answer.OK {
@@ -479,8 +488,14 @@ INSERT INTO TunnelConfigs (Id, Name, Kind, CreatedAt, UpdatedAt) VALUES
 	if !response.OK || response.SocksEndpoint != "" {
 		t.Fatalf("direct acquire response = %#v", response)
 	}
+	if response.ConfiguredTunnelID == nil || *response.ConfiguredTunnelID != "11111111-2222-3333-4444-555555555555" {
+		t.Fatalf("direct choice lost its original route snapshot: %#v", response)
+	}
 	if starts != 0 {
 		t.Fatalf("direct route started the sidecar %d times", starts)
+	}
+	if _, err := database.Exec(`UPDATE Nodes SET TunnelConfigId = '11111111-2222-3333-4444-555555555555' WHERE Id = 'node-1'`); err != nil {
+		t.Fatal(err)
 	}
 
 	manager.handle(backendCommand{ID: "acquire-tunnel", Action: "tunnel.acquire", SessionID: "lease-tunnel", NodeID: "node-1"})
@@ -490,6 +505,9 @@ INSERT INTO TunnelConfigs (Id, Name, Kind, CreatedAt, UpdatedAt) VALUES
 	response = readTunnelResponse(t, responses, "acquire-tunnel")
 	if !response.OK || response.SocksEndpoint != "127.0.0.1:1080" {
 		t.Fatalf("tunnel acquire response = %#v", response)
+	}
+	if response.ConfiguredTunnelID == nil || *response.ConfiguredTunnelID != "11111111-2222-3333-4444-555555555555" {
+		t.Fatalf("active tunnel lost its configured route snapshot: %#v", response)
 	}
 	if starts != 1 {
 		t.Fatalf("sidecar starts = %d, want 1", starts)
@@ -518,6 +536,14 @@ INSERT INTO TunnelConfigs (Id, Name, Kind, CreatedAt, UpdatedAt) VALUES
 	}
 	if starts != 1 {
 		t.Fatalf("sidecar starts = %d, want 1 (shared sidecar reused)", starts)
+	}
+	if _, err := database.Exec(`UPDATE Nodes SET TunnelEnabled = 0 WHERE Id = 'node-1'`); err != nil {
+		t.Fatal(err)
+	}
+	manager.handle(backendCommand{ID: "acquire-disabled", Action: "tunnel.acquire", SessionID: "lease-disabled", NodeID: "node-1"})
+	response = readTunnelResponse(t, responses, "acquire-disabled")
+	if !response.OK || response.TunnelActive || response.ConfiguredTunnelID == nil || *response.ConfiguredTunnelID != "" {
+		t.Fatalf("disabled route snapshot = %#v", response)
 	}
 }
 

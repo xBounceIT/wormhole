@@ -107,6 +107,7 @@ type sshWireCommand struct {
 	Username                      string                `json:"username"`
 	Password                      string                `json:"password"`
 	TunnelConfigID                string                `json:"tunnel_config_id"`
+	ConfiguredTunnelID            *string               `json:"configured_tunnel_id,omitempty"`
 	SocksEndpoint                 string                `json:"socks_endpoint"`
 	HostKeyExpected               string                `json:"host_key_expected"`
 	HostKeyReceived               string                `json:"host_key_received"`
@@ -846,7 +847,7 @@ func (server *sshServer) openNativeSSH(
 		directTarget, command.CredentialID, command.SocksEndpoint, command.TunnelEnabled,
 		command.UsernameOverride, command.PasswordOverride, command.CredentialOverride,
 		command.UsernameOverrideAuthoritative, command.KeyPassphraseOverride,
-		command.Columns, command.Rows, command.Mode,
+		command.Columns, command.Rows, command.ConfiguredTunnelID, command.Mode,
 	)
 }
 
@@ -3630,6 +3631,7 @@ func openNativeSSH(
 	keyPassphraseOverride string,
 	columns uint32,
 	rows uint32,
+	configuredTunnelID *string,
 	modes ...string,
 ) (*sshNativeSession, sshTarget, error) {
 	isSMB := len(modes) > 0 && modes[0] == "smb"
@@ -3690,6 +3692,15 @@ func openNativeSSH(
 	}
 	defer clearBytes(target.privateKey)
 	defer clearBytes(target.certificate)
+	if nodeID != "" && directTarget == nil {
+		// Validate the snapshot before a Direct override can erase the saved VPN ID.
+		// Standalone Go clients may acquire their own route without delegation.
+		delegated := socksEndpoint != "" || tunnelEnabled != nil
+		if (configuredTunnelID == nil && delegated) ||
+			(configuredTunnelID != nil && *configuredTunnelID != target.tunnelConfigID) {
+			return nil, sshTarget{}, errors.New("the VPN route no longer matches this connection; reconnect to use its current settings")
+		}
+	}
 	if keyPassphraseOverride != "" {
 		target.keyPassphrase = keyPassphraseOverride
 	}

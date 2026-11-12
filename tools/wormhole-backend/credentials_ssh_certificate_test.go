@@ -321,7 +321,7 @@ func TestSSHCertificateErrorsKeepTheCredentialAndClearDialMaterial(t *testing.T)
 	cert, _ := testSSHCertificate(t, signer, ssh.UserCert, 0, uint64(time.Now().Unix()-3600))
 	line := ssh.MarshalAuthorizedKey(cert)
 	target := &sshTarget{credentialID: backupTestKeyID, host: "127.0.0.1", port: 22, username: "operator", privateKey: key, certificate: line}
-	_, _, err := openNativeSSH(context.Background(), "", "", "", target, "", "", nil, "", "", false, false, "", 80, 24)
+	_, _, err := openNativeSSH(context.Background(), "", "", "", target, "", "", nil, "", "", false, false, "", 80, 24, nil)
 	var certificateError *sshCertificateAuthError
 	if !errors.As(err, &certificateError) || certificateError.credentialID != backupTestKeyID || !strings.Contains(err.Error(), "expired") {
 		t.Fatal(err)

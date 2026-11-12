@@ -534,6 +534,109 @@ func TestResolveVncTargetPreservesQuickConnectTunnel(t *testing.T) {
 	}
 }
 
+func TestVncRoutePromptPrecedesBlockedVaultLookup(t *testing.T) {
+	for _, choice := range []string{"cancel", "direct", "tunnel"} {
+		t.Run(choice, func(t *testing.T) {
+			databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+			if err := ensureElectronWorkspaceSchema(databasePath); err != nil {
+				t.Fatal(err)
+			}
+			profile := seedLegacyBitwardenCredential(t, databasePath, credentialCreateRequest{
+				Name: "VNC vault", Protocol: "vnc", Provider: "Bitwarden", BitwardenItemID: "item-1",
+			})
+			database, err := openDatabase(databasePath, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer database.Close()
+			_, err = database.Exec(`
+INSERT INTO Nodes (Id, Name, Kind, Protocol, Host, CredentialId, CredentialMode, TunnelEnabled, TunnelConfigId, CreatedAt, UpdatedAt)
+VALUES ('vnc-node', 'Private VNC', 1, 6, 'vnc.example', ?, 2, 1, '11111111-2222-3333-4444-555555555555', 'now', 'now');
+INSERT INTO TunnelConfigs (Id, Name, Kind, CreatedAt, UpdatedAt)
+VALUES ('11111111-2222-3333-4444-555555555555', 'Stormshield', 4, 'one', 'one');`, profile.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Keep settings current so the legacy migration does not disable the prompt.
+			if err := writePromptBeforeTunnelConnect(databasePath, true); err != nil {
+				t.Fatal(err)
+			}
+			starts := 0
+			previousPool := processTunnelPool
+			processTunnelPool = newTunnelRuntimePool(func(context.Context, tunnelConfigSnapshot) (*tunnelProcess, error) {
+				starts++
+				return nil, errors.New("unexpected VPN start before credential validation")
+			})
+			defer func() { processTunnelPool = previousPool }()
+			reader, writer := io.Pipe()
+			defer writer.Close()
+			manager := newVncManager(database, newBackendLineWriter(writer))
+			manager.databasePath = databasePath
+			defer manager.close()
+			defer reader.Close() // Unblock protocol writes if the latency assertion fails.
+			responses := json.NewDecoder(reader)
+			manager.bitwardenOperationMu.Lock()
+			locked := true
+			defer func() {
+				if locked {
+					manager.bitwardenOperationMu.Unlock()
+				}
+			}()
+			go manager.handle(backendCommand{ID: "connect", Action: "vnc.connect", SessionID: "vnc", NodeID: "vnc-node"})
+			if response := readTunnelResponse(t, responses, "connect"); !response.OK {
+				t.Fatalf("connect = %#v", response)
+			}
+			routeReady := make(chan backendEvent, 1)
+			go func() {
+				for {
+					var event backendEvent
+					if responses.Decode(&event) != nil {
+						return
+					}
+					if event.Type == "tunnel.route" {
+						routeReady <- event
+						return
+					}
+				}
+			}()
+			var route backendEvent
+			select {
+			case route = <-routeReady:
+			case <-time.After(3 * time.Second):
+				t.Fatal("VPN route prompt waited for the blocked vault lookup")
+			}
+			if route.ConnectionName != "Private VNC" || route.TunnelName != "Stormshield" {
+				t.Fatalf("route = %#v", route)
+			}
+			go manager.handle(backendCommand{ID: "answer", Action: "tunnel.route-response", SessionID: "vnc", PromptID: route.PromptID, Value: choice})
+			if response := readTunnelResponse(t, responses, "answer"); !response.OK {
+				t.Fatalf("answer = %#v", response)
+			}
+			manager.bitwardenOperationMu.Unlock()
+			locked = false
+			for {
+				event := readTunnelEvent(t, responses, "vnc.status")
+				if event.Status != "failed" {
+					continue
+				}
+				if choice == "cancel" && !strings.Contains(strings.ToLower(event.Message), "cancelled") {
+					t.Fatalf("cancelled route reached credential lookup: %#v", event)
+				}
+				if choice != "cancel" && !strings.Contains(strings.ToLower(event.Message), "bitwarden") {
+					t.Fatalf("route did not reach the expected vault failure: %#v", event)
+				}
+				break
+			}
+			// Drain the session's failure cleanup before checking whether a sidecar started.
+			go manager.handle(backendCommand{ID: "disconnect", Action: "vnc.disconnect", SessionID: "vnc"})
+			readTunnelResponse(t, responses, "disconnect")
+			if starts != 0 {
+				t.Fatal("credential failure started a VPN sidecar")
+			}
+		})
+	}
+}
+
 func TestResolveVncTargetPreservesSavedTunnelInheritance(t *testing.T) {
 	const tunnelID = "11111111-2222-3333-4444-555555555555"
 	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
