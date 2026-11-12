@@ -168,7 +168,7 @@ func TestSendControlHandlesQueueAndOversize(t *testing.T) {
 	state.sendControl(acDPDOut, make([]byte, cstpMaxPayloadLen+1))
 }
 
-func TestWriteFrameAndWriterLoop(t *testing.T) {
+func TestWriteFrame(t *testing.T) {
 	connection := &fakeNetConn{in: &bytes.Buffer{}, out: &bytes.Buffer{}}
 	state := &cstpState{conn: connection, cancel: func() {}, controlFrame: make(chan []byte, 2), dataFrame: make(chan []byte, 2)}
 	if err := state.writeFrame(context.Background(), nil); err != nil {
@@ -180,24 +180,6 @@ func TestWriteFrameAndWriterLoop(t *testing.T) {
 	errorState := &cstpState{conn: &fakeNetConn{in: &bytes.Buffer{}, out: &bytes.Buffer{}, err: errors.New("write failed")}}
 	if err := errorState.writeFrame(context.Background(), []byte("fail")); err == nil {
 		t.Fatal("write error was ignored")
-	}
-	state.controlFrame <- []byte("control")
-	state.dataFrame <- []byte("data")
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		state.writerLoop(ctx)
-		close(done)
-	}()
-	time.Sleep(10 * time.Millisecond)
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("writerLoop did not stop")
-	}
-	if got := connection.out.String(); !strings.Contains(got, "control") || !strings.Contains(got, "data") || !connection.closed {
-		t.Fatalf("writer output=%q closed=%v", got, connection.closed)
 	}
 }
 

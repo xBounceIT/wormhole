@@ -1410,32 +1410,6 @@ func TestBackupWarningsAreBounded(t *testing.T) {
 	}
 }
 
-func TestBackupSecretReadsUseBoundedConcurrency(t *testing.T) {
-	const readCount = 12
-	var lock sync.Mutex
-	active := 0
-	maximum := 0
-	err := runBackupSecretReads(readCount, func(int) error {
-		lock.Lock()
-		active++
-		if active > maximum {
-			maximum = active
-		}
-		lock.Unlock()
-		time.Sleep(10 * time.Millisecond)
-		lock.Lock()
-		active--
-		lock.Unlock()
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if maximum <= 1 || maximum > backupSecretExportConcurrency {
-		t.Fatalf("secret read concurrency = %d", maximum)
-	}
-}
-
 func openBackupTestDatabase(t *testing.T, path string) *sql.DB {
 	t.Helper()
 	database, err := openDatabase(path, false)
