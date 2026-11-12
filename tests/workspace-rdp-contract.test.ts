@@ -129,9 +129,10 @@ test('Quick Connect classifies Azure AD before resolving any RDP secret', () => 
     mainSource.indexOf("ipcMain.handle('rdp:disconnect'"),
   );
   const requirementIndex = startHandler.indexOf('await resolveRdpExternalClientRequirement');
-  const credentialIndex = startHandler.indexOf(
-    'await resolveNativeRdpCredential(request.profile.credentialId)',
-  );
+  const credentialIndex =
+    /await\s+resolveNativeRdpCredential\(\s*request\.profile\.credentialId\s*,?\s*\)/.exec(
+      startHandler,
+    )?.index ?? -1;
   assert.ok(requirementIndex >= 0 && requirementIndex < credentialIndex);
   assert.match(
     startHandler,

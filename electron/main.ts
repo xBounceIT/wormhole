@@ -4676,31 +4676,39 @@ class WebSurfaceManager {
         owner,
         'Web session was superseded before its VPN tunnel could open.',
       );
-      const targetResult = await runBackend<WebTargetResponse>('web-target', {
-        nodeId: request.nodeId,
-        address: request.address,
-        port: request.port,
-        protocol: request.protocol,
-        ignoreCertErrors: request.ignoreCertErrors,
-        tunnelConfigId: request.tunnelConfigId,
-      });
-      const target = validateWebTarget(targetResult);
+      const resolveTarget = async () =>
+        validateWebTarget(
+          await runBackend<WebTargetResponse>('web-target', {
+            nodeId: request.nodeId,
+            address: request.address,
+            port: request.port,
+            protocol: request.protocol,
+            ignoreCertErrors: request.ignoreCertErrors,
+            tunnelConfigId: request.tunnelConfigId,
+          }),
+        );
+      // Quick Connect has no route-choice prompt; reject invalid destinations before VPN auth.
+      let target = request.nodeId ? undefined : await resolveTarget();
       this.assertOpenCurrent(
         request.sessionId,
         generation,
         owner,
         'Web session was superseded before its VPN tunnel could open.',
       );
-      const logicalTargetUrl = target.url;
+      if (!isAuthorizationEpochCurrent(authorizationEpoch)) {
+        throw new Error('Web session was superseded before its VPN tunnel could open.');
+      }
       let resolvedTunnelRoute: 'direct' | 'socks5' | 'forwarder' = 'direct';
       let tunnel: WebBrowserState['tunnel'];
-      if (target.tunnelConfigId) {
+      let tunnelRoute: Awaited<ReturnType<NativeBackendProcess['acquireTunnelRoute']>> | undefined;
+      // Ask for the route before a one-shot backend process resolves the browser target.
+      if (request.nodeId || request.tunnelConfigId) {
         const leaseId = randomUUID();
         openingLeaseId = leaseId;
         this.tunnelLeases.claim(request.sessionId, leaseId);
         this.tunnelLeaseOwners.set(request.sessionId, owner);
         openingTunnelBackend = getNativeBackend();
-        const tunnelRoute = await openingTunnelBackend.acquireTunnelRoute({
+        tunnelRoute = await openingTunnelBackend.acquireTunnelRoute({
           onExit: () => {
             if (!this.tunnelLeases.isActive(request.sessionId, leaseId)) return;
             const record = this.surfaces.get(request.sessionId);
@@ -4710,17 +4718,36 @@ class WebSurfaceManager {
           },
           leaseId,
           nodeId: request.nodeId,
-          tunnelConfigId: target.tunnelConfigId,
+          tunnelConfigId: request.tunnelConfigId,
           progressSessionId: request.sessionId,
         });
+      }
+      this.assertOpenCurrent(
+        request.sessionId,
+        generation,
+        owner,
+        'Web session was superseded before its target could be resolved.',
+      );
+      if (!isAuthorizationEpochCurrent(authorizationEpoch)) {
+        throw new Error('Web session was superseded before its target could be resolved.');
+      }
+      target ??= await resolveTarget();
+      this.assertOpenCurrent(
+        request.sessionId,
+        generation,
+        owner,
+        'Web session was superseded before its VPN tunnel could open.',
+      );
+      const logicalTargetUrl = target.url;
+      if (tunnelRoute) {
         tunnel = tunnelRoute.tunnel;
         if (tunnelRoute.socksEndpoint) {
           resolvedTunnelRoute = 'socks5';
           target.proxyUrl = `socks5://${tunnelRoute.socksEndpoint}`;
         } else if (tunnelRoute.active) {
           resolvedTunnelRoute = 'forwarder';
-          const forwarder = await openingTunnelBackend.bindTunnelForwarder(
-            leaseId,
+          const forwarder = await openingTunnelBackend!.bindTunnelForwarder(
+            openingLeaseId!,
             target.host,
             target.port,
           );
@@ -7194,6 +7221,7 @@ class NativeSshBackend {
   private readonly retainedMismatchSessions = new Set<string>();
   private readonly tunnelLeases = new TunnelLeaseRegistry();
   private readonly connectionAttempts = new WebSessionAttemptTracker();
+  private readonly closingConnections = new KeyedSingleFlight<string, void>();
   private readonly pendingConnections = new Map<string, number>();
   private readonly openWaiters = new Map<
     string,
@@ -7224,10 +7252,14 @@ class NativeSshBackend {
     ) {
       throw new Error('SSH session id is already in use.');
     }
-    this.terminalOwners.set(request.sessionId, owner);
     const generation = this.connectionAttempts.begin(request.sessionId);
     this.pendingConnections.set(request.sessionId, generation);
     try {
+      await this.closingConnections.waitForIdle(request.sessionId);
+      if (!this.connectionAttempts.isCurrent(request.sessionId, generation)) {
+        throw new Error('SSH connection closed before it could start.');
+      }
+      this.terminalOwners.set(request.sessionId, owner);
       return await this.openCurrent(request, authorizationEpoch, generation);
     } finally {
       if (this.pendingConnections.get(request.sessionId) === generation) {
@@ -7241,24 +7273,6 @@ class NativeSshBackend {
     authorizationEpoch: number,
     generation: number,
   ): Promise<SshConnectedResponse> {
-    let bitwardenCredential: BitwardenResolvedCredential = { bitwarden: false };
-    if ((request.nodeId || request.credentialId) && !request.manualCredentials) {
-      try {
-        bitwardenCredential = await runBitwardenBackend<BitwardenResolvedCredential>(
-          request.credentialId ? 'bitwarden.resolve-credential' : 'bitwarden.resolve-node',
-          request.credentialId
-            ? {
-                credentialId: request.credentialId,
-                protocol: request.mode === 'smb' ? 'smb' : 'ssh',
-              }
-            : { nodeId: request.nodeId, protocol: request.mode === 'smb' ? 'smb' : 'ssh' },
-        );
-      } catch (error) {
-        const message = error instanceof Error ? error.message : 'The vault could not be read.';
-        throw new Error(`Bitwarden credential is unavailable: ${message}`);
-      }
-    }
-    const credentialFields = sshOpenCredentialFields(request, bitwardenCredential);
     if (!this.connectionAttempts.isCurrent(request.sessionId, generation)) {
       throw new Error('SSH connection closed before opening its VPN tunnel.');
     }
@@ -7307,7 +7321,29 @@ class NativeSshBackend {
         }
       }
     }
+    let credentialFields: ReturnType<typeof sshOpenCredentialFields>;
     try {
+      requireAuthorizationEpoch(authorizationEpoch);
+      // Vault access can wait on CLI synchronization; the route choice must precede it.
+      let bitwardenCredential: BitwardenResolvedCredential = { bitwarden: false };
+      if ((request.nodeId || request.credentialId) && !request.manualCredentials) {
+        try {
+          bitwardenCredential = await runBitwardenBackend<BitwardenResolvedCredential>(
+            request.credentialId ? 'bitwarden.resolve-credential' : 'bitwarden.resolve-node',
+            request.credentialId
+              ? {
+                  credentialId: request.credentialId,
+                  protocol: request.mode === 'smb' ? 'smb' : 'ssh',
+                }
+              : { nodeId: request.nodeId, protocol: request.mode === 'smb' ? 'smb' : 'ssh' },
+          );
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'The vault could not be read.';
+          throw new Error(`Bitwarden credential is unavailable: ${message}`);
+        }
+      }
+      credentialFields = sshOpenCredentialFields(request, bitwardenCredential);
+
       if (!this.connectionAttempts.isCurrent(request.sessionId, generation)) {
         throw new Error('SSH connection closed before it could start.');
       }
@@ -7537,31 +7573,36 @@ class NativeSshBackend {
   }
 
   async close(sessionId: string): Promise<void> {
-    // Native resources must still close when retaining a journal fails. Go also
-    // freezes copies on native close, and the existing journal stays recoverable.
-    try {
-      await this.finishEditClose(sessionId);
-    } catch {
-      console.warn('[Wormhole] File edit journal could not be finalized; working copies retained.');
-    }
-    this.terminalDelivery.remove(sessionId);
-    this.terminalOwners.delete(sessionId);
+    // A journal RPC can wait while credentials resolve. Invalidate the open before awaiting it.
     this.connectionAttempts.cancel(sessionId);
-    const waiter = this.openWaiters.get(sessionId);
-    if (waiter) {
-      this.openWaiters.delete(sessionId);
-      clearTimeout(waiter.timeout);
-      waiter.reject(new Error('SSH connection closed while connecting.'));
-    }
-    if (this.child && !this.child.killed) {
+    return this.closingConnections.run(sessionId, async () => {
+      // Native resources must still close when retaining a journal fails. Go also
+      // freezes copies on native close, and the existing journal stays recoverable.
       try {
-        this.write({ type: 'close', session_id: sessionId });
+        await this.finishEditClose(sessionId);
       } catch {
-        // The backend may exit between the state check and the write. The renderer is already
-        // removing this tab, so there is no useful recovery action here.
+        console.warn(
+          '[Wormhole] File edit journal could not be finalized; working copies retained.',
+        );
       }
-    }
-    await this.releaseTunnel(sessionId);
+      this.terminalDelivery.remove(sessionId);
+      this.terminalOwners.delete(sessionId);
+      const waiter = this.openWaiters.get(sessionId);
+      if (waiter) {
+        this.openWaiters.delete(sessionId);
+        clearTimeout(waiter.timeout);
+        waiter.reject(new Error('SSH connection closed while connecting.'));
+      }
+      if (this.child && !this.child.killed) {
+        try {
+          this.write({ type: 'close', session_id: sessionId });
+        } catch {
+          // The backend may exit between the state check and the write. The renderer is already
+          // removing this tab, so there is no useful recovery action here.
+        }
+      }
+      await this.releaseTunnel(sessionId);
+    });
   }
 
   cancelPendingConnections(): void {
@@ -10201,69 +10242,6 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
         return runAuthorizedOperation(
           async (authorizationEpoch) => {
             requireNativeResourcesRunning();
-            let resolvedProfile = request.profile;
-            if (request.profile.nodeId) {
-              try {
-                resolvedProfile = await resolveNativeRdpProfile(
-                  request.profile.nodeId,
-                  request.manualCredentials === true,
-                  request.profile,
-                );
-              } catch (error) {
-                const message =
-                  error instanceof Error ? error.message : 'The RDP profile could not be read.';
-                throw new Error(`RDP profile is unavailable: ${message}`);
-              }
-            } else {
-              resolvedProfile = { ...request.profile };
-              const requiresExternalClient =
-                request.profile.useExternalClient === true ||
-                (await resolveRdpExternalClientRequirement({
-                  username: request.profile.username ?? '',
-                  domain: request.profile.domain ?? '',
-                  credentialId:
-                    request.manualCredentials === true ? undefined : request.profile.credentialId,
-                }));
-              if (requiresExternalClient) {
-                resolvedProfile.useExternalClient = true;
-                delete resolvedProfile.username;
-                delete resolvedProfile.domain;
-                delete resolvedProfile.password;
-                delete resolvedProfile.gatewayUsername;
-                delete resolvedProfile.gatewayPassword;
-              } else {
-                if (request.profile.credentialId && request.manualCredentials !== true) {
-                  const credential = await resolveNativeRdpCredential(request.profile.credentialId);
-                  resolvedProfile.username = credential.username;
-                  resolvedProfile.domain = credential.domain;
-                  resolvedProfile.password = credential.password;
-                }
-                const gatewayCredentialId = rdpGatewayCredentialIdForResolution(request.profile);
-                if (request.profile.gatewayUsageMethod && request.profile.gatewayUseSameCreds) {
-                  resolvedProfile.gatewayUsername = rdpGatewayUsername(
-                    resolvedProfile.username,
-                    resolvedProfile.domain,
-                  );
-                  resolvedProfile.gatewayPassword = resolvedProfile.password;
-                } else if (gatewayCredentialId) {
-                  let gateway: BitwardenResolvedCredential;
-                  try {
-                    gateway = await resolveNativeRdpCredential(gatewayCredentialId);
-                  } catch (error) {
-                    const message =
-                      error instanceof Error ? error.message : 'credential resolution failed';
-                    throw new Error(`RDP Gateway credential is unavailable: ${message}`);
-                  }
-                  resolvedProfile.gatewayUsername = rdpGatewayUsername(
-                    gateway.username,
-                    gateway.domain,
-                  );
-                  resolvedProfile.gatewayPassword = gateway.password;
-                }
-              }
-              delete resolvedProfile.credentialId;
-              delete resolvedProfile.gatewayCredentialId;
-            }
             assertRdpStartCurrent(request.sessionId, requestAttempt);
             if (client.hasSession(request.sessionId)) {
               throw new Error('RDP session is already running.');
@@ -10286,7 +10264,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
             rdpConnectingLifecycles.set(lifecycleId, request.sessionId);
             try {
               let socksEndpoint = '';
-              if (resolvedProfile.nodeId || resolvedProfile.tunnelConfigId) {
+              if (request.profile.nodeId || request.profile.tunnelConfigId) {
                 const leaseId = randomUUID();
                 rdpTunnelLeases.claim(lifecycleId, leaseId);
                 rdpTunnelLeaseSessions.set(lifecycleId, request.sessionId);
@@ -10316,8 +10294,8 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
                       ).catch(() => undefined);
                     },
                     leaseId,
-                    nodeId: resolvedProfile.nodeId,
-                    tunnelConfigId: resolvedProfile.tunnelConfigId,
+                    nodeId: request.profile.nodeId,
+                    tunnelConfigId: request.profile.tunnelConfigId,
                     progressSessionId: request.sessionId,
                   });
                 } catch (error) {
@@ -10326,7 +10304,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
                     error instanceof Error ? error.message : 'VPN tunnel establishment failed.';
                   throw new Error(`RDP VPN tunnel is unavailable: ${message}`);
                 }
-                if (!canProceedWithRdpTunnelRoute(resolvedProfile, route)) {
+                if (!canProceedWithRdpTunnelRoute(request.profile, route)) {
                   await releaseRdpTunnel(lifecycleId);
                   throw new Error('RDP VPN tunnel returned an invalid route.');
                 }
@@ -10336,6 +10314,73 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
                   throw new Error('RDP connection closed while opening its VPN tunnel.');
                 }
                 if (!socksEndpoint) await releaseRdpTunnel(lifecycleId);
+              }
+              requireAuthorizationEpoch(authorizationEpoch);
+              // Resolving a saved profile can read the vault, including gateway credentials.
+              let resolvedProfile = request.profile;
+              if (request.profile.nodeId) {
+                try {
+                  resolvedProfile = await resolveNativeRdpProfile(
+                    request.profile.nodeId,
+                    request.manualCredentials === true,
+                    request.profile,
+                  );
+                } catch (error) {
+                  const message =
+                    error instanceof Error ? error.message : 'The RDP profile could not be read.';
+                  throw new Error(`RDP profile is unavailable: ${message}`);
+                }
+              } else {
+                resolvedProfile = { ...request.profile };
+                const requiresExternalClient =
+                  request.profile.useExternalClient === true ||
+                  (await resolveRdpExternalClientRequirement({
+                    username: request.profile.username ?? '',
+                    domain: request.profile.domain ?? '',
+                    credentialId:
+                      request.manualCredentials === true ? undefined : request.profile.credentialId,
+                  }));
+                if (requiresExternalClient) {
+                  resolvedProfile.useExternalClient = true;
+                  delete resolvedProfile.username;
+                  delete resolvedProfile.domain;
+                  delete resolvedProfile.password;
+                  delete resolvedProfile.gatewayUsername;
+                  delete resolvedProfile.gatewayPassword;
+                } else {
+                  if (request.profile.credentialId && request.manualCredentials !== true) {
+                    const credential = await resolveNativeRdpCredential(
+                      request.profile.credentialId,
+                    );
+                    resolvedProfile.username = credential.username;
+                    resolvedProfile.domain = credential.domain;
+                    resolvedProfile.password = credential.password;
+                  }
+                  const gatewayCredentialId = rdpGatewayCredentialIdForResolution(request.profile);
+                  if (request.profile.gatewayUsageMethod && request.profile.gatewayUseSameCreds) {
+                    resolvedProfile.gatewayUsername = rdpGatewayUsername(
+                      resolvedProfile.username,
+                      resolvedProfile.domain,
+                    );
+                    resolvedProfile.gatewayPassword = resolvedProfile.password;
+                  } else if (gatewayCredentialId) {
+                    let gateway: BitwardenResolvedCredential;
+                    try {
+                      gateway = await resolveNativeRdpCredential(gatewayCredentialId);
+                    } catch (error) {
+                      const message =
+                        error instanceof Error ? error.message : 'credential resolution failed';
+                      throw new Error(`RDP Gateway credential is unavailable: ${message}`);
+                    }
+                    resolvedProfile.gatewayUsername = rdpGatewayUsername(
+                      gateway.username,
+                      gateway.domain,
+                    );
+                    resolvedProfile.gatewayPassword = gateway.password;
+                  }
+                }
+                delete resolvedProfile.credentialId;
+                delete resolvedProfile.gatewayCredentialId;
               }
               if (!isAuthorizationEpochCurrent(authorizationEpoch)) {
                 await releaseRdpTunnel(lifecycleId);

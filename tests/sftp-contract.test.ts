@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { stripTypeScriptTypes } from 'node:module';
+import { KeyedSingleFlight } from '../electron/keyed-single-flight.ts';
 import { isFileBrowserProtocol } from '../src/file-protocol.ts';
 import { parseWorkspaceNotes } from '../electron/workspace-notes.ts';
 import { parseWorkspaceRdpSettings } from '../electron/workspace-rdp-contract.ts';
@@ -132,6 +133,7 @@ test('failed edit finalization still disconnects SSH and releases its route', as
         terminalDelivery: { remove: () => calls.push('delivery') },
         terminalOwners: new Map(),
         connectionAttempts: { cancel: () => calls.push('cancel') },
+        closingConnections: new KeyedSingleFlight<string, void>(),
         openWaiters: new Map(),
         child: { killed: false },
         write: (command: { type: string }) => calls.push(command.type),
@@ -139,7 +141,7 @@ test('failed edit finalization still disconnects SSH and releases its route', as
       },
       'session',
     );
-    assert.deepEqual(calls, ['delivery', 'cancel', 'close', 'release']);
+    assert.deepEqual(calls, ['cancel', 'delivery', 'close', 'release']);
   } finally {
     console.warn = originalWarn;
   }

@@ -472,6 +472,64 @@ function browserHarness({ socks = '127.0.0.1:1080', active = true } = {}) {
   };
 }
 
+test('saved web connections request their VPN route before resolving a slow target', async () => {
+  const h = browserHarness();
+  const runBackend = h.sandbox.runBackend;
+  let finishRoute!: (value: any) => void;
+  let resolveTarget!: () => void;
+  let targetStarted = false;
+  h.backend.acquireTunnelRoute = async (request: unknown) => {
+    h.acquisitions.push(request);
+    return new Promise((resolve) => {
+      finishRoute = resolve;
+    });
+  };
+  h.sandbox.runBackend = async (action: string, request: any) => {
+    if (action === 'web-target') {
+      targetStarted = true;
+      await new Promise<void>((resolve) => {
+        resolveTarget = resolve;
+      });
+    }
+    return runBackend(action, request);
+  };
+  const pending = h.open('browser-1', undefined, { nodeId: 'saved' });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(h.acquisitions.length, 1);
+  assert.equal(targetStarted, false);
+  finishRoute({ active: true, socksEndpoint: '127.0.0.1:1080' });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(targetStarted, true);
+  assert.equal(h.children.size, 0);
+  resolveTarget();
+  await pending;
+  h.manager.close('browser-1');
+
+  const failed = browserHarness();
+  failed.sandbox.runBackend = async () => {
+    throw new Error('target unavailable');
+  };
+  await assert.rejects(
+    failed.open('browser-1', undefined, { nodeId: 'saved' }),
+    /target unavailable/,
+  );
+  assert.equal(failed.releases.length, 1);
+  assert.equal(failed.children.size, 0);
+
+  const locked = browserHarness();
+  let targetCalls = 0;
+  locked.backend.acquireTunnelRoute = async () => {
+    locked.authSession.authorizationEpoch++;
+    return { active: true, socksEndpoint: '127.0.0.1:1080' };
+  };
+  locked.sandbox.runBackend = async () => {
+    targetCalls++;
+  };
+  await assert.rejects(locked.open('browser-1', undefined, { nodeId: 'saved' }), /superseded/);
+  assert.equal(targetCalls, 0);
+  assert.equal(locked.releases.length, 1);
+});
+
 test('native tunnel acquisition bounds display metadata and preserves backend failures', async () => {
   const source = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
   const start = source.indexOf('  async acquireTunnelRoute(');
@@ -518,6 +576,16 @@ test('native tunnel acquisition bounds display metadata and preserves backend fa
     });
   }
   assert.equal(watched.length, 5);
+});
+
+test('invalid Quick Connect web targets never authenticate or start a VPN', async () => {
+  const h = browserHarness();
+  h.sandbox.runBackend = async () => {
+    throw new Error('web address is invalid');
+  };
+  await assert.rejects(h.open(), /web address is invalid/);
+  assert.equal(h.acquisitions.length, 0);
+  assert.equal(h.children.size, 0);
 });
 
 test('browser route metadata survives tab commands for saved and temporary connections', async () => {

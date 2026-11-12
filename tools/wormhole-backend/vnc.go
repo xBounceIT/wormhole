@@ -897,6 +897,34 @@ func (s *vncSession) connect(command backendCommand, database *sql.DB, electronU
 		s.fail(err)
 		return
 	}
+	if target.tunnelConfigID != "" {
+		if target.nodeID != "" {
+			useTunnel, promptErr := readPromptBeforeTunnelConnect(s.manager.databasePath)
+			if promptErr != nil {
+				s.fail(promptErr)
+				return
+			}
+			if useTunnel {
+				connectionName := target.displayName
+				if connectionName == "" {
+					connectionName = "the target"
+				}
+				route, routeErr := s.manager.routeTunnel(
+					s.id,
+					s.id,
+					connectionName,
+					tunnelConfigName(s.manager.databasePath, target.tunnelConfigID),
+				)(connectContext)
+				if routeErr != nil {
+					s.fail(routeErr)
+					return
+				}
+				if route == "direct" {
+					target.tunnelConfigID = ""
+				}
+			}
+		}
+	}
 	passwordProvided := command.PasswordProvided || command.Password != ""
 	if target.password == "" && !passwordProvided && database != nil {
 		credentialID := command.CredentialID
@@ -938,34 +966,6 @@ func (s *vncSession) connect(command backendCommand, database *sql.DB, electronU
 	s.emitStatus("connecting", "", false)
 
 	var tunnel *tunnelRuntime
-	if target.tunnelConfigID != "" {
-		if target.nodeID != "" {
-			useTunnel, promptErr := readPromptBeforeTunnelConnect(s.manager.databasePath)
-			if promptErr != nil {
-				s.fail(promptErr)
-				return
-			}
-			if useTunnel {
-				connectionName := target.displayName
-				if connectionName == "" {
-					connectionName = "the target"
-				}
-				route, routeErr := s.manager.routeTunnel(
-					s.id,
-					s.id,
-					connectionName,
-					tunnelConfigName(s.manager.databasePath, target.tunnelConfigID),
-				)(connectContext)
-				if routeErr != nil {
-					s.fail(routeErr)
-					return
-				}
-				if route == "direct" {
-					target.tunnelConfigID = ""
-				}
-			}
-		}
-	}
 	if target.tunnelConfigID != "" {
 		progressContext := withTunnelProgressHandler(connectContext, s.manager.progressTunnel(s.id))
 		promptContext := withTunnelPromptHandler(progressContext, s.manager.promptTunnel(s.id))
