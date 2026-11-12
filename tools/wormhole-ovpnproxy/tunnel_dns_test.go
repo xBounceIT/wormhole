@@ -142,6 +142,66 @@ func TestTunnelDNSPreservesPushedAnswersAndPrivateNames(t *testing.T) {
 	}
 }
 
+func TestTunnelDNSFallsBackWhenPushedAnswersHaveNoRoutableAddress(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		primary []string
+		v6      bool
+	}{
+		{"IPv4 tunnel", []string{"2001:db8::50"}, false},
+		{"IPv6 tunnel", []string{"192.0.2.50"}, true},
+		{"IPv4 mapped on IPv6 tunnel", []string{"::ffff:192.0.2.50"}, true},
+		{"invalid addresses", []string{"not-an-ip", "fe80::1%eth0"}, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			queried := false
+			resolver := tunnelDNSResolver{fallback: true, hasV4: !test.v6, hasV6: test.v6,
+				primary: func(context.Context, string) ([]string, error) { return test.primary, nil },
+				tunnel: tunnelDNSPeer(t, func(_ string, q dnsmessage.Question) dnsmessage.Message {
+					queried = true
+					return tunnelDNSAnswer(q)
+				}),
+			}
+			want := "192.0.2.20"
+			if test.v6 {
+				want = "2001:db8::14"
+			}
+			addrs, err := resolver.LookupContextHost(context.Background(), "images.example.com")
+			if err != nil || !reflect.DeepEqual(addrs, []string{want}) || !queried {
+				t.Fatalf("unusable pushed DNS prevented fallback: %v, %v (public queried=%v)", addrs, err, queried)
+			}
+		})
+	}
+}
+
+func TestTunnelDNSKeepsOnlyRoutablePrimaryAnswersWithoutMutatingThem(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		primary []string
+		v6      bool
+		want    []string
+	}{
+		{"IPv4", []string{"2001:db8::50", "10.0.0.20", "invalid"}, false, []string{"10.0.0.20"}},
+		{"IPv6", []string{"192.0.2.50", "2001:db8::50"}, true, []string{"2001:db8::50"}},
+		{"IPv4 mapped", []string{"::ffff:192.0.2.50"}, false, []string{"::ffff:192.0.2.50"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			original := append([]string(nil), test.primary...)
+			resolver := tunnelDNSResolver{fallback: true, hasV4: !test.v6, hasV6: test.v6,
+				primary: func(context.Context, string) ([]string, error) { return test.primary, nil },
+				tunnel: tunnelDNSDialFunc(func(context.Context, string, string) (net.Conn, error) {
+					t.Error("usable pushed DNS answer sent to public DNS")
+					return nil, errors.New("unexpected query")
+				}),
+			}
+			addrs, err := resolver.LookupContextHost(context.Background(), "images.example.com")
+			if err != nil || !reflect.DeepEqual(addrs, test.want) || !reflect.DeepEqual(test.primary, original) {
+				t.Fatalf("primary address filtering = %v, %v; input = %v", addrs, err, test.primary)
+			}
+		})
+	}
+}
+
 func TestTunnelDNSRetriesPublicServerAndMatchesTunnelFamily(t *testing.T) {
 	for _, v6 := range []bool{false, true} {
 		t.Run(map[bool]string{false: "IPv4", true: "IPv6"}[v6], func(t *testing.T) {

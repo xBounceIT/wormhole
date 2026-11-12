@@ -42,8 +42,21 @@ func (r tunnelDNSResolver) LookupContextHost(ctx context.Context, host string) (
 		}
 		addrs, err := r.primary(primaryCtx, host)
 		cancel()
-		if err == nil && len(addrs) > 0 {
-			return addrs, nil
+		if err == nil {
+			var routable []string
+			for _, address := range addrs {
+				ip := net.ParseIP(address)
+				if ip == nil {
+					continue
+				}
+				isV4 := ip.To4() != nil
+				if isV4 && r.hasV4 || !isV4 && r.hasV6 {
+					routable = append(routable, address)
+				}
+			}
+			if len(routable) > 0 {
+				return routable, nil
+			}
 		}
 		primaryErr = err
 	}
