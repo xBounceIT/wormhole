@@ -461,6 +461,9 @@ test('RDP preserves direct, manual, external-client and gateway credential flows
   const active = harness('rdp');
   active.client.hasSession = () => true;
   await assert.rejects(active.open(), /already running/);
+  assert.ok(!active.trace.includes('route'));
+  assert.ok(!active.trace.includes('credentials'));
+  assert.ok(!active.trace.includes('disconnect'));
 });
 
 test('RDP tears down failed or superseded native starts and ignores retired tunnel callbacks', async () => {
