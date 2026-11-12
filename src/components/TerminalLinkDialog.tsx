@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
 import { Button } from './ui/button';
-import { useNativeSurfaceOverlay } from './ui/context-menu';
 import {
   Dialog,
   DialogContent,
@@ -23,7 +22,6 @@ export function TerminalLinkDialog({
   const mounted = useRef(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  useNativeSurfaceOverlay(true);
   useEffect(() => {
     mounted.current = true;
     return () => {

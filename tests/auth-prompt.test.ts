@@ -283,6 +283,10 @@ test('authentication prompts and window-close controls work in Chromium', async 
     new URL('../src/dialog-lifecycle.ts', import.meta.url),
     'utf8',
   ).replace(/^export /gm, '');
+  const overlay = readFileSync(
+    new URL('../src/components/ui/context-menu.tsx', import.meta.url),
+    'utf8',
+  );
   const startupSource = readFileSync(new URL('../src/main.tsx', import.meta.url), 'utf8');
   const cardStart = startupSource.indexOf('function renderCard');
   const cardEnd = startupSource.indexOf('async function mountWorkspace', cardStart);
@@ -321,7 +325,15 @@ test('authentication prompts and window-close controls work in Chromium', async 
     }
   `;
   const transformed = await transformWithOxc(
-    dialogLifecycle +
+    readFileSync(
+      new URL('../src/native-surface-overlay-state.ts', import.meta.url),
+      'utf8',
+    ).replace(/^export /gm, '') +
+      overlay.slice(
+        overlay.indexOf('type ContextMenuOverlayContextValue'),
+        overlay.indexOf('function ContextMenu({'),
+      ) +
+      dialogLifecycle +
       dialogSource +
       ['input', 'button', 'password-input']
         .map((name) => {

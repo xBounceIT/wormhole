@@ -893,6 +893,42 @@ test('late overlay captures cannot reveal a locked, resumed, closed or replaced 
   }
 });
 
+test(
+  'stalled overlay captures hide the page and late results cannot hide a resumed session',
+  { timeout: 5000 },
+  async () => {
+    const h = browserHarness();
+    await h.open();
+    const record = h.manager.surfaces.get('browser-1');
+    const view = record.view;
+    const bounds = { sessionId: 'browser-1', x: 0, y: 0, width: 900, height: 600, visible: true };
+    for (const outcome of ['success', 'failure']) {
+      await h.manager.setBounds(h.owner, bounds);
+      let resolveCapture: (value: unknown) => void;
+      let rejectCapture: (error: Error) => void;
+      view.webContents.capturePage = () =>
+        new Promise((resolve, reject) => {
+          resolveCapture = resolve;
+          rejectCapture = reject;
+        });
+      const preview = h.manager.setBounds(h.owner, {
+        ...bounds,
+        visible: false,
+        capturePreview: true,
+        previewId: randomUUID(),
+      });
+      assert.equal(await preview, undefined);
+      assert.equal(view.visible, false, 'a stalled compositor must release the dialog');
+      await h.manager.setBounds(h.owner, bounds);
+      if (outcome === 'failure') rejectCapture!(new Error('Late capture failure'));
+      else resolveCapture!({ isEmpty: () => false });
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(view.visible, true, 'late captures must not hide the resumed session');
+      assert.equal(record.preview, undefined);
+    }
+  },
+);
+
 test('overlay captures bound image dimensions and IPC payloads and tolerate empty or failed captures', async () => {
   const h = browserHarness();
   await h.open();

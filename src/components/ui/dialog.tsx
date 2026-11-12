@@ -3,6 +3,7 @@ import { Dialog as DialogPrimitive } from 'radix-ui';
 
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
+import { useNativeSurfaceOverlay } from '@/components/ui/context-menu';
 import { XIcon } from 'lucide-react';
 import { selectDialogVisuals } from '@/dialog-lifecycle';
 
@@ -21,6 +22,7 @@ function Dialog({
   const [uncontrolledOpen, setUncontrolledOpen] = React.useState(defaultOpen ?? false);
   const controlled = controlledOpen !== undefined;
   const open = controlled ? controlledOpen : uncontrolledOpen;
+  useNativeSurfaceOverlay(open);
 
   return (
     <DialogOpenContext.Provider value={open}>

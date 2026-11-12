@@ -24,10 +24,19 @@ test('Bitwarden operation dialogs contain long messages and keep Close reachable
     return source.slice(start, end);
   };
   const transformed = await transformWithOxc(
-    readFileSync(new URL('../src/dialog-lifecycle.ts', import.meta.url), 'utf8').replace(
-      /^export /gm,
-      '',
-    ) +
+    readFileSync(
+      new URL('../src/native-surface-overlay-state.ts', import.meta.url),
+      'utf8',
+    ).replace(/^export /gm, '') +
+      section(
+        '../src/components/ui/context-menu.tsx',
+        'type ContextMenuOverlayContextValue',
+        'function ContextMenu({',
+      ) +
+      readFileSync(new URL('../src/dialog-lifecycle.ts', import.meta.url), 'utf8').replace(
+        /^export /gm,
+        '',
+      ) +
       section('../src/components/ui/button.tsx', 'const buttonVariants', 'export {') +
       section('../src/components/ui/dialog.tsx', 'const DialogOpenContext', 'export {') +
       section('../src/App.tsx', 'function BitwardenOperationDialog(', 'const mcpTokenPlaceholder'),

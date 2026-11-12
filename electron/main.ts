@@ -5085,18 +5085,25 @@ class WebSurfaceManager {
   }
 
   private async capturePreview(view: WebContentsView): Promise<string | undefined> {
+    let timeout: ReturnType<typeof setTimeout> | undefined;
     try {
       const bounds = view.getBounds();
-      const image = await view.webContents.capturePage(
-        {
-          x: 0,
-          y: 0,
-          width: Math.min(bounds.width, 4096),
-          height: Math.min(bounds.height, 4096),
-        },
-        { stayHidden: true },
-      );
-      if (image.isEmpty()) return;
+      const image = await Promise.race([
+        view.webContents.capturePage(
+          {
+            x: 0,
+            y: 0,
+            width: Math.min(bounds.width, 4096),
+            height: Math.min(bounds.height, 4096),
+          },
+          { stayHidden: true },
+        ),
+        new Promise<undefined>((resolve) => {
+          // A stalled compositor must not keep the native page above a renderer dialog.
+          timeout = setTimeout(() => resolve(undefined), 250);
+        }),
+      ]);
+      if (!image || image.isEmpty()) return;
       const size = image.getSize();
       const scale = Math.min(1, 2048 / Math.max(size.width, size.height));
       const bounded =
@@ -5107,6 +5114,8 @@ class WebSurfaceManager {
     } catch {
       // Closing or crashing a tab during capture must not leave a native view over the menu.
       return;
+    } finally {
+      clearTimeout(timeout);
     }
   }
 
