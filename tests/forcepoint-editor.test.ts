@@ -51,6 +51,8 @@ test('VPN editors align paired controls and Forcepoint displays certificate conf
   const transformed = await transformWithOxc(
     `
     ${read('../src/dialog-lifecycle.ts').replace(/^export /gm, '')}
+    ${read('../src/native-surface-overlay-state.ts').replace(/^export /gm, '')}
+    ${section(read('../src/components/ui/context-menu.tsx'), 'type ContextMenuOverlayContextValue', 'function ContextMenu({')}
     ${controls}
     ${read('../src/fortinet-ipsec-state.ts').replace(/^export /gm, '')}
     ${section(app, 'function tunnelEditorFields(', 'function tunnelDefaultSettings(')}

@@ -105,8 +105,20 @@ test('MCP dialog renders request contents as selectable text with bounded scroll
   const dialog = readFileSync(new URL('../src/components/ui/dialog.tsx', import.meta.url), 'utf8');
   const lifecycle = readFileSync(new URL('../src/dialog-lifecycle.ts', import.meta.url), 'utf8');
   const fixture = readFileSync(new URL('./fixtures/mcp-approval.tsx', import.meta.url), 'utf8');
+  const overlay = readFileSync(
+    new URL('../src/components/ui/context-menu.tsx', import.meta.url),
+    'utf8',
+  );
   const transformed = await transformWithOxc(
-    lifecycle.replace(/^export /gm, '') +
+    readFileSync(
+      new URL('../src/native-surface-overlay-state.ts', import.meta.url),
+      'utf8',
+    ).replace(/^export /gm, '') +
+      overlay.slice(
+        overlay.indexOf('type ContextMenuOverlayContextValue'),
+        overlay.indexOf('function ContextMenu({'),
+      ) +
+      lifecycle.replace(/^export /gm, '') +
       dialog.slice(dialog.indexOf('const DialogOpenContext'), dialog.lastIndexOf('export {')) +
       approval.slice(start).replace('export function', 'function') +
       fixture,
