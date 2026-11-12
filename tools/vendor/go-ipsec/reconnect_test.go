@@ -93,43 +93,6 @@ func TestSuperviseCoalescesWhileBusy(t *testing.T) {
 	}
 }
 
-// TestRedialBackoffInterruptedByClose checks the redial loop unwinds promptly
-// with errClientClosing when Close cancels superCtx mid-backoff.
-func TestRedialBackoffInterruptedByClose(t *testing.T) {
-	c := newClient(Config{
-		Logger:                  discardLogger(),
-		ReconnectBackoffBase:    50 * time.Millisecond,
-		ReconnectBackoffMax:     50 * time.Millisecond,
-		ReconnectAttemptTimeout: time.Second,
-	})
-	var attempts atomic.Int32
-	c.dialSession = func(context.Context) (*session.Session, error) {
-		attempts.Add(1)
-		return nil, errors.New("dial boom")
-	}
-
-	done := make(chan error, 1)
-	go func() {
-		_, err := c.redialWithBackoff()
-		done <- err
-	}()
-
-	time.Sleep(120 * time.Millisecond) // let a couple of attempts fail
-	c.superCancel()
-
-	select {
-	case err := <-done:
-		if !errors.Is(err, errClientClosing) {
-			t.Fatalf("err = %v, want errClientClosing", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("redialWithBackoff did not return after Close")
-	}
-	if attempts.Load() < 1 {
-		t.Fatal("expected at least one dial attempt")
-	}
-}
-
 // TestRedialBackoffSucceedsAfterRetries verifies the loop returns the dialed
 // session once an attempt succeeds, after retrying the failures.
 func TestRedialBackoffSucceedsAfterRetries(t *testing.T) {

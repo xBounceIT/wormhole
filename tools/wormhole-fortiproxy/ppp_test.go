@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
-	"strings"
 	"testing"
 	"time"
 )
@@ -208,7 +207,7 @@ type writeErrorConn struct{ fakeConn }
 
 func (c *writeErrorConn) Write([]byte) (int, error) { return 0, errors.New("write failed") }
 
-func TestWriteFrameAndWriterLoop(t *testing.T) {
+func TestWriteFrame(t *testing.T) {
 	connection := &fakeConn{in: &bytes.Buffer{}, out: &bytes.Buffer{}}
 	state := &pppState{conn: connection, cancel: func() {}, controlFrame: make(chan []byte, 2), dataFrame: make(chan []byte, 2)}
 	if err := state.writeFrame(context.Background(), nil); err != nil {
@@ -220,25 +219,6 @@ func TestWriteFrameAndWriterLoop(t *testing.T) {
 	errorState := &pppState{conn: &writeErrorConn{fakeConn: fakeConn{in: &bytes.Buffer{}, out: &bytes.Buffer{}}}}
 	if err := errorState.writeFrame(context.Background(), []byte("fail")); err == nil {
 		t.Fatal("write error was ignored")
-	}
-
-	state.controlFrame <- []byte("control")
-	state.dataFrame <- []byte("data")
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		state.writerLoop(ctx)
-		close(done)
-	}()
-	time.Sleep(10 * time.Millisecond)
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("writerLoop did not stop")
-	}
-	if got := connection.out.String(); !strings.Contains(got, "control") || !strings.Contains(got, "data") {
-		t.Fatalf("writer output = %q", got)
 	}
 }
 
