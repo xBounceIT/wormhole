@@ -294,13 +294,13 @@ func TestSMBDialLifecycleAndFailClosed(t *testing.T) {
 		return smbTestFS{root: root}, func(ctx context.Context) error { return ctx.Err() }, nil
 	}
 	target := sshTarget{credentialProtocol: smbProtocolValue, host: "smb://127.0.0.1/share", port: port, username: `CORP\user`, password: "test-password"}
-	native, _, err := openNativeSSH(context.Background(), "", "", "", &target, "", "", nil, "", "", false, false, "", 80, 24, "smb")
+	native, _, err := openNativeSSH(context.Background(), "", "", "", &target, "", "", nil, "", "", false, false, "", 80, 24, nil, "smb")
 	require.NoError(t, err)
 	require.NotNil(t, native.smb)
 	require.NoError(t, native.smb.checkAlive())
 	native.close(false)
 	require.Error(t, native.smb.checkAlive())
-	_, _, err = openNativeSSH(context.Background(), "", "", "", &target, "", "", nil, "", "", false, false, "", 80, 24, "terminal")
+	_, _, err = openNativeSSH(context.Background(), "", "", "", &target, "", "", nil, "", "", false, false, "", 80, 24, nil, "terminal")
 	require.ErrorContains(t, err, "protocol")
 	target.socksEndpoint = "127.0.0.1:1"
 	_, err = dialNativeSMB(context.Background(), target, nil)

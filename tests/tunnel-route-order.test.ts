@@ -119,11 +119,6 @@ function harness(protocol: 'ssh' | 'rdp', extra: Record<string, any> = {}) {
     },
   };
   const backend = {
-    acquireTunnel: async (request: any) => {
-      trace.push('route');
-      onExit = request.onExit;
-      return '127.0.0.1:1080';
-    },
     acquireTunnelRoute: async (request: any) => {
       trace.push('route');
       onExit = request.onExit;
@@ -258,8 +253,7 @@ for (const protocol of ['ssh', 'rdp'] as const) {
     const h = harness(protocol);
     const route = deferred<any>();
     const credentials = deferred<any>();
-    const acquire = protocol === 'ssh' ? 'acquireTunnel' : 'acquireTunnelRoute';
-    h.backend[acquire] = async () => {
+    h.backend.acquireTunnelRoute = async () => {
       h.trace.push('route');
       return route.promise;
     };
@@ -272,11 +266,7 @@ for (const protocol of ['ssh', 'rdp'] as const) {
     await tick();
     assert.ok(h.trace.includes('route'));
     assert.ok(!h.trace.includes('credentials'));
-    route.resolve(
-      protocol === 'ssh'
-        ? '127.0.0.1:1080'
-        : { active: true, socksEndpoint: '127.0.0.1:1080', configuredTunnelId: 'vpn-1' },
-    );
+    route.resolve({ active: true, socksEndpoint: '127.0.0.1:1080', configuredTunnelId: 'vpn-1' });
     await tick();
     assert.ok(h.trace.includes('credentials'));
     assert.ok(!h.trace.includes('connect'));
@@ -289,7 +279,7 @@ for (const protocol of ['ssh', 'rdp'] as const) {
     assert.ok(h.trace.includes('connect'));
 
     const cancelled = harness(protocol);
-    cancelled.backend[acquire] = async () => {
+    cancelled.backend.acquireTunnelRoute = async () => {
       throw new Error('Connection cancelled');
     };
     await assert.rejects(cancelled.open(), /cancelled/);
@@ -297,11 +287,9 @@ for (const protocol of ['ssh', 'rdp'] as const) {
     assert.ok(cancelled.trace.includes('release'));
 
     const locked = harness(protocol);
-    locked.backend[acquire] = async () => {
+    locked.backend.acquireTunnelRoute = async () => {
       locked.lock();
-      return protocol === 'ssh'
-        ? '127.0.0.1:1080'
-        : { active: true, socksEndpoint: '127.0.0.1:1080' };
+      return { active: true, socksEndpoint: '127.0.0.1:1080', configuredTunnelId: 'vpn-1' };
     };
     await assert.rejects(locked.open(), /locked/);
     assert.ok(!locked.trace.includes('credentials'));
@@ -332,16 +320,20 @@ test('SSH keeps direct/manual connections and fails closed on missing or cancell
   await harness('ssh').open({ credentialId: 'selected', mode: 'smb' });
   for (const saved of [true, false]) {
     const h = harness('ssh');
-    h.backend.acquireTunnel = async () => '';
+    h.backend.acquireTunnelRoute = async () => ({
+      active: false,
+      socksEndpoint: '',
+      configuredTunnelId: '',
+    });
     if (saved) await h.open();
     else await assert.rejects(h.open({ tunnelConfigId: 'vpn' }), /no SOCKS endpoint/);
   }
   const stale = harness('ssh');
   await assert.rejects(stale.ssh.openCurrent({ sessionId: 'session' }, 1, -1), /closed before/);
   const lost = harness('ssh');
-  lost.backend.acquireTunnel = async () => {
+  lost.backend.acquireTunnelRoute = async () => {
     lost.attempts.cancel('session');
-    return 'endpoint';
+    return { active: true, socksEndpoint: 'endpoint', configuredTunnelId: 'vpn-1' };
   };
   await assert.rejects(lost.open(), /closed while/);
   const failed = harness('ssh');
@@ -350,6 +342,33 @@ test('SSH keeps direct/manual connections and fails closed on missing or cancell
   };
   await assert.rejects(failed.open(), /service unavailable/);
   assert.ok(failed.trace.includes('release'));
+});
+
+test('SSH forwards the acquired saved-route snapshot after a pending vault lookup', async () => {
+  for (const mode of ['terminal', 'sftp', 'smb']) {
+    for (const route of [
+      { active: false, socksEndpoint: '', configuredTunnelId: '' },
+      { active: false, socksEndpoint: '', configuredTunnelId: 'vpn-old' },
+      { active: true, socksEndpoint: '127.0.0.1:1080', configuredTunnelId: 'vpn-old' },
+    ]) {
+      const h = harness('ssh');
+      const credentials = deferred<any>();
+      h.backend.acquireTunnelRoute = async () => route;
+      h.sandbox.runBitwardenBackend = () => credentials.promise;
+      let command: any;
+      h.ssh.write = (request: any) => {
+        command = request;
+      };
+      const pending = h.open({ nodeId: 'node', mode });
+      await tick();
+      assert.equal(command, undefined);
+      credentials.resolve({ bitwarden: false });
+      await pending;
+      assert.equal(command.configured_tunnel_id, route.configuredTunnelId);
+      assert.equal(command.socks_endpoint, route.socksEndpoint);
+      assert.equal(command.tunnel_enabled, route.socksEndpoint ? undefined : false);
+    }
+  }
 });
 
 test('SSH close and VPN failure invalidate pending credentials before slow journal cleanup', async () => {

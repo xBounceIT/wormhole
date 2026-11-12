@@ -93,12 +93,14 @@ test('tunnel failure dispatch disconnects current dependents once and ignores re
   assert.match(tunnelClosedMessage, /disconnected/);
   const main = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
   // Process entrypoints are covered by scoped source contracts, with the dispatcher executed above.
-  for (const start of [
-    'tunnelRoute = await openingTunnelBackend.acquireTunnelRoute({',
-    'socksEndpoint = await getNativeBackend().acquireTunnel({',
-    'route = await getNativeBackend().acquireTunnelRoute({',
+  for (const [scope, start] of [
+    ['class WebSurfaceManager', 'tunnelRoute = await openingTunnelBackend.acquireTunnelRoute({'],
+    ['class NativeSshBackend', 'const route = await getNativeBackend().acquireTunnelRoute({'],
+    ["ipcMain.handle('rdp:start'", 'route = await getNativeBackend().acquireTunnelRoute({'],
   ]) {
-    const startIndex = main.indexOf(start);
+    const scopeIndex = main.indexOf(scope);
+    assert.ok(scopeIndex >= 0, `Missing native entrypoint: ${scope}`);
+    const startIndex = main.indexOf(start, scopeIndex);
     assert.ok(startIndex >= 0, `Missing native tunnel acquisition: ${start}`);
     const block = main.slice(startIndex, startIndex + 2000);
     assert.match(block, /onExit:/);

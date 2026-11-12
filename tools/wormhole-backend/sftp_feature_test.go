@@ -543,7 +543,7 @@ func TestSftpOnlyTransportHasNoShellAndSurvivesSiblingClose(t *testing.T) {
 	address := listener.Addr().(*net.TCPAddr)
 	goTunnelDisabled := false
 	target := &sshTarget{host: "127.0.0.1", port: address.Port, username: "fixture", password: "test", tunnelConfigID: "disabled-vpn"}
-	native, openedTarget, err := openNativeSSH(context.Background(), "", "", "", target, "", "", &goTunnelDisabled, "", "", false, false, "", 80, 24, "sftp")
+	native, openedTarget, err := openNativeSSH(context.Background(), "", "", "", target, "", "", &goTunnelDisabled, "", "", false, false, "", 80, 24, nil, "sftp")
 	if err != nil {
 		t.Fatal(err)
 	}

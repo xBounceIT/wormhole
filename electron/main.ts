@@ -7293,13 +7293,14 @@ class NativeSshBackend {
       throw new Error('SSH connection closed before opening its VPN tunnel.');
     }
     let socksEndpoint = '';
+    let configuredTunnelId: string | undefined;
     const tunnelRequested = Boolean(request.nodeId || request.tunnelConfigId);
     let leaseId: string | undefined;
     if (tunnelRequested) {
       leaseId = randomUUID();
       this.tunnelLeases.claim(request.sessionId, leaseId);
       try {
-        socksEndpoint = await getNativeBackend().acquireTunnel({
+        const route = await getNativeBackend().acquireTunnelRoute({
           onExit: () => {
             if (!this.tunnelLeases.isActive(request.sessionId, leaseId!)) return;
             this.broadcast({
@@ -7315,6 +7316,8 @@ class NativeSshBackend {
           tunnelConfigId: request.tunnelConfigId,
           progressSessionId: request.sessionId,
         });
+        socksEndpoint = route.socksEndpoint;
+        configuredTunnelId = route.configuredTunnelId;
       } catch (error) {
         await this.releaseTunnel(request.sessionId).catch(() => undefined);
         throw error;
@@ -7377,6 +7380,7 @@ class NativeSshBackend {
         host: request.host,
         port: request.port,
         tunnel_config_id: request.tunnelConfigId,
+        configured_tunnel_id: request.nodeId ? configuredTunnelId : undefined,
         socks_endpoint: socksEndpoint,
         tunnel_enabled: request.nodeId && !socksEndpoint ? false : undefined,
         key_passphrase_override: request.manualKeyPassphrase ? request.keyPassphrase : undefined,
