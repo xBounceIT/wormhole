@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"net"
 	"reflect"
+	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,8 +21,8 @@ func TestTunnelDialReservesTimeForOtherCDNAddresses(t *testing.T) {
 		t.Run(budget.String(), func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), budget)
 			defer cancel()
-			deadline, _ := ctx.Deadline()
-			var attempts []string
+			attempts := make(chan string, 2)
+			stopped := make(chan struct{})
 			client, peer := net.Pipe()
 			defer client.Close()
 			defer peer.Close()
@@ -28,25 +31,32 @@ func TestTunnelDialReservesTimeForOtherCDNAddresses(t *testing.T) {
 					return []string{"192.0.2.1", "192.0.2.2"}, nil
 				}},
 				tunnel: tunnelDNSDialFunc(func(attemptCtx context.Context, network, address string) (net.Conn, error) {
-					attempts = append(attempts, address)
+					attempts <- address
 					if network != "tcp" {
-						t.Fatalf("CDN connection network = %s", network)
+						t.Errorf("CDN connection network = %s", network)
+						return nil, errors.New("unexpected network")
 					}
 					if address == "192.0.2.1:443" {
-						// Model a blackholed CDN edge. It must time out before the overall
-						// SOCKS deadline, leaving another address a chance to connect.
-						attemptDeadline, ok := attemptCtx.Deadline()
-						if !ok || !attemptDeadline.Before(deadline) {
-							t.Fatal("first CDN address can consume the entire connection timeout")
-						}
-						return nil, context.DeadlineExceeded
+						<-attemptCtx.Done()
+						close(stopped)
+						return nil, attemptCtx.Err()
 					}
 					return client, nil
 				}),
 			}
 			conn, err := dialer.DialContext(ctx, "tcp", "cdn.jsdelivr.net:443")
-			if err != nil || conn != client || !reflect.DeepEqual(attempts, []string{"192.0.2.1:443", "192.0.2.2:443"}) {
-				t.Fatalf("CDN retry = %v, %v; attempts = %v", conn, err, attempts)
+			if err != nil || conn != client {
+				t.Fatalf("CDN retry = %v, %v", conn, err)
+			}
+			select {
+			case <-stopped:
+			case <-ctx.Done():
+				t.Fatal("winning connection did not cancel the unresponsive edge")
+			}
+			got := []string{<-attempts, <-attempts}
+			slices.Sort(got)
+			if !reflect.DeepEqual(got, []string{"192.0.2.1:443", "192.0.2.2:443"}) {
+				t.Fatalf("CDN attempts = %v", got)
 			}
 			if ctx.Err() != nil {
 				t.Fatalf("address timeout cancelled the browser connection: %v", ctx.Err())
@@ -62,16 +72,11 @@ func TestTunnelDialDoesNotStarveReachableCDNWithLargeDNSAnswer(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	client, peer := net.Pipe()
-	defer client.Close()
-	defer peer.Close()
-	attempts := 0
 	dialer := tunnelDialer{
 		resolver: tunnelDNSResolver{hasV4: true, primary: func(context.Context, string) ([]string, error) {
 			return addresses, nil
 		}},
 		tunnel: tunnelDNSDialFunc(func(ctx context.Context, _ string, _ string) (net.Conn, error) {
-			attempts++
 			// A reachable edge takes 250 ms to establish TCP over this VPN. A
 			// large answer must not reduce every attempt below that latency.
 			ready := time.NewTimer(250 * time.Millisecond)
@@ -80,13 +85,176 @@ func TestTunnelDialDoesNotStarveReachableCDNWithLargeDNSAnswer(t *testing.T) {
 			case <-ctx.Done():
 				return nil, ctx.Err()
 			case <-ready.C:
+				client, peer := net.Pipe()
+				peer.Close()
 				return client, nil
 			}
 		}),
 	}
 	conn, err := dialer.DialContext(ctx, "tcp", "cdn.jsdelivr.net:443")
-	if err != nil || conn != client || attempts != 1 {
-		t.Fatalf("reachable CDN starved by DNS answer size: conn=%v err=%v attempts=%d", conn, err, attempts)
+	if conn != nil {
+		defer conn.Close()
+	}
+	if err != nil || conn == nil {
+		t.Fatalf("reachable CDN starved by DNS answer size: conn=%v err=%v", conn, err)
+	}
+}
+
+func TestTunnelDialReachesLaterCDNAfterSeveralBlackholedAddresses(t *testing.T) {
+	addresses := make([]string, 64)
+	for i := range addresses {
+		addresses[i] = fmt.Sprintf("192.0.2.%d", i+1)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var reached atomic.Bool
+	dialer := tunnelDialer{
+		resolver: tunnelDNSResolver{hasV4: true, primary: func(context.Context, string) ([]string, error) {
+			return addresses, nil
+		}},
+		tunnel: tunnelDNSDialFunc(func(ctx context.Context, _ string, address string) (net.Conn, error) {
+			if address != "192.0.2.5:443" {
+				<-ctx.Done()
+				return nil, ctx.Err()
+			}
+			ready := time.NewTimer(250 * time.Millisecond)
+			defer ready.Stop()
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-ready.C:
+				reached.Store(true)
+				client, peer := net.Pipe()
+				peer.Close()
+				return client, nil
+			}
+		}),
+	}
+	conn, err := dialer.DialContext(ctx, "tcp", "cdn.jsdelivr.net:443")
+	if conn != nil {
+		defer conn.Close()
+	}
+	if err != nil || conn == nil || !reached.Load() {
+		t.Fatalf("later reachable CDN starved: conn=%v err=%v", conn, err)
+	}
+}
+
+type observedTunnelConn struct {
+	net.Conn
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (c *observedTunnelConn) Close() error {
+	err := c.Conn.Close()
+	c.once.Do(func() { close(c.closed) })
+	return err
+}
+
+func TestTunnelDialClosesLateSuccessWithoutClosingWinner(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	first, firstPeer := net.Pipe()
+	defer firstPeer.Close()
+	loser := &observedTunnelConn{Conn: first, closed: make(chan struct{})}
+	defer loser.Close()
+	second, secondPeer := net.Pipe()
+	defer secondPeer.Close()
+	winner := &observedTunnelConn{Conn: second, closed: make(chan struct{})}
+	defer winner.Close()
+	release := make(chan struct{})
+	var released sync.Once
+	unblock := func() { released.Do(func() { close(release) }) }
+	defer unblock()
+	dialer := tunnelDialer{tunnel: tunnelDNSDialFunc(func(_ context.Context, _ string, address string) (net.Conn, error) {
+		if address == "192.0.2.1:443" {
+			// Model a success completing concurrently with cancellation. The
+			// caller has already selected a different connection when it arrives.
+			<-release
+			return loser, nil
+		}
+		return winner, nil
+	})}
+	conn, err := dialer.dialTargets(ctx, "tcp", []string{"192.0.2.1:443", "192.0.2.2:443"})
+	if err != nil || conn != winner {
+		t.Fatalf("selected connection = %v, %v", conn, err)
+	}
+	unblock()
+	select {
+	case <-loser.closed:
+	case <-ctx.Done():
+		t.Fatal("late successful connection was leaked")
+	}
+	select {
+	case <-winner.closed:
+		t.Fatal("cancelling pending attempts closed the winning connection")
+	default:
+	}
+}
+
+func TestTunnelDialCancellationStopsAllPendingAttempts(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	started := make(chan string, 2)
+	stopped := make(chan string, 2)
+	dialer := tunnelDialer{tunnel: tunnelDNSDialFunc(func(ctx context.Context, _ string, address string) (net.Conn, error) {
+		started <- address
+		<-ctx.Done()
+		stopped <- address
+		return nil, ctx.Err()
+	})}
+	done := make(chan error, 1)
+	go func() {
+		_, err := dialer.dialTargets(ctx, "tcp", []string{"192.0.2.1:443", "192.0.2.2:443"})
+		done <- err
+	}()
+	watchdog := time.NewTimer(5 * time.Second)
+	defer watchdog.Stop()
+	for range 2 {
+		select {
+		case <-started:
+		case <-watchdog.C:
+			t.Fatal("concurrent connection attempts did not start")
+		}
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancelled parallel connections = %v", err)
+		}
+	case <-watchdog.C:
+		t.Fatal("cancelled browser connection did not return")
+	}
+	for range 2 {
+		select {
+		case <-stopped:
+		case <-watchdog.C:
+			t.Fatal("a pending connection outlived cancellation")
+		}
+	}
+}
+
+func TestTunnelDialReturnsErrorWhenOverlappingAttemptsAllFail(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	failure := errors.New("VPN disconnected")
+	lastStarted := make(chan struct{})
+	dialer := tunnelDialer{tunnel: tunnelDNSDialFunc(func(ctx context.Context, _ string, address string) (net.Conn, error) {
+		if address == "192.0.2.1:443" {
+			select {
+			case <-lastStarted:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		} else if address == "192.0.2.3:443" {
+			close(lastStarted)
+		}
+		return nil, failure
+	})}
+	conn, err := dialer.dialTargets(ctx, "tcp", []string{"192.0.2.1:443", "192.0.2.2:443", "192.0.2.3:443"})
+	if conn != nil || !errors.Is(err, failure) {
+		t.Fatalf("failed overlapping attempts = %v, %v", conn, err)
 	}
 }
 
@@ -142,7 +310,7 @@ func TestTunnelDialRetriesUniqueSupportedAddresses(t *testing.T) {
 			if v6 {
 				want = []string{"[2001:db8::1]:443", "[2001:db8::2]:443"}
 			}
-			var attempts []string
+			attempts := make(chan string, len(addresses))
 			client, peer := net.Pipe()
 			defer client.Close()
 			defer peer.Close()
@@ -150,16 +318,21 @@ func TestTunnelDialRetriesUniqueSupportedAddresses(t *testing.T) {
 				resolver: tunnelDNSResolver{hasV4: !v6, hasV6: v6,
 					primary: func(context.Context, string) ([]string, error) { return addresses, nil }},
 				tunnel: tunnelDNSDialFunc(func(_ context.Context, _ string, address string) (net.Conn, error) {
-					attempts = append(attempts, address)
-					if len(attempts) == 1 {
+					attempts <- address
+					if address == want[0] {
 						return nil, errors.New("first CDN edge refused connection")
 					}
 					return client, nil
 				}),
 			}
 			conn, err := dialer.DialContext(context.Background(), "tcp", "cdn.jsdelivr.net:443")
-			if err != nil || conn != client || !reflect.DeepEqual(attempts, want) {
-				t.Fatalf("CDN addresses = %v, %v; attempts = %v", conn, err, attempts)
+			var got []string
+			for len(attempts) > 0 {
+				got = append(got, <-attempts)
+			}
+			slices.Sort(got)
+			if err != nil || conn != client || !reflect.DeepEqual(got, want) {
+				t.Fatalf("CDN addresses = %v, %v; attempts = %v", conn, err, got)
 			}
 		})
 	}
@@ -174,7 +347,7 @@ func TestTunnelDialFailureAndCancellationNeverUseAnotherRoute(t *testing.T) {
 			if scenario == "cancelled before DNS" {
 				cancel()
 			}
-			attempts := 0
+			var attempts atomic.Int32
 			dialer := tunnelDialer{
 				resolver: tunnelDNSResolver{hasV4: true, primary: func(context.Context, string) ([]string, error) {
 					if scenario == "cancelled before DNS" || scenario == "invalid endpoint" {
@@ -186,7 +359,7 @@ func TestTunnelDialFailureAndCancellationNeverUseAnotherRoute(t *testing.T) {
 					return []string{"192.0.2.1", "192.0.2.2"}, nil
 				}},
 				tunnel: tunnelDNSDialFunc(func(context.Context, string, string) (net.Conn, error) {
-					attempts++
+					attempts.Add(1)
 					if scenario == "cancelled during connect" {
 						cancel()
 					}
@@ -215,8 +388,8 @@ func TestTunnelDialFailureAndCancellationNeverUseAnotherRoute(t *testing.T) {
 					wantAttempts = 2
 				}
 			}
-			if conn != nil || err == nil || attempts != wantAttempts {
-				t.Fatalf("failed connection = %v, %v; tunnel attempts = %d", conn, err, attempts)
+			if conn != nil || err == nil || int(attempts.Load()) != wantAttempts {
+				t.Fatalf("failed connection = %v, %v; tunnel attempts = %d", conn, err, attempts.Load())
 			}
 		})
 	}

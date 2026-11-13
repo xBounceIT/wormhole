@@ -55,28 +55,77 @@ func (d tunnelDialer) DialContext(ctx context.Context, network, address string) 
 	if len(targets) == 0 {
 		return nil, fmt.Errorf("no addresses of installed family (v4=%v v6=%v) for %s", d.resolver.hasV4, d.resolver.hasV6, host)
 	}
-	var lastErr error
-	for i, target := range targets {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		dialCtx := ctx
-		cancel := func() {}
-		if deadline, ok := ctx.Deadline(); ok && len(targets)-i > 1 {
-			// A CDN can return several addresses. Share the remaining SOCKS budget
-			// so a blackholed first edge cannot prevent trying every other edge.
-			remaining := time.Until(deadline)
-			// Match the netstack's two-second minimum for a useful TCP attempt
-			// when possible, while reserving at least half the time for retries.
-			budget := max(remaining/time.Duration(len(targets)-i), min(2*time.Second, remaining/2))
-			dialCtx, cancel = context.WithTimeout(ctx, budget)
-		}
-		conn, err := d.tunnel.DialContext(dialCtx, network, target)
-		cancel()
-		if err == nil {
-			return conn, nil
-		}
-		lastErr = err
+	return d.dialTargets(ctx, network, targets)
+}
+
+func (d tunnelDialer) dialTargets(ctx context.Context, network string, targets []string) (net.Conn, error) {
+	if len(targets) == 1 {
+		return d.tunnel.DialContext(ctx, network, targets[0])
 	}
-	return nil, lastErr
+	type result struct {
+		conn net.Conn
+		err  error
+	}
+	dialCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	results := make(chan result)
+	timer := time.NewTimer(250 * time.Millisecond)
+	defer timer.Stop()
+	next, active := 0, 0
+	startNext := func() {
+		target := targets[next]
+		next++
+		active++
+		go func() {
+			conn, err := d.tunnel.DialContext(dialCtx, network, target)
+			select {
+			case results <- result{conn, err}:
+			case <-dialCtx.Done():
+				if conn != nil {
+					conn.Close()
+				}
+			}
+		}()
+		if next < len(targets) {
+			timer.Reset(250 * time.Millisecond)
+		} else {
+			timer.Stop()
+		}
+	}
+	startNext()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case outcome := <-results:
+			active--
+			if err := ctx.Err(); err != nil {
+				if outcome.conn != nil {
+					outcome.conn.Close()
+				}
+				return nil, err
+			}
+			if outcome.err == nil {
+				return outcome.conn, nil
+			}
+			if outcome.conn != nil {
+				outcome.conn.Close()
+			}
+			if active == 0 {
+				if next == len(targets) {
+					return nil, outcome.err
+				}
+				startNext()
+			}
+		case <-timer.C:
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			// Keep the caller's deadline on every attempt. A later reachable edge
+			// must not inherit a geometrically shrinking slice of that deadline.
+			if next < len(targets) {
+				startNext()
+			}
+		}
+	}
 }

@@ -199,11 +199,12 @@ server.
 
   Pushed DNS gets up to four seconds before fallback; each public resolver gets
   two seconds, leaving time for the resource connection within the SOCKS timeout.
-  If DNS returns several CDN addresses, connection attempts share the remaining
-  SOCKS timeout across distinct addresses of the tunnel's supported IP family.
-  Each attempt gets at least two seconds when possible, retaining at least half
-  the remaining time for retries, so large answers do not starve reachable edges.
-  An unresponsive first edge cannot consume the budget needed to try another.
+  If DNS returns several CDN addresses, connection attempts start 250 ms apart
+  across distinct addresses of the tunnel's supported IP family. Each attempt
+  retains the caller's remaining SOCKS timeout; later reachable edges are not
+  starved by earlier unresponsive edges. Immediate failures advance without
+  waiting when no other attempt remains active. Selecting a connection cancels
+  pending attempts and closes any other successful connections.
   The VPN gateway must permit reaching the public DNS servers and resource hosts.
   No query or resource connection falls back to the host network on tunnel failure.
 
