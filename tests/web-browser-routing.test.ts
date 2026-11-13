@@ -88,6 +88,13 @@ test('real Chromium sibling tabs retain their proxy and never fall back to a dir
               response.end('<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><rect width="16" height="16" fill="green"/><image href="http://127.0.0.1:' + server.address().port + '/favicon-escape"/></svg>');
               return;
             }
+            if (request.url.startsWith('/external-button.svg')) {
+              response.setHeader('Content-Type', 'image/svg+xml');
+              response.setHeader('Access-Control-Allow-Origin', '*');
+              // Match CDN icons with a viewBox, white paths and no intrinsic width/height.
+              response.end('<svg xmlns="http://www.w3.org/2000/svg" xml:space="preserve" viewBox="0 0 512 512"><path d="M0 0h512v512H0z" style="fill-rule:evenodd;clip-rule:evenodd;fill:#fff"/></svg>');
+              return;
+            }
             response.setHeader('Content-Type', 'text/html');
             response.setHeader('Set-Cookie', 'iconAuth=browser-one; SameSite=Lax');
             response.end('<title>' + (request.url === '/help' ? 'Help' : 'Gateway') + '</title><link rel="icon" href="/icon.svg"><h1>Internal console</h1>');
@@ -151,6 +158,12 @@ test('real Chromium sibling tabs retain their proxy and never fall back to a dir
           assert.ok(proxied.includes('gateway.internal'));
           assert.equal(await owner.webContents.executeJavaScript('new Promise(resolve => { const icon = new Image(); icon.onload = () => resolve(icon.naturalWidth); icon.onerror = () => resolve(0); icon.src = ' + JSON.stringify(favicon) + '; })'), 16);
           assert.equal(requests.includes('/favicon-escape'), false, 'Workspace favicons must not make their own network requests');
+          // Button images are decoded by the guest renderer, unlike native favicon fetches.
+          // Use another origin that only the VPN route can resolve and inspect actual SVG pixels.
+          const externalSvg = 'http://assets.example.com:' + targetPort + '/external-button.svg';
+          const svgPixels = await first.executeJavaScript('new Promise(resolve => { const image = new Image(); image.crossOrigin = "anonymous"; image.onload = () => { image.decode().then(() => { const canvas = document.createElement("canvas"); canvas.width = 80; canvas.height = 80; const ctx = canvas.getContext("2d"); ctx.drawImage(image, 0, 0, 80, 80); resolve({ decoded: image.naturalWidth > 0 && image.naturalHeight > 0, pixel: Array.from(ctx.getImageData(40, 40, 1, 1).data) }); }).catch(() => resolve(null)); }; image.onerror = () => resolve(null); image.src = ' + JSON.stringify(externalSvg) + '; })');
+          assert.deepEqual(svgPixels, { decoded: true, pixel: [255, 255, 255, 255] }, 'A third-party SVG must load and render through the browser VPN route');
+          assert.ok(proxied.includes('assets.example.com'), 'External button images must use the same VPN route as the page');
           // Renderer menus must retain real page pixels while their native sibling is hidden.
           await first.executeJavaScript("document.body.style.background = 'rgb(40, 160, 80)'; window.overlayState = 42; true");
           const originalLease = record.tunnelLeaseId;
@@ -240,6 +253,11 @@ test('real Chromium sibling tabs retain their proxy and never fall back to a dir
           assert.ok(proxied.includes('127.0.0.1'));
           for (const socket of sockets) socket.destroy();
           await new Promise(resolve => proxy.close(resolve));
+          // A page may hide broken images in onerror: a missing broken-image badge is not proof
+          // of successful decoding. Check that scenario without allowing direct resource access.
+          const failedSvg = await first.executeJavaScript('new Promise(resolve => { const image = new Image(); image.onload = () => resolve({ loaded: true }); image.onerror = () => { image.style.display = "none"; resolve({ loaded: false, hidden: image.style.display === "none", width: image.naturalWidth }); }; image.src = ' + JSON.stringify(externalSvg + '?disconnected') + '; })');
+          assert.deepEqual(failedSvg, { loaded: false, hidden: true, width: 0 });
+          assert.equal(requests.includes('/external-button.svg?disconnected'), false, 'External SVG requests must fail closed when the VPN stops');
           await manager.command(owner, { sessionId: 'routed', operation: 'navigate', url: 'http://127.0.0.1:' + targetPort + '/no-direct-fallback' });
           await waitFor(() => Boolean(record.tabs.snapshot('vpn').tabs.find(tab => tab.id === record.tabs.activeId).error));
           assert.equal(requests.includes('/no-direct-fallback'), false);

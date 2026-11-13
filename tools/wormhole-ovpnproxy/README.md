@@ -199,13 +199,20 @@ server.
 
   Pushed DNS gets up to four seconds before fallback; each public resolver gets
   two seconds, leaving time for the resource connection within the SOCKS timeout.
+  If DNS returns several CDN addresses, connection attempts start 250 ms apart
+  across distinct addresses of the tunnel's supported IP family. Each attempt
+  retains the caller's remaining SOCKS timeout; later reachable edges are not
+  starved by earlier unresponsive edges. Immediate failures advance without
+  waiting when no other attempt remains active. Selecting a connection cancels
+  pending attempts and closes any other successful connections.
   The VPN gateway must permit reaching the public DNS servers and resource hosts.
   No query or resource connection falls back to the host network on tunnel failure.
 
 Run `go test ./... -coverprofile=coverage.out` in this module to verify DNS policy,
-IPv4/IPv6 fallback, cancellation and tunnel failure. The DNS policy is compiled in
-the normal test build; CGO setup only binds it to the production netstack. An actual
-Stormshield login and page load require a live appliance.
+IPv4/IPv6 fallback, cancellation, CDN address retries and tunnel failure. DNS and
+address selection are compiled in the normal test build; CGO setup only binds
+them to the production netstack. Stormshield login and page loading still require
+a live appliance.
 
 `ipconfig /all` is unchanged after a session starts. A diff of `netstat -anob` shows
 exactly one new entry: this binary's SOCKS5 listener on a loopback port.

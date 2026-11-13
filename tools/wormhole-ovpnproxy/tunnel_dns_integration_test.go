@@ -4,9 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"io"
-	"net"
 	"net/netip"
-	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -118,7 +116,22 @@ func TestTunnelDNSResolvesRemoteResourceThroughNetstack(t *testing.T) {
 			dnsDone <- err
 			return
 		}
-		response := tunnelDNSAnswer(request.Questions[0])
+		question := request.Questions[0]
+		if question.Name.String() != "cdn.jsdelivr.net." {
+			t.Errorf("unexpected CDN DNS question: %v", question)
+		}
+		response := tunnelDNSAnswer(question)
+		alias, _ := dnsmessage.NewName("jsdelivr.map.fastly.net.")
+		response.Answers[0].Header.Name = alias
+		// Model a CDN answer with an unresponsive edge before the working one.
+		// The peer owns only .20, so .21's SYN packets receive no response.
+		blackholed := response.Answers[0]
+		blackholed.Body = &dnsmessage.AResource{A: [4]byte{192, 0, 2, 21}}
+		response.Answers = append([]dnsmessage.Resource{
+			{Header: dnsmessage.ResourceHeader{Name: question.Name, Class: dnsmessage.ClassINET},
+				Body: &dnsmessage.CNAMEResource{CNAME: alias}},
+			blackholed,
+		}, response.Answers...)
 		response.ID, response.Response, response.RecursionAvailable = request.ID, true, true
 		response.Questions = request.Questions
 		wire, _ = response.Pack()
@@ -126,16 +139,6 @@ func TestTunnelDNSResolvesRemoteResourceThroughNetstack(t *testing.T) {
 		_, err = conn.Write(append(size[:], wire...))
 		dnsDone <- err
 	}()
-	resolver := tunnelDNSResolver{primary: client.LookupContextHost, tunnel: client, fallback: true, hasV4: true}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	addrs, err := resolver.LookupContextHost(ctx, "images.example.com")
-	if err != nil || !reflect.DeepEqual(addrs, []string{"192.0.2.20"}) {
-		t.Fatalf("resource DNS through packet tunnel = %v, %v", addrs, err)
-	}
-	if err := <-dnsDone; err != nil {
-		t.Fatal(err)
-	}
 	resource, err := peer.ListenTCPAddrPort(netip.MustParseAddrPort("192.0.2.20:443"))
 	if err != nil {
 		t.Fatal(err)
@@ -149,11 +152,18 @@ func TestTunnelDNSResolvesRemoteResourceThroughNetstack(t *testing.T) {
 			io.WriteString(conn, "remote resource")
 		}
 	}()
-	conn, err := client.DialContext(ctx, "tcp", net.JoinHostPort(addrs[0], "443"))
+	resolver := tunnelDNSResolver{primary: client.LookupContextHost, tunnel: client, fallback: true, hasV4: true}
+	dialer := tunnelDialer{tunnel: client, resolver: resolver}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := dialer.DialContext(ctx, "tcp", "cdn.jsdelivr.net:443")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer conn.Close()
+	if err := <-dnsDone; err != nil {
+		t.Fatal(err)
+	}
 	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	payload, err := io.ReadAll(conn)
 	if err != nil || string(payload) != "remote resource" {

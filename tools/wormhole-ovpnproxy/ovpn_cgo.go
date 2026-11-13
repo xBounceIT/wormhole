@@ -326,10 +326,7 @@ func startOpenVpn(ctx context.Context, cfg config) (sockstun.Dialer, func(), err
 		resolver.primary = tnet.LookupContextHost
 	}
 	return tnetDialer{
-		tnet:     tnet,
-		hasV4:    hasV4,
-		hasV6:    hasV6,
-		resolver: resolver,
+		dialer:   tunnelDialer{tunnel: tnet, resolver: resolver},
 		counters: counters,
 		client:   client,
 		diag:     packetDiag,
@@ -457,10 +454,7 @@ func pumpOutbound(ctx context.Context, client *C.ovpn_client_t, dev tun.Device, 
 // Dial only addresses of the installed family to avoid waiting for an unroutable
 // IPv6 candidate on an IPv4-only tunnel (and vice versa).
 type tnetDialer struct {
-	tnet     *netstack.Net
-	hasV4    bool
-	hasV6    bool
-	resolver tunnelDNSResolver
+	dialer   tunnelDialer
 	counters *ovpnTrafficCounters
 	client   *C.ovpn_client_t
 	diag     *packetDiagHub
@@ -489,10 +483,6 @@ func (d tnetDialer) DialContext(ctx context.Context, network, address string) (c
 		}
 	}()
 
-	host, port, err := net.SplitHostPort(address)
-	if err != nil {
-		return nil, err
-	}
 	if d.diag != nil && dialID != 0 {
 		d.diag.beginDial(dialID, address)
 	}
@@ -501,54 +491,7 @@ func (d tnetDialer) DialContext(ctx context.Context, network, address string) (c
 		defer C.ovpn_set_dial_id(d.client, C.ulonglong(0))
 	}
 
-	// IP literal: bypass resolution entirely, but enforce the family-installed check so
-	// a v4-only tunnel doesn't waste a netstack timeout trying to dial a literal IPv6.
-	if ip := net.ParseIP(host); ip != nil {
-		if ip.To4() != nil {
-			if !d.hasV4 {
-				return nil, fmt.Errorf("IPv4 destination %s requested but tunnel is IPv6-only", host)
-			}
-		} else if !d.hasV6 {
-			return nil, fmt.Errorf("IPv6 destination %s requested but tunnel is IPv4-only", host)
-		}
-		return d.tnet.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
-	}
-
-	// Resolve and connect exclusively through this tunnel, filtering by installed family.
-	addrs, err := d.resolver.LookupContextHost(ctx, host)
-	if err != nil {
-		return nil, fmt.Errorf("resolve %s through tunnel DNS: %w", host, err)
-	}
-	if len(addrs) == 0 {
-		return nil, fmt.Errorf("no addresses for %s (tunnel DNS may not be configured; use an IP literal or push dhcp-option DNS in the .ovpn)", host)
-	}
-	var lastErr error
-	dialed := false
-	for _, a := range addrs {
-		ip := net.ParseIP(a)
-		if ip == nil {
-			continue
-		}
-		// Skip addresses whose family the netstack can't route — avoids a full per-
-		// address timeout inside tnet.DialContext for the mismatched family.
-		if ip.To4() != nil {
-			if !d.hasV4 {
-				continue
-			}
-		} else if !d.hasV6 {
-			continue
-		}
-		dialed = true
-		conn, dialErr := d.tnet.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
-		if dialErr == nil {
-			return conn, nil
-		}
-		lastErr = dialErr
-	}
-	if !dialed {
-		return nil, fmt.Errorf("no addresses of installed family (v4=%v v6=%v) for %s", d.hasV4, d.hasV6, host)
-	}
-	return nil, lastErr
+	return d.dialer.DialContext(ctx, network, address)
 }
 
 type ovpnTrafficCounters struct {
