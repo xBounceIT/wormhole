@@ -491,23 +491,27 @@ internal sealed class RdpHostForm : FormsForm
     /// <summary>Read the OCX's <c>ExtendedDisconnectReason</c> and translate the pair into
     /// a human-readable string in one pass. Per the IMsTscAxEvents::OnDisconnected guidance
     /// the extended reason is what gives the catch-all <c>disconnectReasonNoInfo</c> bucket
-    /// any actionable server-side context. Returns <c>(0, fallback)</c> if the OCX is gone
-    /// or doesn't expose the properties.</summary>
+    /// any actionable server-side context. Keeps the extended reason if description lookup
+    /// fails; returns <c>(0, fallback)</c> if the OCX or reason property is unavailable.</summary>
     internal (int Extended, string Description) GetDisconnectInfo(int code)
+        => ReadDisconnectInfo(TryGetOcx(), code);
+
+    internal static (int Extended, string Description) ReadDisconnectInfo(object? ocxObj, int code)
     {
         var fallback = $"Disconnect reason {code}.";
-        if (TryGetOcx() is not { } ocxObj) return (0, fallback);
+        if (ocxObj is null) return (0, fallback);
+        var extended = 0;
         try
         {
             dynamic ocx = ocxObj;
-            int extended = (int)ocx.ExtendedDisconnectReason;
+            extended = (int)ocx.ExtendedDisconnectReason;
             string desc = (string)ocx.GetErrorDescription((uint)code, (uint)extended);
             return (extended, desc);
         }
         catch (Exception ex) when (
             ex is COMException or RuntimeBinderException or InvalidCastException or InvalidOperationException or ObjectDisposedException)
         {
-            return (0, fallback);
+            return (extended, fallback);
         }
     }
 

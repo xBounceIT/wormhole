@@ -124,6 +124,11 @@ type rdpEvent struct {
 	Certificate         *rdpCertificate `json:"certificate,omitempty"`
 }
 
+type rdpNativeEvent struct {
+	rdpEvent
+	ExtendedDisconnectReason int `json:"extendedDisconnectReason,omitempty"`
+}
+
 type rdpSystemClientCapability struct {
 	Supported bool   `json:"supported"`
 	Reason    string `json:"reason,omitempty"`
@@ -657,11 +662,12 @@ func (c *rdpController) readNativeEvents(process *rdpProcess, stdout io.ReadClos
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 8*1024), 64*1024)
 	for scanner.Scan() {
-		var event rdpEvent
-		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
+		var nativeEvent rdpNativeEvent
+		if err := json.Unmarshal(scanner.Bytes(), &nativeEvent); err != nil {
 			continue
 		}
-		classifyNativeRdpEvent(&event)
+		event := nativeEvent.rdpEvent
+		classifyNativeRdpEvent(&event, nativeEvent.ExtendedDisconnectReason)
 		event.SessionID = process.sessionID
 		event.LifecycleID = process.lifecycleID
 		event.Backend = process.backend
@@ -773,8 +779,29 @@ func (c *rdpController) scheduleRequestedRdpDisconnectFallback(process *rdpProce
 	}()
 }
 
-func classifyNativeRdpEvent(event *rdpEvent) {
+func classifyNativeRdpEvent(event *rdpEvent, extendedDisconnectReason int) {
 	event.CredentialFailure = event.Type == "logonError" && isWindowsRdpCredentialFailure(event.Code)
+	if event.Type != "disconnected" {
+		return
+	}
+	// ActiveX disconnect reasons are not process exit codes. Windows uses 1/2/3 for
+	// normal disconnects, and an explicit server logoff can accompany a generic error.
+	// https://learn.microsoft.com/windows/win32/termserv/extendeddisconnectreasoncode
+	switch extendedDisconnectReason {
+	case 1, 2, 11, 12: // Application/user disconnect or logoff.
+	case 0:
+		if event.Code < 0 || event.Code > 3 {
+			return
+		}
+	default:
+		// An extended server error must still fail when the primary reason is NoInfo.
+		if event.Code == 0 {
+			event.Code = -1
+		}
+		return
+	}
+	event.Code = 0
+	event.Message = ""
 }
 
 func isWindowsRdpCredentialFailure(code int) bool {
