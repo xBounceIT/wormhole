@@ -2,6 +2,32 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { applyRdpBackendEvent, applyRdpSystemClientOpenFailure } from '../src/rdp-state.ts';
 
+test('a normalized remote signout closes the RDP session without a failure or stale logon message', () => {
+  const connected = {
+    rdpStatus: 'connected' as const,
+    rdpBackend: 'activex' as const,
+    rdpError: 'Previous logon notification.',
+  };
+  const disconnected = applyRdpBackendEvent(connected, { type: 'disconnected', code: 0 });
+  const exited = applyRdpBackendEvent(disconnected, { type: 'exited', code: 0 });
+
+  assert.equal(disconnected.rdpStatus, 'disconnected');
+  assert.equal(disconnected.rdpError, undefined);
+  assert.equal(exited.rdpStatus, 'disconnected');
+  assert.equal(exited.rdpError, undefined);
+});
+
+test('a normal helper exit preserves an actual RDP disconnect failure', () => {
+  const disconnected = applyRdpBackendEvent(
+    { rdpStatus: 'connected' as const },
+    { type: 'disconnected', code: 2308, message: 'Socket closed.' },
+  );
+  const exited = applyRdpBackendEvent(disconnected, { type: 'exited', code: 0 });
+
+  assert.equal(exited.rdpStatus, 'failed');
+  assert.equal(exited.rdpError, 'Socket closed.');
+});
+
 test('a non-terminal logon notification does not make retry start a duplicate process', () => {
   const next = applyRdpBackendEvent(
     { rdpStatus: 'starting', rdpBackend: 'activex' },

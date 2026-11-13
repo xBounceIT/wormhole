@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -253,11 +254,72 @@ func TestNativeRdpEventClassificationIsAuthoritative(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			classifyNativeRdpEvent(&test.event)
+			classifyNativeRdpEvent(&test.event, 0)
 			if test.event.CredentialFailure != test.want {
 				t.Fatalf("CredentialFailure = %t, want %t", test.event.CredentialFailure, test.want)
 			}
 		})
+	}
+}
+
+func TestNativeRdpDisconnectDistinguishesLogoffFromFailures(t *testing.T) {
+	tests := []struct {
+		name     string
+		code     int
+		extended int
+		wantCode int
+	}{
+		{name: "no reason"},
+		{name: "local disconnect", code: 1},
+		{name: "remote user disconnect", code: 2},
+		{name: "server disconnect", code: 3},
+		{name: "application disconnect", code: 3, extended: 1},
+		{name: "application logoff", code: 3, extended: 2},
+		{name: "RPC user disconnect", code: 3, extended: 11},
+		{name: "user signout", code: 3, extended: 12},
+		{name: "signout with generic internal error", code: 1032, extended: 12},
+		{name: "socket failure", code: 2308, wantCode: 2308},
+		{name: "internal error without logoff", code: 1032, wantCode: 1032},
+		{name: "unknown primary error", code: -1, wantCode: -1},
+		{name: "idle timeout", code: 3, extended: 3, wantCode: 3},
+		{name: "logon timeout", code: 3, extended: 4, wantCode: 3},
+		{name: "connection replaced", code: 3, extended: 5, wantCode: 3},
+		{name: "server denial", code: 3, extended: 7, wantCode: 3},
+		{name: "licensing error without primary reason", extended: 256, wantCode: -1},
+		{name: "server denial without primary reason", extended: 7, wantCode: -1},
+		{name: "unknown extended error", extended: 4096, wantCode: -1},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			const message = "Errore interno."
+			wire := fmt.Sprintf(`{"type":"disconnected","code":%d,"extendedDisconnectReason":%d,"message":%q}`, test.code, test.extended, message)
+			var nativeEvent rdpNativeEvent
+			if err := json.Unmarshal([]byte(wire), &nativeEvent); err != nil {
+				t.Fatal(err)
+			}
+			event := nativeEvent.rdpEvent
+			classifyNativeRdpEvent(&event, nativeEvent.ExtendedDisconnectReason)
+			if event.Type != "disconnected" || event.Code != test.wantCode {
+				t.Fatalf("disconnect = %#v, want code %d", event, test.wantCode)
+			}
+			wantMessage := message
+			if test.wantCode == 0 {
+				wantMessage = ""
+			}
+			if event.Message != wantMessage {
+				t.Fatalf("disconnect message = %q, want %q", event.Message, wantMessage)
+			}
+		})
+	}
+}
+
+func TestNativeRdpLogoffReasonDoesNotMaskOtherEvents(t *testing.T) {
+	for _, eventType := range []string{"fatalError", "error", "exited", "logonError"} {
+		event := rdpEvent{Type: eventType, Code: 1032, Message: "Actual failure."}
+		classifyNativeRdpEvent(&event, 12)
+		if event.Code != 1032 || event.Message != "Actual failure." {
+			t.Fatalf("non-disconnect event was normalized: %#v", event)
+		}
 	}
 }
 
@@ -930,21 +992,102 @@ func TestRdpControllerStreamRejectsMalformedCommandsAndCloses(t *testing.T) {
 }
 
 func TestRdpNativeEventReaderNormalizesAndFiltersEvents(t *testing.T) {
+	if os.Getenv("WORMHOLE_RDP_READER_TEST_HELPER") == "1" {
+		runRdpNativeEventReaderFixture(t)
+		return
+	}
+	tests := []struct {
+		name        string
+		disconnect  string
+		wantCode    int
+		wantMessage string
+	}{
+		{
+			name:       "signout with generic internal error",
+			disconnect: `{"type":"disconnected","code":1032,"extendedDisconnectReason":12,"message":"Errore interno.","sessionId":"forged","lifecycleId":"forged","backend":"freerdp","lifecycleGeneration":99,"credentialFailure":true}`,
+		},
+		{
+			name:       "legacy user disconnect without extended reason",
+			disconnect: `{"type":"disconnected","code":2,"message":"Localized description."}`,
+		},
+		{
+			name:        "real socket failure",
+			disconnect:  `{"type":"disconnected","code":2308,"message":"Socket closed."}`,
+			wantCode:    2308,
+			wantMessage: "Socket closed.",
+		},
+		{
+			name:        "server denial without primary reason",
+			disconnect:  `{"type":"disconnected","extendedDisconnectReason":7,"message":"Server denied connection."}`,
+			wantCode:    -1,
+			wantMessage: "Server denied connection.",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestRdpNativeEventReaderNormalizesAndFiltersEvents$")
+			cmd.Env = append(os.Environ(), "WORMHOLE_RDP_READER_TEST_HELPER=1")
+			cmd.Stdin = strings.NewReader(strings.Join([]string{
+				"not-json",
+				`{"type":"ack","requestId":"start"}`,
+				`{"type":"logonError","code":0}`,
+				`{"type":"connected"}`,
+				test.disconnect,
+				`{"type":"connected"}`,
+			}, "\n"))
+			output, err := cmd.Output()
+			if err != nil {
+				t.Fatalf("native reader fixture failed: %v\n%s", err, output)
+			}
+			var events []rdpEvent
+			scanner := bufio.NewScanner(bytes.NewReader(output))
+			for scanner.Scan() {
+				// The child test runner appends its own footer after the native JSON stream.
+				if scanner.Text() == "PASS" || strings.HasPrefix(scanner.Text(), "coverage: ") {
+					continue
+				}
+				var event rdpEvent
+				if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
+					t.Fatalf("invalid reader output %q: %v", scanner.Text(), err)
+				}
+				events = append(events, event)
+			}
+			if err := scanner.Err(); err != nil {
+				t.Fatal(err)
+			}
+			want := []rdpEvent{
+				{Type: "ack", RequestID: "start"},
+				{Type: "logonError", CredentialFailure: true},
+				{Type: "connected"},
+				{Type: "disconnected", Code: test.wantCode, Message: test.wantMessage},
+			}
+			for index := range want {
+				want[index].SessionID = "session"
+				want[index].LifecycleID = "lifecycle"
+				want[index].Backend = "activex"
+				want[index].LifecycleGeneration = 4
+			}
+			if !reflect.DeepEqual(events, want) {
+				t.Fatalf("native reader events = %#v, want %#v", events, want)
+			}
+			if bytes.Contains(output, []byte("extendedDisconnectReason")) {
+				t.Fatal("native-only disconnect details leaked into the renderer contract")
+			}
+		})
+	}
+}
+
+func runRdpNativeEventReaderFixture(t *testing.T) {
+	t.Helper()
 	controller := &rdpController{processes: make(map[string]*rdpProcess)}
 	process := &rdpProcess{
 		sessionID: "session", lifecycleID: "lifecycle", backend: "activex",
 		startRequestID: "start", nativeEventsDone: make(chan struct{}), lifecycleGeneration: 4,
 	}
 	controller.processes[process.sessionID] = process
-	input := strings.Join([]string{
-		"not-json",
-		`{"type":"ack","requestId":"start"}`,
-		`{"type":"logonError","code":0}`,
-		`{"type":"connected"}`,
-		`{"type":"disconnected"}`,
-		`{"type":"connected"}`,
-	}, "\n")
-	controller.readNativeEvents(process, io.NopCloser(strings.NewReader(input)))
+	controller.readNativeEvents(process, io.NopCloser(os.Stdin))
 	if process.unansweredStartRequestID() != "" {
 		t.Fatal("native start acknowledgement was not recorded")
 	}

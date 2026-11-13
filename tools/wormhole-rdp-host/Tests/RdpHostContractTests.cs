@@ -8,8 +8,29 @@ public sealed class RdpHostContractTests
 {
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         PropertyNameCaseInsensitive = true,
     };
+
+    [Theory]
+    [InlineData(3, 12)]
+    [InlineData(1032, 12)]
+    [InlineData(3, 7)]
+    [InlineData(2308, 0)]
+    public void DisconnectEvent_PreservesBothNativeReasonsForTheGoController(int code, int extendedReason)
+    {
+        var hostEvent = new RdpHostEvent(
+            "disconnected", Code: code, Message: "Errore interno.",
+            ExtendedDisconnectReason: extendedReason);
+
+        using var document = JsonDocument.Parse(JsonSerializer.Serialize(hostEvent, JsonOptions));
+        var root = document.RootElement;
+
+        Assert.Equal("disconnected", root.GetProperty("type").GetString());
+        Assert.Equal(code, root.GetProperty("code").GetInt32());
+        Assert.Equal(extendedReason, root.GetProperty("extendedDisconnectReason").GetInt32());
+        Assert.Equal("Errore interno.", root.GetProperty("message").GetString());
+    }
 
     [Fact]
     public void JsonContract_IgnoresControllerOnlyFieldsRemovedFromTheActiveXModel()

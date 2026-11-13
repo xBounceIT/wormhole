@@ -283,7 +283,9 @@ internal sealed class RdpHostApplicationContext : ApplicationContext
         {
             Conceal();
             var info = form.GetDisconnectInfo(code);
-            Write(new RdpHostEvent("disconnected", Code: code, Message: info.Description));
+            Write(new RdpHostEvent(
+                "disconnected", Code: code, Message: info.Description,
+                ExtendedDisconnectReason: info.Extended));
             // Dispose the ActiveX host after a terminal disconnect so a later retry can create a
             // fresh OCX instead of hitting Start()'s one-shot guard on a dead control. Auto-reconnect
             // events arrive before this terminal notification and keep the form alive while the OCX
@@ -612,4 +614,5 @@ internal sealed record RdpHostEvent(
     string? Message = null,
     int Code = 0,
     int Attempt = 0,
-    int Max = 0);
+    int Max = 0,
+    int ExtendedDisconnectReason = 0);
