@@ -39,6 +39,7 @@ func TestMRemoteImportValidEncryptedFixturePlansAndCommitsMappings(t *testing.T)
 		t.Fatalf("unexpected plan: %+v", plan)
 	}
 	request.PlanToken = plan.PlanToken
+	installUnjournaledCredentialSecretStoreTest(t)
 	previousStore, previousDelete := credentialSecretStore, credentialSecretDelete
 	stored := map[string]string{}
 	credentialSecretStore = func(id, _ string, password string) (string, string, error) {
@@ -180,6 +181,7 @@ func TestMRemoteImportStructureOnlyNeverStoresDecryptedSecrets(t *testing.T) {
 }
 
 func TestMRemoteImportDuplicateAllocatesCollisionFreeCredentialNames(t *testing.T) {
+	installUnjournaledCredentialSecretStoreTest(t)
 	databasePath := newMRemoteTestDatabase(t)
 	fixture := writeMRemoteFixture(t, validMRemoteFixture(t))
 	previousStore, previousDelete := credentialSecretStore, credentialSecretDelete
@@ -188,6 +190,7 @@ func TestMRemoteImportDuplicateAllocatesCollisionFreeCredentialNames(t *testing.
 	t.Cleanup(func() { credentialSecretStore = previousStore; credentialSecretDelete = previousDelete })
 	for index, nonce := range []string{"55555555-5555-4555-8555-555555555555", "66666666-6666-4666-8666-666666666666"} {
 		request := mremoteImportRequest{Path: fixture, Password: mremoteTestPassword, PlanNonce: nonce}
+		request.ReuseExisting = new(bool)
 		plan, err := analyzeMRemoteImport(databasePath, request)
 		if err != nil {
 			t.Fatal(err)
@@ -212,6 +215,7 @@ func TestMRemoteImportDuplicateAllocatesCollisionFreeCredentialNames(t *testing.
 }
 
 func TestMRemoteImportCancellationAndFailureRollbackAtomically(t *testing.T) {
+	installUnjournaledCredentialSecretStoreTest(t)
 	databasePath := newMRemoteTestDatabase(t)
 	request := mremoteImportRequest{Path: writeMRemoteFixture(t, validMRemoteFixture(t)), Password: mremoteTestPassword, PlanNonce: "77777777-7777-4777-8777-777777777777"}
 	plan, err := analyzeMRemoteImport(databasePath, request)

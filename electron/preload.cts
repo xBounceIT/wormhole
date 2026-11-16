@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import type { SshTerminalTheme } from './terminal-theme-settings.js';
+import type { MRemoteImportOptions } from './mremote-import-contract.js';
 import type { WebBrowserCommand, WebBrowserState } from './web-browser-tabs.js';
 import type {
   RdpBackendEvent,
@@ -74,10 +75,10 @@ const wormholeBridge = {
   loadWorkspaceNodeNotes: (request: { nodeId: string }) =>
     ipcRenderer.invoke('workspace:node-notes', request),
   selectMRemoteImport: () => ipcRenderer.invoke('mremote-import:select'),
-  analyzeMRemoteImport: (options: { password: string; structureOnly: boolean }) =>
+  analyzeMRemoteImport: (options: MRemoteImportOptions) =>
     ipcRenderer.invoke('mremote-import:analyze', options),
   cancelMRemoteImportAnalysis: () => ipcRenderer.send('mremote-import:cancel-analysis'),
-  commitMRemoteImport: (options: { password: string; structureOnly: boolean }) =>
+  commitMRemoteImport: (options: MRemoteImportOptions) =>
     ipcRenderer.invoke('mremote-import:commit', options),
   cancelMRemoteImportCommit: () => ipcRenderer.invoke('mremote-import:cancel-commit'),
   clearMRemoteImport: () => ipcRenderer.send('mremote-import:clear'),

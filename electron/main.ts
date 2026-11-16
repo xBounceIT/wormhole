@@ -462,6 +462,7 @@ type NativeBackendCommand = {
   sourceRevision?: number;
   profilePath?: string;
   structureOnly?: boolean;
+  reuseExisting?: boolean;
   planNonce?: string;
   planToken?: string;
 };
@@ -925,6 +926,7 @@ type MRemoteImportSelection = {
   planNonce?: string;
   planToken?: string;
   structureOnly?: boolean;
+  reuseExisting?: boolean;
 };
 const mremoteImportSelections = new WeakMap<Electron.WebContents, MRemoteImportSelection>();
 const mremoteImportAnalysis = new WeakMap<Electron.WebContents, AbortController>();
@@ -3348,7 +3350,7 @@ class NativeBackendProcess {
     action: 'backup.export' | 'backup.import' | 'mremote.import.commit',
     request: Pick<
       NativeBackendCommand,
-      'path' | 'password' | 'structureOnly' | 'planNonce' | 'planToken'
+      'path' | 'password' | 'structureOnly' | 'reuseExisting' | 'planNonce' | 'planToken'
     >,
   ): Promise<unknown> {
     const response = await this.send(
@@ -3948,7 +3950,7 @@ async function runOwnedNativeOperation(
   action: 'backup.export' | 'backup.import' | 'mremote.import.commit',
   request: Pick<
     NativeBackendCommand,
-    'path' | 'password' | 'structureOnly' | 'planNonce' | 'planToken'
+    'path' | 'password' | 'structureOnly' | 'reuseExisting' | 'planNonce' | 'planToken'
   >,
 ): Promise<unknown> {
   requireNativeResourcesRunning();
@@ -8450,6 +8452,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
                 path: selection.path,
                 password: options.password,
                 structureOnly: options.structureOnly,
+                reuseExisting: options.reuseExisting,
                 planNonce,
               },
               backupTimeoutMs,
@@ -8463,6 +8466,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
             planNonce,
             planToken: plan.planToken,
             structureOnly: options.structureOnly,
+            reuseExisting: options.reuseExisting,
           });
           return plan;
         },
@@ -8490,7 +8494,8 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     if (
       !selection?.planNonce ||
       !selection.planToken ||
-      selection.structureOnly !== options.structureOnly
+      selection.structureOnly !== options.structureOnly ||
+      selection.reuseExisting !== options.reuseExisting
     ) {
       throw new Error('Analyze the mRemoteNG file with these options before importing it.');
     }
@@ -8499,6 +8504,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
         path: selection.path,
         password: options.password,
         structureOnly: options.structureOnly,
+        reuseExisting: options.reuseExisting,
         planNonce: selection.planNonce,
         planToken: selection.planToken,
       }),

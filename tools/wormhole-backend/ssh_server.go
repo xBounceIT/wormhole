@@ -241,6 +241,7 @@ type sshNode struct {
 	host                 string
 	port                 *int64
 	username             string
+	usernameSet          bool
 	credentialID         string
 	credentialMode       *int64
 	useInlinePassword    bool
@@ -4130,6 +4131,7 @@ func loadFileTargetWithCredentialOverrides(
 	}
 
 	username := ""
+	usernameSet := false
 	credentialID := ""
 	credentialResolved := root.useInlinePassword
 	identityBoundary := false
@@ -4150,8 +4152,9 @@ func loadFileTargetWithCredentialOverrides(
 		}
 		seen[current.id] = struct{}{}
 		trustContext[current.id] = *current
-		if !identityBoundary && username == "" && strings.TrimSpace(current.username) != "" {
+		if !identityBoundary && !usernameSet && (current.usernameSet || strings.TrimSpace(current.username) != "") {
 			username = strings.TrimSpace(current.username)
+			usernameSet = true
 		}
 		if knownFingerprint == "" && strings.TrimSpace(current.knownHostFingerprint) != "" {
 			knownFingerprint = strings.TrimSpace(current.knownHostFingerprint)
@@ -4335,6 +4338,7 @@ func loadSSHNodes(database *sql.DB) (map[string]*sshNode, error) {
 			kind:                 row.Kind,
 			host:                 nullableString(row.Host),
 			username:             nullableString(row.Username),
+			usernameSet:          row.Username.Valid,
 			credentialID:         normalizeID(nullableString(row.CredentialID)),
 			useInlinePassword:    row.UseInlinePassword.Valid && row.UseInlinePassword.Int64 != 0,
 			knownHostFingerprint: nullableString(row.KnownHostFingerprint),

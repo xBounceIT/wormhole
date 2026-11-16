@@ -760,6 +760,9 @@ interface WormholeMRemoteImportPlan {
   folders: number;
   connections: number;
   credentials: number;
+  credentialsReused: number;
+  sharedCredentials: number;
+  sharedCredentialConnections: number;
   skippedUnsupported: number;
   skippedUnsupportedSamples: string[];
   warnings: string[];
@@ -777,6 +780,7 @@ interface WormholeMRemoteImportResult {
   foldersCreated: number;
   connectionsCreated: number;
   credentialsCreated: number;
+  credentialsReused: number;
   skippedUnsupported: number;
   warnings: string[];
   droppedWarnings: number;
@@ -844,11 +848,13 @@ interface Window {
     analyzeMRemoteImport(options: {
       password: string;
       structureOnly: boolean;
+      reuseExisting: boolean;
     }): Promise<WormholeMRemoteImportPlan>;
     cancelMRemoteImportAnalysis(): void;
     commitMRemoteImport(options: {
       password: string;
       structureOnly: boolean;
+      reuseExisting: boolean;
     }): Promise<WormholeMRemoteImportResult>;
     cancelMRemoteImportCommit(): Promise<boolean>;
     clearMRemoteImport(): void;

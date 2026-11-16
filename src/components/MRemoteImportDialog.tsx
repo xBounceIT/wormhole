@@ -55,6 +55,7 @@ export function MRemoteImportDialog({
   const operationGeneration = useRef(0);
   const [passwordProvided, setPasswordProvided] = useState(false);
   const [structureOnly, setStructureOnly] = useState(false);
+  const [reuseExisting, setReuseExisting] = useState(true);
   const [phase, setPhase] = useState<MRemoteImportPhase>('idle');
   const [commitProgress, setCommitProgress] = useState<WormholeOperationProgress | null>(null);
   const [commitCancelling, setCommitCancelling] = useState(false);
@@ -70,6 +71,7 @@ export function MRemoteImportDialog({
     if (passwordInput.current) passwordInput.current.value = '';
     setPasswordProvided(false);
     setStructureOnly(false);
+    setReuseExisting(true);
     setPhase('idle');
     setCommitProgress(null);
     setCommitCancelling(false);
@@ -144,6 +146,7 @@ export function MRemoteImportDialog({
       const analyzed = await api.analyzeMRemoteImport({
         password: structureOnly ? '' : (passwordInput.current?.value ?? ''),
         structureOnly,
+        reuseExisting,
       });
       if (generation === operationGeneration.current) setPlan(analyzed);
     } catch (analysisError) {
@@ -166,6 +169,7 @@ export function MRemoteImportDialog({
       const imported = await api.commitMRemoteImport({
         password: structureOnly ? '' : (passwordInput.current?.value ?? ''),
         structureOnly,
+        reuseExisting,
       });
       if (generation !== operationGeneration.current) return;
       setResult(imported);
@@ -297,6 +301,20 @@ export function MRemoteImportDialog({
           ) : null}
 
           {inspection && !result ? (
+            <label className="flex items-start gap-2 text-xs text-muted-foreground">
+              <Checkbox
+                checked={reuseExisting}
+                disabled={busy || structureOnly}
+                onCheckedChange={(checked) => {
+                  setReuseExisting(checked === true);
+                  changeOptions();
+                }}
+              />
+              <span>Reuse matching saved credentials</span>
+            </label>
+          ) : null}
+
+          {inspection && !result ? (
             <div aria-live="polite" className="grid gap-1">
               <div className="flex justify-between text-xs text-muted-foreground">
                 <span>
@@ -326,9 +344,13 @@ export function MRemoteImportDialog({
               <div className="grid grid-cols-2 gap-2 text-sm sm:grid-cols-4">
                 <ImportCount label="Folders" value={plan.folders} />
                 <ImportCount label="Connections" value={plan.connections} />
-                <ImportCount label="Credentials" value={plan.credentials} />
+                <ImportCount label="New credentials" value={plan.credentials} />
                 <ImportCount label="Skipped" value={plan.skippedUnsupported} />
               </div>
+              <p className="text-xs text-muted-foreground">
+                Credentials: {plan.credentials} new ({plan.sharedCredentials} shared by{' '}
+                {plan.sharedCredentialConnections} connections), {plan.credentialsReused} reused.
+              </p>
               <div>
                 <p className="mb-2 text-xs font-medium">Plan preview</p>
                 <ScrollArea className="h-44 rounded border border-border/60 bg-background/40">
@@ -381,8 +403,9 @@ export function MRemoteImportDialog({
               <AlertTitle>Import complete</AlertTitle>
               <AlertDescription>
                 Created {result.foldersCreated} folders, {result.connectionsCreated} connections,
-                and {result.credentialsCreated} protected credentials. Skipped{' '}
-                {result.skippedUnsupported} unsupported connections.
+                and {result.credentialsCreated} protected credentials. Reused{' '}
+                {result.credentialsReused} saved credentials. Skipped {result.skippedUnsupported}{' '}
+                unsupported connections.
                 {result.warnings.length > 0 ? ` ${result.warnings.slice(0, 3).join(' ')}` : ''}
                 {result.warnings.length > 3 || result.droppedWarnings > 0
                   ? ` ${Math.max(0, result.warnings.length - 3) + result.droppedWarnings} additional warnings were omitted.`
