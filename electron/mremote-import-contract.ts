@@ -18,6 +18,9 @@ export type MRemoteImportPlan = {
   folders: number;
   connections: number;
   credentials: number;
+  credentialsReused: number;
+  sharedCredentials: number;
+  sharedCredentialConnections: number;
   skippedUnsupported: number;
   skippedUnsupportedSamples: string[];
   warnings: string[];
@@ -30,12 +33,17 @@ export type MRemoteImportResult = {
   foldersCreated: number;
   connectionsCreated: number;
   credentialsCreated: number;
+  credentialsReused: number;
   skippedUnsupported: number;
   warnings: string[];
   droppedWarnings: number;
 };
 
-export type MRemoteImportOptions = { password: string; structureOnly: boolean };
+export type MRemoteImportOptions = {
+  password: string;
+  structureOnly: boolean;
+  reuseExisting: boolean;
+};
 
 const maxPasswordBytes = 16 * 1024;
 const maxListLength = 250;
@@ -46,11 +54,16 @@ export function parseMRemoteImportOptions(value: unknown): MRemoteImportOptions 
   if (
     typeof record.password !== 'string' ||
     Buffer.byteLength(record.password, 'utf8') > maxPasswordBytes ||
-    typeof record.structureOnly !== 'boolean'
+    typeof record.structureOnly !== 'boolean' ||
+    typeof record.reuseExisting !== 'boolean'
   ) {
     throw new Error('mRemoteNG import options are invalid.');
   }
-  return { password: record.password, structureOnly: record.structureOnly };
+  return {
+    password: record.password,
+    structureOnly: record.structureOnly,
+    reuseExisting: record.reuseExisting,
+  };
 }
 
 export function parseMRemoteImportInspection(
@@ -106,6 +119,9 @@ export function parseMRemoteImportPlan(value: unknown): MRemoteImportPlan {
       'folders',
       'connections',
       'credentials',
+      'credentialsReused',
+      'sharedCredentials',
+      'sharedCredentialConnections',
       'skippedUnsupported',
       'skippedUnsupportedSamples',
       'warnings',
@@ -118,6 +134,11 @@ export function parseMRemoteImportPlan(value: unknown): MRemoteImportPlan {
     !safeCount(record.folders) ||
     !safeCount(record.connections) ||
     !safeCount(record.credentials) ||
+    !safeCount(record.credentialsReused) ||
+    !safeCount(record.sharedCredentials) ||
+    !safeCount(record.sharedCredentialConnections) ||
+    (record.sharedCredentials as number) > (record.credentials as number) ||
+    (record.sharedCredentialConnections as number) > (record.connections as number) ||
     !safeCount(record.skippedUnsupported) ||
     !safeCount(record.droppedWarnings) ||
     !safeStrings(record.skippedUnsupportedSamples, 5) ||
@@ -132,7 +153,8 @@ export function parseMRemoteImportPlan(value: unknown): MRemoteImportPlan {
         hasOnlyKeys(node, ['name', 'kind', 'protocol', 'depth']) &&
         typeof node.name === 'string' &&
         node.name.length > 0 &&
-        node.name.length <= 256 &&
+        node.name.length <= 512 &&
+        [...node.name].length <= 256 &&
         (node.kind === 'folder' || node.kind === 'connection') &&
         (node.protocol === undefined ||
           node.protocol === 'ssh' ||
@@ -157,6 +179,7 @@ export function parseMRemoteImportResult(value: unknown): MRemoteImportResult {
       'foldersCreated',
       'connectionsCreated',
       'credentialsCreated',
+      'credentialsReused',
       'skippedUnsupported',
       'warnings',
       'droppedWarnings',
@@ -164,6 +187,7 @@ export function parseMRemoteImportResult(value: unknown): MRemoteImportResult {
     !safeCount(record.foldersCreated) ||
     !safeCount(record.connectionsCreated) ||
     !safeCount(record.credentialsCreated) ||
+    !safeCount(record.credentialsReused) ||
     !safeCount(record.skippedUnsupported) ||
     !safeCount(record.droppedWarnings) ||
     !safeStrings(record.warnings, 50)
@@ -174,6 +198,7 @@ export function parseMRemoteImportResult(value: unknown): MRemoteImportResult {
     foldersCreated: record.foldersCreated,
     connectionsCreated: record.connectionsCreated,
     credentialsCreated: record.credentialsCreated,
+    credentialsReused: record.credentialsReused,
     skippedUnsupported: record.skippedUnsupported,
     warnings: record.warnings,
     droppedWarnings: record.droppedWarnings,

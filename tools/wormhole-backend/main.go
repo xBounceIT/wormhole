@@ -374,12 +374,14 @@ func runBackendCLI(args []string, input io.Reader, output io.Writer, errorOutput
 		var request mremoteImportRequest
 		err = decodeInput(&request)
 		if err == nil {
+			request.ElectronUserDataPath = *electronUserDataPath
 			result, err = analyzeMRemoteImport(*databasePath, request)
 		}
 	case "mremote-import-commit":
 		var request mremoteImportRequest
 		err = decodeInput(&request)
 		if err == nil {
+			request.ElectronUserDataPath = *electronUserDataPath
 			result, err = commitMRemoteImport(*databasePath, request)
 		}
 	case "backup-inspect":

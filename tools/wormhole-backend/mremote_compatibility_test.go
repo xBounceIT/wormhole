@@ -140,6 +140,7 @@ func TestMRemoteImportBouncyCastleGoldenFixtures(t *testing.T) {
 			assertMRemoteJSONArrays(t, response, "warnings", "skippedUnsupportedSamples", "preview")
 			assertMRemoteDatabaseEmpty(t, databasePath)
 
+			installUnjournaledCredentialSecretStoreTest(t)
 			previousStore := credentialSecretStore
 			stored := 0
 			credentialSecretStore = func(id, _, password string) (string, string, error) {

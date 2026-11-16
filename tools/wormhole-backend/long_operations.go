@@ -89,11 +89,13 @@ func (m *vncManager) runBackendOperation(
 		}, progress)
 	case "mremote.import.commit":
 		return commitMRemoteImportContextWithProgress(ctx, m.databasePath, mremoteImportRequest{
-			Path:          command.Path,
-			Password:      command.Password,
-			StructureOnly: command.StructureOnly,
-			PlanNonce:     command.PlanNonce,
-			PlanToken:     command.PlanToken,
+			Path:                 command.Path,
+			Password:             command.Password,
+			StructureOnly:        command.StructureOnly,
+			ReuseExisting:        command.ReuseExisting,
+			ElectronUserDataPath: m.electronUserDataPath,
+			PlanNonce:            command.PlanNonce,
+			PlanToken:            command.PlanToken,
 		}, progress)
 	default:
 		return nil, fmt.Errorf("unsupported operation %q", command.Action)

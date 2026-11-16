@@ -41,11 +41,13 @@ const (
 )
 
 type mremoteImportRequest struct {
-	Path          string `json:"path"`
-	Password      string `json:"password"`
-	StructureOnly bool   `json:"structureOnly"`
-	PlanNonce     string `json:"planNonce"`
-	PlanToken     string `json:"planToken"`
+	Path                 string `json:"path"`
+	Password             string `json:"password"`
+	StructureOnly        bool   `json:"structureOnly"`
+	PlanNonce            string `json:"planNonce"`
+	PlanToken            string `json:"planToken"`
+	ReuseExisting        *bool  `json:"reuseExisting"`
+	ElectronUserDataPath string `json:"-"`
 }
 
 type mremoteImportInspection struct {
@@ -63,22 +65,26 @@ type mremoteImportPreviewNode struct {
 }
 
 type mremoteImportPlanResponse struct {
-	PlanToken                 string                     `json:"planToken"`
-	Folders                   int                        `json:"folders"`
-	Connections               int                        `json:"connections"`
-	Credentials               int                        `json:"credentials"`
-	SkippedUnsupported        int                        `json:"skippedUnsupported"`
-	SkippedUnsupportedSamples []string                   `json:"skippedUnsupportedSamples"`
-	Warnings                  []string                   `json:"warnings"`
-	DroppedWarnings           int                        `json:"droppedWarnings"`
-	Preview                   []mremoteImportPreviewNode `json:"preview"`
-	PreviewTruncated          bool                       `json:"previewTruncated"`
+	PlanToken                   string                     `json:"planToken"`
+	Folders                     int                        `json:"folders"`
+	Connections                 int                        `json:"connections"`
+	Credentials                 int                        `json:"credentials"`
+	CredentialsReused           int                        `json:"credentialsReused"`
+	SharedCredentials           int                        `json:"sharedCredentials"`
+	SharedCredentialConnections int                        `json:"sharedCredentialConnections"`
+	SkippedUnsupported          int                        `json:"skippedUnsupported"`
+	SkippedUnsupportedSamples   []string                   `json:"skippedUnsupportedSamples"`
+	Warnings                    []string                   `json:"warnings"`
+	DroppedWarnings             int                        `json:"droppedWarnings"`
+	Preview                     []mremoteImportPreviewNode `json:"preview"`
+	PreviewTruncated            bool                       `json:"previewTruncated"`
 }
 
 type mremoteImportResult struct {
 	FoldersCreated     int      `json:"foldersCreated"`
 	ConnectionsCreated int      `json:"connectionsCreated"`
 	CredentialsCreated int      `json:"credentialsCreated"`
+	CredentialsReused  int      `json:"credentialsReused"`
 	SkippedUnsupported int      `json:"skippedUnsupported"`
 	Warnings           []string `json:"warnings"`
 	DroppedWarnings    int      `json:"droppedWarnings"`
@@ -142,17 +148,21 @@ type mremotePlannedNode struct {
 }
 
 type mremotePlan struct {
-	FileHash         string
-	Nodes            []mremotePlannedNode
-	Credentials      []mremotePlannedCredential
-	Folders          int
-	Connections      int
-	Skipped          int
-	SkippedSamples   []string
-	Warnings         []string
-	DroppedWarnings  int
-	Preview          []mremoteImportPreviewNode
-	PreviewTruncated bool
+	FileHash                    string
+	Nodes                       []mremotePlannedNode
+	Credentials                 []mremotePlannedCredential
+	ReusedCredentials           []mremoteReusedCredential
+	ReuseExisting               bool
+	SharedCredentials           int
+	SharedCredentialConnections int
+	Folders                     int
+	Connections                 int
+	Skipped                     int
+	SkippedSamples              []string
+	Warnings                    []string
+	DroppedWarnings             int
+	Preview                     []mremoteImportPreviewNode
+	PreviewTruncated            bool
 }
 
 func inspectMRemoteImport(request mremoteImportRequest) (mremoteImportInspection, error) {
@@ -187,7 +197,9 @@ func analyzeMRemoteImportContext(ctx context.Context, databasePath string, reque
 	return mremoteImportPlanResponse{
 		PlanToken: token, Folders: plan.Folders, Connections: plan.Connections,
 		Credentials: len(plan.Credentials), SkippedUnsupported: plan.Skipped,
-		SkippedUnsupportedSamples: plan.SkippedSamples, Warnings: plan.Warnings,
+		CredentialsReused: len(plan.ReusedCredentials), SharedCredentials: plan.SharedCredentials,
+		SharedCredentialConnections: plan.SharedCredentialConnections,
+		SkippedUnsupportedSamples:   plan.SkippedSamples, Warnings: plan.Warnings,
 		DroppedWarnings: plan.DroppedWarnings, Preview: plan.Preview,
 		PreviewTruncated: plan.PreviewTruncated,
 	}, nil
@@ -222,6 +234,13 @@ func commitMRemoteImportContextWithProgress(
 	if !strings.EqualFold(token, request.PlanToken) {
 		return mremoteImportResult{}, errors.New("the mRemoteNG file or workspace changed after analysis; analyze it again")
 	}
+	if len(plan.Credentials) > 0 {
+		release, err := acquireRecoveredCredentialPrivateKeyLock(databasePath)
+		if err != nil {
+			return mremoteImportResult{}, err
+		}
+		defer release()
+	}
 	reportOperationProgress(progress, "protecting", "Protecting imported credentials…", 45)
 
 	database, err := openDatabase(databasePath, false)
@@ -236,13 +255,10 @@ func commitMRemoteImportContextWithProgress(
 		return mremoteImportResult{}, err
 	}
 
-	type storedSecret struct{ id, encoded, encoding string }
-	stored := make([]storedSecret, 0, len(plan.Credentials))
+	stored := make([]*stagedCredentialSecretWrite, 0, len(plan.Credentials))
 	cleanup := func() {
 		for _, secret := range stored {
-			if err := credentialSecretDelete(secret.id, secret.encoded, secret.encoding); err != nil {
-				logWarn("could not remove protected secret for rolled back mRemoteNG credential %s", secret.id)
-			}
+			secret.rollback(database)
 		}
 	}
 	for index, credential := range plan.Credentials {
@@ -250,12 +266,12 @@ func commitMRemoteImportContextWithProgress(
 			cleanup()
 			return mremoteImportResult{}, err
 		}
-		encoded, encoding, storeErr := credentialSecretStore(credential.ID, "", credential.Password)
+		secret, storeErr := stageCredentialSecretWrite(database, credential.ID, credential.Password)
 		if storeErr != nil {
 			cleanup()
 			return mremoteImportResult{}, errors.New("could not protect an imported credential password; no changes were saved")
 		}
-		stored = append(stored, storedSecret{credential.ID, encoded, encoding})
+		stored = append(stored, secret)
 		reportOperationProgress(
 			progress,
 			"protecting",
@@ -275,6 +291,11 @@ func commitMRemoteImportContextWithProgress(
 			_ = tx.Rollback()
 		}
 	}()
+	if err := validateMRemoteReusedCredentials(ctx, tx, plan.ReusedCredentials); err != nil {
+		_ = tx.Rollback()
+		cleanup()
+		return mremoteImportResult{}, err
+	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	totalWrites := len(plan.Credentials) + len(plan.Nodes)
 	completedWrites := 0
@@ -292,6 +313,9 @@ VALUES (?, ?, ?, ?, 0, NULL, ?, 0, NULL, NULL, 'login.password', ?);`,
 			nullableCredentialField(credential.Domain), credential.Protocol, now)
 		if err == nil {
 			err = upsertCredentialSecret(tx, credential.ID, stored[index].encoded, stored[index].encoding)
+		}
+		if err == nil {
+			err = stored[index].complete(tx)
 		}
 		if err != nil {
 			_ = tx.Rollback()
@@ -325,6 +349,11 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
 		completedWrites++
 		reportOperationProgress(progress, "committing", "Saving credentials and connections…", progressBetween(65, 95, completedWrites, totalWrites))
 	}
+	if err := ctx.Err(); err != nil {
+		_ = tx.Rollback()
+		cleanup()
+		return mremoteImportResult{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		cleanup()
 		return mremoteImportResult{}, fmt.Errorf("could not commit mRemoteNG import; no changes were saved: %w", err)
@@ -334,7 +363,8 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
 	return mremoteImportResult{
 		FoldersCreated: plan.Folders, ConnectionsCreated: plan.Connections,
 		CredentialsCreated: len(plan.Credentials), SkippedUnsupported: plan.Skipped,
-		Warnings: plan.Warnings, DroppedWarnings: plan.DroppedWarnings,
+		CredentialsReused: len(plan.ReusedCredentials),
+		Warnings:          plan.Warnings, DroppedWarnings: plan.DroppedWarnings,
 	}, nil
 }
 
@@ -410,17 +440,19 @@ func buildMRemotePlan(ctx context.Context, databasePath string, request mremoteI
 		FileHash: fileHash, Nodes: make([]mremotePlannedNode, 0), Credentials: make([]mremotePlannedCredential, 0),
 		SkippedSamples: make([]string, 0), Warnings: make([]string, 0), Preview: make([]mremoteImportPreviewNode, 0),
 	}
-	fingerprints := map[string]string{}
+	sources := make([]mremoteCredentialSource, 0)
 	sequence := 0
 	type frame struct {
 		node        mremoteXMLNode
 		parentID    string
 		sort, depth int
 		path        string
+		parentIndex int
+		identity    mremoteEffectiveIdentity
 	}
 	stack := make([]frame, 0, len(root.Nodes))
 	for index := len(root.Nodes) - 1; index >= 0; index-- {
-		stack = append(stack, frame{root.Nodes[index], "", rootSort + index, 1, strconv.Itoa(index)})
+		stack = append(stack, frame{node: root.Nodes[index], sort: rootSort + index, depth: 1, path: strconv.Itoa(index), parentIndex: -1})
 	}
 	for len(stack) > 0 {
 		if err := ctx.Err(); err != nil {
@@ -439,11 +471,12 @@ func buildMRemotePlan(ctx context.Context, databasePath string, request mremoteI
 		if !recognized {
 			continue
 		}
-		protocol, mapped := mremoteProtocol(current.node.Protocol)
+		identity := resolveMRemoteIdentity(current.node, current.identity, len(plan.Nodes))
+		protocol, mapped := mremoteProtocol(identity.protocol)
 		if kind == workspaceNodeConnection && !mapped {
 			plan.Skipped++
 			if len(plan.SkippedSamples) < 5 {
-				label := safeMRemoteLabel(current.node.Protocol, 128)
+				label := safeMRemoteLabel(identity.protocol, 128)
 				if label == "" {
 					label = "(unspecified)"
 				}
@@ -453,7 +486,6 @@ func buildMRemotePlan(ctx context.Context, databasePath string, request mremoteI
 		}
 		id := deterministicMRemoteID(request.PlanNonce, "node", current.path)
 		node := mremotePlannedNode{ID: id, ParentID: current.parentID, Name: displayMRemoteName(current.node, kind), Kind: kind, SortOrder: current.sort}
-		credentialProtocol := protocol
 		if mapped && !attributeTrue(current.node.InheritProtocol) {
 			node.Protocol = sql.NullInt64{Int64: protocol, Valid: true}
 		}
@@ -464,40 +496,27 @@ func buildMRemotePlan(ctx context.Context, databasePath string, request mremoteI
 			node.Port = parseMRemotePort(current.node.Port)
 		}
 		if !attributeTrue(current.node.InheritUsername) && protocol != 6 {
-			node.Username = nullableMRemoteText(current.node.Username, maxCredentialUsernameLength)
+			node.Username = sql.NullString{String: identity.username, Valid: true}
 		}
 		if (protocol == 1 || !mapped) && !attributeTrue(current.node.InheritDomain) {
-			node.RDPDomain = nullableMRemoteText(current.node.Domain, maxCredentialDomainLength)
+			node.RDPDomain = sql.NullString{String: identity.domain, Valid: true}
+		}
+		// A saved credential can now supply the split domain. Store an explicit
+		// DOMAIN\user in separate node fields too, so it cannot override that
+		// credential with an already-qualified username at connect time.
+		if protocol == 1 && node.Username.Valid && identity.domain == "" {
+			_, username, domain := mremoteCredentialIdentity(protocol, node.Username.String, "")
+			if domain != "" {
+				node.Username = nullableMRemoteText(username, maxCredentialUsernameLength)
+				node.RDPDomain = nullableMRemoteText(domain, maxCredentialDomainLength)
+			}
 		}
 		if (protocol == 1 || !mapped) && !attributeTrue(current.node.InheritResolution) {
 			node.RDPScreenSize, node.RDPFullScreen = mapMRemoteResolution(current.node.Resolution)
 		}
 
-		if !attributeTrue(current.node.InheritPassword) && strings.TrimSpace(current.node.Password) != "" {
-			if request.StructureOnly {
-				addMRemoteWarning(&plan, fmt.Sprintf("Password for '%s' was not imported in structure-only mode.", node.Name))
-			} else if plain, ok := decryptMRemote(current.node.Password, password, iterations); !ok {
-				addMRemoteWarning(&plan, fmt.Sprintf("Could not decrypt password for '%s'; credential left unset.", node.Name))
-			} else if plain != "" {
-				if utf8.RuneCountInString(plain) > maxStoredCredentialPassword || len(plain) > maxStoredCredentialBytes {
-					addMRemoteWarning(&plan, fmt.Sprintf("Password for '%s' exceeds Wormhole's protected credential limit; credential left unset.", node.Name))
-				} else if mapped {
-					username := nullableString(node.Username)
-					domain := nullableString(node.RDPDomain)
-					fingerprint := fmt.Sprintf("%s\x00%s\x00%s\x00%d", username, domain, plain, credentialProtocol)
-					credentialID := fingerprints[fingerprint]
-					if credentialID == "" {
-						credentialID = deterministicMRemoteID(request.PlanNonce, "credential", strconv.Itoa(len(plan.Credentials)))
-						name := allocateMRemoteCredentialName(username, nullableString(node.Host), node.Name, credentialProtocol, existingNames)
-						plan.Credentials = append(plan.Credentials, mremotePlannedCredential{credentialID, name, credentialProtocol, username, domain, plain})
-						fingerprints[fingerprint] = credentialID
-					}
-					node.CredentialID = sql.NullString{String: credentialID, Valid: true}
-				} else {
-					addMRemoteWarning(&plan, fmt.Sprintf("Folder '%s' had a password but no supported protocol; password not imported.", node.Name))
-				}
-			}
-		}
+		sources = append(sources, mremoteCredentialSource{identity: identity, parent: current.parentIndex, protocol: protocol, mapped: mapped})
+		nodeIndex := len(plan.Nodes)
 		plan.Nodes = append(plan.Nodes, node)
 		if kind == workspaceNodeFolder {
 			plan.Folders++
@@ -519,9 +538,12 @@ func buildMRemotePlan(ctx context.Context, databasePath string, request mremoteI
 		}
 		if kind == workspaceNodeFolder {
 			for index := len(current.node.Children) - 1; index >= 0; index-- {
-				stack = append(stack, frame{current.node.Children[index], id, index, current.depth + 1, current.path + "/" + strconv.Itoa(index)})
+				stack = append(stack, frame{node: current.node.Children[index], parentID: id, sort: index, depth: current.depth + 1, path: current.path + "/" + strconv.Itoa(index), parentIndex: nodeIndex, identity: identity})
 			}
 		}
+	}
+	if err := planMRemoteCredentials(ctx, database, &plan, sources, request, password, iterations, existingNames); err != nil {
+		return mremotePlan{}, err
 	}
 	return plan, nil
 }
@@ -665,6 +687,7 @@ func decryptMRemote(encoded, password string, iterations int) (string, bool) {
 		return "", false
 	}
 	plain, err := gcm.Open(nil, nonce, blob[32:], salt)
+	defer clear(plain)
 	if err != nil || !utf8.Valid(plain) {
 		return "", false
 	}
@@ -685,7 +708,8 @@ func mremotePlanToken(plan mremotePlan, nonce string) (string, error) {
 		Nodes           []mremotePlannedNode
 		Credentials     []safeCredential
 		Skipped         int
-	}{plan.FileHash, nonce, plan.Nodes, safeCredentials, plan.Skipped})
+		ReuseExisting   bool
+	}{plan.FileHash, nonce, plan.Nodes, safeCredentials, plan.Skipped, plan.ReuseExisting})
 	if err != nil {
 		return "", errors.New("could not create mRemoteNG import plan")
 	}
@@ -809,22 +833,24 @@ func addMRemoteWarning(plan *mremotePlan, warning string) {
 
 var mremoteNameSanitizer = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
 
+func mremoteNamePart(value string) string {
+	return truncateMRemote(strings.Trim(mremoteNameSanitizer.ReplaceAllString(strings.TrimSpace(value), "-"), "-"), 60)
+}
+
 func allocateMRemoteCredentialName(username, host, fallback string, protocol int64, taken map[string]struct{}) string {
-	user := strings.Trim(mremoteNameSanitizer.ReplaceAllString(strings.TrimSpace(username), "-"), "-")
-	if len(user) > 60 {
-		user = user[:60]
-	}
-	anchor := strings.Trim(mremoteNameSanitizer.ReplaceAllString(strings.TrimSpace(host), "-"), "-")
+	user := mremoteNamePart(username)
+	anchor := mremoteNamePart(host)
 	if anchor == "" {
-		anchor = strings.Trim(mremoteNameSanitizer.ReplaceAllString(fallback, "-"), "-")
-	}
-	if len(anchor) > 60 {
-		anchor = anchor[:60]
+		anchor = mremoteNamePart(fallback)
 	}
 	stem := "mremoteng-" + user + "@" + anchor
 	if user == "" {
 		stem = "mremoteng-" + anchor + "-" + protocolName(sql.NullInt64{Int64: protocol, Valid: true})
 	}
+	return allocateMRemoteName(stem, taken)
+}
+
+func allocateMRemoteName(stem string, taken map[string]struct{}) string {
 	for n := 1; ; n++ {
 		candidate := stem
 		if n > 1 {
@@ -849,7 +875,9 @@ func credentialModeForImport(value sql.NullString) any {
 	if value.Valid {
 		return int64(2)
 	}
-	return nil
+	// Every imported node has already resolved its password source. An unset
+	// credential must not silently fall back to a different folder password.
+	return int64(1)
 }
 func normalizeMRemoteCommitError(err error) error {
 	lower := strings.ToLower(err.Error())

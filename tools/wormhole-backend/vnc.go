@@ -79,6 +79,7 @@ type backendCommand struct {
 	SourceRevision    int64  `json:"sourceRevision,omitempty"`
 	ProfilePath       string `json:"profilePath,omitempty"`
 	StructureOnly     bool   `json:"structureOnly,omitempty"`
+	ReuseExisting     *bool  `json:"reuseExisting,omitempty"`
 	PlanNonce         string `json:"planNonce,omitempty"`
 	PlanToken         string `json:"planToken,omitempty"`
 }
