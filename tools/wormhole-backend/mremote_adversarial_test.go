@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -342,6 +343,86 @@ func TestMRemoteExplicitEmptyIdentityDoesNotInheritWithoutPassword(t *testing.T)
 			if target.username != want {
 				t.Errorf("%s resolved the wrong identity", node.Name)
 			}
+		}
+	}
+}
+
+func TestMRemoteReuseMatchingAllocationsGrowLinearly(t *testing.T) {
+	const count = 256
+	identity := mremoteIdentityKey{protocol: 0, username: "alice"}
+	groups := make([]mremoteCredentialGroup, count)
+	saved := make([]mremoteReusedCredential, count)
+	for index := range groups {
+		password := strings.Repeat("imported-password-", 4) + strconv.Itoa(index)
+		groups[index] = mremoteCredentialGroup{key: mremoteCredentialKey{identity, password}, credential: mremotePlannedCredential{Password: password}}
+		saved[index] = mremoteReusedCredential{ID: strconv.Itoa(index)}
+	}
+	candidates := map[mremoteIdentityKey][]mremoteReusedCredential{identity: saved}
+	previous := mremoteUnprotectCredentialSecret
+	t.Cleanup(func() { mremoteUnprotectCredentialSecret = previous })
+	mremoteUnprotectCredentialSecret = func(_, _, _ string, _ ...string) ([]byte, error) {
+		return []byte(strings.Repeat("saved-password-", 5)), nil
+	}
+	allocations := testing.AllocsPerRun(1, func() {
+		matches, err := matchMRemoteCredentials(context.Background(), groups, candidates, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, match := range matches {
+			if match != nil {
+				t.Fatal("different passwords were reused")
+			}
+		}
+	})
+	if allocations > 20*count {
+		t.Fatalf("matching allocated %.0f times for %d groups and candidates; expected linear growth", allocations, count)
+	}
+}
+
+func TestMRemoteReuseCancelledBeforeIndexAvoidsGroupWork(t *testing.T) {
+	identity := mremoteIdentityKey{protocol: 0, username: "alice"}
+	groups := make([]mremoteCredentialGroup, 4096)
+	for index := range groups {
+		groups[index].key.mremoteIdentityKey = identity
+	}
+	candidates := map[mremoteIdentityKey][]mremoteReusedCredential{identity: {{ID: "candidate"}}}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	allocations := testing.AllocsPerRun(1, func() {
+		if _, err := matchMRemoteCredentials(ctx, groups, candidates, ""); !errors.Is(err, context.Canceled) {
+			t.Fatalf("lost cancellation: %v", err)
+		}
+	})
+	if allocations > 8 {
+		t.Fatalf("cancelled matching still built a group index: %.0f allocations", allocations)
+	}
+}
+
+func TestMRemoteReuseCancellationAfterSecretReadClearsBuffer(t *testing.T) {
+	identity := mremoteIdentityKey{protocol: 0, username: "alice"}
+	groups := []mremoteCredentialGroup{{key: mremoteCredentialKey{identity, "shared-secret"}, credential: mremotePlannedCredential{Password: "shared-secret"}}}
+	candidates := map[mremoteIdentityKey][]mremoteReusedCredential{identity: {{ID: "first"}, {ID: "second"}}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	previous := mremoteUnprotectCredentialSecret
+	t.Cleanup(func() { mremoteUnprotectCredentialSecret = previous })
+	var buffer []byte
+	reads := 0
+	mremoteUnprotectCredentialSecret = func(_, _, _ string, _ ...string) ([]byte, error) {
+		reads++
+		buffer = []byte("shared-secret")
+		cancel()
+		return buffer, nil
+	}
+	if _, err := matchMRemoteCredentials(ctx, groups, candidates, ""); !errors.Is(err, context.Canceled) {
+		t.Fatalf("lost cancellation: %v", err)
+	}
+	if reads != 1 {
+		t.Fatalf("read %d candidates after cancellation", reads)
+	}
+	for _, value := range buffer {
+		if value != 0 {
+			t.Fatal("cancelled read left plaintext in its buffer")
 		}
 	}
 }

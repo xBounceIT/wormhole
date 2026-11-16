@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"database/sql"
 	"errors"
@@ -320,22 +321,50 @@ func loadMRemoteReuseCandidates(ctx context.Context, database *sql.DB) (map[mrem
 
 var mremoteUnprotectCredentialSecret = unprotectStoredSecret
 
+type mremotePasswordKey struct {
+	mremoteIdentityKey
+	digest [sha256.Size]byte
+}
+
 func matchMRemoteCredentials(ctx context.Context, groups []mremoteCredentialGroup, candidates map[mremoteIdentityKey][]mremoteReusedCredential, userDataPath string) ([]*mremoteReusedCredential, error) {
 	matches := make([]*mremoteReusedCredential, len(groups))
-	byIdentity := make(map[mremoteIdentityKey][]int)
+	byPassword := make(map[mremotePasswordKey][]int)
+	remaining := make(map[mremoteIdentityKey]int)
 	for index, group := range groups {
-		byIdentity[group.key.mremoteIdentityKey] = append(byIdentity[group.key.mremoteIdentityKey], index)
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		password := []byte(group.credential.Password)
+		key := mremotePasswordKey{group.key.mremoteIdentityKey, sha256.Sum256(password)}
+		clear(password)
+		byPassword[key] = append(byPassword[key], index)
+		remaining[group.key.mremoteIdentityKey]++
 	}
-	for identity, indexes := range byIdentity {
+	for identity, count := range remaining {
 		for _, candidate := range candidates[identity] {
 			if err := ctx.Err(); err != nil {
 				return nil, err
 			}
 			secret, err := mremoteUnprotectCredentialSecret(candidate.ID, candidate.Encoded, candidate.Encoding, userDataPath)
+			if cancelErr := ctx.Err(); cancelErr != nil {
+				clear(secret)
+				return nil, cancelErr
+			}
+			if err != nil {
+				clear(secret)
+				continue
+			}
+			key := mremotePasswordKey{identity, sha256.Sum256(secret)}
+			indexes := byPassword[key]
 			unmatched := indexes[:0]
 			for _, index := range indexes {
+				if err := ctx.Err(); err != nil {
+					clear(secret)
+					return nil, err
+				}
+				// Confirm exact bytes even if distinct passwords share a digest.
 				password := []byte(groups[index].credential.Password)
-				matched := err == nil && subtle.ConstantTimeCompare(secret, password) == 1
+				matched := subtle.ConstantTimeCompare(secret, password) == 1
 				clear(password)
 				if matched {
 					matches[index] = &candidate
@@ -344,8 +373,13 @@ func matchMRemoteCredentials(ctx context.Context, groups []mremoteCredentialGrou
 				}
 			}
 			clear(secret)
-			indexes = unmatched
-			if len(indexes) == 0 {
+			count -= len(indexes) - len(unmatched)
+			if len(unmatched) == 0 {
+				delete(byPassword, key)
+			} else {
+				byPassword[key] = unmatched
+			}
+			if count == 0 {
 				break
 			}
 		}
