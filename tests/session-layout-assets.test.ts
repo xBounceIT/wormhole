@@ -109,8 +109,7 @@ test('sidebar navigation places Sessions above Credentials and preserves the rem
   );
   assert.match(navigationSource, /\{sidebarNavigationItems\.map\(/);
   const layout = sourceBetween(appSource, '<SidebarLayout', 'initialPinned=');
-  assert.match(layout, /navigation=\{\(collapsed\) => \(/);
-  assert.match(layout, /<SidebarNavigation\b/);
+  assert.match(layout, /navigation=\{\s*<SidebarNavigation\b/);
 });
 
 test('live surfaces are keyed only by session identity in one stable workspace layer', () => {

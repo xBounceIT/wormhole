@@ -7,8 +7,10 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  type HTMLAttributes,
   type MouseEvent,
   type ReactNode,
+  type Ref,
 } from 'react';
 import { PanelLeft } from 'lucide-react';
 import { usePanelRef } from 'react-resizable-panels';
@@ -19,23 +21,48 @@ import { ContextMenuOverlayProvider } from '@/components/ui/context-menu';
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 
-const SidebarPinContext = createContext({ pinned: true, busy: false, toggle: () => {} });
-const collapsedSidebarWidth = 40;
+type SidebarInteractions = Pick<
+  HTMLAttributes<HTMLElement>,
+  | 'onBlur'
+  | 'onFocus'
+  | 'onKeyDown'
+  | 'onMouseEnter'
+  | 'onMouseLeave'
+  | 'onMouseMove'
+  | 'onPointerDown'
+>;
+
+const SidebarPinContext = createContext<{
+  pinned: boolean;
+  busy: boolean;
+  toggle: () => void;
+  visible?: boolean;
+  sidebarId?: string;
+  buttonRef?: Ref<HTMLButtonElement>;
+  interactions?: SidebarInteractions;
+}>({ pinned: true, busy: false, toggle: () => {} });
+const sidebarHoverExitDelayMs = 120;
 
 export function SidebarPinButton() {
-  const { pinned, busy, toggle } = useContext(SidebarPinContext);
+  const { pinned, busy, toggle, visible, sidebarId, buttonRef, interactions } =
+    useContext(SidebarPinContext);
   const label = pinned ? 'Unpin sidebar' : 'Pin sidebar';
   return (
-    <Tooltip>
+    <Tooltip disableHoverableContent>
       <TooltipTrigger asChild>
         <Button
+          {...interactions}
           aria-busy={busy}
+          aria-controls={sidebarId}
           aria-disabled={busy}
+          aria-expanded={visible}
+          aria-keyshortcuts={pinned ? undefined : 'ArrowDown'}
           aria-label={label}
           aria-pressed={pinned}
           className="transition aria-disabled:opacity-50 [-webkit-app-region:no-drag]"
           data-sidebar-pin=""
           onClick={toggle}
+          ref={buttonRef}
           size="icon"
           type="button"
           variant="ghost"
@@ -52,7 +79,9 @@ export function SidebarPinButton() {
           </PanelLeft>
         </Button>
       </TooltipTrigger>
-      <TooltipContent side="bottom">{label}</TooltipContent>
+      <TooltipContent className="pointer-events-none" side="right" sideOffset={4}>
+        {label}
+      </TooltipContent>
     </Tooltip>
   );
 }
@@ -70,7 +99,7 @@ export function SidebarLayout({
   children,
 }: {
   header: ReactNode;
-  navigation: (collapsed: boolean) => ReactNode;
+  navigation: ReactNode;
   initialPinned: boolean;
   initialWidth: number;
   keepOpen: boolean;
@@ -87,7 +116,7 @@ export function SidebarLayout({
   const [error, setError] = useState('');
   const [width, setWidth] = useState(() => normalizeSidebarWidth(initialWidth));
   const [defaultSize] = useState(() =>
-    initialPinned ? `${normalizeSidebarWidth(initialWidth)}px` : `${collapsedSidebarWidth}px`,
+    initialPinned ? `${normalizeSidebarWidth(initialWidth)}px` : '0px',
   );
   const [hovered, setHovered] = useState(false);
   const [focused, setFocused] = useState(false);
@@ -95,7 +124,9 @@ export function SidebarLayout({
   const [menuOpen, setMenuOpen] = useState(false);
   const panelRef = usePanelRef();
   const expandedWidth = useRef(normalizeSidebarWidth(initialWidth));
-  const revealButton = useRef<HTMLButtonElement>(null);
+  const pinButton = useRef<HTMLButtonElement>(null);
+  const lastInputWasPointer = useRef(false);
+  const hoverExit = useRef<number | undefined>(undefined);
   const sidebarSurface = useRef<HTMLElement>(null);
   const previousPinned = useRef(pinned);
   const sidebarId = useId();
@@ -106,14 +137,67 @@ export function SidebarLayout({
   useEffect(() => {
     setRevealed((current) => hovered || focused || (shouldKeepOpen && current));
   }, [hovered, focused, shouldKeepOpen]);
+  useEffect(() => () => window.clearTimeout(hoverExit.current), []);
+  useEffect(() => {
+    // Chromium matches :focus-visible on text inputs even when the pointer focuses them.
+    const markPointerInput = () => {
+      lastInputWasPointer.current = true;
+    };
+    const markKeyboardInput = () => {
+      lastInputWasPointer.current = false;
+    };
+    document.addEventListener('pointerdown', markPointerInput, true);
+    document.addEventListener('keydown', markKeyboardInput, true);
+    return () => {
+      document.removeEventListener('pointerdown', markPointerInput, true);
+      document.removeEventListener('keydown', markKeyboardInput, true);
+    };
+  }, []);
 
-  function revealOnHover(event: MouseEvent<HTMLDivElement>) {
+  function revealOnHover(event: MouseEvent<HTMLElement>) {
     // Portaled menus are outside this surface even though React events bubble through it.
     if (!event.currentTarget.contains(event.target as Node)) return;
+    window.clearTimeout(hoverExit.current);
     setHovered(true);
     // Recover on movement too, including when an entry event happened before mounting or closing.
     setRevealed(true);
   }
+
+  const interactions: SidebarInteractions = {
+    onBlur(event) {
+      if (
+        event.relatedTarget !== pinButton.current &&
+        !sidebarSurface.current?.contains(event.relatedTarget)
+      ) {
+        setFocused(false);
+      }
+    },
+    onFocus(event) {
+      setFocused(!lastInputWasPointer.current && event.target.matches(':focus-visible'));
+    },
+    onKeyDown(event) {
+      if (pinned || !event.currentTarget.contains(event.target as Node)) return;
+      if (event.key === 'ArrowDown' && event.target === pinButton.current) {
+        event.preventDefault();
+        setFocused(true);
+        setRevealed(true);
+      } else if (event.key === 'Escape' && !shouldKeepOpen && visible) {
+        event.preventDefault();
+        pinButton.current?.focus();
+        setFocused(false);
+        setHovered(false);
+        setRevealed(false);
+      }
+    },
+    onMouseEnter: revealOnHover,
+    onMouseLeave() {
+      window.clearTimeout(hoverExit.current);
+      // Give the pointer time to cross the space below the titlebar button.
+      hoverExit.current = window.setTimeout(() => setHovered(false), sidebarHoverExitDelayMs);
+    },
+    onMouseMove: revealOnHover,
+    onPointerDown: () => setFocused(false),
+  };
 
   const resizePanel = useEffectEvent(() => {
     if (pinned) panelRef.current?.resize(`${expandedWidth.current}px`);
@@ -167,7 +251,9 @@ export function SidebarLayout({
   }
 
   return (
-    <SidebarPinContext.Provider value={{ pinned, busy, toggle }}>
+    <SidebarPinContext.Provider
+      value={{ pinned, busy, toggle, visible, sidebarId, buttonRef: pinButton, interactions }}
+    >
       <div className="flex min-h-0 flex-1 flex-col">
         {header}
         {error ? (
@@ -181,9 +267,39 @@ export function SidebarLayout({
           data-pinned={pinned}
           data-revealed={visible}
         >
+          <div
+            {...interactions}
+            className="absolute inset-y-0 left-0 z-30"
+            style={{ width: visible ? width : 0 }}
+          >
+            <aside
+              aria-hidden={!visible}
+              aria-label="Sidebar"
+              className="absolute inset-y-0 left-0 flex flex-col overflow-hidden border-r border-sidebar-border bg-sidebar data-[overlay=true]:shadow-xl"
+              data-expanded={visible}
+              data-overlay={!pinned}
+              data-sidebar-surface=""
+              id={sidebarId}
+              inert={!visible}
+              ref={sidebarSurface}
+              style={{ width: visible ? width : 0 }}
+            >
+              <div className="min-h-0 flex-1" data-sidebar-content="" style={{ width }}>
+                <ContextMenuOverlayProvider onOpenChange={setMenuOpen}>
+                  {sidebar}
+                </ContextMenuOverlayProvider>
+              </div>
+              <div
+                className="relative z-20 shrink-0 border-t border-sidebar-border p-1"
+                data-sidebar-navigation=""
+              >
+                {navigation}
+              </div>
+            </aside>
+          </div>
           <ResizablePanelGroup className="h-full min-h-0" orientation="horizontal">
             <ResizablePanel
-              collapsedSize={`${collapsedSidebarWidth}px`}
+              collapsedSize="0px"
               collapsible={!pinned}
               defaultSize={defaultSize}
               groupResizeBehavior="preserve-pixel-size"
@@ -213,72 +329,6 @@ export function SidebarLayout({
               {children}
             </ResizablePanel>
           </ResizablePanelGroup>
-          <div
-            className="absolute inset-y-0 left-0 z-30"
-            onBlur={(event) => {
-              if (!event.currentTarget.contains(event.relatedTarget)) setFocused(false);
-            }}
-            onFocus={(event) => setFocused(event.target.matches(':focus-visible'))}
-            onKeyDown={(event) => {
-              if (event.key === 'Escape' && !pinned && !shouldKeepOpen) {
-                event.preventDefault();
-                revealButton.current?.focus();
-                setFocused(false);
-                setHovered(false);
-                setRevealed(false);
-              }
-            }}
-            onPointerDown={() => setFocused(false)}
-            onMouseEnter={revealOnHover}
-            onMouseMove={revealOnHover}
-            onMouseLeave={() => setHovered(false)}
-            style={{ width: visible ? width : collapsedSidebarWidth }}
-          >
-            <aside
-              aria-label="Sidebar"
-              className="absolute inset-y-0 left-0 flex flex-col overflow-hidden border-r border-sidebar-border bg-sidebar data-[overlay=true]:shadow-xl"
-              data-expanded={visible}
-              data-overlay={!pinned}
-              data-sidebar-surface=""
-              ref={sidebarSurface}
-              style={{ width: visible ? width : collapsedSidebarWidth }}
-            >
-              {!pinned ? (
-                <button
-                  aria-controls={sidebarId}
-                  aria-expanded={revealed}
-                  aria-label="Show sidebar"
-                  className="absolute inset-0 z-10 bg-transparent outline-none data-[expanded=true]:pointer-events-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-sidebar-ring"
-                  data-expanded={visible}
-                  onClick={(event) => {
-                    setFocused(event.currentTarget.matches(':focus-visible'));
-                    setRevealed(true);
-                  }}
-                  ref={revealButton}
-                  tabIndex={visible ? -1 : 0}
-                  type="button"
-                />
-              ) : null}
-              <div
-                aria-hidden={!visible}
-                className="min-h-0 flex-1 aria-hidden:pointer-events-none"
-                data-sidebar-content=""
-                id={sidebarId}
-                inert={!visible}
-                style={{ width }}
-              >
-                <ContextMenuOverlayProvider onOpenChange={setMenuOpen}>
-                  {sidebar}
-                </ContextMenuOverlayProvider>
-              </div>
-              <div
-                className="relative z-20 shrink-0 border-t border-sidebar-border p-1"
-                data-sidebar-navigation=""
-              >
-                {navigation(!visible)}
-              </div>
-            </aside>
-          </div>
         </div>
       </div>
     </SidebarPinContext.Provider>
