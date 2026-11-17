@@ -7513,6 +7513,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
             ) : activePage === 'tunnels' ? (
               <TunnelsPage
                 tree={tree}
+                isAuthorized={authGate === 'unlocked'}
                 credentials={credentialOptions.ssh.filter(
                   (credential) =>
                     credential.provider === 'Local' &&
@@ -12828,11 +12829,42 @@ function TunnelAdvanced({
   );
 }
 
+function FortinetIPsecPasswordFields({
+  settings,
+  disabled,
+}: {
+  settings: Record<string, unknown>;
+  disabled: boolean;
+}) {
+  return [
+    ['PreSharedKey', 'Gateway pre-shared key (PSK)'],
+    ['Password', 'VPN user password'],
+  ].map(([secret, label]) => {
+    if (!fortinetIPsecFieldVisible(secret, settings)) return null;
+    const stored = settings[`Has${secret}`] === true;
+    return (
+      <div className="grid gap-2" key={secret}>
+        <Label htmlFor={`tunnel-ipsec-${secret}`}>{label}</Label>
+        <PasswordInput
+          autoComplete="off"
+          disabled={disabled}
+          id={`tunnel-ipsec-${secret}`}
+          maxLength={4096}
+          pattern={String.raw`[\s\S]*\P{White_Space}[\s\S]*`}
+          placeholder={stored ? 'Leave blank to keep the stored value' : undefined}
+          required={!stored}
+        />
+      </div>
+    );
+  });
+}
+
 // Provider-specific tunnel fields are schema-driven branches of one editor transaction; separate
 // components would duplicate validation and secret-clearing behavior.
 // react-doctor-disable-next-line react-doctor/no-giant-component
 function TunnelEditorDialog({
   tree,
+  isAuthorized,
   credentials,
   tunnels,
   initial,
@@ -12841,6 +12873,7 @@ function TunnelEditorDialog({
   onSaved,
 }: {
   tree: TreeNode[];
+  isAuthorized: boolean;
   credentials: CredentialRecord[];
   tunnels: TunnelRecord[];
   initial: TunnelEditorValue;
@@ -12981,7 +13014,8 @@ function TunnelEditorDialog({
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!canSave) return;
+    if (busy || !canSave) return;
+    const form = event.currentTarget;
     if (
       value.id &&
       value.kind !== initial.kind &&
@@ -13019,19 +13053,26 @@ function TunnelEditorDialog({
         kind: tunnelKindLabel(saved.kind),
         endpoint: saved.endpoint,
       });
-      onOpenChange(false);
+      if (form.isConnected) onOpenChange(false);
     } catch (saveError) {
-      setError(saveError instanceof Error ? saveError.message : 'Could not save VPN tunnel.');
+      setError(
+        saveError instanceof Error
+          ? userFacingTunnelError(saveError)
+          : 'Could not save VPN tunnel.',
+      );
     } finally {
       setBusy(false);
     }
   }
 
+  if (!isAuthorized && value.kind === 9) return null;
+
   return (
-    <Dialog onOpenChange={onOpenChange} open={open}>
+    <Dialog onOpenChange={(next) => !busy && onOpenChange(next)} open={open}>
       <DialogContent
         className="flex max-h-[calc(100dvh-2rem)] w-full max-w-[min(48rem,calc(100vw-2rem))] flex-col overflow-hidden border-border/70 bg-card sm:max-w-[min(48rem,calc(100vw-2rem))]"
         onInteractOutside={(event) => event.preventDefault()}
+        showCloseButton={!busy}
       >
         <DialogHeader>
           <DialogTitle>{value.id ? 'Edit VPN tunnel' : 'Add VPN tunnel'}</DialogTitle>
@@ -13318,38 +13359,31 @@ function TunnelEditorDialog({
                   {rows('Authentication', {
                     hidden: (field) => !fortinetIPsecFieldVisible(field.key, value.settings),
                   })}
-                  <p className="text-[11px] text-muted-foreground md:col-span-2">
-                    Enter keys, certificates and saved passwords in a separate secure window when
-                    you save.
-                  </p>
-                  {(value.settings.AuthMethod === 1
-                    ? ['ClientCert', 'ClientKey', 'CaCert']
-                    : ['PreSharedKey']
-                  )
-                    .concat(value.settings.UserAuth === 2 ? ['Password'] : [])
-                    .map((secret) =>
-                      value.settings[`Has${secret}`] === true || secret === 'CaCert' ? (
-                        <Label key={secret} className="flex items-center gap-2 md:col-span-2">
-                          <Checkbox
-                            checked={value.settings[`Replace${secret}`] === true}
-                            onCheckedChange={(checked) =>
-                              setSetting(`Replace${secret}`, checked === true)
-                            }
-                          />
-                          {secret === 'CaCert' ? 'Configure' : 'Replace stored'}{' '}
-                          {secret === 'PreSharedKey'
-                            ? 'gateway PSK'
-                            : secret === 'ClientCert'
-                              ? 'client certificate'
-                              : secret === 'ClientKey'
-                                ? 'private key'
-                                : secret === 'CaCert'
-                                  ? 'CA certificate'
-                                  : 'password'}{' '}
-                          when saving
-                        </Label>
-                      ) : null,
-                    )}
+                  <FortinetIPsecPasswordFields disabled={busy} settings={value.settings} />
+                  {value.settings.AuthMethod === 1 ? (
+                    <>
+                      <p className="text-[11px] text-muted-foreground md:col-span-2">
+                        Certificate material is entered in a secure window when you save.
+                      </p>
+                      {[
+                        ['ClientCert', 'Replace stored client certificate'],
+                        ['ClientKey', 'Replace stored private key'],
+                        ['CaCert', 'Configure CA certificate'],
+                      ].map(([secret, label]) =>
+                        value.settings[`Has${secret}`] === true || secret === 'CaCert' ? (
+                          <Label key={secret} className="flex items-center gap-2 md:col-span-2">
+                            <Checkbox
+                              checked={value.settings[`Replace${secret}`] === true}
+                              onCheckedChange={(checked) =>
+                                setSetting(`Replace${secret}`, checked === true)
+                              }
+                            />
+                            {label} when saving
+                          </Label>
+                        ) : null,
+                      )}
+                    </>
+                  ) : null}
                 </TunnelSection>
                 <TunnelSection title="VPN settings" contentClassName="items-start md:grid-cols-2">
                   {rows('VPN settings', {
@@ -13448,6 +13482,7 @@ function TunnelEditorDialog({
 // react-doctor-disable-next-line react-doctor/no-giant-component, react-doctor/prefer-useReducer
 function TunnelsPage({
   tree,
+  isAuthorized,
   credentials,
   tunnels,
   onTunnelsLoaded,
@@ -13456,6 +13491,7 @@ function TunnelsPage({
   onTunnelDeleted,
 }: {
   tree: TreeNode[];
+  isAuthorized: boolean;
   credentials: CredentialRecord[];
   tunnels: TunnelRecord[];
   onTunnelsLoaded: (tunnels: TunnelRecord[]) => void;
@@ -13798,6 +13834,7 @@ function TunnelsPage({
       {editorOpen ? (
         <TunnelEditorDialog
           tree={tree}
+          isAuthorized={isAuthorized}
           credentials={credentials}
           tunnels={tunnels}
           initial={editorValue}

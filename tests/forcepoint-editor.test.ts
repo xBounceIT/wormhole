@@ -15,7 +15,7 @@ const require = createRequire(import.meta.url);
 const read = (path: string) => readFileSync(new URL(path, import.meta.url), 'utf8');
 
 test('VPN editors align paired controls and Forcepoint displays certificate confirmation over its tester', async (context) => {
-  const app = read('../src/App.tsx');
+  const app = read('../src/App.tsx').replaceAll('\r\n', '\n');
   const section = (source: string, from: string, to: string) => {
     const start = source.indexOf(from);
     const end = source.indexOf(to, start);
@@ -32,6 +32,12 @@ test('VPN editors align paired controls and Forcepoint displays certificate conf
     /<TunnelSection\b[^>]*title="VPN settings"[\s\S]*?(?=<TunnelAdvanced)/,
   )?.[0];
   assert.ok(fortinetVpnSettings, 'Missing mounted Fortinet VPN settings');
+  const tunnelPageMount = section(app, '<TunnelsPage', '            ) : (');
+  const tunnelEditorMount = section(
+    app,
+    '      {editorOpen ? (\n        <TunnelEditorDialog',
+    '      <Dialog\n',
+  );
   const confirmationFixture = JSON.parse(read('fixtures/forcepoint-certificate-prompt.json'));
   const promptOpen = app.indexOf('        open={tunnelPrompts.length > 0}');
   const promptStart = app.lastIndexOf('      <Dialog', promptOpen);
@@ -40,7 +46,7 @@ test('VPN editors align paired controls and Forcepoint displays certificate conf
   const promptHandlerStart = app.indexOf("      if (event.type === 'tunnel.prompt-closed'");
   const promptHandlerEnd = app.indexOf('\n    });', promptHandlerStart);
   assert.ok(promptHandlerStart > 0 && promptHandlerEnd > promptHandlerStart);
-  const controls = ['input', 'label', 'collapsible', 'button', 'dialog', 'select']
+  const controls = ['input', 'label', 'collapsible', 'button', 'dialog', 'select', 'password-input']
     .map((name) =>
       read(`../src/components/ui/${name}.tsx`)
         .replace(/^import .*;\r?\n/gm, '')
@@ -54,10 +60,15 @@ test('VPN editors align paired controls and Forcepoint displays certificate conf
     ${read('../src/native-surface-overlay-state.ts').replace(/^export /gm, '')}
     ${section(read('../src/components/ui/context-menu.tsx'), 'type ContextMenuOverlayContextValue', 'function ContextMenu({')}
     ${controls}
+    const { useMemo, useState } = React;
     ${read('../src/fortinet-ipsec-state.ts').replace(/^export /gm, '')}
+    ${section(read('../src/tunnel-state.ts'), 'function userFacingTunnelError(', '// Only treat a test')}
+    ${section(app, 'const tunnelKinds =', 'function TunnelRouteField(')}
+    const missingTunnelFields = ({ settings }) => missingFortinetIPsecFields(settings);
+    const normalizeTunnelEditorSettings = (_kind, settings) => normalizeFortinetIPsecSettings(settings);
     ${section(app, 'function tunnelEditorFields(', 'function tunnelDefaultSettings(')}
     ${section(app, 'function tunnelSettingText(', '// Provider-specific tunnel fields')}
-    const PasswordInput = (props) => <Input {...props} type="password" />;
+    ${section(app, 'function TunnelEditorDialog(', '// Tunnel CRUD, test progress')}
     function ForcepointEditorHarness() {
       const value = { kind: 7, settings: { Host: 'vpn.example.test', Port: 443, Mtu: 1390 } };
       const [advancedOpen, setAdvancedOpen] = React.useState(true);
@@ -163,6 +174,108 @@ test('VPN editors align paired controls and Forcepoint displays certificate conf
         assert.ok(Math.abs(ike.left - address.left) < 1, 'Fortinet stacked fields have different insets');
       }
     }
+    async function checkFortinetPasswords(root) {
+      const render = async (settings) => {
+        await React.act(async () => {
+          root.render(<form id="tunnel-editor-form">
+            <FortinetIPsecPasswordFields settings={settings} disabled={false} />
+          </form>);
+        });
+        return document.getElementById('tunnel-editor-form');
+      };
+
+      const form = await render({ AuthMethod: 0, UserAuth: 2 });
+      const psk = form.querySelector('#tunnel-ipsec-PreSharedKey');
+      const password = form.querySelector('#tunnel-ipsec-Password');
+      for (const field of [psk, password]) {
+        assert.equal(field.type, 'password');
+        assert.equal(field.checkValidity(), false);
+        assert.ok(field.labels[0]?.textContent);
+      }
+      psk.value = 'gateway-key';
+      password.value = String.fromCharCode(0x85);
+      assert.equal(form.checkValidity(), false);
+      password.value = 'pass' + String.fromCharCode(0x2028) + 'word';
+      assert.equal(form.checkValidity(), true);
+      assert.deepEqual([...new FormData(form)], [], 'browser serialized inline credentials');
+      for (const auth of [0, 1, 3]) {
+        await render({ AuthMethod: 0, UserAuth: auth });
+        assert.equal(form.querySelector('#tunnel-ipsec-Password'), null);
+      }
+      await render({ AuthMethod: 1, UserAuth: 2 });
+      assert.equal(form.querySelector('#tunnel-ipsec-PreSharedKey'), null);
+      assert.ok(form.querySelector('#tunnel-ipsec-Password'));
+
+      await render({ AuthMethod: 0, UserAuth: 2, HasPreSharedKey: true, HasPassword: true });
+      for (const key of ['PreSharedKey', 'Password']) {
+        const field = form.querySelector('#tunnel-ipsec-' + key);
+        assert.equal(field.value, '');
+      }
+      assert.equal(form.checkValidity(), true);
+    }
+    function TunnelsPage({ credentials, isAuthorized, onTunnelCreated, tree, tunnels }) {
+      const [editorOpen, setTunnelEditorOpen] = useState(true);
+      const editorValue = { kind: 9, name: 'VPN', settings: { ...fortinetIPsecDefaults, Host: 'vpn.test' } };
+      const tunnelSaved = onTunnelCreated;
+      return <>${tunnelEditorMount}</>;
+    }
+    function FortinetEditorHarness({ isAuthorized = true }) {
+      const [tunnels, setTunnels] = useState([]);
+      const tree = [];
+      const credentialOptions = { ssh: [] };
+      const authGate = isAuthorized ? 'unlocked' : 'locked';
+      return <>
+        ${tunnelPageMount}
+        <output id="saved-vpns">{tunnels.map(tunnel => tunnel.id).join(',')}</output>
+      </>;
+    }
+    async function checkFortinetSave(root) {
+      let completeSave;
+      let failSave;
+      let saves = 0;
+      window.wormhole = { createTunnel: (request) => {
+        saves++;
+        assert.equal(request.kind, 9);
+        assert.equal(Object.hasOwn(request.settings, 'PreSharedKey'), false);
+        return new Promise((resolve, reject) => { completeSave = resolve; failSave = reject; });
+      }};
+      await React.act(async () => { root.render(<FortinetEditorHarness />); });
+      const form = document.getElementById('tunnel-editor-form');
+      const psk = form.querySelector('#tunnel-ipsec-PreSharedKey');
+      assert.ok(document.querySelector('[data-slot="dialog-close"]'));
+      psk.value = 'gateway-key';
+      await React.act(async () => { form.requestSubmit(); });
+      assert.equal(saves, 1);
+      assert.equal(document.querySelector('[data-slot="dialog-close"]'), null);
+      await React.act(async () => {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        form.requestSubmit();
+      });
+      assert.equal(document.getElementById('tunnel-editor-form'), form);
+      assert.equal(saves, 1);
+      await React.act(async () => { failSave(new Error("Error invoking remote method 'tunnel:create': Error: Save failed.")); });
+      assert.equal(document.querySelector('[role="alert"]').textContent, 'Save failed.');
+      assert.equal(psk.value, 'gateway-key');
+      assert.ok(document.querySelector('[data-slot="dialog-close"]'));
+      await React.act(async () => { form.requestSubmit(); });
+      assert.equal(saves, 2);
+      const finishBeforeLock = completeSave;
+      await React.act(async () => { root.render(<FortinetEditorHarness isAuthorized={false} />); });
+      assert.equal(document.getElementById('tunnel-editor-form'), null);
+      await React.act(async () => { root.render(<FortinetEditorHarness />); });
+      const reopened = document.getElementById('tunnel-editor-form');
+      const reopenedPsk = reopened.querySelector('#tunnel-ipsec-PreSharedKey');
+      assert.equal(reopenedPsk.value, '');
+      await React.act(async () => { finishBeforeLock({ kind: 9, name: 'VPN', id: 'saved' }); });
+      assert.equal(document.getElementById('tunnel-editor-form'), reopened);
+      assert.equal(document.getElementById('saved-vpns').textContent, 'saved');
+      reopenedPsk.value = 'new-key';
+      await React.act(async () => { reopened.requestSubmit(); });
+      assert.equal(saves, 3);
+      await React.act(async () => { completeSave({ kind: 9, name: 'VPN', id: 'saved-after-lock' }); });
+      assert.equal(document.getElementById('tunnel-editor-form'), null);
+      assert.equal(document.getElementById('saved-vpns').textContent, 'saved,saved-after-lock');
+    }
     async function runForcepointEditorTests() {
       const root = createRoot(document.getElementById('root'));
       await React.act(async () => { root.render(<ForcepointEditorHarness />); });
@@ -197,6 +310,10 @@ test('VPN editors align paired controls and Forcepoint displays certificate conf
     async function runVpnEditorTests() {
       await runForcepointEditorTests();
       const root = createRoot(document.getElementById('fortinet-root'));
+      if (runCredentialChecks) {
+        await checkFortinetPasswords(root);
+        await checkFortinetSave(root);
+      }
       await checkFortinetAlignment(root);
     }
     runVpnEditorTests();
@@ -224,7 +341,7 @@ test('VPN editors align paired controls and Forcepoint displays certificate conf
     const React = require(${JSON.stringify(require.resolve('react'))});
     const { createRoot } = require(${JSON.stringify(require.resolve('react-dom/client'))});
     const { Label: LabelPrimitive, Collapsible: CollapsiblePrimitive, Dialog: DialogPrimitive, Select: SelectPrimitive, Slot } = require(${JSON.stringify(require.resolve('radix-ui'))});
-    const { ChevronDown, ChevronDownIcon, ChevronUpIcon, CheckIcon, XIcon } = require(${JSON.stringify(require.resolve('lucide-react'))});
+    const { ChevronDown, ChevronDownIcon, ChevronUpIcon, Check, CheckIcon, Eye, EyeOff, Plus, XIcon } = require(${JSON.stringify(require.resolve('lucide-react'))});
     const { cva } = require(${JSON.stringify(require.resolve('class-variance-authority'))});
     const { clsx } = require(${JSON.stringify(require.resolve('clsx'))});
     const { twMerge } = require(${JSON.stringify(require.resolve('tailwind-merge'))});
@@ -259,7 +376,7 @@ test('VPN editors align paired controls and Forcepoint displays certificate conf
             window.webContents.debugger.attach('1.3');
             await window.webContents.debugger.sendCommand('Profiler.enable');
             await window.webContents.debugger.sendCommand('Profiler.startPreciseCoverage', { callCount: true, detailed: true });
-            await window.webContents.executeJavaScript(${JSON.stringify(renderer)});
+            await window.webContents.executeJavaScript('const runCredentialChecks = ' + (width === 1024) + ';\\n' + ${JSON.stringify(renderer)});
             const coverage = await window.webContents.debugger.sendCommand('Profiler.takePreciseCoverage');
             const script = coverage.result.find(item => item.url === 'wormhole-forcepoint-editor.js');
             const parent = script?.functions.find(item => item.functionName === 'TunnelAdvanced');
@@ -276,6 +393,14 @@ test('VPN editors align paired controls and Forcepoint displays certificate conf
             if (handlerPercent < ${coverageThreshold}) throw new Error('Tunnel prompt handler coverage below project threshold: ' + handlerPercent.toFixed(2));
             const fortinetHarness = script.functions.find(item => item.functionName === 'FortinetVpnSettingsHarness');
             if (!fortinetHarness || fortinetHarness.ranges.some(item => item.count === 0)) throw new Error('Modified Fortinet section was not fully covered.');
+            if (width === 1024) {
+              const passwordFields = script.functions.find(item => item.functionName === 'FortinetIPsecPasswordFields')?.ranges[0];
+              if (!passwordFields) throw new Error('Missing Fortinet IPsec password fields coverage.');
+              const passwordBlocks = script.functions.filter(item => item.ranges[0].startOffset >= passwordFields.startOffset && item.ranges[0].endOffset <= passwordFields.endOffset).flatMap(item => item.ranges);
+              const passwordPercent = 100 * passwordBlocks.filter(item => item.count > 0).length / passwordBlocks.length;
+              if (passwordPercent < ${coverageThreshold}) throw new Error('Fortinet IPsec password fields coverage below project threshold: ' + passwordPercent.toFixed(2));
+              console.log('Fortinet IPsec password fields: V8 block coverage ' + passwordPercent.toFixed(2) + '%');
+            }
             console.log(width + 'x' + height + ': Fortinet labels and controls aligned; modified section coverage 100%');
             console.log(width + 'x' + height + ': paired labels and inputs aligned; TunnelAdvanced coverage ' + percent.toFixed(2) + '%');
             console.log(width + 'x' + height + ': Go certificate event shown over tester; prompt handler coverage ' + handlerPercent.toFixed(2) + '%');

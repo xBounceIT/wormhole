@@ -41,6 +41,7 @@ test('authentication prompts and window-close controls work in Chromium', async 
       return `
         function ${name}() {
           const [open, setOpen] = React.useState(true);
+          const busy = false;
           return <Dialog open={open} onOpenChange={setOpen}>
             ${source.slice(contentStart, contentEnd)}
               <DialogTitle>Editor draft</DialogTitle>

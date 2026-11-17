@@ -152,7 +152,13 @@ import {
   type TunnelBrowserCompletion,
   type TunnelBrowserFailure,
 } from './tunnel-auth.js';
-import { prepareFortinetIPsecWrite, promptFortinetIPsecSecret } from './fortinet-ipsec-secret.js';
+import {
+  parseFortinetIPsecCredentials,
+  prepareFortinetIPsecWrite,
+  promptFortinetIPsecSecret,
+  type FortinetIPsecCertificate,
+  type FortinetIPsecCredentials,
+} from './fortinet-ipsec-secret.js';
 import {
   SerialBackendClient,
   isSerialInput,
@@ -8192,9 +8198,10 @@ function parseMcpApproval(value: unknown): {
 async function saveTunnelWithNativeSecret(
   operation: 'tunnel-create' | 'tunnel-update',
   request: ReturnType<typeof parseTunnelWriteRequest>,
+  credentials: FortinetIPsecCredentials,
 ) {
   const epoch = authSession.authorizationEpoch;
-  const native = await prepareFortinetIPsecWrite(request, (kind) => {
+  const promptForCertificate = (kind: FortinetIPsecCertificate) => {
     const pending = tunnelBrowserAuthQueue
       .catch(() => undefined)
       .then(() => {
@@ -8215,7 +8222,8 @@ async function saveTunnelWithNativeSecret(
       () => undefined,
     );
     return pending;
-  });
+  };
+  const native = await prepareFortinetIPsecWrite(request, promptForCertificate, credentials);
   try {
     requireAuthorizationEpoch(epoch);
     return parseTunnelDetailsResponse(await runBackend<unknown>(operation, native));
@@ -9331,11 +9339,12 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     return afterBitwardenPopupInputEvent(() => webSurfaces.closeBitwardenPopup(sessionId));
   });
 
-  ipcMain.handle('tunnel:create', async (_event, value: unknown) => {
+  ipcMain.handle('tunnel:create', async (_event, value: unknown, inlineCredentials: unknown) => {
     const request = parseTunnelWriteRequest(value, false);
+    const credentials = parseFortinetIPsecCredentials(request.kind, inlineCredentials);
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
-      return saveTunnelWithNativeSecret('tunnel-create', request);
+      return saveTunnelWithNativeSecret('tunnel-create', request, credentials);
     });
   });
 
@@ -9353,11 +9362,12 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     });
   });
 
-  ipcMain.handle('tunnel:update', async (_event, value: unknown) => {
+  ipcMain.handle('tunnel:update', async (_event, value: unknown, inlineCredentials: unknown) => {
     const request = parseTunnelWriteRequest(value, true);
+    const credentials = parseFortinetIPsecCredentials(request.kind, inlineCredentials);
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
-      return saveTunnelWithNativeSecret('tunnel-update', request);
+      return saveTunnelWithNativeSecret('tunnel-update', request, credentials);
     });
   });
 

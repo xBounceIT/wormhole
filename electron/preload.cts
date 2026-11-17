@@ -2,6 +2,8 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import type { SshTerminalTheme } from './terminal-theme-settings.js';
 import type { MRemoteImportOptions } from './mremote-import-contract.js';
 import type { WebBrowserCommand, WebBrowserState } from './web-browser-tabs.js';
+import type { FortinetIPsecCredentials } from './fortinet-ipsec-secret.js';
+import type { TunnelWriteRequest } from './tunnel-test-contract.js';
 import type {
   RdpBackendEvent,
   RdpCommandRequest,
@@ -10,6 +12,23 @@ import type {
   RdpSystemClientOpenRequest,
   RdpSystemClientOpenResult,
 } from './rdp-contract.js';
+
+function writeTunnel(channel: 'tunnel:create' | 'tunnel:update', request: TunnelWriteRequest) {
+  if (request.kind !== 9) return ipcRenderer.invoke(channel, request);
+
+  // Read unnamed inputs so secrets stay out of React state and HTML form serialization.
+  const credentials: FortinetIPsecCredentials = {};
+  const form = document.getElementById('tunnel-editor-form');
+  if (form instanceof HTMLFormElement) {
+    for (const key of ['PreSharedKey', 'Password'] as const) {
+      const field = form.querySelector(`#tunnel-ipsec-${key}`);
+      if (!(field instanceof HTMLInputElement) || field.value === '') continue;
+      if (field.value.length > 4096) throw new Error('A Fortinet IPsec credential is too long.');
+      credentials[key] = field.value;
+    }
+  }
+  return ipcRenderer.invoke(channel, request, credentials);
+}
 
 type WormholeUpdateCheckResult = {
   currentVersion: string;
@@ -281,17 +300,11 @@ const wormholeBridge = {
           tunnelConfigId: string;
         },
   ) => ipcRenderer.invoke('workspace:update-node-tunnel', request),
-  createTunnel: (request: { name: string; kind: number; settings: Record<string, unknown> }) =>
-    ipcRenderer.invoke('tunnel:create', request),
+  createTunnel: (request: TunnelWriteRequest) => writeTunnel('tunnel:create', request),
   listTunnels: () => ipcRenderer.invoke('tunnel:list'),
   readTunnel: (id: string) => ipcRenderer.invoke('tunnel:read', { id }),
-  updateTunnel: (request: {
-    forgetJumpHostKeySha256?: string;
-    id: string;
-    name: string;
-    kind: number;
-    settings: Record<string, unknown>;
-  }) => ipcRenderer.invoke('tunnel:update', request),
+  updateTunnel: (request: TunnelWriteRequest & { id: string }) =>
+    writeTunnel('tunnel:update', request),
   deleteTunnel: (id: string) => ipcRenderer.invoke('tunnel:delete', { id }),
   testTunnel: (request: {
     id: string;

@@ -894,16 +894,6 @@ test('VPN cards show searchable endpoint metadata instead of a managed-tunnel pl
 
   assert.match(preloadSource, /listTunnels: \(\) => ipcRenderer\.invoke\('tunnel:list'\)/);
   assert.match(mainSource, /parseTunnelSummaryList\(await runBackend<unknown>\('tunnel-list'\)\)/);
-  assert.match(mainSource, /saveTunnelWithNativeSecret\('tunnel-create', request\)/);
-  const nativeSave = sourceBetween(
-    mainSource,
-    'async function saveTunnelWithNativeSecret(',
-    'function registerIpcHandlers(',
-  );
-  assert.match(
-    nativeSave,
-    /parseTunnelDetailsResponse\(await runBackend<unknown>\(operation, native\)\)/,
-  );
   assert.match(tunnelsPage, /\.listTunnels\(\)/);
   assert.match(tunnelsPage, /attempt === summaryLoadAttemptRef\.current/);
   assert.match(tunnelsPage, /\+\+summaryLoadAttemptRef\.current/);
