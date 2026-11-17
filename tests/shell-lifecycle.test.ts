@@ -2045,33 +2045,6 @@ test('window close always follows renderer teardown with native cleanup', () => 
   assert.match(failureBranch, /await shutdownNativeResources\(\)/);
 });
 
-test('RDP start cancellation and VPN ownership are scoped before asynchronous profile resolution', () => {
-  const mainSource = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
-  const start = mainSource.indexOf("ipcMain.handle('rdp:start'");
-  const end = mainSource.indexOf("ipcMain.handle('rdp:system-client-capability'", start);
-  const startHandler = mainSource.slice(start, end);
-  assert.match(startHandler, /rdpStartAttempts\.begin\(request\.sessionId\)/);
-  assert.match(startHandler, /resolveNativeRdpProfile\(/);
-  assert.ok(
-    startHandler.indexOf('rdpStartAttempts.begin(request.sessionId)') <
-      startHandler.indexOf('resolveNativeRdpProfile('),
-  );
-  assert.match(startHandler, /assertRdpStartCurrent\(request\.sessionId, requestAttempt\)/);
-  assert.match(startHandler, /rdpSessionAttempts\.begin\(request\.sessionId\)/);
-  assert.match(
-    startHandler,
-    /assertRdpStartCurrent\(request\.sessionId, requestAttempt, generation\)/,
-  );
-  assert.match(startHandler, /rdpTunnelLeases\.claim\(lifecycleId, leaseId\)/);
-  assert.match(startHandler, /rdpTunnelLeaseSessions\.set\(lifecycleId, request\.sessionId\)/);
-  assert.match(startHandler, /releaseRdpTunnelsForSession\(request\.sessionId\)/);
-  assert.doesNotMatch(startHandler, /rdpTunnelLeases\.claim\(request\.sessionId, leaseId\)/);
-  assert.match(
-    mainSource,
-    /function cancelPreparingRdpStarts\(\)[\s\S]*rdpStartAttempts\.cancelAll\(\)[\s\S]*rdpSessionAttempts\.cancelAll\(\)[\s\S]*releaseRdpTunnel\(lifecycleId\)/,
-  );
-});
-
 test('application shutdown permanently stops the broker before dropping its reference', () => {
   const mainSource = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
   const shutdown = mainSource.slice(

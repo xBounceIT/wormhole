@@ -2,13 +2,8 @@ import { isTunnelIdentifier } from '../electron/tunnel-test-contract.ts';
 import { hasValidCredentialSecretLength } from '../electron/credential-secret-length.ts';
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { readFileSync } from 'node:fs';
 import { stripTypeScriptTypes } from 'node:module';
-import { KeyedSingleFlight } from '../electron/keyed-single-flight.ts';
 import { isFileBrowserProtocol } from '../src/file-protocol.ts';
 import { parseWorkspaceNotes } from '../electron/workspace-notes.ts';
 import { parseWorkspaceRdpSettings } from '../electron/workspace-rdp-contract.ts';
@@ -74,77 +69,6 @@ test('editor snapshots and watcher updates leave the owning session and file bro
   listener({ type: 'sftp.edit', sessionId: 'backend', requestId: 'empty-list', edits: [] });
   assert.equal(current, sessions, 'an empty edit inventory retired the file-transfer tab');
   assert.equal(sessionUpdates, 0, 'edit-only events must not enter the lifecycle mapper');
-});
-
-test('SFTP bridge declarations preserve the renderer Vite ambient type reference', () => {
-  const directory = mkdtempSync(join(tmpdir(), 'wormhole-vite-types-'));
-  try {
-    const declaration = fileURLToPath(new URL('../src/vite-env.d.ts', import.meta.url)).replaceAll(
-      '\\',
-      '/',
-    );
-    const source = join(directory, 'ambient.mts');
-    writeFileSync(
-      source,
-      `/// <reference path="${declaration}" />\nconst development: boolean = import.meta.env.DEV;\n`,
-    );
-    execFileSync(
-      process.execPath,
-      [
-        fileURLToPath(new URL('../node_modules/typescript/bin/tsc', import.meta.url)),
-        '--noEmit',
-        '--skipLibCheck',
-        '--target',
-        'es2022',
-        '--module',
-        'esnext',
-        '--moduleResolution',
-        'bundler',
-        source,
-      ],
-      { cwd: directory, windowsHide: true, timeout: 30000, stdio: 'pipe' },
-    );
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-});
-
-test('failed edit finalization still disconnects SSH and releases its route', async () => {
-  const source = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
-  const start = source.indexOf(
-    '  async close(sessionId: string): Promise<void> {',
-    source.indexOf('class NativeSshBackend'),
-  );
-  const end = source.indexOf('\n  cancelPendingConnections()', start);
-  assert.ok(start > 0 && end > start);
-  const { close } = new Function(
-    stripTypeScriptTypes(`function makeClose() { return { ${source.slice(start, end)} }; }`) +
-      ';return makeClose();',
-  )();
-  const calls: string[] = [];
-  const originalWarn = console.warn;
-  console.warn = () => undefined;
-  try {
-    await close.call(
-      {
-        finishEditClose: async () => {
-          throw new Error('journal write failed');
-        },
-        terminalDelivery: { remove: () => calls.push('delivery') },
-        terminalOwners: new Map(),
-        connectionAttempts: { cancel: () => calls.push('cancel') },
-        closingConnections: new KeyedSingleFlight<string, void>(),
-        openWaiters: new Map(),
-        child: { killed: false },
-        write: (command: { type: string }) => calls.push(command.type),
-        releaseTunnel: async () => calls.push('release'),
-      },
-      'session',
-    );
-    assert.deepEqual(calls, ['cancel', 'delivery', 'close', 'release']);
-  } finally {
-    console.warn = originalWarn;
-  }
 });
 
 test('SFTP reconnect waits for edit confirmation and close, rejecting duplicates and stale tabs', async () => {

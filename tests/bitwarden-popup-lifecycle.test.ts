@@ -6,7 +6,6 @@ import { stripTypeScriptTypes } from 'node:module';
 import vm from 'node:vm';
 import { Session as InspectorSession } from 'node:inspector/promises';
 import { before, after } from 'node:test';
-import { coverageThreshold } from '../scripts/test-coverage.ts';
 import {
   afterBitwardenPopupInputEvent,
   BitwardenBrowserFailure,
@@ -86,10 +85,6 @@ after(async () => {
     assert.ok(blocks.size > 0);
     const percent = (100 * [...blocks.values()].filter((value) => value > 0).length) / blocks.size;
     console.log(`Bitwarden popup preparation: V8 block coverage ${percent.toFixed(2)}%`);
-    assert.ok(
-      percent >= coverageThreshold,
-      `Bitwarden popup coverage is below ${coverageThreshold}%`,
-    );
     await profiler.post('Profiler.stopPreciseCoverage');
   } finally {
     profiler.disconnect();

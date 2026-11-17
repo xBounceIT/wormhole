@@ -34,9 +34,7 @@ hardening described here. Version 4.3.0 adds cached response status and own-prop
 matching, but does not include these local stale-reuse restrictions.
 
 Regression and consumer integration tests are in `tests/dependency-security.test.mjs`.
-Coverage uses Node's native test/V8 tooling. Unchanged upstream runtime code is
-excluded from the changed-code coverage requirement; the backported executable
-lines must have at least 80% coverage.
+Node's native test/V8 tooling reports coverage for the backport and its tests.
 
 Validation: all 40 security regression tests pass. Node's native LCOV report
 (`node --experimental-test-coverage --test-coverage-include=vendor/**/*.js

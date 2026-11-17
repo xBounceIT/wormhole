@@ -7241,14 +7241,13 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
               ) : null}
             </>
           }
-          navigation={(collapsed) => (
+          navigation={
             <SidebarNavigation
               activePage={activePage}
-              collapsed={collapsed}
               onNavigate={setActivePage}
               sessionCount={sessions.length}
             />
-          )}
+          }
           initialPinned={initialSettings.sidebarPinned !== false}
           initialWidth={sidebarWidth}
           keepOpen={sidebarImportMenuOpen}

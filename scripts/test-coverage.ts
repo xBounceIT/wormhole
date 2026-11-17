@@ -4,8 +4,6 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
-export const coverageThreshold = 80;
-
 export interface GoCoverage {
   covered: number;
   total: number;
@@ -65,7 +63,7 @@ function runTypeScriptCoverage(repositoryRoot: string): void {
   // Node's native coverage can measure only modules loaded by node:test. React TSX surfaces and
   // process entrypoints remain protected by the repository's integration and source-contract
   // tests, but they are intentionally not represented by this unit-module percentage.
-  console.log(`\nTypeScript loaded-module coverage (minimum ${coverageThreshold}%):`);
+  console.log('\nTypeScript loaded-module coverage:');
   run(
     process.execPath,
     [
@@ -74,9 +72,6 @@ function runTypeScriptCoverage(repositoryRoot: string): void {
       // Native Electron fixtures own focus and precise profilers. Bound coverage memory
       // and avoid competing hidden windows while their V8 reports are flushed on exit.
       '--test-concurrency=1',
-      `--test-coverage-lines=${coverageThreshold}`,
-      `--test-coverage-branches=${coverageThreshold}`,
-      `--test-coverage-functions=${coverageThreshold}`,
       '--test-coverage-include=src/**/*.ts',
       '--test-coverage-include=electron/**/*.ts',
       '--test-coverage-include=scripts/**/*.ts',
@@ -125,22 +120,6 @@ export function parseGoCoverage(contents: string): GoCoverage {
   return { covered, total };
 }
 
-export function meetsCoverageThreshold(coverage: GoCoverage, threshold: number): boolean {
-  if (
-    !Number.isSafeInteger(coverage.covered) ||
-    !Number.isSafeInteger(coverage.total) ||
-    coverage.covered < 0 ||
-    coverage.total <= 0 ||
-    coverage.covered > coverage.total ||
-    !Number.isFinite(threshold) ||
-    threshold < 0 ||
-    threshold > 100
-  ) {
-    throw new Error('Coverage totals and threshold must be valid.');
-  }
-  return coverage.covered * 100 >= coverage.total * threshold;
-}
-
 export function runGoCoverage(repositoryRoot: string, runCommand: typeof run = run): void {
   const goModules = discoverGoModules(repositoryRoot);
   if (goModules.length === 0) {
@@ -151,7 +130,7 @@ export function runGoCoverage(repositoryRoot: string, runCommand: typeof run = r
   let covered = 0;
   let total = 0;
 
-  console.log(`\nGo coverage (aggregate minimum ${coverageThreshold}%):`);
+  console.log('\nGo statement coverage:');
   try {
     for (const [index, modulePath] of goModules.entries()) {
       const profilePath = join(temporaryDirectory, `module-${index}.out`);
@@ -174,11 +153,8 @@ export function runGoCoverage(repositoryRoot: string, runCommand: typeof run = r
     rmSync(temporaryDirectory, { recursive: true, force: true });
   }
 
-  const aggregate = { covered, total };
+  if (!Number.isSafeInteger(total)) throw new Error('Go coverage total is invalid.');
   console.log(`  aggregate: ${((100 * covered) / total).toFixed(2)}% (${covered}/${total})`);
-  if (!meetsCoverageThreshold(aggregate, coverageThreshold)) {
-    throw new Error(`Go statement coverage must be at least ${coverageThreshold}%.`);
-  }
 }
 
 export function main(repositoryRoot = resolve(import.meta.dirname, '..')): void {

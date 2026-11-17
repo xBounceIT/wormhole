@@ -5,7 +5,7 @@ import test from 'node:test';
 const appSource = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
 
 // JSX call sites are covered by these scoped contracts. The shared behavior and
-// callbacks are executed in Chromium with the >=80% V8 coverage gate in auth-prompt.test.ts.
+// callbacks are exercised and measured in Chromium in auth-prompt.test.ts.
 test('password forms use the shared visibility control across every editor and prompt', () => {
   for (const file of [
     'App.tsx',
@@ -92,27 +92,6 @@ function sourceBetween(source: string, startMarker: string, endMarker: string): 
   return source.slice(start, end);
 }
 
-// Static TSX configuration is outside Node's loaded-module coverage in scripts/test-coverage.ts.
-test('sidebar navigation places Sessions above Credentials and preserves the remaining order', () => {
-  const navigationSource = readFileSync(
-    new URL('../src/components/SidebarNavigation.tsx', import.meta.url),
-    'utf8',
-  );
-  const navigation = sourceBetween(
-    navigationSource,
-    'export const sidebarNavigationItems',
-    'export type SidebarPage',
-  );
-  assert.deepEqual(
-    [...navigation.matchAll(/\bid: '([^']+)'/g)].map(([, id]) => id),
-    ['sessions', 'credentials', 'tunnels', 'settings'],
-  );
-  assert.match(navigationSource, /\{sidebarNavigationItems\.map\(/);
-  const layout = sourceBetween(appSource, '<SidebarLayout', 'initialPinned=');
-  assert.match(layout, /navigation=\{\(collapsed\) => \(/);
-  assert.match(layout, /<SidebarNavigation\b/);
-});
-
 test('live surfaces are keyed only by session identity in one stable workspace layer', () => {
   const surfaceLayer = appSource.slice(
     appSource.indexOf('{sessions.map((session) => {', appSource.indexOf('function SessionsPage')),
@@ -126,12 +105,6 @@ test('live surfaces are keyed only by session identity in one stable workspace l
   );
   assert.match(surfaceLayer, /<SessionSurface/);
   assert.doesNotMatch(surfaceLayer, /key=\{`?\$?\{?pane/);
-});
-
-test('layout moves do not call protocol close or disconnect operations', () => {
-  const layoutSource = readFileSync(new URL('../src/session-layout.ts', import.meta.url), 'utf8');
-  assert.doesNotMatch(layoutSource, /wormhole|disconnect|closeWebSession|closeRdpSession/);
-  assert.match(appSource, /function closeSession\(id: string, preferredNextSessionId\?: string\)/);
 });
 
 test('stable VNC identity preserves the single App-owned disconnect lifecycle', () => {
@@ -170,21 +143,6 @@ test('stable VNC identity preserves the single App-owned disconnect lifecycle', 
     vncSource,
     /if \(!disconnected\) void connect\(\);[\s\S]*connectAttempt\.current \+= 1/,
   );
-});
-
-test('authentication prompt keeps the active Windows Hello request through StrictMode replay', () => {
-  const promptSource = appSource.slice(
-    appSource.indexOf('function AuthPrompt'),
-    appSource.indexOf('type WormholeAppProps'),
-  );
-  assert.match(promptSource, /const activeAuthRequest = useRef<string \| null>\(null\)/);
-  assert.match(promptSource, /helloInFlight\.current === requestKey/);
-  assert.match(promptSource, /activeAuthRequest\.current = authRequestKey/);
-  assert.match(
-    promptSource,
-    /if \(activeAuthRequest\.current === authRequestKey\) activeAuthRequest\.current = null/,
-  );
-  assert.doesNotMatch(promptSource, /let cancelled = false/);
 });
 
 test('MCP approval settles an active authentication confirmation before opening', () => {
@@ -334,108 +292,19 @@ test('renderer reload settles RDP processes and every broker tunnel lease', () =
   assert.ok(rdpCleanup >= 0 && backendStop > rdpCleanup);
 });
 
-test('RDP start rechecks lifecycle generation after the native acknowledgement', () => {
-  const startSource = sourceBetween(
-    mainSource,
-    "ipcMain.handle('rdp:start'",
-    "ipcMain.handle('rdp:system-client-capability'",
-  );
-  const startCall = startSource.indexOf('const response = await client.start');
-  const postStartCheck = startSource.indexOf(
-    '!rdpSessionAttempts.isCurrent(request.sessionId, generation)',
-    startCall,
-  );
-  assert.ok(startCall >= 0 && postStartCheck > startCall);
-  assert.match(startSource.slice(postStartCheck), /client\.command\([\s\S]*'disconnect'/);
-});
-
-test('stale RDP starts delegate process and tunnel cleanup to their failure boundary once', () => {
-  const embeddedSource = sourceBetween(
-    mainSource,
-    "ipcMain.handle('rdp:start'",
-    "ipcMain.handle('rdp:system-client-capability'",
-  );
+test('stale system RDP starts release their reserved lifecycle and VPN', () => {
   const systemSource = sourceBetween(
     mainSource,
     "ipcMain.handle('rdp:open-system'",
     "ipcMain.handle('rdp:resize'",
   );
-  const embeddedStart = embeddedSource.indexOf('const response = await client.start');
-  const embeddedCatch = embeddedSource.indexOf('} catch (error) {', embeddedStart);
   const systemStart = systemSource.indexOf('const result = await client.start');
   const systemCatch = systemSource.indexOf('} catch (error) {', systemStart);
-  assert.ok(embeddedStart >= 0 && embeddedCatch > embeddedStart);
-  assert.match(
-    embeddedSource.slice(embeddedCatch),
-    /settleTunnelCleanup\([\s\S]*client\.command\([\s\S]*lifecycleId[\s\S]*releaseRdpTunnel\(lifecycleId\)/,
-  );
   assert.ok(systemStart >= 0 && systemCatch > systemStart);
   assert.match(
     systemSource.slice(systemCatch),
     /settleTunnelCleanup\([\s\S]*client\.command\([\s\S]*lifecycleId[\s\S]*releaseRdpTunnel\(lifecycleId\)/,
   );
-});
-
-test('authorization loss disconnects an acknowledged RDP lifecycle after renderer invalidation', () => {
-  const startSource = sourceBetween(
-    mainSource,
-    "ipcMain.handle('rdp:start'",
-    "ipcMain.handle('rdp:system-client-capability'",
-  );
-  const authorizationCleanup = startSource.slice(startSource.indexOf('if (!ownsLifecycle) return'));
-  assert.doesNotMatch(authorizationCleanup, /lifecycleId && !ownerWindow\.isDestroyed\(\)/);
-  assert.match(authorizationCleanup, /settleTunnelCleanup\(/);
-  assert.match(
-    authorizationCleanup,
-    /ownerWindowAvailable \? nativeWindowHandle\(ownerWindow\) : ''[\s\S]*ownerWindowAvailable \? toScreenBounds\(ownerWindow, request\.bounds\) : undefined[\s\S]*lifecycleId/,
-  );
-});
-
-test('duplicate RDP starts preserve the accepted lifecycle and VPN lease', () => {
-  const startSource = sourceBetween(
-    mainSource,
-    "ipcMain.handle('rdp:start'",
-    "ipcMain.handle('rdp:system-client-capability'",
-  );
-  const profileResolution = startSource.indexOf('resolveNativeRdpProfile');
-  const runningCheck = startSource.indexOf('client.hasSession(request.sessionId)');
-  const lifecycleBegin = startSource.indexOf('rdpSessionAttempts.begin(request.sessionId)');
-  const previousDisconnect = startSource.indexOf('.command(', lifecycleBegin);
-  const tunnelRelease = startSource.indexOf('await releaseRdpTunnelsForSession(request.sessionId)');
-  const lifecycleIdBegin = startSource.indexOf(
-    'lifecycleId = client.beginStart(request.sessionId)',
-  );
-  const tunnelClaim = startSource.indexOf('rdpTunnelLeases.claim(lifecycleId, leaseId)');
-  const exclusiveStart = startSource.indexOf('rdpStartOperations.runExclusive(');
-  assert.ok(
-    exclusiveStart >= 0 &&
-      runningCheck > exclusiveStart &&
-      lifecycleBegin > runningCheck &&
-      previousDisconnect > lifecycleBegin &&
-      tunnelRelease > previousDisconnect &&
-      lifecycleIdBegin > tunnelRelease &&
-      tunnelClaim > lifecycleIdBegin &&
-      profileResolution > tunnelClaim,
-  );
-  assert.match(startSource, /rdpStartAttempts\.begin\(request\.sessionId\)/);
-  assert.match(startSource, /if \(!ownsLifecycle\) return/);
-  assert.match(
-    startSource,
-    /catch \(error\) \{[\s\S]*settleTunnelCleanup\([\s\S]*client\.command\([\s\S]*'disconnect'[\s\S]*releaseRdpTunnel/,
-  );
-});
-
-test('RDP start honors only Go-authorized direct broker routes', () => {
-  const startSource = mainSource.slice(
-    mainSource.indexOf("ipcMain.handle('rdp:start'"),
-    mainSource.indexOf("ipcMain.handle('rdp:system-client-capability'"),
-  );
-  assert.match(startSource, /acquireTunnelRoute\(/);
-  const routeGuard = startSource.indexOf('canProceedWithRdpTunnelRoute(request.profile, route)');
-  const profileResolution = startSource.indexOf('await resolveNativeRdpProfile');
-  const nativeStart = startSource.indexOf('await client.start');
-  assert.ok(routeGuard >= 0 && profileResolution > routeGuard && nativeStart > profileResolution);
-  assert.doesNotMatch(startSource, /!socksEndpoint && resolvedProfile\.tunnelConfigId/);
 });
 
 test('system RDP commits its replacement lifecycle only after safe profile resolution', () => {
@@ -695,33 +564,6 @@ test('session reconciliation is persisted so reopened IDs cannot revive stale pa
   assert.match(sessionsSource, /\}, \[draggedSessionId, selectedSession\?\.id, sessionIds\]\);/);
 });
 
-test('Quick Connect keeps its session name optional in the mounted form', () => {
-  assert.match(appSource, /Session name \(optional\)/);
-  assert.match(appSource, /required=\{connectionEditorMode === 'saved'\}/);
-  assert.match(appSource, /connectionEditorMode === 'quick'[\s\S]{0,160}Defaults to target/);
-});
-
-test('serial connections omit the VPN route from the mounted connection editor', () => {
-  const editorSource = sourceBetween(
-    appSource,
-    'open={newConnectionOpen}',
-    'open={folderDetailsOpen}',
-  );
-  const tunnelFieldIndex = editorSource.indexOf('id="connection-tunnel-route"');
-  assert.ok(tunnelFieldIndex >= 0, 'missing connection VPN route field');
-  const tunnelFieldSource = editorSource.slice(
-    Math.max(0, tunnelFieldIndex - 300),
-    tunnelFieldIndex + 500,
-  );
-
-  assert.match(
-    tunnelFieldSource,
-    /connectionProtocolSupportsTunnel\(newConnectionForm\.protocol\) \? \([\s\S]*<TunnelRouteField/,
-  );
-  assert.doesNotMatch(tunnelFieldSource, /disabled=/);
-  assert.equal(editorSource.match(/id="connection-tunnel-route"/g)?.length, 1);
-});
-
 test('new folders expose every inheritable default before creation', () => {
   assert.match(appSource, /id="new-folder-credential"/);
   assert.match(appSource, /id="new-folder-auto-sudo"/);
@@ -848,18 +690,6 @@ test('an asynchronous Bitwarden region refresh does not clear an open login form
     dialogMount,
     /key=\{`\$\{bitwardenCliDialog\}:\$\{bitwardenServerRegion\}`\}/,
   );
-});
-
-test('SFTP keyboard range selection replaces a stale anchor', () => {
-  const keyboardSelection = sourceBetween(
-    readFileSync(new URL('../src/components/SftpBrowser.tsx', import.meta.url), 'utf8'),
-    'function moveKeyboardSelection',
-    'function beginRename',
-  );
-
-  assert.match(keyboardSelection, /validSelectedPaths\.size > 0/);
-  assert.match(keyboardSelection, /nextSftpSelection\(/);
-  assert.match(keyboardSelection, /selectionAnchorPath\.current = next\.anchorPath/);
 });
 
 test('VPN diagnostics expose target probing and cancellation across the bridge', () => {

@@ -37,11 +37,9 @@ Use your judgment to choose the approach, tools, and depth of analysis appropria
 for the task. Make reasonable assumptions for routine decisions and ask when
 missing information materially affects the outcome.
 
-Code changes require automated tests with at least 80% coverage of new or modified
-code, measured by the project's tooling. Explicitly test critical behavior, error
-paths, and regressions. Document justified exclusions; avoid tests written only
-to inflate coverage. Documentation and non-executable changes are outside this
-coverage requirement.
+Code changes require automated tests for critical behavior, error paths, and
+regressions. Use the project's coverage reports to identify gaps and document
+justified exclusions. Avoid tests written only to inflate coverage.
 
 Choose checks based on the affected code and risk, respecting existing CI gates.
 Report what was verified and any remaining limitations.

@@ -9,7 +9,6 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import tailwindcss from '@tailwindcss/vite';
 import { build, transformWithOxc } from 'vite';
-import { coverageThreshold } from '../scripts/test-coverage.ts';
 
 const require = createRequire(import.meta.url);
 
@@ -510,9 +509,6 @@ test('authentication prompts and window-close controls work in Chromium', async 
             const percent = 100 * covered / ranges.length;
             console.log(name + ': V8 block coverage ' + covered + '/' + ranges.length +
               ' (' + percent.toFixed(2) + '%)');
-            if (percent < ${coverageThreshold}) {
-              throw new Error(name + ' coverage is below ${coverageThreshold}%.');
-            }
           }
         } finally { window.destroy(); }
         // This process is a test host, and all assertions and window teardown

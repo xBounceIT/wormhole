@@ -73,14 +73,9 @@ function Harness({
             ) : null}
           </>
         }
-        navigation={(collapsed) => (
-          <SidebarNavigation
-            activePage={activePage}
-            onNavigate={setActivePage}
-            sessionCount={2}
-            collapsed={collapsed}
-          />
-        )}
+        navigation={
+          <SidebarNavigation activePage={activePage} onNavigate={setActivePage} sessionCount={2} />
+        }
         initialPinned={pinned}
         initialWidth={width}
         keepOpen={dropdownOpen}
@@ -172,6 +167,7 @@ window.runSidebarTests = async (handleOnly = false) => {
             left: left(),
             width: aside().getBoundingClientRect().width,
             state: layout().dataset,
+            focus: document.activeElement?.getAttribute('aria-label'),
             transitions: aside()
               .getAnimations()
               .map((animation) => ({
@@ -188,7 +184,6 @@ window.runSidebarTests = async (handleOnly = false) => {
   const aside = () => query('aside');
   const sidebarContent = () => query('[data-sidebar-content]');
   const pin = () => query('[data-sidebar-pin]') as HTMLButtonElement;
-  const rail = () => query('[aria-label="Show sidebar"]');
   const left = () => query('#content').getBoundingClientRect().left;
   const shown = async (expected: boolean) => {
     await waitFor(
@@ -197,7 +192,7 @@ window.runSidebarTests = async (handleOnly = false) => {
         aside().getAnimations().length === 0 &&
         (expected
           ? aside().getBoundingClientRect().left === 0
-          : aside().getBoundingClientRect().right === 40),
+          : aside().getBoundingClientRect().width === 0),
       'Sidebar visibility did not settle',
     );
     assert.equal(
@@ -209,13 +204,25 @@ window.runSidebarTests = async (handleOnly = false) => {
         hover: aside().matches(':hover'),
       }),
     );
-    assert.equal(sidebarContent().inert, !expected);
-    assert.equal(sidebarContent().getAttribute('aria-hidden'), String(!expected));
+    assert.equal(aside().inert, !expected);
+    assert.equal(aside().getAttribute('aria-hidden'), String(!expected));
+    assert.equal(pin().getAttribute('aria-expanded'), String(expected));
+    assert.equal(getComputedStyle(aside()).opacity, expected ? '1' : '0');
   };
   const move = async (x: number, y = 450) => {
     await React.act(async () => window.sidebarInput({ type: 'mouseMove', x, y }));
     await tick();
-    if (x === 6) await shown(true);
+  };
+  const pinPoint = () => {
+    const bounds = pin().getBoundingClientRect();
+    return [
+      Math.round(bounds.x + bounds.width / 2),
+      Math.round(bounds.y + bounds.height / 2),
+    ] as const;
+  };
+  const hoverPin = async () => {
+    await move(...pinPoint());
+    await shown(true);
   };
   const click = async (element: HTMLElement) => {
     const bounds = element.getBoundingClientRect();
@@ -264,7 +271,7 @@ window.runSidebarTests = async (handleOnly = false) => {
       () =>
         layout().dataset.pinned === 'true'
           ? left() >= aside().getBoundingClientRect().right
-          : Math.abs(left() - 40) <= 1,
+          : left() === 0,
       'Pin layout did not settle',
     );
   };
@@ -455,9 +462,11 @@ window.runSidebarTests = async (handleOnly = false) => {
   await React.act(async () => pin().click());
   assert.deepEqual(saves, [false]);
   await settle();
+  await shown(true);
+  await move(1000);
   await shown(false);
   assert.equal(getComputedStyle(query('[data-slot="resizable-handle"]')).display, 'none');
-  assert.equal(document.querySelector('[data-slot="sidebar-menu-badge"]'), null);
+  assert.ok(navigation.closest('[inert]'));
   assert.equal(
     document.querySelectorAll('nav[aria-label="Main navigation"]').length,
     1,
@@ -470,13 +479,18 @@ window.runSidebarTests = async (handleOnly = false) => {
     ),
     'Collapsing replaced the navigation buttons',
   );
-  await move(1000);
+  await move(6);
   await shown(false);
-  assert.ok(Math.abs(left() - 40) <= 1);
+  assert.equal(left(), 0);
+  assert.ok(content.contains(document.elementFromPoint(6, 450)));
   assert.equal(query('#native-visible').textContent, 'true');
   assert.equal(document.activeElement === search, false);
 
-  await move(6);
+  await hoverPin();
+  // Cross the titlebar padding and enter the sidebar away from its former rail.
+  const bodyTop = layout().getBoundingClientRect().top;
+  await move(pinPoint()[0], bodyTop - 2);
+  await move(160, bodyTop + 80);
   await shown(true);
   assertBadgeAligned();
   assert.equal(document.querySelectorAll('nav[aria-label="Main navigation"]').length, 1);
@@ -486,7 +500,8 @@ window.runSidebarTests = async (handleOnly = false) => {
       (button, index) => button === navigationButtons[index],
     ),
   );
-  assert.ok(Math.abs(left() - 40) <= 1, 'Hovering must not move the session');
+  assert.equal(left(), 0, 'Hovering must not move the session');
+  assert.deepEqual(saves, [false], 'Hovering must not save a pin preference');
   assert.equal(query('#native-visible').textContent, 'false');
   assert.ok(query('#content') === content, 'Pin changes remounted the session content');
   assert.equal((query('input') as HTMLInputElement).value, 'saved query');
@@ -494,9 +509,9 @@ window.runSidebarTests = async (handleOnly = false) => {
   await move(1000);
   await shown(false);
 
-  // Keyboard focus opens the rail, remains usable within the panel, and Escape closes it.
+  // The titlebar button opens the sidebar for keyboard navigation, and Escape returns to it.
   await keypress('Tab');
-  await React.act(async () => rail().focus());
+  await React.act(async () => pin().focus());
   await tick();
   await shown(true);
   await keypress('Tab');
@@ -505,18 +520,18 @@ window.runSidebarTests = async (handleOnly = false) => {
   await shown(true);
   await keypress('Escape');
   await shown(false);
-  assert.ok(document.activeElement === rail(), 'Escape did not return focus to the reveal button');
+  assert.ok(document.activeElement === pin(), 'Escape did not return focus to the titlebar button');
   await React.act(async () => query('#outside').focus());
 
   // Both types of portaled menus keep their sidebar visible beyond its bounds.
-  await move(6);
+  await hoverPin();
   await click(query('[data-slot="dropdown-menu-trigger"]'));
   await waitFor(() => document.querySelector('[role="menu"]') !== null, 'Import menu did not open');
   assert.ok(document.querySelector('[role="menu"]'));
   await move(700);
   await shown(true);
   await keypress('Escape');
-  await move(6);
+  await hoverPin();
   const treeBounds = query('#tree').getBoundingClientRect();
   await React.act(async () =>
     query('#tree').dispatchEvent(
@@ -538,7 +553,7 @@ window.runSidebarTests = async (handleOnly = false) => {
   await move(700);
   await shown(true);
   await keypress('Escape');
-  await move(6);
+  await hoverPin();
   await click(pin());
   await settle();
   await shown(true);
@@ -576,7 +591,7 @@ window.runSidebarTests = async (handleOnly = false) => {
   await move(1000);
   await mount(false, 420);
   await shown(false);
-  assert.ok(Math.abs(left() - 40) <= 1);
+  assert.equal(left(), 0);
   await React.act(async () =>
     query('#outside').dispatchEvent(
       new MouseEvent('contextmenu', {
@@ -594,10 +609,8 @@ window.runSidebarTests = async (handleOnly = false) => {
   );
   await shown(false);
   await keypress('Escape');
-  await React.act(async () => rail().click());
-  await shown(true);
+  await hoverPin();
   assert.equal(aside().getBoundingClientRect().width, 420);
-  await move(6);
   await click(pin());
   await settle();
   assert.equal(aside().getBoundingClientRect().width, 420);
@@ -613,12 +626,49 @@ window.runSidebarTests = async (handleOnly = false) => {
       reviewFailures.push(name + ': ' + (error as Error).message);
     }
   };
+  await reviewCase('clicking search does not keep the hover preview open', async () => {
+    await move(1000);
+    await mount(false, 420);
+    await hoverPin();
+    const input = query('[aria-label="Search connections"]');
+    await click(input);
+    assert.equal(document.activeElement, input);
+    await move(1000);
+    await shown(false);
+    assert.equal(query('#native-visible').textContent, 'true');
+    await hoverPin();
+    await click(input);
+    await keypress('Tab');
+    assert.equal(document.activeElement, query('[data-slot="dropdown-menu-trigger"]'));
+    await move(1000);
+    await shown(true);
+    await keypress('Escape');
+    await shown(false);
+  });
+  await reviewCase(
+    'choosing a portaled menu item with the mouse releases the preview',
+    async () => {
+      await move(1000);
+      await mount(false, 420);
+      await hoverPin();
+      await click(query('[data-slot="dropdown-menu-trigger"]'));
+      await waitFor(
+        () => document.querySelector('[role="menuitem"]') !== null,
+        'Import menu did not open',
+      );
+      const item = query('[role="menuitem"]');
+      const bounds = item.getBoundingClientRect();
+      assert.ok(bounds.x + bounds.width / 2 > aside().getBoundingClientRect().right);
+      await click(item);
+      await shown(false);
+      assert.equal(query('#native-visible').textContent, 'true');
+    },
+  );
   await reviewCase('an update notification cannot latch the auto-hide sidebar open', async () => {
     await move(1000);
     await mount(false, 420, { notification: true });
     await shown(false);
-    await move(6);
-    await shown(true);
+    await hoverPin();
     await move(900, 300);
     await shown(false);
     assert.ok(document.getElementById('update-notification-title'));
@@ -669,7 +719,7 @@ window.runSidebarTests = async (handleOnly = false) => {
     await move(1000);
     await mount(false, 420);
     await keypress('Tab');
-    await React.act(async () => rail().focus());
+    await React.act(async () => pin().focus());
     await shown(true);
     await waitFor(
       () => getComputedStyle(pin()).visibility === 'visible',
@@ -711,7 +761,7 @@ window.runSidebarTests = async (handleOnly = false) => {
     async () => {
       await move(1000);
       await mount(false, 600);
-      await move(6);
+      await hoverPin();
       await React.act(async () => pin().click());
       await settle();
       await shown(true);
@@ -734,7 +784,7 @@ window.runSidebarTests = async (handleOnly = false) => {
     for (const fail of [false, true]) {
       await move(1000);
       await mount(false, 420);
-      await move(6);
+      await hoverPin();
       const originalRequest = window.requestAnimationFrame;
       const originalCancel = window.cancelAnimationFrame;
       const frames = new Map<number, FrameRequestCallback>();
@@ -782,7 +832,7 @@ window.runSidebarTests = async (handleOnly = false) => {
       await waitFor(
         () =>
           fail
-            ? Math.abs(left() - 40) <= 1
+            ? left() === 0
             : left() >= aside().getBoundingClientRect().right &&
               query('#native-visible').textContent === 'true',
         'Deferred pin layout and native visibility did not settle',
@@ -793,16 +843,12 @@ window.runSidebarTests = async (handleOnly = false) => {
     await move(1000);
     await mount(false, 420);
     await keypress('Tab');
-    await React.act(async () => rail().focus());
+    await React.act(async () => pin().focus());
     await shown(true);
-    await React.act(async () =>
-      rail().dispatchEvent(
-        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
-      ),
-    );
+    await keypress('Escape');
     await shown(false);
-    assert.ok(document.activeElement === rail(), 'Escape did not focus the reveal button');
-    await React.act(async () => rail().click());
+    assert.ok(document.activeElement === pin(), 'Escape did not focus the titlebar button');
+    await keypress('Down');
     await shown(true);
     await React.act(async () => query('#outside').focus());
     await tick();
@@ -812,16 +858,16 @@ window.runSidebarTests = async (handleOnly = false) => {
       'The explicit reopen remained latched after focus left',
     );
   });
-  await reviewCase('mouse movement inside the rail recovers after Escape', async () => {
+  await reviewCase('mouse movement on the titlebar button recovers after Escape', async () => {
     await move(1000);
     await mount(false, 420);
     await keypress('Tab');
-    await React.act(async () => rail().focus());
-    await move(6);
-    await shown(true);
+    await React.act(async () => pin().focus());
+    await hoverPin();
     await keypress('Escape');
     await shown(false);
-    await move(20);
+    const [x, y] = pinPoint();
+    await move(x + 1, y);
     await shown(true);
     await move(1000);
     await React.act(async () => query('#outside').focus());
@@ -848,15 +894,17 @@ window.runSidebarTests = async (handleOnly = false) => {
   assert.equal(titlebarPin.querySelector('svg path[fill="currentColor"]'), null);
   assert.equal(titlebarPin.querySelector('svg')!.getAttribute('aria-hidden'), 'true');
   assert.ok(pinBounds.width >= 32 && pinBounds.height >= 32);
-  assert.equal(rail().children.length, 0, 'The removed vertical grip returned');
+  assert.equal(pin().getAttribute('aria-controls'), aside().id);
   const nav = query('[data-sidebar-navigation] nav');
+  assert.ok(nav.closest('[inert]'));
+  await hoverPin();
   assert.ok(
     nav.querySelector('[aria-label="Sessions"] svg.lucide-terminal'),
-    'Collapsed Sessions button must use the SSH icon',
+    'Sessions button must use the SSH icon',
   );
   assert.ok(
     nav.querySelector('[aria-label="Settings"] svg.lucide-settings'),
-    'Collapsed Settings button must use the gear icon',
+    'Settings button must use the gear icon',
   );
   assert.deepEqual(
     [...nav.querySelectorAll('button')].map((button) => button.getAttribute('aria-label')),
@@ -869,14 +917,14 @@ window.runSidebarTests = async (handleOnly = false) => {
     await click(button);
     assert.equal(button.getAttribute('aria-current'), 'page');
     assert.equal(query('#page').textContent, button.getAttribute('aria-label')!.toLowerCase());
+    await shown(true);
   }
   await move(1000);
   await React.act(async () => query('#outside').focus());
   await shown(false);
   const saveCount = saves.length;
-  await move(Math.round(pinBounds.x + pinBounds.width / 2), Math.round(pinBounds.y + 16));
-  await shown(false);
-  assert.equal(query('#native-visible').textContent, 'true');
+  await hoverPin();
+  assert.equal(query('#native-visible').textContent, 'false');
   await click(titlebarPin);
   assert.equal(saves.length, saveCount + 1);
   assert.equal(saves.at(-1), true);
@@ -887,7 +935,7 @@ window.runSidebarTests = async (handleOnly = false) => {
   await React.act(async () => pin().click());
   assert.equal(saves.length, saveCount + 1, 'A pending titlebar pin was submitted twice');
   await settle(true);
-  await shown(false);
+  await shown(true);
   assert.equal(layout().dataset.pinned, 'false');
   assert.match(query('[role="alert"]').textContent!, /couldn't save the sidebar preference/);
   assert.ok(document.activeElement === pin(), 'Failed titlebar pin lost its retry control');
@@ -898,7 +946,7 @@ window.runSidebarTests = async (handleOnly = false) => {
 
   await keypress('Tab');
   await React.act(async () => pin().focus());
-  await shown(false);
+  await shown(true);
   await keypress('Space');
   assert.equal(layout().dataset.pinned, 'true');
   assert.ok(document.activeElement === pin(), 'Keyboard titlebar pin did not retain focus');
@@ -912,11 +960,12 @@ window.runSidebarTests = async (handleOnly = false) => {
   await React.act(async () => window.sidebarReducedMotion(false));
   await mount(false, 420);
   await shown(false);
-  assert.equal(aside().getBoundingClientRect().right, 40);
+  assert.equal(aside().getBoundingClientRect().width, 0);
   const animatedSurface = aside();
   const session = query('#content');
   // Pause real CSS transitions so intermediate positions and reversals are deterministic.
-  const beginSlide = async (x: number, y = 450) => {
+  const beginSlide = async (opening: boolean) => {
+    const [x, y] = opening ? pinPoint() : [1000, 450];
     await React.act(async () => window.sidebarInput({ type: 'mouseMove', x, y }));
     const slide = () =>
       animatedSurface
@@ -926,7 +975,7 @@ window.runSidebarTests = async (handleOnly = false) => {
             animation instanceof CSSTransition && animation.transitionProperty === 'width',
         );
     await waitFor(
-      () => layout().dataset.revealed === String(x < 40) && Boolean(slide()),
+      () => layout().dataset.revealed === String(opening) && Boolean(slide()),
       'Sidebar slide transition did not start',
     );
     for (const animation of animatedSurface.getAnimations()) animation.pause();
@@ -939,11 +988,11 @@ window.runSidebarTests = async (handleOnly = false) => {
     const bounds = animatedSurface.getBoundingClientRect();
     assert.equal(bounds.left, 0, 'The existing sidebar moved instead of expanding');
     assert.ok(
-      bounds.width > 40 && bounds.width < 420,
+      bounds.width > 0 && bounds.width < 420,
       'Sidebar did not pass through an intermediate width',
     );
     assert.equal(document.querySelectorAll('nav[aria-label="Main navigation"]').length, 1);
-    assert.equal(left(), 40, 'Sliding the sidebar moved the session');
+    assert.equal(left(), 0, 'Sliding the sidebar moved the session');
     assert.ok(query('#content') === session, 'Sliding remounted the session');
   };
   const finishSlide = async () => {
@@ -953,7 +1002,7 @@ window.runSidebarTests = async (handleOnly = false) => {
     await tick();
   };
   try {
-    const entering = await beginSlide(20, 68);
+    const entering = await beginSlide(true);
     assert.equal(entering.effect!.getComputedTiming().activeDuration, 200);
     await halfway(entering);
     assert.equal(query('#native-visible').textContent, 'false');
@@ -961,35 +1010,34 @@ window.runSidebarTests = async (handleOnly = false) => {
     await shown(true);
     assert.equal(animatedSurface.getBoundingClientRect().left, 0);
 
-    await halfway(await beginSlide(1000));
+    await halfway(await beginSlide(false));
     assert.equal(getComputedStyle(pin()).visibility, 'visible');
     assert.ok(pin() === titlebarPin || query('header').contains(pin()));
-    assert.equal(sidebarContent().inert, true);
-    assert.equal(getComputedStyle(sidebarContent()).pointerEvents, 'none');
+    assert.equal(aside().inert, true);
     assert.equal(getComputedStyle(animatedSurface).visibility, 'visible');
     assert.equal(query('#native-visible').textContent, 'false');
     assert.ok(!sidebarContent().contains(document.elementFromPoint(20, 450)));
 
     // Reenter before exit completes: cancellation must not expose native surfaces.
-    await halfway(await beginSlide(6));
+    await halfway(await beginSlide(true));
     await tick();
-    assert.equal(sidebarContent().inert, false);
+    assert.equal(aside().inert, false);
     assert.equal(query('#native-visible').textContent, 'false');
     await finishSlide();
     await shown(true);
     assert.equal(query('#native-visible').textContent, 'false');
 
-    await halfway(await beginSlide(1000));
+    await halfway(await beginSlide(false));
     await finishSlide();
     await shown(false);
-    assert.equal(animatedSurface.getBoundingClientRect().right, 40);
+    assert.equal(animatedSurface.getBoundingClientRect().width, 0);
     assert.equal(query('#native-visible').textContent, 'true');
 
     // Changing the system preference during an exit cancels motion and releases the overlay.
-    await beginSlide(6);
+    await beginSlide(true);
     await finishSlide();
     await shown(true);
-    await halfway(await beginSlide(1000));
+    await halfway(await beginSlide(false));
     await React.act(async () => window.sidebarReducedMotion(true));
     await shown(false);
     await waitFor(
@@ -998,8 +1046,7 @@ window.runSidebarTests = async (handleOnly = false) => {
     );
     assert.equal(query('#native-visible').textContent, 'true');
     assert.equal(getComputedStyle(animatedSurface).transitionProperty, 'none');
-    await move(6);
-    await shown(true);
+    await hoverPin();
     assert.equal(animatedSurface.getBoundingClientRect().left, 0);
     assert.equal(query('#native-visible').textContent, 'false');
     await move(1000);
@@ -1047,7 +1094,7 @@ async function runAppIntegrationTests(handleOnly = false) {
       return (
         query('[data-sidebar-layout]').dataset.revealed === String(expected) &&
         surface.getAnimations().length === 0 &&
-        (expected ? bounds.left === 0 : bounds.right === 40)
+        (expected ? bounds.left === 0 : bounds.width === 0)
       );
     }, 'Full App sidebar did not settle: ' + expected);
   };
@@ -1165,8 +1212,15 @@ async function runAppIntegrationTests(handleOnly = false) {
       pin.getBoundingClientRect().right < query('header span').getBoundingClientRect().left,
     );
     assert.equal(getComputedStyle(pin).getPropertyValue('-webkit-app-region'), 'no-drag');
-    assert.equal(query('[aria-label="Show sidebar"]').children.length, 0);
+    const pinBounds = pin.getBoundingClientRect();
+    const hoverPin = async () => {
+      await move(pinBounds.x + pinBounds.width / 2, pinBounds.y + pinBounds.height / 2);
+      await shown(true);
+    };
     const nav = query('[data-sidebar-navigation] nav');
+    assert.ok(nav.closest('[inert]'));
+    assert.equal(getComputedStyle(query('[data-sidebar-surface]')).opacity, '0');
+    assert.equal(query('[data-slot="sidebar-inset"]').getBoundingClientRect().left, 0);
     const buttons = [...nav.querySelectorAll<HTMLButtonElement>('button')];
     const iconCenter = (element: Element) => {
       const bounds = element.querySelector('svg')!.getBoundingClientRect();
@@ -1177,14 +1231,9 @@ async function runAppIntegrationTests(handleOnly = false) {
       ['Sessions', 'Credentials', 'Tunnels', 'Settings'],
     );
     for (const button of buttons) {
+      await hoverPin();
       await window.sidebarObserve(button.getAttribute('aria-label')!);
       assert.ok(button.querySelector('svg'));
-      assert.ok(
-        Math.abs(iconCenter(pin) - iconCenter(button)) <= 1,
-        'Titlebar toggle is not aligned with the collapsed navigation icons',
-      );
-      const bounds = button.getBoundingClientRect();
-      assert.ok(bounds.left >= 0 && bounds.right <= 40 && bounds.bottom <= innerHeight);
       await click(button);
       await shown(true);
       assert.ok(
@@ -1206,10 +1255,8 @@ async function runAppIntegrationTests(handleOnly = false) {
       await move(1000, 400);
       await shown(false);
     }
-    const bodyTop = query('[data-sidebar-layout]').getBoundingClientRect().top;
     await window.sidebarObserve('collapsed');
-    await move(20, bodyTop + 100);
-    await shown(true);
+    await hoverPin();
     assert.equal(query('[data-sidebar-surface]').getBoundingClientRect().left, 0);
     const quickConnect = query('aside [aria-keyshortcuts="Control+K Meta+K"]');
     assert.equal(getComputedStyle(quickConnect).visibility, 'visible');
@@ -1314,14 +1361,13 @@ async function runAppIntegrationTests(handleOnly = false) {
     await tick();
     await window.sidebarObserve('tree-highlight');
     await React.act(async () => {
-      query('[aria-label="Show sidebar"]').focus();
-      query('[aria-label="Show sidebar"]').dispatchEvent(
+      folder.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
       );
     });
     await shown(false);
-    await move(21, bodyTop + 101);
-    await shown(true);
+    await move(1000, 400);
+    await hoverPin();
     await move(1000, 400);
     await React.act(async () => pin.focus());
     await shown(false);
@@ -1404,7 +1450,117 @@ async function runAppIntegrationTests(handleOnly = false) {
     assert.match(query('[data-connection-tree]').textContent!, /Nothing here yet\./);
     assert.equal(document.querySelectorAll('[data-connection-tree] button[draggable]').length, 0);
     await window.sidebarObserve('tree-boundaries');
+
+    await click(query('aside [aria-keyshortcuts="Control+K Meta+K"]'));
+    const name = document.querySelector<HTMLInputElement>('#connection-name')!;
+    assert.equal(name.required, false);
+    assert.match(name.labels![0].textContent!, /optional/i);
+    assert.ok(query('#connection-tunnel-route'), 'SSH should offer a VPN route');
+    await click(query('#connection-protocol'));
+    const serial = [...document.querySelectorAll<HTMLElement>('[role="option"]')].find(
+      (option) => option.textContent?.trim() === 'Serial',
+    );
+    assert.ok(serial, 'Serial must be selectable in Quick Connect');
+    await click(serial);
+    assert.equal(query('label[for="connection-host"]').textContent, 'Serial line');
+    assert.equal(query('#connection-tunnel-route'), null, 'Serial must omit the VPN route');
+    const clickDialogButton = async (label: string) => {
+      const button = [
+        ...document.querySelectorAll<HTMLButtonElement>(
+          '[role="dialog"][data-state="open"] button',
+        ),
+      ].find((item) => item.textContent?.trim() === label);
+      assert.ok(button, 'Missing dialog action ' + label);
+      await React.act(async () => button.click());
+    };
+    await clickDialogButton('Cancel');
+    await waitFor(() => !query('#connection-name'), 'Quick Connect did not close');
+
+    await React.act(async () => query('[aria-label="New connection"]').click());
+    assert.equal(document.querySelector<HTMLInputElement>('#connection-name')?.required, true);
+    await clickDialogButton('Cancel');
+    await waitFor(() => !query('#connection-name'), 'The saved connection editor did not close');
+
+    const importButton = query('[aria-label="Import connections"]');
+    await React.act(async () => {
+      importButton.focus();
+      importButton.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'ArrowDown',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    const mremote = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((item) =>
+      item.textContent?.includes('Import from mRemoteNG'),
+    );
+    assert.ok(mremote, 'the Connections menu must offer mRemoteNG import');
+    await React.act(async () => mremote.click());
+    assert.match(query('[role="dialog"]').textContent!, /mRemoteNG/i);
+    const imported = {
+      foldersCreated: 1,
+      connectionsCreated: 0,
+      credentialsCreated: 0,
+      credentialsReused: 0,
+      skippedUnsupported: 0,
+      warnings: [],
+      droppedWarnings: 0,
+    } satisfies WormholeMRemoteImportResult;
+    let completeImport!: (result: WormholeMRemoteImportResult) => void;
+    window.wormhole = {
+      hideTreeTooltip: () => {},
+      clearMRemoteImport: () => {},
+      onOperationProgress: () => () => {},
+      selectMRemoteImport: async () => ({
+        fileName: 'connections.xml',
+        fileSize: 128,
+        confVersion: '2.7',
+        passwordRequired: false,
+        fullFileEncrypted: false,
+      }),
+      analyzeMRemoteImport: async () => ({
+        planToken: 'a'.repeat(64),
+        folders: 1,
+        connections: 0,
+        credentials: 0,
+        credentialsReused: 0,
+        sharedCredentials: 0,
+        sharedCredentialConnections: 0,
+        skippedUnsupported: 0,
+        skippedUnsupportedSamples: [],
+        warnings: [],
+        droppedWarnings: 0,
+        preview: [],
+        previewTruncated: false,
+      }),
+      commitMRemoteImport: () =>
+        new Promise<WormholeMRemoteImportResult>((resolve) => {
+          completeImport = resolve;
+        }),
+      loadWorkspace: async () => ({
+        tree: [{ id: 'new-import', kind: 'folder', name: 'Imported servers' }],
+        credentials: [],
+        credentialOptions: { ssh: [], rdp: [], vnc: [] },
+        tunnels: [],
+      }),
+    } as unknown as Window['wormhole'];
+    await clickDialogButton('Choose file…');
+    await clickDialogButton('Analyze file');
+    await clickDialogButton('Import plan');
+    assert.match(query('[data-connection-tree]').textContent!, /Nothing here yet/);
+    await React.act(async () => completeImport(imported));
+    await waitFor(
+      () => query('[data-connection-tree]').textContent!.includes('Imported servers'),
+      'The connection tree did not refresh after import',
+    );
+    await clickDialogButton('Close');
+    window.wormhole = undefined;
+
     await checkPinnedHandle();
+  } catch (error) {
+    if (error instanceof AggregateError) throw new Error(error.errors.map(String).join(' / '));
+    throw error;
   } finally {
     await React.act(async () => root.unmount());
     window.wormhole = originalBridge;

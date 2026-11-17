@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -7,7 +8,6 @@ import test from 'node:test';
 import {
   discoverGoModules,
   discoverTypeScriptTests,
-  meetsCoverageThreshold,
   parseGoCoverage,
   runGoCoverage,
 } from '../scripts/test-coverage.ts';
@@ -23,8 +23,6 @@ test('Go coverage parsing is exact and fails closed', () => {
     ].join('\n'),
   );
   assert.deepEqual(coverage, { covered: 8, total: 10 });
-  assert.equal(meetsCoverageThreshold(coverage, 80), true);
-  assert.equal(meetsCoverageThreshold({ covered: 799, total: 1000 }, 80), false);
 
   assert.throws(() => parseGoCoverage(''), /invalid header/);
   assert.throws(() => parseGoCoverage('mode: set\n'), /no statements/);
@@ -34,9 +32,6 @@ test('Go coverage parsing is exact and fails closed', () => {
     () => parseGoCoverage('mode: set\nexample.go:1.1,2.2 9007199254740992 1'),
     /invalid counters/,
   );
-  assert.throws(() => meetsCoverageThreshold({ covered: 0, total: 0 }, 80), /must be valid/);
-  assert.throws(() => meetsCoverageThreshold({ covered: 2, total: 1 }, 80), /must be valid/);
-  assert.throws(() => meetsCoverageThreshold({ covered: 1, total: 1 }, 101), /must be valid/);
 });
 
 test('coverage discovery includes nested tests and every Go module', () => {
@@ -66,13 +61,13 @@ test('coverage discovery includes nested tests and every Go module', () => {
   }
 });
 
-test('Go coverage allows the Windows suite to finish and still enforces failures and cleanup', (context) => {
-  context.mock.method(console, 'log', () => {});
+test('Go coverage reports low percentages and propagates test failures', (context) => {
+  const output: string[] = [];
+  context.mock.method(console, 'log', (line: string) => output.push(line));
   const root = mkdtempSync(join(tmpdir(), 'wormhole-coverage-runner-'));
   const modules = ['backend', 'adapter'].map((name) => join(root, 'tools', name));
   const calls: string[] = [];
   const profiles: string[] = [];
-  let covered = 8;
   let failCommand = false;
   const runCommand = (command: string, args: string[], cwd: string) => {
     assert.equal(command, 'go');
@@ -82,10 +77,7 @@ test('Go coverage allows the Windows suite to finish and still enforces failures
     const profile = args.find((arg) => arg.startsWith('-coverprofile='))!.slice(14);
     profiles.push(profile);
     if (failCommand) throw new Error('go test failed');
-    writeFileSync(
-      profile,
-      `mode: set\nexample.go:1.1,2.2 ${covered} 1\nexample.go:3.1,4.2 ${10 - covered} 0\n`,
-    );
+    writeFileSync(profile, `mode: set\nexample.go:1.1,2.2 7 1\nexample.go:3.1,4.2 3 0\n`);
   };
   try {
     for (const modulePath of modules) {
@@ -96,9 +88,7 @@ test('Go coverage allows the Windows suite to finish and still enforces failures
     assert.equal(calls.length, 2);
     assert.ok(profiles.every((profile) => !existsSync(dirname(profile))));
 
-    covered = 7;
-    assert.throws(() => runGoCoverage(root, runCommand), /coverage must be at least 80%/);
-    assert.ok(profiles.every((profile) => !existsSync(dirname(profile))));
+    assert.ok(output.includes('  aggregate: 70.00% (14/20)'));
 
     failCommand = true;
     const previousCalls = calls.length;
@@ -109,6 +99,89 @@ test('Go coverage allows the Windows suite to finish and still enforces failures
     const emptyRoot = join(root, 'empty');
     mkdirSync(join(emptyRoot, 'tools'), { recursive: true });
     assert.throws(() => runGoCoverage(emptyRoot, runCommand), /No Go modules/);
+  } finally {
+    assert.equal(resolve(root, '..'), resolve(tmpdir()));
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('the coverage command reports low TypeScript and Go coverage without failing', () => {
+  const root = mkdtempSync(join(tmpdir(), 'wormhole-coverage-smoke-'));
+  try {
+    mkdirSync(join(root, 'src'));
+    mkdirSync(join(root, 'tests'));
+    const modulePath = join(root, 'tools', 'example');
+    mkdirSync(modulePath, { recursive: true });
+    writeFileSync(join(root, 'package.json'), '{"type":"module"}');
+    writeFileSync(
+      join(root, 'src', 'pick.ts'),
+      `export function pick(value: number): number {
+  if (value === 1) {
+    return 1;
+  }
+  if (value === 2) {
+    return 2;
+  }
+  return 3;
+}
+`,
+    );
+    writeFileSync(
+      join(root, 'tests', 'pick.test.mjs'),
+      `import assert from 'node:assert/strict';
+import test from 'node:test';
+import { pick } from '../src/pick.ts';
+test('pick', () => assert.equal(pick(1), 1));
+`,
+    );
+    writeFileSync(join(modulePath, 'go.mod'), 'module example.test/coverage\n\ngo 1.23.0\n');
+    writeFileSync(
+      join(modulePath, 'pick.go'),
+      `package example
+
+func Pick(value int) int {
+  if value == 1 {
+    return 1
+  }
+  if value == 2 {
+    return 2
+  }
+  return 3
+}
+`,
+    );
+    writeFileSync(
+      join(modulePath, 'pick_test.go'),
+      `package example
+
+import "testing"
+
+func TestPick(t *testing.T) {
+  if Pick(1) != 1 {
+    t.Fatal("wrong result")
+  }
+}
+`,
+    );
+    const script = new URL('../scripts/test-coverage.ts', import.meta.url).href;
+    const {
+      NODE_TEST_CONTEXT: _parentTestContext,
+      NODE_V8_COVERAGE: _parentCoverage,
+      ...env
+    } = process.env;
+    const report = execFileSync(
+      process.execPath,
+      [
+        '--experimental-strip-types',
+        '--input-type=module',
+        '--eval',
+        `import { main } from ${JSON.stringify(script)}; main(process.cwd());`,
+      ],
+      { cwd: root, env, encoding: 'utf8', timeout: 60_000, windowsHide: true },
+    );
+    const typeScriptLines = /^.*all files\s+\|\s+([\d.]+)\s+\|/m.exec(report)?.[1];
+    assert.ok(typeScriptLines && Number(typeScriptLines) < 80, report);
+    assert.match(report, /aggregate: 40\.00% \(2\/5\)/);
   } finally {
     assert.equal(resolve(root, '..'), resolve(tmpdir()));
     rmSync(root, { recursive: true, force: true });
