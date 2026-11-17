@@ -183,6 +183,41 @@ async function runSftpPaneTests() {
   assert.equal(transfers.at(-1).payload.sourcePane, 'remote');
   assert.equal(transfers.at(-1).payload.items[0].sourcePath, '/remote-reopened/file.txt');
 
+  const renderListing = async (path: string) =>
+    React.act(async () =>
+      root.render(
+        <SftpFilePane
+          pane="remote"
+          state={state(path)}
+          onNavigate={() => {}}
+          onRefresh={() => {}}
+          onOperation={() => {}}
+          onTransfer={() => {}}
+        />,
+      ),
+    );
+  const rows = () => [...document.querySelectorAll<HTMLElement>('[role="row"][aria-selected]')];
+  await renderListing('/before');
+  await React.act(async () =>
+    rows()[1].querySelector<HTMLElement>('[aria-label="Select file.txt"]')!.click(),
+  );
+  assert.equal(rows()[1].getAttribute('aria-selected'), 'true');
+  await renderListing('/after');
+  await React.act(async () =>
+    rows()[0].dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: 'ArrowDown',
+        shiftKey: true,
+        bubbles: true,
+        cancelable: true,
+      }),
+    ),
+  );
+  assert.deepEqual(
+    rows().map((row) => row.getAttribute('aria-selected')),
+    ['true', 'true'],
+  );
+
   for (const direction of ['local-to-remote', 'remote-to-local', 'local-to-local']) {
     const decisions = [];
     let cancels = 0;

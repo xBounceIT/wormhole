@@ -1,4 +1,4 @@
-export const maxSessionPanes = 4;
+const maxSessionPanes = 4;
 
 export type SessionLayoutEdge = 'left' | 'right' | 'top' | 'bottom';
 export type SessionSplitOrientation = 'horizontal' | 'vertical';
@@ -321,28 +321,6 @@ export function sessionSplitDividers(root: SessionLayoutNode | null): SessionSpl
   }
   visit(root, 0, 0, 100, 100);
   return result;
-}
-
-export function assertSessionLayout(state: SessionLayoutState): void {
-  const panes = sessionPanes(state.root);
-  if (panes.length > maxSessionPanes) throw new Error('session layout exceeds the four-pane cap');
-  const paneIds = new Set<string>();
-  const sessions = new Set<string>();
-  for (const pane of panes) {
-    if (paneIds.has(pane.id)) throw new Error(`duplicate pane id: ${pane.id}`);
-    paneIds.add(pane.id);
-    if (pane.tabs.length === 0) throw new Error(`empty pane: ${pane.id}`);
-    if (!pane.tabs.includes(pane.activeSessionId)) {
-      throw new Error(`pane active session is missing: ${pane.id}`);
-    }
-    for (const sessionId of pane.tabs) {
-      if (sessions.has(sessionId)) throw new Error(`duplicate session placement: ${sessionId}`);
-      sessions.add(sessionId);
-    }
-  }
-  if (state.activePaneId && !paneIds.has(state.activePaneId)) {
-    throw new Error(`active pane is missing: ${state.activePaneId}`);
-  }
 }
 
 function appendSession(state: SessionLayoutState, sessionId: string): SessionLayoutState {

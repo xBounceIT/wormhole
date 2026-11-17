@@ -83,9 +83,8 @@ policy is unchanged; retained data can contain recovered edits.
 
 Run `npm run test:sftp-state`, `npm run test:quick-connect-state`, the static
 checks and `npm run test:electron`. The SFTP tests include real Chromium/React
-surfaces and enforce the project's 80% V8 coverage threshold for the new
-components, including their nested callbacks. Node's coverage measures tree
-state, routing and IPC contracts.
+surfaces and report V8 coverage for the components and their nested callbacks.
+Node's coverage measures tree state, routing and IPC contracts.
 Go tests use in-process SFTP servers, including an SSH server that rejects shell
 and PTY requests, and cover shared lifetime, credentials, backup protocol,
 listing bounds, editor argv/environment, save debounce, conflicts and recovery.

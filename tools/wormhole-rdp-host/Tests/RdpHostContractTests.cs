@@ -32,33 +32,6 @@ public sealed class RdpHostContractTests
         Assert.Equal("Errore interno.", root.GetProperty("message").GetString());
     }
 
-    [Fact]
-    public void JsonContract_IgnoresControllerOnlyFieldsRemovedFromTheActiveXModel()
-    {
-        const string json = """
-            {
-              "op": "start",
-              "profile": {
-                "nodeId": "saved-rdp",
-                "name": "Production RDP",
-                "host": "rdp.example",
-                "port": 3391,
-                "username": "operator",
-                "gatewayBypassLocal": true,
-                "useExternalClient": false
-              }
-            }
-            """;
-
-        var command = JsonSerializer.Deserialize<RdpHostCommand>(json, JsonOptions);
-
-        Assert.NotNull(command);
-        var profile = command.Profile.ToRdpConnectionProfile();
-        Assert.Equal("rdp.example", profile.Host);
-        Assert.Equal(3391, profile.Port);
-        Assert.Equal("operator", profile.Username);
-    }
-
     [Theory]
     [InlineData(-1, 3389)]
     [InlineData(0, 3389)]
@@ -82,42 +55,56 @@ public sealed class RdpHostContractTests
     }
 
     [Fact]
-    public void ProfileMapping_PreservesTheEmbeddedElectronSettings()
+    public void StartCommand_MapsWireSettingsToTheActiveXProfile()
     {
-        var profile = new RdpHostProfile
-        {
-            Host = "rdp.example",
-            Port = 3390,
-            Username = "operator",
-            Domain = "EXAMPLE",
-            ScreenSize = "1440x900",
-            FullScreen = true,
-            ColorDepth = 24,
-            UseAllMonitors = true,
-            AudioMode = 2,
-            AudioCaptureMode = 1,
-            KeyboardHookMode = 1,
-            RedirectClipboard = false,
-            RedirectPrinters = true,
-            RedirectSmartCards = true,
-            RedirectPorts = true,
-            RedirectDevices = true,
-            RedirectDrives = "C,D",
-            ConnectionSpeed = 6,
-            DesktopBackground = false,
-            FontSmoothing = false,
-            DesktopComposition = false,
-            WindowDrag = false,
-            MenuAnimation = false,
-            VisualStyles = false,
-            BitmapCaching = false,
-            AutoReconnect = false,
-            ServerAuthentication = 1,
-            GatewayUsageMethod = 1,
-            GatewayHostname = "gateway.example",
-            GatewayUseSameCreds = true,
-        }.ToRdpConnectionProfile();
+        const string json = """
+            {
+              "op": "start",
+              "profile": {
+                "nodeId": "saved-rdp",
+                "name": "Production RDP",
+                "host": "rdp.example",
+                "port": 3390,
+                "username": "operator",
+                "domain": "EXAMPLE",
+                "screenSize": "1440x900",
+                "fullScreen": true,
+                "colorDepth": 24,
+                "useAllMonitors": true,
+                "audioMode": 2,
+                "audioCaptureMode": 1,
+                "keyboardHookMode": 1,
+                "redirectClipboard": false,
+                "redirectPrinters": true,
+                "redirectSmartCards": true,
+                "redirectPorts": true,
+                "redirectDevices": true,
+                "redirectDrives": "C,D",
+                "connectionSpeed": 6,
+                "desktopBackground": false,
+                "fontSmoothing": false,
+                "desktopComposition": false,
+                "windowDrag": false,
+                "menuAnimation": false,
+                "visualStyles": false,
+                "bitmapCaching": false,
+                "autoReconnect": false,
+                "serverAuthentication": 1,
+                "gatewayUsageMethod": 1,
+                "gatewayHostname": "gateway.example",
+                "gatewayBypassLocal": true,
+                "gatewayUseSameCreds": true
+              }
+            }
+            """;
 
+        var command = JsonSerializer.Deserialize<RdpHostCommand>(json, JsonOptions);
+        Assert.NotNull(command);
+        Assert.Equal("start", command.Op);
+        var profile = command.Profile.ToRdpConnectionProfile();
+
+        Assert.Equal("rdp.example", profile.Host);
+        Assert.Equal(3390, profile.Port);
         Assert.Equal("operator", profile.Username);
         Assert.Equal("EXAMPLE", profile.RdpDomain);
         Assert.Equal("1440x900", profile.RdpScreenSize);

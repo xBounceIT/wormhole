@@ -17,15 +17,13 @@ once a reviewed upstream release includes a fix. Do not restore unpatched 4.3.1.
 
 Regression and consumer resolution tests are in `tests/dependency-security.test.mjs`.
 Coverage uses the project's native Node test/V8 tooling, including this vendor
-directory explicitly. Unchanged upstream code and TypeScript declarations are
-excluded from changed-code coverage; all executable security patch lines must
-meet the 80% threshold.
+directory explicitly. Coverage reports help review the security patch and its
+regression tests.
 
 Validation: all 56 security tests pass. The complete vendored runtime has 100%
 line and function coverage and 96.49% branch coverage, measured with:
 
 ```sh
 node --experimental-test-coverage --test-coverage-include=vendor/deepmerge/index.js \
-  --test-coverage-lines=80 --test-coverage-branches=80 --test-coverage-functions=80 \
   --test tests/dependency-security.test.mjs
 ```

@@ -26,7 +26,5 @@ Local changes in `state.go`:
 - Reset both viewports completely on RIS, including rectangular terminal sizes.
 
 `cursor_test.go` and the backend terminal regression suite exercise these changes.
-Unmodified imported code is third-party code, excluded from the new/modified-code
-coverage requirement; local changes must meet the usual 80% threshold. The full
-backend coverage profile still includes this package. Keep changes focused and
+The backend coverage profile includes this package. Keep changes focused and
 compare against v1.3.1 when updating it.

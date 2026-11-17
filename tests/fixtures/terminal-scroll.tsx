@@ -82,8 +82,64 @@ async function runTerminalScrollTests() {
     await settle();
   };
 
+  const selection = document.getSelection();
   try {
     for (isSerial of [false, true]) {
+      await render(1, {
+        columns: 12,
+        rows: 1,
+        cells: [...'split  right'].map((character, index) => ({
+          character,
+          foreground: index < 2 ? 1 : 7,
+          background: 0,
+        })),
+        scrollback: [
+          {
+            runs: [
+              { text: 'sp', cells: 2, foreground: 1, background: 0 },
+              { text: 'lit  right', cells: 10, foreground: 7, background: 0 },
+            ],
+          },
+        ],
+      });
+      const renderedRows = surface().querySelectorAll<HTMLElement>('[data-terminal-row]');
+      assert.equal(
+        renderedRows.length,
+        2,
+        'the fixture must mount a live row and a scrollback row',
+      );
+      for (const row of renderedRows) {
+        assert.equal(row.innerText, 'split  right');
+        const firstRun = row.firstElementChild;
+        const range = document.createRange();
+        range.setStart(firstRun.firstChild, 0);
+        range.setEnd(firstRun.firstChild, 1);
+        const glyph = range.getBoundingClientRect();
+        firstRun.dispatchEvent(
+          new MouseEvent('mousedown', {
+            bubbles: true,
+            cancelable: true,
+            button: 0,
+            detail: 2,
+            clientX: (glyph.left + glyph.right) / 2,
+          }),
+        );
+        assert.equal(
+          selection.toString(),
+          'split',
+          'a double click must select across styled runs',
+        );
+
+        range.selectNodeContents(row);
+        selection.removeAllRanges();
+        selection.addRange(range);
+        const clipboardData = new DataTransfer();
+        row.dispatchEvent(
+          new ClipboardEvent('copy', { clipboardData, bubbles: true, cancelable: true }),
+        );
+        assert.equal(clipboardData.getData('text/plain'), 'split  right');
+        selection.removeAllRanges();
+      }
       session.backendSessionId = `backend-${isSerial}`;
       for (const lines of [0, 1, 128, 129, 5000, 5000, 256]) {
         await render(lines);
@@ -190,7 +246,6 @@ async function runTerminalScrollTests() {
       viewportReads = 0;
       const scrollback = surface().querySelector('.terminal-scrollback');
       const retained = scrollback.querySelectorAll('[data-terminal-row]')[2000];
-      const selection = document.getSelection();
       const range = document.createRange();
       range.selectNodeContents(retained);
       selection.removeAllRanges();

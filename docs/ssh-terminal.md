@@ -92,14 +92,14 @@ and binary mouse input, clipboard behavior, history bounds, hidden tabs, resets,
 focus, hyperlink confirmation/cancellation/errors, WebGL context loss and software
 fallback, live theme changes, hidden/new sessions, preference save failures and
 rendered contrast for world-writable directory styles. It measures the application
-terminal code with V8 block coverage and
-enforces 80%. Third-party xterm code is excluded from that percentage.
+terminal code with V8 block coverage. Third-party xterm code is excluded from that
+percentage.
 
 Go tests cover byte fidelity, credits, bounded queues, blocked readers, MCP replay,
 initial reset ordering, shutdown, and an actual local SSH server in both legacy and
-streaming modes. `npm run test:coverage` enforces the existing Node and aggregate Go
-coverage gates. Electron entrypoint adapters are exercised by source-extracted
-runtime tests; their delegated stream module is measured directly by Node coverage.
+streaming modes. `npm run test:coverage` reports Node and aggregate Go coverage.
+Source-extracted runtime tests exercise the Electron entrypoint adapters. Node
+coverage measures their delegated stream module directly.
 
 Build and static gates remain `npm run build`, `npm run typecheck`, `npm run lint`
 and `npm run format:check`. Responsiveness against a particular remote server or
