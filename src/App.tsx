@@ -12829,31 +12829,44 @@ function TunnelAdvanced({
   );
 }
 
-function FortinetIPsecPasswordFields({
+const fortinetIPsecEditableFields = [
+  ['PreSharedKey', 'Gateway pre-shared key (PSK)'],
+  ['Password', 'VPN user password'],
+] as const;
+
+type FortinetIPsecEditorField = (typeof fortinetIPsecEditableFields)[number][0];
+type FortinetIPsecCredentialDraft = {
+  id: string;
+  entered: Partial<Record<FortinetIPsecEditorField, boolean>>;
+};
+
+function FortinetIPsecCredentialFields({
   settings,
+  draft,
   disabled,
+  onEnter,
 }: {
   settings: Record<string, unknown>;
+  draft: FortinetIPsecCredentialDraft | null;
   disabled: boolean;
+  onEnter: (field: FortinetIPsecEditorField) => void;
 }) {
-  return [
-    ['PreSharedKey', 'Gateway pre-shared key (PSK)'],
-    ['Password', 'VPN user password'],
-  ].map(([secret, label]) => {
+  return fortinetIPsecEditableFields.map(([secret, label]) => {
     if (!fortinetIPsecFieldVisible(secret, settings)) return null;
     const stored = settings[`Has${secret}`] === true;
+    const entered = draft?.entered[secret] === true;
     return (
       <div className="grid gap-2" key={secret}>
         <Label htmlFor={`tunnel-ipsec-${secret}`}>{label}</Label>
-        <PasswordInput
-          autoComplete="off"
+        <Button
           disabled={disabled}
           id={`tunnel-ipsec-${secret}`}
-          maxLength={4096}
-          pattern={String.raw`[\s\S]*\P{White_Space}[\s\S]*`}
-          placeholder={stored ? 'Leave blank to keep the stored value' : undefined}
-          required={!stored}
-        />
+          onClick={() => onEnter(secret)}
+          type="button"
+          variant="outline"
+        >
+          {entered ? 'Change entered value' : stored ? 'Replace stored value' : 'Enter securely'}
+        </Button>
       </div>
     );
   });
@@ -12884,6 +12897,7 @@ function TunnelEditorDialog({
   const [value, setValue] = useState<TunnelEditorValue>(initial);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [credentialDraft, setCredentialDraft] = useState<FortinetIPsecCredentialDraft | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(
     () =>
       initial.kind === 3 &&
@@ -12893,7 +12907,31 @@ function TunnelEditorDialog({
       ),
   );
 
-  const missing = useMemo(() => missingTunnelFields(value), [value]);
+  const draftId = credentialDraft?.id;
+  if (credentialDraft && (value.kind !== 9 || !isAuthorized || !open)) {
+    setCredentialDraft(null);
+  }
+  useEffect(() => {
+    if (!draftId) return;
+    return () => {
+      void window.wormhole?.discardFortinetIPsecCredentials(draftId).catch(() => undefined);
+    };
+  }, [draftId]);
+
+  const missing = useMemo(() => {
+    const fields = missingTunnelFields(value);
+    if (value.kind !== 9) return fields;
+    return fields.concat(
+      fortinetIPsecEditableFields
+        .filter(
+          ([field]) =>
+            fortinetIPsecFieldVisible(field, value.settings) &&
+            value.settings[`Has${field}`] !== true &&
+            credentialDraft?.entered[field] !== true,
+        )
+        .map(([, label]) => label),
+    );
+  }, [value, credentialDraft]);
   const canSave = missing.length === 0;
   const fields = tunnelEditorFields(value.kind);
   const rows = (
@@ -13012,6 +13050,28 @@ function TunnelEditorDialog({
     }));
   }
 
+  async function enterFortinetIPsecCredential(field: FortinetIPsecEditorField) {
+    const api = window.wormhole;
+    if (!api || busy || !isAuthorized) return;
+    const draft = credentialDraft ?? { id: newSessionToken(), entered: {} };
+    setCredentialDraft(draft);
+    setBusy(true);
+    setError('');
+    try {
+      if (await api.enterFortinetIPsecCredential(draft.id, field)) {
+        setCredentialDraft((current) =>
+          current?.id === draft.id
+            ? { ...current, entered: { ...current.entered, [field]: true } }
+            : current,
+        );
+      }
+    } catch (entryError) {
+      setError(userFacingTunnelError(entryError));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (busy || !canSave) return;
@@ -13033,20 +13093,25 @@ function TunnelEditorDialog({
     setBusy(true);
     setError('');
     try {
-      const settings = normalizeTunnelEditorSettings(value.kind, value.settings);
+      const request = {
+        name: value.name,
+        kind: value.kind,
+        settings: normalizeTunnelEditorSettings(value.kind, value.settings),
+      };
+      const saveDraftId =
+        credentialDraft && Object.values(credentialDraft.entered).some(Boolean)
+          ? credentialDraft.id
+          : undefined;
       const saved = value.id
-        ? await api.updateTunnel({
-            forgetJumpHostKeySha256: value.forgetJumpHostKeySha256,
-            id: value.id,
-            name: value.name,
-            kind: value.kind,
-            settings,
-          })
-        : await api.createTunnel({
-            name: value.name,
-            kind: value.kind,
-            settings,
-          });
+        ? await api.updateTunnel(
+            {
+              forgetJumpHostKeySha256: value.forgetJumpHostKeySha256,
+              id: value.id,
+              ...request,
+            },
+            saveDraftId,
+          )
+        : await api.createTunnel(request, saveDraftId);
       onSaved({
         id: saved.id,
         name: saved.name,
@@ -13359,7 +13424,12 @@ function TunnelEditorDialog({
                   {rows('Authentication', {
                     hidden: (field) => !fortinetIPsecFieldVisible(field.key, value.settings),
                   })}
-                  <FortinetIPsecPasswordFields disabled={busy} settings={value.settings} />
+                  <FortinetIPsecCredentialFields
+                    disabled={busy}
+                    draft={credentialDraft}
+                    onEnter={(field) => void enterFortinetIPsecCredential(field)}
+                    settings={value.settings}
+                  />
                   {value.settings.AuthMethod === 1 ? (
                     <>
                       <p className="text-[11px] text-muted-foreground md:col-span-2">

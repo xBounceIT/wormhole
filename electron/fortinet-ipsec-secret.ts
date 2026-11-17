@@ -4,6 +4,7 @@ import type {
   BrowserWindowConstructorOptions,
   IpcMain,
   IpcMainEvent,
+  WebContents,
 } from 'electron';
 import type { TunnelWriteRequest } from './tunnel-test-contract.js';
 const fortinetIPsecSecrets = [
@@ -15,30 +16,102 @@ const fortinetIPsecSecrets = [
 ] as const;
 
 const fortinetIPsecSecretChannel = 'fortinet-ipsec:secret-response';
-export type FortinetIPsecCredentials = Partial<Record<'PreSharedKey' | 'Password', string>>;
+export type FortinetIPsecEditableSecret = 'PreSharedKey' | 'Password';
+type FortinetIPsecCredentials = Partial<Record<FortinetIPsecEditableSecret, string>>;
 const certificateLabels = {
   ClientCert: 'Client certificate chain (PEM)',
   ClientKey: 'Client private key (PEM, unencrypted)',
   CaCert: 'Trusted CA certificates (PEM; leave blank for system trust)',
 };
 export type FortinetIPsecCertificate = keyof typeof certificateLabels;
+type FortinetIPsecSecret = FortinetIPsecEditableSecret | FortinetIPsecCertificate;
 
-function secretPage(kind: FortinetIPsecCertificate): string {
+export function isFortinetIPsecEditableSecret(
+  value: unknown,
+): value is FortinetIPsecEditableSecret {
+  return value === 'PreSharedKey' || value === 'Password';
+}
+
+export class FortinetIPsecEntryCancelled extends Error {}
+
+type CredentialDraft = {
+  id: string;
+  epoch: number;
+  pending: boolean;
+  credentials: FortinetIPsecCredentials;
+};
+
+export class FortinetIPsecCredentialDrafts {
+  private drafts = new WeakMap<WebContents, CredentialDraft>();
+
+  async enter(
+    owner: WebContents,
+    id: string,
+    epoch: number,
+    key: FortinetIPsecEditableSecret,
+    prompt: (isCurrent: () => boolean) => Promise<string>,
+  ): Promise<boolean> {
+    const current = this.drafts.get(owner);
+    if (current?.pending) throw new Error('A Fortinet IPsec credential window is already open.');
+    const draft =
+      current?.id === id && current.epoch === epoch
+        ? current
+        : { id, epoch, pending: false, credentials: {} };
+    this.drafts.set(owner, draft);
+    draft.pending = true;
+    const isCurrent = () => this.drafts.get(owner) === draft;
+    try {
+      const value = await prompt(isCurrent);
+      if (!isCurrent()) return false;
+      draft.credentials[key] = value;
+      return true;
+    } catch (error) {
+      if (error instanceof FortinetIPsecEntryCancelled) return false;
+      throw error;
+    } finally {
+      draft.pending = false;
+    }
+  }
+
+  read(owner: WebContents, id: string | undefined, epoch: number): FortinetIPsecCredentials {
+    if (!id) return {};
+    const draft = this.drafts.get(owner);
+    if (draft?.id !== id || draft.epoch !== epoch)
+      throw new Error('The Fortinet IPsec credential draft expired. Enter the credentials again.');
+    if (draft.pending)
+      throw new Error('Finish entering the Fortinet IPsec credential before saving.');
+    return { ...draft.credentials };
+  }
+
+  discard(owner: WebContents, id?: string): void {
+    if (id === undefined || this.drafts.get(owner)?.id === id) this.drafts.delete(owner);
+  }
+
+  clear(): void {
+    this.drafts = new WeakMap();
+  }
+}
+
+function secretPage(kind: FortinetIPsecSecret): string {
+  const password = isFortinetIPsecEditableSecret(kind);
+  const label =
+    kind === 'PreSharedKey'
+      ? 'Gateway pre-shared key (PSK)'
+      : kind === 'Password'
+        ? 'VPN user password'
+        : certificateLabels[kind];
   return `<!doctype html><html><head><meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; form-action 'none'; base-uri 'none'">
-<style>body{font:14px system-ui;margin:28px;color-scheme:light dark}footer{display:flex;justify-content:flex-end;gap:8px}button{padding:7px 16px}</style>
+<style>body{font:14px system-ui;margin:28px;color-scheme:light dark}input{box-sizing:border-box;width:100%;margin:12px 0;padding:8px}footer{display:flex;justify-content:flex-end;gap:8px}button{padding:7px 16px}</style>
 </head><body><form><h2>Fortinet IPsec credentials</h2>
-<label for="secret">${certificateLabels[kind]}</label>
-<textarea id="secret" autocomplete="off" spellcheck="false" maxlength="131072" autofocus ${kind === 'CaCert' ? '' : 'required'} style="width:100%;height:150px"></textarea>
-<p>Credentials are stored securely and are never returned to the connection editor.</p>
-<footer><button id="cancel" type="button">Cancel</button><button type="submit">Save</button></footer>
+<label for="secret">${label}</label>
+${password ? '<input id="secret" type="password" autocomplete="off" spellcheck="false" maxlength="4096" autofocus required>' : `<textarea id="secret" autocomplete="off" spellcheck="false" maxlength="131072" autofocus ${kind === 'CaCert' ? '' : 'required'} style="width:100%;height:150px"></textarea>`}
+<p>${password ? 'This value will be applied when you save the VPN tunnel.' : 'Certificate material is stored securely.'}</p>
+<footer><button id="cancel" type="button">Cancel</button><button type="submit">Continue</button></footer>
 </form></body></html>`;
 }
 
-function validFortinetIPsecSecret(
-  value: unknown,
-  kind: keyof FortinetIPsecCredentials | FortinetIPsecCertificate,
-): value is string {
+function validFortinetIPsecSecret(value: unknown, kind: FortinetIPsecSecret): value is string {
   if (kind === 'ClientCert' || kind === 'ClientKey' || kind === 'CaCert')
     return (
       typeof value === 'string' &&
@@ -58,25 +131,6 @@ function validFortinetIPsecSecret(
     if (code < 32 || code === 127) return false;
   }
   return true;
-}
-
-export function parseFortinetIPsecCredentials(
-  kind: number,
-  input: unknown,
-): FortinetIPsecCredentials {
-  if (input === undefined) return {};
-  if (
-    kind !== 9 ||
-    !input ||
-    typeof input !== 'object' ||
-    Object.getPrototypeOf(input) !== Object.prototype ||
-    Object.entries(input).some(
-      ([key, value]) =>
-        (key !== 'PreSharedKey' && key !== 'Password') || !validFortinetIPsecSecret(value, key),
-    )
-  )
-    throw new Error('Enter a valid Fortinet IPsec pre-shared key or user password in the editor.');
-  return input as FortinetIPsecCredentials;
 }
 
 export async function prepareFortinetIPsecWrite(
@@ -125,7 +179,7 @@ export async function prepareFortinetIPsecWrite(
   return { ...request, settings };
 }
 
-// The isolated certificate window sends PEM directly to main for the current write.
+// Only this isolated window handles input. The workspace gets a draft reference and status.
 export function promptFortinetIPsecSecret(options: {
   createWindow: (options: BrowserWindowConstructorOptions) => BrowserWindow;
   ipc: Pick<IpcMain, 'on' | 'removeListener'>;
@@ -134,12 +188,12 @@ export function promptFortinetIPsecSecret(options: {
   isAuthorized: () => boolean;
   present: (window: BrowserWindow) => void;
   forget: (window: BrowserWindow) => void;
-  kind: FortinetIPsecCertificate;
+  kind: FortinetIPsecSecret;
 }): Promise<string> {
   if (!options.isAuthorized()) return Promise.reject(new Error('Authentication is required.'));
   const window = options.createWindow({
     width: 480,
-    height: 560,
+    height: isFortinetIPsecEditableSecret(options.kind) ? 360 : 560,
     resizable: false,
     show: false,
     parent: options.parent,
@@ -169,7 +223,8 @@ export function promptFortinetIPsecSecret(options: {
       if (error) reject(error);
       else resolve(value);
     };
-    const cancel = () => finish(new Error('Fortinet IPsec certificate entry was cancelled.'));
+    const cancel = () =>
+      finish(new FortinetIPsecEntryCancelled('Fortinet IPsec credential entry was cancelled.'));
     const receive = (event: IpcMainEvent, message: unknown) => {
       if (event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame)
         return;
@@ -184,7 +239,7 @@ export function promptFortinetIPsecSecret(options: {
         return;
       }
       if (!validFortinetIPsecSecret(input.value, options.kind)) {
-        finish(new Error('The Fortinet IPsec certificate material is invalid.'));
+        finish(new Error('The Fortinet IPsec credential is invalid.'));
         return;
       }
       finish(undefined, input.value);

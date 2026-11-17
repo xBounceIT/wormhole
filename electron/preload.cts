@@ -2,7 +2,7 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import type { SshTerminalTheme } from './terminal-theme-settings.js';
 import type { MRemoteImportOptions } from './mremote-import-contract.js';
 import type { WebBrowserCommand, WebBrowserState } from './web-browser-tabs.js';
-import type { FortinetIPsecCredentials } from './fortinet-ipsec-secret.js';
+import type { FortinetIPsecEditableSecret } from './fortinet-ipsec-secret.js';
 import type { TunnelWriteRequest } from './tunnel-test-contract.js';
 import type {
   RdpBackendEvent,
@@ -12,23 +12,6 @@ import type {
   RdpSystemClientOpenRequest,
   RdpSystemClientOpenResult,
 } from './rdp-contract.js';
-
-function writeTunnel(channel: 'tunnel:create' | 'tunnel:update', request: TunnelWriteRequest) {
-  if (request.kind !== 9) return ipcRenderer.invoke(channel, request);
-
-  // Read unnamed inputs so secrets stay out of React state and HTML form serialization.
-  const credentials: FortinetIPsecCredentials = {};
-  const form = document.getElementById('tunnel-editor-form');
-  if (form instanceof HTMLFormElement) {
-    for (const key of ['PreSharedKey', 'Password'] as const) {
-      const field = form.querySelector(`#tunnel-ipsec-${key}`);
-      if (!(field instanceof HTMLInputElement) || field.value === '') continue;
-      if (field.value.length > 4096) throw new Error('A Fortinet IPsec credential is too long.');
-      credentials[key] = field.value;
-    }
-  }
-  return ipcRenderer.invoke(channel, request, credentials);
-}
 
 type WormholeUpdateCheckResult = {
   currentVersion: string;
@@ -300,11 +283,16 @@ const wormholeBridge = {
           tunnelConfigId: string;
         },
   ) => ipcRenderer.invoke('workspace:update-node-tunnel', request),
-  createTunnel: (request: TunnelWriteRequest) => writeTunnel('tunnel:create', request),
+  enterFortinetIPsecCredential: (draftId: string, field: FortinetIPsecEditableSecret) =>
+    ipcRenderer.invoke('tunnel:enter-ipsec-credential', draftId, field),
+  discardFortinetIPsecCredentials: (draftId: string) =>
+    ipcRenderer.invoke('tunnel:discard-ipsec-credentials', draftId),
+  createTunnel: (request: TunnelWriteRequest, draftId?: string) =>
+    ipcRenderer.invoke('tunnel:create', request, draftId),
   listTunnels: () => ipcRenderer.invoke('tunnel:list'),
   readTunnel: (id: string) => ipcRenderer.invoke('tunnel:read', { id }),
-  updateTunnel: (request: TunnelWriteRequest & { id: string }) =>
-    writeTunnel('tunnel:update', request),
+  updateTunnel: (request: TunnelWriteRequest & { id: string }, draftId?: string) =>
+    ipcRenderer.invoke('tunnel:update', request, draftId),
   deleteTunnel: (id: string) => ipcRenderer.invoke('tunnel:delete', { id }),
   testTunnel: (request: {
     id: string;
