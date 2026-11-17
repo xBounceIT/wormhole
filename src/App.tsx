@@ -12897,6 +12897,7 @@ function TunnelEditorDialog({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [credentialDraft, setCredentialDraft] = useState<FortinetIPsecCredentialDraft | null>(null);
+  const mounted = useRef(true);
   const [advancedOpen, setAdvancedOpen] = useState(
     () =>
       initial.kind === 3 &&
@@ -12916,6 +12917,12 @@ function TunnelEditorDialog({
       void window.wormhole?.discardFortinetIPsecCredentials(draftId).catch(() => undefined);
     };
   }, [draftId]);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   const missing = useMemo(() => {
     const fields = missingTunnelFields(value);
@@ -13074,7 +13081,6 @@ function TunnelEditorDialog({
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (busy || !canSave) return;
-    const form = event.currentTarget;
     if (
       value.id &&
       value.kind !== initial.kind &&
@@ -13117,7 +13123,7 @@ function TunnelEditorDialog({
         kind: tunnelKindLabel(saved.kind),
         endpoint: saved.endpoint,
       });
-      if (form.isConnected) onOpenChange(false);
+      if (mounted.current) onOpenChange(false);
     } catch (saveError) {
       setError(
         saveError instanceof Error

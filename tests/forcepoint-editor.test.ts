@@ -59,7 +59,7 @@ test('VPN editors align paired controls and Forcepoint displays certificate conf
     ${read('../src/native-surface-overlay-state.ts').replace(/^export /gm, '')}
     ${section(read('../src/components/ui/context-menu.tsx'), 'type ContextMenuOverlayContextValue', 'function ContextMenu({')}
     ${controls}
-    const { useEffect, useMemo, useState } = React;
+    const { useEffect, useMemo, useRef, useState } = React;
     ${read('../src/fortinet-ipsec-state.ts').replace(/^export /gm, '')}
     ${section(read('../src/tunnel-state.ts'), 'function userFacingTunnelError(', '// Only treat a test')}
     ${section(app, 'const tunnelKinds =', 'function TunnelRouteField(')}
@@ -211,13 +211,13 @@ test('VPN editors align paired controls and Forcepoint displays certificate conf
       const tunnelSaved = onTunnelCreated;
       return <>${tunnelEditorMount}</>;
     }
-    function FortinetEditorHarness({ isAuthorized = true }) {
+    function FortinetEditorHarness({ isAuthorized = true, editorInstance = 'original' }) {
       const [tunnels, setTunnels] = useState([]);
       const tree = [];
       const credentialOptions = { ssh: [] };
       const authGate = isAuthorized ? 'unlocked' : 'locked';
       return <>
-        ${tunnelPageMount}
+        ${tunnelPageMount.replace('<TunnelsPage', '<TunnelsPage key={editorInstance}')}
         <output id="saved-vpns">{tunnels.map(tunnel => tunnel.id).join(',')}</output>
       </>;
     }
@@ -273,16 +273,22 @@ test('VPN editors align paired controls and Forcepoint displays certificate conf
       const reopened = document.getElementById('tunnel-editor-form');
       const reopenedPsk = reopened.querySelector('#tunnel-ipsec-PreSharedKey');
       assert.equal(reopenedPsk.textContent, 'Enter securely');
-      await React.act(async () => { finishBeforeLock({ kind: 9, name: 'VPN', id: 'saved' }); });
-      assert.equal(document.getElementById('tunnel-editor-form'), reopened);
-      assert.equal(document.getElementById('saved-vpns').textContent, 'saved');
-      await React.act(async () => { reopenedPsk.click(); });
-      assert.notEqual(entered.at(-1).id, entered[0].id);
+      assert.equal(reopenedPsk.disabled, true);
       await React.act(async () => { reopened.requestSubmit(); });
-      assert.equal(saves, 3);
-      await React.act(async () => { completeSave({ kind: 9, name: 'VPN', id: 'saved-after-lock' }); });
+      assert.equal(saves, 2);
+      await React.act(async () => { finishBeforeLock({ kind: 9, name: 'VPN', id: 'saved' }); });
       assert.equal(document.getElementById('tunnel-editor-form'), null);
-      assert.equal(document.getElementById('saved-vpns').textContent, 'saved,saved-after-lock');
+      assert.equal(document.getElementById('saved-vpns').textContent, 'saved');
+
+      await React.act(async () => { root.render(<FortinetEditorHarness editorInstance="second" />); });
+      await React.act(async () => { document.querySelector('#tunnel-ipsec-PreSharedKey').click(); });
+      await React.act(async () => { document.getElementById('tunnel-editor-form').requestSubmit(); });
+      assert.equal(saves, 3);
+      await React.act(async () => { root.render(<FortinetEditorHarness editorInstance="third" />); });
+      const replacement = document.getElementById('tunnel-editor-form');
+      await React.act(async () => { completeSave({ kind: 9, name: 'VPN', id: 'saved-before-replacement' }); });
+      assert.equal(document.getElementById('tunnel-editor-form'), replacement);
+      assert.equal(document.getElementById('saved-vpns').textContent, 'saved,saved-before-replacement');
     }
     async function runForcepointEditorTests() {
       const root = createRoot(document.getElementById('root'));

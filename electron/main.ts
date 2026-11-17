@@ -8260,6 +8260,34 @@ function fortinetIPsecEditorOwner(event: Electron.IpcMainInvokeEvent): BrowserWi
   return owner;
 }
 
+async function finishFortinetIPsecSave<T>(sender: Electron.WebContents, pending: Promise<T>) {
+  const lifetime = new AbortController();
+  const cancel = () => lifetime.abort();
+  sender.once('destroyed', cancel);
+  sender.once('did-start-loading', cancel);
+  try {
+    const [outcome] = await Promise.allSettled([pending]);
+    // A committed write survives a lock. Deliver its result to the same workspace after unlock.
+    while (!lifetime.signal.aborted && !authSession.isAccessAllowed) {
+      await new Promise<void>((resolve) => {
+        const resume = () => {
+          unsubscribe();
+          lifetime.signal.removeEventListener('abort', resume);
+          resolve();
+        };
+        const unsubscribe = authSession.onUnlocked(resume);
+        lifetime.signal.addEventListener('abort', resume, { once: true });
+      });
+    }
+    if (lifetime.signal.aborted) throw new Error('Fortinet IPsec editor is unavailable.');
+    if (outcome.status === 'rejected') throw outcome.reason;
+    return outcome.value;
+  } finally {
+    sender.removeListener('destroyed', cancel);
+    sender.removeListener('did-start-loading', cancel);
+  }
+}
+
 async function saveTunnelWithNativeSecret(
   operation: 'tunnel-create' | 'tunnel-update',
   event: Electron.IpcMainInvokeEvent,
@@ -8301,11 +8329,13 @@ async function saveTunnelWithNativeSecret(
         delete native.settings[key];
     }
   };
-  if (draftId) return runAuthorizedOperation(save);
-  return serializeAuthOperation(async () => {
+  const { result } = await serializeAuthOperation(async () => {
     await requireWorkspaceAuth();
-    return save(authSession.authorizationEpoch);
+    const pending = save(authSession.authorizationEpoch);
+    if (!draftId) return { result: await pending };
+    return { result: finishFortinetIPsecSave(event.sender, pending) };
   });
+  return result;
 }
 
 function registerIpcHandlers(sshBackend: NativeSshBackend): void {

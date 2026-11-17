@@ -11,6 +11,7 @@ import { promisify } from 'node:util';
 import { runInNewContext } from 'node:vm';
 import * as path from 'node:path';
 import test from 'node:test';
+import { AuthSession } from '../electron/auth-session.ts';
 import {
   FortinetIPsecCredentialDrafts,
   FortinetIPsecEntryCancelled,
@@ -307,7 +308,7 @@ test('the workspace bridge collects draft status and saves without prompting for
   );
   const authorization = main.slice(
     main.indexOf('function serializeAuthOperation<'),
-    main.indexOf('function isAuthorizationEpochCurrent('),
+    main.indexOf('function serializeAuthStateMutation<'),
   );
   const id = '11111111-2222-3333-4444-555555555555';
   const draftId = '11111111-2222-3333-4444-555555555556';
@@ -317,8 +318,9 @@ test('the workspace bridge collects draft status and saves without prompting for
     ipsecReferences: Record<string, string>;
   }[] = [];
   const staged: { reference: string; field: string; secret: string }[] = [];
-  const authSession = { authorizationEpoch: 7, isAccessAllowed: true };
-  const sender = { mainFrame: {} };
+  const authSession = new AuthSession();
+  authSession.remember({ configured: true }, true);
+  const sender = Object.assign(new EventEmitter(), { mainFrame: {} });
   const event = { sender, senderFrame: sender.mainFrame };
   const owner = { isDestroyed: () => false };
   const opened: string[] = [];
@@ -389,6 +391,7 @@ test('the workspace bridge collects draft status and saves without prompting for
       },
       windowCloseCoordinators: new Map([[owner, {}]]),
       mcpApprovalWindowCoordinator: {},
+      AbortController,
       Buffer,
       backendTimeoutMs: 30_000,
       nativeBackendCommandTimeoutMs: 30_000,
@@ -417,7 +420,7 @@ test('the workspace bridge collects draft status and saves without prompting for
       parseTunnelWriteRequest,
       parseTunnelDetailsResponse,
       prepareFortinetIPsecWrite,
-      requireWorkspaceAuth: async () => {},
+      requireWorkspaceAuth: async () => authSession.requireUnlocked(),
       isAuthorizationEpochCurrent: (epoch: number) => authSession.authorizationEpoch === epoch,
       requireAuthorizationEpoch: (epoch: number) => {
         if (authSession.authorizationEpoch !== epoch) throw new Error('Authentication expired');
@@ -428,7 +431,8 @@ test('the workspace bridge collects draft status and saves without prompting for
         if (options.kind === 'PreSharedKey') return ' gateway-key ';
         if (options.kind === 'Password') return 'vpn-password';
         if (options.kind !== 'CaCert') return '-----BEGIN FIXTURE-----';
-        authSession.authorizationEpoch++;
+        authSession.lock();
+        authSession.markUnlocked();
         return '';
       },
       runBackend: async () => {
@@ -500,9 +504,19 @@ test('the workspace bridge collects draft status and saves without prompting for
   });
   await setImmediate();
   assert.equal(authorizationQueueAvailable, true);
+  authSession.lock();
   replyToSave();
+  await setImmediate();
+  assert.equal(settled, false, 'a committed save must not return workspace data while locked');
+  authSession.markUnlocked();
+  authSession.lock();
+  await setImmediate();
+  assert.equal(settled, false, 'relocking before delivery must keep the result pending');
+  authSession.markUnlocked();
   const created = await inFlight;
   delaySave = false;
+  assert.equal(sender.listenerCount('did-start-loading'), 0);
+  assert.equal(sender.listenerCount('destroyed'), 0);
   assert.deepEqual(created.settings, { HasPreSharedKey: true });
   assert.deepEqual(saves.at(-1), {
     action: 'tunnel.ipsec-create',
@@ -542,6 +556,21 @@ test('the workspace bridge collects draft status and saves without prompting for
   await api.enterFortinetIPsecCredential(draftId, 'PreSharedKey');
   await api.enterFortinetIPsecCredential(draftId, 'Password');
   delaySave = true;
+  replyToSave = undefined;
+  const navigatedSave = api.createTunnel(request, draftId);
+  const navigated = assert.rejects(navigatedSave, /editor is unavailable/);
+  await setImmediate();
+  assert.ok(replyToSave);
+  authSession.lock();
+  replyToSave();
+  await setImmediate();
+  sender.emit('did-start-loading');
+  await navigated;
+  assert.equal(sender.listenerCount('destroyed'), 0);
+  authSession.markUnlocked();
+
+  await api.enterFortinetIPsecCredential(draftId, 'PreSharedKey');
+  await api.enterFortinetIPsecCredential(draftId, 'Password');
   replyToSave = undefined;
   const disconnectedSave = api.createTunnel(request, draftId);
   const stopped = assert.rejects(disconnectedSave, /Wormhole service stopped/);
