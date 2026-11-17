@@ -17,7 +17,7 @@ const fortinetIPsecSecrets = [
 
 const fortinetIPsecSecretChannel = 'fortinet-ipsec:secret-response';
 export type FortinetIPsecEditableSecret = 'PreSharedKey' | 'Password';
-type FortinetIPsecCredentials = Partial<Record<FortinetIPsecEditableSecret, string>>;
+export type FortinetIPsecDraftReferences = Partial<Record<FortinetIPsecEditableSecret, string>>;
 const certificateLabels = {
   ClientCert: 'Client certificate chain (PEM)',
   ClientKey: 'Client private key (PEM, unencrypted)',
@@ -38,53 +38,69 @@ type CredentialDraft = {
   id: string;
   epoch: number;
   pending: boolean;
-  credentials: FortinetIPsecCredentials;
+  references: FortinetIPsecDraftReferences;
 };
 
 export class FortinetIPsecCredentialDrafts {
   private drafts = new WeakMap<WebContents, CredentialDraft>();
+  private readonly discardReference: (reference: string) => void;
+
+  constructor(discardReference: (reference: string) => void) {
+    this.discardReference = discardReference;
+  }
 
   async enter(
     owner: WebContents,
     id: string,
     epoch: number,
     key: FortinetIPsecEditableSecret,
-    prompt: (isCurrent: () => boolean) => Promise<string>,
+    stage: (reference: string, isCurrent: () => boolean) => Promise<void>,
   ): Promise<boolean> {
     const current = this.drafts.get(owner);
     if (current?.pending) throw new Error('A Fortinet IPsec credential window is already open.');
     const draft =
       current?.id === id && current.epoch === epoch
         ? current
-        : { id, epoch, pending: false, credentials: {} };
+        : { id, epoch, pending: false, references: {} };
+    if (current && current !== draft) this.discard(owner);
     this.drafts.set(owner, draft);
     draft.pending = true;
     const isCurrent = () => this.drafts.get(owner) === draft;
+    const reference = randomUUID();
+    let accepted = false;
     try {
-      const value = await prompt(isCurrent);
+      await stage(reference, isCurrent);
       if (!isCurrent()) return false;
-      draft.credentials[key] = value;
+      const previous = draft.references[key];
+      draft.references[key] = reference;
+      accepted = true;
+      if (previous) this.discardReference(previous);
       return true;
     } catch (error) {
       if (error instanceof FortinetIPsecEntryCancelled) return false;
       throw error;
     } finally {
       draft.pending = false;
+      if (!accepted) this.discardReference(reference);
     }
   }
 
-  read(owner: WebContents, id: string | undefined, epoch: number): FortinetIPsecCredentials {
+  read(owner: WebContents, id: string | undefined, epoch: number): FortinetIPsecDraftReferences {
     if (!id) return {};
     const draft = this.drafts.get(owner);
     if (draft?.id !== id || draft.epoch !== epoch)
       throw new Error('The Fortinet IPsec credential draft expired. Enter the credentials again.');
     if (draft.pending)
       throw new Error('Finish entering the Fortinet IPsec credential before saving.');
-    return { ...draft.credentials };
+    return { ...draft.references };
   }
 
-  discard(owner: WebContents, id?: string): void {
-    if (id === undefined || this.drafts.get(owner)?.id === id) this.drafts.delete(owner);
+  discard(owner: WebContents, id?: string, consumed = false): void {
+    const draft = this.drafts.get(owner);
+    if (!draft || (id !== undefined && draft.id !== id)) return;
+    this.drafts.delete(owner);
+    if (!consumed)
+      for (const reference of Object.values(draft.references)) this.discardReference(reference);
   }
 
   clear(): void {
@@ -136,7 +152,7 @@ function validFortinetIPsecSecret(value: unknown, kind: FortinetIPsecSecret): va
 export async function prepareFortinetIPsecWrite(
   request: TunnelWriteRequest,
   prompt: (kind: FortinetIPsecCertificate) => Promise<string>,
-  credentials: FortinetIPsecCredentials = {},
+  references: FortinetIPsecDraftReferences = {},
 ): Promise<TunnelWriteRequest> {
   if (request.kind !== 9) return request;
   const settings = { ...request.settings };
@@ -149,12 +165,7 @@ export async function prepareFortinetIPsecWrite(
     delete settings[`Has${secret}`];
     delete settings[`Replace${secret}`];
     if (!required.includes(secret)) continue;
-    const entered =
-      secret === 'PreSharedKey' || secret === 'Password' ? credentials[secret] : undefined;
-    if (entered !== undefined) {
-      settings[secret] = entered;
-      continue;
-    }
+    if (isFortinetIPsecEditableSecret(secret) && references[secret] !== undefined) continue;
     if (preserve) {
       settings[`Has${secret}`] = true;
       continue;

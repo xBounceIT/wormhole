@@ -132,25 +132,34 @@ test('the isolated password window preserves valid Unicode and rejects invalid n
 });
 
 test('credential drafts are bound to one workspace, editor and authorization epoch', async () => {
-  const drafts = new FortinetIPsecCredentialDrafts();
+  const discarded: string[] = [];
+  const drafts = new FortinetIPsecCredentialDrafts((id) => discarded.push(id));
   const owner = {} as Electron.WebContents;
   const other = {} as Electron.WebContents;
   const id = 'draft-id';
-  assert.equal(await drafts.enter(owner, id, 1, 'PreSharedKey', async () => 'psk'), true);
+  let reference = '';
+  assert.equal(
+    await drafts.enter(owner, id, 1, 'PreSharedKey', async (value) => {
+      reference = value;
+    }),
+    true,
+  );
   assert.equal(
     await drafts.enter(owner, id, 1, 'PreSharedKey', async () => {
       throw new FortinetIPsecEntryCancelled();
     }),
     false,
   );
-  assert.deepEqual(drafts.read(owner, id, 1), { PreSharedKey: 'psk' });
+  assert.deepEqual(drafts.read(owner, id, 1), { PreSharedKey: reference });
   assert.throws(() => drafts.read(other, id, 1), /draft expired/);
   assert.throws(() => drafts.read(owner, 'other-editor', 1), /draft expired/);
   assert.throws(() => drafts.read(owner, id, 2), /draft expired/);
 
-  let resolveEntry!: (secret: string) => void;
+  let resolveEntry!: () => void;
   let canFinish!: () => boolean;
-  const pending = drafts.enter(owner, id, 1, 'Password', (isCurrent) => {
+  let pendingReference = '';
+  const pending = drafts.enter(owner, id, 1, 'Password', (value, isCurrent) => {
+    pendingReference = value;
     canFinish = isCurrent;
     return new Promise((resolve) => {
       resolveEntry = resolve;
@@ -158,7 +167,7 @@ test('credential drafts are bound to one workspace, editor and authorization epo
   });
   assert.equal(canFinish(), true);
   await assert.rejects(
-    drafts.enter(owner, id, 1, 'Password', async () => 'duplicate'),
+    drafts.enter(owner, id, 1, 'Password', async () => {}),
     /already open/,
   );
   assert.throws(() => drafts.read(owner, id, 1), /before saving/);
@@ -166,18 +175,19 @@ test('credential drafts are bound to one workspace, editor and authorization epo
   assert.equal(canFinish(), true);
   drafts.clear();
   assert.equal(canFinish(), false);
-  resolveEntry('late-password');
+  resolveEntry();
   assert.equal(await pending, false);
+  assert.ok(discarded.includes(pendingReference));
   assert.throws(() => drafts.read(owner, id, 1), /draft expired/);
 });
 
-test('inline values replace saved credentials and omitted values preserve them on edit', async () => {
+test('a draft reference satisfies the credential requirement without going into the settings', async () => {
   const request = { name: 'VPN', kind: 9, settings: { Host: 'vpn.test', HasPreSharedKey: true } };
   const prompt = async () => {
     throw new Error('unexpected prompt');
   };
-  const credentials = { PreSharedKey: ' native key ' };
-  const settings = { Host: 'vpn.test', PreSharedKey: ' native key ' };
+  const credentials = { PreSharedKey: 'draft-ref' };
+  const settings = { Host: 'vpn.test' };
   assert.deepEqual(
     (await prepareFortinetIPsecWrite(request, prompt, credentials)).settings,
     settings,
@@ -292,7 +302,12 @@ test('the workspace bridge collects draft status and saves without prompting for
   );
   const id = '11111111-2222-3333-4444-555555555555';
   const draftId = '11111111-2222-3333-4444-555555555556';
-  const saves: { operation: string; request: TunnelWriteRequest }[] = [];
+  const saves: {
+    action: string;
+    ipsecWrite: TunnelWriteRequest;
+    ipsecReferences: Record<string, string>;
+  }[] = [];
+  const staged: { reference: string; field: string; secret: string }[] = [];
   const authSession = { authorizationEpoch: 7 };
   const sender = { mainFrame: {} };
   const event = { sender, senderFrame: sender.mainFrame };
@@ -303,7 +318,8 @@ test('the workspace bridge collects draft status and saves without prompting for
   runInNewContext(stripTypeScriptTypes(nativeSave + registrations.join('\n')), {
     authSession,
     authLockRequested: false,
-    fortinetIPsecDrafts: new FortinetIPsecCredentialDrafts(),
+    fortinetIPsecDrafts: new FortinetIPsecCredentialDrafts(() => {}),
+    FortinetIPsecEntryCancelled,
     tunnelBrowserAuthQueue: Promise.resolve(),
     __dirname: '/electron',
     path,
@@ -312,6 +328,8 @@ test('the workspace bridge collects draft status and saves without prompting for
     },
     windowCloseCoordinators: new Map([[owner, {}]]),
     mcpApprovalWindowCoordinator: {},
+    Buffer,
+    backendTimeoutMs: 30000,
     ipcMain: { handle: handlers.set.bind(handlers) },
     isTunnelIdentifier,
     isFortinetIPsecEditableSecret,
@@ -333,10 +351,38 @@ test('the workspace bridge collects draft status and saves without prompting for
       authSession.authorizationEpoch++;
       return '';
     },
-    runBackend: async (operation: string, request: TunnelWriteRequest) => {
-      saves.push({ operation, request: structuredClone(request) });
-      if (failSave) throw new Error('VPN save failed');
-      return { id, name: request.name, kind: request.kind, settings: { HasPreSharedKey: true } };
+    getNativeBackend: () => ({
+      send: async (message: {
+        action: string;
+        sessionId: string;
+        ipsecField: string;
+        ipsecSecret: string;
+        ipsecWrite: TunnelWriteRequest;
+        ipsecReferences: Record<string, string>;
+      }) => {
+        if (message.action === 'tunnel.ipsec-stage') {
+          staged.push({
+            reference: message.sessionId,
+            field: message.ipsecField,
+            secret: Buffer.from(message.ipsecSecret, 'base64').toString('utf8'),
+          });
+          return { ok: true };
+        }
+        saves.push(structuredClone(message));
+        if (failSave) return { ok: false, error: 'VPN save failed' };
+        return {
+          ok: true,
+          result: {
+            id,
+            name: message.ipsecWrite.name,
+            kind: 9,
+            settings: { HasPreSharedKey: true },
+          },
+        };
+      },
+    }),
+    runBackend: async () => {
+      throw new Error('Unexpected save without Go draft references');
     },
   });
 
@@ -370,16 +416,24 @@ test('the workspace bridge collects draft status and saves without prompting for
 
   assert.equal(await api.enterFortinetIPsecCredential(draftId, 'PreSharedKey'), true);
   assert.equal(await api.enterFortinetIPsecCredential(draftId, 'Password'), true);
+  assert.deepEqual(
+    staged.map(({ field, secret }) => [field, secret]),
+    [
+      ['PreSharedKey', ' gateway-key '],
+      ['Password', 'vpn-password'],
+    ],
+  );
   failSave = true;
   await assert.rejects(api.createTunnel(request, draftId), /VPN save failed/);
   failSave = false;
   const created = await api.createTunnel(request, draftId);
   assert.deepEqual(created.settings, { HasPreSharedKey: true });
   assert.deepEqual(saves.at(-1), {
-    operation: 'tunnel-create',
-    request: {
-      ...request,
-      settings: { UserAuth: 2, PreSharedKey: ' gateway-key ', Password: 'vpn-password' },
+    action: 'tunnel.ipsec-create',
+    ipsecWrite: request,
+    ipsecReferences: {
+      PreSharedKey: staged[0].reference,
+      Password: staged[1].reference,
     },
   });
   await assert.rejects(api.createTunnel(request, draftId), /draft expired/);
@@ -392,8 +446,9 @@ test('the workspace bridge collects draft status and saves without prompting for
   assert.equal(await api.enterFortinetIPsecCredential(draftId, 'Password'), true);
   await api.updateTunnel(edit, draftId);
   assert.deepEqual(saves.at(-1), {
-    operation: 'tunnel-update',
-    request: { ...edit, settings: { ...edit.settings, Password: 'vpn-password' } },
+    action: 'tunnel.ipsec-update',
+    ipsecWrite: edit,
+    ipsecReferences: { Password: staged[2].reference },
   });
   assert.deepEqual(opened, ['PreSharedKey', 'Password', 'Password']);
 
