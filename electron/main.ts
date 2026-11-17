@@ -3209,7 +3209,7 @@ class NativeBackendProcess {
 
   async send(
     command: NativeBackendCommand,
-    timeoutMs = nativeBackendCommandTimeoutMs,
+    timeoutMs: number | null = nativeBackendCommandTimeoutMs,
   ): Promise<BackendResponse> {
     await this.start();
     const child = this.child;
@@ -3228,6 +3228,8 @@ class NativeBackendProcess {
       this.pending.delete(id);
       throw error instanceof Error ? error : new Error(String(error));
     }
+
+    if (timeoutMs === null) return response;
 
     const timeout = setTimeout(() => {
       const pending = this.pending.get(id);
@@ -8267,12 +8269,10 @@ async function saveTunnelWithNativeSecret(
   const request = parseTunnelWriteRequest(value, operation === 'tunnel-update');
   if (draftId !== undefined && (request.kind !== 9 || !isTunnelIdentifier(draftId)))
     throw new Error('Fortinet IPsec credential draft is invalid.');
-  return serializeAuthOperation(async () => {
-    await requireWorkspaceAuth();
+  const save = async (epoch: number) => {
     if (request.kind !== 9)
       return parseTunnelDetailsResponse(await runBackend<unknown>(operation, request));
     const owner = fortinetIPsecEditorOwner(event);
-    const epoch = authSession.authorizationEpoch;
     const references = fortinetIPsecDrafts.read(event.sender, draftId, epoch);
     const native = await prepareFortinetIPsecWrite(
       request,
@@ -8283,13 +8283,14 @@ async function saveTunnelWithNativeSecret(
       requireAuthorizationEpoch(epoch);
       if (authLockRequested) throw new Error('Authentication is required before saving the VPN.');
       if (!draftId) return parseTunnelDetailsResponse(await runBackend<unknown>(operation, native));
+      // Only the service can confirm whether it committed the write and consumed the draft.
       const response = await getNativeBackend().send(
         {
           action: operation === 'tunnel-create' ? 'tunnel.ipsec-create' : 'tunnel.ipsec-update',
           ipsecWrite: native,
           ipsecReferences: references,
         },
-        backendTimeoutMs,
+        null,
       );
       if (!response.ok)
         throw new Error(response.error || 'Could not save the Fortinet IPsec tunnel.');
@@ -8299,6 +8300,11 @@ async function saveTunnelWithNativeSecret(
       for (const key of ['PreSharedKey', 'Password', 'ClientCert', 'ClientKey', 'CaCert'])
         delete native.settings[key];
     }
+  };
+  if (draftId) return runAuthorizedOperation(save);
+  return serializeAuthOperation(async () => {
+    await requireWorkspaceAuth();
+    return save(authSession.authorizationEpoch);
   });
 }
 

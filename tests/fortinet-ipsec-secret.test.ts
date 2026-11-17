@@ -5,6 +5,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire, stripTypeScriptTypes } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { setImmediate } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { runInNewContext } from 'node:vm';
@@ -286,7 +287,7 @@ test('native input expires and closes when workspace authorization changes', asy
 
 test('the workspace bridge collects draft status and saves without prompting for PSK or password', async () => {
   const main = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
-  const handlers = new Map<string, (...args: unknown[]) => Promise<unknown>>();
+  const handlers = new Map<string, (...args: unknown[]) => unknown>();
   const registrations = [
     'create',
     'update',
@@ -300,6 +301,14 @@ test('the workspace bridge collects draft status and saves without prompting for
     main.indexOf('function queueFortinetIPsecSecret('),
     main.indexOf('function registerIpcHandlers('),
   );
+  const nativeBackend = main.slice(
+    main.indexOf('class NativeBackendProcess'),
+    main.indexOf('let nativeBackend:'),
+  );
+  const authorization = main.slice(
+    main.indexOf('function serializeAuthOperation<'),
+    main.indexOf('function isAuthorizationEpochCurrent('),
+  );
   const id = '11111111-2222-3333-4444-555555555555';
   const draftId = '11111111-2222-3333-4444-555555555556';
   const saves: {
@@ -308,93 +317,136 @@ test('the workspace bridge collects draft status and saves without prompting for
     ipsecReferences: Record<string, string>;
   }[] = [];
   const staged: { reference: string; field: string; secret: string }[] = [];
-  const authSession = { authorizationEpoch: 7 };
+  const authSession = { authorizationEpoch: 7, isAccessAllowed: true };
   const sender = { mainFrame: {} };
   const event = { sender, senderFrame: sender.mainFrame };
   const owner = { isDestroyed: () => false };
   const opened: string[] = [];
   let failSave = false;
-
-  runInNewContext(stripTypeScriptTypes(nativeSave + registrations.join('\n')), {
-    authSession,
-    authLockRequested: false,
-    fortinetIPsecDrafts: new FortinetIPsecCredentialDrafts(() => {}),
-    FortinetIPsecEntryCancelled,
-    tunnelBrowserAuthQueue: Promise.resolve(),
-    __dirname: '/electron',
-    path,
-    BrowserWindow: {
-      fromWebContents: (contents: unknown) => (contents === sender ? owner : undefined),
-    },
-    windowCloseCoordinators: new Map([[owner, {}]]),
-    mcpApprovalWindowCoordinator: {},
-    Buffer,
-    backendTimeoutMs: 30000,
-    ipcMain: { handle: handlers.set.bind(handlers) },
-    isTunnelIdentifier,
-    isFortinetIPsecEditableSecret,
-    parseTunnelWriteRequest,
-    parseTunnelDetailsResponse,
-    prepareFortinetIPsecWrite,
-    serializeAuthOperation: (operation: () => Promise<unknown>) => operation(),
-    requireWorkspaceAuth: async () => {},
-    isAuthorizationEpochCurrent: (epoch: number) => authSession.authorizationEpoch === epoch,
-    requireAuthorizationEpoch: (epoch: number) => {
-      if (authSession.authorizationEpoch !== epoch) throw new Error('Authentication expired');
-    },
-    promptFortinetIPsecSecret: async (options: { kind: string; isAuthorized: () => boolean }) => {
-      assert.ok(options.isAuthorized());
-      opened.push(options.kind);
-      if (options.kind === 'PreSharedKey') return ' gateway-key ';
-      if (options.kind === 'Password') return 'vpn-password';
-      if (options.kind !== 'CaCert') return '-----BEGIN FIXTURE-----';
-      authSession.authorizationEpoch++;
-      return '';
-    },
-    getNativeBackend: () => ({
-      send: async (message: {
-        action: string;
-        sessionId: string;
-        ipsecField: string;
-        ipsecSecret: string;
-        ipsecWrite: TunnelWriteRequest;
-        ipsecReferences: Record<string, string>;
-      }) => {
+  let replyToSave: (() => void) | undefined;
+  let delaySave = false;
+  const timers = new Set<() => void>();
+  const stdout = Object.assign(new EventEmitter(), { setEncoding: () => {} });
+  const child = Object.assign(new EventEmitter(), {
+    stdout,
+    stdin: Object.assign(new EventEmitter(), {
+      write(payload: string) {
+        const { id: commandId, ...message } = JSON.parse(payload);
+        const reply = (response: object) =>
+          stdout.emit('data', `${JSON.stringify({ id: commandId, ...response })}\n`);
         if (message.action === 'tunnel.ipsec-stage') {
           staged.push({
             reference: message.sessionId,
             field: message.ipsecField,
             secret: Buffer.from(message.ipsecSecret, 'base64').toString('utf8'),
           });
-          return { ok: true };
+          reply({ ok: true });
+          return;
         }
-        saves.push(structuredClone(message));
-        if (failSave) return { ok: false, error: 'VPN save failed' };
-        return {
-          ok: true,
-          result: {
-            id,
-            name: message.ipsecWrite.name,
-            kind: 9,
-            settings: { HasPreSharedKey: true },
-          },
-        };
+        saves.push(message);
+        const respond = () =>
+          reply(
+            failSave
+              ? { ok: false, error: 'VPN save failed' }
+              : {
+                  ok: true,
+                  result: {
+                    id,
+                    name: message.ipsecWrite.name,
+                    kind: 9,
+                    settings: { HasPreSharedKey: true },
+                  },
+                },
+          );
+        if (delaySave) replyToSave = respond;
+        else respond();
       },
     }),
-    runBackend: async () => {
-      throw new Error('Unexpected save without Go draft references');
-    },
   });
+
+  const script = stripTypeScriptTypes(`
+    let authOperationQueue = Promise.resolve();
+    ${authorization}
+    ${nativeBackend}
+    const service = new NativeBackendProcess();
+    const getNativeBackend = () => service;
+    ${nativeSave}
+    ${registrations.join('\n')}
+    serializeAuthOperation;
+  `);
+  const runWhileSaving = runInNewContext(
+    script,
+    {
+      authSession,
+      authLockRequested: false,
+      fortinetIPsecDrafts: new FortinetIPsecCredentialDrafts(() => {}),
+      FortinetIPsecEntryCancelled,
+      tunnelBrowserAuthQueue: Promise.resolve(),
+      __dirname: '/electron',
+      path,
+      BrowserWindow: {
+        fromWebContents: (contents: unknown) => (contents === sender ? owner : undefined),
+      },
+      windowCloseCoordinators: new Map([[owner, {}]]),
+      mcpApprovalWindowCoordinator: {},
+      Buffer,
+      backendTimeoutMs: 30_000,
+      nativeBackendCommandTimeoutMs: 30_000,
+      nativeBackendLineLimit: 64 * 1024,
+      setTimeout: (expire: () => void) => {
+        timers.add(expire);
+        return expire;
+      },
+      clearTimeout: (expire: () => void) => timers.delete(expire),
+      TunnelFailureRegistry: class {
+        failAll() {}
+      },
+      TunnelBrowserPromptTracker: class {
+        clear() {}
+      },
+      backendPath: () => 'backend',
+      wormholeDatabasePath: () => 'database',
+      electronUserDataPath: () => 'profile',
+      spawn: () => {
+        queueMicrotask(() => child.emit('spawn'));
+        return child;
+      },
+      ipcMain: { handle: handlers.set.bind(handlers) },
+      isTunnelIdentifier,
+      isFortinetIPsecEditableSecret,
+      parseTunnelWriteRequest,
+      parseTunnelDetailsResponse,
+      prepareFortinetIPsecWrite,
+      requireWorkspaceAuth: async () => {},
+      isAuthorizationEpochCurrent: (epoch: number) => authSession.authorizationEpoch === epoch,
+      requireAuthorizationEpoch: (epoch: number) => {
+        if (authSession.authorizationEpoch !== epoch) throw new Error('Authentication expired');
+      },
+      promptFortinetIPsecSecret: async (options: { kind: string; isAuthorized: () => boolean }) => {
+        assert.ok(options.isAuthorized());
+        opened.push(options.kind);
+        if (options.kind === 'PreSharedKey') return ' gateway-key ';
+        if (options.kind === 'Password') return 'vpn-password';
+        if (options.kind !== 'CaCert') return '-----BEGIN FIXTURE-----';
+        authSession.authorizationEpoch++;
+        return '';
+      },
+      runBackend: async () => {
+        throw new Error('Unexpected save without Go draft references');
+      },
+    },
+    { filename: 'wormhole-ipsec-save.js' },
+  );
 
   const preload = readFileSync(new URL('../electron/preload.cts', import.meta.url), 'utf8');
   let api!: NonNullable<Window['wormhole']>;
   runInNewContext(stripTypeScriptTypes(preload).replace(/^import .* from 'electron';/, ''), {
     process: { isMainFrame: true },
     ipcRenderer: {
-      invoke: (channel: string, ...args: unknown[]) => {
+      invoke: async (channel: string, ...args: unknown[]) => {
         const handler = handlers.get(channel);
         assert.ok(handler, 'Missing IPC handler: ' + channel);
-        return handler(event, ...structuredClone(args));
+        return structuredClone(await handler(event, ...structuredClone(args)));
       },
     },
     contextBridge: {
@@ -426,7 +478,31 @@ test('the workspace bridge collects draft status and saves without prompting for
   failSave = true;
   await assert.rejects(api.createTunnel(request, draftId), /VPN save failed/);
   failSave = false;
-  const created = await api.createTunnel(request, draftId);
+  delaySave = true;
+  const inFlight = api.createTunnel(request, draftId);
+  let settled = false;
+  void inFlight.then(
+    () => {
+      settled = true;
+    },
+    () => {
+      settled = true;
+    },
+  );
+  await setImmediate();
+  assert.ok(replyToSave);
+  for (const expire of timers) expire();
+  await setImmediate();
+  assert.equal(settled, false, 'a slow save must still await the service result');
+  let authorizationQueueAvailable = false;
+  void runWhileSaving(() => {
+    authorizationQueueAvailable = true;
+  });
+  await setImmediate();
+  assert.equal(authorizationQueueAvailable, true);
+  replyToSave();
+  const created = await inFlight;
+  delaySave = false;
   assert.deepEqual(created.settings, { HasPreSharedKey: true });
   assert.deepEqual(saves.at(-1), {
     action: 'tunnel.ipsec-create',
@@ -462,6 +538,17 @@ test('the workspace bridge collects draft status and saves without prompting for
     /Authentication expired/,
   );
   assert.equal(saves.length, 3);
+
+  await api.enterFortinetIPsecCredential(draftId, 'PreSharedKey');
+  await api.enterFortinetIPsecCredential(draftId, 'Password');
+  delaySave = true;
+  replyToSave = undefined;
+  const disconnectedSave = api.createTunnel(request, draftId);
+  const stopped = assert.rejects(disconnectedSave, /Wormhole service stopped/);
+  await setImmediate();
+  assert.ok(replyToSave);
+  child.emit('close', null);
+  await stopped;
 });
 
 test('real Chromium credential prompts are separate from the workspace and expose no bridge', async () => {

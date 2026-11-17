@@ -470,6 +470,10 @@ test('idle lock cancels an earlier Hello before draining security mutations and 
     source.indexOf("ipcMain.handle('auth:update-settings'"),
     source.indexOf("ipcMain.handle('auth:system-idle'"),
   );
+  const clearIPsecDrafts = source.slice(
+    source.indexOf('function clearFortinetIPsecDrafts('),
+    source.indexOf('function queueFortinetIPsecSecret('),
+  );
   for (const scenario of ['confirmation', 'queued-settings', 'starting-verification']) {
     const session = new AuthSession();
     session.remember({ configured: true }, true);
@@ -477,6 +481,7 @@ test('idle lock cancels an earlier Hello before draining security mutations and 
     const handlers = new Map<string, IpcHandler>();
     let helloCalls = 0;
     let firstSignal: AbortSignal | undefined;
+    const nativeActions: string[] = [];
     let holdHello = false;
     let pauseNextEnsure: (() => Promise<void>) | undefined;
     let start!: () => void;
@@ -497,6 +502,7 @@ test('idle lock cancels an earlier Hello before draining security mutations and 
       let authLockRequested = false;
       let activeHelloVerification;
       ${serialization}
+      ${clearIPsecDrafts}
       ${handlersSource}
       ({ get lockRequested() { return authLockRequested; }, get activeHello() { return activeHelloVerification; } })
     `),
@@ -564,7 +570,10 @@ test('idle lock cancels an earlier Hello before draining security mutations and 
           setMcpLocked: async () => {},
         },
         webSurfaces: { hideAll: () => {} },
-        nativeBackend: undefined,
+        fortinetIPsecDrafts: new Map([[sender, { id: 'draft' }]]),
+        nativeBackend: {
+          send: async ({ action }: { action: string }) => nativeActions.push(action),
+        },
         rdpClient: undefined,
         cancelPreparingRdpStarts: () => {},
       },
@@ -583,6 +592,7 @@ test('idle lock cancels an earlier Hello before draining security mutations and 
         : Promise.resolve();
     const locked = handlers.get('auth:lock')!({ sender });
     assert.equal(context.lockRequested, true);
+    assert.deepEqual(nativeActions, ['tunnel.ipsec-clear']);
     if (scenario === 'starting-verification') releaseHelloStart();
     else
       assert.equal(
