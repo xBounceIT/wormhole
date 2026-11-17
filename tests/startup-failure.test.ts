@@ -53,6 +53,7 @@ test('workspace failure IPC releases native resources once and ignores unrelated
       serializeAuthOperation: (action: () => Promise<void>) =>
         (pending = Promise.resolve().then(action)),
       authSession: { lock: () => actions.push('lock') },
+      clearFortinetIPsecDrafts: () => actions.push('clear-ipsec-drafts'),
       runWindowTeardown,
       withBitwardenBrowserTimeout: (promise: Promise<void>) => promise,
       webSurfaces: {
@@ -89,6 +90,7 @@ test('workspace failure IPC releases native resources once and ignores unrelated
         'active:0',
         'opacity:1',
         'lock',
+        'clear-ipsec-drafts',
         'flush',
         'close',
         'shutdown',
