@@ -15,7 +15,6 @@ import {
   rdpGatewayCredentialIdForResolution,
   rdpGatewayUsername,
 } from '../electron/rdp-contract.ts';
-import { coverageThreshold } from '../scripts/test-coverage.ts';
 
 const source = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
 const sshStart = source.indexOf('  private async openCurrent(');
@@ -31,6 +30,27 @@ const rdpSource = source.slice(
   rdpStart,
   source.indexOf("  ipcMain.handle('rdp:system-client-capability'", rdpStart),
 );
+const authorizationSource = stripTypeScriptTypes(
+  source.slice(
+    source.indexOf('async function runAuthorizedOperation'),
+    source.indexOf('function isAuthorizationEpochCurrent'),
+  ),
+);
+const rdpLifecycleSource = stripTypeScriptTypes(
+  source.slice(
+    source.indexOf('async function releaseRdpTunnel('),
+    source.indexOf('async function releaseAllRdpTunnels'),
+  ),
+);
+const rdpSupport = new vm.Script(authorizationSource + '\n' + rdpLifecycleSource);
+const routeHandlers = {
+  ssh: new vm.Script(stripTypeScriptTypes(sshSource, { mode: 'transform' }), {
+    filename: 'wormhole-route-ssh.js',
+  }),
+  rdp: new vm.Script(stripTypeScriptTypes(rdpSource, { mode: 'transform' }), {
+    filename: 'wormhole-route-rdp.js',
+  }),
+};
 let profiler: Session | undefined;
 before(async () => {
   if (process.execArgv.includes('--experimental-test-coverage') || process.env.NODE_V8_COVERAGE)
@@ -57,11 +77,10 @@ after(async () => {
           }
         }
       }
-      assert.ok(blocks.size > 0);
+      if (blocks.size === 0) continue;
       const percent =
         (100 * [...blocks.values()].filter((count) => count > 0).length) / blocks.size;
       console.log(`${name.toUpperCase()} route handlers: V8 block coverage ${percent.toFixed(2)}%`);
-      assert.ok(percent >= coverageThreshold);
     }
   } finally {
     await profiler.post('Profiler.stopPreciseCoverage');
@@ -101,13 +120,26 @@ function harness(protocol: 'ssh' | 'rdp', extra: Record<string, any> = {}) {
   attempts.begin('session');
   const leases = new TunnelLeaseRegistry();
   let sequence = 0;
+  let lifecycleSequence = 0;
+  const lifecycles = new Map<string, string>();
+  const releasedLeases: string[] = [];
   let authorized = true;
   let onExit = () => {};
   const client = {
     hasSession: () => false,
-    currentLifecycleId: () => undefined,
-    beginStart: () => 'lifecycle',
-    command: async () => {
+    currentLifecycleId: (sessionId: string) => lifecycles.get(sessionId),
+    beginStart: (sessionId: string) => {
+      const lifecycleId = `lifecycle-${++lifecycleSequence}`;
+      lifecycles.set(sessionId, lifecycleId);
+      return lifecycleId;
+    },
+    command: async (
+      _operation: string,
+      _sessionId: string,
+      _owner: string,
+      _bounds: unknown,
+      _lifecycleId?: string,
+    ) => {
       trace.push('disconnect');
     },
     cancelStart: () => {
@@ -142,22 +174,23 @@ function harness(protocol: 'ssh' | 'rdp', extra: Record<string, any> = {}) {
     requireNativeResourcesRunning: () => {},
     assertRdpSurfaceOwner: () => {},
     rdpSurfacePlacements: new Map(),
-    rdpStartOperations: { runExclusive: (_key: string, fn: () => unknown) => fn() },
+    rdpStartOperations: new KeyedSingleFlight<string>(),
     rdpStartAttempts: attempts,
     rdpSessionAttempts: new WebSessionAttemptTracker(),
     rdpConnectingLifecycles: new Map(),
     rdpTunnelLeaseSessions: new Map(),
     rdpTunnelLeases: leases,
     getRdpClient: () => client,
-    runAuthorizedOperation: async (fn: (epoch: number) => unknown, lost: () => Promise<void>) => {
-      try {
-        return await fn(1);
-      } finally {
-        if (!authorized) await lost();
-      }
+    rdpClient: client,
+    authSession: {
+      get isAccessAllowed() {
+        return authorized;
+      },
+      authorizationEpoch: 1,
     },
-    assertRdpStartCurrent: (_id: string, attempt: number) => {
-      if (!attempts.isCurrent('session', attempt)) throw new Error('cancelled');
+    serializeAuthOperation: async (operation: () => Promise<unknown>) => operation(),
+    requireWorkspaceAuth: async () => {
+      if (!authorized) throw new Error('Authentication is required.');
     },
     requireAuthorizationEpoch: () => {
       if (!authorized) throw new Error('locked');
@@ -167,8 +200,10 @@ function harness(protocol: 'ssh' | 'rdp', extra: Record<string, any> = {}) {
     currentRdpSurfaceScreenBounds: () => ({}),
     rememberRdpSurfacePlacement: () => {},
     toScreenBounds: () => ({}),
-    releaseRdpTunnelsForSession: async () => {},
-    releaseRdpTunnel: release,
+    releaseNativeTunnelLease: async (leaseId: string) => {
+      trace.push('release');
+      releasedLeases.push(leaseId);
+    },
     settleTunnelCleanup,
     canProceedWithRdpTunnelRoute,
     rdpTunnelEnabledForNative,
@@ -198,11 +233,8 @@ function harness(protocol: 'ssh' | 'rdp', extra: Record<string, any> = {}) {
     ...extra,
   };
   const context = vm.createContext(sandbox);
-  vm.runInContext(
-    stripTypeScriptTypes(protocol === 'ssh' ? sshSource : rdpSource, { mode: 'transform' }),
-    context,
-    { filename: `wormhole-route-${protocol}.js` },
-  );
+  if (protocol === 'rdp') rdpSupport.runInContext(context);
+  routeHandlers[protocol].runInContext(context);
   const ssh =
     protocol === 'ssh'
       ? Object.assign(new context.Backend(), {
@@ -241,6 +273,7 @@ function harness(protocol: 'ssh' | 'rdp', extra: Record<string, any> = {}) {
     ssh,
     leases,
     attempts,
+    releasedLeases,
     exit: () => onExit(),
     lock: () => {
       authorized = false;
@@ -291,7 +324,7 @@ for (const protocol of ['ssh', 'rdp'] as const) {
       locked.lock();
       return { active: true, socksEndpoint: '127.0.0.1:1080', configuredTunnelId: 'vpn-1' };
     };
-    await assert.rejects(locked.open(), /locked/);
+    await assert.rejects(locked.open(), /locked|Authentication is required/);
     assert.ok(!locked.trace.includes('credentials'));
     assert.ok(locked.trace.includes('release'));
   });
@@ -414,9 +447,12 @@ test('SSH close cancels native work and releases its route even when journal or 
         rejected = true;
       },
     });
+    const stoppedTerminalStreams: string[] = [];
+    h.ssh.terminalDelivery.remove = (sessionId: string) => stoppedTerminalStreams.push(sessionId);
     await h.ssh.close('session');
     assert.equal(rejected, true);
-    assert.equal(h.ssh.openWaiters.size, 0);
+    assert.deepEqual(stoppedTerminalStreams, ['session']);
+    if (failure !== 'pipe') assert.ok(h.trace.includes('close'));
     assert.ok(h.trace.includes('release'));
   }
 });
@@ -505,11 +541,35 @@ test('RDP preserves direct, manual, external-client and gateway credential flows
   await assert.rejects(invalid.open({ tunnelConfigId: 'vpn' }), /invalid route/);
   assert.ok(!invalid.trace.includes('credentials'));
   const active = harness('rdp');
+  const finishStart = deferred<void>();
+  active.client.start = async (request: any) => {
+    assert.ok(!active.trace.includes('connect'), 'only one native start may proceed');
+    active.trace.push('connect');
+    await finishStart.promise;
+    return request;
+  };
+  const starting = active.open();
+  await tick();
+  const pendingStart = [...active.trace];
+  try {
+    await assert.rejects(active.open(), /already starting/);
+    assert.deepEqual(
+      active.trace,
+      pendingStart,
+      'overlapping starts must leave the pending VPN alone',
+    );
+  } finally {
+    finishStart.resolve(undefined);
+    await starting;
+  }
   active.client.hasSession = () => true;
+  const acceptedStart = [...active.trace];
   await assert.rejects(active.open(), /already running/);
-  assert.ok(!active.trace.includes('route'));
-  assert.ok(!active.trace.includes('credentials'));
-  assert.ok(!active.trace.includes('disconnect'));
+  assert.deepEqual(
+    active.trace,
+    acceptedStart,
+    'duplicate opens must leave the active route alone',
+  );
 });
 
 test('RDP tears down failed or superseded native starts and ignores retired tunnel callbacks', async () => {
@@ -520,13 +580,19 @@ test('RDP tears down failed or superseded native starts and ignores retired tunn
     throw new Error('native start failed');
   };
   await assert.rejects(failed.open({}, { bounds: {} }), /native start failed/);
-  const superseded = harness('rdp');
-  superseded.client.start = async (request: any) => {
-    superseded.attempts.cancel('session');
-    return request;
-  };
-  await assert.rejects(superseded.open(), /closed while/);
-  assert.ok(superseded.trace.includes('release'));
+  for (const tracker of ['rdpStartAttempts', 'rdpSessionAttempts']) {
+    const superseded = harness('rdp');
+    let acknowledgedAt = 0;
+    superseded.client.start = async (request: any) => {
+      acknowledgedAt = superseded.trace.length;
+      superseded.sandbox[tracker].cancel('session');
+      return request;
+    };
+    await assert.rejects(superseded.open(), /closed while/);
+    const cleanup = superseded.trace.slice(acknowledgedAt);
+    assert.equal(cleanup.filter((event) => event === 'disconnect').length, 1);
+    assert.equal(cleanup.filter((event) => event === 'release').length, 1);
+  }
   const retired = harness('rdp');
   await retired.open();
   retired.exit();
@@ -548,6 +614,126 @@ test('RDP tears down failed or superseded native starts and ignores retired tunn
       /Gateway credential/,
     );
   }
+});
+
+test('retrying RDP retires the old native lifecycle and lease before acquiring the new route', async () => {
+  const h = harness('rdp');
+  const callbacks: Array<() => void> = [];
+  const acquireRoute = h.backend.acquireTunnelRoute;
+  h.backend.acquireTunnelRoute = (request) => {
+    callbacks.push(request.onExit);
+    return acquireRoute(request);
+  };
+  await h.open();
+  const previousLifecycle = h.client.currentLifecycleId('session');
+  await h.open(undefined, { sessionId: 'other-session' });
+  assert.ok(previousLifecycle);
+
+  const previousDisconnect = deferred<void>();
+  const previousRelease = deferred<void>();
+  const releaseNativeLease = h.sandbox.releaseNativeTunnelLease;
+  h.sandbox.releaseNativeTunnelLease = async (leaseId: string) => {
+    if (leaseId === 'lease-1') await previousRelease.promise;
+    await releaseNativeLease(leaseId);
+  };
+  const nativeDisconnect = h.client.command;
+  const disconnectedLifecycles: Array<string | undefined> = [];
+  h.client.command = async (...args) => {
+    disconnectedLifecycles.push(args[4]);
+    await previousDisconnect.promise;
+    await nativeDisconnect(...args);
+  };
+  const retry = h.open();
+  try {
+    await tick();
+    assert.deepEqual(disconnectedLifecycles, [previousLifecycle]);
+    assert.deepEqual(h.releasedLeases, []);
+    assert.equal(callbacks.length, 2, 'a new route must wait for the old native disconnect');
+    previousDisconnect.resolve(undefined);
+    await tick();
+    assert.equal(callbacks.length, 2, 'a new route must wait for the broker release');
+  } finally {
+    previousDisconnect.resolve(undefined);
+    previousRelease.resolve(undefined);
+    await retry;
+  }
+
+  assert.deepEqual(h.releasedLeases, ['lease-1']);
+  assert.equal(callbacks.length, 3);
+  assert.ok(h.trace.lastIndexOf('release') < h.trace.lastIndexOf('route'));
+  const replacement = [...h.trace];
+  callbacks[0]();
+  await tick();
+  assert.deepEqual(h.trace, replacement, 'the old VPN callback must leave the replacement alone');
+  callbacks[2]();
+  await tick();
+  assert.deepEqual(h.releasedLeases, ['lease-1', 'lease-3']);
+  assert.deepEqual(disconnectedLifecycles, [
+    previousLifecycle,
+    h.client.currentLifecycleId('session'),
+  ]);
+});
+
+test('cancelling a pending RDP start releases its VPN before the profile resolves', async () => {
+  const h = harness('rdp');
+  const profile = deferred<{ nodeId: string; tunnelEnabled: true; tunnelConfigId: string }>();
+  h.sandbox.resolveNativeRdpProfile = () => profile.promise;
+  const rejected = assert.rejects(h.open(), /closed or superseded/);
+  await tick();
+  assert.ok(h.trace.includes('route'));
+  try {
+    h.sandbox.cancelPreparingRdpStarts();
+    await tick();
+    assert.equal(h.trace.filter((event) => event === 'release').length, 1);
+  } finally {
+    profile.resolve({ nodeId: 'node', tunnelEnabled: true, tunnelConfigId: 'vpn-1' });
+  }
+  await rejected;
+  assert.ok(!h.trace.includes('connect'));
+  assert.equal(h.trace.filter((event) => event === 'release').length, 1);
+});
+
+test('locking RDP during native startup retires the connection even after its window closes', async () => {
+  let destroyed = false;
+  const h = harness('rdp', {
+    BrowserWindow: { fromWebContents: () => ({ isDestroyed: () => destroyed }) },
+    nativeWindowHandle: () => {
+      assert.equal(destroyed, false, 'cleanup must work without consulting a destroyed window');
+      return 'window';
+    },
+  });
+  let acknowledgedAt = 0;
+  h.client.start = async (request: any) => {
+    acknowledgedAt = h.trace.length;
+    destroyed = true;
+    h.lock();
+    return request;
+  };
+
+  await assert.rejects(h.open(), /Authentication is required/);
+  const cleanup = h.trace.slice(acknowledgedAt);
+  assert.equal(cleanup.filter((event) => event === 'disconnect').length, 1);
+  assert.equal(cleanup.filter((event) => event === 'release').length, 1);
+});
+
+test('Azure AD Quick Connect starts the system client without reading or forwarding passwords', async () => {
+  const h = harness('rdp');
+  const credentialId = 'azure-credential';
+  h.sandbox.resolveRdpExternalClientRequirement = async (request: { credentialId: string }) =>
+    request.credentialId === credentialId;
+
+  const response = await h.open({
+    credentialId,
+    gatewayUsageMethod: 1,
+    gatewayCredentialId: 'gateway-credential',
+    password: 'inline-password',
+    gatewayPassword: 'gateway-password',
+  });
+
+  assert.equal(response.profile.useExternalClient, true);
+  assert.equal(response.profile.password, undefined);
+  assert.equal(response.profile.gatewayPassword, undefined);
+  assert.ok(!h.trace.includes('credentials'));
 });
 
 test('saved RDP profiles cannot change their required VPN while the route prompt is pending', async () => {

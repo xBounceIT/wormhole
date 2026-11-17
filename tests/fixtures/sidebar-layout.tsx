@@ -1450,7 +1450,117 @@ async function runAppIntegrationTests(handleOnly = false) {
     assert.match(query('[data-connection-tree]').textContent!, /Nothing here yet\./);
     assert.equal(document.querySelectorAll('[data-connection-tree] button[draggable]').length, 0);
     await window.sidebarObserve('tree-boundaries');
+
+    await click(query('aside [aria-keyshortcuts="Control+K Meta+K"]'));
+    const name = document.querySelector<HTMLInputElement>('#connection-name')!;
+    assert.equal(name.required, false);
+    assert.match(name.labels![0].textContent!, /optional/i);
+    assert.ok(query('#connection-tunnel-route'), 'SSH should offer a VPN route');
+    await click(query('#connection-protocol'));
+    const serial = [...document.querySelectorAll<HTMLElement>('[role="option"]')].find(
+      (option) => option.textContent?.trim() === 'Serial',
+    );
+    assert.ok(serial, 'Serial must be selectable in Quick Connect');
+    await click(serial);
+    assert.equal(query('label[for="connection-host"]').textContent, 'Serial line');
+    assert.equal(query('#connection-tunnel-route'), null, 'Serial must omit the VPN route');
+    const clickDialogButton = async (label: string) => {
+      const button = [
+        ...document.querySelectorAll<HTMLButtonElement>(
+          '[role="dialog"][data-state="open"] button',
+        ),
+      ].find((item) => item.textContent?.trim() === label);
+      assert.ok(button, 'Missing dialog action ' + label);
+      await React.act(async () => button.click());
+    };
+    await clickDialogButton('Cancel');
+    await waitFor(() => !query('#connection-name'), 'Quick Connect did not close');
+
+    await React.act(async () => query('[aria-label="New connection"]').click());
+    assert.equal(document.querySelector<HTMLInputElement>('#connection-name')?.required, true);
+    await clickDialogButton('Cancel');
+    await waitFor(() => !query('#connection-name'), 'The saved connection editor did not close');
+
+    const importButton = query('[aria-label="Import connections"]');
+    await React.act(async () => {
+      importButton.focus();
+      importButton.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'ArrowDown',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    const mremote = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((item) =>
+      item.textContent?.includes('Import from mRemoteNG'),
+    );
+    assert.ok(mremote, 'the Connections menu must offer mRemoteNG import');
+    await React.act(async () => mremote.click());
+    assert.match(query('[role="dialog"]').textContent!, /mRemoteNG/i);
+    const imported = {
+      foldersCreated: 1,
+      connectionsCreated: 0,
+      credentialsCreated: 0,
+      credentialsReused: 0,
+      skippedUnsupported: 0,
+      warnings: [],
+      droppedWarnings: 0,
+    } satisfies WormholeMRemoteImportResult;
+    let completeImport!: (result: WormholeMRemoteImportResult) => void;
+    window.wormhole = {
+      hideTreeTooltip: () => {},
+      clearMRemoteImport: () => {},
+      onOperationProgress: () => () => {},
+      selectMRemoteImport: async () => ({
+        fileName: 'connections.xml',
+        fileSize: 128,
+        confVersion: '2.7',
+        passwordRequired: false,
+        fullFileEncrypted: false,
+      }),
+      analyzeMRemoteImport: async () => ({
+        planToken: 'a'.repeat(64),
+        folders: 1,
+        connections: 0,
+        credentials: 0,
+        credentialsReused: 0,
+        sharedCredentials: 0,
+        sharedCredentialConnections: 0,
+        skippedUnsupported: 0,
+        skippedUnsupportedSamples: [],
+        warnings: [],
+        droppedWarnings: 0,
+        preview: [],
+        previewTruncated: false,
+      }),
+      commitMRemoteImport: () =>
+        new Promise<WormholeMRemoteImportResult>((resolve) => {
+          completeImport = resolve;
+        }),
+      loadWorkspace: async () => ({
+        tree: [{ id: 'new-import', kind: 'folder', name: 'Imported servers' }],
+        credentials: [],
+        credentialOptions: { ssh: [], rdp: [], vnc: [] },
+        tunnels: [],
+      }),
+    } as unknown as Window['wormhole'];
+    await clickDialogButton('Choose file…');
+    await clickDialogButton('Analyze file');
+    await clickDialogButton('Import plan');
+    assert.match(query('[data-connection-tree]').textContent!, /Nothing here yet/);
+    await React.act(async () => completeImport(imported));
+    await waitFor(
+      () => query('[data-connection-tree]').textContent!.includes('Imported servers'),
+      'The connection tree did not refresh after import',
+    );
+    await clickDialogButton('Close');
+    window.wormhole = undefined;
+
     await checkPinnedHandle();
+  } catch (error) {
+    if (error instanceof AggregateError) throw new Error(error.errors.map(String).join(' / '));
+    throw error;
   } finally {
     await React.act(async () => root.unmount());
     window.wormhole = originalBridge;

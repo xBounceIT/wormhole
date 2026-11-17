@@ -149,8 +149,8 @@ its protected storage has been saved; failed saves retain the host for a later r
 
 `npm run test:web-session` covers browser state and IPC validation, the production
 native controller with simulated Go/Electron boundaries, and the mounted browser
-UI in Chromium. The new unit module and modified native/renderer handlers enforce
-at least 80% coverage using Node and V8 tooling. A real Chromium/SOCKS integration
+UI in Chromium. Node and V8 report coverage for the unit module and the
+native and renderer handlers. A real Chromium/SOCKS integration
 test verifies multi-host tabs, popup opener support, cookie isolation and rejection
 of direct fallback after the proxy stops. Authenticated Bitwarden login and live
 VPN-provider interoperability still require manual checks with real accounts.

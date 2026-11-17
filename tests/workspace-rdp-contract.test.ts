@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { parseWorkspaceRdpSettings } from '../electron/workspace-rdp-contract.ts';
 import {
@@ -119,24 +118,6 @@ test('RDP external-client requirement accepts one bounded credential source', ()
   );
   assert.throws(() =>
     parseRdpExternalClientRequirementRequest({ username: 'bad\nuser', domain: '' }),
-  );
-});
-
-test('Quick Connect classifies Azure AD before resolving any RDP secret', () => {
-  const mainSource = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
-  const startHandler = mainSource.slice(
-    mainSource.indexOf("ipcMain.handle('rdp:start'"),
-    mainSource.indexOf("ipcMain.handle('rdp:disconnect'"),
-  );
-  const requirementIndex = startHandler.indexOf('await resolveRdpExternalClientRequirement');
-  const credentialIndex =
-    /await\s+resolveNativeRdpCredential\(\s*request\.profile\.credentialId\s*,?\s*\)/.exec(
-      startHandler,
-    )?.index ?? -1;
-  assert.ok(requirementIndex >= 0 && requirementIndex < credentialIndex);
-  assert.match(
-    startHandler,
-    /if \(requiresExternalClient\)[\s\S]*delete resolvedProfile\.password;[\s\S]*delete resolvedProfile\.gatewayPassword;/,
   );
 });
 

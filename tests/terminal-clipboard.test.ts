@@ -866,27 +866,6 @@ test('auto-copy preserves the selection after success or failure', async () => {
   }
 });
 
-test('styled runs remain inline and preserve spaces when Chromium copies a terminal row', () => {
-  const terminalGridSource = appSource.slice(
-    appSource.indexOf('const TerminalScrollback'),
-    appSource.indexOf('function terminalCsiWithModifier'),
-  );
-
-  // Both live rows and scrollback must opt into the shared selection handler.
-  assert.equal(terminalGridSource.match(/data-terminal-row/g)?.length, 2);
-  const terminalSurfaceSource = appSource.slice(
-    appSource.indexOf('function SshTerminalSurface'),
-    appSource.indexOf('function clearSftpCancelRequestsForTransfer'),
-  );
-  assert.match(terminalSurfaceSource, /onMouseDown={selectTerminalDoubleClick}/);
-  assert.equal(terminalGridSource.match(/inline-block overflow-hidden align-top/g)?.length, 2);
-  assert.equal(
-    terminalGridSource.match(/className="h-\[18px\] min-w-max whitespace-pre"/g)?.length,
-    2,
-  );
-  assert.doesNotMatch(terminalGridSource, /className=(?:"|{`)[^"`]*block flex-none/);
-});
-
 test('mounted SSH and serial terminals follow long output and preserve manual scroll in Chromium', async () => {
   const start = appSource.indexOf('const terminalFontSize');
   const end = appSource.indexOf('function clearSftpCancelRequestsForTransfer', start);
@@ -905,7 +884,14 @@ test('mounted SSH and serial terminals follow long output and preserve manual sc
     appSource.indexOf('const navItems'),
   );
   const transformed = await transformWithOxc(
-    helpers + selectionSource + frameApplicationSource + appSource.slice(start, end) + fixture,
+    [
+      helpers,
+      selectionSource,
+      copyTerminalSelection.toString(),
+      frameApplicationSource,
+      appSource.slice(start, end),
+      fixture,
+    ].join('\n'),
     'terminal-scroll.tsx',
     {
       jsx: { runtime: 'classic' },
