@@ -152,7 +152,16 @@ import {
   type TunnelBrowserCompletion,
   type TunnelBrowserFailure,
 } from './tunnel-auth.js';
-import { prepareFortinetIPsecWrite, promptFortinetIPsecSecret } from './fortinet-ipsec-secret.js';
+import {
+  FortinetIPsecCredentialDrafts,
+  FortinetIPsecEntryCancelled,
+  isFortinetIPsecEditableSecret,
+  prepareFortinetIPsecWrite,
+  promptFortinetIPsecSecret,
+  type FortinetIPsecCertificate,
+  type FortinetIPsecDraftReferences,
+  type FortinetIPsecEditableSecret,
+} from './fortinet-ipsec-secret.js';
 import {
   SerialBackendClient,
   isSerialInput,
@@ -393,6 +402,11 @@ type NativeBackendAction =
   | 'tunnel.release'
   | 'tunnel.prompt-response'
   | 'tunnel.route-response'
+  | 'tunnel.ipsec-stage'
+  | 'tunnel.ipsec-discard'
+  | 'tunnel.ipsec-clear'
+  | 'tunnel.ipsec-create'
+  | 'tunnel.ipsec-update'
   | 'backup.export'
   | 'backup.import'
   | 'mremote.import.commit'
@@ -465,6 +479,10 @@ type NativeBackendCommand = {
   reuseExisting?: boolean;
   planNonce?: string;
   planToken?: string;
+  ipsecField?: FortinetIPsecEditableSecret;
+  ipsecSecret?: string;
+  ipsecReferences?: FortinetIPsecDraftReferences;
+  ipsecWrite?: ReturnType<typeof parseTunnelWriteRequest>;
 };
 type BackendResponse = {
   id: string;
@@ -524,6 +542,11 @@ type AppSettings = {
 };
 
 const windowCloseCoordinators = new WeakMap<BrowserWindow, WindowCloseCoordinator>();
+const fortinetIPsecDrafts = new FortinetIPsecCredentialDrafts((reference) => {
+  void nativeBackend
+    ?.send({ action: 'tunnel.ipsec-discard', sessionId: reference })
+    .catch(() => undefined);
+});
 let confirmOnWindowClose = true;
 const closeConfirmationReadyWindows = new WeakSet<BrowserWindow>();
 const closeConfirmationWaiters = new Map<
@@ -3186,7 +3209,7 @@ class NativeBackendProcess {
 
   async send(
     command: NativeBackendCommand,
-    timeoutMs = nativeBackendCommandTimeoutMs,
+    timeoutMs: number | null = nativeBackendCommandTimeoutMs,
   ): Promise<BackendResponse> {
     await this.start();
     const child = this.child;
@@ -3205,6 +3228,8 @@ class NativeBackendProcess {
       this.pending.delete(id);
       throw error instanceof Error ? error : new Error(String(error));
     }
+
+    if (timeoutMs === null) return response;
 
     const timeout = setTimeout(() => {
       const pending = this.pending.get(id);
@@ -8146,7 +8171,9 @@ function runAuthorizedBitwardenExtensionOperation<T>(
 }
 
 function rememberAuthState(state: AuthStateResponse, assumeUnlocked: boolean): AuthStateResponse {
+  const epoch = authSession.authorizationEpoch;
   authSession.remember(state, assumeUnlocked);
+  if (authSession.authorizationEpoch !== epoch) clearFortinetIPsecDrafts();
   currentAuthState = state;
   return state;
 }
@@ -8189,41 +8216,126 @@ function parseMcpApproval(value: unknown): {
   return { requestId, approved: value.approved };
 }
 
+function clearFortinetIPsecDrafts(): void {
+  fortinetIPsecDrafts.clear();
+  void nativeBackend?.send({ action: 'tunnel.ipsec-clear' }).catch(() => undefined);
+}
+
+function queueFortinetIPsecSecret(
+  kind: FortinetIPsecEditableSecret | FortinetIPsecCertificate,
+  owner: BrowserWindow,
+  isCurrent: () => boolean,
+) {
+  const pending = tunnelBrowserAuthQueue
+    .catch(() => undefined)
+    .then(() =>
+      promptFortinetIPsecSecret({
+        kind,
+        createWindow: (options) => new BrowserWindow(options),
+        ipc: ipcMain,
+        preload: path.join(__dirname, 'fortinet-ipsec-secret-preload.cjs'),
+        parent: owner,
+        isAuthorized: () => !owner.isDestroyed() && !authLockRequested && isCurrent(),
+        present: (window) => mcpApprovalWindowCoordinator.presentTunnelAuthWindow(window),
+        forget: (window) => mcpApprovalWindowCoordinator.forgetTunnelAuthWindow(window),
+      }),
+    );
+  tunnelBrowserAuthQueue = pending.then(
+    () => undefined,
+    () => undefined,
+  );
+  return pending;
+}
+
+function fortinetIPsecEditorOwner(event: Electron.IpcMainInvokeEvent): BrowserWindow {
+  const owner = BrowserWindow.fromWebContents(event.sender);
+  if (
+    !owner ||
+    owner.isDestroyed() ||
+    !windowCloseCoordinators.has(owner) ||
+    !event.senderFrame ||
+    event.senderFrame !== event.sender.mainFrame
+  )
+    throw new Error('Fortinet IPsec editor is unavailable.');
+  return owner;
+}
+
+async function finishFortinetIPsecSave<T>(sender: Electron.WebContents, pending: Promise<T>) {
+  const lifetime = new AbortController();
+  const cancel = () => lifetime.abort();
+  sender.once('destroyed', cancel);
+  sender.once('did-start-loading', cancel);
+  try {
+    const [outcome] = await Promise.allSettled([pending]);
+    // A committed write survives a lock. Deliver its result to the same workspace after unlock.
+    while (!lifetime.signal.aborted && !authSession.isAccessAllowed) {
+      await new Promise<void>((resolve) => {
+        const resume = () => {
+          unsubscribe();
+          lifetime.signal.removeEventListener('abort', resume);
+          resolve();
+        };
+        const unsubscribe = authSession.onUnlocked(resume);
+        lifetime.signal.addEventListener('abort', resume, { once: true });
+      });
+    }
+    if (lifetime.signal.aborted) throw new Error('Fortinet IPsec editor is unavailable.');
+    if (outcome.status === 'rejected') throw outcome.reason;
+    return outcome.value;
+  } finally {
+    sender.removeListener('destroyed', cancel);
+    sender.removeListener('did-start-loading', cancel);
+  }
+}
+
 async function saveTunnelWithNativeSecret(
   operation: 'tunnel-create' | 'tunnel-update',
-  request: ReturnType<typeof parseTunnelWriteRequest>,
+  event: Electron.IpcMainInvokeEvent,
+  value: unknown,
+  draftId: unknown,
 ) {
-  const epoch = authSession.authorizationEpoch;
-  const native = await prepareFortinetIPsecWrite(request, (kind) => {
-    const pending = tunnelBrowserAuthQueue
-      .catch(() => undefined)
-      .then(() => {
-        const parent = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
-        return promptFortinetIPsecSecret({
-          kind,
-          createWindow: (options) => new BrowserWindow(options),
-          ipc: ipcMain,
-          preload: path.join(__dirname, 'fortinet-ipsec-secret-preload.cjs'),
-          parent: parent && !parent.isDestroyed() ? parent : undefined,
-          isAuthorized: () => isAuthorizationEpochCurrent(epoch),
-          present: (window) => mcpApprovalWindowCoordinator.presentTunnelAuthWindow(window),
-          forget: (window) => mcpApprovalWindowCoordinator.forgetTunnelAuthWindow(window),
-        });
-      });
-    tunnelBrowserAuthQueue = pending.then(
-      () => undefined,
-      () => undefined,
+  const request = parseTunnelWriteRequest(value, operation === 'tunnel-update');
+  if (draftId !== undefined && (request.kind !== 9 || !isTunnelIdentifier(draftId)))
+    throw new Error('Fortinet IPsec credential draft is invalid.');
+  const save = async (epoch: number) => {
+    if (request.kind !== 9)
+      return parseTunnelDetailsResponse(await runBackend<unknown>(operation, request));
+    const owner = fortinetIPsecEditorOwner(event);
+    const references = fortinetIPsecDrafts.read(event.sender, draftId, epoch);
+    const native = await prepareFortinetIPsecWrite(
+      request,
+      (kind) => queueFortinetIPsecSecret(kind, owner, () => isAuthorizationEpochCurrent(epoch)),
+      references,
     );
-    return pending;
-  });
-  try {
-    requireAuthorizationEpoch(epoch);
-    return parseTunnelDetailsResponse(await runBackend<unknown>(operation, native));
-  } finally {
-    if (native.kind === 9)
+    try {
+      requireAuthorizationEpoch(epoch);
+      if (authLockRequested) throw new Error('Authentication is required before saving the VPN.');
+      if (!draftId) return parseTunnelDetailsResponse(await runBackend<unknown>(operation, native));
+      // Only the service can confirm whether it committed the write and consumed the draft.
+      const response = await getNativeBackend().send(
+        {
+          action: operation === 'tunnel-create' ? 'tunnel.ipsec-create' : 'tunnel.ipsec-update',
+          ipsecWrite: native,
+          ipsecReferences: references,
+        },
+        null,
+      );
+      if (!response.ok)
+        throw new Error(response.error || 'Could not save the Fortinet IPsec tunnel.');
+      fortinetIPsecDrafts.discard(event.sender, draftId, true);
+      return parseTunnelDetailsResponse(response.result);
+    } finally {
       for (const key of ['PreSharedKey', 'Password', 'ClientCert', 'ClientKey', 'CaCert'])
         delete native.settings[key];
-  }
+    }
+  };
+  const { result } = await serializeAuthOperation(async () => {
+    await requireWorkspaceAuth();
+    const pending = save(authSession.authorizationEpoch);
+    if (!draftId) return { result: await pending };
+    return { result: finishFortinetIPsecSave(event.sender, pending) };
+  });
+  return result;
 }
 
 function registerIpcHandlers(sshBackend: NativeSshBackend): void {
@@ -8282,6 +8394,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     owner.setOpacity(1);
     void serializeAuthOperation(async () => {
       authSession.lock();
+      clearFortinetIPsecDrafts();
       await runWindowTeardown(
         () =>
           withBitwardenBrowserTimeout(
@@ -9331,12 +9444,51 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     return afterBitwardenPopupInputEvent(() => webSurfaces.closeBitwardenPopup(sessionId));
   });
 
-  ipcMain.handle('tunnel:create', async (_event, value: unknown) => {
-    const request = parseTunnelWriteRequest(value, false);
-    return serializeAuthOperation(async () => {
-      await requireWorkspaceAuth();
-      return saveTunnelWithNativeSecret('tunnel-create', request);
+  ipcMain.handle('tunnel:enter-ipsec-credential', async (event, draftId: unknown, key: unknown) => {
+    if (!isTunnelIdentifier(draftId) || !isFortinetIPsecEditableSecret(key))
+      throw new Error('Fortinet IPsec credential request is invalid.');
+    await requireWorkspaceAuth();
+    const owner = fortinetIPsecEditorOwner(event);
+    const frame = event.senderFrame;
+    const epoch = authSession.authorizationEpoch;
+    return fortinetIPsecDrafts.enter(event.sender, draftId, epoch, key, (reference, isCurrent) => {
+      const authorized = () =>
+        isCurrent() &&
+        !owner.isDestroyed() &&
+        !authLockRequested &&
+        isAuthorizationEpochCurrent(epoch) &&
+        frame === event.sender.mainFrame;
+      return queueFortinetIPsecSecret(key, owner, authorized).then((value) => {
+        if (!authorized()) throw new FortinetIPsecEntryCancelled();
+        const bytes = Buffer.from(value, 'utf8');
+        try {
+          return getNativeBackend()
+            .send({
+              action: 'tunnel.ipsec-stage',
+              sessionId: reference,
+              ipsecField: key,
+              ipsecSecret: bytes.toString('base64'),
+            })
+            .then((response) => {
+              if (!response.ok)
+                throw new Error(response.error || 'Could not stage the Fortinet IPsec credential.');
+            });
+        } finally {
+          bytes.fill(0);
+        }
+      });
     });
+  });
+
+  ipcMain.handle('tunnel:discard-ipsec-credentials', (event, draftId: unknown) => {
+    if (!isTunnelIdentifier(draftId))
+      throw new Error('Fortinet IPsec credential draft is invalid.');
+    fortinetIPsecEditorOwner(event);
+    fortinetIPsecDrafts.discard(event.sender, draftId);
+  });
+
+  ipcMain.handle('tunnel:create', async (event, value: unknown, draftId: unknown) => {
+    return saveTunnelWithNativeSecret('tunnel-create', event, value, draftId);
   });
 
   ipcMain.handle('tunnel:list', async () => {
@@ -9353,12 +9505,8 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     });
   });
 
-  ipcMain.handle('tunnel:update', async (_event, value: unknown) => {
-    const request = parseTunnelWriteRequest(value, true);
-    return serializeAuthOperation(async () => {
-      await requireWorkspaceAuth();
-      return saveTunnelWithNativeSecret('tunnel-update', request);
-    });
+  ipcMain.handle('tunnel:update', async (event, value: unknown, draftId: unknown) => {
+    return saveTunnelWithNativeSecret('tunnel-update', event, value, draftId);
   });
 
   ipcMain.handle('tunnel:delete', async (_event, value: unknown) => {
@@ -9678,6 +9826,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
 
   ipcMain.handle('auth:lock', async (event) => {
     authLockRequested = true;
+    clearFortinetIPsecDrafts();
     // A confirmation can still own Hello when idle locking starts. Cancel it
     // before waiting for mutations queued behind that interactive operation.
     activeHelloVerification?.abort();
@@ -9685,6 +9834,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       await authStateMutationQueue.catch(() => undefined);
       await ensureAuthSession();
       authSession.lock();
+      clearFortinetIPsecDrafts();
       // Recheck after asynchronous state refresh: overlapping locks can let a
       // verification start after the cancellation at the beginning of this request.
       activeHelloVerification?.abort();
@@ -11096,6 +11246,7 @@ function createWindow() {
   window.once('closed', () => clearRdpSurfacePlacements(window));
   const credentialSelectionOwner = window.webContents;
   credentialSelectionOwner.once('destroyed', () => {
+    fortinetIPsecDrafts.discard(credentialSelectionOwner);
     sshPrivateKeySelections.delete(credentialSelectionOwner);
     sshCertificateSelections.delete(credentialSelectionOwner);
   });
@@ -11119,6 +11270,7 @@ function createWindow() {
   showFallbackTimer = setTimeout(showWindow, 10_000);
 
   window.webContents.on('did-start-loading', () => {
+    fortinetIPsecDrafts.discard(credentialSelectionOwner);
     failedWorkspaceWindows.delete(window);
     startupReadyWindows.delete(window);
     window.setOpacity(startupWindowOpacity);
@@ -11130,6 +11282,7 @@ function createWindow() {
       // A renderer reload creates a fresh UI process context. Do not let a previous renderer's
       // native unlock survive into the new context before it proves possession of the secret.
       authSession.lock();
+      clearFortinetIPsecDrafts();
       backupImportSelections.delete(window.webContents);
       sshPrivateKeySelections.delete(window.webContents);
       sshCertificateSelections.delete(window.webContents);

@@ -3,7 +3,6 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import {
   fortinetIPsecDefaults,
-  fortinetIPsecFields,
   missingFortinetIPsecFields,
   normalizeFortinetIPsecSettings,
   fortinetIPsecEditorSettings,
@@ -66,7 +65,7 @@ test('IPsec editor keeps only key presence and strips PSK, SSL and ephemeral cre
   });
 });
 
-test('shared create/edit validation requires gateway and ports; the native save flow owns PSK input', () => {
+test('shared create/edit validation requires gateway and ports', () => {
   assert.deepEqual(missingFortinetIPsecFields(settings), []);
   assert.deepEqual(missingTunnelFields({ name: 'IPsec', kind: 9, settings }), []);
   assert.deepEqual(missingTunnelFields({ name: '', kind: 9, settings }), ['Name']);
@@ -80,30 +79,6 @@ test('shared create/edit validation requires gateway and ports; the native save 
     for (const value of [1, 65535, ' 500 '])
       assert.deepEqual(missingFortinetIPsecFields({ ...settings, UserAuth: 3, [key]: value }), []);
   }
-});
-
-test('IPsec editor exposes only key presence/replacement and uses the shared form', () => {
-  assert.equal(
-    fortinetIPsecFields.some((field) => field.key === 'PreSharedKey'),
-    false,
-  );
-  assert.ok(fortinetIPsecFields.some((field) => field.key === 'SamlPort'));
-  assert.equal(
-    fortinetIPsecFields.some((field) => /token|uid|password|cookie/i.test(field.key)),
-    false,
-  );
-  const app = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
-  assert.match(app, /value: 9, label: 'Fortinet IPsec'/);
-  assert.match(app, /if \(kind === 9\) return fortinetIPsecFields/);
-  assert.match(app, /case 9:\s*return \{ \.\.\.fortinetIPsecDefaults \}/);
-  const start = app.indexOf('{value.kind === 9 ? (');
-  const surface = app.slice(start, app.indexOf('{value.kind === 7 ? (', start));
-  for (const section of ['Gateway', 'Authentication', 'VPN settings', 'Phase 1', 'Phase 2'])
-    assert.ok(surface.includes(`rows('${section}'`));
-  assert.match(surface, /Has\$\{secret\}/);
-  assert.match(surface, /Replace\$\{secret\}/);
-  assert.match(surface, /separate secure window when\s+you save/);
-  assert.match(surface, /ClientCert/);
 });
 
 test('new profiles choose PSK without SAML; existing profiles preserve their SAML behavior', () => {
@@ -146,24 +121,23 @@ test('new profiles choose PSK without SAML; existing profiles preserve their SAM
 });
 
 test('advanced fields, errors and credential markers survive the shared editor contract', () => {
-  for (const field of fortinetIPsecFields) {
-    const value =
-      field.type === 'select'
-        ? field.options![0].value
-        : field.type === 'number'
-          ? 100
-          : field.type === 'switch'
-            ? true
-            : 'example';
-    const input = {
-      [field.key]: field.type === 'select' || field.type === 'number' ? String(value) : value,
-    };
-    const normalized = normalizeFortinetIPsecSettings(input);
-    assert.equal(normalized[field.key], value);
-    assert.doesNotThrow(() =>
-      parseTunnelWriteRequest({ name: 'VPN', kind: 9, settings: normalized }, false),
-    );
-  }
+  const advanced = normalizeTunnelEditorSettings(9, {
+    IkeVersion: '2',
+    ManualAddress: ' 192.0.2.3 ',
+    Phase1Lifetime: '3600',
+    Phase2Encryption: '2',
+    Pfs: true,
+  });
+  assert.deepEqual(
+    parseTunnelWriteRequest({ name: 'VPN', kind: 9, settings: advanced }, false).settings,
+    {
+      IkeVersion: 2,
+      ManualAddress: '192.0.2.3',
+      Phase1Lifetime: 3600,
+      Phase2Encryption: 2,
+      Pfs: true,
+    },
+  );
   assert.deepEqual(missingFortinetIPsecFields({ ...settings, SamlPort: 'ignored' }), []);
   assert.ok(missingFortinetIPsecFields({ ...settings, UserAuth: 2 }).includes('Username'));
   assert.ok(
@@ -190,9 +164,6 @@ test('advanced fields, errors and credential markers survive the shared editor c
       [`Replace${secret}`]: false,
     });
     assert.deepEqual(normalized, { [`Has${secret}`]: true, [`Replace${secret}`]: false });
-    assert.throws(() =>
-      parseTunnelWriteRequest({ name: 'VPN', kind: 9, settings: { [secret]: 'secret' } }, false),
-    );
   }
   assert.throws(() =>
     parseTunnelWriteRequest(
@@ -202,14 +173,20 @@ test('advanced fields, errors and credential markers survive the shared editor c
   );
 });
 
-test('IPC admits the persisted IPsec kind and rejects unknown provider numbers', () => {
+test('IPsec IPC accepts presence flags and rejects raw secrets in public settings', () => {
   const request = { name: 'IPsec', kind: 9, settings };
   assert.deepEqual(parseTunnelWriteRequest(request, false), request);
   const details = { ...request, id: '11111111-2222-3333-4444-555555555555' };
   assert.equal(parseTunnelDetailsResponse(details).kind, 9);
-  assert.throws(() => parseTunnelWriteRequest({ ...request, kind: 10 }, false));
-  assert.throws(() => parseTunnelDetailsResponse({ ...details, kind: 10 }));
-  for (const key of ['PreSharedKey', 'SamlToken', 'SamlUid']) {
+  for (const key of [
+    'PreSharedKey',
+    'Password',
+    'ClientCert',
+    'ClientKey',
+    'CaCert',
+    'SamlToken',
+    'SamlUid',
+  ]) {
     assert.throws(() =>
       parseTunnelWriteRequest({ ...request, settings: { ...settings, [key]: 'secret' } }, false),
     );

@@ -7512,6 +7512,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
             ) : activePage === 'tunnels' ? (
               <TunnelsPage
                 tree={tree}
+                isAuthorized={authGate === 'unlocked'}
                 credentials={credentialOptions.ssh.filter(
                   (credential) =>
                     credential.provider === 'Local' &&
@@ -12827,11 +12828,55 @@ function TunnelAdvanced({
   );
 }
 
+const fortinetIPsecEditableFields = [
+  ['PreSharedKey', 'Gateway pre-shared key (PSK)'],
+  ['Password', 'VPN user password'],
+] as const;
+
+type FortinetIPsecEditorField = (typeof fortinetIPsecEditableFields)[number][0];
+type FortinetIPsecCredentialDraft = {
+  id: string;
+  entered: Partial<Record<FortinetIPsecEditorField, boolean>>;
+};
+
+function FortinetIPsecCredentialFields({
+  settings,
+  draft,
+  disabled,
+  onEnter,
+}: {
+  settings: Record<string, unknown>;
+  draft: FortinetIPsecCredentialDraft | null;
+  disabled: boolean;
+  onEnter: (field: FortinetIPsecEditorField) => void;
+}) {
+  return fortinetIPsecEditableFields.map(([secret, label]) => {
+    if (!fortinetIPsecFieldVisible(secret, settings)) return null;
+    const stored = settings[`Has${secret}`] === true;
+    const entered = draft?.entered[secret] === true;
+    return (
+      <div className="grid gap-2" key={secret}>
+        <Label htmlFor={`tunnel-ipsec-${secret}`}>{label}</Label>
+        <Button
+          disabled={disabled}
+          id={`tunnel-ipsec-${secret}`}
+          onClick={() => onEnter(secret)}
+          type="button"
+          variant="outline"
+        >
+          {entered ? 'Change entered value' : stored ? 'Replace stored value' : 'Enter securely'}
+        </Button>
+      </div>
+    );
+  });
+}
+
 // Provider-specific tunnel fields are schema-driven branches of one editor transaction; separate
 // components would duplicate validation and secret-clearing behavior.
 // react-doctor-disable-next-line react-doctor/no-giant-component
 function TunnelEditorDialog({
   tree,
+  isAuthorized,
   credentials,
   tunnels,
   initial,
@@ -12840,6 +12885,7 @@ function TunnelEditorDialog({
   onSaved,
 }: {
   tree: TreeNode[];
+  isAuthorized: boolean;
   credentials: CredentialRecord[];
   tunnels: TunnelRecord[];
   initial: TunnelEditorValue;
@@ -12850,6 +12896,8 @@ function TunnelEditorDialog({
   const [value, setValue] = useState<TunnelEditorValue>(initial);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [credentialDraft, setCredentialDraft] = useState<FortinetIPsecCredentialDraft | null>(null);
+  const mounted = useRef(true);
   const [advancedOpen, setAdvancedOpen] = useState(
     () =>
       initial.kind === 3 &&
@@ -12859,7 +12907,37 @@ function TunnelEditorDialog({
       ),
   );
 
-  const missing = useMemo(() => missingTunnelFields(value), [value]);
+  const draftId = credentialDraft?.id;
+  if (credentialDraft && (value.kind !== 9 || !isAuthorized || !open)) {
+    setCredentialDraft(null);
+  }
+  useEffect(() => {
+    if (!draftId) return;
+    return () => {
+      void window.wormhole?.discardFortinetIPsecCredentials(draftId).catch(() => undefined);
+    };
+  }, [draftId]);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
+  const missing = useMemo(() => {
+    const fields = missingTunnelFields(value);
+    if (value.kind !== 9) return fields;
+    return fields.concat(
+      fortinetIPsecEditableFields
+        .filter(
+          ([field]) =>
+            fortinetIPsecFieldVisible(field, value.settings) &&
+            value.settings[`Has${field}`] !== true &&
+            credentialDraft?.entered[field] !== true,
+        )
+        .map(([, label]) => label),
+    );
+  }, [value, credentialDraft]);
   const canSave = missing.length === 0;
   const fields = tunnelEditorFields(value.kind);
   const rows = (
@@ -12978,9 +13056,31 @@ function TunnelEditorDialog({
     }));
   }
 
+  async function enterFortinetIPsecCredential(field: FortinetIPsecEditorField) {
+    const api = window.wormhole;
+    if (!api || busy || !isAuthorized) return;
+    const draft = credentialDraft ?? { id: newSessionToken(), entered: {} };
+    setCredentialDraft(draft);
+    setBusy(true);
+    setError('');
+    try {
+      if (await api.enterFortinetIPsecCredential(draft.id, field)) {
+        setCredentialDraft((current) =>
+          current?.id === draft.id
+            ? { ...current, entered: { ...current.entered, [field]: true } }
+            : current,
+        );
+      }
+    } catch (entryError) {
+      setError(userFacingTunnelError(entryError));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!canSave) return;
+    if (busy || !canSave) return;
     if (
       value.id &&
       value.kind !== initial.kind &&
@@ -12998,39 +13098,51 @@ function TunnelEditorDialog({
     setBusy(true);
     setError('');
     try {
-      const settings = normalizeTunnelEditorSettings(value.kind, value.settings);
+      const request = {
+        name: value.name,
+        kind: value.kind,
+        settings: normalizeTunnelEditorSettings(value.kind, value.settings),
+      };
+      const saveDraftId =
+        credentialDraft && Object.values(credentialDraft.entered).some(Boolean)
+          ? credentialDraft.id
+          : undefined;
       const saved = value.id
-        ? await api.updateTunnel({
-            forgetJumpHostKeySha256: value.forgetJumpHostKeySha256,
-            id: value.id,
-            name: value.name,
-            kind: value.kind,
-            settings,
-          })
-        : await api.createTunnel({
-            name: value.name,
-            kind: value.kind,
-            settings,
-          });
+        ? await api.updateTunnel(
+            {
+              forgetJumpHostKeySha256: value.forgetJumpHostKeySha256,
+              id: value.id,
+              ...request,
+            },
+            saveDraftId,
+          )
+        : await api.createTunnel(request, saveDraftId);
       onSaved({
         id: saved.id,
         name: saved.name,
         kind: tunnelKindLabel(saved.kind),
         endpoint: saved.endpoint,
       });
-      onOpenChange(false);
+      if (mounted.current) onOpenChange(false);
     } catch (saveError) {
-      setError(saveError instanceof Error ? saveError.message : 'Could not save VPN tunnel.');
+      setError(
+        saveError instanceof Error
+          ? userFacingTunnelError(saveError)
+          : 'Could not save VPN tunnel.',
+      );
     } finally {
       setBusy(false);
     }
   }
 
+  if (!isAuthorized && value.kind === 9) return null;
+
   return (
-    <Dialog onOpenChange={onOpenChange} open={open}>
+    <Dialog onOpenChange={(next) => !busy && onOpenChange(next)} open={open}>
       <DialogContent
         className="flex max-h-[calc(100dvh-2rem)] w-full max-w-[min(48rem,calc(100vw-2rem))] flex-col overflow-hidden border-border/70 bg-card sm:max-w-[min(48rem,calc(100vw-2rem))]"
         onInteractOutside={(event) => event.preventDefault()}
+        showCloseButton={!busy}
       >
         <DialogHeader>
           <DialogTitle>{value.id ? 'Edit VPN tunnel' : 'Add VPN tunnel'}</DialogTitle>
@@ -13317,38 +13429,36 @@ function TunnelEditorDialog({
                   {rows('Authentication', {
                     hidden: (field) => !fortinetIPsecFieldVisible(field.key, value.settings),
                   })}
-                  <p className="text-[11px] text-muted-foreground md:col-span-2">
-                    Enter keys, certificates and saved passwords in a separate secure window when
-                    you save.
-                  </p>
-                  {(value.settings.AuthMethod === 1
-                    ? ['ClientCert', 'ClientKey', 'CaCert']
-                    : ['PreSharedKey']
-                  )
-                    .concat(value.settings.UserAuth === 2 ? ['Password'] : [])
-                    .map((secret) =>
-                      value.settings[`Has${secret}`] === true || secret === 'CaCert' ? (
-                        <Label key={secret} className="flex items-center gap-2 md:col-span-2">
-                          <Checkbox
-                            checked={value.settings[`Replace${secret}`] === true}
-                            onCheckedChange={(checked) =>
-                              setSetting(`Replace${secret}`, checked === true)
-                            }
-                          />
-                          {secret === 'CaCert' ? 'Configure' : 'Replace stored'}{' '}
-                          {secret === 'PreSharedKey'
-                            ? 'gateway PSK'
-                            : secret === 'ClientCert'
-                              ? 'client certificate'
-                              : secret === 'ClientKey'
-                                ? 'private key'
-                                : secret === 'CaCert'
-                                  ? 'CA certificate'
-                                  : 'password'}{' '}
-                          when saving
-                        </Label>
-                      ) : null,
-                    )}
+                  <FortinetIPsecCredentialFields
+                    disabled={busy}
+                    draft={credentialDraft}
+                    onEnter={(field) => void enterFortinetIPsecCredential(field)}
+                    settings={value.settings}
+                  />
+                  {value.settings.AuthMethod === 1 ? (
+                    <>
+                      <p className="text-[11px] text-muted-foreground md:col-span-2">
+                        Certificate material is entered in a secure window when you save.
+                      </p>
+                      {[
+                        ['ClientCert', 'Replace stored client certificate'],
+                        ['ClientKey', 'Replace stored private key'],
+                        ['CaCert', 'Configure CA certificate'],
+                      ].map(([secret, label]) =>
+                        value.settings[`Has${secret}`] === true || secret === 'CaCert' ? (
+                          <Label key={secret} className="flex items-center gap-2 md:col-span-2">
+                            <Checkbox
+                              checked={value.settings[`Replace${secret}`] === true}
+                              onCheckedChange={(checked) =>
+                                setSetting(`Replace${secret}`, checked === true)
+                              }
+                            />
+                            {label} when saving
+                          </Label>
+                        ) : null,
+                      )}
+                    </>
+                  ) : null}
                 </TunnelSection>
                 <TunnelSection title="VPN settings" contentClassName="items-start md:grid-cols-2">
                   {rows('VPN settings', {
@@ -13447,6 +13557,7 @@ function TunnelEditorDialog({
 // react-doctor-disable-next-line react-doctor/no-giant-component, react-doctor/prefer-useReducer
 function TunnelsPage({
   tree,
+  isAuthorized,
   credentials,
   tunnels,
   onTunnelsLoaded,
@@ -13455,6 +13566,7 @@ function TunnelsPage({
   onTunnelDeleted,
 }: {
   tree: TreeNode[];
+  isAuthorized: boolean;
   credentials: CredentialRecord[];
   tunnels: TunnelRecord[];
   onTunnelsLoaded: (tunnels: TunnelRecord[]) => void;
@@ -13797,6 +13909,7 @@ function TunnelsPage({
       {editorOpen ? (
         <TunnelEditorDialog
           tree={tree}
+          isAuthorized={isAuthorized}
           credentials={credentials}
           tunnels={tunnels}
           initial={editorValue}

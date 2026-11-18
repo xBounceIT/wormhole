@@ -2,6 +2,8 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import type { SshTerminalTheme } from './terminal-theme-settings.js';
 import type { MRemoteImportOptions } from './mremote-import-contract.js';
 import type { WebBrowserCommand, WebBrowserState } from './web-browser-tabs.js';
+import type { FortinetIPsecEditableSecret } from './fortinet-ipsec-secret.js';
+import type { TunnelWriteRequest } from './tunnel-test-contract.js';
 import type {
   RdpBackendEvent,
   RdpCommandRequest,
@@ -281,17 +283,16 @@ const wormholeBridge = {
           tunnelConfigId: string;
         },
   ) => ipcRenderer.invoke('workspace:update-node-tunnel', request),
-  createTunnel: (request: { name: string; kind: number; settings: Record<string, unknown> }) =>
-    ipcRenderer.invoke('tunnel:create', request),
+  enterFortinetIPsecCredential: (draftId: string, field: FortinetIPsecEditableSecret) =>
+    ipcRenderer.invoke('tunnel:enter-ipsec-credential', draftId, field),
+  discardFortinetIPsecCredentials: (draftId: string) =>
+    ipcRenderer.invoke('tunnel:discard-ipsec-credentials', draftId),
+  createTunnel: (request: TunnelWriteRequest, draftId?: string) =>
+    ipcRenderer.invoke('tunnel:create', request, draftId),
   listTunnels: () => ipcRenderer.invoke('tunnel:list'),
   readTunnel: (id: string) => ipcRenderer.invoke('tunnel:read', { id }),
-  updateTunnel: (request: {
-    forgetJumpHostKeySha256?: string;
-    id: string;
-    name: string;
-    kind: number;
-    settings: Record<string, unknown>;
-  }) => ipcRenderer.invoke('tunnel:update', request),
+  updateTunnel: (request: TunnelWriteRequest & { id: string }, draftId?: string) =>
+    ipcRenderer.invoke('tunnel:update', request, draftId),
   deleteTunnel: (id: string) => ipcRenderer.invoke('tunnel:delete', { id }),
   testTunnel: (request: {
     id: string;

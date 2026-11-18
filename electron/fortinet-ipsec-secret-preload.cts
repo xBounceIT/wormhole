@@ -1,7 +1,7 @@
 import { ipcRenderer } from 'electron';
 
 window.addEventListener('DOMContentLoaded', () => {
-  const input = document.querySelector<HTMLInputElement>('#secret')!;
+  const input = document.querySelector<HTMLInputElement | HTMLTextAreaElement>('#secret')!;
   const cancel = () => {
     input.value = '';
     ipcRenderer.send('fortinet-ipsec:secret-response', { cancelled: true });

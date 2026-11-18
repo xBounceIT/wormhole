@@ -82,6 +82,11 @@ type backendCommand struct {
 	ReuseExisting     *bool  `json:"reuseExisting,omitempty"`
 	PlanNonce         string `json:"planNonce,omitempty"`
 	PlanToken         string `json:"planToken,omitempty"`
+
+	IPsecField      string              `json:"ipsecField,omitempty"`
+	IPsecSecret     []byte              `json:"ipsecSecret,omitempty"`
+	IPsecReferences map[string]string   `json:"ipsecReferences,omitempty"`
+	IPsecWrite      *tunnelWriteRequest `json:"ipsecWrite,omitempty"`
 }
 
 type backendResponse struct {
@@ -186,11 +191,18 @@ func serveBackendIO(databasePath string, input io.Reader, outputWriter io.Writer
 	scanner.Buffer(make([]byte, 64*1024), backendLineLimit)
 	for scanner.Scan() {
 		var command backendCommand
-		if err := json.Unmarshal(scanner.Bytes(), &command); err != nil {
+		line := scanner.Bytes()
+		err := json.Unmarshal(line, &command)
+		if err != nil || command.IPsecSecret != nil || command.IPsecWrite != nil {
+			clearBytes(line)
+		}
+		if err != nil {
+			clearBytes(command.IPsecSecret)
 			_ = output.write(backendResponse{OK: false, Error: "invalid Wormhole request"})
 			continue
 		}
 		manager.handle(command)
+		clearBytes(command.IPsecSecret)
 	}
 	if err := scanner.Err(); err != nil {
 		return fmt.Errorf("Wormhole request stream failed: %w", err)
@@ -210,6 +222,7 @@ type vncManager struct {
 	tunnelForwarders                   map[string]*tunnelForwarder
 	tunnelStarts                       map[string]*pendingTunnelStart
 	tunnelPrompts                      map[string]*pendingTunnelPrompt
+	fortinetIPsecDrafts                fortinetIPsecDraftStore
 	promptSequence                     uint64
 	routePrompts                       map[string]*pendingTunnelPrompt
 	routeSequence                      uint64
@@ -311,6 +324,20 @@ func (m *vncManager) handle(command backendCommand) {
 		m.respondTunnelPrompt(command)
 	case "tunnel.route-response":
 		m.respondTunnelRoute(command)
+	case "tunnel.ipsec-stage":
+		m.respond(command.ID, m.fortinetIPsecDrafts.stage(command.SessionID, command.IPsecField, command.IPsecSecret))
+	case "tunnel.ipsec-discard":
+		m.fortinetIPsecDrafts.discard(command.SessionID)
+		m.respond(command.ID, nil)
+	case "tunnel.ipsec-clear":
+		m.fortinetIPsecDrafts.clear()
+		m.respond(command.ID, nil)
+	case "tunnel.ipsec-create", "tunnel.ipsec-update":
+		m.cleanupNative(func() {
+			defer clearBytes(command.IPsecWrite.Settings)
+			result, err := m.fortinetIPsecDrafts.save(m.databasePath, *command.IPsecWrite, command.IPsecReferences, command.Action == "tunnel.ipsec-create")
+			m.respondResult(command.ID, result, err)
+		})
 	case "backup.export", "backup.import", "mremote.import.commit":
 		m.startBackendOperation(command)
 	case "operation.cancel":
@@ -391,6 +418,7 @@ func (m *vncManager) remove(session *vncSession) {
 
 func (m *vncManager) close() {
 	m.clearBitwardenSession()
+	m.fortinetIPsecDrafts.clear()
 	m.mu.Lock()
 	sessions := make([]*vncSession, 0, len(m.sessions))
 	for _, session := range m.sessions {
@@ -1570,6 +1598,7 @@ func validateBackendCommand(command backendCommand) error {
 	}
 	bitwardenAction := strings.HasPrefix(command.Action, "bitwarden.")
 	requiresSession := !bitwardenAction &&
+		!strings.HasPrefix(command.Action, "tunnel.ipsec-") &&
 		command.Action != "rdp.resolve-profile" &&
 		command.Action != "rdp.resolve-credential" &&
 		command.Action != "rdp.system-client-capability" &&
@@ -1646,6 +1675,23 @@ func validateBackendCommand(command backendCommand) error {
 		case "tunnel", "direct", "cancel":
 		default:
 			return errors.New("VPN tunnel choice is invalid")
+		}
+	case "tunnel.ipsec-stage", "tunnel.ipsec-discard":
+		if command.SessionID == "" || normalizeTunnelID(command.SessionID) != command.SessionID {
+			return errors.New("Fortinet IPsec credential draft is invalid")
+		}
+	case "tunnel.ipsec-clear":
+	case "tunnel.ipsec-create", "tunnel.ipsec-update":
+		request := command.IPsecWrite
+		if request == nil || request.Kind != 9 || len(request.Settings) == 0 ||
+			len(request.Settings) > backendMaxTunnelRequestBytes ||
+			len(command.IPsecReferences) == 0 || len(command.IPsecReferences) > 2 {
+			return errors.New("Fortinet IPsec draft save is invalid")
+		}
+		for field, id := range command.IPsecReferences {
+			if !isFortinetIPsecDraftField(field) || id == "" || normalizeTunnelID(id) != id {
+				return errors.New("Fortinet IPsec credential draft is invalid")
+			}
 		}
 	case "backup.export", "backup.import":
 		if command.Path == "" || len([]rune(command.Path)) > 4096 || len(command.Password) > maxStoredCredentialBytes {

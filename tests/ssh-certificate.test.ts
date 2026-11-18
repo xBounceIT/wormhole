@@ -456,6 +456,7 @@ test('native SSH certificate parsers, pickers and selection lifetimes stay behin
       destroyed = callback;
     },
   };
+  const ipsecDraftOwners = new Set([contents]);
   keys.set(contents, { id: uuid, path: '/key', fileName: 'key', authorizationEpoch: epoch });
   certificates.set(contents, {
     id: uuid,
@@ -465,10 +466,12 @@ test('native SSH certificate parsers, pickers and selection lifetimes stay behin
   });
   runInNewContext(stripTypeScriptTypes(main.slice(cleanupStart, cleanupEnd)), {
     window: { webContents: contents },
+    fortinetIPsecDrafts: { discard: ipsecDraftOwners.delete.bind(ipsecDraftOwners) },
     sshPrivateKeySelections: keys,
     sshCertificateSelections: certificates,
   });
   destroyed();
+  assert.equal(ipsecDraftOwners.has(contents), false);
   assert.equal(keys.get(contents), undefined);
   assert.equal(certificates.get(contents), undefined);
   const lock = main.slice(

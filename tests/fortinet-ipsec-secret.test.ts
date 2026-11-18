@@ -5,19 +5,36 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire, stripTypeScriptTypes } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { setImmediate } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { runInNewContext } from 'node:vm';
 import * as path from 'node:path';
 import test from 'node:test';
+import { AuthSession } from '../electron/auth-session.ts';
 import {
-  fortinetIPsecSecretChannel,
+  FortinetIPsecCredentialDrafts,
+  FortinetIPsecEntryCancelled,
+  isFortinetIPsecEditableSecret,
   prepareFortinetIPsecWrite,
   promptFortinetIPsecSecret,
-  validFortinetIPsecSecret,
 } from '../electron/fortinet-ipsec-secret.ts';
+import {
+  isTunnelIdentifier,
+  parseTunnelDetailsResponse,
+  parseTunnelWriteRequest,
+  type TunnelWriteRequest,
+} from '../electron/tunnel-test-contract.ts';
 
-function fixture(options: { loadFailure?: boolean; setupFailure?: boolean } = {}) {
+const fortinetIPsecSecretChannel = 'fortinet-ipsec:secret-response';
+
+function fixture(
+  options: {
+    kind?: Parameters<typeof promptFortinetIPsecSecret>[0]['kind'];
+    loadFailure?: boolean;
+    setupFailure?: boolean;
+  } = {},
+) {
   const ipc = new EventEmitter();
   const contents = Object.assign(new EventEmitter(), {
     mainFrame: {},
@@ -38,7 +55,6 @@ function fixture(options: { loadFailure?: boolean; setupFailure?: boolean } = {}
   let presented = 0;
   let forgotten = 0;
   let configuration: any;
-  let url = '';
   const window = Object.assign(new EventEmitter(), {
     webContents: contents,
     isDestroyed: () => destroyed,
@@ -46,12 +62,12 @@ function fixture(options: { loadFailure?: boolean; setupFailure?: boolean } = {}
       destroyed = true;
       window.emit('closed');
     },
-    async loadURL(value: string) {
-      url = value;
+    async loadURL() {
       if (options.loadFailure) throw new Error('private diagnostic');
     },
   });
   const promise = promptFortinetIPsecSecret({
+    kind: options.kind ?? 'ClientKey',
     createWindow: (value) => {
       configuration = value;
       return window as any;
@@ -77,61 +93,125 @@ function fixture(options: { loadFailure?: boolean; setupFailure?: boolean } = {}
     send: (message: unknown, sender: unknown = contents, frame: unknown = contents.mainFrame) =>
       ipc.emit(fortinetIPsecSecretChannel, { sender, senderFrame: frame }, message),
     get state() {
-      return { destroyed, presented, forgotten, configuration, url, permission, popup };
+      return { destroyed, presented, forgotten, configuration, permission, popup };
     },
   };
 }
 
-test('native key validation bounds UTF-8 bytes and rejects empty/control values', () => {
+test('the isolated password window preserves valid Unicode and rejects invalid native responses', async () => {
   for (const value of [
     null,
     undefined,
     42,
     '',
     ' ',
+    '\u0085',
+    '\u2028',
+    '\uD800',
+    'unpaired\uDFFF',
     '\nkey',
     'key\0',
     'x'.repeat(4097),
     'é'.repeat(2049),
-  ])
-    assert.equal(validFortinetIPsecSecret(value), false);
-  for (const value of [' key with spaces ', 'x'.repeat(4096), 'é'.repeat(2048)])
-    assert.equal(validFortinetIPsecSecret(value), true);
+  ]) {
+    const f = fixture({ kind: 'Password' });
+    const rejected = assert.rejects(f.promise, /credential is invalid/);
+    f.send({ value });
+    await rejected;
+  }
+  for (const value of [
+    ' key with spaces ',
+    'key\u2028with\u2029separators',
+    '\uFEFF',
+    '🔒',
+    'x'.repeat(4096),
+    'é'.repeat(2048),
+  ]) {
+    const f = fixture({ kind: 'PreSharedKey' });
+    f.send({ value });
+    assert.equal(await f.promise, value);
+  }
 });
 
-test('only native replacement values enter the backend write; preservation contains no PSK', async () => {
-  const request = { name: 'VPN', kind: 9, settings: { Host: 'vpn.test', HasPreSharedKey: true } };
-  let prompts = 0;
-  const prompt = async () => {
-    prompts++;
-    return ' native key ';
-  };
-  assert.deepEqual((await prepareFortinetIPsecWrite(request, prompt)).settings, {
-    Host: 'vpn.test',
-    PreSharedKey: ' native key ',
+test('credential drafts are bound to one workspace, editor and authorization epoch', async () => {
+  const discarded: string[] = [];
+  const drafts = new FortinetIPsecCredentialDrafts((id) => discarded.push(id));
+  const owner = {} as Electron.WebContents;
+  const other = {} as Electron.WebContents;
+  const id = 'draft-id';
+  let reference = '';
+  assert.equal(
+    await drafts.enter(owner, id, 1, 'PreSharedKey', async (value) => {
+      reference = value;
+    }),
+    true,
+  );
+  assert.equal(
+    await drafts.enter(owner, id, 1, 'PreSharedKey', async () => {
+      throw new FortinetIPsecEntryCancelled();
+    }),
+    false,
+  );
+  assert.deepEqual(drafts.read(owner, id, 1), { PreSharedKey: reference });
+  assert.throws(() => drafts.read(other, id, 1), /draft expired/);
+  assert.throws(() => drafts.read(owner, 'other-editor', 1), /draft expired/);
+  assert.throws(() => drafts.read(owner, id, 2), /draft expired/);
+
+  let resolveEntry!: () => void;
+  let canFinish!: () => boolean;
+  let pendingReference = '';
+  const pending = drafts.enter(owner, id, 1, 'Password', (value, isCurrent) => {
+    pendingReference = value;
+    canFinish = isCurrent;
+    return new Promise((resolve) => {
+      resolveEntry = resolve;
+    });
   });
+  assert.equal(canFinish(), true);
+  await assert.rejects(
+    drafts.enter(owner, id, 1, 'Password', async () => {}),
+    /already open/,
+  );
+  assert.throws(() => drafts.read(owner, id, 1), /before saving/);
+  drafts.discard(owner, 'other-editor');
+  assert.equal(canFinish(), true);
+  drafts.clear();
+  assert.equal(canFinish(), false);
+  resolveEntry();
+  assert.equal(await pending, false);
+  assert.ok(discarded.includes(pendingReference));
+  assert.throws(() => drafts.read(owner, id, 1), /draft expired/);
+});
+
+test('a draft reference satisfies the credential requirement without going into the settings', async () => {
+  const request = { name: 'VPN', kind: 9, settings: { Host: 'vpn.test', HasPreSharedKey: true } };
+  const prompt = async () => {
+    throw new Error('unexpected prompt');
+  };
+  const credentials = { PreSharedKey: 'draft-ref' };
+  const settings = { Host: 'vpn.test' };
+  assert.deepEqual(
+    (await prepareFortinetIPsecWrite(request, prompt, credentials)).settings,
+    settings,
+  );
   const edit = { ...request, id: 'saved' };
   assert.deepEqual(await prepareFortinetIPsecWrite(edit, prompt), edit);
-  assert.equal(prompts, 1);
-  const replaced = await prepareFortinetIPsecWrite(
-    { ...edit, settings: { ...edit.settings, ReplacePreSharedKey: true } },
-    prompt,
-  );
-  assert.deepEqual(replaced.settings, { Host: 'vpn.test', PreSharedKey: ' native key ' });
-  assert.equal(prompts, 2);
-  assert.equal(
-    await prepareFortinetIPsecWrite({ ...request, kind: 2 }, prompt).then((value) => value.kind),
-    2,
+  assert.deepEqual((await prepareFortinetIPsecWrite(edit, prompt, credentials)).settings, settings);
+  await assert.rejects(prepareFortinetIPsecWrite(request, prompt), /gateway PSK in the editor/);
+  await assert.rejects(
+    prepareFortinetIPsecWrite(
+      { ...edit, settings: { ...edit.settings, ReplacePreSharedKey: true } },
+      prompt,
+    ),
+    /gateway PSK in the editor/,
   );
   await assert.rejects(
-    prepareFortinetIPsecWrite(request, async () => ''),
-    /invalid/,
-  );
-  await assert.rejects(
-    prepareFortinetIPsecWrite(request, async () => {
-      throw new Error('cancelled');
-    }),
-    /cancelled/,
+    prepareFortinetIPsecWrite(
+      { ...edit, settings: { ...edit.settings, UserAuth: 2 } },
+      prompt,
+      credentials,
+    ),
+    /user password in the editor/,
   );
   assert.equal('PreSharedKey' in request.settings, false);
 });
@@ -144,7 +224,6 @@ test('secure window accepts only its own main frame and releases every listener'
   assert.equal(f.state.configuration.webPreferences.contextIsolation, true);
   assert.equal(f.state.configuration.webPreferences.nodeIntegration, false);
   assert.equal(f.state.configuration.webPreferences.devTools, false);
-  assert.match(f.state.configuration.webPreferences.partition, /^wormhole-ipsec-key-/);
   assert.deepEqual(f.state.popup(), { action: 'deny' });
   f.state.permission(null, 'clipboard-read', (allowed: boolean) => assert.equal(allowed, false));
   let blocked = false;
@@ -156,12 +235,12 @@ test('secure window accepts only its own main frame and releases every listener'
   assert.equal(blocked, true);
   f.send({ value: 'foreign' }, {}, f.contents.mainFrame);
   f.send({ value: 'subframe' }, f.contents, {});
-  f.send({ value: 'native-only-key' });
-  assert.equal(await f.promise, 'native-only-key');
+  const key = '-----BEGIN PRIVATE KEY-----\nnative-only-key\n-----END PRIVATE KEY-----';
+  f.send({ value: key });
+  assert.equal(await f.promise, key);
   assert.equal(f.state.destroyed, true);
   assert.equal(f.state.forgotten, 1);
   assert.equal(f.ipc.listenerCount(fortinetIPsecSecretChannel), 0);
-  assert.equal(f.state.url.includes('native-only-key'), false);
   f.window.emit('ready-to-show');
   assert.equal(f.state.presented, 1);
 });
@@ -207,84 +286,301 @@ test('native input expires and closes when workspace authorization changes', asy
   );
 });
 
-test('native preload clears uncontrolled input and exposes no application bridge', () => {
-  const source = readFileSync(
-    new URL('../electron/fortinet-ipsec-secret-preload.cts', import.meta.url),
-    'utf8',
-  );
-  assert.ok(source.includes(fortinetIPsecSecretChannel));
-  assert.match(source, /input\.value = ''/);
-  assert.doesNotMatch(source, /contextBridge|console\.|location\.|localStorage|sessionStorage/);
-});
-
-test('native save rechecks authorization and clears the transient PSK on success and failure', async () => {
+test('the workspace bridge collects draft status and saves without prompting for PSK or password', async () => {
   const main = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
-  const source = stripTypeScriptTypes(
-    main.slice(
-      main.indexOf('async function saveTunnelWithNativeSecret('),
-      main.indexOf('function registerIpcHandlers('),
-    ),
+  const handlers = new Map<string, (...args: unknown[]) => unknown>();
+  const registrations = [
+    'create',
+    'update',
+    'enter-ipsec-credential',
+    'discard-ipsec-credentials',
+  ].map((action) => {
+    const start = main.indexOf("ipcMain.handle('tunnel:" + action + "'");
+    return main.slice(start, main.indexOf('\n  });', start) + '\n  });'.length);
+  });
+  const nativeSave = main.slice(
+    main.indexOf('function queueFortinetIPsecSecret('),
+    main.indexOf('function registerIpcHandlers('),
   );
-  for (const mode of ['success', 'auth-loss', 'backend-error', 'queued']) {
-    let native: any;
-    let writes = 0;
-    let prompts = 0;
-    let release!: () => void;
-    const queue =
-      mode === 'queued'
-        ? new Promise<void>((resolve) => {
-            release = resolve;
-          })
-        : Promise.resolve();
-    const save = runInNewContext(`${source}\nsaveTunnelWithNativeSecret`, {
-      authSession: { authorizationEpoch: 7 },
-      tunnelBrowserAuthQueue: queue,
-      path,
+  const nativeBackend = main.slice(
+    main.indexOf('class NativeBackendProcess'),
+    main.indexOf('let nativeBackend:'),
+  );
+  const authorization = main.slice(
+    main.indexOf('function serializeAuthOperation<'),
+    main.indexOf('function serializeAuthStateMutation<'),
+  );
+  const id = '11111111-2222-3333-4444-555555555555';
+  const draftId = '11111111-2222-3333-4444-555555555556';
+  const saves: {
+    action: string;
+    ipsecWrite: TunnelWriteRequest;
+    ipsecReferences: Record<string, string>;
+  }[] = [];
+  const staged: { reference: string; field: string; secret: string }[] = [];
+  const authSession = new AuthSession();
+  authSession.remember({ configured: true }, true);
+  const sender = Object.assign(new EventEmitter(), { mainFrame: {} });
+  const event = { sender, senderFrame: sender.mainFrame };
+  const owner = { isDestroyed: () => false };
+  const opened: string[] = [];
+  let failSave = false;
+  let replyToSave: (() => void) | undefined;
+  let delaySave = false;
+  const timers = new Set<() => void>();
+  const stdout = Object.assign(new EventEmitter(), { setEncoding: () => {} });
+  const child = Object.assign(new EventEmitter(), {
+    stdout,
+    stdin: Object.assign(new EventEmitter(), {
+      write(payload: string) {
+        const { id: commandId, ...message } = JSON.parse(payload);
+        const reply = (response: object) =>
+          stdout.emit('data', `${JSON.stringify({ id: commandId, ...response })}\n`);
+        if (message.action === 'tunnel.ipsec-stage') {
+          staged.push({
+            reference: message.sessionId,
+            field: message.ipsecField,
+            secret: Buffer.from(message.ipsecSecret, 'base64').toString('utf8'),
+          });
+          reply({ ok: true });
+          return;
+        }
+        saves.push(message);
+        const respond = () =>
+          reply(
+            failSave
+              ? { ok: false, error: 'VPN save failed' }
+              : {
+                  ok: true,
+                  result: {
+                    id,
+                    name: message.ipsecWrite.name,
+                    kind: 9,
+                    settings: { HasPreSharedKey: true },
+                  },
+                },
+          );
+        if (delaySave) replyToSave = respond;
+        else respond();
+      },
+    }),
+  });
+
+  const script = stripTypeScriptTypes(`
+    let authOperationQueue = Promise.resolve();
+    ${authorization}
+    ${nativeBackend}
+    const service = new NativeBackendProcess();
+    const getNativeBackend = () => service;
+    ${nativeSave}
+    ${registrations.join('\n')}
+    serializeAuthOperation;
+  `);
+  const runWhileSaving = runInNewContext(
+    script,
+    {
+      authSession,
+      authLockRequested: false,
+      fortinetIPsecDrafts: new FortinetIPsecCredentialDrafts(() => {}),
+      FortinetIPsecEntryCancelled,
+      tunnelBrowserAuthQueue: Promise.resolve(),
       __dirname: '/electron',
-      BrowserWindow: { getFocusedWindow: () => undefined, getAllWindows: () => [] },
-      ipcMain: {},
-      prepareFortinetIPsecWrite: async (...args: Parameters<typeof prepareFortinetIPsecWrite>) => {
-        native = await prepareFortinetIPsecWrite(...args);
-        return native;
+      path,
+      BrowserWindow: {
+        fromWebContents: (contents: unknown) => (contents === sender ? owner : undefined),
       },
-      promptFortinetIPsecSecret: async (options: any) => {
-        prompts++;
-        assert.ok(options.preload.endsWith('fortinet-ipsec-secret-preload.cjs'));
-        return 'transient-key';
-      },
-      isAuthorizationEpochCurrent: () => mode !== 'auth-loss',
-      requireAuthorizationEpoch: (epoch: number) => {
-        assert.equal(epoch, 7);
-        if (mode === 'auth-loss') throw new Error('auth lost');
-      },
+      windowCloseCoordinators: new Map([[owner, {}]]),
       mcpApprovalWindowCoordinator: {},
-      runBackend: async (_operation: string, request: any) => {
-        writes++;
-        assert.equal(request.settings.PreSharedKey, 'transient-key');
-        if (mode === 'backend-error') throw new Error('backend error');
-        return { settings: { HasPreSharedKey: true } };
+      AbortController,
+      Buffer,
+      backendTimeoutMs: 30_000,
+      nativeBackendCommandTimeoutMs: 30_000,
+      nativeBackendLineLimit: 64 * 1024,
+      setTimeout: (expire: () => void) => {
+        timers.add(expire);
+        return expire;
       },
-      parseTunnelDetailsResponse: (value: any) => value,
-    });
-    const promise = save('tunnel-create', { name: 'VPN', kind: 9, settings: { Host: 'vpn.test' } });
-    if (mode === 'queued') {
-      await Promise.resolve();
-      assert.equal(prompts, 0);
-      assert.equal(writes, 0);
-      release();
-    }
-    if (mode === 'success' || mode === 'queued')
-      assert.deepEqual((await promise).settings, { HasPreSharedKey: true });
-    else await assert.rejects(promise, /auth lost|backend error/);
-    assert.equal('PreSharedKey' in native.settings, false);
-    assert.equal(writes, mode === 'auth-loss' ? 0 : 1);
-    assert.equal(prompts, 1);
-  }
-  assert.match(main, /saveTunnelWithNativeSecret\('tunnel-create', request\)/);
-  assert.match(main, /saveTunnelWithNativeSecret\('tunnel-update', request\)/);
+      clearTimeout: (expire: () => void) => timers.delete(expire),
+      TunnelFailureRegistry: class {
+        failAll() {}
+      },
+      TunnelBrowserPromptTracker: class {
+        clear() {}
+      },
+      backendPath: () => 'backend',
+      wormholeDatabasePath: () => 'database',
+      electronUserDataPath: () => 'profile',
+      spawn: () => {
+        queueMicrotask(() => child.emit('spawn'));
+        return child;
+      },
+      ipcMain: { handle: handlers.set.bind(handlers) },
+      isTunnelIdentifier,
+      isFortinetIPsecEditableSecret,
+      parseTunnelWriteRequest,
+      parseTunnelDetailsResponse,
+      prepareFortinetIPsecWrite,
+      requireWorkspaceAuth: async () => authSession.requireUnlocked(),
+      isAuthorizationEpochCurrent: (epoch: number) => authSession.authorizationEpoch === epoch,
+      requireAuthorizationEpoch: (epoch: number) => {
+        if (authSession.authorizationEpoch !== epoch) throw new Error('Authentication expired');
+      },
+      promptFortinetIPsecSecret: async (options: { kind: string; isAuthorized: () => boolean }) => {
+        assert.ok(options.isAuthorized());
+        opened.push(options.kind);
+        if (options.kind === 'PreSharedKey') return ' gateway-key ';
+        if (options.kind === 'Password') return 'vpn-password';
+        if (options.kind !== 'CaCert') return '-----BEGIN FIXTURE-----';
+        authSession.lock();
+        authSession.markUnlocked();
+        return '';
+      },
+      runBackend: async () => {
+        throw new Error('Unexpected save without Go draft references');
+      },
+    },
+    { filename: 'wormhole-ipsec-save.js' },
+  );
+
+  const preload = readFileSync(new URL('../electron/preload.cts', import.meta.url), 'utf8');
+  let api!: NonNullable<Window['wormhole']>;
+  runInNewContext(stripTypeScriptTypes(preload).replace(/^import .* from 'electron';/, ''), {
+    process: { isMainFrame: true },
+    ipcRenderer: {
+      invoke: async (channel: string, ...args: unknown[]) => {
+        const handler = handlers.get(channel);
+        assert.ok(handler, 'Missing IPC handler: ' + channel);
+        return structuredClone(await handler(event, ...structuredClone(args)));
+      },
+    },
+    contextBridge: {
+      exposeInMainWorld: (name: string, bridge: typeof api) => {
+        if (name === 'wormhole') api = bridge;
+      },
+    },
+  });
+
+  const request = { kind: 9, name: 'VPN', settings: { UserAuth: 2 } };
+  await assert.rejects(api.createTunnel(request), /gateway PSK in the editor/);
+  const enter = handlers.get('tunnel:enter-ipsec-credential')!;
+  await assert.rejects(
+    enter({ ...event, senderFrame: {} }, draftId, 'Password'),
+    /editor is unavailable/,
+  );
+  await assert.rejects(enter(event, draftId, 'ClientKey'), /credential request is invalid/);
+  assert.deepEqual(opened, []);
+
+  assert.equal(await api.enterFortinetIPsecCredential(draftId, 'PreSharedKey'), true);
+  assert.equal(await api.enterFortinetIPsecCredential(draftId, 'Password'), true);
+  assert.deepEqual(
+    staged.map(({ field, secret }) => [field, secret]),
+    [
+      ['PreSharedKey', ' gateway-key '],
+      ['Password', 'vpn-password'],
+    ],
+  );
+  failSave = true;
+  await assert.rejects(api.createTunnel(request, draftId), /VPN save failed/);
+  failSave = false;
+  delaySave = true;
+  const inFlight = api.createTunnel(request, draftId);
+  let settled = false;
+  void inFlight.then(
+    () => {
+      settled = true;
+    },
+    () => {
+      settled = true;
+    },
+  );
+  await setImmediate();
+  assert.ok(replyToSave);
+  for (const expire of timers) expire();
+  await setImmediate();
+  assert.equal(settled, false, 'a slow save must still await the service result');
+  let authorizationQueueAvailable = false;
+  void runWhileSaving(() => {
+    authorizationQueueAvailable = true;
+  });
+  await setImmediate();
+  assert.equal(authorizationQueueAvailable, true);
+  authSession.lock();
+  replyToSave();
+  await setImmediate();
+  assert.equal(settled, false, 'a committed save must not return workspace data while locked');
+  authSession.markUnlocked();
+  authSession.lock();
+  await setImmediate();
+  assert.equal(settled, false, 'relocking before delivery must keep the result pending');
+  authSession.markUnlocked();
+  const created = await inFlight;
+  delaySave = false;
+  assert.equal(sender.listenerCount('did-start-loading'), 0);
+  assert.equal(sender.listenerCount('destroyed'), 0);
+  assert.deepEqual(created.settings, { HasPreSharedKey: true });
+  assert.deepEqual(saves.at(-1), {
+    action: 'tunnel.ipsec-create',
+    ipsecWrite: request,
+    ipsecReferences: {
+      PreSharedKey: staged[0].reference,
+      Password: staged[1].reference,
+    },
+  });
+  await assert.rejects(api.createTunnel(request, draftId), /draft expired/);
+  await assert.rejects(
+    handlers.get('tunnel:create')!(event, request, { PreSharedKey: 'injected' }),
+    /draft is invalid/,
+  );
+
+  const edit = { ...request, id, settings: { UserAuth: 2, HasPreSharedKey: true } };
+  assert.equal(await api.enterFortinetIPsecCredential(draftId, 'Password'), true);
+  await api.updateTunnel(edit, draftId);
+  assert.deepEqual(saves.at(-1), {
+    action: 'tunnel.ipsec-update',
+    ipsecWrite: edit,
+    ipsecReferences: { Password: staged[2].reference },
+  });
+  assert.deepEqual(opened, ['PreSharedKey', 'Password', 'Password']);
+
+  await api.enterFortinetIPsecCredential(draftId, 'PreSharedKey');
+  await api.discardFortinetIPsecCredentials(draftId);
+  await assert.rejects(api.createTunnel(request, draftId), /draft expired/);
+  await assert.rejects(api.createTunnel({ ...request, kind: 2 }, draftId), /draft is invalid/);
+
+  await assert.rejects(
+    api.createTunnel({ ...request, settings: { AuthMethod: 1 } }),
+    /Authentication expired/,
+  );
+  assert.equal(saves.length, 3);
+
+  await api.enterFortinetIPsecCredential(draftId, 'PreSharedKey');
+  await api.enterFortinetIPsecCredential(draftId, 'Password');
+  delaySave = true;
+  replyToSave = undefined;
+  const navigatedSave = api.createTunnel(request, draftId);
+  const navigated = assert.rejects(navigatedSave, /editor is unavailable/);
+  await setImmediate();
+  assert.ok(replyToSave);
+  authSession.lock();
+  replyToSave();
+  await setImmediate();
+  sender.emit('did-start-loading');
+  await navigated;
+  assert.equal(sender.listenerCount('destroyed'), 0);
+  authSession.markUnlocked();
+
+  await api.enterFortinetIPsecCredential(draftId, 'PreSharedKey');
+  await api.enterFortinetIPsecCredential(draftId, 'Password');
+  replyToSave = undefined;
+  const disconnectedSave = api.createTunnel(request, draftId);
+  const stopped = assert.rejects(disconnectedSave, /Wormhole service stopped/);
+  await setImmediate();
+  assert.ok(replyToSave);
+  child.emit('close', null);
+  await stopped;
 });
 
-test('real sandboxed Chromium fits PSK/PEM controls and exposes no application bridge', async () => {
+test('real Chromium credential prompts are separate from the workspace and expose no bridge', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'wormhole-ipsec-key-'));
   try {
     const helper = readFileSync(
@@ -314,15 +610,24 @@ app.setPath('userData', ${JSON.stringify(directory)});
 app.on('window-all-closed', () => {});
 app.whenReady().then(async () => {
   const { promptFortinetIPsecSecret } = await import(${JSON.stringify(pathToFileURL(join(directory, 'helper.mjs')).href)});
-  for (const kind of ['PreSharedKey', 'ClientKey']) {
-  const key = await promptFortinetIPsecSecret({
+  const workspace = new BrowserWindow({ show: false });
+  await workspace.loadURL('data:text/html,<h1>VPN editor</h1>');
+  for (const [kind, secret] of [
+    ['PreSharedKey', ' gateway key '],
+    ['Password', 'vpn password'],
+    ['ClientKey', ['-----BEGIN FIXTURE-----', 'pem-body', '-----END FIXTURE-----'].join('\\n')],
+    ['CaCert', ''],
+  ]) {
+  const result = await promptFortinetIPsecSecret({
     kind,
+    parent: workspace,
     createWindow(options) {
       const window = new BrowserWindow(options);
       window.webContents.once('did-finish-load', () => window.webContents.executeJavaScript(\`
         if (window.wormhole !== undefined || window.require !== undefined) throw Error('privileged bridge exposed');
         if (document.querySelector('footer').getBoundingClientRect().bottom > window.innerHeight) throw Error('credential buttons are clipped');
-        document.querySelector('#secret').value = '-----BEGIN FIXTURE-----';
+        const field = document.querySelector('#secret');
+        field.value = \${JSON.stringify(secret)};
       \`).then(() => {
         // Receive the assertion result before submission destroys the frame.
         window.webContents.send('wormhole-test-submit');
@@ -332,9 +637,11 @@ app.whenReady().then(async () => {
     ipc: ipcMain, preload: ${JSON.stringify(join(directory, 'preload.cjs'))},
     isAuthorized: () => true, present() {}, forget() {},
   });
-  assert.equal(key, '-----BEGIN FIXTURE-----');
-  assert.equal(BrowserWindow.getAllWindows().length, 0);
+  assert.equal(result, secret);
+  assert.deepEqual(BrowserWindow.getAllWindows(), [workspace]);
+  assert.equal(await workspace.webContents.executeJavaScript("document.querySelector('#secret') === null"), true);
   }
+  workspace.destroy();
   console.log('Native key isolation passed');
   app.quit();
 }).catch(error => { console.error(error.message); app.exit(1); });`,
@@ -354,21 +661,29 @@ app.whenReady().then(async () => {
   }
 });
 
-test('PSK/password and certificate save flows collect only active secrets outside the editor', async () => {
+test('IPsec save forwards only active credentials and keeps the native certificate prompts', async () => {
   const request = { name: 'IPsec', kind: 9, settings: { AuthMethod: 0, UserAuth: 2 } };
-  const asked: string[] = [];
-  const saved = await prepareFortinetIPsecWrite(request, async (kind) => {
-    asked.push(kind!);
-    return 'native-secret';
-  });
-  assert.deepEqual(asked, ['PreSharedKey', 'Password']);
-  assert.equal(saved.settings.Password, 'native-secret');
+  const credentials = { PreSharedKey: 'gateway-key', Password: 'user-password' };
   const certificate = await prepareFortinetIPsecWrite(
     { ...request, settings: { AuthMethod: 1, UserAuth: 0 } },
-    async (kind) => (kind === 'CaCert' ? '' : '-----BEGIN FIXTURE-----'),
+    async (kind) => (kind === 'CaCert' ? '' : `-----BEGIN ${kind}-----`),
+    credentials,
   );
-  assert.equal(certificate.settings.PreSharedKey, undefined);
-  assert.equal(certificate.settings.ClientKey, '-----BEGIN FIXTURE-----');
+  assert.deepEqual(certificate.settings, {
+    AuthMethod: 1,
+    UserAuth: 0,
+    ClientCert: '-----BEGIN ClientCert-----',
+    ClientKey: '-----BEGIN ClientKey-----',
+    CaCert: '',
+  });
+  for (const pem of ['invalid PEM', '-----BEGIN ' + 'a'.repeat(131072)])
+    await assert.rejects(
+      prepareFortinetIPsecWrite(
+        { ...request, settings: { AuthMethod: 1, UserAuth: 0 } },
+        async () => pem,
+      ),
+      /credential is invalid/,
+    );
   const preserved = await prepareFortinetIPsecWrite(
     {
       ...request,
@@ -400,10 +715,4 @@ test('PSK/password and certificate save flows collect only active secrets outsid
     },
   );
   assert.equal(systemCa.settings.CaCert, '');
-  assert.equal(validFortinetIPsecSecret('', 'CaCert'), true);
-  for (const kind of ['ClientCert', 'ClientKey', 'CaCert']) {
-    assert.equal(validFortinetIPsecSecret('wrong', kind), false);
-    assert.equal(validFortinetIPsecSecret('-----BEGIN ' + 'a'.repeat(131072), kind), false);
-    assert.equal(validFortinetIPsecSecret(null, kind), false);
-  }
 });

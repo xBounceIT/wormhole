@@ -1048,20 +1048,31 @@ interface Window {
             tunnelConfigId: string;
           },
     ): Promise<{ updated: boolean }>;
-    createTunnel(request: {
-      name: string;
-      kind: number;
-      settings: Record<string, unknown>;
-    }): Promise<WormholeTunnelDetails>;
+    enterFortinetIPsecCredential(
+      draftId: string,
+      field: 'PreSharedKey' | 'Password',
+    ): Promise<boolean>;
+    discardFortinetIPsecCredentials(draftId: string): Promise<void>;
+    createTunnel(
+      request: {
+        name: string;
+        kind: number;
+        settings: Record<string, unknown>;
+      },
+      draftId?: string,
+    ): Promise<WormholeTunnelDetails>;
     listTunnels(): Promise<WormholeWorkspaceTunnel[]>;
     readTunnel(id: string): Promise<WormholeTunnelDetails>;
-    updateTunnel(request: {
-      forgetJumpHostKeySha256?: string;
-      id: string;
-      name: string;
-      kind: number;
-      settings: Record<string, unknown>;
-    }): Promise<WormholeTunnelDetails>;
+    updateTunnel(
+      request: {
+        forgetJumpHostKeySha256?: string;
+        id: string;
+        name: string;
+        kind: number;
+        settings: Record<string, unknown>;
+      },
+      draftId?: string,
+    ): Promise<WormholeTunnelDetails>;
     deleteTunnel(id: string): Promise<{ deleted: boolean; error?: string }>;
     testTunnel(request: {
       id: string;

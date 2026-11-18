@@ -295,7 +295,7 @@ test('startup keeps optional native and renderer work off the first-frame path',
   );
   const backgroundScheduler = mainSource.slice(
     mainSource.indexOf('function scheduleUnlockedBackgroundWork'),
-    mainSource.indexOf('authSession.onUnlocked'),
+    mainSource.indexOf('\nauthSession.onUnlocked('),
   );
 
   assert.match(imports, /import type \{ ElectronChromeExtensions \}/);
@@ -2049,7 +2049,7 @@ test('application shutdown permanently stops the broker before dropping its refe
   const mainSource = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
   const shutdown = mainSource.slice(
     mainSource.indexOf('function shutdownNativeResources()'),
-    mainSource.indexOf('authSession.onUnlocked'),
+    mainSource.indexOf('function scheduleUnlockedBackgroundWork'),
   );
   assert.ok(
     shutdown.indexOf('nativeBackend = undefined') < shutdown.indexOf('await backend?.stop(true)'),

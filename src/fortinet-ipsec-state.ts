@@ -263,6 +263,8 @@ export function fortinetIPsecEditorSettings(
 }
 
 export function fortinetIPsecFieldVisible(key: string, settings: Record<string, unknown>): boolean {
+  if (key === 'PreSharedKey') return settings.AuthMethod !== 1;
+  if (key === 'Password') return settings.UserAuth === 2;
   if (key === 'AutoProposals') return settings.IkeVersion === 2;
   if (
     settings.IkeVersion === 2 &&
