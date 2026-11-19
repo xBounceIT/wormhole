@@ -80,6 +80,21 @@ func fortiLogin(ctx context.Context, cfg config) (*session, error) {
 	// derived tunnelURL below (Path=/remote/sslvpn-tunnel) so cookies stored under the
 	// default-path /remote of /remote/logincheck still match.
 	baseURL := &url.URL{Scheme: "https", Host: net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port)), Path: "/"}
+	if hasBrowserCredentials(cfg) {
+		client.CheckRedirect = func(next *http.Request, via []*http.Request) error {
+			port := next.URL.Port()
+			if port == "" {
+				port = "443"
+			}
+			if len(via) >= 10 || next.URL.Scheme != baseURL.Scheme || next.URL.User != nil ||
+				!strings.EqualFold(next.URL.Hostname(), baseURL.Hostname()) || port != baseURL.Port() {
+				return http.ErrUseLastResponse
+			}
+			// net/http sets Referer from the preceding URL, which can contain the one-time ID.
+			next.Header.Del("Referer")
+			return nil
+		}
+	}
 
 	tunnelURL := baseURL.JoinPath("remote", "sslvpn-tunnel")
 	if err := obtainFortinetCookie(authCtx, client, jar, baseURL, tunnelURL, cfg); err != nil {
@@ -89,10 +104,17 @@ func fortiLogin(ctx context.Context, cfg config) (*session, error) {
 	// Step 3: fetch the tunnel config XML (assigned IP, DNS, MTU).
 	xmlBytes, err := httpGet(authCtx, client, "config-xml", baseURL.JoinPath("remote", "fortisslvpn_xml").String(), cfg)
 	if err != nil {
+		var status gatewayHTTPStatus
+		if hasBrowserCredentials(cfg) && !errors.As(err, &status) {
+			return nil, errors.New("could not fetch FortiGate SSL VPN tunnel configuration")
+		}
 		return nil, fmt.Errorf("config XML: %w", err)
 	}
 	cfgXML, err := parseTunnelConfigXML(xmlBytes)
 	if err != nil {
+		if hasBrowserCredentials(cfg) {
+			return nil, errors.New("FortiGate returned invalid SSL VPN tunnel configuration")
+		}
 		return nil, fmt.Errorf("parse config XML: %w", err)
 	}
 
@@ -155,6 +177,13 @@ func obtainFortinetCookie(
 		authURL.RawQuery = query.Encode()
 		body, err = httpGet(ctx, client, "saml-auth-id", authURL.String(), cfg)
 		if err != nil {
+			var status gatewayHTTPStatus
+			if errors.As(err, &status) {
+				if status.code == http.StatusForbidden && status.path == "/remote/hostcheck_install" {
+					return errors.New("FortiGate denied SSL VPN host check (HTTP 403). Ask your VPN administrator to check your assigned portal and its endpoint requirements.")
+				}
+				return fmt.Errorf("FortiGate SAML authentication ID exchange failed (HTTP %d)", status.code)
+			}
 			return errors.New("SAML auth ID exchange failed; verify gateway connectivity and certificate settings")
 		}
 	default:
@@ -188,6 +217,9 @@ func obtainFortinetCookie(
 	}
 
 	if !hasSvpnCookie(jar, tunnelURL) {
+		if hasBrowserCredentials(cfg) {
+			return errors.New("FortiGate did not issue an SSL VPN session cookie")
+		}
 		tags := strings.Join(classifyLoginBody(body), ",")
 		tunnelCookies := strings.Join(cookieNames(jar, tunnelURL), ",")
 		logf("login failed: SVPNCOOKIE absent. body=[%s] jar(tunnel-path)=[%s] jar(root)=[%s]",
@@ -281,6 +313,25 @@ func postForm(ctx context.Context, client *http.Client, label, url string, form 
 	return body, nil
 }
 
+type gatewayHTTPStatus struct {
+	code int
+	path string
+}
+
+func (s gatewayHTTPStatus) Error() string { return fmt.Sprintf("HTTP %d", s.code) }
+
+func responseStatus(resp *http.Response) gatewayHTTPStatus {
+	status := gatewayHTTPStatus{code: resp.StatusCode}
+	if resp.Request != nil {
+		status.path = resp.Request.URL.Path
+	}
+	return status
+}
+
+func hasBrowserCredentials(cfg config) bool {
+	return cfg.SamlAuthID != nil || cfg.SvpnCookie != nil
+}
+
 func httpGet(ctx context.Context, client *http.Client, label, url string, cfg config) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -292,6 +343,10 @@ func httpGet(ctx context.Context, client *http.Client, label, url string, cfg co
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 && hasBrowserCredentials(cfg) {
+		logf("%s: status=%d", label, resp.StatusCode)
+		return nil, responseStatus(resp)
+	}
 	body, err := readBoundedBody(resp.Body, url)
 	if err != nil {
 		return nil, err
@@ -299,7 +354,7 @@ func httpGet(ctx context.Context, client *http.Client, label, url string, cfg co
 	// Classify before the status gate so a non-2xx error page is still logged.
 	logResponseDiagnostics(label, resp, body, cfg)
 	if resp.StatusCode/100 != 2 {
-		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+		return nil, responseStatus(resp)
 	}
 	return body, nil
 }
@@ -458,6 +513,11 @@ func redactBody(body []byte, cfg config) string {
 // status, body length, the NAMES of any Set-Cookie headers (never their values), and a coarse
 // body classification. With debugLog set it adds a redacted, capped body excerpt.
 func logResponseDiagnostics(label string, resp *http.Response, body []byte, cfg config) {
+	// A browser auth response can encode session material in any header or body field.
+	if hasBrowserCredentials(cfg) {
+		logf("%s: status=%d bodyLen=%d", label, resp.StatusCode, len(body))
+		return
+	}
 	var names []string
 	for _, c := range resp.Cookies() {
 		names = append(names, c.Name)

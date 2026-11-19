@@ -143,6 +143,9 @@ import {
   encodeTunnelOAuthCallback,
   isFortinetIPsecRedirect,
   fortinetIPsecCallbackToken,
+  fortinetSSLCallbackAuthId,
+  fortinetSSLLoopback,
+  isFortinetSSLCallbackSource,
   isSameCertificateHostname,
   isMatchingOAuthRedirect,
   tunnelPromptValueMaxBytes,
@@ -2769,6 +2772,7 @@ function parseTunnelBrowserEvent(value: object): TunnelBrowserEvent | undefined 
     (completion !== 'query-token' &&
       completion !== 'oauth-code' &&
       completion !== 'cookie' &&
+      completion !== 'fortinet-ssl' &&
       completion !== 'fortinet-ipsec') ||
     (completion === 'fortinet-ipsec' && !isFortinetIPsecRedirect(redirectPrefix)) ||
     (completion === 'oauth-code' &&
@@ -2951,7 +2955,9 @@ async function runTunnelBrowserAuth(
     if (authTimeout) clearTimeout(authTimeout);
     try {
       if (
-        (event.completion === 'fortinet-ipsec' || event.completion === 'oauth-code') &&
+        (event.completion === 'fortinet-ssl' ||
+          event.completion === 'fortinet-ipsec' ||
+          event.completion === 'oauth-code') &&
         !authWindow.isDestroyed()
       ) {
         // These callbacks can complete synchronously within Chromium's navigation dispatch.
@@ -2992,12 +2998,28 @@ async function runTunnelBrowserAuth(
       void complete(false, '', failure);
     }
   };
-  const inspectNavigation = async (rawURL: string) => {
+  let hostCheckForbidden = false;
+  const inspectNavigation = async (rawURL: string, status?: number) => {
     if (settled) return;
     let current: URL;
     try {
       current = new URL(rawURL);
     } catch {
+      return;
+    }
+    if (event.completion === 'cookie' || event.completion === 'fortinet-ssl') {
+      if (
+        status === 403 &&
+        current.origin === fireboxOrigin &&
+        current.pathname === '/remote/hostcheck_install'
+      ) {
+        if (event.completion === 'cookie') {
+          hostCheckForbidden = true;
+          await inspectCookie();
+        } else {
+          await complete(false, '', 'fortinet-hostcheck-forbidden');
+        }
+      }
       return;
     }
     if (event.completion === 'fortinet-ipsec') {
@@ -3051,6 +3073,8 @@ async function runTunnelBrowserAuth(
   const inspectCookie = async () => {
     if (settled || inspectingCookie || event.completion !== 'cookie') return;
     inspectingCookie = true;
+    // A poll started before the 403 may have read the cookie store before the final redirect.
+    const checkForDenial = hostCheckForbidden;
     try {
       const cookies = await browserSession.cookies.get({ url: cookieScopeURL });
       const cookie = cookies.find(
@@ -3065,6 +3089,8 @@ async function runTunnelBrowserAuth(
         } else {
           await complete(false, cookie.value);
         }
+      } else if (checkForDenial) {
+        await complete(false, '', 'fortinet-hostcheck-forbidden');
       }
     } finally {
       inspectingCookie = false;
@@ -3087,9 +3113,13 @@ async function runTunnelBrowserAuth(
       throw new Error('VPN authentication cookie cleanup failed.');
     }
   };
+  const fortinetLoopbackTarget = (url: string) => fortinetSSLLoopback(url, fireboxOrigin);
   authWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (settled || !isAuthorized()) return { action: 'deny' };
     try {
+      if (event.completion === 'fortinet-ssl' && fortinetLoopbackTarget(url)) {
+        return { action: 'deny' };
+      }
       const target = new URL(url);
       if (matchesOAuthRedirect(target)) {
         void inspectNavigation(url);
@@ -3103,8 +3133,8 @@ async function runTunnelBrowserAuth(
     }
     return { action: 'deny' };
   });
-  const inspectNavigationSafely = (url: string) =>
-    void inspectNavigation(url).catch(() => complete(false, '', 'session'));
+  const inspectNavigationSafely = (url: string, status?: number) =>
+    void inspectNavigation(url, status).catch(() => complete(false, '', 'session'));
   authWindow.webContents.on('did-navigate', (_event, url, status) => {
     if (
       event.completion === 'query-token' &&
@@ -3114,7 +3144,7 @@ async function runTunnelBrowserAuth(
       nextCandidate('load');
       return;
     }
-    inspectNavigationSafely(url);
+    inspectNavigationSafely(url, status);
   });
   authWindow.webContents.on('did-navigate-in-page', (_event, url, isMainFrame) => {
     if (isMainFrame) inspectNavigationSafely(url);
@@ -3140,6 +3170,47 @@ async function runTunnelBrowserAuth(
   // Chromium reports server-side redirects through will-redirect rather than will-navigate; catch
   // the callback before localhost:2023 can fail with ERR_CONNECTION_REFUSED.
   authWindow.webContents.on('will-redirect', captureOAuthRedirect);
+  if (event.completion === 'fortinet-ssl') {
+    const webContentsId = authWindow.webContents.id;
+    const completeCallback = (target: URL, unambiguous = true) => {
+      const id = unambiguous ? fortinetSSLCallbackAuthId(target) : undefined;
+      void complete(false, id ?? '', id ? undefined : 'response');
+    };
+    // Capture the HTTPS gateway's response before Chromium can send the ID to a local process.
+    browserSession.webRequest.onHeadersReceived((details, callback) => {
+      if (
+        settled ||
+        details.webContentsId !== webContentsId ||
+        details.resourceType !== 'mainFrame' ||
+        ![301, 302, 303, 307, 308].includes(details.statusCode) ||
+        !isFortinetSSLCallbackSource(details.url, fireboxOrigin)
+      ) {
+        callback({});
+        return;
+      }
+      const locations = Object.entries(details.responseHeaders ?? {})
+        .filter(([name]) => name.toLowerCase() === 'location')
+        .flatMap(([, values]) => values);
+      const target = locations.map(fortinetLoopbackTarget).find((url) => url !== undefined);
+      if (!target) {
+        callback({});
+        return;
+      }
+      callback({ cancel: true });
+      completeCallback(target, locations.length === 1);
+    });
+    authWindow.webContents.on('will-navigate', (navigationEvent) => {
+      const target = fortinetLoopbackTarget(navigationEvent.url);
+      if (!target) return;
+      navigationEvent.preventDefault();
+      if (isFortinetSSLCallbackSource(navigationEvent.initiator?.url ?? '', fireboxOrigin)) {
+        completeCallback(target);
+      }
+    });
+    authWindow.webContents.on('will-redirect', (navigationEvent) => {
+      if (fortinetLoopbackTarget(navigationEvent.url)) navigationEvent.preventDefault();
+    });
+  }
   authWindow.webContents.on('did-fail-load', (_event, code, _description, url, isMainFrame) => {
     const failure = tunnelBrowserLoadFailure(code);
     if (!isMainFrame || settled) return;
@@ -3158,6 +3229,7 @@ async function runTunnelBrowserAuth(
   });
   authWindow.once('closed', () => {
     mcpApprovalWindowCoordinator.forgetTunnelAuthWindow(authWindow);
+    if (event.completion === 'fortinet-ssl') browserSession.webRequest.onHeadersReceived(null);
     void complete(true);
   });
   // Keep this child non-modal so an MCP approval can safely preempt it on every supported desktop.
@@ -3185,6 +3257,12 @@ async function runTunnelBrowserAuth(
   void initialize().catch(() => complete(false, '', 'session'));
   await finished;
   signal.removeEventListener('abort', abort);
+  if (event.completion === 'fortinet-ssl') {
+    // The callback partitions are never reused. Cleanup can finish while the next prompt starts.
+    void Promise.resolve()
+      .then(() => browserSession.clearStorageData())
+      .catch(() => undefined);
+  }
   // Remove Fortinet's ephemeral VPN credential from its temporary cookie store after it
   // has crossed the one-shot Go sidecar boundary.
   if (event.completion === 'cookie') {

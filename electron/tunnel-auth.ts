@@ -1,7 +1,18 @@
 import { createHash, randomUUID } from 'node:crypto';
 
-export type TunnelBrowserCompletion = 'query-token' | 'oauth-code' | 'cookie' | 'fortinet-ipsec';
-export type TunnelBrowserFailure = 'load' | 'certificate' | 'timeout' | 'session' | 'response';
+export type TunnelBrowserCompletion =
+  | 'query-token'
+  | 'oauth-code'
+  | 'cookie'
+  | 'fortinet-ssl'
+  | 'fortinet-ipsec';
+export type TunnelBrowserFailure =
+  | 'load'
+  | 'certificate'
+  | 'timeout'
+  | 'session'
+  | 'response'
+  | 'fortinet-hostcheck-forbidden';
 export const tunnelPromptValueMaxBytes = 16 * 1024;
 
 // Chromium aborts superseded loads during redirects. These do not end authentication.
@@ -42,7 +53,7 @@ export class TunnelBrowserPromptTracker {
 }
 
 export type TunnelAuthPartitionRequest =
-  | { completion: 'cookie' | 'oauth-code' | 'fortinet-ipsec' }
+  | { completion: 'cookie' | 'oauth-code' | 'fortinet-ssl' | 'fortinet-ipsec' }
   | {
       completion: 'query-token';
       origin: string;
@@ -57,6 +68,7 @@ export type TunnelAuthPartitionRequest =
 export function tunnelAuthPartition(request: TunnelAuthPartitionRequest): string {
   switch (request.completion) {
     case 'cookie':
+    case 'fortinet-ssl':
     case 'fortinet-ipsec':
       return `wormhole-tunnel-auth-fortinet-${randomUUID()}`;
     case 'oauth-code':
@@ -103,6 +115,35 @@ export function fortinetIPsecCallbackToken(url: URL): string | undefined {
   const tokens = url.searchParams.getAll('tokenid');
   return tokens.length === 1 && /^[a-fA-F0-9]{32}$/.test(tokens[0]) && !url.hash
     ? tokens[0]
+    : undefined;
+}
+
+export function fortinetSSLLoopback(url: string, gatewayOrigin: string): URL | undefined {
+  const target = URL.parse(url);
+  if (!target || (target.protocol !== 'http:' && target.protocol !== 'https:')) return undefined;
+  if (target.origin === gatewayOrigin) return undefined;
+  return ['127.0.0.1', '[::1]', 'localhost', 'localhost.'].includes(target.hostname)
+    ? target
+    : undefined;
+}
+
+export function isFortinetSSLCallbackSource(url: string, gatewayOrigin: string): boolean {
+  const source = URL.parse(url);
+  return (
+    source?.origin === gatewayOrigin &&
+    (source.pathname === '/remote/saml/login' || source.pathname === '/remote/saml/login/')
+  );
+}
+
+export function fortinetSSLCallbackAuthId(url: URL): string | undefined {
+  const ids = url.searchParams.getAll('id');
+  if (url.pathname !== '/' || url.username || url.password || url.hash || ids.length !== 1)
+    return undefined;
+  const [id] = ids;
+  return id.length > 0 &&
+    id.length <= 4096 &&
+    Array.from(id).every((char) => char > ' ' && char <= '~')
+    ? id
     : undefined;
 }
 

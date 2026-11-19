@@ -454,3 +454,23 @@ for (const legacy of [undefined, false, true]) {
     );
   });
 }
+
+test('Fortinet callback is saved for SSO and requires an empty realm', () => {
+  const settings = {
+    Host: 'vpn.example.test',
+    Port: 443,
+    UseSingleSignOn: true,
+    UseSamlCallback: true,
+  };
+  assert.equal(normalizeTunnelEditorSettings(2, settings).UseSamlCallback, true);
+  assert.ok(
+    !(
+      'UseSamlCallback' in normalizeTunnelEditorSettings(2, { ...settings, UseSingleSignOn: false })
+    ),
+  );
+  assert.deepEqual(missingTunnelFields({ name: 'Forti', kind: 2, settings }), []);
+  assert.deepEqual(
+    missingTunnelFields({ name: 'Forti', kind: 2, settings: { ...settings, Realm: 'staff' } }),
+    ['an empty realm for the FortiGate SAML callback'],
+  );
+});

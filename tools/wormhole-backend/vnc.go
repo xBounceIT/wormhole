@@ -263,11 +263,12 @@ type tunnelPromptResult struct {
 
 // Only fixed, non-secret diagnostics may cross the browser authentication boundary.
 var tunnelBrowserFailureMessages = map[string]string{
-	"load":        "VPN sign-in page could not be loaded. Check the gateway address, port and network connection.",
-	"certificate": "VPN sign-in page certificate validation failed. Check the gateway certificate and trust settings.",
-	"timeout":     "VPN browser authentication timed out.",
-	"session":     "VPN browser authentication could not access its sign-in session. Please retry.",
-	"response":    "VPN browser authentication returned an invalid or oversized response.",
+	"load":                         "VPN sign-in page could not be loaded. Check the gateway address, port and network connection.",
+	"certificate":                  "VPN sign-in page certificate validation failed. Check the gateway certificate and trust settings.",
+	"timeout":                      "VPN browser authentication timed out.",
+	"session":                      "VPN browser authentication could not access its sign-in session. Please retry.",
+	"response":                     "VPN browser authentication returned an invalid or oversized response.",
+	"fortinet-hostcheck-forbidden": "FortiGate denied SSL VPN sign-in at /remote/hostcheck_install (HTTP 403). Ask your VPN administrator to check your assigned portal and its endpoint requirements.",
 }
 
 func newVncManager(

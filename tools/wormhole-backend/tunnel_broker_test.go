@@ -724,6 +724,7 @@ func TestTunnelBrokerRelaysBrowserFailuresAndCancellation(t *testing.T) {
 		{"timeout", false, "VPN browser authentication timed out."},
 		{"session", false, "VPN browser authentication could not access its sign-in session. Please retry."},
 		{"response", false, "VPN browser authentication returned an invalid or oversized response."},
+		{"fortinet-hostcheck-forbidden", false, "FortiGate denied SSL VPN sign-in at /remote/hostcheck_install (HTTP 403). Ask your VPN administrator to check your assigned portal and its endpoint requirements."},
 		{"", true, "VPN authentication was cancelled"},
 	} {
 		t.Run(tc.want, func(t *testing.T) {
