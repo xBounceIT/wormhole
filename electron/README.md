@@ -106,8 +106,9 @@ through native Go backends and bundled Go sidecars. Interactive challenges are s
 the Electron main process; browser tokens and VPN cookies stay inside isolated authentication
 sessions and are handed directly to Go rather than exposed to the renderer. A failed provider
 never falls back to routing outside the tunnel. Fortinet SAML always uses a fresh,
-in-memory browser profile per sign-in, including for saved tunnels with legacy external-browser
-settings. It never opens the system browser or reuses another account's IdP session.
+in-memory browser profile per sign-in. For Fortinet SSL profiles without a realm,
+**Use FortiGate SAML callback** selects the gateway's loopback redirect flow. Electron captures
+the one-time authentication ID inside the dedicated window and Go exchanges it with the gateway.
 
 Fortinet IPsec separates gateway authentication (PSK or client certificate) from
 user authentication (disabled, prompt, saved password or SAML). Keys, PEM client

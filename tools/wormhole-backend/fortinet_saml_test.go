@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -57,6 +59,124 @@ func TestPrepareFortinetAuthenticationUsesEmbeddedBrowserCookie(t *testing.T) {
 	}
 	if got := tunnelSettingString(settings, "SamlAuthId"); got != "" {
 		t.Fatalf("unexpected external SAML auth id = %q", got)
+	}
+}
+
+func TestFortinetSAMLCallbackPassesOnlyTheFreshAuthID(t *testing.T) {
+	raw := json.RawMessage(`{
+		"Host":"vpn.example.test","Port":10443,"UseSingleSignOn":true,
+		"UseSamlCallback":true,"SamlAuthId":"old-id","SvpnCookie":"old-cookie"
+	}`)
+	ctx := withTunnelPromptHandler(context.Background(), func(_ context.Context, prompt tunnelPrompt) (string, error) {
+		if !prompt.Browser || prompt.Completion != "fortinet-ssl" || prompt.CookieName != "" || prompt.RequireHTTPOnly {
+			t.Fatalf("unexpected callback prompt: %#v", prompt)
+		}
+		if len(prompt.URLs) != 1 || prompt.URLs[0] != "https://vpn.example.test:10443/remote/saml/start?redirect=1" {
+			t.Fatalf("unexpected SAML URL: %#v", prompt.URLs)
+		}
+		return "one-shot+id", nil
+	})
+	prepared, err := prepareTunnelAuthentication(ctx, 2, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executable, payload, err := tunnelSidecarCommand(2, prepared)
+	if err != nil || executable != "wormhole-fortiproxy" {
+		t.Fatalf("sidecar: %v, %v", executable, err)
+	}
+	var config map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &config); err != nil {
+		t.Fatal(err)
+	}
+	if tunnelSettingString(config, "saml_auth_id") != "one-shot+id" || tunnelSettingString(config, "svpn_cookie") != "" {
+		t.Fatal("sidecar did not receive only the fresh SAML authentication ID")
+	}
+}
+
+func TestFortinetSSLDoesNotPersistBrowserCredentials(t *testing.T) {
+	settings := json.RawMessage(`{
+		"Host":"vpn.example.test","UseSingleSignOn":true,"UseSamlCallback":true,
+		"SamlAuthId":"old-id","SvpnCookie":"old-cookie"
+	}`)
+	path := filepath.Join(t.TempDir(), "wormhole.db")
+	created, err := createTunnel(path, tunnelWriteRequest{Name: "Fortinet", Kind: 2, Settings: settings})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := readTunnelUnlocked(path, tunnelReadRequest{ID: created.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyEditor, err := tunnelEditorSettings(2, created.ID, settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range []json.RawMessage{created.Settings, stored.Settings, legacyEditor} {
+		if bytes.Contains(raw, []byte("SamlAuthId")) || bytes.Contains(raw, []byte("SvpnCookie")) {
+			t.Fatal("transient authentication appeared in saved or editor settings")
+		}
+		if !bytes.Contains(raw, []byte(`"UseSamlCallback":true`)) {
+			t.Fatal("saved callback preference was lost")
+		}
+	}
+}
+
+func TestFortinetSSLPasswordSidecarIgnoresLegacyBrowserCredentials(t *testing.T) {
+	raw := json.RawMessage(`{
+		"Host":"vpn.example.test","Username":"alice","Password":"password",
+		"SamlAuthId":"old-id","SvpnCookie":"old-cookie"
+	}`)
+	_, payload, err := tunnelSidecarCommand(2, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(payload, []byte("old-id")) || bytes.Contains(payload, []byte("old-cookie")) ||
+		!bytes.Contains(payload, []byte(`"username":"alice"`)) {
+		t.Fatal("sidecar did not receive only the configured password login")
+	}
+}
+
+func TestFortinetSAMLStartupFailureRelaysSafeGatewayDiagnostics(t *testing.T) {
+	t.Setenv("WORMHOLE_TUNNEL_DEBUG", "")
+	for _, tc := range []struct{ fatal, want string }{
+		{"FortiGate denied SSL VPN host check (HTTP 403).", "/remote/hostcheck_install (HTTP 403)"},
+		{"FortiGate SAML authentication ID exchange failed (HTTP 401)", "exchanging the SAML sign-in ID"},
+		{"FortiGate did not issue an SSL VPN session cookie", "did not issue an SSL VPN session cookie"},
+	} {
+		stderr := "saml-auth-id: status=403\nprivate-test-data\nfatal: fortinet start: login: " + tc.fatal
+		err := tunnelSidecarStartupFailure(tunnelConfigSnapshot{kind: 2}, nil, "wormhole-fortiproxy", stderr, 1)
+		if !strings.Contains(err.Error(), tc.want) || strings.Contains(err.Error(), "private-test-data") {
+			t.Fatalf("unexpected sanitized failure: %v", err)
+		}
+	}
+}
+
+func TestFortinetSAMLCallbackRejectsRealmAndInvalidAuthID(t *testing.T) {
+	settings := map[string]json.RawMessage{
+		"Host": json.RawMessage(`"vpn.example.test"`), "UseSingleSignOn": json.RawMessage("true"),
+		"UseSamlCallback": json.RawMessage("true"),
+	}
+	if err := validateTunnelSettings(2, settings); err != nil {
+		t.Fatal(err)
+	}
+	settings["Realm"] = json.RawMessage(`"staff"`)
+	if err := validateTunnelSettings(2, settings); err == nil {
+		t.Fatal("accepted a realm in callback mode")
+	}
+	raw, _ := json.Marshal(settings)
+	if _, err := prepareFortinetAuthentication(context.Background(), raw); err == nil || !strings.Contains(err.Error(), "without a realm") {
+		t.Fatalf("connection did not reject a realm before opening the prompt: %v", err)
+	}
+
+	delete(settings, "Realm")
+	raw, _ = json.Marshal(settings)
+	for _, invalid := range []string{"", "id with spaces", "id\x00", strings.Repeat("x", 4097)} {
+		ctx := withTunnelPromptHandler(context.Background(), func(context.Context, tunnelPrompt) (string, error) {
+			return invalid, nil
+		})
+		if prepared, err := prepareFortinetAuthentication(ctx, raw); err == nil || prepared != nil {
+			t.Fatal("accepted an invalid callback authentication ID")
+		}
 	}
 }
 

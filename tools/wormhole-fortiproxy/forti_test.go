@@ -14,9 +14,11 @@ import (
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"reflect"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -409,6 +411,155 @@ func TestObtainFortinetCookie_SamlAuthIDIsAbsentFromErrors(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), authID) {
 		t.Fatalf("auth ID leaked into error: %v", err)
+	}
+}
+
+func TestFortinetSAMLReportsGatewayRejection(t *testing.T) {
+	for _, tc := range []struct {
+		name, redirect, want string
+		status               int
+	}{
+		{"invalid ID", "", "SAML authentication ID exchange failed (HTTP 401)", http.StatusUnauthorized},
+		{"host check", "/remote/hostcheck_install?user=private-user", "denied SSL VPN host check (HTTP 403)", http.StatusForbidden},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/remote/saml/auth_id" && tc.redirect != "" {
+					http.Redirect(w, r, tc.redirect, http.StatusFound)
+					return
+				}
+				http.Error(w, "private gateway response", tc.status)
+			}))
+			defer server.Close()
+			base, err := url.Parse(server.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			jar, _ := cookiejar.New(nil)
+			client := server.Client()
+			client.Jar = jar
+			authID := "private-id"
+			err = obtainFortinetCookie(context.Background(), client, jar, base,
+				base.JoinPath("remote", "sslvpn-tunnel"), config{SamlAuthID: &authID})
+			if err == nil || !strings.Contains(err.Error(), tc.want) || strings.Contains(err.Error(), "private") {
+				t.Fatalf("expected a sanitized gateway rejection, got %v", err)
+			}
+		})
+	}
+}
+
+func TestFortinetSAMLDiagnosticsLogOnlyResponseMetadata(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	defer writer.Close()
+	stderr, debug := os.Stderr, debugLog
+	os.Stderr, debugLog = writer, true
+	t.Cleanup(func() { os.Stderr, debugLog = stderr, debug })
+	id := "fixture-id"
+	logResponseDiagnostics("saml-auth-id", &http.Response{
+		StatusCode: 200, Header: http.Header{"Set-Cookie": {"fixture-cookie-name=fixture-value"}},
+	}, []byte("private-browser-response ret=1234567"), config{SamlAuthID: &id})
+	_ = writer.Close()
+	log, err := io.ReadAll(reader)
+	if err != nil || !strings.Contains(string(log), "status=200") ||
+		strings.Contains(string(log), "private-browser-response") ||
+		strings.Contains(string(log), "1234567") || strings.Contains(string(log), "fixture-cookie-name") {
+		t.Fatal("expected only response metadata for browser authentication")
+	}
+}
+
+func TestFortinetSAMLConfigurationErrorsOmitGatewayValues(t *testing.T) {
+	const privateValue = "private-response-field"
+	for _, tc := range []struct {
+		name, location, want string
+	}{
+		{"redirect", "/%GG" + privateValue, "could not fetch FortiGate SSL VPN tunnel configuration"},
+		{"XML", "", "FortiGate returned invalid SSL VPN tunnel configuration"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/remote/saml/auth_id":
+					http.SetCookie(w, &http.Cookie{Name: "SVPNCOOKIE", Value: "fixture", Path: "/remote"})
+					w.WriteHeader(http.StatusOK)
+				case "/remote/fortisslvpn_xml":
+					if tc.location != "" {
+						w.Header().Set("Location", tc.location)
+						w.WriteHeader(http.StatusFound)
+						return
+					}
+					_, _ = fmt.Fprintf(w, "<config><ipv4 assigned-addr=%q/></config>", privateValue)
+				default:
+					t.Error("unexpected gateway endpoint")
+				}
+			}))
+			defer server.Close()
+			address := server.Listener.Addr().(*net.TCPAddr)
+			authID := "fixture-id"
+			_, err := fortiLogin(context.Background(), config{
+				Host: address.IP.String(), Port: address.Port, SamlAuthID: &authID, TrustServerCertificate: true,
+			})
+			if err == nil || err.Error() != tc.want {
+				t.Fatal("expected a fixed configuration diagnostic")
+			}
+		})
+	}
+}
+
+func TestFortinetSAMLRedirectKeepsBrowserCredentialsAtTheGateway(t *testing.T) {
+	authID := "private-one-shot-id"
+	cookie := "private-session-cookie"
+	var reachedFinish, reachedConfig, outside atomic.Bool
+	unrelated := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		outside.Store(true)
+	}))
+	defer unrelated.Close()
+	gateway := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/remote/saml/auth_id":
+			if r.URL.Query().Get("id") != authID {
+				t.Error("auth ID missing from the gateway exchange")
+			}
+			http.Redirect(w, r, "/finish", http.StatusFound)
+		case "/finish":
+			reachedFinish.Store(true)
+			if r.Referer() != "" {
+				t.Error("auth ID exchange leaked its URL as a Referer")
+			}
+			http.Redirect(w, r, unrelated.URL, http.StatusFound)
+		case "/remote/fortisslvpn_xml":
+			reachedConfig.Store(true)
+			if supplied, err := r.Cookie("SVPNCOOKIE"); err != nil || supplied.Value != cookie {
+				t.Error("browser cookie missing from the gateway request")
+			}
+			http.Redirect(w, r, unrelated.URL+"/remote/fortisslvpn_xml", http.StatusFound)
+		default:
+			t.Error("unexpected gateway endpoint")
+		}
+	}))
+	defer gateway.Close()
+	host, port, err := net.SplitHostPort(gateway.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	portNumber, err := strconv.Atoi(port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = fortiLogin(context.Background(), config{
+		Host: host, Port: portNumber, SamlAuthID: &authID, TrustServerCertificate: true,
+	})
+	if err == nil || !reachedFinish.Load() || outside.Load() || strings.Contains(err.Error(), authID) {
+		t.Fatalf("expected a sanitized exchange failure without contacting the unrelated server: %v", err)
+	}
+	_, err = fortiLogin(context.Background(), config{
+		Host: host, Port: portNumber, SvpnCookie: &cookie, TrustServerCertificate: true,
+	})
+	if err == nil || !reachedConfig.Load() || outside.Load() || strings.Contains(err.Error(), cookie) {
+		t.Fatalf("expected a sanitized configuration failure without contacting the unrelated server: %v", err)
 	}
 }
 

@@ -12309,6 +12309,13 @@ function tunnelEditorFields(kind: number): TunnelField[] {
           type: 'switch',
         },
         {
+          key: 'UseSamlCallback',
+          label: 'Use FortiGate SAML callback',
+          section: 'Single sign-on',
+          type: 'switch',
+          fullWidth: true,
+        },
+        {
           key: 'TotpSecret',
           label: 'TOTP shared secret (Base32, optional)',
           section: 'Advanced',
@@ -13325,7 +13332,9 @@ function TunnelEditorDialog({
                   })}
                 </TunnelSection>
                 <div className="grid gap-2 rounded-lg border border-border/70 bg-muted/20 px-3 py-2">
-                  {rows('Single sign-on')}
+                  {rows('Single sign-on', {
+                    hidden: (field) => field.key === 'UseSamlCallback' && !useFortinetSso,
+                  })}
                   <p className="text-[11px] leading-relaxed text-muted-foreground">
                     SAML authentication opens in a dedicated window with a fresh, temporary browser
                     profile for each sign-in, keeping different accounts separate.
