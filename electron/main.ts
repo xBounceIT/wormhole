@@ -2846,9 +2846,13 @@ function showCoordinatedMessageBox(
 function enqueueTunnelBrowserAuth(backend: NativeBackendProcess, event: TunnelBrowserEvent): void {
   const signal = backend.browserPrompts.begin(event.sessionId, event.promptId);
   if (!signal) return;
+  const authorizationEpoch =
+    authSession.isAccessAllowed && !authLockRequested && !isQuitting
+      ? authSession.authorizationEpoch
+      : undefined;
   tunnelBrowserAuthQueue = tunnelBrowserAuthQueue
     .catch(() => undefined)
-    .then(() => runTunnelBrowserAuth(backend, event, signal))
+    .then(() => runTunnelBrowserAuth(backend, event, signal, authorizationEpoch))
     .catch(async () => {
       if (!signal.aborted) {
         await backend
@@ -2868,10 +2872,16 @@ function enqueueTunnelBrowserAuth(backend: NativeBackendProcess, event: TunnelBr
 async function runTunnelBrowserAuth(
   backend: NativeBackendProcess,
   event: TunnelBrowserEvent,
-  signal?: AbortSignal,
+  signal: AbortSignal,
+  authorizationEpoch: number | undefined,
 ): Promise<void> {
-  if (signal?.aborted) return;
-  if (!authSession.isAccessAllowed || isQuitting) {
+  if (signal.aborted) return;
+  const isAuthorized = () =>
+    authorizationEpoch !== undefined &&
+    !authLockRequested &&
+    !isQuitting &&
+    isAuthorizationEpochCurrent(authorizationEpoch);
+  if (!isAuthorized()) {
     await backend
       .respondTunnelPrompt({
         leaseId: event.sessionId,
@@ -2939,24 +2949,33 @@ async function runTunnelBrowserAuth(
     if (settled) return;
     settled = true;
     if (authTimeout) clearTimeout(authTimeout);
-    if (!authWindow.isDestroyed()) authWindow.destroy();
     try {
-      if (!signal?.aborted)
+      if (
+        (event.completion === 'fortinet-ipsec' || event.completion === 'oauth-code') &&
+        !authWindow.isDestroyed()
+      ) {
+        // These callbacks can complete synchronously within Chromium's navigation dispatch.
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      if (!authWindow.isDestroyed()) authWindow.destroy();
+      if (!signal.aborted) {
+        const promptCancelled = cancelled || !isAuthorized();
         await backend
           .respondTunnelPrompt({
             leaseId: event.sessionId,
             promptId: event.promptId,
-            value,
-            cancelled,
-            failure,
+            value: promptCancelled ? '' : value,
+            cancelled: promptCancelled,
+            failure: promptCancelled ? undefined : failure,
           })
           .catch(() => undefined);
+      }
     } finally {
       finish();
     }
   };
   const abort = () => void complete(true);
-  signal?.addEventListener('abort', abort, { once: true });
+  signal.addEventListener('abort', abort, { once: true });
   authTimeout = setTimeout(
     () => void complete(false, '', 'timeout'),
     nativeConnectionTimeoutMs - 5_000,
@@ -3069,6 +3088,7 @@ async function runTunnelBrowserAuth(
     }
   };
   authWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (settled || !isAuthorized()) return { action: 'deny' };
     try {
       const target = new URL(url);
       if (matchesOAuthRedirect(target)) {
@@ -3141,9 +3161,10 @@ async function runTunnelBrowserAuth(
     void complete(true);
   });
   // Keep this child non-modal so an MCP approval can safely preempt it on every supported desktop.
-  authWindow.once('ready-to-show', () =>
-    mcpApprovalWindowCoordinator.presentTunnelAuthWindow(authWindow),
-  );
+  authWindow.once('ready-to-show', () => {
+    if (!settled && isAuthorized())
+      mcpApprovalWindowCoordinator.presentTunnelAuthWindow(authWindow);
+  });
   let cookieTimer: NodeJS.Timeout | undefined;
   authWindow.once('closed', () => {
     if (cookieTimer) clearInterval(cookieTimer);
@@ -3163,7 +3184,7 @@ async function runTunnelBrowserAuth(
   };
   void initialize().catch(() => complete(false, '', 'session'));
   await finished;
-  signal?.removeEventListener('abort', abort);
+  signal.removeEventListener('abort', abort);
   // Remove Fortinet's ephemeral VPN credential from its temporary cookie store after it
   // has crossed the one-shot Go sidecar boundary.
   if (event.completion === 'cookie') {
@@ -5336,9 +5357,10 @@ class WebSurfaceManager {
   }
 
   private destroyBrowserTab(record: WebSurfaceRecord, view: WebContentsView): void {
-    if (record.bitwarden) {
+    const contents = view.webContents;
+    if (record.bitwarden && contents) {
       try {
-        this.chromeExtensionApis.get(record.bitwarden.partition)?.removeTab(view.webContents);
+        this.chromeExtensionApis.get(record.bitwarden.partition)?.removeTab(contents);
       } catch {
         /* Already removed. */
       }
@@ -5348,7 +5370,7 @@ class WebSurfaceManager {
     } catch {
       /* Owner is closing. */
     }
-    if (!view.webContents.isDestroyed()) view.webContents.close();
+    if (contents && !contents.isDestroyed()) contents.close();
   }
 
   async openBitwardenPopup(request: BitwardenPopupOpenRequest): Promise<{ open: boolean }> {
@@ -7044,16 +7066,24 @@ class WebSurfaceManager {
         record.tabs.get(tabId) !== view
       )
         return;
-      if (record.tabs.remove(tabId)) {
-        this.destroyBrowserTab(record, view);
-        this.showBrowserTab(record);
-        this.sendEvent(sessionId, record, 'navigation');
-      } else {
+      const removedView = record.tabs.remove(tabId);
+      if (!removedView) {
         this.sendEvent(sessionId, record, 'failed', {
           error: 'The browser closed unexpectedly. Reconnect to continue.',
         });
-        this.close(sessionId);
+        record.disposed = true;
       }
+      // Retire the dead tab immediately, then detach its view after Chromium's teardown.
+      setImmediate(() => {
+        if (removedView) this.destroyBrowserTab(record, removedView);
+        if (this.surfaces.get(sessionId) !== record) return;
+        if (!removedView) {
+          this.close(sessionId);
+        } else if (!record.disposed) {
+          this.showBrowserTab(record);
+          this.sendEvent(sessionId, record, 'navigation');
+        }
+      });
     });
   }
 

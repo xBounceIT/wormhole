@@ -261,6 +261,11 @@ test('real Chromium sibling tabs retain their proxy and never fall back to a dir
           await manager.command(owner, { sessionId: 'routed', operation: 'navigate', url: 'http://127.0.0.1:' + targetPort + '/no-direct-fallback' });
           await waitFor(() => Boolean(record.tabs.snapshot('vpn').tabs.find(tab => tab.id === record.tabs.activeId).error));
           assert.equal(requests.includes('/no-direct-fallback'), false);
+          const tabCount = record.tabs.size;
+          second.close();
+          await waitFor(() => second.isDestroyed() && record.tabs.size === tabCount - 1, 'Closed SOCKS tab');
+          assert.equal(manager.surfaces.get('routed'), record);
+          assert.match(await first.session.resolveProxy('http://gateway.internal:' + targetPort), /^SOCKS5 /);
           await manager.open(owner, { sessionId: 'direct', attempt: 1, address: 'http://127.0.0.1:' + targetPort + '/direct', protocol: 'http' });
           const direct = manager.surfaces.get('direct');
           await waitFor(() => direct.view.webContents.getTitle() === 'Gateway');
