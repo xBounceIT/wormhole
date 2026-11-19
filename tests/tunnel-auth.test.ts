@@ -145,6 +145,8 @@ function browserAuthHarness(
   const partitions: string[] = [];
   const windowPartitions: string[] = [];
   const responses: { cancelled: boolean; value: string; browserFailure?: string }[] = [];
+  const authSession = { isAccessAllowed: true, authorizationEpoch: 1 };
+  const presented: AuthWindow[] = [];
   let expire!: () => void;
   let expireCleanup: (() => void) | undefined;
   let poll: (() => void) | undefined;
@@ -162,7 +164,12 @@ function browserAuthHarness(
       return [];
     }
     destroyed = false;
-    webContents = Object.assign(new EventEmitter(), { setWindowOpenHandler() {} });
+    windowOpenHandler?: (details: { url: string }) => { action: string };
+    webContents = Object.assign(new EventEmitter(), {
+      setWindowOpenHandler: (handler: AuthWindow['windowOpenHandler']) => {
+        this.windowOpenHandler = handler;
+      },
+    });
     isDestroyed() {
       return this.destroyed;
     }
@@ -182,7 +189,10 @@ function browserAuthHarness(
   const { enqueue, getQueue, backend } = runInNewContext(
     popupScript,
     {
-      authSession: { isAccessAllowed: true },
+      authSession,
+      authLockRequested: false,
+      isAuthorizationEpochCurrent: (epoch: number) =>
+        authSession.isAccessAllowed && authSession.authorizationEpoch === epoch,
       isQuitting: false,
       URL,
       Buffer,
@@ -193,6 +203,7 @@ function browserAuthHarness(
       clearInterval: () => {
         poll = undefined;
       },
+      setImmediate: globalThis.setImmediate,
       setTimeout: (callback: () => void, milliseconds: number) => {
         if (milliseconds === 1_000) {
           expireCleanup = callback;
@@ -238,7 +249,7 @@ function browserAuthHarness(
       nativeConnectionTimeoutMs: 315_000,
       mcpApprovalWindowCoordinator: {
         forgetTunnelAuthWindow() {},
-        presentTunnelAuthWindow() {},
+        presentTunnelAuthWindow: (window: AuthWindow) => presented.push(window),
       },
     },
     { filename: popupFilename },
@@ -268,6 +279,8 @@ function browserAuthHarness(
   return {
     loads,
     responses,
+    authSession,
+    presented,
     finished,
     urls,
     windows,
@@ -435,8 +448,10 @@ test('Fortinet IPsec accepts only an exact reserved loopback callback', async (t
       prevented = true;
     },
   });
-  await auth.finished;
   assert.equal(prevented, true);
+  assert.equal(auth.window.isDestroyed(), false, 'Chromium is still dispatching the redirect');
+  assert.deepEqual(auth.responses, []);
+  await auth.finished;
   assert.equal(auth.responses.length, 1);
   assert.equal(auth.responses[0].value, token);
   assert.equal(auth.window.isDestroyed(), true);
@@ -458,6 +473,36 @@ test('Fortinet IPsec rejects invalid tokens and isolates every sign-in', async (
     tunnelAuthPartition({ completion: 'fortinet-ipsec' }),
     tunnelAuthPartition({ completion: 'fortinet-ipsec' }),
   );
+});
+
+test('a deferred Fortinet IPsec callback cannot show its closed prompt or deliver a token after relock', async (t) => {
+  const callback = 'http://127.0.0.1:41001/';
+  const auth = browserAuthHarness(t, { completion: 'fortinet-ipsec', redirectPrefix: callback });
+  await setImmediate();
+  auth.window.webContents.emit('will-redirect', {
+    isMainFrame: true,
+    url: callback + '?tokenid=' + 'a1'.repeat(16),
+    preventDefault() {},
+  });
+  auth.window.emit('ready-to-show');
+  const popup = auth.window.windowOpenHandler?.({ url: 'https://idp.example.test/again' });
+  const queued = auth.enqueue({ promptId: 'waiting-before-relock' });
+
+  // The workspace can lock and unlock before the next main-loop turn.
+  auth.authSession.authorizationEpoch++;
+  auth.authSession.isAccessAllowed = false;
+  const receivedWhileLocked = auth.enqueue({ promptId: 'received-while-locked' });
+  auth.authSession.isAccessAllowed = true;
+  await auth.finished;
+  await setImmediate();
+  assert.equal(auth.windows.length, 1);
+  await Promise.all([queued, receivedWhileLocked]);
+  assert.equal(auth.window.isDestroyed(), true);
+  assert.equal(auth.responses.length, 3);
+  assert.ok(auth.responses.every(({ cancelled, value }) => cancelled && value === ''));
+  assert.deepEqual(auth.presented, []);
+  assert.equal(popup?.action, 'deny');
+  assert.equal(auth.loads.length, 1);
 });
 
 test('Fortinet IPsec callback parsing bounds ports and prevents ambiguous tokens', () => {

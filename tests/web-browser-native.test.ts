@@ -346,6 +346,7 @@ function browserHarness({ socks = '127.0.0.1:1080', active = true } = {}) {
     randomUUID,
     URL,
     console,
+    setImmediate,
     setTimeout,
     clearTimeout,
     clearInterval,
@@ -1265,13 +1266,45 @@ test('page failures, aborted loads and tab crashes keep the browser route alive'
   assert.match(record.tabs.snapshot('vpn').tabs[0].error, /stopped unexpectedly/);
   assert.equal(h.releases.length, 0);
   await h.command('new-tab');
-  first.webContents.close();
+  const firstContents = first.webContents;
+  first.webContents = undefined;
+  firstContents.close();
+  assert.equal(h.children.has(first), true, 'Chromium is still destroying the tab contents');
+  await new Promise((resolve) => setImmediate(resolve));
   assert.equal(record.tabs.size, 1);
+  assert.equal(h.children.has(first), false);
   assert.equal(h.manager.surfaces.has('browser-1'), true);
   h.manager.backendStopped();
   assert.equal(h.manager.surfaces.size, 0);
   assert.equal(h.children.size, 0);
   assert.ok(h.events.some((event) => event.type === 'failed' && /VPN/.test(event.error)));
+});
+
+test('native tab destruction retires the selected page before deferred view cleanup', async () => {
+  const h = browserHarness();
+  await h.open();
+  const record = h.manager.surfaces.get('browser-1');
+  const first = record.view;
+  await h.command('new-tab');
+  const second = record.view;
+  const secondContents = second.webContents;
+  second.webContents = undefined;
+  secondContents.close();
+  assert.equal(h.children.has(second), true);
+  assert.equal(await h.command('reload'), true);
+  assert.equal(first.webContents.reloads, 1);
+  assert.equal(h.releases.length, 0);
+
+  const firstContents = first.webContents;
+  first.webContents = undefined;
+  firstContents.close();
+  assert.equal(await h.command('new-tab'), false);
+  assert.equal(await h.command('reload'), false);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(h.children.size, 0);
+  assert.equal(h.manager.surfaces.has('browser-1'), false);
+  assert.equal(h.releases.length, 1);
+  assert.equal(h.events.filter((event) => event.type === 'failed').length, 1);
 });
 
 test('forwarder popups adopt their native guest and rewrite only authorized main-frame requests', async () => {
