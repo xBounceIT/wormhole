@@ -25,6 +25,7 @@ import {
   useRef,
   useState,
   type ComponentProps,
+  type ComponentType,
   type CSSProperties,
   type DragEvent,
   type FormEvent,
@@ -177,6 +178,7 @@ import {
   Copy,
   Database,
   Download,
+  FileText,
   FlaskConical,
   Folder,
   FolderOpen,
@@ -196,9 +198,12 @@ import {
   Plus,
   Power,
   Bot,
+  Puzzle,
   Radio,
   RefreshCcw,
   Search,
+  Shield,
+  SlidersHorizontal,
   Terminal,
   Trash2,
   Upload,
@@ -230,6 +235,7 @@ import {
 } from '@/components/ui/context-menu';
 import {
   Dialog,
+  DialogClose,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -367,6 +373,13 @@ import {
   fortinetIPsecEditorSettings,
   fortinetIPsecFieldVisible,
 } from './fortinet-ipsec-state';
+import {
+  filterSettingsCategories,
+  isSettingsTabId,
+  resolveVisibleSettingsTab,
+  settingsCategoryById,
+  type SettingsTabId,
+} from './settings-navigation';
 
 const MRemoteImportDialog = lazy(() =>
   import('./components/MRemoteImportDialog').then((module) => ({
@@ -1600,6 +1613,34 @@ function AuthPrompt({
   }, [onDialogElementChange]);
 
   useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+    const hasOpenNestedDialog = () =>
+      Boolean(
+        dialog.querySelector(
+          '[role="dialog"][data-state="open"], [role="alertdialog"][data-state="open"]',
+        ),
+      );
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.isComposing || event.key !== 'Escape' || !dialog.open) return;
+      if (hasOpenNestedDialog()) return;
+      event.stopPropagation();
+      event.preventDefault();
+      if (request.kind === 'confirmation') onResultRef.current(false);
+    };
+    const handleFocusIn = (event: FocusEvent) => {
+      if (!dialog.open || hasOpenNestedDialog()) return;
+      event.stopPropagation();
+    };
+    dialog.addEventListener('focusin', handleFocusIn);
+    window.addEventListener('keydown', handleKeyDown, { capture: true });
+    return () => {
+      dialog.removeEventListener('focusin', handleFocusIn);
+      window.removeEventListener('keydown', handleKeyDown, { capture: true });
+    };
+  }, [request.kind]);
+
+  useEffect(() => {
     if (helloBusy || (isHelloMode && request.autoWindowsHello && !helloMessage)) return;
     const focused = document.activeElement;
     if (
@@ -1642,7 +1683,7 @@ function AuthPrompt({
       ref={dialogRef}
       aria-describedby="auth-prompt-description"
       aria-labelledby="auth-prompt-title"
-      className="fixed inset-0 z-[100] m-0 h-auto max-h-none w-auto max-w-none border-0 bg-background/85 p-5 backdrop-blur-md open:flex open:items-center open:justify-center"
+      className="pointer-events-auto fixed inset-0 z-[100] m-0 h-auto max-h-none w-auto max-w-none border-0 bg-background/85 p-5 backdrop-blur-md open:flex open:items-center open:justify-center"
       closedby={request.kind === 'lock' ? 'none' : 'closerequest'}
       onCancel={(event) => {
         event.preventDefault();
@@ -2064,6 +2105,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   const [updateBusy, setUpdateBusy] = useState(false);
   const [updateStatus, setUpdateStatus] = useState('');
   const [updateDownloadProgress, setUpdateDownloadProgress] = useState<number | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsUpdatesRequest, setSettingsUpdatesRequest] = useState(0);
   const treeMovePending = useRef(false);
   const [treeMoveError, setTreeMoveError] = useState('');
@@ -2398,7 +2440,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   function handleViewUpdateChanges() {
     handleDismissUpdate();
     setSettingsUpdatesRequest((request) => request + 1);
-    setActivePage('settings');
+    setSettingsOpen(true);
   }
 
   function handleAutoCopyOnSelectChange(enabled: boolean) {
@@ -7245,7 +7287,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
             <SidebarNavigation
               activePage={activePage}
               onNavigate={setActivePage}
+              onOpenSettings={() => setSettingsOpen(true)}
               sessionCount={sessions.length}
+              settingsOpen={settingsOpen}
             />
           }
           initialPinned={initialSettings.sidebarPinned !== false}
@@ -7466,41 +7510,6 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                   sessions={sessions}
                 />
               </SshCertificateEditorContext>
-            ) : activePage === 'settings' ? (
-              <SettingsPage
-                sshTheme={sshTheme}
-                autoCopyOnSelect={autoCopyOnSelect}
-                backupEncryptionRequired={backupExportRequiresEncryption(credentials)}
-                confirmOnTabClose={confirmOnTabClose}
-                confirmOnWindowClose={confirmOnWindowClose}
-                confirmOnWindowCloseBusy={confirmOnWindowCloseBusy}
-                authGate={authGate}
-                authState={authState}
-                onAuthStateChange={setAuthState}
-                onAutoCopyOnSelectChange={handleAutoCopyOnSelectChange}
-                onConfirmOnTabCloseChange={handleConfirmOnTabCloseChange}
-                onConfirmOnWindowCloseChange={handleConfirmOnWindowCloseChange}
-                onBackupImported={() => refreshWorkspace(true)}
-                onRequestAuthentication={requestAuthentication}
-                onThemeChange={handleThemeChange}
-                onCheckForUpdates={() => void handleCheckForUpdates()}
-                onDismissUpdate={handleDismissUpdate}
-                onInstallUpdate={() => void handleInstallUpdate()}
-                onSetAutoCheckForUpdates={handleSetAutoCheckForUpdates}
-                settingsUpdatesRequest={settingsUpdatesRequest}
-                onWorkspaceCredentialsChanged={refreshWorkspaceCredentials}
-                theme={theme}
-                update={{
-                  autoCheckForUpdates,
-                  busy: updateBusy,
-                  currentVersion: updateCurrentVersion,
-                  downloadProgress: updateDownloadProgress,
-                  lastUpdateCheck,
-                  result: updateResult,
-                  dismissedUpdateVersion,
-                  status: updateStatus,
-                }}
-              />
             ) : activePage === 'credentials' ? (
               <CredentialsPage
                 initialCredentials={credentials}
@@ -7553,6 +7562,91 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
             />
           </Suspense>
         ) : null}
+
+        <Dialog
+          onOpenChange={(open) => {
+            if (!open && (visibleAuthPrompt !== null || mcpApprovals.length > 0)) return;
+            setSettingsOpen(open);
+          }}
+          open={settingsOpen}
+        >
+          <DialogContent
+            aria-hidden={authGate !== 'unlocked'}
+            className={cn(
+              'flex h-[min(680px,calc(100dvh-2.5rem))] w-[min(920px,calc(100vw-2.5rem))] max-w-none flex-col gap-0 overflow-hidden rounded-2xl border border-border/80 bg-popover p-0 text-popover-foreground shadow-2xl ring-1 ring-foreground/10 transition-none sm:max-w-none',
+              authGate !== 'unlocked' && 'invisible',
+            )}
+            data-locked={authGate !== 'unlocked'}
+            data-settings-dialog=""
+            inert={authGate !== 'unlocked'}
+            onEscapeKeyDown={(event) => {
+              if (visibleAuthPrompt !== null || mcpApprovals.length > 0) event.preventDefault();
+            }}
+            onFocusOutside={(event) => {
+              if (visibleAuthPrompt !== null || mcpApprovals.length > 0) event.preventDefault();
+            }}
+            onInteractOutside={(event) => {
+              if (
+                visibleAuthPrompt !== null ||
+                mcpApprovals.length > 0 ||
+                (event.target instanceof Element &&
+                  (!event.target.isConnected || event.target.closest('dialog') !== null))
+              ) {
+                event.preventDefault();
+              }
+            }}
+            onPointerDownOutside={(event) => {
+              if (
+                visibleAuthPrompt !== null ||
+                mcpApprovals.length > 0 ||
+                (event.target instanceof Element &&
+                  (!event.target.isConnected || event.target.closest('dialog') !== null))
+              ) {
+                event.preventDefault();
+              }
+            }}
+            overlayClassName={cn(
+              'bg-black/55 backdrop-blur-[2px] transition-none',
+              authGate !== 'unlocked' && 'invisible',
+            )}
+            showCloseButton={false}
+          >
+            <SettingsPage
+              sshTheme={sshTheme}
+              autoCopyOnSelect={autoCopyOnSelect}
+              backupEncryptionRequired={backupExportRequiresEncryption(credentials)}
+              confirmOnTabClose={confirmOnTabClose}
+              confirmOnWindowClose={confirmOnWindowClose}
+              confirmOnWindowCloseBusy={confirmOnWindowCloseBusy}
+              authGate={authGate}
+              authState={authState}
+              onAuthStateChange={setAuthState}
+              onAutoCopyOnSelectChange={handleAutoCopyOnSelectChange}
+              onConfirmOnTabCloseChange={handleConfirmOnTabCloseChange}
+              onConfirmOnWindowCloseChange={handleConfirmOnWindowCloseChange}
+              onBackupImported={() => refreshWorkspace(true)}
+              onRequestAuthentication={requestAuthentication}
+              onThemeChange={handleThemeChange}
+              onCheckForUpdates={() => void handleCheckForUpdates()}
+              onDismissUpdate={handleDismissUpdate}
+              onInstallUpdate={() => void handleInstallUpdate()}
+              onSetAutoCheckForUpdates={handleSetAutoCheckForUpdates}
+              settingsUpdatesRequest={settingsUpdatesRequest}
+              onWorkspaceCredentialsChanged={refreshWorkspaceCredentials}
+              theme={theme}
+              update={{
+                autoCheckForUpdates,
+                busy: updateBusy,
+                currentVersion: updateCurrentVersion,
+                downloadProgress: updateDownloadProgress,
+                lastUpdateCheck,
+                result: updateResult,
+                dismissedUpdateVersion,
+                status: updateStatus,
+              }}
+            />
+          </DialogContent>
+        </Dialog>
 
         <Dialog
           onOpenChange={(open) => {
@@ -14084,13 +14178,13 @@ function SettingsSection({
 }) {
   return (
     <section className="space-y-3">
-      <div className="space-y-1">
-        <h3 className="text-sm font-semibold tracking-tight">{title}</h3>
+      <div className="space-y-1 border-b border-border/60 pb-2">
+        <h3 className="text-xs font-semibold tracking-tight text-foreground">{title}</h3>
         {description ? (
           <p className="text-[11px] leading-relaxed text-muted-foreground">{description}</p>
         ) : null}
       </div>
-      {children}
+      <div className="space-y-3">{children}</div>
     </section>
   );
 }
@@ -14109,9 +14203,9 @@ function SettingsSwitch({
   onCheckedChange: (checked: boolean) => void;
 }) {
   return (
-    <div className="flex items-start justify-between gap-6 rounded-lg border border-border/70 bg-card/40 px-3 py-3">
+    <div className="flex items-center justify-between gap-6 border-b border-border/50 py-2.5 last:border-b-0">
       <div className="min-w-0 space-y-1">
-        <p className="text-xs font-medium">{label}</p>
+        <p className="text-xs font-medium text-foreground">{label}</p>
         {description ? (
           <p className="text-[11px] leading-relaxed text-muted-foreground">{description}</p>
         ) : null}
@@ -14131,22 +14225,42 @@ function SettingsTabPanel({
   children,
   forceMount,
 }: {
-  value: string;
+  value: SettingsTabId;
   children: ReactNode;
   forceMount?: true;
 }) {
+  const category = settingsCategoryById[value];
   return (
     <TabsContent
       className="min-h-0 flex-1 overflow-hidden data-[state=inactive]:hidden"
       forceMount={forceMount}
       value={value}
     >
-      <ScrollArea className="h-full">
-        <div className="max-w-[720px] space-y-7 px-1 py-5 pb-12">{children}</div>
+      <ScrollArea className="h-full [&>[data-slot=scroll-area-viewport]>div]:block!">
+        <div className="mx-auto w-full max-w-[600px] space-y-7 px-6 pt-8 pb-12 sm:px-8 sm:pt-9">
+          <header className="space-y-1 pr-8">
+            <h2 className="text-xl font-semibold tracking-tight text-foreground">
+              {category.label}
+            </h2>
+            <p className="text-xs leading-relaxed text-muted-foreground">{category.description}</p>
+          </header>
+          {children}
+        </div>
       </ScrollArea>
     </TabsContent>
   );
 }
+
+const settingsCategoryIcons: Record<SettingsTabId, ComponentType<{ className?: string }>> = {
+  general: SlidersHorizontal,
+  'file-transfer': ArrowRightLeft,
+  security: Shield,
+  extensions: Puzzle,
+  mcp: Bot,
+  backup: Database,
+  logs: FileText,
+  updates: Download,
+};
 
 function logsErrorMessage(error: unknown): string {
   if (error instanceof Error && error.message) return error.message;
@@ -15187,13 +15301,23 @@ function SettingsPage({
   onWorkspaceCredentialsChanged: () => Promise<void>;
   // react-doctor-disable-next-line react-doctor/prefer-useReducer
 }) {
-  const [activeTabSelection, setActiveTabSelection] = useState({
+  const [activeTabSelection, setActiveTabSelection] = useState<{
+    request: number;
+    value: SettingsTabId;
+  }>({
     request: settingsUpdatesRequest,
     value: settingsUpdatesRequest > 0 ? 'updates' : 'general',
   });
-  const activeTab =
+  const activeTab: SettingsTabId =
     activeTabSelection.request === settingsUpdatesRequest ? activeTabSelection.value : 'updates';
   const [promptBeforeTunnelConnect, setPromptBeforeTunnelConnect] = useState(true);
+  const [searchState, setSearchState] = useState({
+    request: settingsUpdatesRequest,
+    query: '',
+  });
+  const searchQuery = searchState.request === settingsUpdatesRequest ? searchState.query : '';
+  const filteredGroups = useMemo(() => filterSettingsCategories(searchQuery), [searchQuery]);
+  const displayedTab = resolveVisibleSettingsTab(activeTab, searchQuery);
   const authMethod = authState?.mode ?? 'disabled';
   const helloFallback = authState?.fallback ?? 'pin';
   const idleTimeout = authState?.idleTimeoutMinutes ?? 15;
@@ -16398,276 +16522,342 @@ function SettingsPage({
   const currentBitwardenServerRegion = bitwardenCliServerRegionCode(bitwardenCliStatus?.serverUrl);
 
   return (
-    <section className="flex h-full min-h-0 flex-col overflow-hidden p-6">
-      <h2 className="shrink-0 text-xl font-semibold tracking-tight">Settings</h2>
-
+    <section className="relative flex min-h-0 flex-1 flex-col overflow-hidden sm:flex-row">
       <Tabs
-        className="mt-4 min-h-0 flex-1 gap-0"
-        onValueChange={(value) => setActiveTabSelection({ request: settingsUpdatesRequest, value })}
-        value={activeTab}
+        className="flex min-h-0 flex-1 flex-col gap-0 sm:flex-row"
+        onValueChange={(value) => {
+          if (isSettingsTabId(value)) {
+            setActiveTabSelection({ request: settingsUpdatesRequest, value });
+          }
+        }}
+        orientation="vertical"
+        value={displayedTab ?? ''}
       >
-        <TabsList
-          className="h-9 w-full shrink-0 items-stretch justify-start gap-1 overflow-x-auto overflow-y-hidden rounded-none border-b border-border p-0"
-          variant="line"
+        <aside
+          aria-label="Settings navigation"
+          className="flex w-full shrink-0 flex-col border-b border-border/70 bg-sidebar sm:w-[236px] sm:border-r sm:border-b-0"
         >
-          <TabsTrigger
-            className="h-full flex-none rounded-none border-0 bg-transparent px-3 py-0 text-xs after:bottom-0 data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:after:opacity-100 focus-visible:border-transparent focus-visible:ring-0 focus-visible:outline-none"
-            value="general"
-          >
-            General
-          </TabsTrigger>
-          <TabsTrigger
-            className="h-full flex-none rounded-none border-0 bg-transparent px-3 py-0 text-xs after:bottom-0 data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:after:opacity-100 focus-visible:border-transparent focus-visible:ring-0 focus-visible:outline-none"
-            value="security"
-          >
-            Security
-          </TabsTrigger>
-          <TabsTrigger
-            className="h-full flex-none rounded-none border-0 bg-transparent px-3 py-0 text-xs after:bottom-0 data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:after:opacity-100 focus-visible:border-transparent focus-visible:ring-0 focus-visible:outline-none"
-            value="extensions"
-          >
-            Extensions
-          </TabsTrigger>
-          <TabsTrigger
-            className="h-full flex-none rounded-none border-0 bg-transparent px-3 py-0 text-xs after:bottom-0 data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:after:opacity-100 focus-visible:border-transparent focus-visible:ring-0 focus-visible:outline-none"
-            value="updates"
-          >
-            Updates
-          </TabsTrigger>
-          <TabsTrigger
-            className="h-full flex-none rounded-none border-0 bg-transparent px-3 py-0 text-xs after:bottom-0 data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:after:opacity-100 focus-visible:border-transparent focus-visible:ring-0 focus-visible:outline-none"
-            value="logs"
-          >
-            Logs
-          </TabsTrigger>
-          <TabsTrigger
-            className="h-full flex-none rounded-none border-0 bg-transparent px-3 py-0 text-xs after:bottom-0 data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:after:opacity-100 focus-visible:border-transparent focus-visible:ring-0 focus-visible:outline-none"
-            value="backup"
-          >
-            Backup &amp; Restore
-          </TabsTrigger>
-          <TabsTrigger
-            className="h-full flex-none rounded-none border-0 bg-transparent px-3 py-0 text-xs after:bottom-0 data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:after:opacity-100 focus-visible:border-transparent focus-visible:ring-0 focus-visible:outline-none"
-            value="mcp"
-          >
-            AI Agent (MCP)
-          </TabsTrigger>
-          <TabsTrigger
-            value="file-transfer"
-            className="h-full flex-none rounded-none border-0 bg-transparent px-3 py-0 text-xs"
-          >
-            File transfer
-          </TabsTrigger>
-        </TabsList>
-
-        <SettingsTabPanel value="file-transfer">
-          <SftpEditorSettings />
-        </SettingsTabPanel>
-        <SettingsTabPanel value="general">
-          <SettingsSection title="Appearance">
-            <div className="grid max-w-60 gap-2">
-              <Label htmlFor="settings-theme">Theme</Label>
-              <Select
-                onValueChange={(value) => {
-                  if (isTheme(value)) onThemeChange(value);
-                }}
-                value={theme}
-              >
-                <SelectTrigger id="settings-theme" className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="system">System default</SelectItem>
-                  <SelectItem value="light">Light</SelectItem>
-                  <SelectItem value="dark">Dark</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-          </SettingsSection>
-
-          <SettingsSection title="Tabs">
-            <SettingsSwitch
-              checked={confirmOnTabClose}
-              description="Ask before closing a connected session tab."
-              label="Confirm before closing a connected tab"
-              onCheckedChange={onConfirmOnTabCloseChange}
-            />
-          </SettingsSection>
-
-          <SettingsSection title="Application">
-            <SettingsSwitch
-              checked={confirmOnWindowClose}
-              description="Ask before closing Wormhole while one or more sessions are active."
-              disabled={confirmOnWindowCloseBusy}
-              label="Confirm before closing Wormhole"
-              onCheckedChange={onConfirmOnWindowCloseChange}
-            />
-          </SettingsSection>
-
-          <SettingsSection title="Terminal">
-            <SshThemeSettings
-              theme={sshTheme.theme}
-              busy={sshTheme.busy}
-              error={sshTheme.error}
-              onChange={(value) => void sshTheme.changeTheme(value)}
-            />
-            <SettingsSwitch
-              checked={autoCopyOnSelect}
-              description="Copy selected terminal text to the clipboard automatically."
-              label="Auto-copy selection to clipboard"
-              onCheckedChange={onAutoCopyOnSelectChange}
-            />
-          </SettingsSection>
-
-          <SettingsSection title="VPN">
-            <SettingsSwitch
-              checked={promptBeforeTunnelConnect}
-              description="Ask whether to start a configured tunnel before connecting to a target."
-              label="Ask whether to use the tunnel when connecting"
-              onCheckedChange={handlePromptBeforeTunnelConnectChange}
-            />
-          </SettingsSection>
-        </SettingsTabPanel>
-
-        <SettingsTabPanel value="security">
-          <SettingsSection
-            description="Ask for a PIN, password, or Windows Hello when Wormhole opens or is left idle."
-            title="App lock"
-          >
-            <div className="space-y-2 rounded-lg border border-border/70 bg-card/40 p-3">
-              <div className="flex items-center justify-between gap-3">
-                <p className="text-xs font-medium">App lock</p>
-                <Badge variant={authState?.configured ? 'default' : 'secondary'}>
-                  {authState?.configured ? 'Enabled' : 'Disabled'}
-                </Badge>
-              </div>
-              <p className="text-[11px] leading-relaxed text-muted-foreground">
-                {authState?.isCorrupted
-                  ? "Wormhole can't read the saved lock. Set a new PIN or password."
-                  : authState?.configured
-                    ? `Unlock with ${authModeLabel(authState.mode)}.`
-                    : 'Wormhole opens without asking you to unlock it.'}
-              </p>
-            </div>
-            <div className="grid max-w-64 gap-2">
-              <Label htmlFor="settings-auth-method">How to unlock</Label>
-              <Select
-                disabled={!authState || securityBusy}
-                onValueChange={(value) => void handleAuthMethodChange(value)}
-                value={authMethod}
-              >
-                <SelectTrigger id="settings-auth-method" className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="disabled">Disabled</SelectItem>
-                  <SelectItem value="pin">PIN</SelectItem>
-                  <SelectItem value="password">Password</SelectItem>
-                  {window.wormhole?.platform === 'win32' ? (
-                    <SelectItem value="windowsHello">Windows Hello</SelectItem>
-                  ) : authMethod === 'windowsHello' ? (
-                    <SelectItem disabled value="windowsHello">
-                      Windows Hello (Windows only)
-                    </SelectItem>
-                  ) : null}
-                </SelectContent>
-              </Select>
-            </div>
-
-            {authMethod === 'windowsHello' && authState ? (
-              <div className="space-y-3 rounded-lg border border-border/70 bg-card/40 p-3">
-                <div className="flex items-center justify-between gap-3">
-                  <p className="text-xs font-medium">Windows Hello</p>
-                  <Badge variant={authState.windowsHello.available ? 'default' : 'secondary'}>
-                    {authState.windowsHello.available ? 'Available' : 'Unavailable'}
-                  </Badge>
-                </div>
-                <p className="text-[11px] leading-relaxed text-muted-foreground">
-                  {authState.windowsHello.message}
-                </p>
-                <div className="grid max-w-64 gap-2">
-                  <Label htmlFor="settings-hello-fallback">If Windows Hello doesn't work</Label>
-                  <Select
-                    disabled={securityBusy}
-                    onValueChange={(value) => void handleFallbackChange(value)}
-                    value={helloFallback}
-                  >
-                    <SelectTrigger id="settings-hello-fallback" className="w-full">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="pin">PIN</SelectItem>
-                      <SelectItem value="password">Password</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
+          <div className="flex items-center justify-between gap-2 px-4 pt-4 pb-2.5">
+            <DialogTitle className="text-[15px] font-semibold tracking-tight text-foreground">
+              Settings
+            </DialogTitle>
+            <DialogDescription className="sr-only">
+              Configure Wormhole application preferences.
+            </DialogDescription>
+          </div>
+          <div className="px-3 pb-3">
+            <div className="relative">
+              <Search className="pointer-events-none absolute top-1/2 left-3 size-3.5 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                aria-label="Search settings"
+                className="h-8 rounded-full border-border/70 bg-background/60 pr-8 pl-8 text-xs shadow-none placeholder:text-muted-foreground/80 dark:bg-input/40"
+                onChange={(event) =>
+                  setSearchState({
+                    request: settingsUpdatesRequest,
+                    query: event.target.value,
+                  })
+                }
+                placeholder="Search"
+                value={searchQuery}
+              />
+              {searchQuery ? (
                 <Button
-                  disabled={securityBusy}
-                  onClick={() => void handleRefreshWindowsHello()}
-                  size="sm"
+                  aria-label="Clear settings search"
+                  className="absolute top-1/2 right-1 size-6 -translate-y-1/2 rounded-full text-muted-foreground hover:text-foreground"
+                  onClick={() => setSearchState({ request: settingsUpdatesRequest, query: '' })}
+                  size="icon-xs"
                   type="button"
-                  variant="outline"
+                  variant="ghost"
                 >
-                  <RefreshCcw data-icon="inline-start" />
-                  Check again
+                  <X aria-hidden="true" className="size-3" />
                 </Button>
-              </div>
-            ) : null}
-
-            <div className="grid max-w-64 gap-2">
-              <Label htmlFor="settings-idle-timeout">Auto-lock after</Label>
-              <Select
-                disabled={!authState || securityBusy}
-                onValueChange={(value) => void handleIdleTimeoutChange(value)}
-                value={idleTimeout === null ? 'none' : String(idleTimeout)}
-              >
-                <SelectTrigger id="settings-idle-timeout" className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="none">None</SelectItem>
-                  <SelectItem value="1">1 minute</SelectItem>
-                  <SelectItem value="5">5 minutes</SelectItem>
-                  <SelectItem value="15">15 minutes</SelectItem>
-                  <SelectItem value="30">30 minutes</SelectItem>
-                  <SelectItem value="60">60 minutes</SelectItem>
-                </SelectContent>
-              </Select>
+              ) : null}
             </div>
-            <div className="flex flex-wrap gap-2">
+          </div>
+          <ScrollArea className="max-h-40 min-h-0 flex-1 sm:max-h-none [&>[data-slot=scroll-area-viewport]>div]:block!">
+            <TabsList
+              aria-label="Settings categories"
+              className="flex h-auto w-full flex-col items-stretch justify-start gap-0.5 rounded-none bg-transparent px-2.5 pt-0 pb-4 text-left"
+              variant="default"
+            >
+              {filteredGroups.length > 0 ? (
+                filteredGroups.map((group, index) => (
+                  <div className={index > 0 ? 'mt-4 space-y-0.5' : 'space-y-0.5'} key={group.label}>
+                    <p className="px-2.5 py-1 text-[11px] font-medium text-muted-foreground/80">
+                      {group.label}
+                    </p>
+                    {group.items.map((item) => {
+                      const Icon = settingsCategoryIcons[item.id];
+                      return (
+                        <TabsTrigger
+                          className="h-8 flex-none justify-start gap-2.5 rounded-lg border-0 px-2.5 py-1.5 text-[13px] font-normal text-foreground/75 transition-colors after:hidden hover:bg-foreground/[0.05] hover:text-foreground data-[state=active]:bg-foreground/[0.09] data-[state=active]:font-medium data-[state=active]:text-foreground data-[state=active]:shadow-none dark:text-muted-foreground dark:hover:bg-foreground/[0.06] dark:hover:text-foreground dark:data-[state=active]:border-transparent dark:data-[state=active]:bg-foreground/[0.1] dark:data-[state=active]:text-foreground"
+                          key={item.id}
+                          value={item.id}
+                        >
+                          <Icon aria-hidden="true" className="size-4 shrink-0 opacity-80" />
+                          <span className="truncate">{item.label}</span>
+                          {item.id === 'updates' && updateAvailable ? (
+                            <span
+                              aria-hidden="true"
+                              className="ml-auto size-1.5 shrink-0 rounded-full bg-primary"
+                            />
+                          ) : null}
+                        </TabsTrigger>
+                      );
+                    })}
+                  </div>
+                ))
+              ) : (
+                <p className="px-2.5 py-6 text-center text-xs text-muted-foreground">
+                  No matching settings.
+                </p>
+              )}
+            </TabsList>
+          </ScrollArea>
+        </aside>
+
+        <div className="relative flex min-h-0 min-w-0 flex-1 flex-col bg-background dark:bg-[oklch(0.235_0_0)]">
+          <DialogClose asChild>
+            <Button
+              aria-label="Close settings"
+              className="absolute top-3.5 right-3.5 z-10 size-8 rounded-lg text-muted-foreground hover:bg-foreground/[0.07] hover:text-foreground"
+              size="icon-sm"
+              type="button"
+              variant="ghost"
+            >
+              <X aria-hidden="true" className="size-4" />
+            </Button>
+          </DialogClose>
+          {displayedTab === null ? (
+            <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8 text-center">
+              <p className="text-sm font-medium text-foreground">No matching settings</p>
+              <p className="max-w-xs text-xs text-muted-foreground">
+                No settings category matched “{searchQuery.trim()}”.
+              </p>
               <Button
-                disabled={!authState || authMethod === 'disabled' || securityBusy}
-                onClick={() => void handleSetSecret()}
-                size="sm"
-                type="button"
-              >
-                {selectedSecretExists
-                  ? `Change ${authSecretLabel(selectedSecretMethod!)}`
-                  : `Set ${authSecretLabel(selectedSecretMethod ?? 'pin')}`}
-              </Button>
-              <Button
-                disabled={!authState || securityBusy}
-                onClick={() => void handleTestUnlock()}
+                onClick={() => setSearchState({ request: settingsUpdatesRequest, query: '' })}
                 size="sm"
                 type="button"
                 variant="outline"
               >
-                Test app lock
+                Clear search
               </Button>
             </div>
-            {securityError ? <p className="text-[11px] text-destructive">{securityError}</p> : null}
-            {securityMessage ? (
-              <p className="text-[11px] text-emerald-400">{securityMessage}</p>
-            ) : null}
-          </SettingsSection>
-        </SettingsTabPanel>
+          ) : null}
 
-        <SettingsTabPanel value="extensions">
-          <SettingsSection
-            description="Use Bitwarden for credential passwords and Browser connections."
-            title="Bitwarden"
-          >
-            <SettingsSection title="Credential vault">
+          <SettingsTabPanel value="file-transfer">
+            <SftpEditorSettings />
+          </SettingsTabPanel>
+          <SettingsTabPanel value="general">
+            <SettingsSection title="Appearance">
+              <div className="flex flex-col gap-3 border-b border-border/50 py-2.5 sm:flex-row sm:items-center sm:justify-between">
+                <div className="min-w-0 space-y-1">
+                  <Label className="text-xs font-medium" htmlFor="settings-theme">
+                    Theme
+                  </Label>
+                  <p className="text-[11px] leading-relaxed text-muted-foreground">
+                    Choose light, dark, or match your system appearance.
+                  </p>
+                </div>
+                <Select
+                  onValueChange={(value) => {
+                    if (isTheme(value)) onThemeChange(value);
+                  }}
+                  value={theme}
+                >
+                  <SelectTrigger id="settings-theme" className="w-full sm:w-44">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="system">System default</SelectItem>
+                    <SelectItem value="light">Light</SelectItem>
+                    <SelectItem value="dark">Dark</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </SettingsSection>
+
+            <SettingsSection title="Tabs">
+              <SettingsSwitch
+                checked={confirmOnTabClose}
+                description="Ask before closing a connected session tab."
+                label="Confirm before closing a connected tab"
+                onCheckedChange={onConfirmOnTabCloseChange}
+              />
+            </SettingsSection>
+
+            <SettingsSection title="Application">
+              <SettingsSwitch
+                checked={confirmOnWindowClose}
+                description="Ask before closing Wormhole while one or more sessions are active."
+                disabled={confirmOnWindowCloseBusy}
+                label="Confirm before closing Wormhole"
+                onCheckedChange={onConfirmOnWindowCloseChange}
+              />
+            </SettingsSection>
+
+            <SettingsSection title="Terminal">
+              <SshThemeSettings
+                theme={sshTheme.theme}
+                busy={sshTheme.busy}
+                error={sshTheme.error}
+                onChange={(value) => void sshTheme.changeTheme(value)}
+              />
+              <SettingsSwitch
+                checked={autoCopyOnSelect}
+                description="Copy selected terminal text to the clipboard automatically."
+                label="Auto-copy selection to clipboard"
+                onCheckedChange={onAutoCopyOnSelectChange}
+              />
+            </SettingsSection>
+
+            <SettingsSection title="VPN">
+              <SettingsSwitch
+                checked={promptBeforeTunnelConnect}
+                description="Ask whether to start a configured tunnel before connecting to a target."
+                label="Ask whether to use the tunnel when connecting"
+                onCheckedChange={handlePromptBeforeTunnelConnectChange}
+              />
+            </SettingsSection>
+          </SettingsTabPanel>
+
+          <SettingsTabPanel value="security">
+            <SettingsSection
+              description="Ask for a PIN, password, or Windows Hello when Wormhole opens or is left idle."
+              title="App lock"
+            >
+              <div className="space-y-2 rounded-lg border border-border/70 bg-card/40 p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-xs font-medium">App lock</p>
+                  <Badge variant={authState?.configured ? 'default' : 'secondary'}>
+                    {authState?.configured ? 'Enabled' : 'Disabled'}
+                  </Badge>
+                </div>
+                <p className="text-[11px] leading-relaxed text-muted-foreground">
+                  {authState?.isCorrupted
+                    ? "Wormhole can't read the saved lock. Set a new PIN or password."
+                    : authState?.configured
+                      ? `Unlock with ${authModeLabel(authState.mode)}.`
+                      : 'Wormhole opens without asking you to unlock it.'}
+                </p>
+              </div>
+              <div className="grid max-w-64 gap-2">
+                <Label htmlFor="settings-auth-method">How to unlock</Label>
+                <Select
+                  disabled={!authState || securityBusy}
+                  onValueChange={(value) => void handleAuthMethodChange(value)}
+                  value={authMethod}
+                >
+                  <SelectTrigger id="settings-auth-method" className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="disabled">Disabled</SelectItem>
+                    <SelectItem value="pin">PIN</SelectItem>
+                    <SelectItem value="password">Password</SelectItem>
+                    {window.wormhole?.platform === 'win32' ? (
+                      <SelectItem value="windowsHello">Windows Hello</SelectItem>
+                    ) : authMethod === 'windowsHello' ? (
+                      <SelectItem disabled value="windowsHello">
+                        Windows Hello (Windows only)
+                      </SelectItem>
+                    ) : null}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              {authMethod === 'windowsHello' && authState ? (
+                <div className="space-y-3 rounded-lg border border-border/70 bg-card/40 p-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="text-xs font-medium">Windows Hello</p>
+                    <Badge variant={authState.windowsHello.available ? 'default' : 'secondary'}>
+                      {authState.windowsHello.available ? 'Available' : 'Unavailable'}
+                    </Badge>
+                  </div>
+                  <p className="text-[11px] leading-relaxed text-muted-foreground">
+                    {authState.windowsHello.message}
+                  </p>
+                  <div className="grid max-w-64 gap-2">
+                    <Label htmlFor="settings-hello-fallback">If Windows Hello doesn't work</Label>
+                    <Select
+                      disabled={securityBusy}
+                      onValueChange={(value) => void handleFallbackChange(value)}
+                      value={helloFallback}
+                    >
+                      <SelectTrigger id="settings-hello-fallback" className="w-full">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="pin">PIN</SelectItem>
+                        <SelectItem value="password">Password</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <Button
+                    disabled={securityBusy}
+                    onClick={() => void handleRefreshWindowsHello()}
+                    size="sm"
+                    type="button"
+                    variant="outline"
+                  >
+                    <RefreshCcw data-icon="inline-start" />
+                    Check again
+                  </Button>
+                </div>
+              ) : null}
+
+              <div className="grid max-w-64 gap-2">
+                <Label htmlFor="settings-idle-timeout">Auto-lock after</Label>
+                <Select
+                  disabled={!authState || securityBusy}
+                  onValueChange={(value) => void handleIdleTimeoutChange(value)}
+                  value={idleTimeout === null ? 'none' : String(idleTimeout)}
+                >
+                  <SelectTrigger id="settings-idle-timeout" className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="none">None</SelectItem>
+                    <SelectItem value="1">1 minute</SelectItem>
+                    <SelectItem value="5">5 minutes</SelectItem>
+                    <SelectItem value="15">15 minutes</SelectItem>
+                    <SelectItem value="30">30 minutes</SelectItem>
+                    <SelectItem value="60">60 minutes</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  disabled={!authState || authMethod === 'disabled' || securityBusy}
+                  onClick={() => void handleSetSecret()}
+                  size="sm"
+                  type="button"
+                >
+                  {selectedSecretExists
+                    ? `Change ${authSecretLabel(selectedSecretMethod!)}`
+                    : `Set ${authSecretLabel(selectedSecretMethod ?? 'pin')}`}
+                </Button>
+                <Button
+                  disabled={!authState || securityBusy}
+                  onClick={() => void handleTestUnlock()}
+                  size="sm"
+                  type="button"
+                  variant="outline"
+                >
+                  Test app lock
+                </Button>
+              </div>
+              {securityError ? (
+                <p className="text-[11px] text-destructive">{securityError}</p>
+              ) : null}
+              {securityMessage ? (
+                <p className="text-[11px] text-emerald-400">{securityMessage}</p>
+              ) : null}
+            </SettingsSection>
+          </SettingsTabPanel>
+
+          <SettingsTabPanel value="extensions">
+            <SettingsSection title="Bitwarden — Credential vault">
               <SettingsSwitch
                 checked={bitwardenEnabled}
                 description="Manage the Bitwarden vault used by SSH, RDP, VNC, and SMB credentials."
@@ -16858,7 +17048,7 @@ function SettingsPage({
               </div>
             </SettingsSection>
 
-            <SettingsSection title="Browser extension">
+            <SettingsSection title="Bitwarden — Browser extension">
               <SettingsSwitch
                 checked={browserExtensionEnabled}
                 description="Use the official Bitwarden extension with HTTPS home pages in Browser connections."
@@ -16908,416 +17098,420 @@ function SettingsPage({
                 </Button>
               </div>
             </SettingsSection>
-          </SettingsSection>
-        </SettingsTabPanel>
+          </SettingsTabPanel>
 
-        {bitwardenCliDialog ? (
-          <BitwardenCliDialog
-            currentServerRegion={currentBitwardenServerRegion}
-            defaultServerRegion={bitwardenServerRegion}
-            error={bitwardenError}
-            key={bitwardenCliDialog}
-            loginBusy={bitwardenBusy}
-            mode={bitwardenCliDialog}
-            onClose={() => setBitwardenCliDialog(null)}
-            onLogin={(email, masterPassword, authenticatorCode, serverRegion) =>
-              void handleBitwardenCliLogin(email, masterPassword, authenticatorCode, serverRegion)
-            }
-            onUnlock={(masterPassword) => void handleBitwardenCliUnlock(masterPassword)}
-          />
-        ) : null}
-
-        <BitwardenOperationDialog
-          description="Refresh the Bitwarden credentials available to Wormhole."
-          onClose={() => setBitwardenSyncDialog(null)}
-          state={bitwardenSyncDialog}
-          title="Sync Bitwarden vault"
-        />
-
-        <BitwardenOperationDialog
-          description="Download and install the latest Bitwarden command-line client."
-          onClose={() => setBitwardenCliUpdateDialog(null)}
-          state={bitwardenCliUpdateDialog}
-          title="Update Bitwarden CLI"
-        />
-
-        <BitwardenOperationDialog
-          description="Download and install the latest official Bitwarden browser extension."
-          onClose={() => setBitwardenExtensionUpdateDialog(null)}
-          state={bitwardenExtensionUpdateDialog}
-          title="Update Bitwarden extension"
-        />
-
-        <SettingsTabPanel value="updates">
-          <SettingsSection title="Wormhole updates">
-            <p className="text-xs font-medium">Wormhole {update.currentVersion || '…'}</p>
-            <p className="text-[11px] text-muted-foreground">
-              {formatLastUpdateCheck(update.lastUpdateCheck)}
-            </p>
-            <SettingsSwitch
-              checked={update.autoCheckForUpdates}
-              description="Check for a newer Wormhole build when the app starts."
-              label="Automatically check for updates on startup"
-              onCheckedChange={onSetAutoCheckForUpdates}
-            />
-            {updateMessage ? (
-              <p className="text-[11px] text-muted-foreground">{updateMessage}</p>
-            ) : null}
-            {update.downloadProgress !== null ? (
-              <div className="max-w-sm">
-                <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-muted">
-                  <div
-                    className="h-full rounded-full bg-primary transition-[width]"
-                    style={{
-                      width: `${Math.round(update.downloadProgress * 100)}%`,
-                    }}
-                  />
-                </div>
-              </div>
-            ) : null}
-            <div className="flex flex-wrap gap-2">
-              <Button disabled={update.busy} onClick={onCheckForUpdates} size="sm">
-                Check now
-              </Button>
-              <Button
-                disabled={update.busy || !updateAvailable}
-                onClick={onInstallUpdate}
-                size="sm"
-              >
-                {window.wormhole?.platform === 'linux' ? 'Download AppImage' : 'Install update'}
-              </Button>
-              {updateDismissible ? (
-                <Button disabled={update.busy} onClick={onDismissUpdate} size="sm" variant="ghost">
-                  Not now
-                </Button>
+          <SettingsTabPanel value="updates">
+            <SettingsSection title="Wormhole updates">
+              <p className="text-xs font-medium">Wormhole {update.currentVersion || '…'}</p>
+              <p className="text-[11px] text-muted-foreground">
+                {formatLastUpdateCheck(update.lastUpdateCheck)}
+              </p>
+              <SettingsSwitch
+                checked={update.autoCheckForUpdates}
+                description="Check for a newer Wormhole build when the app starts."
+                label="Automatically check for updates on startup"
+                onCheckedChange={onSetAutoCheckForUpdates}
+              />
+              {updateMessage ? (
+                <p className="text-[11px] text-muted-foreground">{updateMessage}</p>
               ) : null}
-            </div>
-          </SettingsSection>
-
-          <SettingsSection title="Release notes">
-            {showReleaseNotes ? (
-              <p className="text-xs font-medium">
-                Update available: {update.result?.latestVersion}
-              </p>
-            ) : null}
-            <Card className="border-border/70 bg-card/40 p-4 shadow-none">
-              {showReleaseNotes ? (
-                <div className="text-[11px] leading-relaxed text-muted-foreground">
-                  <ReleaseNotesMarkdown markdown={update.result?.releaseNotes ?? ''} />
+              {update.downloadProgress !== null ? (
+                <div className="max-w-sm">
+                  <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-muted">
+                    <div
+                      className="h-full rounded-full bg-primary transition-[width]"
+                      style={{
+                        width: `${Math.round(update.downloadProgress * 100)}%`,
+                      }}
+                    />
+                  </div>
                 </div>
-              ) : (
-                <p className="text-[11px] leading-relaxed text-muted-foreground">
-                  {update.result?.checkFailed
-                    ? "Couldn't reach the update server. Try again later."
-                    : update.result?.latestVersion
-                      ? "You're on the latest version."
-                      : 'Update information will appear here when a new release is available.'}
-                </p>
-              )}
-            </Card>
-          </SettingsSection>
-        </SettingsTabPanel>
-
-        <SettingsTabPanel forceMount value="logs">
-          <SettingsSection title="Current log">
-            <div className="grid gap-2">
-              <Label htmlFor="settings-log-file">Today&apos;s log file</Label>
-              <Input
-                id="settings-log-file"
-                readOnly
-                spellCheck={false}
-                value={logsInfo?.currentLogFilePath ?? 'Loading the current log path…'}
-              />
-            </div>
-            <div className="flex flex-wrap gap-2">
-              <Button
-                disabled={logsOpenBusy || retentionBusy}
-                onClick={() => void openCurrentLogFile()}
-                size="sm"
-                type="button"
-              >
-                Open today&apos;s log
-              </Button>
-              <Button
-                disabled={logsOpenBusy || retentionBusy}
-                onClick={() => void openLogsFolder()}
-                size="sm"
-                type="button"
-                variant="outline"
-              >
-                Open log folder
-              </Button>
-            </div>
-            {logsActionError ? (
-              <p className="text-[11px] text-destructive">{logsActionError}</p>
-            ) : null}
-          </SettingsSection>
-
-          <LogLevelSetting
-            initialValue={savedLogLevel.current}
-            loaded={logsInfo !== null}
-            onSaved={(level) => {
-              savedLogLevel.current = level;
-            }}
-          />
-
-          <SettingsSection title="Rotation">
-            <div className="grid max-w-52 gap-2">
-              <Label htmlFor="settings-retention">Retain daily log files</Label>
-              <Input
-                disabled={retentionBusy}
-                id="settings-retention"
-                max="365"
-                min="1"
-                onBlur={() => void commitLogRetention()}
-                onChange={(event) => setRetentionDays(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter') {
-                    event.preventDefault();
-                    void commitLogRetention();
-                  }
-                }}
-                type="number"
-                value={retentionDays}
-              />
-            </div>
-            <p className="text-[11px] leading-relaxed text-muted-foreground">
-              Logs rotate daily. Retention changes are saved now and apply after restarting
-              Wormhole.
-            </p>
-            {retentionError ? (
-              <p className="text-[11px] text-destructive">{retentionError}</p>
-            ) : null}
-          </SettingsSection>
-        </SettingsTabPanel>
-
-        <SettingsTabPanel value="backup">
-          <SettingsSection title="Backup &amp; Restore">
-            <p className="max-w-2xl text-xs leading-relaxed text-muted-foreground">
-              Export your connections, credentials, SSH keys, and VPN tunnels to a JSON file, or
-              restore a backup from another installation. Existing metadata and readable secrets are
-              kept; missing or unreadable secrets can be repaired from the backup.
-            </p>
-            <div className="flex flex-wrap gap-2">
-              <Button
-                disabled={backupImportPickerBusy}
-                onClick={() => {
-                  setBackupSectionError('');
-                  setBackupExportError('');
-                  setBackupExportResult(null);
-                  setBackupExportOpen(true);
-                }}
-                size="sm"
-                type="button"
-              >
-                <Download data-icon="inline-start" />
-                Export backup…
-              </Button>
-              <Button
-                disabled={backupImportPickerBusy}
-                onClick={() => void chooseBackupForImport()}
-                size="sm"
-                type="button"
-                variant="outline"
-              >
-                {backupImportPickerBusy ? (
-                  <LoaderCircle className="animate-spin" data-icon="inline-start" />
-                ) : (
-                  <Upload data-icon="inline-start" />
-                )}
-                Import backup…
-              </Button>
-            </div>
-            <p className="max-w-2xl text-[11px] leading-relaxed text-muted-foreground">
-              {backupEncryptionRequired
-                ? 'This workspace contains SSH private keys, so exports require a password.'
-                : 'Add a password to encrypt every connection name and secret; plaintext exports contain readable credentials.'}
-            </p>
-            {backupSectionError ? (
-              <p className="text-[11px] text-destructive">{backupSectionError}</p>
-            ) : null}
-          </SettingsSection>
-        </SettingsTabPanel>
-
-        <SettingsTabPanel value="mcp">
-          <SettingsSection
-            description="Let a local AI agent open saved connections and control live SSH sessions."
-            title="AI Agent (MCP)"
-          >
-            <p className="text-xs leading-relaxed text-muted-foreground">
-              The local MCP server listens on localhost only and requires a bearer token. Choose
-              when Wormhole asks you to approve AI agent actions.
-            </p>
-            <SettingsSwitch
-              checked={mcpEnabled}
-              description="Start the localhost MCP server for this app session."
-              label="Enable MCP server"
-              onCheckedChange={(checked) => void handleMcpToggle(checked)}
-            />
-            <div className="grid max-w-md gap-2">
-              <Label htmlFor="settings-mcp-approval-mode">Approval mode</Label>
-              <Select
-                disabled={mcpBusy || !mcpState}
-                onValueChange={(value) =>
-                  void handleMcpApprovalMode(value as WormholeMcpApprovalMode)
-                }
-                value={mcpState?.approvalMode ?? 'first-access'}
-              >
-                <SelectTrigger
-                  aria-describedby="settings-mcp-approval-description"
-                  className="w-full"
-                  id="settings-mcp-approval-mode"
-                >
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="full-access">Full access</SelectItem>
-                  <SelectItem value="always-ask">Always ask</SelectItem>
-                  <SelectItem value="first-access">Ask on first access</SelectItem>
-                </SelectContent>
-              </Select>
-              <p
-                className="text-[11px] leading-relaxed text-muted-foreground"
-                id="settings-mcp-approval-description"
-              >
-                {mcpState?.approvalMode === 'full-access'
-                  ? 'AI agents can use all MCP tools without approval popups.'
-                  : mcpState?.approvalMode === 'always-ask'
-                    ? 'Every MCP action requires approval in a popup, including listing connections and reading terminal output.'
-                    : 'Approve access once per SSH session. Opening a saved connection also requires approval.'}
-              </p>
-            </div>
-            <div className="grid max-w-52 gap-2">
-              <Label htmlFor="settings-mcp-port">Port</Label>
-              <Input
-                disabled={mcpBusy || mcpRunning}
-                id="settings-mcp-port"
-                onBlur={() => void commitMcpPort()}
-                onChange={(event) => setMcpPort(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter') {
-                    event.preventDefault();
-                    void commitMcpPort();
-                  }
-                }}
-                max="65535"
-                min="1"
-                type="number"
-                value={mcpPort}
-              />
-            </div>
-            <p className="text-[11px] text-muted-foreground">
-              {mcpRunning
-                ? `Running — connect an MCP client to ${mcpEndpoint}`
-                : mcpEnabled
-                  ? 'MCP server is enabled and will start when Wormhole is ready.'
-                  : 'Stopped'}
-            </p>
-            <div className="grid gap-2">
-              <Label htmlFor="settings-mcp-endpoint">Endpoint</Label>
-              <div className="flex gap-2">
-                <Input
-                  className="min-w-0"
-                  id="settings-mcp-endpoint"
-                  readOnly
-                  value={mcpEndpoint}
-                />
-                <Button
-                  className="shrink-0"
-                  disabled={mcpBusy}
-                  onClick={() => void copyMcpEndpoint()}
-                  size="sm"
-                  type="button"
-                  variant="outline"
-                >
-                  Copy
-                </Button>
-              </div>
-            </div>
-            <div className="grid gap-2">
-              <Label htmlFor="settings-mcp-token">Bearer token</Label>
+              ) : null}
               <div className="flex flex-wrap gap-2">
+                <Button disabled={update.busy} onClick={onCheckForUpdates} size="sm">
+                  Check now
+                </Button>
+                <Button
+                  disabled={update.busy || !updateAvailable}
+                  onClick={onInstallUpdate}
+                  size="sm"
+                >
+                  {window.wormhole?.platform === 'linux' ? 'Download AppImage' : 'Install update'}
+                </Button>
+                {updateDismissible ? (
+                  <Button
+                    disabled={update.busy}
+                    onClick={onDismissUpdate}
+                    size="sm"
+                    variant="ghost"
+                  >
+                    Not now
+                  </Button>
+                ) : null}
+              </div>
+            </SettingsSection>
+
+            <SettingsSection title="Release notes">
+              {showReleaseNotes ? (
+                <p className="text-xs font-medium">
+                  Update available: {update.result?.latestVersion}
+                </p>
+              ) : null}
+              <Card className="border-border/70 bg-card/40 p-4 shadow-none">
+                {showReleaseNotes ? (
+                  <div className="text-[11px] leading-relaxed text-muted-foreground">
+                    <ReleaseNotesMarkdown markdown={update.result?.releaseNotes ?? ''} />
+                  </div>
+                ) : (
+                  <p className="text-[11px] leading-relaxed text-muted-foreground">
+                    {update.result?.checkFailed
+                      ? "Couldn't reach the update server. Try again later."
+                      : update.result?.latestVersion
+                        ? "You're on the latest version."
+                        : 'Update information will appear here when a new release is available.'}
+                  </p>
+                )}
+              </Card>
+            </SettingsSection>
+          </SettingsTabPanel>
+
+          <SettingsTabPanel forceMount value="logs">
+            <SettingsSection title="Current log">
+              <div className="grid gap-2">
+                <Label htmlFor="settings-log-file">Today&apos;s log file</Label>
                 <Input
-                  className="min-w-64 flex-1"
-                  id="settings-mcp-token"
-                  placeholder="•••••••• (hidden — click Reveal)"
+                  id="settings-log-file"
                   readOnly
-                  type={mcpTokenRevealed ? 'text' : 'password'}
-                  value={mcpTokenRevealed ? mcpToken : ''}
+                  spellCheck={false}
+                  value={logsInfo?.currentLogFilePath ?? 'Loading the current log path…'}
                 />
+              </div>
+              <div className="flex flex-wrap gap-2">
                 <Button
-                  disabled={mcpBusy}
-                  onClick={() => void revealMcpToken()}
+                  disabled={logsOpenBusy || retentionBusy}
+                  onClick={() => void openCurrentLogFile()}
                   size="sm"
                   type="button"
-                  variant="outline"
                 >
-                  {mcpTokenRevealed ? 'Hide' : 'Reveal'}
+                  Open today&apos;s log
                 </Button>
                 <Button
-                  disabled={mcpBusy}
-                  onClick={() => void copyMcpToken()}
+                  disabled={logsOpenBusy || retentionBusy}
+                  onClick={() => void openLogsFolder()}
                   size="sm"
                   type="button"
                   variant="outline"
                 >
-                  Copy
-                </Button>
-                <Button
-                  disabled={mcpBusy}
-                  onClick={() => void regenerateMcpToken()}
-                  size="sm"
-                  type="button"
-                  variant="outline"
-                >
-                  Regenerate
+                  Open log folder
                 </Button>
               </div>
-            </div>
-            <div className="grid max-w-60 gap-2">
-              <Label htmlFor="settings-mcp-client">Client</Label>
-              <Select onValueChange={(value) => setMcpClient(value as McpClient)} value={mcpClient}>
-                <SelectTrigger id="settings-mcp-client" className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="claude-code">Claude Code CLI</SelectItem>
-                  <SelectItem value="claude-desktop">Claude Desktop</SelectItem>
-                  <SelectItem value="codex">Codex</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <p className="text-[11px] leading-relaxed text-muted-foreground">
-              {mcpConfigDetails.caption}
-            </p>
-            <p className="text-[11px] leading-relaxed text-muted-foreground">
-              Reveal the token first to view it here, or use Copy config to copy a ready-to-paste
-              configuration with the current token.
-            </p>
-            <div className="grid gap-2">
-              <Label htmlFor="settings-mcp-config">{mcpConfigDetails.label}</Label>
-              <Textarea
-                className="min-h-48 resize-none font-mono text-[11px]"
-                id="settings-mcp-config"
-                readOnly
-                value={mcpConfig}
+              {logsActionError ? (
+                <p className="text-[11px] text-destructive">{logsActionError}</p>
+              ) : null}
+            </SettingsSection>
+
+            <LogLevelSetting
+              initialValue={savedLogLevel.current}
+              loaded={logsInfo !== null}
+              onSaved={(level) => {
+                savedLogLevel.current = level;
+              }}
+            />
+
+            <SettingsSection title="Rotation">
+              <div className="grid max-w-52 gap-2">
+                <Label htmlFor="settings-retention">Retain daily log files</Label>
+                <Input
+                  disabled={retentionBusy}
+                  id="settings-retention"
+                  max="365"
+                  min="1"
+                  onBlur={() => void commitLogRetention()}
+                  onChange={(event) => setRetentionDays(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') {
+                      event.preventDefault();
+                      void commitLogRetention();
+                    }
+                  }}
+                  type="number"
+                  value={retentionDays}
+                />
+              </div>
+              <p className="text-[11px] leading-relaxed text-muted-foreground">
+                Logs rotate daily. Retention changes are saved now and apply after restarting
+                Wormhole.
+              </p>
+              {retentionError ? (
+                <p className="text-[11px] text-destructive">{retentionError}</p>
+              ) : null}
+            </SettingsSection>
+          </SettingsTabPanel>
+
+          <SettingsTabPanel value="backup">
+            <SettingsSection title="Workspace backup">
+              <p className="max-w-2xl text-xs leading-relaxed text-muted-foreground">
+                Export your connections, credentials, SSH keys, and VPN tunnels to a JSON file, or
+                restore a backup from another installation. Existing metadata and readable secrets
+                are kept; missing or unreadable secrets can be repaired from the backup.
+              </p>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  disabled={backupImportPickerBusy}
+                  onClick={() => {
+                    setBackupSectionError('');
+                    setBackupExportError('');
+                    setBackupExportResult(null);
+                    setBackupExportOpen(true);
+                  }}
+                  size="sm"
+                  type="button"
+                >
+                  <Download data-icon="inline-start" />
+                  Export backup…
+                </Button>
+                <Button
+                  disabled={backupImportPickerBusy}
+                  onClick={() => void chooseBackupForImport()}
+                  size="sm"
+                  type="button"
+                  variant="outline"
+                >
+                  {backupImportPickerBusy ? (
+                    <LoaderCircle className="animate-spin" data-icon="inline-start" />
+                  ) : (
+                    <Upload data-icon="inline-start" />
+                  )}
+                  Import backup…
+                </Button>
+              </div>
+              <p className="max-w-2xl text-[11px] leading-relaxed text-muted-foreground">
+                {backupEncryptionRequired
+                  ? 'This workspace contains SSH private keys, so exports require a password.'
+                  : 'Add a password to encrypt every connection name and secret; plaintext exports contain readable credentials.'}
+              </p>
+              {backupSectionError ? (
+                <p className="text-[11px] text-destructive">{backupSectionError}</p>
+              ) : null}
+            </SettingsSection>
+          </SettingsTabPanel>
+
+          <SettingsTabPanel value="mcp">
+            <SettingsSection title="Local MCP server">
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                The local MCP server listens on localhost only and requires a bearer token. Choose
+                when Wormhole asks you to approve AI agent actions.
+              </p>
+              <SettingsSwitch
+                checked={mcpEnabled}
+                description="Start the localhost MCP server for this app session."
+                label="Enable MCP server"
+                onCheckedChange={(checked) => void handleMcpToggle(checked)}
               />
-              <Button
-                className="w-fit"
-                disabled={mcpBusy}
-                onClick={() => void copyMcpConfig()}
-                size="sm"
-                type="button"
-                variant="outline"
-              >
-                Copy config
-              </Button>
-            </div>
-            {mcpError ? <p className="text-[11px] text-destructive">{mcpError}</p> : null}
-            {mcpMessage ? <p className="text-[11px] text-emerald-400">{mcpMessage}</p> : null}
-          </SettingsSection>
-        </SettingsTabPanel>
+              <div className="grid max-w-md gap-2">
+                <Label htmlFor="settings-mcp-approval-mode">Approval mode</Label>
+                <Select
+                  disabled={mcpBusy || !mcpState}
+                  onValueChange={(value) =>
+                    void handleMcpApprovalMode(value as WormholeMcpApprovalMode)
+                  }
+                  value={mcpState?.approvalMode ?? 'first-access'}
+                >
+                  <SelectTrigger
+                    aria-describedby="settings-mcp-approval-description"
+                    className="w-full"
+                    id="settings-mcp-approval-mode"
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="full-access">Full access</SelectItem>
+                    <SelectItem value="always-ask">Always ask</SelectItem>
+                    <SelectItem value="first-access">Ask on first access</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p
+                  className="text-[11px] leading-relaxed text-muted-foreground"
+                  id="settings-mcp-approval-description"
+                >
+                  {mcpState?.approvalMode === 'full-access'
+                    ? 'AI agents can use all MCP tools without approval popups.'
+                    : mcpState?.approvalMode === 'always-ask'
+                      ? 'Every MCP action requires approval in a popup, including listing connections and reading terminal output.'
+                      : 'Approve access once per SSH session. Opening a saved connection also requires approval.'}
+                </p>
+              </div>
+              <div className="grid max-w-52 gap-2">
+                <Label htmlFor="settings-mcp-port">Port</Label>
+                <Input
+                  disabled={mcpBusy || mcpRunning}
+                  id="settings-mcp-port"
+                  onBlur={() => void commitMcpPort()}
+                  onChange={(event) => setMcpPort(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') {
+                      event.preventDefault();
+                      void commitMcpPort();
+                    }
+                  }}
+                  max="65535"
+                  min="1"
+                  type="number"
+                  value={mcpPort}
+                />
+              </div>
+              <p className="text-[11px] text-muted-foreground">
+                {mcpRunning
+                  ? `Running — connect an MCP client to ${mcpEndpoint}`
+                  : mcpEnabled
+                    ? 'MCP server is enabled and will start when Wormhole is ready.'
+                    : 'Stopped'}
+              </p>
+              <div className="grid gap-2">
+                <Label htmlFor="settings-mcp-endpoint">Endpoint</Label>
+                <div className="flex gap-2">
+                  <Input
+                    className="min-w-0"
+                    id="settings-mcp-endpoint"
+                    readOnly
+                    value={mcpEndpoint}
+                  />
+                  <Button
+                    className="shrink-0"
+                    disabled={mcpBusy}
+                    onClick={() => void copyMcpEndpoint()}
+                    size="sm"
+                    type="button"
+                    variant="outline"
+                  >
+                    Copy
+                  </Button>
+                </div>
+              </div>
+              <div className="grid gap-2">
+                <Label htmlFor="settings-mcp-token">Bearer token</Label>
+                <div className="flex flex-wrap gap-2">
+                  <Input
+                    className="min-w-64 flex-1"
+                    id="settings-mcp-token"
+                    placeholder="•••••••• (hidden — click Reveal)"
+                    readOnly
+                    type={mcpTokenRevealed ? 'text' : 'password'}
+                    value={mcpTokenRevealed ? mcpToken : ''}
+                  />
+                  <Button
+                    disabled={mcpBusy}
+                    onClick={() => void revealMcpToken()}
+                    size="sm"
+                    type="button"
+                    variant="outline"
+                  >
+                    {mcpTokenRevealed ? 'Hide' : 'Reveal'}
+                  </Button>
+                  <Button
+                    disabled={mcpBusy}
+                    onClick={() => void copyMcpToken()}
+                    size="sm"
+                    type="button"
+                    variant="outline"
+                  >
+                    Copy
+                  </Button>
+                  <Button
+                    disabled={mcpBusy}
+                    onClick={() => void regenerateMcpToken()}
+                    size="sm"
+                    type="button"
+                    variant="outline"
+                  >
+                    Regenerate
+                  </Button>
+                </div>
+              </div>
+              <div className="grid max-w-60 gap-2">
+                <Label htmlFor="settings-mcp-client">Client</Label>
+                <Select
+                  onValueChange={(value) => setMcpClient(value as McpClient)}
+                  value={mcpClient}
+                >
+                  <SelectTrigger id="settings-mcp-client" className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="claude-code">Claude Code CLI</SelectItem>
+                    <SelectItem value="claude-desktop">Claude Desktop</SelectItem>
+                    <SelectItem value="codex">Codex</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <p className="text-[11px] leading-relaxed text-muted-foreground">
+                {mcpConfigDetails.caption}
+              </p>
+              <p className="text-[11px] leading-relaxed text-muted-foreground">
+                Reveal the token first to view it here, or use Copy config to copy a ready-to-paste
+                configuration with the current token.
+              </p>
+              <div className="grid gap-2">
+                <Label htmlFor="settings-mcp-config">{mcpConfigDetails.label}</Label>
+                <Textarea
+                  className="min-h-48 resize-none font-mono text-[11px]"
+                  id="settings-mcp-config"
+                  readOnly
+                  value={mcpConfig}
+                />
+                <Button
+                  className="w-fit"
+                  disabled={mcpBusy}
+                  onClick={() => void copyMcpConfig()}
+                  size="sm"
+                  type="button"
+                  variant="outline"
+                >
+                  Copy config
+                </Button>
+              </div>
+              {mcpError ? <p className="text-[11px] text-destructive">{mcpError}</p> : null}
+              {mcpMessage ? <p className="text-[11px] text-emerald-400">{mcpMessage}</p> : null}
+            </SettingsSection>
+          </SettingsTabPanel>
+        </div>
       </Tabs>
+      {bitwardenCliDialog ? (
+        <BitwardenCliDialog
+          currentServerRegion={currentBitwardenServerRegion}
+          defaultServerRegion={bitwardenServerRegion}
+          error={bitwardenError}
+          key={bitwardenCliDialog}
+          loginBusy={bitwardenBusy}
+          mode={bitwardenCliDialog}
+          onClose={() => setBitwardenCliDialog(null)}
+          onLogin={(email, masterPassword, authenticatorCode, serverRegion) =>
+            void handleBitwardenCliLogin(email, masterPassword, authenticatorCode, serverRegion)
+          }
+          onUnlock={(masterPassword) => void handleBitwardenCliUnlock(masterPassword)}
+        />
+      ) : null}
+
+      <BitwardenOperationDialog
+        description="Refresh the Bitwarden credentials available to Wormhole."
+        onClose={() => setBitwardenSyncDialog(null)}
+        state={bitwardenSyncDialog}
+        title="Sync Bitwarden vault"
+      />
+
+      <BitwardenOperationDialog
+        description="Download and install the latest Bitwarden command-line client."
+        onClose={() => setBitwardenCliUpdateDialog(null)}
+        state={bitwardenCliUpdateDialog}
+        title="Update Bitwarden CLI"
+      />
+
+      <BitwardenOperationDialog
+        description="Download and install the latest official Bitwarden browser extension."
+        onClose={() => setBitwardenExtensionUpdateDialog(null)}
+        state={bitwardenExtensionUpdateDialog}
+        title="Update Bitwarden extension"
+      />
       <Dialog onOpenChange={closeBackupExport} open={backupExportOpen}>
         <DialogContent className="border-border/70 bg-card text-card-foreground sm:max-w-lg">
           <DialogHeader>
@@ -17662,12 +17856,6 @@ function UtilityPage({
       description:
         'Secure routes are shared across sessions and released when the last tab closes.',
       cards: ['WireGuard', 'OpenVPN', 'Cisco Secure Client'],
-    },
-    settings: {
-      kicker: 'Preferences',
-      title: 'Settings',
-      description: 'Tune the shell, terminal behavior, and security defaults for this machine.',
-      cards: ['Appearance', 'Security', 'Updates'],
     },
     sessions: {
       kicker: 'Open sessions',
