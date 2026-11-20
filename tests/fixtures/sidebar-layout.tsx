@@ -54,6 +54,7 @@ function Harness({
   const [dropdownOpen, setDropdownOpen] = React.useState(false);
   const [overlayOpen, setOverlayOpen] = React.useState(false);
   const [activePage, setActivePage] = React.useState<SidebarPage>('sessions');
+  const [settingsOpen, setSettingsOpen] = React.useState(false);
   return (
     <div className="flex h-full flex-col">
       <SidebarLayout
@@ -74,7 +75,13 @@ function Harness({
           </>
         }
         navigation={
-          <SidebarNavigation activePage={activePage} onNavigate={setActivePage} sessionCount={2} />
+          <SidebarNavigation
+            activePage={activePage}
+            onNavigate={setActivePage}
+            onOpenSettings={() => setSettingsOpen(true)}
+            sessionCount={2}
+            settingsOpen={settingsOpen}
+          />
         }
         initialPinned={pinned}
         initialWidth={width}
@@ -125,6 +132,7 @@ function Harness({
           </ContextMenu>
           <output id="native-visible">{String(!overlayOpen && !menuOpen)}</output>
           <output id="page">{activePage}</output>
+          <output id="settings-open">{String(settingsOpen)}</output>
         </main>
       </SidebarLayout>
     </div>
@@ -910,7 +918,8 @@ window.runSidebarTests = async (handleOnly = false) => {
     [...nav.querySelectorAll('button')].map((button) => button.getAttribute('aria-label')),
     ['Sessions', 'Credentials', 'Tunnels', 'Settings'],
   );
-  for (const button of nav.querySelectorAll('button')) {
+  const navButtons = [...nav.querySelectorAll('button')];
+  for (const button of navButtons.slice(0, 3)) {
     assert.ok(button.querySelector('svg'));
     assert.equal(getComputedStyle(button).visibility, 'visible');
     assert.ok(button.getBoundingClientRect().right <= aside().getBoundingClientRect().right);
@@ -919,6 +928,19 @@ window.runSidebarTests = async (handleOnly = false) => {
     assert.equal(query('#page').textContent, button.getAttribute('aria-label')!.toLowerCase());
     await shown(true);
   }
+  const settingsNavButton = navButtons[3];
+  assert.ok(settingsNavButton.querySelector('svg'));
+  assert.equal(getComputedStyle(settingsNavButton).visibility, 'visible');
+  assert.ok(
+    settingsNavButton.getBoundingClientRect().right <= aside().getBoundingClientRect().right,
+  );
+  await click(settingsNavButton);
+  assert.equal(settingsNavButton.getAttribute('aria-haspopup'), 'dialog');
+  assert.equal(settingsNavButton.getAttribute('aria-expanded'), 'true');
+  assert.equal(settingsNavButton.getAttribute('aria-current'), null);
+  assert.equal(query('#settings-open').textContent, 'true');
+  assert.equal(query('#page').textContent, 'tunnels');
+  await shown(true);
   await move(1000);
   await React.act(async () => query('#outside').focus());
   await shown(false);
@@ -1230,7 +1252,7 @@ async function runAppIntegrationTests(handleOnly = false) {
       buttons.map((button) => button.getAttribute('aria-label')),
       ['Sessions', 'Credentials', 'Tunnels', 'Settings'],
     );
-    for (const button of buttons) {
+    for (const button of buttons.slice(0, 3)) {
       await hoverPin();
       await window.sidebarObserve(button.getAttribute('aria-label')!);
       assert.ok(button.querySelector('svg'));
@@ -1255,6 +1277,29 @@ async function runAppIntegrationTests(handleOnly = false) {
       await move(1000, 400);
       await shown(false);
     }
+    const settingsButton = buttons[3];
+    await hoverPin();
+    await window.sidebarObserve(settingsButton.getAttribute('aria-label')!);
+    assert.ok(settingsButton.querySelector('svg'));
+    assert.ok(
+      Math.abs(iconCenter(pin) - iconCenter(settingsButton)) <= 1,
+      'Expanding the sidebar moved its navigation icons out of alignment',
+    );
+    assert.equal(settingsButton.getAttribute('aria-haspopup'), 'dialog');
+    assert.equal(settingsButton.getAttribute('aria-current'), null);
+    await click(settingsButton);
+    await waitFor(
+      () => document.querySelector('[data-settings-dialog][data-state="open"]') !== null,
+      'Settings overlay dialog did not open',
+    );
+    assert.match(query('[data-slot="sidebar-inset"]').textContent!, /Tunnels/i);
+    await click(query('[aria-label="Close settings"]'));
+    await waitFor(
+      () => document.querySelector('[data-settings-dialog][data-state="open"]') === null,
+      'Settings overlay dialog did not close',
+    );
+    await move(1000, 400);
+    await shown(false);
     await window.sidebarObserve('collapsed');
     await hoverPin();
     assert.equal(query('[data-sidebar-surface]').getBoundingClientRect().left, 0);
