@@ -146,6 +146,26 @@ async function runWebBrowserTests() {
     webBrowser: { ...session.webBrowser, tunnel: { name: 'Office', kind: 'OpenVPN' } },
   });
   assert.ok(document.body.textContent?.includes("Office's OpenVPN ACTIVE"));
+  await render({ webBrowser: { ...session.webBrowser, vpnStatus: 'disconnected' } });
+  const recovery = document.querySelector<HTMLButtonElement>(
+    'button[aria-label="VPN disconnected. Reconnect?"]',
+  )!;
+  assert.ok(recovery.classList.contains('bg-red-700'));
+  assert.ok(recovery.classList.contains('text-white'));
+  assert.equal(document.querySelectorAll('[role="tab"]').length, 3);
+  assert.equal(nativeVisible, true);
+  await click('VPN disconnected. Reconnect?');
+  assert.deepEqual(commands.pop(), { sessionId: 'browser', operation: 'reconnect-vpn' });
+  assert.equal(reconnects.length, 0);
+  await render({ webBrowser: { ...session.webBrowser, vpnStatus: 'reconnecting' } });
+  assert.equal(
+    document.querySelector<HTMLButtonElement>('button[aria-label="Reconnecting VPN…"]')!.disabled,
+    true,
+  );
+  assert.equal(nativeVisible, true);
+  await render({ webBrowser: { ...session.webBrowser, vpnStatus: 'active' } });
+  assert.ok(document.body.textContent?.includes("Office's OpenVPN ACTIVE"));
+  assert.equal(document.querySelectorAll('[role="tab"]').length, 3);
   await render({ status: 'failed' });
   assert.ok(!document.body.textContent?.includes('ACTIVE'));
   await render({ status: 'connected' });

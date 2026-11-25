@@ -40,12 +40,17 @@ const popupScript = stripTypeScriptTypes(
       send = backendSend;
       child = {};
       browserPrompts = new TunnelBrowserPromptTracker();
+      rendererTunnelPrompts = new Map();
       tunnelFailures = new TunnelFailureRegistry();
       outputBuffer = '';
       pending = new Map();`,
     mainSource.slice(
       mainSource.indexOf('  async releaseTunnel(leaseId:'),
       mainSource.indexOf('  async respondTunnelRoute(request:'),
+    ),
+    mainSource.slice(
+      mainSource.indexOf('  async openWebTunnelEndpoint('),
+      mainSource.indexOf('  async acquireTunnelRoute('),
     ),
     mainSource.slice(
       mainSource.indexOf('  private readOutput(chunk:'),
@@ -154,6 +159,11 @@ function browserAuthHarness(
   const responses: { cancelled: boolean; value: string; browserFailure?: string }[] = [];
   const diagnostics: unknown[][] = [];
   const authSession = { isAccessAllowed: true, authorizationEpoch: 1 };
+  const rendererEvents: unknown[] = [];
+  const renderer = {
+    isDestroyed: () => false,
+    webContents: { send: (_channel: string, event: unknown) => rendererEvents.push(event) },
+  };
   const presented: AuthWindow[] = [];
   let expire!: () => void;
   let expireCleanup: (() => void) | undefined;
@@ -224,6 +234,7 @@ function browserAuthHarness(
       isAuthorizationEpochCurrent: (epoch: number) =>
         authSession.isAccessAllowed && authSession.authorizationEpoch === epoch,
       isQuitting: false,
+      randomUUID: () => 'relay-id',
       URL,
       Buffer,
       setInterval: (callback: () => void) => {
@@ -265,7 +276,8 @@ function browserAuthHarness(
       nativeBackendLineLimit: 64 * 1024 * 1024,
       routeNativeOperationProgress() {},
       routeTunnelTestProgress: () => false,
-      windowCloseCoordinators: new Set(),
+      windowCloseCoordinators: new Set([renderer]),
+      isSshSessionId: (value: unknown) => typeof value === 'string' && /^[\w-]{1,128}$/.test(value),
       electronSession: {
         fromPartition: (partition: string) => {
           partitions.push(partition);
@@ -273,6 +285,9 @@ function browserAuthHarness(
         },
       },
       BrowserWindow: class extends AuthWindow {
+        static getAllWindows() {
+          return [renderer];
+        }
         constructor(options: { webPreferences: { partition: string } }) {
           super();
           windowPartitions.push(options.webPreferences.partition);
@@ -315,6 +330,7 @@ function browserAuthHarness(
     loads,
     responses,
     authSession,
+    rendererEvents,
     presented,
     finished,
     urls,
@@ -651,6 +667,27 @@ test('backend loss closes a hidden SAML popup and discards queued prompts', asyn
   assert.deepEqual(auth.responses, []);
 });
 
+test('workspace VPN prompts close after a lock or a backend crash', async (t) => {
+  const auth = browserAuthHarness(t);
+  const prompt = { type: 'tunnel.prompt', sessionId: 'reconnect', promptId: 'plain-prompt' };
+  const closed = { ...prompt, type: 'tunnel.prompt-closed' };
+  auth.emit(prompt);
+  auth.authSession.isAccessAllowed = false;
+  auth.emit({ ...closed, sessionId: 'different-lease' });
+  auth.emit({ ...prompt, promptId: 'hidden-prompt' });
+  assert.deepEqual(JSON.parse(JSON.stringify(auth.rendererEvents)), [prompt]);
+  auth.emit(closed);
+  auth.authSession.isAccessAllowed = true;
+  auth.emit(prompt);
+  auth.backend.rejectAll(new Error('Backend crashed'));
+  assert.deepEqual(JSON.parse(JSON.stringify(auth.rendererEvents)), [
+    prompt,
+    closed,
+    prompt,
+    closed,
+  ]);
+});
+
 test('tunnel failure cleanup after backend exit never sends a release to a new process', async (t) => {
   const auth = browserAuthHarness(t);
   await setImmediate();
@@ -677,6 +714,48 @@ test('live tunnel release forgets its failure handler and retains backend errors
   await assert.rejects(auth.backend.releaseTunnel('other'), /Release unavailable/);
   auth.backend.send = async () => ({ ok: false });
   await assert.rejects(auth.backend.releaseTunnel('other'), /Could not release/);
+});
+
+test('a paused browser relay cannot release a lease to a replacement backend', async (t) => {
+  const auth = browserAuthHarness(t);
+  let paused!: () => void;
+  const disconnecting = new Promise<void>((resolve) => {
+    paused = resolve;
+  });
+  const cleanup = auth.backend.releaseTunnel('lease', disconnecting);
+  auth.backend.child = {};
+  paused();
+  await cleanup;
+  assert.deepEqual(auth.responses, []);
+});
+
+test('the browser relay client waits for native acknowledgement and refuses commands after exit', async (t) => {
+  const auth = browserAuthHarness(t);
+  const commands: any[] = [];
+  auth.backend.send = async (command: unknown) => {
+    commands.push(command);
+    return { ok: true, forwardPort: 45000 };
+  };
+  let exits = 0;
+  const endpoint = await auth.backend.openWebTunnelEndpoint(() => exits++);
+  assert.equal(endpoint.port, 45000);
+  await endpoint.connect(2150);
+  const paused = endpoint.disconnect();
+  assert.equal(endpoint.disconnect(), paused);
+  await paused;
+  assert.deepEqual(
+    commands.map(({ action, port }) => [action, port]),
+    [
+      ['browser-relay.open', undefined],
+      ['browser-relay.route', 2150],
+      ['browser-relay.route', 0],
+    ],
+  );
+  auth.backend.rejectAll(new Error('Relay stopped'));
+  assert.equal(exits, 1);
+  await assert.rejects(endpoint.connect(2250), /endpoint is closed/);
+  await endpoint.close();
+  assert.equal(commands.length, 3);
 });
 
 test('native popup setup errors settle the prompt and leave the queue usable', async (t) => {
