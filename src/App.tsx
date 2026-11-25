@@ -7305,26 +7305,34 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
               style={{ '--sidebar-width': '100%' } as CSSProperties}
             >
               <Sidebar className="relative w-full border-r-0" collapsible="none">
-                <SidebarHeader className="gap-3 p-3">
+                <SidebarHeader className="gap-2.5 px-3 pt-1 pb-2">
                   <div className="flex items-center justify-between gap-1">
                     <h1 className="!text-xs font-semibold tracking-tight">Connections</h1>
-                    <Button
-                      aria-keyshortcuts="Control+K Meta+K"
-                      onClick={openQuickConnect}
-                      size="xs"
-                    >
-                      <Zap data-icon="inline-start" />
-                      Quick Connect
-                      <Kbd className="h-4 bg-primary-foreground/10 text-[10px] text-current">
-                        Ctrl K
-                      </Kbd>
-                    </Button>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          aria-keyshortcuts="Control+K Meta+K"
+                          aria-label="Quick Connect"
+                          className="size-[30px]"
+                          onClick={openQuickConnect}
+                          size="icon-sm"
+                        >
+                          <Zap />
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent align="end" side="bottom">
+                        Quick Connect
+                        <Kbd className="h-4 bg-background/15 text-[10px] text-current">
+                          {window.wormhole?.platform === 'darwin' ? '⌘ K' : 'Ctrl K'}
+                        </Kbd>
+                      </TooltipContent>
+                    </Tooltip>
                   </div>
                   <div className="relative">
                     <Search className="pointer-events-none absolute left-2.5 top-1/2 z-10 size-3.5 -translate-y-1/2 text-muted-foreground" />
                     <SidebarInput
                       aria-label="Search connections"
-                      className="bg-background/60 pl-8 pr-8 !text-xs shadow-none"
+                      className="h-9 bg-sidebar-accent/35 pl-8 pr-8 !text-xs dark:bg-sidebar-accent/35"
                       onChange={(event) => updateTreeSearchText(event.target.value)}
                       placeholder="Search connections"
                       value={searchText}
@@ -7339,48 +7347,64 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                       </IconButton>
                     ) : null}
                   </div>
-                  <div className="flex items-center gap-0.5">
-                    <IconButton label="Expand all folders" onClick={() => toggleAllFolders(true)}>
-                      <ChevronDown />
-                    </IconButton>
-                    <IconButton
-                      label="Collapse all folders"
-                      onClick={() => toggleAllFolders(false)}
+                  <div className="flex items-center gap-2">
+                    <div
+                      className="flex items-center gap-1 rounded-lg border border-sidebar-border bg-sidebar-accent/30 p-0.5"
+                      role="group"
+                      aria-label="Folder expansion"
                     >
-                      <ChevronUp />
-                    </IconButton>
-                    <DropdownMenu onOpenChange={setSidebarImportMenuOpen}>
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <DropdownMenuTrigger asChild>
-                            <Button aria-label="Import connections" size="icon-sm" variant="ghost">
-                              <Upload />
-                            </Button>
-                          </DropdownMenuTrigger>
-                        </TooltipTrigger>
-                        <TooltipContent side="bottom">Import connections</TooltipContent>
-                      </Tooltip>
-                      <DropdownMenuContent align="end" className="w-52">
-                        <DropdownMenuItem onClick={() => setMremoteImportOpen(true)}>
-                          <Upload />
-                          Import from mRemoteNG
-                        </DropdownMenuItem>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
-                    <IconButton
-                      aria-keyshortcuts="Control+Shift+N Meta+Shift+N"
-                      label="New folder"
-                      onClick={() => openNewFolder(null)}
+                      <IconButton label="Expand all folders" onClick={() => toggleAllFolders(true)}>
+                        <ChevronDown />
+                      </IconButton>
+                      <IconButton
+                        label="Collapse all folders"
+                        onClick={() => toggleAllFolders(false)}
+                      >
+                        <ChevronUp />
+                      </IconButton>
+                    </div>
+                    <div
+                      className="flex items-center gap-1 rounded-lg border border-sidebar-border bg-sidebar-accent/30 p-0.5"
+                      role="group"
+                      aria-label="Manage connections"
                     >
-                      <FolderPlus />
-                    </IconButton>
-                    <IconButton
-                      aria-keyshortcuts="Control+N Meta+N"
-                      label="New connection"
-                      onClick={() => openNewConnection(null)}
-                    >
-                      <Plus />
-                    </IconButton>
+                      <DropdownMenu onOpenChange={setSidebarImportMenuOpen}>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <DropdownMenuTrigger asChild>
+                              <Button
+                                aria-label="Import connections"
+                                size="icon-sm"
+                                variant="ghost"
+                              >
+                                <Upload />
+                              </Button>
+                            </DropdownMenuTrigger>
+                          </TooltipTrigger>
+                          <TooltipContent side="bottom">Import connections</TooltipContent>
+                        </Tooltip>
+                        <DropdownMenuContent align="end" className="w-52">
+                          <DropdownMenuItem onClick={() => setMremoteImportOpen(true)}>
+                            <Upload />
+                            Import from mRemoteNG
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                      <IconButton
+                        aria-keyshortcuts="Control+Shift+N Meta+Shift+N"
+                        label="New folder"
+                        onClick={() => openNewFolder(null)}
+                      >
+                        <FolderPlus />
+                      </IconButton>
+                      <IconButton
+                        aria-keyshortcuts="Control+N Meta+N"
+                        label="New connection"
+                        onClick={() => openNewConnection(null)}
+                      >
+                        <Plus />
+                      </IconButton>
+                    </div>
                   </div>
                   {searchText ? (
                     <p className="px-1 text-xs text-muted-foreground">
@@ -7434,7 +7458,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
             </SidebarProvider>
           }
         >
-          <SidebarInset className="h-full min-h-0 min-w-0 rounded-none bg-background">
+          <SidebarInset className="h-full min-h-0 min-w-0">
             <SftpRecoveryNotice />
             {activePage === 'sessions' ? (
               <SshCertificateEditorContext
@@ -10766,7 +10790,7 @@ function SessionPaneChrome({
   return (
     <div
       aria-label={`Session pane ${rect.paneId}`}
-      className="pointer-events-none absolute border border-border"
+      className="pointer-events-none absolute border border-transparent"
       role="group"
       style={{
         left: `${rect.x}%`,
@@ -10777,7 +10801,7 @@ function SessionPaneChrome({
     >
       <div
         aria-label="Pane tabs"
-        className={`pointer-events-auto relative z-30 flex h-9 min-w-0 items-stretch overflow-x-auto overflow-y-hidden border-b border-border ${dropTarget ? 'bg-primary/20 ring-2 ring-inset ring-primary' : 'bg-card/55'}`}
+        className={`pointer-events-auto relative z-30 flex h-9 min-w-0 items-stretch overflow-x-auto overflow-y-hidden border-b border-border ${dropTarget ? 'bg-primary/20 ring-2 ring-inset ring-primary' : 'bg-sidebar/55'}`}
         onFocusCapture={onActivate}
         onPointerDown={onActivate}
         role="tablist"

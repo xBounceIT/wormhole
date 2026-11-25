@@ -201,7 +201,7 @@ window.runSidebarTests = async (handleOnly = false) => {
   const aside = () => query('aside');
   const sidebarContent = () => query('[data-sidebar-content]');
   const pin = () => query('[data-sidebar-pin]') as HTMLButtonElement;
-  const left = () => query('#content').getBoundingClientRect().left;
+  const left = () => query('[data-workspace-canvas] > div').getBoundingClientRect().left;
   const shown = async (expected: boolean) => {
     await waitFor(
       () =>
@@ -301,9 +301,9 @@ window.runSidebarTests = async (handleOnly = false) => {
       const titleBounds = title.getBoundingClientRect();
       assert.equal(headerBounds.height, 48 + nativeTitlebarHeight);
       assert.equal(getComputedStyle(header).paddingTop, nativeTitlebarHeight + 'px');
-      assert.equal(getComputedStyle(header).paddingLeft, '4px');
-      assert.equal(content.getBoundingClientRect().left, 4);
-      assert.equal(pinBounds.left, 4);
+      assert.equal(getComputedStyle(header).paddingLeft, '12px');
+      assert.equal(content.getBoundingClientRect().left, 12);
+      assert.equal(pinBounds.left, 12);
       assert.ok(pinBounds.top >= headerBounds.top + nativeTitlebarHeight);
       assert.ok(titleBounds.top >= headerBounds.top + nativeTitlebarHeight);
       assert.ok(titleBounds.left > pinBounds.right);
@@ -349,15 +349,13 @@ window.runSidebarTests = async (handleOnly = false) => {
     const separator = query('[data-slot="resizable-handle"]');
     const separatorBounds = separator.getBoundingClientRect();
     const gripBounds = separator.firstElementChild!.getBoundingClientRect();
-    const surface = query('[data-sidebar-surface]');
-    const dividerLeft =
-      surface.getBoundingClientRect().right -
-      parseFloat(getComputedStyle(surface).borderRightWidth);
+    const canvas = query('[data-workspace-canvas] > div');
+    const dividerCenter =
+      canvas.getBoundingClientRect().left +
+      parseFloat(getComputedStyle(canvas).borderLeftWidth) / 2;
     assert.ok(
-      Math.abs(
-        gripBounds.left + gripBounds.width / 2 - (dividerLeft + separatorBounds.right) / 2,
-      ) <= 0.25,
-      'The resize grip must stay centered across both visible divider borders',
+      Math.abs(gripBounds.left + gripBounds.width / 2 - dividerCenter) <= 0.25,
+      'The resize grip must stay centered on the canvas border',
     );
     assert.ok(
       Math.abs(
@@ -1188,8 +1186,57 @@ async function runAppIntegrationTests(handleOnly = false) {
   };
   const checkPinnedHandle = async () => {
     for (const theme of ['dark', 'light'] as const) {
-      await mount([], 294, true, theme);
+      await mount(
+        [{ id: 'preview-server', kind: 'connection', name: 'Preview server', protocol: 'https' }],
+        294,
+        true,
+        theme,
+      );
+      const connection = query('[data-connection-tree] button[draggable]');
+      await React.act(async () =>
+        connection.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })),
+      );
+      const tab = query('[role="tab"][data-session-tab-id="session-preview-server"]');
+      assert.ok(tab, 'Opening a connection must render its session tab');
+      assert.equal(tab.getAttribute('aria-selected'), 'true');
+      const titlebar = query('header');
+      const sidebar = query('[data-sidebar-surface]');
+      const canvas = query('[data-workspace-canvas] > div');
+      const titlebarStyle = getComputedStyle(titlebar);
+      const canvasStyle = getComputedStyle(canvas);
+      assert.equal(titlebarStyle.backgroundColor, getComputedStyle(sidebar).backgroundColor);
+      assert.equal(
+        titlebarStyle.backgroundColor,
+        getComputedStyle(titlebar.parentElement!).backgroundColor,
+      );
+      assert.equal(titlebarStyle.borderBottomWidth, '0px');
+      assert.equal(getComputedStyle(sidebar).borderRightWidth, '0px');
+      assert.notEqual(canvasStyle.backgroundColor, titlebarStyle.backgroundColor);
+      assert.equal(canvasStyle.borderTopLeftRadius, '12px');
+      assert.equal(canvasStyle.borderTopRightRadius, '0px');
+      assert.equal(canvasStyle.borderBottomLeftRadius, '0px');
+      assert.equal(canvasStyle.overflow, 'hidden');
+      assert.ok(parseFloat(canvasStyle.borderTopWidth) > 0);
+      assert.ok(parseFloat(canvasStyle.borderLeftWidth) > 0);
+      const bounds = canvas.getBoundingClientRect();
+      assert.equal(bounds.top, titlebar.getBoundingClientRect().bottom);
+      assert.ok(canvas.contains(tab));
+      assert.ok(!canvas.contains(document.elementFromPoint(bounds.left + 1, bounds.top + 1)));
       await window.sidebarObserve('pinned-' + theme);
+
+      const quickConnect = query('aside button[aria-label="Quick Connect"]');
+      await React.act(async () => quickConnect.focus());
+      const tooltip = () => query('[data-slot="tooltip-content"]');
+      await waitFor(
+        () => tooltip()?.textContent?.includes('Quick Connect') === true,
+        'Quick Connect must show its tooltip on keyboard focus',
+      );
+      const tooltipBounds = tooltip().getBoundingClientRect();
+      assert.ok(
+        tooltipBounds.left >= sidebar.getBoundingClientRect().left &&
+          tooltipBounds.right <= bounds.left,
+        'Quick Connect tooltip must fit inside the sidebar, clear of native session surfaces',
+      );
     }
   };
   const originalBridge = window.wormhole;
@@ -1251,7 +1298,9 @@ async function runAppIntegrationTests(handleOnly = false) {
     const nav = query('[data-sidebar-navigation] nav');
     assert.ok(nav.closest('[inert]'));
     assert.equal(getComputedStyle(query('[data-sidebar-surface]')).opacity, '0');
-    assert.equal(query('[data-slot="sidebar-inset"]').getBoundingClientRect().left, 0);
+    const canvas = query('[data-workspace-canvas] > div');
+    assert.equal(canvas.getBoundingClientRect().left, 0);
+    assert.equal(getComputedStyle(canvas).borderTopLeftRadius, '12px');
     const buttons = [...nav.querySelectorAll<HTMLButtonElement>('button')];
     const iconCenter = (element: Element) => {
       const bounds = element.querySelector('svg')!.getBoundingClientRect();
@@ -1465,9 +1514,13 @@ async function runAppIntegrationTests(handleOnly = false) {
           assert.equal(quick.right, search.right);
           assert.ok(quick.bottom <= search.top);
 
-          const actionBounds = connectionActions().map((action) => action.getBoundingClientRect());
+          const actions = connectionActions();
+          const actionBounds = actions.map((action) => action.getBoundingClientRect());
           const firstAction = actionBounds[0];
-          assert.equal(firstAction.left, search.left);
+          assert.equal(
+            actions[0].closest('[role="group"]')!.getBoundingClientRect().left,
+            search.left,
+          );
           assert.ok(search.bottom <= firstAction.top);
           assert.ok(firstAction.bottom <= rows[0].getBoundingClientRect().top);
           for (const [index, action] of actionBounds.entries()) {
