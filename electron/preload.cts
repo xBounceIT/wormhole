@@ -248,7 +248,7 @@ const wormholeBridge = {
   closeWebSession: (sessionId: string) => ipcRenderer.invoke('web:close', sessionId),
   onWebEvent: (
     listener: (event: {
-      type: 'connected' | 'failed' | 'navigation' | 'focus-address';
+      type: 'connected' | 'failed' | 'vpn-state' | 'navigation' | 'focus-address';
       sessionId: string;
       attempt: number;
       url: string;

@@ -55,6 +55,9 @@ export function WebSurface({
   const previewIdRef = useRef<string | undefined>(undefined);
   const browser = session.webBrowser;
   const vpnLabel = `${browser?.tunnel?.name ? `${browser.tunnel.name}'s ` : ''}${browser?.tunnel?.kind || 'VPN tunnel'}${session.status === 'connected' ? ' ACTIVE' : ''}`;
+  const vpnReconnecting = browser?.vpnStatus === 'reconnecting';
+  const vpnInterrupted = vpnReconnecting || browser?.vpnStatus === 'disconnected';
+  const vpnRecoveryLabel = vpnReconnecting ? 'Reconnecting VPN…' : 'VPN disconnected. Reconnect?';
   const tab = browser?.tabs.find((candidate) => candidate.id === browser.activeTabId);
   const available = isActive && isAuthorized && session.status === 'connected';
   const ready = available && !isOccluded;
@@ -352,29 +355,53 @@ export function WebSurface({
         >
           <Plus />
         </ToolbarButton>
-        <span
-          className="ml-auto flex max-w-[40%] shrink-0 items-center gap-1.5 border-l border-border pl-3 pr-1 text-[10px] font-medium text-muted-foreground"
-          title={
-            browser?.restrictedOrigin
-              ? `${vpnLabel}. VPN access is limited to ${browser.restrictedOrigin}`
-              : browser?.route === 'vpn'
-                ? `${vpnLabel}. All tabs use this browser’s VPN tunnel`
-                : 'No VPN tunnel is attached to this browser. Tabs use the normal network connection.'
-          }
-        >
-          {browser?.route === 'vpn' ? (
-            <ShieldCheck className="size-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
+        <div aria-live="polite" className="ml-auto max-w-[40%] shrink-0">
+          {vpnInterrupted ? (
+            <button
+              aria-label={vpnRecoveryLabel}
+              className="flex max-w-full items-center gap-1.5 rounded bg-red-700 px-2 py-1 text-[10px] font-medium text-white enabled:cursor-pointer enabled:hover:bg-red-800"
+              disabled={!ready || vpnReconnecting}
+              onClick={() => command('reconnect-vpn')}
+              title={
+                vpnReconnecting
+                  ? session.tunnelProgress?.detail || vpnRecoveryLabel
+                  : vpnRecoveryLabel
+              }
+              type="button"
+            >
+              {vpnReconnecting ? (
+                <LoaderCircle aria-hidden="true" className="size-3.5 shrink-0 animate-spin" />
+              ) : (
+                <AlertCircle aria-hidden="true" className="size-3.5 shrink-0" />
+              )}
+              <span className="truncate">{vpnRecoveryLabel}</span>
+            </button>
           ) : (
-            <Globe className="size-3.5" />
+            <span
+              className="flex items-center gap-1.5 border-l border-border pl-3 pr-1 text-[10px] font-medium text-muted-foreground"
+              title={
+                browser?.restrictedOrigin
+                  ? `${vpnLabel}. VPN access is limited to ${browser.restrictedOrigin}`
+                  : browser?.route === 'vpn'
+                    ? `${vpnLabel}. All tabs use this browser’s VPN tunnel`
+                    : 'No VPN tunnel is attached to this browser. Tabs use the normal network connection.'
+              }
+            >
+              {browser?.route === 'vpn' ? (
+                <ShieldCheck className="size-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
+              ) : (
+                <Globe className="size-3.5" />
+              )}
+              <span className="truncate">
+                {session.status === 'connecting'
+                  ? 'Connecting…'
+                  : browser?.route === 'vpn'
+                    ? vpnLabel
+                    : 'No VPN'}
+              </span>
+            </span>
           )}
-          <span className="truncate">
-            {session.status === 'connecting'
-              ? 'Connecting…'
-              : browser?.route === 'vpn'
-                ? vpnLabel
-                : 'No VPN'}
-          </span>
-        </span>
+        </div>
       </div>
       <header className="flex h-11 shrink-0 items-center gap-2 border-b border-border bg-card px-2">
         <div className="flex items-center gap-0.5">

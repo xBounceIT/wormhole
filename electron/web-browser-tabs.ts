@@ -149,6 +149,7 @@ export type WebBrowserState = {
   tabs: WebBrowserTabState[];
   route: 'direct' | 'vpn';
   tunnel?: { name: string; kind: string };
+  vpnStatus?: 'active' | 'disconnected' | 'reconnecting';
   restrictedOrigin?: string;
 };
 
@@ -164,6 +165,7 @@ export type WebBrowserCommand = {
     | 'new-tab'
     | 'close-tab'
     | 'select-tab'
+    | 'reconnect-vpn'
     | 'navigate';
   tabId?: string;
   url?: string;
@@ -274,9 +276,16 @@ export function isWebBrowserCommand(value: unknown): value is WebBrowserCommand 
   }
   return (
     typeof request.operation === 'string' &&
-    ['back', 'forward', 'reload', 'stop', 'zoom-in', 'zoom-out', 'new-tab'].includes(
-      request.operation,
-    )
+    [
+      'back',
+      'forward',
+      'reload',
+      'stop',
+      'zoom-in',
+      'zoom-out',
+      'new-tab',
+      'reconnect-vpn',
+    ].includes(request.operation)
   );
 }
 

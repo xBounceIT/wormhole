@@ -19,7 +19,12 @@ import { WebSessionAttemptTracker } from '../electron/web-session-attempt.ts';
 import { adjustWebZoom } from '../electron/web-zoom.ts';
 import { TunnelLeaseRegistry } from '../electron/tunnel-lease-registry.ts';
 import { assertTunnelRouteUnchanged } from '../electron/tunnel-route-snapshot.ts';
-import { tunnelClosedMessage } from '../electron/tunnel-failure.ts';
+import {
+  blockedWebTunnelProxy,
+  parseWebTunnelSocksPort,
+  WebTunnelProxy,
+  type WebTunnelEndpoint,
+} from '../electron/web-tunnel-endpoint.ts';
 import { KeyedSingleFlight } from '../electron/keyed-single-flight.ts';
 import { KeyedTaskTracker } from '../electron/keyed-task-tracker.ts';
 import { ExtensionMutationGuard } from '../electron/extension-mutation-guard.ts';
@@ -148,6 +153,7 @@ function browserHarness({ socks = '127.0.0.1:1080', active = true } = {}) {
         setProxy: async (proxy: unknown) => {
           sessions.get(partition)!.proxy = proxy;
         },
+        closeAllConnections: async () => {},
         setPermissionRequestHandler() {},
         setPermissionCheckHandler() {},
         fetch: async () => new Response(null, { status: 404 }),
@@ -196,6 +202,9 @@ function browserHarness({ socks = '127.0.0.1:1080', active = true } = {}) {
       return this.destroyed;
     }
     isLoading() {
+      return this.loading;
+    }
+    isLoadingMainFrame() {
       return this.loading;
     }
     getURL() {
@@ -306,7 +315,26 @@ function browserHarness({ socks = '127.0.0.1:1080', active = true } = {}) {
     WebSessionAttemptTracker,
     TunnelLeaseRegistry,
     assertTunnelRouteUnchanged,
-    tunnelClosedMessage,
+    blockedWebTunnelProxy,
+    parseWebTunnelSocksPort,
+    WebTunnelProxy,
+    WebTunnelEndpoint: {
+      listen: async () => ({
+        port: 53001,
+        upstream: undefined as number | undefined,
+        closed: false,
+        connect(port: number) {
+          this.upstream = port;
+        },
+        disconnect() {
+          this.upstream = undefined;
+        },
+        close() {
+          this.disconnect();
+          this.closed = true;
+        },
+      }),
+    },
     KeyedSingleFlight,
     KeyedTaskTracker,
     ExtensionMutationGuard,
@@ -437,14 +465,14 @@ function browserHarness({ socks = '127.0.0.1:1080', active = true } = {}) {
   const open = (
     sessionId = 'browser-1',
     tunnelConfigId: string | undefined = 'vpn-1',
-    extra = {},
+    extra: { nodeId?: string; [key: string]: unknown } = {},
   ) =>
     manager.open(owner, {
       sessionId,
       attempt: 1,
       protocol: 'https',
       address: 'https://router.internal/',
-      tunnelConfigId,
+      tunnelConfigId: extra.nodeId ? undefined : tunnelConfigId,
       ...extra,
     });
   const command = (operation: string, extra = {}, sessionId = 'browser-1') =>
@@ -1128,7 +1156,7 @@ test('each browser owns its profile and one VPN lease shared by all its tabs', a
   assert.equal(h.acquisitions.length, 1);
   assert.equal(
     (h.sessions.get(record.partition)!.proxy as any).proxyRules,
-    'socks5://127.0.0.1:1080',
+    'socks5://127.0.0.1:53001',
   );
   assert.equal((h.sessions.get(record.partition)!.proxy as any).proxyBypassRules, '<-loopback>');
   await h.command('navigate', { url: 'https://another.internal/admin' });
@@ -1275,9 +1303,12 @@ test('page failures, aborted loads and tab crashes keep the browser route alive'
   assert.equal(h.children.has(first), false);
   assert.equal(h.manager.surfaces.has('browser-1'), true);
   h.manager.backendStopped();
-  assert.equal(h.manager.surfaces.size, 0);
-  assert.equal(h.children.size, 0);
-  assert.ok(h.events.some((event) => event.type === 'failed' && /VPN/.test(event.error)));
+  assert.equal(h.manager.surfaces.get('browser-1'), record);
+  assert.equal(h.children.size, 1);
+  assert.equal(h.events.at(-1).browser.vpnStatus, 'disconnected');
+  assert.equal(record.vpn.endpoint.upstream, undefined);
+  assert.equal(await h.command('reconnect-vpn'), true);
+  assert.equal(h.events.at(-1).browser.vpnStatus, 'active');
 });
 
 test('native tab destruction retires the selected page before deferred view cleanup', async () => {
@@ -1677,26 +1708,104 @@ test('a VPN browser cannot finish opening after its acquired lease disappears du
   );
 });
 
-test('a dropped SSH route closes every browser tab and releases its shared lease', async () => {
+test('a VPN drop releases the shared lease and reconnects all tabs in place', async () => {
   const h = browserHarness();
   await h.open();
-  await h.command('new-tab', { address: 'https://second.internal/' });
+  await h.command('new-tab');
+  await h.command('navigate', { url: 'https://second.internal/' });
   const record = h.manager.surfaces.get('browser-1');
   const contents = record.tabs.all().map((view: any) => view.webContents);
+  const before = h.events.at(-1).browser;
   assert.equal(contents.length, 2);
   const request = h.acquisitions[0] as { onExit: () => void };
   request.onExit();
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(h.manager.surfaces.size, 0);
-  assert.equal(h.children.size, 0);
-  assert.ok(contents.every((tab) => tab.destroyed));
+  assert.equal(h.manager.surfaces.get('browser-1'), record);
+  assert.equal(h.children.size, 2);
+  assert.ok(contents.every((tab) => !tab.destroyed));
   assert.equal(h.releases.length, 1);
-  assert.ok(
-    h.events.some((event) => event.type === 'failed' && event.error === tunnelClosedMessage),
+  assert.equal(record.vpn.endpoint.upstream, undefined);
+  assert.equal(h.events.at(-1).type, 'vpn-state');
+  assert.equal(h.events.at(-1).browser.vpnStatus, 'disconnected');
+  assert.deepEqual(h.events.at(-1).browser.tabs, before.tabs);
+  await assert.rejects(
+    h.command('navigate', { url: 'https://other.internal/' }),
+    /Reconnect the VPN/,
   );
+  await assert.rejects(h.command('reload'), /Reconnect the VPN/);
+  assert.equal(contents[1].opens({ url: 'https://other.internal/' }).action, 'deny');
+  assert.equal(contents[1].getURL(), 'https://second.internal/');
+
+  const acquire = h.backend.acquireTunnelRoute;
+  h.backend.acquireTunnelRoute = async () => {
+    throw new Error('VPN authentication was cancelled');
+  };
+  await assert.rejects(h.command('reconnect-vpn'), /authentication was cancelled/);
+  assert.equal(h.releases.length, 2);
+  assert.equal(record.vpn.endpoint.upstream, undefined);
+  assert.equal(h.events.at(-1).browser.vpnStatus, 'disconnected');
+
+  h.backend.acquireTunnelRoute = async (request) => ({
+    ...(await acquire(request)),
+    socksEndpoint: '127.0.0.1:2090',
+  });
+  const reconnecting = h.command('reconnect-vpn');
+  assert.equal(h.events.at(-1).browser.vpnStatus, 'reconnecting');
+  assert.equal(await h.command('reconnect-vpn'), false);
+  assert.equal(await reconnecting, true);
+  assert.equal((h.acquisitions.at(-1) as any).tunnelConfigId, 'vpn-1');
+  assert.equal(h.events.at(-1).browser.vpnStatus, 'active');
+  assert.equal(h.events.at(-1).browser.activeTabId, before.activeTabId);
+  assert.deepEqual(h.events.at(-1).browser.tabs, before.tabs);
+  assert.deepEqual(
+    record.tabs.all().map((view: any) => view.webContents),
+    contents,
+  );
+  assert.ok(contents.every((tab) => tab.reloads === 0));
+  assert.equal(record.vpn.endpoint.upstream, 2090);
+  request.onExit();
+  assert.equal(h.events.at(-1).browser.vpnStatus, 'active');
 });
 
-test('an old SSH route exit cannot close a replacement browser', async () => {
+test('a VPN reconnect rejects a direct route and a late acquisition after closing', async () => {
+  const h = browserHarness();
+  await h.open();
+  const record = h.manager.surfaces.get('browser-1');
+  (h.acquisitions[0] as { onExit: () => void }).onExit();
+  const acquire = h.backend.acquireTunnelRoute;
+  h.backend.acquireTunnelRoute = async (request) => ({
+    ...(await acquire(request)),
+    active: false,
+    socksEndpoint: '',
+  });
+  await assert.rejects(h.command('reconnect-vpn'), /different route/);
+  assert.equal(h.events.at(-1).browser.vpnStatus, 'disconnected');
+  assert.equal(record.vpn.endpoint.upstream, undefined);
+
+  let finish!: () => void;
+  let started!: () => void;
+  const acquisitionStarted = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  h.backend.acquireTunnelRoute = async (request) => {
+    await new Promise<void>((resolve) => {
+      finish = resolve;
+      started();
+    });
+    return acquire(request);
+  };
+  const reconnecting = h.command('reconnect-vpn');
+  await acquisitionStarted;
+  h.manager.close('browser-1');
+  finish();
+  assert.equal(await reconnecting, false);
+  assert.equal(record.vpn.endpoint.closed, true);
+  assert.equal(record.vpn.endpoint.upstream, undefined);
+  assert.equal(h.manager.surfaces.size, 0);
+  assert.equal(h.releases.length, 3);
+});
+
+test('an old VPN exit cannot disconnect a replacement browser', async () => {
   const h = browserHarness();
   await h.open();
   const oldRequest = h.acquisitions[0] as { onExit: () => void };
@@ -1708,16 +1817,111 @@ test('an old SSH route exit cannot close a replacement browser', async () => {
   h.manager.close('browser-1');
 });
 
-test('an explicit Direct route choice releases its unused lease and labels the browser accurately', async () => {
+test('Quick Connect requires its requested VPN while a saved Direct choice remains available', async () => {
   const h = browserHarness({ active: false, socks: '' });
-  const target = await h.open();
+  const initialSessionCount = h.sessions.size;
+  await assert.rejects(h.open(), /requested VPN tunnel is unavailable/);
+  assert.equal(h.children.size, 0);
+  assert.equal(h.sessions.size, initialSessionCount);
+  assert.equal(h.releases.length, 1);
+  const acquire = h.backend.acquireTunnelRoute;
+  h.backend.acquireTunnelRoute = async (request) => ({
+    ...(await acquire(request)),
+    active: true,
+    configuredTunnelId: 'other-vpn',
+  });
+  await assert.rejects(h.open(), /VPN route no longer matches/);
+  assert.equal(h.children.size, 0);
+  assert.equal(h.releases.length, 2);
+  h.backend.acquireTunnelRoute = acquire;
+  const target = await h.open('browser-1', undefined, {
+    nodeId: 'saved',
+    address: undefined,
+    tunnelConfigId: undefined,
+  });
   const record = h.manager.surfaces.get('browser-1');
   assert.equal(target.browser.route, 'direct');
   assert.equal(record.tunnelLeaseId, undefined);
   assert.equal(h.manager.tunnelLeases.has('browser-1'), false);
-  assert.equal(h.releases.length, 1);
+  assert.equal(h.releases.length, 3);
   assert.equal(h.sessions.get(record.partition)!.proxy, undefined);
   h.manager.close('browser-1');
+});
+
+test('locking during VPN authentication promptly releases the reconnect lease', async () => {
+  const h = browserHarness();
+  await h.open();
+  const record = h.manager.surfaces.get('browser-1');
+  (h.acquisitions[0] as { onExit: () => void }).onExit();
+
+  let startAuthentication!: (leaseId: string) => void;
+  const authentication = new Promise<string>((resolve) => {
+    startAuthentication = resolve;
+  });
+  let finishAuthentication!: () => void;
+  h.backend.acquireTunnelRoute = async (request) => {
+    startAuthentication(request.leaseId);
+    await new Promise<void>((resolve) => {
+      finishAuthentication = resolve;
+    });
+    throw new Error('VPN authentication was cancelled');
+  };
+  const attempt = h.command('reconnect-vpn');
+  const rejected = assert.rejects(attempt, /authentication was cancelled/);
+  const lease = await authentication;
+  h.authSession.authorizationEpoch++;
+  h.authSession.isAccessAllowed = false;
+  h.manager.cancelTunnelReconnects();
+  assert.equal(h.releases.at(-1), lease);
+  assert.equal(h.manager.tunnelLeases.isActive('browser-1', lease), false);
+  finishAuthentication();
+  await rejected;
+  assert.equal(h.events.at(-1).browser.vpnStatus, 'disconnected');
+  assert.equal(h.manager.surfaces.get('browser-1'), record);
+});
+
+test('a retired browser proxy keeps its port reserved through Chromium cleanup and failed retries', async () => {
+  const calls: string[] = [];
+  let flushConnections!: () => void;
+  let failFlush = true;
+  const session = {
+    setProxy: async ({ proxyRules }: Electron.ProxyConfig) => {
+      calls.push(proxyRules!);
+    },
+    closeAllConnections: async () => {
+      if (failFlush) throw new Error('Chromium close failed');
+      await new Promise<void>((resolve) => {
+        flushConnections = resolve;
+      });
+    },
+  } as unknown as Electron.Session;
+  const makeEndpoint = (name: string) =>
+    ({
+      disconnect: () => calls.push(`disconnect ${name}`),
+      close: () => calls.push(`close ${name}`),
+    }) as unknown as WebTunnelEndpoint;
+  const oldEndpoint = makeEndpoint('old');
+  const newEndpoint = makeEndpoint('new');
+  const proxy = new WebTunnelProxy();
+  const oldConfig = { ...blockedWebTunnelProxy, proxyRules: 'socks5://127.0.0.1:53001' };
+  const newConfig = { ...blockedWebTunnelProxy, proxyRules: 'socks5://127.0.0.1:53002' };
+  await proxy.attach(session, oldEndpoint, oldConfig);
+  await assert.rejects(proxy.detach(session, oldEndpoint), /Chromium close failed/);
+  assert.deepEqual(calls, [
+    oldConfig.proxyRules,
+    'disconnect old',
+    blockedWebTunnelProxy.proxyRules,
+  ]);
+
+  failFlush = false;
+  const attached = proxy.attach(session, newEndpoint, newConfig);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls.at(-1), newConfig.proxyRules);
+  await proxy.detach(session, oldEndpoint);
+  assert.equal(calls.at(-1), newConfig.proxyRules);
+  flushConnections();
+  await attached;
+  assert.equal(calls.at(-1), 'close old');
 });
 
 test('cancelled native shortcuts cannot focus a replacement tab after a delayed popup flush', async () => {

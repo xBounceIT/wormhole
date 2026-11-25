@@ -110,6 +110,12 @@ import { readBitwardenStartupState } from './bitwarden-startup.js';
 import { readDarwinHardwareModel, shouldDisableHardwareAcceleration } from './gpu-compatibility.js';
 import { KeyedSingleFlight } from './keyed-single-flight.js';
 import {
+  blockedWebTunnelProxy,
+  parseWebTunnelSocksPort,
+  WebTunnelEndpoint,
+  WebTunnelProxy,
+} from './web-tunnel-endpoint.js';
+import {
   parseWorkspaceNodesRequest,
   parseWorkspaceMoveNodesRequest,
   workspaceDeleteNodesMaxRequestBytes,
@@ -3291,6 +3297,7 @@ async function runTunnelBrowserAuth(
 class NativeBackendProcess {
   private readonly tunnelFailures = new TunnelFailureRegistry();
   readonly browserPrompts = new TunnelBrowserPromptTracker();
+  private readonly rendererTunnelPrompts = new Map<string, string>();
   private child: ReturnType<typeof spawn> | undefined;
   private startPromise: Promise<void> | undefined;
   private stopPromise: Promise<void> | undefined;
@@ -3607,10 +3614,20 @@ class NativeBackendProcess {
       if ('type' in message && typeof message.type === 'string') {
         if (this.tunnelFailures.fail(message)) continue;
         if (message.type === 'tunnel.prompt-closed') {
-          this.browserPrompts.close(
-            'sessionId' in message ? message.sessionId : undefined,
-            'promptId' in message ? message.promptId : undefined,
-          );
+          const prompt = message as BackendEvent;
+          this.browserPrompts.close(prompt.sessionId, prompt.promptId);
+          if (
+            prompt.promptId &&
+            this.rendererTunnelPrompts.get(prompt.promptId) === prompt.sessionId &&
+            this.rendererTunnelPrompts.delete(prompt.promptId)
+          ) {
+            this.broadcastBackendEvent({
+              type: 'tunnel.prompt-closed',
+              sessionId: prompt.sessionId,
+              promptId: prompt.promptId,
+            });
+          }
+          continue;
         }
         if (message.type === 'tunnel.browser') {
           const event = parseTunnelBrowserEvent(message);
@@ -3625,14 +3642,23 @@ class NativeBackendProcess {
           continue;
         }
         if (!authSession.isAccessAllowed) continue;
-        for (const window of BrowserWindow.getAllWindows()) {
-          if (window.isDestroyed() || !windowCloseCoordinators.has(window)) continue;
-          try {
-            window.webContents.send('backend:event', message as BackendEvent);
-          } catch {
-            // The window may be destroyed between isDestroyed() and send().
-          }
+        const event = message as BackendEvent;
+        if (event.type === 'tunnel.prompt') {
+          if (!isSshSessionId(event.promptId) || !isSshSessionId(event.sessionId)) continue;
+          this.rendererTunnelPrompts.set(event.promptId, event.sessionId);
         }
+        this.broadcastBackendEvent(event);
+      }
+    }
+  }
+
+  private broadcastBackendEvent(event: BackendEvent): void {
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (window.isDestroyed() || !windowCloseCoordinators.has(window)) continue;
+      try {
+        window.webContents.send('backend:event', event);
+      } catch {
+        // The window may be destroyed between isDestroyed() and send().
       }
     }
   }
@@ -3640,6 +3666,10 @@ class NativeBackendProcess {
   private rejectAll(error: Error): void {
     this.tunnelFailures.failAll();
     this.browserPrompts.clear();
+    for (const [promptId, sessionId] of this.rendererTunnelPrompts) {
+      this.broadcastBackendEvent({ type: 'tunnel.prompt-closed', sessionId, promptId });
+    }
+    this.rendererTunnelPrompts.clear();
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();
   }
@@ -4587,6 +4617,12 @@ type WebSurfaceRecord = {
   };
   route: 'direct' | 'vpn';
   tunnel?: WebBrowserState['tunnel'];
+  vpn?: {
+    configId: string;
+    endpoint: WebTunnelEndpoint;
+    session: Electron.Session;
+    status: NonNullable<WebBrowserState['vpnStatus']>;
+  };
   attempt: number;
   disposed: boolean;
   navigation: {
@@ -4756,6 +4792,7 @@ const treeTooltips = new TreeTooltipManager((options) => new BrowserWindow(optio
 
 class WebSurfaceManager {
   private readonly surfaces = new Map<string, WebSurfaceRecord>();
+  private readonly tunnelProxy = new WebTunnelProxy();
   private readonly pendingOpenOwners = new Map<string, BrowserWindow>();
   private readonly tunnelLeases = new TunnelLeaseRegistry();
   private readonly tunnelLeaseOwners = new Map<string, BrowserWindow>();
@@ -4799,6 +4836,8 @@ class WebSurfaceManager {
     this.pendingOpenOwners.set(request.sessionId, owner);
     this.dispose(request.sessionId);
     let openingLeaseId: string | undefined;
+    let openingEndpoint: WebTunnelEndpoint | undefined;
+    let openingProxySession: Electron.Session | undefined;
     let openingTunnelBackend: NativeBackendProcess | undefined;
     let bitwardenUseRelease: (() => void) | undefined;
     let openingRecord: WebSurfaceRecord | undefined;
@@ -4844,11 +4883,8 @@ class WebSurfaceManager {
         openingTunnelBackend = getNativeBackend();
         tunnelRoute = await openingTunnelBackend.acquireTunnelRoute({
           onExit: () => {
-            if (!this.tunnelLeases.isActive(request.sessionId, leaseId)) return;
-            const record = this.surfaces.get(request.sessionId);
-            if (record)
-              this.sendEvent(request.sessionId, record, 'failed', { error: tunnelClosedMessage });
-            this.close(request.sessionId);
+            openingEndpoint?.disconnect();
+            this.webTunnelExited(request.sessionId, leaseId);
           },
           leaseId,
           nodeId: request.nodeId,
@@ -4866,7 +4902,7 @@ class WebSurfaceManager {
         throw new Error('Web session was superseded before its target could be resolved.');
       }
       target ??= await resolveTarget();
-      if (request.nodeId) {
+      if (request.nodeId || tunnelRoute?.active) {
         assertTunnelRouteUnchanged(tunnelRoute?.configuredTunnelId, target.tunnelConfigId ?? '');
       }
       this.assertOpenCurrent(
@@ -4876,26 +4912,37 @@ class WebSurfaceManager {
         'Web session was superseded before its VPN tunnel could open.',
       );
       const logicalTargetUrl = target.url;
-      if (tunnelRoute) {
+      if (!tunnelRoute?.active && (request.tunnelConfigId || tunnelRoute?.socksEndpoint)) {
+        throw new Error('The requested VPN tunnel is unavailable.');
+      }
+      if (tunnelRoute?.active) {
+        if (!target.tunnelConfigId)
+          throw new Error('The browser VPN configuration is unavailable.');
         tunnel = tunnelRoute.tunnel;
+        const port = await this.webTunnelUpstreamPort(
+          openingTunnelBackend!,
+          openingLeaseId!,
+          target,
+          tunnelRoute.socksEndpoint,
+        );
+        openingEndpoint = await WebTunnelEndpoint.listen();
+        if (!this.tunnelLeases.isActive(request.sessionId, openingLeaseId!)) {
+          throw new Error('The VPN connection stopped while preparing this browser.');
+        }
+        openingEndpoint.connect(port);
         if (tunnelRoute.socksEndpoint) {
           resolvedTunnelRoute = 'socks5';
           target.proxyUrl = `socks5://${tunnelRoute.socksEndpoint}`;
-        } else if (tunnelRoute.active) {
-          resolvedTunnelRoute = 'forwarder';
-          const forwarder = await openingTunnelBackend!.bindTunnelForwarder(
-            openingLeaseId!,
-            target.host,
-            target.port,
-          );
-          const forwardedUrl = new URL(target.url);
-          forwardedUrl.hostname = forwarder.host;
-          forwardedUrl.port = String(forwarder.port);
-          target.url = forwardedUrl.toString();
         } else {
-          await this.releaseTunnel(request.sessionId);
-          openingLeaseId = undefined;
+          resolvedTunnelRoute = 'forwarder';
+          const forwardedUrl = new URL(target.url);
+          forwardedUrl.hostname = '127.0.0.1';
+          forwardedUrl.port = String(openingEndpoint.port);
+          target.url = forwardedUrl.toString();
         }
+      } else if (openingLeaseId) {
+        await this.releaseTunnel(request.sessionId);
+        openingLeaseId = undefined;
       }
       if (!isAuthorizationEpochCurrent(authorizationEpoch)) {
         throw new Error('Web session was superseded before its browser could open.');
@@ -4981,24 +5028,22 @@ class WebSurfaceManager {
       const browserSession = electronSession.fromPartition(partition, {
         cache: true,
       });
-      if (target.proxyUrl) {
-        await browserSession.setProxy({
-          mode: 'fixed_servers',
-          proxyRules: target.proxyUrl,
-          proxyBypassRules: '<-loopback>',
-        });
+      const routedOrigin =
+        resolvedTunnelRoute === 'forwarder' ? new URL(target.url).origin : undefined;
+      if (openingEndpoint) {
+        const proxyConfig = { ...blockedWebTunnelProxy };
+        if (routedOrigin) {
+          // Permit direct connections only to this browser's loopback forwarder.
+          proxyConfig.proxyBypassRules += `;${routedOrigin};${routedOrigin.replace(/^http/, 'ws')}`;
+        } else {
+          target.proxyUrl = `socks5://127.0.0.1:${openingEndpoint.port}`;
+          proxyConfig.proxyRules = target.proxyUrl;
+        }
+        openingProxySession = browserSession;
+        await this.tunnelProxy.attach(browserSession, openingEndpoint, proxyConfig);
       }
-      if (resolvedTunnelRoute === 'forwarder') {
+      if (routedOrigin) {
         const routedUrl = target.url;
-        const routedOrigin = new URL(routedUrl).origin;
-        // webRequest cannot intercept WebTransport or speculative connections. Keep a closed
-        // proxy as the session default, with direct access only to this loopback TCP forwarder.
-        // Port zero cannot host a proxy and the single proxy rule has no DIRECT fallback.
-        await browserSession.setProxy({
-          mode: 'fixed_servers',
-          proxyRules: 'socks5://127.0.0.1:0',
-          proxyBypassRules: `<-loopback>;${routedOrigin};${routedOrigin.replace(/^http/, 'ws')}`,
-        });
         browserSession.webRequest.onBeforeRequest((details, callback) => {
           const navigationUrl =
             details.resourceType === 'mainFrame'
@@ -5108,6 +5153,14 @@ class WebSurfaceManager {
         partition,
         route: resolvedTunnelRoute === 'direct' ? 'direct' : 'vpn',
         tunnel,
+        vpn: openingEndpoint
+          ? {
+              configId: target.tunnelConfigId!,
+              endpoint: openingEndpoint,
+              session: browserSession,
+              status: 'active',
+            }
+          : undefined,
         attempt: request.attempt,
         disposed: false,
         navigation: {
@@ -5120,6 +5173,7 @@ class WebSurfaceManager {
       };
       this.surfaces.set(request.sessionId, record);
       openingRecord = record;
+      openingEndpoint = undefined;
       bitwardenUseRelease = undefined;
       this.pendingOpenOwners.delete(request.sessionId);
       owner.contentView.addChildView(view);
@@ -5148,15 +5202,15 @@ class WebSurfaceManager {
           describeWebNavigationError(error),
         );
       });
-      target.browser = tabs.snapshot(
-        record.route,
-        record.navigation.originalUrl ? new URL(logicalTargetUrl).origin : undefined,
-        record.tunnel,
-      );
+      target.browser = this.browserState(record);
       this.sendEvent(request.sessionId, record, 'connected');
       openingLeaseId = undefined;
       return target;
     } catch (error) {
+      if (openingEndpoint) {
+        if (openingProxySession) this.detachTunnelProxy(openingProxySession, openingEndpoint);
+        else openingEndpoint.close();
+      }
       bitwardenUseRelease?.();
       if (openingRecord && this.surfaces.get(request.sessionId) === openingRecord) {
         this.dispose(request.sessionId);
@@ -5287,6 +5341,7 @@ class WebSurfaceManager {
     if (!authSession.isAccessAllowed) return false;
     const record = this.surfaces.get(request.sessionId);
     if (!record || record.owner !== owner || record.disposed) return false;
+    if (request.operation === 'reconnect-vpn') return this.reconnectTunnel(record);
     const sourceTabId = record.tabs.activeId;
     if (this.bitwardenPopups.has(request.sessionId)) {
       const authorizationEpoch = authSession.authorizationEpoch;
@@ -5299,6 +5354,13 @@ class WebSurfaceManager {
         if (isCurrent()) await this.closeBitwardenPopup(request.sessionId);
       });
       if (!isCurrent()) return false;
+    }
+    if (
+      record.vpn &&
+      record.vpn.status !== 'active' &&
+      ['navigate', 'back', 'forward', 'reload'].includes(request.operation)
+    ) {
+      throw new Error('Reconnect the VPN to navigate.');
     }
     const contents = record.view.webContents;
     if (request.operation === 'new-tab') {
@@ -5340,6 +5402,7 @@ class WebSurfaceManager {
 
   private browserNavigationUrl(record: WebSurfaceRecord, url: string): string | undefined {
     if (url === 'about:blank') return url;
+    if (record.vpn && record.vpn.status !== 'active') return;
     const navigationUrl = getInSessionNavigationUrl(
       url,
       record.navigation.originalUrl ? record.navigation.navigateUrl : undefined,
@@ -6621,6 +6684,7 @@ class WebSurfaceManager {
     if (!record) return;
     record.disposed = true;
     record.preview = undefined;
+    if (record.vpn) this.detachTunnelProxy(record.vpn.session, record.vpn.endpoint);
     for (const auxiliary of [...this.bitwardenAuxiliaryWindows.values()]) {
       if (auxiliary.sessionId === sessionId && !auxiliary.window.isDestroyed()) {
         auxiliary.window.destroy();
@@ -6678,6 +6742,115 @@ class WebSurfaceManager {
   private async releaseTunnel(sessionId: string): Promise<void> {
     await this.tunnelLeases.release(sessionId, releaseNativeTunnelLease);
     if (!this.tunnelLeases.has(sessionId)) this.tunnelLeaseOwners.delete(sessionId);
+  }
+
+  private detachTunnelProxy(session: Electron.Session, endpoint: WebTunnelEndpoint): void {
+    void this.tunnelProxy.detach(session, endpoint).catch(() => {
+      console.warn('[Wormhole] Could not clear the browser VPN proxy.');
+    });
+  }
+
+  cancelTunnelReconnects(): void {
+    for (const record of this.surfaces.values()) {
+      if (record.vpn?.status === 'reconnecting' && record.tunnelLeaseId) {
+        this.disconnectTunnel(record);
+        void this.releaseTunnel(record.sessionId).catch(() => undefined);
+      }
+    }
+  }
+
+  private async webTunnelUpstreamPort(
+    backend: NativeBackendProcess,
+    leaseId: string,
+    target: WebTargetResponse,
+    socksEndpoint: string,
+  ): Promise<number> {
+    if (socksEndpoint) return parseWebTunnelSocksPort(socksEndpoint);
+    return (await backend.bindTunnelForwarder(leaseId, target.host, target.port)).port;
+  }
+
+  private webTunnelExited(sessionId: string, leaseId: string): void {
+    if (!this.tunnelLeases.isActive(sessionId, leaseId)) return;
+    const record = this.surfaces.get(sessionId);
+    if (record?.tunnelLeaseId !== leaseId) {
+      this.close(sessionId);
+      return;
+    }
+    this.disconnectTunnel(record);
+    void this.releaseTunnel(sessionId).catch(() => undefined);
+  }
+
+  private disconnectTunnel(record: WebSurfaceRecord): void {
+    record.tunnelLeaseId = undefined;
+    const vpn = record.vpn;
+    if (!vpn) return;
+    vpn.endpoint.disconnect();
+    if (vpn.status === 'active') {
+      vpn.status = 'disconnected';
+      for (const view of record.tabs.all()) {
+        const contents = view.webContents;
+        if (contents && !contents.isDestroyed() && contents.isLoadingMainFrame()) contents.stop();
+      }
+      this.sendEvent(record.sessionId, record, 'vpn-state');
+    }
+  }
+
+  private async reconnectTunnel(record: WebSurfaceRecord): Promise<boolean> {
+    const { sessionId, owner, vpn } = record;
+    if (!vpn || vpn.status !== 'disconnected') return false;
+    const authorizationEpoch = authSession.authorizationEpoch;
+    const isCurrent = () =>
+      !record.disposed &&
+      !owner.isDestroyed() &&
+      this.surfaces.get(sessionId) === record &&
+      isAuthorizationEpochCurrent(authorizationEpoch);
+    vpn.status = 'reconnecting';
+    this.sendEvent(sessionId, record, 'vpn-state');
+    const leaseId = randomUUID();
+    try {
+      await this.releaseTunnel(sessionId);
+      if (!isCurrent()) return false;
+      this.tunnelLeases.claim(sessionId, leaseId);
+      record.tunnelLeaseId = leaseId;
+      this.tunnelLeaseOwners.set(sessionId, owner);
+      const backend = getNativeBackend();
+      const route = await backend.acquireTunnelRoute({
+        onExit: () => this.webTunnelExited(sessionId, leaseId),
+        leaseId,
+        tunnelConfigId: vpn.configId,
+        progressSessionId: sessionId,
+      });
+      if (!isCurrent()) return false;
+      assertTunnelRouteUnchanged(route.configuredTunnelId, vpn.configId);
+      const usesForwarder = Boolean(record.navigation.originalUrl);
+      const acquiredForwarder = !route.socksEndpoint;
+      if (!route.active || acquiredForwarder !== usesForwarder) {
+        throw new Error('The VPN returned a different route for this browser.');
+      }
+      const port = await this.webTunnelUpstreamPort(
+        backend,
+        leaseId,
+        record.target,
+        route.socksEndpoint,
+      );
+      if (!isCurrent()) return false;
+      if (!this.tunnelLeases.isActive(sessionId, leaseId)) {
+        throw new Error('The VPN connection stopped while reconnecting.');
+      }
+      vpn.endpoint.connect(port);
+      record.tunnel = route.tunnel;
+      vpn.status = 'active';
+      return true;
+    } finally {
+      if (vpn.status === 'reconnecting') {
+        vpn.status = 'disconnected';
+        if (this.tunnelLeases.isActive(sessionId, leaseId)) {
+          record.tunnelLeaseId = undefined;
+          void this.releaseTunnel(sessionId).catch(() => undefined);
+        }
+      }
+      if (this.surfaces.get(sessionId) === record) this.sendEvent(sessionId, record, 'vpn-state');
+    }
   }
 
   private assertOpenCurrent(
@@ -6788,10 +6961,8 @@ class WebSurfaceManager {
     for (const sessionId of sessionIds) {
       this.attempts.cancel(sessionId);
       this.pendingOpenOwners.delete(sessionId);
-      const record = this.surfaces.get(sessionId);
-      await this.releaseTunnel(sessionId).catch(() => undefined);
-      if (record) record.tunnelLeaseId = undefined;
       this.dispose(sessionId, true);
+      await this.releaseTunnel(sessionId).catch(() => undefined);
     }
   }
 
@@ -6826,10 +6997,8 @@ class WebSurfaceManager {
     for (const sessionId of sessionIds) {
       this.attempts.cancel(sessionId);
       this.pendingOpenOwners.delete(sessionId);
-      const record = this.surfaces.get(sessionId);
-      await this.releaseTunnel(sessionId).catch(() => undefined);
-      if (record) record.tunnelLeaseId = undefined;
       this.dispose(sessionId, true);
+      await this.releaseTunnel(sessionId).catch(() => undefined);
     }
     // Background token refreshes can outlive the final HTTPS tab. Flush those profiles too.
     try {
@@ -6843,13 +7012,8 @@ class WebSurfaceManager {
     this.tunnelLeases.clear();
     this.tunnelLeaseOwners.clear();
     for (const [sessionId, record] of this.surfaces) {
-      record.tunnelLeaseId = undefined;
-      if (record.route === 'vpn') {
-        this.sendEvent(sessionId, record, 'failed', {
-          error: 'The VPN connection stopped. Reconnect this browser to continue.',
-        });
-        this.dispose(sessionId);
-      }
+      this.disconnectTunnel(record);
+      if (record.vpn && (!authSession.isAccessAllowed || isQuitting)) this.dispose(sessionId);
     }
   }
 
@@ -7176,18 +7340,25 @@ class WebSurfaceManager {
     this.sendEvent(sessionId, record, 'navigation');
   }
 
+  private browserState(record: WebSurfaceRecord): WebBrowserState {
+    return {
+      ...record.tabs.snapshot(
+        record.route,
+        record.navigation.originalUrl ? new URL(record.navigation.originalUrl).origin : undefined,
+        record.tunnel,
+      ),
+      vpnStatus: record.vpn?.status,
+    };
+  }
+
   private sendEvent(
     sessionId: string,
     record: WebSurfaceRecord,
-    type: 'connected' | 'failed' | 'navigation' | 'focus-address',
+    type: 'connected' | 'failed' | 'vpn-state' | 'navigation' | 'focus-address',
     values: { error?: string; isLoading?: boolean } = {},
   ): void {
     if (record.disposed || record.owner.isDestroyed()) return;
-    const browser = record.tabs.snapshot(
-      record.route,
-      record.navigation.originalUrl ? new URL(record.navigation.originalUrl).origin : undefined,
-      record.tunnel,
-    );
+    const browser = this.browserState(record);
     const tab = browser.tabs.find((candidate) => candidate.id === browser.activeTabId);
     if (!tab) return;
     try {
@@ -9959,6 +10130,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     sshBackend.prepareForLock();
     sshBackend.closeAllSftp();
     sshBackend.cancelPendingConnections();
+    webSurfaces.cancelTunnelReconnects();
     webSurfaces.hideAll();
     const ownerWindow = BrowserWindow.fromWebContents(event.sender);
     // Lock is deliberately not queued behind ordinary authorized operations: a VPN test or CLI
@@ -10171,6 +10343,13 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     if (!isWebCommandRequest(request)) throw new Error('Web browser command is invalid.');
     const ownerWindow = BrowserWindow.fromWebContents(event.sender);
     if (!ownerWindow || ownerWindow.isDestroyed()) return;
+    if (request.operation === 'reconnect-vpn') {
+      requireNativeResourcesRunning();
+      return runAuthorizedOperation(async () => {
+        requireNativeResourcesRunning();
+        return webSurfaces.command(ownerWindow, request);
+      });
+    }
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
       await webSurfaces.command(ownerWindow, request);

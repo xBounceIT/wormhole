@@ -40,6 +40,7 @@ const popupScript = stripTypeScriptTypes(
       send = backendSend;
       child = {};
       browserPrompts = new TunnelBrowserPromptTracker();
+      rendererTunnelPrompts = new Map();
       tunnelFailures = new TunnelFailureRegistry();
       outputBuffer = '';
       pending = new Map();`,
@@ -153,6 +154,11 @@ function browserAuthHarness(
   const windowPartitions: string[] = [];
   const responses: { cancelled: boolean; value: string; browserFailure?: string }[] = [];
   const authSession = { isAccessAllowed: true, authorizationEpoch: 1 };
+  const rendererEvents: unknown[] = [];
+  const renderer = {
+    isDestroyed: () => false,
+    webContents: { send: (_channel: string, event: unknown) => rendererEvents.push(event) },
+  };
   const presented: AuthWindow[] = [];
   let expire!: () => void;
   let expireCleanup: (() => void) | undefined;
@@ -262,7 +268,8 @@ function browserAuthHarness(
       nativeBackendLineLimit: 64 * 1024 * 1024,
       routeNativeOperationProgress() {},
       routeTunnelTestProgress: () => false,
-      windowCloseCoordinators: new Set(),
+      windowCloseCoordinators: new Set([renderer]),
+      isSshSessionId: (value: unknown) => typeof value === 'string' && /^[\w-]{1,128}$/.test(value),
       electronSession: {
         fromPartition: (partition: string) => {
           partitions.push(partition);
@@ -270,6 +277,9 @@ function browserAuthHarness(
         },
       },
       BrowserWindow: class extends AuthWindow {
+        static getAllWindows() {
+          return [renderer];
+        }
         constructor(options: { webPreferences: { partition: string } }) {
           super();
           windowPartitions.push(options.webPreferences.partition);
@@ -312,6 +322,7 @@ function browserAuthHarness(
     loads,
     responses,
     authSession,
+    rendererEvents,
     presented,
     finished,
     urls,
@@ -645,6 +656,27 @@ test('backend loss closes a hidden SAML popup and discards queued prompts', asyn
   assert.equal(auth.windows.length, 1);
   assert.equal(auth.window.isDestroyed(), true);
   assert.deepEqual(auth.responses, []);
+});
+
+test('workspace VPN prompts close after a lock or a backend crash', async (t) => {
+  const auth = browserAuthHarness(t);
+  const prompt = { type: 'tunnel.prompt', sessionId: 'reconnect', promptId: 'plain-prompt' };
+  const closed = { ...prompt, type: 'tunnel.prompt-closed' };
+  auth.emit(prompt);
+  auth.authSession.isAccessAllowed = false;
+  auth.emit({ ...closed, sessionId: 'different-lease' });
+  auth.emit({ ...prompt, promptId: 'hidden-prompt' });
+  assert.deepEqual(JSON.parse(JSON.stringify(auth.rendererEvents)), [prompt]);
+  auth.emit(closed);
+  auth.authSession.isAccessAllowed = true;
+  auth.emit(prompt);
+  auth.backend.rejectAll(new Error('Backend crashed'));
+  assert.deepEqual(JSON.parse(JSON.stringify(auth.rendererEvents)), [
+    prompt,
+    closed,
+    prompt,
+    closed,
+  ]);
 });
 
 test('tunnel failure cleanup after backend exit never sends a release to a new process', async (t) => {

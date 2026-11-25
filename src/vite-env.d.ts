@@ -332,7 +332,7 @@ interface WormholeBitwardenLoginItem {
 }
 
 interface WormholeWebEvent {
-  type: 'connected' | 'failed' | 'navigation' | 'focus-address';
+  type: 'connected' | 'failed' | 'vpn-state' | 'navigation' | 'focus-address';
   sessionId: string;
   attempt: number;
   url: string;

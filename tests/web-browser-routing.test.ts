@@ -14,9 +14,11 @@ test('real Chromium sibling tabs retain their proxy and never fall back to a dir
   const source = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
   const helpers = [
     'web-browser-tabs',
+    'web-tunnel-endpoint',
     'web-zoom',
     'web-session-attempt',
     'tunnel-lease-registry',
+    'tunnel-route-snapshot',
     'keyed-single-flight',
     'keyed-task-tracker',
     'extension-mutation-guard',
@@ -24,10 +26,9 @@ test('real Chromium sibling tabs retain their proxy and never fall back to a dir
     'bitwarden-active-tab-bridge',
   ]
     .map((name) =>
-      readFileSync(new URL(`../electron/${name}.ts`, import.meta.url), 'utf8').replace(
-        /^export /gm,
-        '',
-      ),
+      readFileSync(new URL(`../electron/${name}.ts`, import.meta.url), 'utf8')
+        .replace(/^export /gm, '')
+        .replace(/^import .* from 'node:net';$/m, ''),
     )
     .join('\n');
   const managerStart = source.indexOf('class WebSurfaceManager');
@@ -44,6 +45,7 @@ test('real Chromium sibling tabs retain their proxy and never fall back to a dir
       const assert = require('node:assert/strict');
       const { randomUUID } = require('node:crypto');
       const net = require('node:net');
+      const { createConnection, createServer } = net;
       const http = require('node:http');
       const dgram = require('node:dgram');
       const { app, BrowserWindow, WebContentsView: NativeWebContentsView, Menu, net: electronNet, session: electronSession } = require('electron');
@@ -57,6 +59,7 @@ test('real Chromium sibling tabs retain their proxy and never fall back to a dir
       const authSession = { authorizationEpoch: 1, isAccessAllowed: true };
       const isAuthorizationEpochCurrent = epoch => epoch === authSession.authorizationEpoch;
       const webMaxUrlLength = 4096;
+      const isQuitting = false;
       const validateWebTarget = value => value;
       const describeWebNavigationError = () => 'Navigation failed';
       const describeWebLoadFailure = () => 'Page unavailable';
@@ -102,7 +105,7 @@ test('real Chromium sibling tabs retain their proxy and never fall back to a dir
         });
         await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
         const targetPort = server.address().port;
-        const proxy = net.createServer(client => {
+        const createSocksProxy = () => net.createServer(client => {
           sockets.add(client);
           client.on('error', () => {});
           client.on('close', () => sockets.delete(client));
@@ -138,9 +141,15 @@ test('real Chromium sibling tabs retain their proxy and never fall back to a dir
           };
           client.on('data', receive);
         });
+        let proxy = createSocksProxy();
+        let exitSocks, exitForwarder, replacementForwarder;
         await new Promise(resolve => proxy.listen(0, '127.0.0.1', resolve));
-        const endpoint = '127.0.0.1:' + proxy.address().port;
-        globalThis.getNativeBackend = () => ({ acquireTunnelRoute: async () => ({ active: true, socksEndpoint: endpoint }) });
+        globalThis.getNativeBackend = () => ({
+          acquireTunnelRoute: async ({ onExit, tunnelConfigId }) => {
+            exitSocks = onExit;
+            return { active: true, socksEndpoint: '127.0.0.1:' + proxy.address().port, configuredTunnelId: tunnelConfigId };
+          },
+        });
         globalThis.runBackend = async (_action, request) => ({ url: request.address, host: new URL(request.address).hostname, protocol: 'http', port: targetPort, ignoreCertErrors: false, tunnelConfigId: request.tunnelConfigId });
         const owner = new BrowserWindow({ show: false, width: 900, height: 700 });
         const manager = new WebSurfaceManager();
@@ -251,16 +260,35 @@ test('real Chromium sibling tabs retain their proxy and never fall back to a dir
           await manager.command(owner, { sessionId: 'routed', operation: 'navigate', url: 'http://127.0.0.1:' + targetPort + '/via-proxy' });
           await waitFor(() => requests.includes('/via-proxy'));
           assert.ok(proxied.includes('127.0.0.1'));
-          for (const socket of sockets) socket.destroy();
-          await new Promise(resolve => proxy.close(resolve));
+          const loopbackTab = record.view.webContents;
+          await waitFor(() => loopbackTab.getURL().endsWith('/via-proxy') && !loopbackTab.isLoading());
+          await first.executeJavaScript("document.querySelector('h1').textContent = 'Unsaved browser state'");
+          const oldProxy = proxy;
+          const oldProxyPort = proxy.address().port;
+          exitSocks();
+          assert.equal(record.vpn.status, 'disconnected');
+          assert.equal(first.isDestroyed(), false);
           // A page may hide broken images in onerror: a missing broken-image badge is not proof
           // of successful decoding. Check that scenario without allowing direct resource access.
           const failedSvg = await first.executeJavaScript('new Promise(resolve => { const image = new Image(); image.onload = () => resolve({ loaded: true }); image.onerror = () => { image.style.display = "none"; resolve({ loaded: false, hidden: image.style.display === "none", width: image.naturalWidth }); }; image.src = ' + JSON.stringify(externalSvg + '?disconnected') + '; })');
           assert.deepEqual(failedSvg, { loaded: false, hidden: true, width: 0 });
           assert.equal(requests.includes('/external-button.svg?disconnected'), false, 'External SVG requests must fail closed when the VPN stops');
-          await manager.command(owner, { sessionId: 'routed', operation: 'navigate', url: 'http://127.0.0.1:' + targetPort + '/no-direct-fallback' });
-          await waitFor(() => Boolean(record.tabs.snapshot('vpn').tabs.find(tab => tab.id === record.tabs.activeId).error));
+          await assert.rejects(manager.command(owner, { sessionId: 'routed', operation: 'navigate', url: 'http://127.0.0.1:' + targetPort + '/no-direct-fallback' }), /Reconnect the VPN/);
+          await loopbackTab.executeJavaScript("location.href = '/no-direct-fallback'; true");
+          assert.equal(await loopbackTab.executeJavaScript("fetch('/no-direct-fallback').then(() => 'loaded', () => 'blocked')"), 'blocked');
+          assert.ok(loopbackTab.getURL().endsWith('/via-proxy'));
           assert.equal(requests.includes('/no-direct-fallback'), false);
+          proxy = createSocksProxy();
+          await new Promise(resolve => proxy.listen(0, '127.0.0.1', resolve));
+          assert.notEqual(proxy.address().port, oldProxyPort);
+          oldProxy.close();
+          const firstProxy = await first.session.resolveProxy(first.getURL());
+          assert.equal(await manager.command(owner, { sessionId: 'routed', operation: 'reconnect-vpn' }), true);
+          assert.equal(record.vpn.status, 'active');
+          assert.equal(await first.session.resolveProxy(first.getURL()), firstProxy);
+          assert.equal(await first.executeJavaScript("document.querySelector('h1').textContent"), 'Unsaved browser state');
+          assert.equal(await first.executeJavaScript("fetch('/resume-socks').then(response => response.ok)"), true);
+          assert.ok(requests.includes('/resume-socks'));
           const tabCount = record.tabs.size;
           second.close();
           await waitFor(() => second.isDestroyed() && record.tabs.size === tabCount - 1, 'Closed SOCKS tab');
@@ -284,8 +312,11 @@ test('real Chromium sibling tabs retain their proxy and never fall back to a dir
           await waitFor(() => datagrams[0].packets > 0);
           await direct.view.webContents.executeJavaScript('window.udpTransport.close(); true');
           globalThis.getNativeBackend = () => ({
-            acquireTunnelRoute: async () => ({ active: true, socksEndpoint: '' }),
-            bindTunnelForwarder: async () => ({ host: '127.0.0.1', port: targetPort }),
+            acquireTunnelRoute: async ({ onExit, tunnelConfigId }) => {
+              exitForwarder = onExit;
+              return { active: true, socksEndpoint: '', configuredTunnelId: tunnelConfigId };
+            },
+            bindTunnelForwarder: async () => ({ host: '127.0.0.1', port: replacementForwarder?.address().port ?? targetPort }),
           });
           await manager.open(owner, { sessionId: 'forwarder', attempt: 1, address: 'http://forwarded.internal:' + targetPort + '/', protocol: 'http', tunnelConfigId: 'vpn-route' });
           const forwarded = manager.surfaces.get('forwarder');
@@ -319,19 +350,36 @@ test('real Chromium sibling tabs retain their proxy and never fall back to a dir
           await manager.command(owner, { sessionId: 'forwarder', operation: 'new-tab' });
           await manager.command(owner, { sessionId: 'forwarder', operation: 'navigate', url: 'http://forwarded.internal:' + targetPort + '/help' });
           await waitFor(() => forwarded.view.webContents.getTitle() === 'Help');
-          assert.equal(await forwarded.view.webContents.session.resolveProxy('http://127.0.0.1:' + targetPort + '/help'), 'DIRECT');
-          assert.equal(await forwarded.view.webContents.session.resolveProxy('ws://127.0.0.1:' + targetPort + '/socket'), 'DIRECT');
-          assert.match(await forwarded.view.webContents.session.resolveProxy('https://outside.invalid/'), /^SOCKS5 /);
+          const origin = new URL(forwarderOpener.getURL()).origin;
+          assert.equal(await forwarded.view.webContents.session.resolveProxy(origin + '/help'), 'DIRECT');
+          assert.equal(await forwarded.view.webContents.session.resolveProxy(origin.replace(/^http/, 'ws') + '/socket'), 'DIRECT');
+          const forwarderSession = forwarded.view.webContents.session;
+          assert.equal(await forwarderSession.resolveProxy('https://outside.invalid/'), 'SOCKS5 127.0.0.1:0');
+          await forwarderOpener.executeJavaScript("localStorage.setItem('draft', 'in progress')");
+          exitForwarder();
+          assert.equal(forwarded.vpn.status, 'disconnected');
+          assert.equal(await forwarderOpener.executeJavaScript("fetch('/offline').then(() => 'loaded', () => 'blocked')"), 'blocked');
+          assert.equal(requests.includes('/offline'), false);
+          replacementForwarder = http.createServer((request, response) => response.end('reconnected'));
+          await new Promise(resolve => replacementForwarder.listen(0, '127.0.0.1', resolve));
+          assert.equal(await manager.command(owner, { sessionId: 'forwarder', operation: 'reconnect-vpn' }), true);
+          assert.equal(new URL(forwarderOpener.getURL()).origin, origin);
+          assert.equal(await forwarderOpener.executeJavaScript("localStorage.getItem('draft')"), 'in progress');
+          assert.equal(await forwarderOpener.executeJavaScript("fetch('/resume-forwarder').then(response => response.text())"), 'reconnected');
           manager.backendStopped();
-          assert.equal(manager.surfaces.has('routed'), false);
-          assert.equal(manager.surfaces.has('forwarder'), false);
+          assert.equal(manager.surfaces.get('routed'), record);
+          assert.equal(manager.surfaces.get('forwarder'), forwarded);
+          assert.equal(forwarded.vpn.status, 'disconnected');
           assert.equal(manager.surfaces.has('direct'), true);
+          manager.close('forwarder');
+          await waitFor(async () => (await forwarderSession.resolveProxy(origin + '/help')) === 'SOCKS5 127.0.0.1:0', 'Retired forwarder proxy');
         } finally {
           manager.closeForWindow(owner);
           owner.destroy();
           for (const socket of sockets) socket.destroy();
           for (const probe of datagrams) probe.socket.close();
           proxy.close();
+          replacementForwarder?.close();
           server.closeAllConnections(); server.close();
         }
         app.quit();

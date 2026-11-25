@@ -3282,7 +3282,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
             status: event.type === 'connected' ? 'connected' : session.status,
             webIsLoading: event.isLoading,
             error: undefined,
-            tunnelProgress: event.type === 'connected' ? null : session.tunnelProgress,
+            tunnelProgress:
+              event.type === 'connected' || event.type === 'vpn-state'
+                ? null
+                : session.tunnelProgress,
             webUrl: event.url || session.webUrl,
             webCanGoBack: event.canGoBack,
             webCanGoForward: event.canGoForward,
