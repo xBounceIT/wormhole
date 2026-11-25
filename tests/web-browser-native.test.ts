@@ -318,23 +318,24 @@ function browserHarness({ socks = '127.0.0.1:1080', active = true } = {}) {
     blockedWebTunnelProxy,
     parseWebTunnelSocksPort,
     WebTunnelProxy,
-    WebTunnelEndpoint: {
-      listen: async () => ({
+    getBrowserRelayBackend: () => ({
+      openWebTunnelEndpoint: async (_onExit: () => void) => ({
         port: 53001,
+        onExit: _onExit,
         upstream: undefined as number | undefined,
         closed: false,
-        connect(port: number) {
+        async connect(port: number) {
           this.upstream = port;
         },
-        disconnect() {
+        async disconnect() {
           this.upstream = undefined;
         },
-        close() {
-          this.disconnect();
+        async close() {
+          await this.disconnect();
           this.closed = true;
         },
       }),
-    },
+    }),
     KeyedSingleFlight,
     KeyedTaskTracker,
     ExtensionMutationGuard,
@@ -438,7 +439,8 @@ function browserHarness({ socks = '127.0.0.1:1080', active = true } = {}) {
             tunnelConfigId: request.nodeId ? 'vpn-saved' : request.tunnelConfigId,
           },
     getNativeBackend: () => backend,
-    releaseNativeTunnelLease: async (lease: string) => {
+    releaseNativeTunnelLease: async (lease: string, beforeRelease?: Promise<void>) => {
+      if (beforeRelease) await beforeRelease;
       releases.push(lease);
     },
     afterBitwardenPopupInputEvent: async (operation: () => Promise<void>) => operation(),
@@ -1172,7 +1174,7 @@ test('each browser owns its profile and one VPN lease shared by all its tabs', a
   await h.open('browser-2');
   assert.notEqual(h.manager.surfaces.get('browser-2').partition, record.partition);
   h.manager.close('browser-1');
-  await Promise.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
   assert.equal(first.webContents.destroyed, true);
   assert.equal(h.releases.length, 1);
   h.manager.close('browser-2');
@@ -1815,6 +1817,33 @@ test('an old VPN exit cannot disconnect a replacement browser', async () => {
   assert.equal(h.manager.surfaces.get('browser-1'), replacement);
   assert.equal(replacement.view.webContents.destroyed, false);
   h.manager.close('browser-1');
+});
+
+test('a VPN reconnect cannot publish active after the relay acknowledgement loses its lease', async () => {
+  const h = browserHarness();
+  await h.open();
+  (h.acquisitions[0] as { onExit: () => void }).onExit();
+  const record = h.manager.surfaces.get('browser-1');
+  let applying!: () => void;
+  const applyingRoute = new Promise<void>((resolve) => {
+    applying = resolve;
+  });
+  let acknowledge!: () => void;
+  record.vpn.endpoint.connect = async (port: number) => {
+    record.vpn.endpoint.upstream = port;
+    applying();
+    await new Promise<void>((resolve) => {
+      acknowledge = resolve;
+    });
+  };
+  const reconnecting = h.command('reconnect-vpn');
+  await applyingRoute;
+  (h.acquisitions[1] as { onExit: () => void }).onExit();
+  acknowledge();
+  assert.equal(await reconnecting, false);
+  assert.equal(record.vpn.endpoint.upstream, undefined);
+  assert.equal(h.events.at(-1).browser.vpnStatus, 'disconnected');
+  assert.equal(h.manager.surfaces.get('browser-1'), record);
 });
 
 test('Quick Connect requires its requested VPN while a saved Direct choice remains available', async () => {

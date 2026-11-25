@@ -26,9 +26,10 @@ test('real Chromium sibling tabs retain their proxy and never fall back to a dir
     'bitwarden-active-tab-bridge',
   ]
     .map((name) =>
-      readFileSync(new URL(`../electron/${name}.ts`, import.meta.url), 'utf8')
-        .replace(/^export /gm, '')
-        .replace(/^import .* from 'node:net';$/m, ''),
+      readFileSync(new URL(`../electron/${name}.ts`, import.meta.url), 'utf8').replace(
+        /^export /gm,
+        '',
+      ),
     )
     .join('\n');
   const managerStart = source.indexOf('class WebSurfaceManager');
@@ -45,7 +46,6 @@ test('real Chromium sibling tabs retain their proxy and never fall back to a dir
       const assert = require('node:assert/strict');
       const { randomUUID } = require('node:crypto');
       const net = require('node:net');
-      const { createConnection, createServer } = net;
       const http = require('node:http');
       const dgram = require('node:dgram');
       const { app, BrowserWindow, WebContentsView: NativeWebContentsView, Menu, net: electronNet, session: electronSession } = require('electron');
@@ -65,6 +65,33 @@ test('real Chromium sibling tabs retain their proxy and never fall back to a dir
       const describeWebLoadFailure = () => 'Page unavailable';
       const afterBitwardenPopupInputEvent = operation => operation();
       const releaseNativeTunnelLease = async () => {};
+      // Simulate the native relay service here. Its wire protocol and sockets are tested in Go.
+      const getBrowserRelayBackend = () => ({
+        openWebTunnelEndpoint: async () => {
+          let port;
+          const streams = new Set();
+          const relay = net.createServer(client => {
+            if (!port) return client.destroy();
+            const upstream = net.connect(port, '127.0.0.1');
+            const close = () => { client.destroy(); upstream.destroy(); streams.delete(close); };
+            client.on('error', close); upstream.on('error', close);
+            client.on('close', close); upstream.on('close', close);
+            streams.add(close);
+            client.pipe(upstream).pipe(client);
+          });
+          await new Promise(resolve => relay.listen(0, '127.0.0.1', resolve));
+          const disconnect = async () => {
+            port = undefined;
+            for (const close of streams) close();
+          };
+          return {
+            port: relay.address().port,
+            connect: async upstream => { port = upstream; },
+            disconnect,
+            close: async () => { await disconnect(); relay.close(); },
+          };
+        },
+      });
       ${controller}
       const waitFor = async (predicate, label = 'Browser state') => {
         const deadline = Date.now() + 10000;

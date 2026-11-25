@@ -49,6 +49,10 @@ const popupScript = stripTypeScriptTypes(
       mainSource.indexOf('  async respondTunnelRoute(request:'),
     ),
     mainSource.slice(
+      mainSource.indexOf('  async openWebTunnelEndpoint('),
+      mainSource.indexOf('  async acquireTunnelRoute('),
+    ),
+    mainSource.slice(
       mainSource.indexOf('  private readOutput(chunk:'),
       mainSource.lastIndexOf('\n}', mainSource.indexOf('let nativeBackend:')),
     ),
@@ -229,6 +233,7 @@ function browserAuthHarness(
       isAuthorizationEpochCurrent: (epoch: number) =>
         authSession.isAccessAllowed && authSession.authorizationEpoch === epoch,
       isQuitting: false,
+      randomUUID: () => 'relay-id',
       URL,
       Buffer,
       setInterval: (callback: () => void) => {
@@ -705,6 +710,48 @@ test('live tunnel release forgets its failure handler and retains backend errors
   await assert.rejects(auth.backend.releaseTunnel('other'), /Release unavailable/);
   auth.backend.send = async () => ({ ok: false });
   await assert.rejects(auth.backend.releaseTunnel('other'), /Could not release/);
+});
+
+test('a paused browser relay cannot release a lease to a replacement backend', async (t) => {
+  const auth = browserAuthHarness(t);
+  let paused!: () => void;
+  const disconnecting = new Promise<void>((resolve) => {
+    paused = resolve;
+  });
+  const cleanup = auth.backend.releaseTunnel('lease', disconnecting);
+  auth.backend.child = {};
+  paused();
+  await cleanup;
+  assert.deepEqual(auth.responses, []);
+});
+
+test('the browser relay client waits for native acknowledgement and refuses commands after exit', async (t) => {
+  const auth = browserAuthHarness(t);
+  const commands: any[] = [];
+  auth.backend.send = async (command: unknown) => {
+    commands.push(command);
+    return { ok: true, forwardPort: 45000 };
+  };
+  let exits = 0;
+  const endpoint = await auth.backend.openWebTunnelEndpoint(() => exits++);
+  assert.equal(endpoint.port, 45000);
+  await endpoint.connect(2150);
+  const paused = endpoint.disconnect();
+  assert.equal(endpoint.disconnect(), paused);
+  await paused;
+  assert.deepEqual(
+    commands.map(({ action, port }) => [action, port]),
+    [
+      ['browser-relay.open', undefined],
+      ['browser-relay.route', 2150],
+      ['browser-relay.route', 0],
+    ],
+  );
+  auth.backend.rejectAll(new Error('Relay stopped'));
+  assert.equal(exits, 1);
+  await assert.rejects(endpoint.connect(2250), /endpoint is closed/);
+  await endpoint.close();
+  assert.equal(commands.length, 3);
 });
 
 test('native popup setup errors settle the prompt and leave the queue usable', async (t) => {

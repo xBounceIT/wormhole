@@ -1,4 +1,3 @@
-import { createConnection, createServer, type AddressInfo, type Socket } from 'node:net';
 import type { ProxyConfig, Session } from 'electron';
 
 // A single unusable proxy and no implicit loopback bypass keep Chromium fail-closed.
@@ -8,65 +7,12 @@ export const blockedWebTunnelProxy = {
   proxyBypassRules: '<-loopback>',
 } satisfies ProxyConfig;
 
-// Chromium keeps this loopback address for the browser's lifetime. In particular, changing the
-// address of a TCP forwarder would change the page origin, including its storage and history.
-export class WebTunnelEndpoint {
-  private upstreamPort?: number;
-  private readonly sockets = new Set<Socket>();
-  private readonly server = createServer({ allowHalfOpen: true }, (client) => {
-    if (this.upstreamPort === undefined) {
-      client.destroy();
-      return;
-    }
-    const upstream = createConnection({
-      host: '127.0.0.1',
-      port: this.upstreamPort,
-      allowHalfOpen: true,
-    });
-    for (const [socket, peer] of [
-      [client, upstream],
-      [upstream, client],
-    ]) {
-      this.sockets.add(socket);
-      socket.once('close', () => this.sockets.delete(socket));
-      socket.on('error', () => peer.destroy());
-      socket.pipe(peer);
-    }
-  });
-
-  private constructor() {}
-
-  static async listen(): Promise<WebTunnelEndpoint> {
-    const endpoint = new WebTunnelEndpoint();
-    await new Promise<void>((resolve, reject) => {
-      endpoint.server.once('error', reject);
-      endpoint.server.listen(0, '127.0.0.1', () => {
-        endpoint.server.off('error', reject);
-        endpoint.server.unref();
-        resolve();
-      });
-    });
-    return endpoint;
-  }
-
-  get port(): number {
-    return (this.server.address() as AddressInfo).port;
-  }
-
-  connect(port: number): void {
-    this.upstreamPort = port;
-  }
-
-  disconnect(): void {
-    this.upstreamPort = undefined;
-    for (const socket of this.sockets) socket.destroy();
-  }
-
-  close(): void {
-    this.disconnect();
-    this.server.close();
-  }
-}
+export type WebTunnelEndpoint = {
+  readonly port: number;
+  connect(port: number): Promise<void>;
+  disconnect(): Promise<void>;
+  close(): Promise<void>;
+};
 
 type BrowserProxyState = {
   endpoint?: WebTunnelEndpoint;
@@ -102,17 +48,19 @@ export class WebTunnelProxy {
     state.endpoint = endpoint;
     // A background page can outlive its browser. Disconnect immediately and keep the old port
     // reserved until Chromium drops the obsolete proxy configuration and cached connections.
-    previous?.disconnect();
-    const pending = state.pending
-      .catch(() => undefined)
-      .then(async () => {
-        if (previous) state.retired.add(previous);
-        await session.setProxy(config);
-        if (!state.retired.size) return;
-        await session.closeAllConnections();
-        for (const retired of state.retired) retired.close();
-        state.retired.clear();
-      });
+    const pending = Promise.all([
+      state.pending.catch(() => undefined),
+      previous?.disconnect(),
+    ]).then(async () => {
+      if (previous) state.retired.add(previous);
+      await session.setProxy(config);
+      if (!state.retired.size) return;
+      await session.closeAllConnections();
+      for (const retired of state.retired) {
+        await retired.close();
+        state.retired.delete(retired);
+      }
+    });
     state.pending = pending;
     return pending;
   }

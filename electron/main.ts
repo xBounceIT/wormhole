@@ -112,7 +112,7 @@ import { KeyedSingleFlight } from './keyed-single-flight.js';
 import {
   blockedWebTunnelProxy,
   parseWebTunnelSocksPort,
-  WebTunnelEndpoint,
+  type WebTunnelEndpoint,
   WebTunnelProxy,
 } from './web-tunnel-endpoint.js';
 import {
@@ -401,6 +401,9 @@ type BackendOperation =
   | 'extension-import-folder'
   | 'extension-update-if-stale';
 type NativeBackendAction =
+  | 'browser-relay.open'
+  | 'browser-relay.route'
+  | 'browser-relay.close'
   | 'vnc.connect'
   | 'vnc.disconnect'
   | 'vnc.pointer'
@@ -3313,6 +3316,12 @@ class NativeBackendProcess {
     }
   >();
 
+  private readonly operation: 'serve' | 'browser-relay';
+
+  constructor(operation: 'serve' | 'browser-relay' = 'serve') {
+    this.operation = operation;
+  }
+
   async send(
     command: NativeBackendCommand,
     timeoutMs: number | null = nativeBackendCommandTimeoutMs,
@@ -3356,6 +3365,57 @@ class NativeBackendProcess {
     dedicated?: boolean;
   }): Promise<string> {
     return (await this.acquireTunnelRoute(request)).socksEndpoint;
+  }
+
+  async openWebTunnelEndpoint(onExit: () => void): Promise<WebTunnelEndpoint> {
+    const sessionId = randomUUID();
+    let available = true;
+    let disconnecting: Promise<void> | undefined;
+    this.tunnelFailures.watch(sessionId, () => {
+      available = false;
+      onExit();
+    });
+    const send = async (
+      action: 'browser-relay.open' | 'browser-relay.route' | 'browser-relay.close',
+      port?: number,
+    ) => {
+      if (!available) throw new Error('The browser VPN endpoint is closed.');
+      const response = await this.send({ action, sessionId, port });
+      if (!response.ok || !available) throw new Error('The browser VPN endpoint is unavailable.');
+      return response;
+    };
+    const retire = async (action: 'browser-relay.route' | 'browser-relay.close') => {
+      if (!available) return;
+      try {
+        await send(action, action === 'browser-relay.route' ? 0 : undefined);
+      } catch {
+        // An unacknowledged pause or close leaves the upstream state unknown.
+        if (available) await this.stop();
+      }
+    };
+    const close = async () => {
+      await retire('browser-relay.close');
+      available = false;
+      this.tunnelFailures.forget(sessionId);
+    };
+    try {
+      const { forwardPort: port } = await send('browser-relay.open');
+      if (typeof port !== 'number' || !Number.isInteger(port) || port < 1 || port > 65535) {
+        throw new Error('The browser VPN endpoint returned an invalid port.');
+      }
+      return {
+        port,
+        connect: async (upstreamPort) => {
+          disconnecting = undefined;
+          await send('browser-relay.route', upstreamPort);
+        },
+        disconnect: () => (disconnecting ??= retire('browser-relay.route')),
+        close,
+      };
+    } catch (error) {
+      await close();
+      throw error;
+    }
   }
 
   async acquireTunnelRoute(request: {
@@ -3434,9 +3494,11 @@ class NativeBackendProcess {
       throw new Error(response.error || 'The VPN tunnel could not reach the target.');
   }
 
-  async releaseTunnel(leaseId: string): Promise<void> {
+  async releaseTunnel(leaseId: string, beforeRelease?: Promise<void>): Promise<void> {
+    const child = this.child;
     this.tunnelFailures.forget(leaseId);
-    if (!this.child) return;
+    if (beforeRelease) await beforeRelease;
+    if (!child || this.child !== child) return;
     const response = await this.send({
       action: 'tunnel.release',
       sessionId: leaseId,
@@ -3537,14 +3599,16 @@ class NativeBackendProcess {
       let settled = false;
       const child = spawn(
         backendPath(),
-        [
-          '--operation',
-          'serve',
-          '--database',
-          wormholeDatabasePath(),
-          '--electron-user-data',
-          electronUserDataPath(),
-        ],
+        this.operation === 'browser-relay'
+          ? ['--operation', this.operation]
+          : [
+              '--operation',
+              this.operation,
+              '--database',
+              wormholeDatabasePath(),
+              '--electron-user-data',
+              electronUserDataPath(),
+            ],
         { windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'] },
       );
       this.child = child;
@@ -3676,6 +3740,7 @@ class NativeBackendProcess {
 }
 
 let nativeBackend: NativeBackendProcess | undefined;
+let browserRelayBackend: NativeBackendProcess | undefined;
 const activeTunnelTests = new Map<number, ActiveTunnelTest>();
 const activeNativeOperations = new Map<number, ActiveNativeOperation>();
 
@@ -3760,10 +3825,17 @@ function getNativeBackend(): NativeBackendProcess {
   return nativeBackend;
 }
 
-async function releaseNativeTunnelLease(leaseId: string): Promise<void> {
+function getBrowserRelayBackend(): NativeBackendProcess {
+  browserRelayBackend ??= new NativeBackendProcess('browser-relay');
+  return browserRelayBackend;
+}
+
+async function releaseNativeTunnelLease(
+  leaseId: string,
+  beforeRelease?: Promise<void>,
+): Promise<void> {
   const backend = nativeBackend;
-  if (!backend) return;
-  await backend.releaseTunnel(leaseId);
+  await (backend ? backend.releaseTunnel(leaseId, beforeRelease) : beforeRelease);
 }
 
 async function runBitwardenCredentialMaintenance(): Promise<void> {
@@ -4795,6 +4867,7 @@ class WebSurfaceManager {
   private readonly tunnelProxy = new WebTunnelProxy();
   private readonly pendingOpenOwners = new Map<string, BrowserWindow>();
   private readonly tunnelLeases = new TunnelLeaseRegistry();
+  private readonly tunnelEndpoints = new Map<string, WebTunnelEndpoint>();
   private readonly tunnelLeaseOwners = new Map<string, BrowserWindow>();
   private readonly attempts = new WebSessionAttemptTracker();
   private readonly extensionLoads = new Map<string, Promise<void>>();
@@ -4882,10 +4955,7 @@ class WebSurfaceManager {
         this.tunnelLeaseOwners.set(request.sessionId, owner);
         openingTunnelBackend = getNativeBackend();
         tunnelRoute = await openingTunnelBackend.acquireTunnelRoute({
-          onExit: () => {
-            openingEndpoint?.disconnect();
-            this.webTunnelExited(request.sessionId, leaseId);
-          },
+          onExit: () => this.webTunnelExited(request.sessionId, leaseId),
           leaseId,
           nodeId: request.nodeId,
           tunnelConfigId: request.tunnelConfigId,
@@ -4925,11 +4995,21 @@ class WebSurfaceManager {
           target,
           tunnelRoute.socksEndpoint,
         );
-        openingEndpoint = await WebTunnelEndpoint.listen();
+        openingEndpoint = await getBrowserRelayBackend().openWebTunnelEndpoint(() => {
+          if (!this.attempts.isCurrent(request.sessionId, generation)) return;
+          const record = this.surfaces.get(request.sessionId);
+          if (record) {
+            this.sendEvent(request.sessionId, record, 'failed', {
+              error: 'The browser VPN endpoint stopped. Reconnect this browser to continue.',
+            });
+          }
+          this.close(request.sessionId);
+        });
         if (!this.tunnelLeases.isActive(request.sessionId, openingLeaseId!)) {
           throw new Error('The VPN connection stopped while preparing this browser.');
         }
-        openingEndpoint.connect(port);
+        this.tunnelEndpoints.set(openingLeaseId!, openingEndpoint);
+        await openingEndpoint.connect(port);
         if (tunnelRoute.socksEndpoint) {
           resolvedTunnelRoute = 'socks5';
           target.proxyUrl = `socks5://${tunnelRoute.socksEndpoint}`;
@@ -5209,7 +5289,7 @@ class WebSurfaceManager {
     } catch (error) {
       if (openingEndpoint) {
         if (openingProxySession) this.detachTunnelProxy(openingProxySession, openingEndpoint);
-        else openingEndpoint.close();
+        else await openingEndpoint.close();
       }
       bitwardenUseRelease?.();
       if (openingRecord && this.surfaces.get(request.sessionId) === openingRecord) {
@@ -6740,7 +6820,11 @@ class WebSurfaceManager {
   }
 
   private async releaseTunnel(sessionId: string): Promise<void> {
-    await this.tunnelLeases.release(sessionId, releaseNativeTunnelLease);
+    await this.tunnelLeases.release(sessionId, async (leaseId) => {
+      const endpoint = this.tunnelEndpoints.get(leaseId);
+      await releaseNativeTunnelLease(leaseId, endpoint?.disconnect());
+      this.tunnelEndpoints.delete(leaseId);
+    });
     if (!this.tunnelLeases.has(sessionId)) this.tunnelLeaseOwners.delete(sessionId);
   }
 
@@ -6784,7 +6868,6 @@ class WebSurfaceManager {
     record.tunnelLeaseId = undefined;
     const vpn = record.vpn;
     if (!vpn) return;
-    vpn.endpoint.disconnect();
     if (vpn.status === 'active') {
       vpn.status = 'disconnected';
       for (const view of record.tabs.all()) {
@@ -6837,7 +6920,9 @@ class WebSurfaceManager {
       if (!this.tunnelLeases.isActive(sessionId, leaseId)) {
         throw new Error('The VPN connection stopped while reconnecting.');
       }
-      vpn.endpoint.connect(port);
+      this.tunnelEndpoints.set(leaseId, vpn.endpoint);
+      await vpn.endpoint.connect(port);
+      if (!isCurrent() || !this.tunnelLeases.isActive(sessionId, leaseId)) return false;
       record.tunnel = route.tunnel;
       vpn.status = 'active';
       return true;
@@ -7009,6 +7094,10 @@ class WebSurfaceManager {
   }
 
   backendStopped(): void {
+    for (const endpoint of this.tunnelEndpoints.values()) {
+      void endpoint.disconnect().catch(() => undefined);
+    }
+    this.tunnelEndpoints.clear();
     this.tunnelLeases.clear();
     this.tunnelLeaseOwners.clear();
     for (const [sessionId, record] of this.surfaces) {
@@ -11723,6 +11812,9 @@ function shutdownNativeResources(): Promise<void> {
     if (nativeBackend === backend) nativeBackend = undefined;
     await backend?.stop(true);
     webSurfaces.backendStopped();
+    const relayBackend = browserRelayBackend;
+    browserRelayBackend = undefined;
+    await relayBackend?.stop(true);
     sshBackend.backendStopped();
     rdpTunnelLeases.clear();
     rdpTunnelLeaseSessions.clear();

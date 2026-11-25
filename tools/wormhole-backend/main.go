@@ -257,6 +257,13 @@ func runBackendCLI(args []string, input io.Reader, output io.Writer, errorOutput
 		return decodeOptionalInputReader(input, target)
 	}
 
+	if *operation == "browser-relay" {
+		if err := serveBrowserRelays(input, output); err != nil {
+			writeErrorTo(errorOutput, err.Error())
+			return 1
+		}
+		return 0
+	}
 	if *databasePath == "" {
 		writeErrorTo(errorOutput, "database path is required")
 		return 1
