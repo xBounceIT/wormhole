@@ -222,6 +222,12 @@ git push origin vX.Y.Z
 GitHub Actions builds the tagged commit and uses `X.Y.Z` as the version in the
 app and release files.
 
+For a manual run, select an existing tag that contains this workflow as the ref.
+
+```sh
+gh workflow run release.yml --ref vX.Y.Z
+```
+
 AppImages are named `Wormhole-<version>-x86_64.AppImage` or
 `Wormhole-<version>-arm64.AppImage`. They use electron-builder's static runtime,
 which does not require the system's libfuse2, and contain AppImageUpdate metadata.

@@ -787,15 +787,10 @@ test('release packages generate and upload the installer checksums required by t
 
 test('release resolves the version from a stable tag regardless of the checked-in version', async () => {
   assert.deepEqual(releaseConfig.on.push.tags, ['v*']);
-  assert.equal(
-    releaseJobs.checks.if,
-    "github.event_name == 'workflow_dispatch' || (github.ref_type == 'tag' && !github.event.deleted)",
-  );
+  assert.equal(releaseConfig.on.workflow_dispatch, null);
+  assert.equal(releaseJobs.checks.if, "github.ref_type == 'tag' && !github.event.deleted");
   const tagCheck = releaseJobs.checks.steps.find((step) => step.id === 'release');
-  assert.equal(
-    tagCheck?.env.RELEASE_TAG,
-    "${{ github.event_name == 'push' && github.ref_name || inputs.tag }}",
-  );
+  assert.equal(tagCheck?.env.RELEASE_TAG, '${{ github.ref_name }}');
   assert.equal(tagCheck.shell, 'bash');
   const otherVersion = packageJson.version === '8.12.34' ? '9.12.34' : '8.12.34';
   const workDir = await mkdtemp(join(tmpdir(), 'wormhole-release-version-'));
@@ -842,17 +837,11 @@ test('all release builds use the tagged commit and embed the resolved version', 
   assert.deepEqual(checks.outputs, {
     tag: '${{ steps.release.outputs.tag }}',
     version: '${{ steps.release.outputs.version }}',
-    commit: '${{ steps.source.outputs.commit }}',
   });
   const checkout = (job) => job.steps.find((step) => step.uses?.startsWith('actions/checkout@'));
-  assert.equal(checkout(checks).id, 'source');
-  assert.equal(
-    checkout(checks).with.ref,
-    "${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', steps.release.outputs.tag) || '' }}",
-  );
   for (const job of [build, packages]) {
     assert.equal(job.needs, 'checks');
-    assert.equal(checkout(job).with.ref, '${{ needs.checks.outputs.commit }}');
+    assert.equal(checkout(job).with?.ref, undefined);
   }
 
   const version = '${{ needs.checks.outputs.version }}';
@@ -913,10 +902,7 @@ test('electron-builder writes the release version into the packaged app manifest
 test('release publication waits for every build and publishes the downloaded assets', () => {
   assert.equal(releaseConfig.permissions.contents, 'read');
   assert.match(packageJson.scripts.package, /--publish never(?:\s|$)/);
-  assert.equal(
-    releaseConfig.concurrency.group,
-    "release-${{ github.event_name == 'push' && github.ref_name || inputs.tag }}",
-  );
+  assert.equal(releaseConfig.concurrency.group, 'release-${{ github.ref_name }}');
   assert.equal(releaseConfig.concurrency['cancel-in-progress'], false);
   const release = releaseJobs.release;
   assert.deepEqual([...release.needs].sort(), ['build', 'checks', 'packages']);
@@ -929,7 +915,7 @@ test('release publication waits for every build and publishes the downloaded ass
   const publish = release.steps.find((step) => step.run?.includes('gh release create'));
   assert.ok(publish, 'release publication step is missing');
   assert.equal(publish.env.RELEASE_TAG, '${{ needs.checks.outputs.tag }}');
-  assert.equal(publish.env.RELEASE_COMMIT, '${{ needs.checks.outputs.commit }}');
+  assert.equal(publish.env.RELEASE_COMMIT, '${{ github.sha }}');
   assert.match(publish.run, /gh release create[\s\S]*?dist\/\*/);
   assert.match(publish.run, /for asset in dist\/\*/);
   assert.match(publish.run, /gh release upload "\$RELEASE_TAG" "\$asset" --repo "\$REPOSITORY"/);

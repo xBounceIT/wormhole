@@ -4,35 +4,29 @@ on:
   push:
     tags: ['v*']
   workflow_dispatch:
-    inputs:
-      tag:
-        description: 'Existing tag to release (e.g. v0.1.0)'
-        required: true
-        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+  group: release-${{ github.ref_name }}
   cancel-in-progress: false
 
 jobs:
   checks:
     name: Resolve release version
-    if: github.event_name == 'workflow_dispatch' || (github.ref_type == 'tag' && !github.event.deleted)
+    if: github.ref_type == 'tag' && !github.event.deleted
     runs-on: ubuntu-24.04
     outputs:
       tag: ${{ steps.release.outputs.tag }}
       version: ${{ steps.release.outputs.version }}
-      commit: ${{ steps.source.outputs.commit }}
     steps:
       - name: Read version from tag
         id: release
         shell: bash
         env:
           LC_ALL: C
-          RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
           if [[ ! "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]{0,4})\.(0|[1-9][0-9]{0,4})\.(0|[1-9][0-9]{0,4})$ ]] ||
              (( BASH_REMATCH[1] > 65535 || BASH_REMATCH[2] > 65535 || BASH_REMATCH[3] > 65535 )); then
@@ -40,12 +34,6 @@ jobs:
             exit 1
           fi
           printf 'tag=%s\nversion=%s\n' "$RELEASE_TAG" "${RELEASE_TAG#v}" >> "$GITHUB_OUTPUT"
-
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        id: source
-        with:
-          # For a push, use checkout's default so it verifies the tag against the event SHA.
-          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', steps.release.outputs.tag) || '' }}
 
   build:
     name: Build Electron ${{ matrix.platform }}
@@ -59,7 +47,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.checks.outputs.commit }}
           submodules: recursive
 
       - name: Setup .NET 10
@@ -222,8 +209,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ needs.checks.outputs.commit }}
 
       - name: Setup Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -420,7 +405,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.checks.outputs.tag }}
-          RELEASE_COMMIT: ${{ needs.checks.outputs.commit }}
+          RELEASE_COMMIT: ${{ github.sha }}
           REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
