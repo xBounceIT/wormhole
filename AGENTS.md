@@ -31,6 +31,18 @@ Electron desktop application for Windows, macOS, and Linux.
   packaging. Use the existing Electron release scripts; no MSIX or alternate shell.
 - Preserve existing user changes and keep edits within the requested scope.
 
+## Visual changelog
+
+- For each change, consider whether it introduces a user-visible feature or a
+  workflow change worth explaining in the visual changelog. If it does, ask the
+  user whether to include it unless they already gave direction.
+- Keep `src/changelog/latest-release.ts` focused on one upcoming stable major
+  or minor release. When preparing that release, use its intended `X.Y.0` tag
+  version, replace the previous release, and keep each approved change to one slide.
+- Give each slide a title, a short subtitle, and an image, GIF, or video bundled
+  with the renderer. Use demo data in captures. Supply alt text for images, a
+  still image for reduced motion with GIFs, and captions for videos with speech.
+
 ## Working approach
 
 Use your judgment to choose the approach, tools, and depth of analysis appropriate

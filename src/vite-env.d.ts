@@ -1143,6 +1143,7 @@ interface Window {
       currentVersion: string;
       result: WormholeUpdateCheckResult | null;
     }>;
+    claimVisualChangelog(hasChangelog: boolean): Promise<{ claimed: boolean }>;
     checkForUpdates(): Promise<WormholeUpdateCheckResult>;
     downloadUpdate(request: {
       installerUrl: string;

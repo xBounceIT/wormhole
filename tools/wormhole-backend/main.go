@@ -230,7 +230,7 @@ type tunnelRow struct {
 func operationNeedsWorkspaceInitialization(operation string) bool {
 	switch operation {
 	case "mcp-status", "logs-info", "open-log-file", "open-logs-folder",
-		"settings-set-log-level", "settings-set-log-retention":
+		"settings-set-log-level", "settings-set-log-retention", "visual-changelog-claim":
 		return false
 	default:
 		return true
@@ -838,6 +838,17 @@ func runBackendCLI(args []string, input io.Reader, output io.Writer, errorOutput
 		err = dismissBitwardenOnboardingNotice(*databasePath)
 		if err == nil {
 			result = map[string]bool{"updated": true}
+		}
+	case "visual-changelog-claim":
+		var request struct {
+			AppVersion   string `json:"appVersion"`
+			HasChangelog bool   `json:"hasChangelog"`
+		}
+		err = decodeInput(&request)
+		if err == nil {
+			var claimed bool
+			claimed, err = claimVisualChangelog(*databasePath, request.AppVersion, request.HasChangelog)
+			result = map[string]bool{"claimed": claimed}
 		}
 	case "extension-read":
 		result, err = readBitwardenExtensionState(*databasePath)

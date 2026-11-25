@@ -17,12 +17,13 @@ function Dialog({
   defaultOpen,
   onOpenChange,
   open: controlledOpen,
+  overlayId,
   ...props
-}: React.ComponentProps<typeof DialogPrimitive.Root>) {
+}: React.ComponentProps<typeof DialogPrimitive.Root> & { overlayId?: string }) {
   const [uncontrolledOpen, setUncontrolledOpen] = React.useState(defaultOpen ?? false);
   const controlled = controlledOpen !== undefined;
   const open = controlled ? controlledOpen : uncontrolledOpen;
-  useNativeSurfaceOverlay(open);
+  useNativeSurfaceOverlay(open, { id: overlayId, modal: props.modal !== false });
 
   return (
     <DialogOpenContext.Provider value={open}>

@@ -12,7 +12,7 @@ import { build } from 'vite';
 
 const require = createRequire(import.meta.url);
 
-test('settings opens as a centered two-pane overlay dialog with search, occlusion, and auth stacking', async () => {
+test('settings and visual changelog dialogs integrate with the workspace', async () => {
   const result = await build({
     configFile: false,
     logLevel: 'silent',
