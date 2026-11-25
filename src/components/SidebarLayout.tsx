@@ -7,6 +7,7 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  type CSSProperties,
   type HTMLAttributes,
   type MouseEvent,
   type ReactNode,
@@ -42,6 +43,7 @@ const SidebarPinContext = createContext<{
   interactions?: SidebarInteractions;
 }>({ pinned: true, busy: false, toggle: () => {} });
 const sidebarHoverExitDelayMs = 120;
+const canvasMinPercent = 54;
 
 export function SidebarPinButton() {
   const { pinned, busy, toggle, visible, sidebarId, buttonRef, interactions } =
@@ -123,6 +125,7 @@ export function SidebarLayout({
   const [revealed, setRevealed] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const panelRef = usePanelRef();
+  const sidebarPanel = useRef<HTMLDivElement>(null);
   const expandedWidth = useRef(normalizeSidebarWidth(initialWidth));
   const pinButton = useRef<HTMLButtonElement>(null);
   const lastInputWasPointer = useRef(false);
@@ -207,15 +210,33 @@ export function SidebarLayout({
   useEffect(() => {
     if (previousPinned.current === pinned && !pinResizePending) return;
     previousPinned.current = pinned;
+    let active = true;
     // The panel group registers changed collapse constraints in its own layout update.
-    const frame = requestAnimationFrame(() => resizePanel());
-    return () => cancelAnimationFrame(frame);
+    let frame = requestAnimationFrame(resizeWhenSettled);
+    function resizeWhenSettled() {
+      const transition = pinned ? sidebarPanel.current?.getAnimations()[0] : undefined;
+      if (!transition) {
+        resizePanel();
+        return;
+      }
+      const checkAgain = () => {
+        if (active) frame = requestAnimationFrame(resizeWhenSettled);
+      };
+      void transition.finished.then(checkAgain, checkAgain);
+    }
+    return () => {
+      active = false;
+      cancelAnimationFrame(frame);
+    };
   }, [pinned, pinResizePending]);
 
   useLayoutEffect(() => {
     let active = true;
-    const transitions = sidebarSurface.current!.getAnimations();
-    // Native surfaces stay behind the sidebar through its exit and deferred pin resize.
+    const transitions = [
+      ...sidebarPanel.current!.getAnimations(),
+      ...sidebarSurface.current!.getAnimations(),
+    ];
+    // Native surfaces stay hidden until the canvas has settled after an exit or pin resize.
     onOverlayOpenChange(pinResizePending || (!pinned && (visible || transitions.length > 0)));
     if (!visible && transitions.length > 0) {
       void Promise.allSettled(transitions.map((transition) => transition.finished)).then(() => {
@@ -266,42 +287,21 @@ export function SidebarLayout({
           data-sidebar-layout=""
           data-pinned={pinned}
           data-revealed={visible}
+          style={
+            {
+              '--sidebar-preview-width': `min(${width}px, ${100 - canvasMinPercent}cqi)`,
+            } as CSSProperties
+          }
         >
-          <div
-            {...interactions}
-            className="absolute inset-y-0 left-0 z-30"
-            style={{ width: visible ? width : 0 }}
-          >
-            <aside
-              aria-hidden={!visible}
-              aria-label="Sidebar"
-              className="absolute inset-y-0 left-0 flex flex-col overflow-hidden border-sidebar-border bg-sidebar data-[overlay=true]:border-r data-[overlay=true]:shadow-xl"
-              data-expanded={visible}
-              data-overlay={!pinned}
-              data-sidebar-surface=""
-              id={sidebarId}
-              inert={!visible}
-              ref={sidebarSurface}
-              style={{ width: visible ? width : 0 }}
-            >
-              <div className="min-h-0 flex-1" data-sidebar-content="" style={{ width }}>
-                <ContextMenuOverlayProvider onOpenChange={setMenuOpen}>
-                  {sidebar}
-                </ContextMenuOverlayProvider>
-              </div>
-              <div
-                className="relative z-20 mx-3 shrink-0 border-t border-sidebar-border py-2"
-                data-sidebar-navigation=""
-              >
-                {navigation}
-              </div>
-            </aside>
-          </div>
           <ResizablePanelGroup className="h-full min-h-0" orientation="horizontal">
             <ResizablePanel
+              className="relative"
               collapsedSize="0px"
               collapsible={!pinned}
+              data-sidebar-panel=""
+              data-preview={!pinned || pinResizePending}
               defaultSize={defaultSize}
+              elementRef={sidebarPanel}
               groupResizeBehavior="preserve-pixel-size"
               maxSize={`${maxSidebarWidth}px`}
               minSize={`${minSidebarWidth}px`}
@@ -314,7 +314,33 @@ export function SidebarLayout({
                 }
               }}
               panelRef={panelRef}
-            />
+              style={{ overflow: 'hidden' }}
+            >
+              <aside
+                {...interactions}
+                aria-hidden={!visible}
+                aria-label="Sidebar"
+                className="absolute inset-0 flex flex-col overflow-hidden bg-sidebar"
+                data-expanded={visible}
+                data-overlay={!pinned}
+                data-sidebar-surface=""
+                id={sidebarId}
+                inert={!visible}
+                ref={sidebarSurface}
+              >
+                <div className="min-h-0 flex-1" data-sidebar-content="">
+                  <ContextMenuOverlayProvider onOpenChange={setMenuOpen}>
+                    {sidebar}
+                  </ContextMenuOverlayProvider>
+                </div>
+                <div
+                  className="relative z-20 mx-3 shrink-0 border-t border-sidebar-border py-2"
+                  data-sidebar-navigation=""
+                >
+                  {navigation}
+                </div>
+              </aside>
+            </ResizablePanel>
             {/* The canvas border is the divider. Center the grip on that border. */}
             <ResizableHandle
               className={
@@ -322,13 +348,13 @@ export function SidebarLayout({
                   ? 'z-40 bg-transparent [&>div]:absolute [&>div]:top-1/2 [&>div]:left-[calc(100%+0.5px)] [&>div]:-translate-1/2'
                   : 'hidden'
               }
-              disabled={!pinned}
+              disabled={!pinned || pinResizePending}
               withHandle
             />
             <ResizablePanel
               className="min-h-0 rounded-tl-xl border-t border-l border-border bg-background"
               data-workspace-canvas=""
-              minSize="54%"
+              minSize={`${canvasMinPercent}%`}
               style={{ overflow: 'hidden' }}
             >
               {children}

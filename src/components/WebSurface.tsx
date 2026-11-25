@@ -140,6 +140,7 @@ export function WebSurface({
     let frame = 0;
     let current = true;
     let requestId = 0;
+    let previousHasBounds: boolean | undefined;
     const previewId = showPreview ? crypto.randomUUID() : undefined;
     previewIdRef.current = previewId;
     if (!available) setPreview(undefined);
@@ -147,6 +148,10 @@ export function WebSurface({
       frame = 0;
       const bounds = surface.getBoundingClientRect();
       const hasBounds = bounds.width >= 1 && bounds.height >= 1;
+      // The renderer scales the captured image as the canvas resizes. Reuse it until occlusion
+      // ends, while still reporting when the surface becomes measurable or loses its bounds.
+      if (previewId && hasBounds === previousHasBounds) return;
+      previousHasBounds = hasBounds;
       const id = ++requestId;
       void api
         .setWebSessionBounds({
