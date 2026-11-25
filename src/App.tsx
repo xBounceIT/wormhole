@@ -7311,68 +7311,18 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
             >
               <Sidebar className="relative w-full border-r-0" collapsible="none">
                 <SidebarHeader className="gap-3 p-3">
-                  <div className="flex items-center justify-between gap-2 px-1">
-                    <div>
-                      <h1 className="!text-xs font-semibold tracking-tight">Connections</h1>
-                    </div>
-                    <div className="flex items-center gap-0.5">
-                      <IconButton label="Expand all folders" onClick={() => toggleAllFolders(true)}>
-                        <ChevronDown />
-                      </IconButton>
-                      <IconButton
-                        label="Collapse all folders"
-                        onClick={() => toggleAllFolders(false)}
-                      >
-                        <ChevronUp />
-                      </IconButton>
-                      <DropdownMenu onOpenChange={setSidebarImportMenuOpen}>
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <DropdownMenuTrigger asChild>
-                              <Button
-                                aria-label="Import connections"
-                                size="icon-sm"
-                                variant="ghost"
-                              >
-                                <Upload />
-                              </Button>
-                            </DropdownMenuTrigger>
-                          </TooltipTrigger>
-                          <TooltipContent side="bottom">Import connections</TooltipContent>
-                        </Tooltip>
-                        <DropdownMenuContent align="end" className="w-52">
-                          <DropdownMenuItem onClick={() => setMremoteImportOpen(true)}>
-                            <Upload />
-                            Import from mRemoteNG
-                          </DropdownMenuItem>
-                        </DropdownMenuContent>
-                      </DropdownMenu>
-                      <IconButton
-                        aria-keyshortcuts="Control+Shift+N Meta+Shift+N"
-                        label="New folder"
-                        onClick={() => openNewFolder(null)}
-                      >
-                        <FolderPlus />
-                      </IconButton>
-                      <IconButton
-                        aria-keyshortcuts="Control+N Meta+N"
-                        label="New connection"
-                        onClick={() => openNewConnection(null)}
-                      >
-                        <Plus />
-                      </IconButton>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center justify-between gap-1">
+                    <h1 className="!text-xs font-semibold tracking-tight">Connections</h1>
                     <Button
                       aria-keyshortcuts="Control+K Meta+K"
-                      className="min-w-0 flex-1 justify-center gap-2 !text-xs"
                       onClick={openQuickConnect}
-                      size="default"
+                      size="xs"
                     >
                       <Zap data-icon="inline-start" />
                       Quick Connect
-                      <Kbd>Ctrl K</Kbd>
+                      <Kbd className="h-4 bg-primary-foreground/10 text-[10px] text-current">
+                        Ctrl K
+                      </Kbd>
                     </Button>
                   </div>
                   <div className="relative">
@@ -7393,6 +7343,49 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                         <X />
                       </IconButton>
                     ) : null}
+                  </div>
+                  <div className="flex items-center gap-0.5">
+                    <IconButton label="Expand all folders" onClick={() => toggleAllFolders(true)}>
+                      <ChevronDown />
+                    </IconButton>
+                    <IconButton
+                      label="Collapse all folders"
+                      onClick={() => toggleAllFolders(false)}
+                    >
+                      <ChevronUp />
+                    </IconButton>
+                    <DropdownMenu onOpenChange={setSidebarImportMenuOpen}>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <DropdownMenuTrigger asChild>
+                            <Button aria-label="Import connections" size="icon-sm" variant="ghost">
+                              <Upload />
+                            </Button>
+                          </DropdownMenuTrigger>
+                        </TooltipTrigger>
+                        <TooltipContent side="bottom">Import connections</TooltipContent>
+                      </Tooltip>
+                      <DropdownMenuContent align="end" className="w-52">
+                        <DropdownMenuItem onClick={() => setMremoteImportOpen(true)}>
+                          <Upload />
+                          Import from mRemoteNG
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                    <IconButton
+                      aria-keyshortcuts="Control+Shift+N Meta+Shift+N"
+                      label="New folder"
+                      onClick={() => openNewFolder(null)}
+                    >
+                      <FolderPlus />
+                    </IconButton>
+                    <IconButton
+                      aria-keyshortcuts="Control+N Meta+N"
+                      label="New connection"
+                      onClick={() => openNewConnection(null)}
+                    >
+                      <Plus />
+                    </IconButton>
                   </div>
                   {searchText ? (
                     <p className="px-1 text-xs text-muted-foreground">

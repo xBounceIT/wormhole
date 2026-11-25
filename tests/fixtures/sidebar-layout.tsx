@@ -139,6 +139,16 @@ function Harness({
   );
 }
 
+const tick = () => React.act(async () => new Promise((resolve) => setTimeout(resolve, 30)));
+
+async function keypress(keyCode: string) {
+  await React.act(async () => {
+    await window.sidebarInput({ type: 'keyDown', keyCode });
+    await window.sidebarInput({ type: 'keyUp', keyCode });
+  });
+  await tick();
+}
+
 window.runSidebarTests = async (handleOnly = false) => {
   if (handleOnly) return runAppIntegrationTests(true);
   const assert = window.sidebarAssert;
@@ -162,7 +172,6 @@ window.runSidebarTests = async (handleOnly = false) => {
     );
     await tick();
   };
-  const tick = () => React.act(async () => new Promise((resolve) => setTimeout(resolve, 30)));
   const waitFor = async (condition: () => boolean, message: string) => {
     const deadline = performance.now() + 5000;
     while (!condition()) {
@@ -254,13 +263,6 @@ window.runSidebarTests = async (handleOnly = false) => {
     await React.act(async () => {
       await window.sidebarInput({ type: 'mouseDown', button: 'left', x, y, clickCount: 1 });
       await window.sidebarInput({ type: 'mouseUp', button: 'left', x, y, clickCount: 1 });
-    });
-    await tick();
-  };
-  const keypress = async (keyCode: string) => {
-    await React.act(async () => {
-      await window.sidebarInput({ type: 'keyDown', keyCode });
-      await window.sidebarInput({ type: 'keyUp', keyCode });
     });
     await tick();
   };
@@ -1085,7 +1087,14 @@ async function runAppIntegrationTests(handleOnly = false) {
   const assert = window.sidebarAssert;
   const root = createRoot(document.getElementById('root')!);
   const query = (selector: string) => document.querySelector<HTMLElement>(selector)!;
-  const tick = () => React.act(async () => new Promise((resolve) => setTimeout(resolve, 30)));
+  const connectionActions = () =>
+    [
+      'Expand all folders',
+      'Collapse all folders',
+      'Import connections',
+      'New folder',
+      'New connection',
+    ].map((label) => query(`aside button[aria-label="${label}"]`));
   const waitFor = async (condition: () => boolean, message: string) => {
     const deadline = performance.now() + 5000;
     while (!condition()) {
@@ -1353,10 +1362,7 @@ async function runAppIntegrationTests(handleOnly = false) {
         'Tree highlight overlaps the scrollbar',
       );
     }
-    await React.act(async () => {
-      await window.sidebarInput({ type: 'keyDown', keyCode: 'Tab' });
-      await window.sidebarInput({ type: 'keyUp', keyCode: 'Tab' });
-    });
+    await keypress('Tab');
     // Cover the shared row style on root/nested folders and connections, including the last row.
     for (const row of [rows[0], rows[1], rows[2], rows[3], rows.at(-1)!]) {
       await React.act(async () => row.focus());
@@ -1445,6 +1451,31 @@ async function runAppIntegrationTests(handleOnly = false) {
           ),
         ];
         assert.equal(rows.length, depth + 1);
+        if (depth === 0) {
+          const title = query('aside h1').getBoundingClientRect();
+          const quickConnect = query('aside [aria-keyshortcuts="Control+K Meta+K"]');
+          const quick = quickConnect.getBoundingClientRect();
+          const search = query('[aria-label="Search connections"]').getBoundingClientRect();
+          assert.ok(title.right < quick.left, 'Quick Connect must sit to the right of Connections');
+          assert.ok(
+            Math.abs(title.top + title.height / 2 - (quick.top + quick.height / 2)) < 1,
+            'Quick Connect and Connections must share a row',
+          );
+          assert.ok(quick.height < search.height && quick.width < search.width);
+          assert.equal(quick.right, search.right);
+          assert.ok(quick.bottom <= search.top);
+
+          const actionBounds = connectionActions().map((action) => action.getBoundingClientRect());
+          const firstAction = actionBounds[0];
+          assert.equal(firstAction.left, search.left);
+          assert.ok(search.bottom <= firstAction.top);
+          assert.ok(firstAction.bottom <= rows[0].getBoundingClientRect().top);
+          for (const [index, action] of actionBounds.entries()) {
+            assert.equal(action.top, firstAction.top);
+            assert.ok(action.right <= search.right);
+            if (index > 0) assert.ok(action.left >= actionBounds[index - 1].right);
+          }
+        }
         await React.act(async () => rows.at(-1)!.focus());
         await tick();
         assert.equal(
@@ -1496,7 +1527,17 @@ async function runAppIntegrationTests(handleOnly = false) {
     assert.equal(document.querySelectorAll('[data-connection-tree] button[draggable]').length, 0);
     await window.sidebarObserve('tree-boundaries');
 
-    await click(query('aside [aria-keyshortcuts="Control+K Meta+K"]'));
+    const headerQuickConnect = query('aside [aria-keyshortcuts="Control+K Meta+K"]');
+    await React.act(async () => headerQuickConnect.focus());
+    for (const control of [query('[aria-label="Search connections"]'), ...connectionActions()]) {
+      await keypress('Tab');
+      assert.ok(
+        document.activeElement === control,
+        `Expected Tab to focus ${control.getAttribute('aria-label')}`,
+      );
+    }
+
+    await click(headerQuickConnect);
     const name = document.querySelector<HTMLInputElement>('#connection-name')!;
     assert.equal(name.required, false);
     assert.match(name.labels![0].textContent!, /optional/i);
