@@ -162,7 +162,7 @@ test('pinned and auto-hide sidebars preserve layout, focus, menus and saved pref
           const checkHandle = stage.startsWith('pinned-');
           if (checkHandle || (process.env.WORMHOLE_TEST_SCREENSHOTS && ['collapsed', 'hover', 'tree-highlight'].includes(stage))) {
             // Freeze motion for stills: capturing a hidden window can resume a stale paint frame.
-            const stillStyles = await window.webContents.insertCSS('[data-sidebar-surface] { transition: none !important; }');
+            const stillStyles = await window.webContents.insertCSS('[data-sidebar-panel], [data-sidebar-surface] { transition: none !important; }');
             try {
               const viewport = await window.webContents.executeJavaScript('({ width: innerWidth, height: innerHeight })');
               for (const scale of checkHandle ? [1, 1.25, 1.5, 2] : [null]) {

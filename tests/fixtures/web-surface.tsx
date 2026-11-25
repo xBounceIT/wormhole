@@ -207,9 +207,9 @@ function DialogOverlayHarness({ mounted = true, revision = 0 }) {
 
 export async function runDialogOverlayTests() {
   const root = createRoot(document.getElementById('root'));
-  const visibilityRequests: boolean[] = [];
+  const boundsRequests: Parameters<typeof setNativeBounds>[0][] = [];
   window.wormhole.setWebSessionBounds = (request) => {
-    visibilityRequests.push(request.visible);
+    boundsRequests.push(request);
     return setNativeBounds(request);
   };
   const render = async (props = {}) => {
@@ -257,7 +257,7 @@ export async function runDialogOverlayTests() {
         'the production preview must replace the native page',
       );
     }
-    visibilityRequests.length = 0;
+    boundsRequests.length = 0;
     await click('Delete connection');
     assert.ok(document.querySelector('[role="dialog"]'));
     assert.equal(
@@ -266,7 +266,7 @@ export async function runDialogOverlayTests() {
       'closing the context menu must not put the native page over the delete confirmation',
     );
     assert.ok(
-      !visibilityRequests.includes(true),
+      !boundsRequests.some((request) => request.visible),
       'the native page must stay hidden throughout the menu-to-dialog handoff',
     );
   };
@@ -277,15 +277,27 @@ export async function runDialogOverlayTests() {
   await requestDelete();
   for (let revision = 1; revision <= 3; revision++) {
     await render({ revision });
-    await settle();
+    const canvas = document.querySelector('[aria-label="Web browser canvas"]');
+    assert.equal(canvas.getBoundingClientRect().width, 700 + revision);
+    // Hidden test windows can defer ResizeObserver notifications. Also exercise the resize event
+    // so the coalesced bounds callback runs before the next change.
+    await act(async () => {
+      window.dispatchEvent(new Event('resize'));
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    });
     assert.equal(await readNativeVisibility(), false, 'resizing must preserve modal occlusion');
   }
+  assert.ok(
+    !boundsRequests.some((request) => request.capturePreview),
+    'Resizing an occluded canvas must not request the captured image again',
+  );
   await click('Another confirmation');
   assert.equal(await readNativeVisibility(), false);
   await click('Close nested confirmation');
   assert.equal(await readNativeVisibility(), false, 'the outer confirmation is still open');
   await click('Cancel');
   assert.equal(await readNativeVisibility(), true, 'Cancel restores the session');
+  assert.equal(boundsRequests.at(-1)?.width, 703, 'Restored bounds match the resized canvas');
 
   await requestDelete();
   await render({ mounted: false });

@@ -121,19 +121,34 @@
   animation: none !important;
 }
 
-[data-sidebar-surface] {
-  transition:
-    width 200ms ease-out,
-    opacity 150ms ease-out;
+[data-sidebar-layout] {
+  container-type: inline-size;
+}
+
+[data-sidebar-panel] {
+  width: var(--sidebar-panel-width, var(--sidebar-preview-width)) !important;
+}
+
+[data-sidebar-panel][data-preview='true'] {
+  /* Preview the saved width without changing the resizable group's stored layout. */
+  flex: none !important;
+  transition: width 200ms ease-out;
+}
+
+[data-sidebar-layout][data-revealed='false'] [data-sidebar-panel] {
+  --sidebar-panel-width: 0px;
+}
+
+[data-sidebar-panel][data-preview='true'] [data-sidebar-content] {
+  width: var(--sidebar-preview-width);
 }
 
 [data-sidebar-surface][data-expanded='false'] {
-  border-right-width: 0;
   opacity: 0;
 }
 
-[data-sidebar-surface][data-overlay='false'] {
-  transition: none;
+[data-sidebar-surface][data-overlay='true'] {
+  transition: opacity 150ms ease-out;
 }
 
 @keyframes terminal-cursor-blink {
@@ -191,7 +206,8 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  [data-sidebar-surface] {
+  [data-sidebar-panel][data-preview='true'],
+  [data-sidebar-surface][data-overlay='true'] {
     transition: none;
   }
 

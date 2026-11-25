@@ -185,12 +185,10 @@ window.runSidebarTests = async (handleOnly = false) => {
             width: aside().getBoundingClientRect().width,
             state: layout().dataset,
             focus: document.activeElement?.getAttribute('aria-label'),
-            transitions: aside()
-              .getAnimations()
-              .map((animation) => ({
-                property: (animation as CSSTransition).transitionProperty,
-                state: animation.playState,
-              })),
+            transitions: sidebarAnimations().map((animation) => ({
+              property: (animation as CSSTransition).transitionProperty,
+              state: animation.playState,
+            })),
           }),
       );
       await tick();
@@ -198,15 +196,22 @@ window.runSidebarTests = async (handleOnly = false) => {
   };
   const query = (selector: string) => document.querySelector<HTMLElement>(selector)!;
   const layout = () => query('[data-sidebar-layout]');
+  const panel = () => query('[data-sidebar-panel]');
   const aside = () => query('aside');
+  const sidebarAnimations = () => [...panel().getAnimations(), ...aside().getAnimations()];
   const sidebarContent = () => query('[data-sidebar-content]');
   const pin = () => query('[data-sidebar-pin]') as HTMLButtonElement;
   const left = () => query('[data-workspace-canvas] > div').getBoundingClientRect().left;
+  const assertPreviewAlignment = () => {
+    const canvas = query('[data-workspace-canvas] > div').getBoundingClientRect();
+    assert.equal(canvas.left, aside().getBoundingClientRect().right);
+    assert.equal(canvas.right, layout().getBoundingClientRect().right);
+  };
   const shown = async (expected: boolean) => {
     await waitFor(
       () =>
         layout().dataset.revealed === String(expected) &&
-        aside().getAnimations().length === 0 &&
+        sidebarAnimations().length === 0 &&
         (expected
           ? aside().getBoundingClientRect().left === 0
           : aside().getBoundingClientRect().width === 0),
@@ -225,6 +230,7 @@ window.runSidebarTests = async (handleOnly = false) => {
     assert.equal(aside().getAttribute('aria-hidden'), String(!expected));
     assert.equal(pin().getAttribute('aria-expanded'), String(expected));
     assert.equal(getComputedStyle(aside()).opacity, expected ? '1' : '0');
+    if (layout().dataset.pinned === 'false') assertPreviewAlignment();
   };
   const move = async (x: number, y = 450) => {
     await React.act(async () => window.sidebarInput({ type: 'mouseMove', x, y }));
@@ -280,8 +286,8 @@ window.runSidebarTests = async (handleOnly = false) => {
     await waitFor(
       () =>
         layout().dataset.pinned === 'true'
-          ? left() >= aside().getBoundingClientRect().right
-          : left() === 0,
+          ? panel().dataset.preview === 'false' && left() >= aside().getBoundingClientRect().right
+          : left() === aside().getBoundingClientRect().right,
       'Pin layout did not settle',
     );
   };
@@ -508,12 +514,15 @@ window.runSidebarTests = async (handleOnly = false) => {
       (button, index) => button === navigationButtons[index],
     ),
   );
-  assert.equal(left(), 0, 'Hovering must not move the session');
+  assert.ok(
+    Math.abs(left() - resizedWidth) <= 1,
+    `Hovering reserved ${left()}px after resizing to ${resizedWidth}px`,
+  );
   assert.deepEqual(saves, [false], 'Hovering must not save a pin preference');
   assert.equal(query('#native-visible').textContent, 'false');
   assert.ok(query('#content') === content, 'Pin changes remounted the session content');
   assert.equal((query('input') as HTMLInputElement).value, 'saved query');
-  assert.equal(aside().getBoundingClientRect().width, resizedWidth);
+  assert.ok(Math.abs(aside().getBoundingClientRect().width - resizedWidth) <= 1);
   await move(1000);
   await shown(false);
 
@@ -770,6 +779,9 @@ window.runSidebarTests = async (handleOnly = false) => {
       await move(1000);
       await mount(false, 600);
       await hoverPin();
+      const previewWidth = aside().getBoundingClientRect().width;
+      assert.ok(previewWidth < 600, 'The preview must respect the canvas minimum width');
+      assert.equal(sidebarContent().getBoundingClientRect().width, previewWidth);
       await React.act(async () => pin().click());
       await settle();
       await shown(true);
@@ -782,6 +794,7 @@ window.runSidebarTests = async (handleOnly = false) => {
         width >= 256 && width < 600,
         'The narrow viewport must constrain the saved maximum width',
       );
+      assert.ok(Math.abs(width - previewWidth) <= 1, 'Pinning must preserve the preview width');
       assert.ok(
         aside().getBoundingClientRect().right <= left() + 1,
         'The pinned sidebar must not overlap unoccluded native content',
@@ -840,7 +853,7 @@ window.runSidebarTests = async (handleOnly = false) => {
       await waitFor(
         () =>
           fail
-            ? left() === 0
+            ? left() === aside().getBoundingClientRect().right
             : left() >= aside().getBoundingClientRect().right &&
               query('#native-visible').textContent === 'true',
         'Deferred pin layout and native visibility did not settle',
@@ -990,7 +1003,7 @@ window.runSidebarTests = async (handleOnly = false) => {
     const [x, y] = opening ? pinPoint() : [1000, 450];
     await React.act(async () => window.sidebarInput({ type: 'mouseMove', x, y }));
     const slide = () =>
-      animatedSurface
+      panel()
         .getAnimations()
         .find(
           (animation) =>
@@ -1000,7 +1013,7 @@ window.runSidebarTests = async (handleOnly = false) => {
       () => layout().dataset.revealed === String(opening) && Boolean(slide()),
       'Sidebar slide transition did not start',
     );
-    for (const animation of animatedSurface.getAnimations()) animation.pause();
+    for (const animation of sidebarAnimations()) animation.pause();
     return slide()!;
   };
   const halfway = async (animation: Animation) => {
@@ -1014,12 +1027,12 @@ window.runSidebarTests = async (handleOnly = false) => {
       'Sidebar did not pass through an intermediate width',
     );
     assert.equal(document.querySelectorAll('nav[aria-label="Main navigation"]').length, 1);
-    assert.equal(left(), 0, 'Sliding the sidebar moved the session');
+    assertPreviewAlignment();
     assert.ok(query('#content') === session, 'Sliding remounted the session');
   };
   const finishSlide = async () => {
     await React.act(async () => {
-      for (const animation of animatedSurface.getAnimations()) animation.finish();
+      for (const animation of sidebarAnimations()) animation.finish();
     });
     await tick();
   };
@@ -1067,6 +1080,7 @@ window.runSidebarTests = async (handleOnly = false) => {
       'Cancelling sidebar motion did not restore native surfaces',
     );
     assert.equal(query('#native-visible').textContent, 'true');
+    assert.equal(getComputedStyle(panel()).transitionProperty, 'none');
     assert.equal(getComputedStyle(animatedSurface).transitionProperty, 'none');
     await hoverPin();
     assert.equal(animatedSurface.getBoundingClientRect().left, 0);
@@ -1074,6 +1088,37 @@ window.runSidebarTests = async (handleOnly = false) => {
     await move(1000);
     await shown(false);
     assert.equal(query('#native-visible').textContent, 'true');
+
+    await React.act(async () => window.sidebarReducedMotion(false));
+    await halfway(await beginSlide(true));
+    const previewWidth = aside().getBoundingClientRect().width;
+    await React.act(async () => pin().click());
+    await React.act(
+      async () =>
+        new Promise<void>((resolve) => {
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+        }),
+    );
+    assert.equal(layout().dataset.pinned, 'true');
+    assert.equal(
+      aside().getBoundingClientRect().width,
+      previewWidth,
+      'Pinning during the slide must allow the width transition to finish',
+    );
+    assert.equal(query('#native-visible').textContent, 'false');
+    await settle(true);
+    assert.equal(layout().dataset.pinned, 'false');
+    assert.equal(aside().getBoundingClientRect().width, previewWidth);
+    assertPreviewAlignment();
+    await React.act(async () => pin().click());
+    await finishSlide();
+    await settle();
+    await shown(true);
+    await waitFor(
+      () => query('#native-visible').textContent === 'true',
+      'Pinning during the slide left native content hidden',
+    );
+    assertResizeHandleCentered();
   } finally {
     await React.act(async () => window.sidebarReducedMotion(false));
   }
@@ -1118,10 +1163,12 @@ async function runAppIntegrationTests(handleOnly = false) {
   const shown = async (expected: boolean) => {
     await waitFor(() => {
       const surface = query('[data-sidebar-surface]');
+      const panel = query('[data-sidebar-panel]');
       // Flush computed layout even while a hidden Chromium window still reports an animation.
       const bounds = surface.getBoundingClientRect();
       return (
         query('[data-sidebar-layout]').dataset.revealed === String(expected) &&
+        panel.getAnimations().length === 0 &&
         surface.getAnimations().length === 0 &&
         (expected ? bounds.left === 0 : bounds.width === 0)
       );
@@ -1383,7 +1430,9 @@ async function runAppIntegrationTests(handleOnly = false) {
     await shown(false);
     await window.sidebarObserve('collapsed');
     await hoverPin();
-    assert.equal(query('[data-sidebar-surface]').getBoundingClientRect().left, 0);
+    const preview = query('[data-sidebar-surface]').getBoundingClientRect();
+    assert.equal(preview.left, 0);
+    assert.equal(canvas.getBoundingClientRect().left, preview.right);
     const quickConnect = query('aside [aria-keyshortcuts="Control+K Meta+K"]');
     assert.equal(getComputedStyle(quickConnect).visibility, 'visible');
     const quickBounds = quickConnect.getBoundingClientRect();
