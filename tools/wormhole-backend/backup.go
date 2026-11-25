@@ -1384,9 +1384,6 @@ func importBackupContext(
 	); err != nil {
 		return result, err
 	}
-	for _, warning := range result.Warnings {
-		logInfo("backup import warning: %s", warning)
-	}
 	logInfo("backup imported: nodes=%d/%d credentials=%d/%d tunnels=%d/%d warnings=%d",
 		result.NodesImported, result.NodesSkipped,
 		result.CredentialsImported, result.CredentialsSkipped,

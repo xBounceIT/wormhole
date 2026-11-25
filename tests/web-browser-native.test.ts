@@ -141,6 +141,7 @@ function browserHarness({ socks = '127.0.0.1:1080', active = true } = {}) {
     events: any[] = [],
     menus: any[] = [],
     copiedLinks: string[] = [];
+  const diagnostics: unknown[][] = [];
   const authSession = { authorizationEpoch: 1, isAccessAllowed: true };
   const fromPartition = (partition: string) => {
     if (!sessions.has(partition))
@@ -346,6 +347,8 @@ function browserHarness({ socks = '127.0.0.1:1080', active = true } = {}) {
     randomUUID,
     URL,
     console,
+    recordDiagnostic: (...args: unknown[]) => diagnostics.push(args),
+    reportWarning: (message: string) => diagnostics.push(['WRN', message]),
     setImmediate,
     setTimeout,
     clearTimeout,
@@ -464,6 +467,7 @@ function browserHarness({ socks = '127.0.0.1:1080', active = true } = {}) {
     sandbox,
     menus,
     copiedLinks,
+    diagnostics,
   };
 }
 
@@ -1262,8 +1266,15 @@ test('page failures, aborted loads and tab crashes keep the browser route alive'
   await h.command('reload');
   assert.equal(first.webContents.reloads, 1);
   assert.equal(record.tabs.snapshot('vpn').tabs[0].error, undefined);
-  first.webContents.emit('render-process-gone');
+  first.webContents.emit('render-process-gone', {}, { reason: 'crashed', exitCode: 1 });
   assert.match(record.tabs.snapshot('vpn').tabs[0].error, /stopped unexpectedly/);
+  assert.equal(
+    JSON.stringify(h.diagnostics),
+    JSON.stringify([
+      ['ERR', 'Browser navigation failed', { errorCode: -105 }],
+      ['ERR', 'Browser renderer exited', { reason: 'crashed', exitCode: 1 }],
+    ]),
+  );
   assert.equal(h.releases.length, 0);
   await h.command('new-tab');
   const firstContents = first.webContents;

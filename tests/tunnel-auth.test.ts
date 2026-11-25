@@ -145,6 +145,7 @@ function browserAuthHarness(
   const partitions: string[] = [];
   const windowPartitions: string[] = [];
   const responses: { cancelled: boolean; value: string; browserFailure?: string }[] = [];
+  const diagnostics: unknown[][] = [];
   const authSession = { isAccessAllowed: true, authorizationEpoch: 1 };
   const presented: AuthWindow[] = [];
   let expire!: () => void;
@@ -225,6 +226,8 @@ function browserAuthHarness(
       fortinetIPsecCallbackToken,
       tunnelPromptValueMaxBytes,
       tunnelBrowserLoadFailure,
+      recordDiagnostic: (...args: unknown[]) => diagnostics.push(args),
+      reportWarning: (message: string) => diagnostics.push(['WRN', message]),
       TunnelBrowserPromptTracker,
       TunnelFailureRegistry,
       nativeBackendLineLimit: 64 * 1024 * 1024,
@@ -286,6 +289,7 @@ function browserAuthHarness(
     windows,
     partitions,
     windowPartitions,
+    diagnostics,
     backend,
     browserSession,
     enqueue: (overrides: Record<string, unknown>) => {
@@ -923,6 +927,10 @@ test('a crashed authentication renderer settles as an error and frees the popup'
   await setImmediate();
   auth.window.webContents.emit('render-process-gone', {}, { reason: 'crashed', exitCode: 1 });
   await setImmediate();
+  assert.equal(
+    JSON.stringify(auth.diagnostics),
+    JSON.stringify([['ERR', 'VPN sign-in renderer exited', { reason: 'crashed', exitCode: 1 }]]),
+  );
   assert.equal(auth.responses[0]?.browserFailure, 'session');
   assert.equal(auth.window.isDestroyed(), true);
   assert.equal(auth.responses[0].cancelled, false);

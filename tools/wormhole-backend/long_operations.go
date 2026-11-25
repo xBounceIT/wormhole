@@ -33,7 +33,7 @@ func (m *vncManager) startBackendOperation(command backendCommand) {
 	if _, exists := m.operations[command.SessionID]; exists {
 		m.mu.Unlock()
 		cancel()
-		m.respond(command.ID, errors.New("an operation with this id is already running"))
+		m.respond(command, errors.New("an operation with this id is already running"))
 		return
 	}
 	m.operations[command.SessionID] = pending
@@ -69,7 +69,7 @@ func (m *vncManager) startBackendOperation(command backendCommand) {
 		if errors.Is(err, context.Canceled) {
 			err = errors.New("Operation cancelled.")
 		}
-		m.respondResult(command.ID, result, err)
+		m.respondResult(command, result, err)
 	}()
 }
 
@@ -112,5 +112,5 @@ func (m *vncManager) cancelBackendOperation(command backendCommand) {
 	if pending != nil {
 		<-pending.done
 	}
-	m.respond(command.ID, nil)
+	m.respond(command, nil)
 }

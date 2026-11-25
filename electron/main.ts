@@ -51,6 +51,14 @@ import {
   type ConnectionTreeExpansionSetting,
 } from './connection-tree-settings.js';
 import { initializeLocalCrashDiagnostics } from './crash-diagnostics.js';
+import {
+  backendErrorText,
+  createRuntimeDiagnostics,
+  diagnosticErrorCode,
+  expectBackendExit,
+  observeBackendProcess,
+  withIpcDiagnostics,
+} from './runtime-diagnostics.js';
 import { isAppTheme, parseThemeStartupRequest, type AppTheme } from './theme-settings.js';
 import { isSshTerminalTheme, type SshTerminalTheme } from './terminal-theme-settings.js';
 import { nativeTitlebarOverlay, syncNativeTitlebarTheme } from './native-titlebar-theme.js';
@@ -224,6 +232,7 @@ import {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rendererUrl = process.env.VITE_DEV_SERVER_URL;
+const productionRendererPath = path.resolve(__dirname, '..', 'dist', 'index.html');
 const applicationIconPath = path.join(
   __dirname,
   '..',
@@ -256,6 +265,39 @@ const bitwardenBrowserNavigationTimeoutMs = 15_000;
 const bitwardenExtensionReadyTimeoutMs = 15_000;
 const bitwardenExtensionHostMaxListeners = 64;
 
+const recordDiagnostic = createRuntimeDiagnostics({
+  databasePath: wormholeDatabasePath,
+  fallbackPath: () => path.join(app.getPath('userData'), 'wormhole-diagnostics.log'),
+});
+
+function reportWarning(event: string, error?: unknown): void {
+  recordDiagnostic('WRN', event, { code: diagnosticErrorCode(error) });
+}
+
+function recordCrashDiagnostic(level: 'INF' | 'WRN' | 'ERR', message: string): void {
+  if (!recordDiagnostic(level, message, {}, true)) {
+    throw new Error('Could not persist crash diagnostics.');
+  }
+}
+
+process.on('uncaughtExceptionMonitor', (error, origin) => {
+  recordDiagnostic(
+    'ERR',
+    'Main process exception',
+    { origin, code: diagnosticErrorCode(error) },
+    true,
+  );
+});
+
+app.on('child-process-gone', (_event, details) => {
+  if (details.reason === 'clean-exit') return;
+  recordDiagnostic('ERR', 'Chromium child process exited', {
+    type: details.type,
+    reason: details.reason,
+    exitCode: details.exitCode,
+  });
+});
+
 // Crashpad must start before any renderer or utility process is created. This adapter keeps every
 // report local, records only bounded non-secret context, and degrades without blocking startup.
 initializeLocalCrashDiagnostics({
@@ -266,6 +308,11 @@ initializeLocalCrashDiagnostics({
   electronVersion: process.versions.electron ?? 'unknown',
   processId: process.pid,
   localAppData: process.env.LOCALAPPDATA,
+  logger: {
+    info: (message) => recordCrashDiagnostic('INF', message),
+    warn: (message) => recordCrashDiagnostic('WRN', message),
+    error: (message) => recordCrashDiagnostic('ERR', message),
+  },
 });
 
 const forceSoftwareRendering = process.env.WORMHOLE_DISABLE_HARDWARE_ACCELERATION === '1';
@@ -280,10 +327,10 @@ const useSoftwareRendering =
 if (useSoftwareRendering) {
   // This must run synchronously before Electron readiness; Chromium cannot change GPU mode later.
   app.disableHardwareAcceleration();
-  console.warn(
+  reportWarning(
     forceSoftwareRendering
-      ? '[Wormhole] Hardware acceleration disabled by startup override.'
-      : '[Wormhole] Hardware acceleration disabled for legacy Intel macOS GPU compatibility.',
+      ? 'Hardware acceleration disabled by startup override.'
+      : 'Hardware acceleration disabled for legacy Intel macOS GPU compatibility.',
   );
 }
 
@@ -3119,7 +3166,10 @@ async function runTunnelBrowserAuth(
   authWindow.webContents.on('did-navigate-in-page', (_event, url, isMainFrame) => {
     if (isMainFrame) inspectNavigationSafely(url);
   });
-  authWindow.webContents.on('render-process-gone', () => void complete(false, '', 'session'));
+  authWindow.webContents.on('render-process-gone', (_event, { reason, exitCode }) => {
+    recordDiagnostic('ERR', 'VPN sign-in renderer exited', { reason, exitCode });
+    void complete(false, '', 'session');
+  });
   const captureOAuthRedirect = (
     navigationEvent: Electron.Event<{ isMainFrame: boolean; url: string }>,
   ) => {
@@ -3154,6 +3204,7 @@ async function runTunnelBrowserAuth(
       // A malformed failure URL cannot be an OAuth callback and follows normal fallback handling.
     }
     if (failure === undefined) return;
+    reportWarning('VPN sign-in page failed to load');
     nextCandidate(failure);
   });
   authWindow.once('closed', () => {
@@ -3256,6 +3307,10 @@ class NativeBackendProcess {
       const pending = this.pending.get(id);
       if (!pending) return;
       this.pending.delete(id);
+      recordDiagnostic('ERR', 'Native backend request timed out (' + command.action + ')', {
+        childPid: child.pid,
+        timeoutMs,
+      });
       pending.reject(new Error('Wormhole service did not respond in time.'));
     }, timeoutMs);
 
@@ -3432,7 +3487,7 @@ class NativeBackendProcess {
         gracefulTimeoutMs: nativeBackendShutdownTimeoutMs,
       });
       if (!exited) {
-        console.warn('[Wormhole] App service did not stop within the allowed time.');
+        reportWarning('App service did not stop within the allowed time.');
       }
       if (this.child === child) this.child = undefined;
     })().finally(() => {
@@ -3460,16 +3515,19 @@ class NativeBackendProcess {
           '--electron-user-data',
           electronUserDataPath(),
         ],
-        { windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'] },
+        { windowsHide: true, stdio: 'pipe' },
       );
       this.child = child;
+      observeBackendProcess(child, 'serve', recordDiagnostic);
       child.stdout?.setEncoding('utf8');
       child.stdout?.on('data', (chunk: string | Buffer) => this.readOutput(String(chunk)));
       child.stdout?.once('error', (error) => {
+        reportWarning('Native backend output stream failed', error);
         this.rejectAll(error instanceof Error ? error : new Error(String(error)));
         void this.stop();
       });
       child.stdin?.once('error', (error) => {
+        if (!this.stopping) reportWarning('Native backend input stream failed', error);
         this.rejectAll(error instanceof Error ? error : new Error(String(error)));
       });
       child.once('spawn', () => {
@@ -3500,6 +3558,7 @@ class NativeBackendProcess {
   private readOutput(chunk: string): void {
     this.outputBuffer += chunk;
     if (this.outputBuffer.length > nativeBackendLineLimit) {
+      recordDiagnostic('ERR', 'Native backend response exceeded the stream limit');
       void this.stop();
       return;
     }
@@ -3515,6 +3574,7 @@ class NativeBackendProcess {
       try {
         message = JSON.parse(line);
       } catch {
+        reportWarning('Native backend sent invalid JSON');
         continue;
       }
       if (!message || typeof message !== 'object') continue;
@@ -3673,7 +3733,7 @@ async function runBitwardenCredentialMaintenance(): Promise<void> {
       await runBitwardenBackend('bitwarden.sync-if-stale');
     }
   } catch (error) {
-    console.warn('[Wormhole] Bitwarden credential background maintenance failed.', error);
+    reportWarning('Bitwarden credential background maintenance failed.', error);
   }
 }
 
@@ -3707,7 +3767,7 @@ async function runBitwardenExtensionStartupMaintenance(): Promise<void> {
       }
     });
   } catch (error) {
-    console.warn('[Wormhole] Bitwarden browser extension background maintenance failed.', error);
+    reportWarning('Bitwarden browser extension background maintenance failed.', error);
   }
 }
 
@@ -3768,7 +3828,7 @@ function showBitwardenOnboardingNoticeIfNeeded(): Promise<void> {
     await runBackend<{ updated: boolean }>('bitwarden-onboarding-dismiss');
   })()
     .catch((error) => {
-      console.warn('[Wormhole] Could not show the Bitwarden onboarding notice.', error);
+      reportWarning('Could not show the Bitwarden onboarding notice.', error);
     })
     .finally(() => {
       bitwardenOnboardingPromise = undefined;
@@ -4089,6 +4149,7 @@ function backendPath(): string {
       ? findBundledExecutable('wormhole-backend-universal')
       : undefined);
   if (!executablePath) {
+    recordDiagnostic('ERR', 'Required backend executable missing', { architecture });
     throw new Error('A required Wormhole component is missing.');
   }
   return executablePath;
@@ -4153,6 +4214,12 @@ async function runBackend<T>(
     let stderr = '';
     let settled = false;
     let abortRequested = false;
+    observeBackendProcess(
+      child,
+      operation,
+      recordDiagnostic,
+      (code) => abortRequested || code === 0,
+    );
     const cancellationError = new Error('Operation cancelled.');
     const effectiveTimeoutMs =
       timeoutMs === backendTimeoutMs && operation.startsWith('backup-')
@@ -4164,6 +4231,14 @@ async function runBackend<T>(
       operation === 'auth-hello-verify'
         ? undefined
         : setTimeout(() => {
+            if (abortRequested) {
+              finishReject(cancellationError);
+              return;
+            }
+            recordDiagnostic('ERR', 'Backend request timed out (' + operation + ')', {
+              childPid: child.pid,
+              timeoutMs: effectiveTimeoutMs,
+            });
             child.kill();
             finishReject(new Error('Wormhole did not respond in time.'));
           }, effectiveTimeoutMs);
@@ -4185,14 +4260,19 @@ async function runBackend<T>(
     child.stdout?.setEncoding('utf8');
     child.stderr?.setEncoding('utf8');
     child.stdout?.on('data', (chunk: string) => {
+      if (settled || abortRequested) return;
       stdout += chunk;
       stdoutBytes += Buffer.byteLength(chunk, 'utf8');
       if (stdoutBytes > backendMaxBuffer) {
+        recordDiagnostic('ERR', 'Backend response exceeded the limit (' + operation + ')', {
+          childPid: child.pid,
+        });
         child.kill();
         finishReject(new Error('Wormhole returned too much data.'));
       }
     });
     child.stderr?.on('data', (chunk: string) => {
+      if (settled || abortRequested) return;
       stderr += chunk;
       if (stderr.length > backendMaxBuffer) stderr = stderr.slice(-backendMaxBuffer);
     });
@@ -4212,7 +4292,7 @@ async function runBackend<T>(
       clearTimeout(timeout);
       signal?.removeEventListener('abort', abort);
       if (code !== 0) {
-        reject(new Error(stderr.trim() || 'Wormhole could not complete the request.'));
+        reject(new Error(backendErrorText(stderr) || 'Wormhole could not complete the request.'));
         return;
       }
       resolve(stdout);
@@ -4228,6 +4308,9 @@ async function runBackend<T>(
   try {
     return JSON.parse(output) as T;
   } catch {
+    recordDiagnostic('ERR', 'Backend returned invalid JSON (' + operation + ')', {
+      childPid: child.pid,
+    });
     throw new Error('Wormhole returned invalid data.');
   }
 }
@@ -4303,6 +4386,7 @@ function downloadUpdateInstaller(
     { stdio: 'pipe', windowsHide: true },
   );
   updateDownloadChild = child;
+  observeBackendProcess(child, 'update-download', recordDiagnostic, (code) => code === 0);
   const cleanup = () => {
     if (updateDownloadChild === child) updateDownloadChild = undefined;
   };
@@ -4341,9 +4425,10 @@ function downloadUpdateInstaller(
     child.on('close', (code) => {
       if (settled) return;
       if (code !== 0) {
-        finishReject(new Error(stderr.trim() || 'The installer download failed.'));
+        finishReject(new Error(backendErrorText(stderr) || 'The installer download failed.'));
         return;
       }
+      recordDiagnostic('ERR', 'Update download ended before reporting completion');
       finishReject(new Error('The installer download ended before completing.'));
     });
 
@@ -4455,8 +4540,7 @@ function scheduleStartupUpdateCheck(settings: AppSettings): void {
     void performUpdateCheck().catch((error) => {
       // A failed startup check must never block the app: the settings page still exposes
       // "Check now", and a later result arrives through the update:result event.
-      const message = error instanceof Error ? error.message : String(error);
-      console.warn('[Wormhole] Startup update check failed.', message);
+      reportWarning('Startup update check failed.', error);
     });
   }, startupUpdateDelayMs);
 }
@@ -4468,12 +4552,11 @@ async function runUserDeletion<T extends { deleted: boolean }>(
 ): Promise<T | { deleted: false; error: string }> {
   try {
     const result = await runBackend<T>(operation, request);
-    console.info(`[Wormhole] Deleted ${what}.`, request.id);
+    recordDiagnostic('INF', 'Deleted ' + what);
     return result;
   } catch (error) {
     // A refused or already-missing item is a normal user outcome, not an app error.
     const message = error instanceof Error ? error.message : String(error);
-    console.info(`[Wormhole] ${what} deletion was not performed (${request.id}): ${message}`);
     return { deleted: false, error: message };
   }
 }
@@ -4854,10 +4937,7 @@ class WebSurfaceManager {
           reservedUseRelease?.();
           // An optional extension failure must not prevent the appliance session itself from
           // opening. The plain HTTPS tab remains available and Settings exposes the install error.
-          console.warn(
-            '[Wormhole] Bitwarden browser extension setup failed for this HTTPS tab.',
-            error,
-          );
+          reportWarning('Bitwarden browser extension setup failed for this HTTPS tab.', error);
         }
         const freshInstall = freshState?.installed;
         if (freshState?.enabled && freshInstall) {
@@ -5348,7 +5428,7 @@ class WebSurfaceManager {
             await this.closeBitwardenPopup(record.sessionId);
           }
         }).catch(() => {
-          console.warn('[Wormhole] Could not dismiss the previous browser tab’s Bitwarden popup.');
+          reportWarning('Could not dismiss the previous browser tab’s Bitwarden popup.');
         });
       }
     }
@@ -5450,7 +5530,7 @@ class WebSurfaceManager {
         if (this.bitwardenPopups.get(sessionId) !== popup) return;
         await this.closeBitwardenPopup(sessionId);
       }).catch((error) => {
-        console.warn('[Wormhole] Could not dismiss the Bitwarden browser popup.', error);
+        reportWarning('Could not dismiss the Bitwarden browser popup.', error);
       });
     };
     const onOwnerMouse = (_event: Electron.Event, mouse: Electron.MouseInputEvent) => {
@@ -5473,7 +5553,7 @@ class WebSurfaceManager {
       // renderer does not keep reporting a destroyed popup as open.
       if (this.bitwardenPopups.get(sessionId) !== popup) return;
       void this.closeBitwardenPopup(sessionId).catch((error) => {
-        console.warn('[Wormhole] Could not clean up the closed Bitwarden browser popup.', error);
+        reportWarning('Could not clean up the closed Bitwarden browser popup.', error);
       });
     });
     record.owner.contentView.addChildView(popup);
@@ -5573,10 +5653,8 @@ class WebSurfaceManager {
     stage: BitwardenBrowserStage,
   ): BitwardenBrowserFailure {
     const failure = describeBitwardenBrowserFailure(error, stage);
-    console.error(`[Wormhole] Bitwarden browser operation failed. code=${failure.code}`);
-    // The application log belongs to Go. Console output alone is invisible in installed builds.
     void runBitwardenBackend('bitwarden.browser-failure', { value: failure.code }, 5_000).catch(
-      () => console.warn('[Wormhole] Could not record the Bitwarden browser failure.'),
+      () => recordDiagnostic('ERR', 'Bitwarden browser operation failed', { code: failure.code }),
     );
     return failure;
   }
@@ -5651,7 +5729,7 @@ class WebSurfaceManager {
           await this.synchronizeBitwardenStorageInContents(bitwarden.partition, contents);
         });
       } catch (error) {
-        console.warn('[Wormhole] Could not flush Bitwarden browser storage from its popup.', error);
+        reportWarning('Could not flush Bitwarden browser storage from its popup.', error);
       }
     } else if (popup) {
       closeBitwardenPopupContents(popup);
@@ -5666,10 +5744,7 @@ class WebSurfaceManager {
           bitwarden.popupUrl,
         );
       } catch (error) {
-        console.warn(
-          '[Wormhole] Could not flush Bitwarden browser storage when its popup closed.',
-          error,
-        );
+        reportWarning('Could not flush Bitwarden browser storage when its popup closed.', error);
       }
     }
     return { open: false };
@@ -6116,8 +6191,8 @@ class WebSurfaceManager {
           source.bitwarden.partition,
           source.bitwarden.popupUrl,
         ).catch((error) => {
-          console.warn(
-            '[Wormhole] Could not flush Bitwarden browser storage after its auxiliary window closed.',
+          reportWarning(
+            'Could not flush Bitwarden browser storage after its auxiliary window closed.',
             error,
           );
         });
@@ -6211,7 +6286,7 @@ class WebSurfaceManager {
             try {
               await this.synchronizeBitwardenStorageCore(partition, background);
             } catch {
-              console.warn('[Wormhole] Bitwarden update deferred until its session can be saved.');
+              reportWarning('Bitwarden update deferred until its session can be saved.');
               return;
             }
           }
@@ -6240,7 +6315,7 @@ class WebSurfaceManager {
           } catch (error) {
             // Profile seeding is an offline convenience. A locked or concurrently active source
             // IndexedDB must not prevent the HTTPS session or the extension from opening.
-            console.warn('[Wormhole] Bitwarden browser profile state could not be seeded.', error);
+            reportWarning('Bitwarden browser profile state could not be seeded.', error);
           }
         }
         // Initialize the chrome.* API bridge before Electron starts Bitwarden's persistent MV2
@@ -6257,7 +6332,7 @@ class WebSurfaceManager {
           try {
             await this.synchronizeBitwardenStorageCore(partition, background);
           } catch {
-            console.warn('[Wormhole] Bitwarden browser storage initialization will be retried.');
+            reportWarning('Bitwarden browser storage initialization will be retried.');
           }
         }
         this.startBitwardenStorageCheckpoints();
@@ -6272,7 +6347,7 @@ class WebSurfaceManager {
           } catch (error) {
             // Registration only discovers a source for future profiles. Keep the current session
             // usable even when its marker cannot be persisted.
-            console.warn('[Wormhole] Bitwarden browser profile could not be registered.', error);
+            reportWarning('Bitwarden browser profile could not be registered.', error);
           }
         }
         if (defaultPopup) this.extensionPopupPaths.set(partition, defaultPopup);
@@ -6285,10 +6360,7 @@ class WebSurfaceManager {
           }
         }
       } catch (error) {
-        console.warn(
-          '[Wormhole] Bitwarden browser extension could not be loaded for this HTTPS tab.',
-          error,
-        );
+        reportWarning('Bitwarden browser extension could not be loaded for this HTTPS tab.', error);
         this.extensionIds.delete(partition);
         this.extensionLoadKeys.delete(partition);
         this.extensionPopupPaths.delete(partition);
@@ -6508,7 +6580,7 @@ class WebSurfaceManager {
     this.pendingOpenOwners.delete(sessionId);
     this.dispose(sessionId);
     void this.releaseTunnel(sessionId).catch((error) => {
-      console.warn('[Wormhole] Could not release the web VPN tunnel.', error);
+      reportWarning('Could not release the web VPN tunnel.', error);
     });
   }
 
@@ -6562,8 +6634,8 @@ class WebSurfaceManager {
         record.bitwarden.partition,
         record.bitwarden.popupUrl,
       ).catch((error) => {
-        console.warn(
-          '[Wormhole] Could not flush Bitwarden browser storage when its HTTPS tab closed.',
+        reportWarning(
+          'Could not flush Bitwarden browser storage when its HTTPS tab closed.',
           error,
         );
       });
@@ -6579,13 +6651,13 @@ class WebSurfaceManager {
     if (record.tunnelLeaseId) {
       record.tunnelLeaseId = undefined;
       void this.releaseTunnel(sessionId).catch((error) => {
-        console.warn('[Wormhole] Could not release the web VPN tunnel.', error);
+        reportWarning('Could not release the web VPN tunnel.', error);
       });
     }
     for (const view of record.tabs.all()) this.destroyBrowserTab(record, view);
     if (record.bitwarden) {
       void this.retireBitwardenProfile(record.bitwarden.partition).catch(() => {
-        console.warn('[Wormhole] Bitwarden profile remains loaded until its storage can be saved.');
+        reportWarning('Bitwarden profile remains loaded until its storage can be saved.');
       });
     }
   }
@@ -6692,10 +6764,7 @@ class WebSurfaceManager {
           record.bitwarden.popupUrl,
         );
       } catch (error) {
-        console.warn(
-          '[Wormhole] Could not flush Bitwarden browser storage while closing its window.',
-          error,
-        );
+        reportWarning('Could not flush Bitwarden browser storage while closing its window.', error);
       }
     }
     // The final tab may already be gone while its persistent background still refreshes tokens.
@@ -6703,9 +6772,7 @@ class WebSurfaceManager {
     try {
       await this.checkpointBitwardenStorage();
     } catch {
-      console.warn(
-        '[Wormhole] Could not save Bitwarden background storage while closing its window.',
-      );
+      reportWarning('Could not save Bitwarden background storage while closing its window.');
     }
     for (const sessionId of sessionIds) {
       this.attempts.cancel(sessionId);
@@ -6739,8 +6806,8 @@ class WebSurfaceManager {
           record.bitwarden.popupUrl,
         );
       } catch (error) {
-        console.warn(
-          '[Wormhole] Could not flush Bitwarden browser storage during application shutdown.',
+        reportWarning(
+          'Could not flush Bitwarden browser storage during application shutdown.',
           error,
         );
       }
@@ -6757,7 +6824,7 @@ class WebSurfaceManager {
     try {
       await this.flushBitwardenBackgroundStorage();
     } catch {
-      console.warn('[Wormhole] Could not save Bitwarden background storage during shutdown.');
+      reportWarning('Could not save Bitwarden background storage during shutdown.');
     }
   }
 
@@ -7048,11 +7115,13 @@ class WebSurfaceManager {
         // ERR_ABORTED is the normal companion to client-side redirects and must not turn a viable
         // connection into a failed tab.
         if (!isMainFrame || errorCode === -3 || record.disposed) return;
+        recordDiagnostic('ERR', 'Browser navigation failed', { errorCode });
         update({ isLoading: false, error: describeWebLoadFailure(errorCode, errorDescription) });
       },
     );
-    contents.on('render-process-gone', () => {
+    contents.on('render-process-gone', (_event, { reason, exitCode }) => {
       if (record.disposed || this.surfaces.get(sessionId) !== record) return;
+      recordDiagnostic('ERR', 'Browser renderer exited', { reason, exitCode });
       update({
         isLoading: false,
         error: 'This tab stopped unexpectedly. Reload the page to continue.',
@@ -7662,9 +7731,7 @@ class NativeSshBackend {
       try {
         await this.finishEditClose(sessionId);
       } catch {
-        console.warn(
-          '[Wormhole] File edit journal could not be finalized; working copies retained.',
-        );
+        reportWarning('File edit journal could not be finalized; working copies retained.');
       }
       this.terminalDelivery.remove(sessionId);
       this.terminalOwners.delete(sessionId);
@@ -7689,7 +7756,7 @@ class NativeSshBackend {
   cancelPendingConnections(): void {
     for (const sessionId of this.pendingConnections.keys()) {
       void this.close(sessionId).catch((error) => {
-        console.warn('[Wormhole] Could not release a pending SSH VPN tunnel.', error);
+        reportWarning('Could not release a pending SSH VPN tunnel.', error);
       });
     }
   }
@@ -7828,7 +7895,7 @@ class NativeSshBackend {
     if (child && !child.killed) {
       const exited = await stopChildProcess(child);
       if (!exited) {
-        console.warn('[Wormhole] SSH service did not stop within the allowed time.');
+        reportWarning('SSH service did not stop within the allowed time.');
       }
     }
     await tunnelReleases;
@@ -7856,6 +7923,7 @@ class NativeSshBackend {
       { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] },
     );
     this.child = child;
+    observeBackendProcess(child, 'ssh', recordDiagnostic);
     const lineReader = createInterface({
       input: child.stdout,
       crlfDelay: Infinity,
@@ -7866,13 +7934,10 @@ class NativeSshBackend {
     });
     child.stdin.on('error', (error) => {
       if (this.child !== child) return;
+      reportWarning('SSH input stream failed', error);
       const failure = new Error(`SSH service connection failed: ${error.message}`);
       this.failOpenWaiters(failure);
       this.failControlWaiters(failure);
-    });
-    child.stderr.on('data', () => {
-      // The backend deliberately keeps protocol events on stdout. Drain stderr so a native
-      // failure cannot block the session pipe; do not mirror raw backend text into the UI.
     });
     child.on('error', (error) => {
       if (this.child !== child) return;
@@ -8368,7 +8433,10 @@ async function saveTunnelWithNativeSecret(
   return result;
 }
 
-function registerIpcHandlers(sshBackend: NativeSshBackend): void {
+function registerIpcHandlers(
+  sshBackend: NativeSshBackend,
+  ipcMain: Pick<Electron.IpcMain, 'handle' | 'on'>,
+): void {
   ipcMain.on('lifecycle:close-confirmation-ready', (event) => {
     const owner = BrowserWindow.fromWebContents(event.sender);
     if (owner) closeConfirmationReadyWindows.add(owner);
@@ -8409,6 +8477,27 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     scheduleUnlockedBackgroundWork();
   });
 
+  ipcMain.on('diagnostics:renderer-failure', (event, reason: unknown) => {
+    if (
+      reason !== 'uncaught-error' &&
+      reason !== 'unhandled-rejection' &&
+      reason !== 'workspace-mount'
+    )
+      return;
+    const owner = BrowserWindow.fromWebContents(event.sender);
+    const frame = event.senderFrame;
+    if (
+      !owner ||
+      owner.isDestroyed() ||
+      !windowCloseCoordinators.has(owner) ||
+      !frame ||
+      frame !== event.sender.mainFrame ||
+      !isTrustedRendererNavigation(frame.url, productionRendererPath)
+    )
+      return;
+    recordDiagnostic('ERR', 'Workspace renderer failure (' + reason + ')');
+  });
+
   ipcMain.on('workspace:failed', (event) => {
     const owner = BrowserWindow.fromWebContents(event.sender);
     if (
@@ -8418,6 +8507,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       failedWorkspaceWindows.has(owner)
     )
       return;
+    recordDiagnostic('ERR', 'Workspace React error boundary activated');
     failedWorkspaceWindows.add(owner);
     windowCloseCoordinators.get(owner)?.updateActiveCount(0);
     startupReadyWindows.delete(owner);
@@ -8442,7 +8532,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
           }
         },
       );
-    }).catch(() => console.warn('[Wormhole] Workspace failure cleanup did not finish cleanly.'));
+    }).catch(() => reportWarning('Workspace failure cleanup did not finish cleanly.'));
   });
 
   ipcMain.handle('startup:load', async (_event, value: unknown) => {
@@ -8459,8 +8549,9 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       startup.settings.confirmOnWindowClose = confirmOnWindowClose;
       scheduleStartupUpdateCheck(startup.settings);
       if (startup.migrationFailed) {
-        console.error(
-          '[Wormhole] Credential Manager migration failed. It will be retried next launch.',
+        recordDiagnostic(
+          'ERR',
+          'Credential Manager migration failed. It will be retried next launch.',
         );
       } else if (startup.migration.status === 'completed') {
         console.info(
@@ -9618,7 +9709,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       if (test.cancelled || /cancell/i.test(message)) {
         console.info(`[Wormhole] VPN tunnel test cancelled (${request.id}).`);
       } else {
-        console.warn(`[Wormhole] VPN tunnel test failed (${request.id}).`);
+        reportWarning('VPN tunnel test failed', error);
       }
       return { connected: false, error: message };
     } finally {
@@ -9626,7 +9717,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
         event.sender.removeListener('destroyed', cancelWhenRendererCloses);
       }
       await releaseTunnelTest(test).catch((error) => {
-        console.warn('[Wormhole] Could not release the VPN tunnel test lease.', error);
+        reportWarning('Could not release the VPN tunnel test lease.', error);
       });
       sendTunnelTestProgress(test, 'closed', 'The temporary VPN tunnel is closed.');
       if (activeTunnelTests.get(senderID) === test) activeTunnelTests.delete(senderID);
@@ -10878,7 +10969,11 @@ function getRdpClient(): RdpBackendClient {
   const configuredFreeRdp = process.env.WORMHOLE_FREERDP_PATH?.trim();
   if (configuredFreeRdp) args.push('--freerdp', configuredFreeRdp);
 
-  rdpClient = new RdpBackendClient({ executable: backendPath(), args });
+  rdpClient = new RdpBackendClient({
+    executable: backendPath(),
+    args,
+    diagnostics: recordDiagnostic,
+  });
   rdpClient.onEvent((event: RdpBackendEvent) => {
     if (
       event.sessionId &&
@@ -10934,7 +11029,7 @@ function getRdpClient(): RdpBackendClient {
     ) {
       rdpConnectingLifecycles.delete(event.lifecycleId);
       void releaseRdpTunnel(event.lifecycleId).catch((error) => {
-        console.warn('[Wormhole] Could not release the RDP VPN tunnel.', error);
+        reportWarning('Could not release the RDP VPN tunnel.', error);
       });
     }
     if (event.sessionId && terminalEvent) forgetRdpSurfacePlacement(event.sessionId);
@@ -10983,7 +11078,7 @@ function cancelPreparingRdpStarts(): void {
     rdpConnectingLifecycles.delete(lifecycleId);
     rdpClient?.cancelStart(sessionId, lifecycleId);
     void releaseRdpTunnel(lifecycleId).catch((error) => {
-      console.warn('[Wormhole] Could not release a pending RDP VPN tunnel.', error);
+      reportWarning('Could not release a pending RDP VPN tunnel.', error);
     });
   }
 }
@@ -10994,7 +11089,7 @@ async function releaseAllRdpTunnels(): Promise<void> {
     if (!rdpTunnelLeases.has(lifecycleId)) rdpTunnelLeaseSessions.delete(lifecycleId);
   }
   if (results.some((result) => result.status === 'rejected')) {
-    console.warn('[Wormhole] One or more RDP VPN tunnel leases could not be released cleanly.');
+    reportWarning('One or more RDP VPN tunnel leases could not be released cleanly.');
   }
 }
 
@@ -11055,6 +11150,7 @@ function getSerialBackend(): SerialBackendClient {
 
   const client = new SerialBackendClient({
     executable: backendPath(),
+    diagnostics: recordDiagnostic,
     args: [
       '--operation',
       'serial',
@@ -11241,7 +11337,6 @@ function valueAsRecord(value: unknown): Record<string, any> {
 }
 
 function createWindow() {
-  const productionRendererPath = path.resolve(__dirname, '..', 'dist', 'index.html');
   const window = new BrowserWindow({
     // Keep the window hidden until the renderer has painted its first frame
     // (ready-to-show). Showing it earlier flashes unpainted frames — black
@@ -11330,12 +11425,14 @@ function createWindow() {
       }
       await shutdownNativeResources();
     }).catch((error) => {
-      console.error('[Wormhole] Could not reset app authentication.', error);
+      recordDiagnostic('ERR', 'Could not reset app authentication.', {
+        code: diagnosticErrorCode(error),
+      });
     });
   });
 
-  window.webContents.on('preload-error', (_event, preloadPath, error) => {
-    console.error(`[Wormhole] Preload failed (${path.basename(preloadPath)}).`, error.message);
+  window.webContents.on('preload-error', (_event, _preloadPath, error) => {
+    recordDiagnostic('ERR', 'Workspace preload failed', { code: diagnosticErrorCode(error) });
   });
 
   const closeReason = new WindowCloseReasonTracker();
@@ -11344,7 +11441,7 @@ function createWindow() {
     // Windows can end the process without an ordinary window-close / before-quit sequence.
     // Start saving at the first shutdown notification, while the native backend is still alive.
     void webSurfaces.checkpointBitwardenStorage().catch(() => {
-      console.warn('[Wormhole] Could not checkpoint Bitwarden storage before system shutdown.');
+      reportWarning('Could not checkpoint Bitwarden storage before system shutdown.');
     });
   });
   window.on('session-end', () => {
@@ -11357,11 +11454,12 @@ function createWindow() {
       'Bitwarden system shutdown checkpoint timed out.',
     )
       .catch(() => {
-        console.warn('[Wormhole] Bitwarden system shutdown checkpoint did not finish.');
+        reportWarning('Bitwarden system shutdown checkpoint did not finish.');
       })
       .finally(() => shutdownNativeResources());
   });
-  window.webContents.on('render-process-gone', () => {
+  window.webContents.on('render-process-gone', (_event, { reason, exitCode }) => {
+    recordDiagnostic('ERR', 'Workspace renderer exited', { reason, exitCode });
     closeReason.rendererFailed();
     if (!window.isDestroyed()) window.close();
   });
@@ -11384,7 +11482,7 @@ function createWindow() {
                   'Bitwarden browser storage window-close flush timed out.',
                 );
               } catch (error) {
-                console.warn('[Wormhole] Browser window shutdown did not finish cleanly.', error);
+                reportWarning('Browser window shutdown did not finish cleanly.', error);
               }
             },
             async () => {
@@ -11405,7 +11503,7 @@ function createWindow() {
         },
       })
       .catch((error) => {
-        console.warn('[Wormhole] Window close cleanup failed.', error);
+        reportWarning('Window close cleanup failed.', error);
       });
   });
   window.once('closed', () => {
@@ -11423,6 +11521,7 @@ function createWindow() {
       rendererUrl ? window.loadURL(rendererUrl) : window.loadFile(productionRendererPath),
     isDestroyed: () => window.isDestroyed(),
     reportFailure: () => {
+      recordDiagnostic('ERR', 'Workspace page failed to load');
       dialog.showErrorBox(
         "Wormhole couldn't open",
         'The application page could not be loaded. Try reopening Wormhole. If the problem persists, reinstall the application.',
@@ -11459,7 +11558,7 @@ function shutdownNativeResources(): Promise<void> {
     serialBackend = undefined;
     const results = await Promise.allSettled([sshBackend.dispose(), rdpClient?.dispose()]);
     if (results.some((result) => result.status === 'rejected')) {
-      console.warn('[Wormhole] One or more connection services did not stop cleanly.');
+      reportWarning('One or more connection services did not stop cleanly.');
     }
     await releaseAllRdpTunnels();
     const backend = nativeBackend;
@@ -11494,7 +11593,9 @@ function scheduleUnlockedBackgroundWork(): void {
     startBitwardenBackgroundMaintenance();
     void showBitwardenOnboardingNoticeIfNeeded();
     void sshBackend.syncMcpAfterUnlock(authorizationEpoch).catch((error) => {
-      console.error('[Wormhole] Could not synchronize the MCP service after unlock.', error);
+      recordDiagnostic('ERR', 'Could not synchronize the MCP service after unlock.', {
+        code: diagnosticErrorCode(error),
+      });
     });
   }, startupBackgroundDelayMs);
 }
@@ -11506,7 +11607,15 @@ authSession.onUnlocked(() => {
 });
 
 app.whenReady().then(() => {
-  registerIpcHandlers(sshBackend);
+  recordDiagnostic('INF', 'Application started', {
+    version: app.getVersion(),
+    platform: process.platform,
+  });
+  registerIpcHandlers(sshBackend, {
+    handle: (channel, listener) =>
+      ipcMain.handle(channel, withIpcDiagnostics(listener, channel, recordDiagnostic)),
+    on: ipcMain.on.bind(ipcMain),
+  });
   createWindow();
 
   app.on('activate', () => {
@@ -11570,7 +11679,10 @@ app.on('before-quit', (event) => {
     startupUpdateTimer = undefined;
     if (startupBackgroundTimer) clearTimeout(startupBackgroundTimer);
     startupBackgroundTimer = undefined;
-    updateDownloadChild?.kill();
+    if (updateDownloadChild) {
+      expectBackendExit(updateDownloadChild);
+      updateDownloadChild.kill();
+    }
     updateDownloadChild = undefined;
     if (bitwardenBackgroundTimer) {
       clearInterval(bitwardenBackgroundTimer);
@@ -11583,7 +11695,7 @@ app.on('before-quit', (event) => {
         'Bitwarden browser storage shutdown flush timed out.',
       );
     } catch (error) {
-      console.warn('[Wormhole] Browser session shutdown did not finish cleanly.', error);
+      reportWarning('Browser session shutdown did not finish cleanly.', error);
     } finally {
       await Promise.allSettled(
         BrowserWindow.getAllWindows().map((window) => requestRendererTeardown(window)),
@@ -11593,7 +11705,7 @@ app.on('before-quit', (event) => {
       } catch {
         // File-edit journals are finalized and native services may already be partially
         // stopped. Finish exiting instead of leaving an unusable workspace.
-        console.warn('[Wormhole] Native resource shutdown did not finish cleanly.');
+        reportWarning('Native resource shutdown did not finish cleanly.');
       }
       quitCleanupComplete = true;
       app.quit();
@@ -11604,7 +11716,7 @@ app.on('before-quit', (event) => {
     settleUpdateQuit(
       new Error('Wormhole could not close for the update. File editing copies are retained.'),
     );
-    console.warn('[Wormhole] Close did not finish; file editing copies are retained.');
+    reportWarning('Close did not finish; file editing copies are retained.');
   });
 });
 

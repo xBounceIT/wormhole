@@ -13,7 +13,7 @@ import (
 func TestLogLevelDefaultsAndPersists(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
 
-	level, err := readLogLevel(databasePath)
+	_, level, err := readLogSettings(databasePath)
 	if err != nil || level != "info" {
 		t.Fatalf("absent level = %q, %v; want info", level, err)
 	}
@@ -39,7 +39,7 @@ func TestLogLevelDefaultsAndPersists(t *testing.T) {
 		if err != nil || written != test.want {
 			t.Fatalf("writeLogLevel(%q) = %q, %v; want %q", test.input, written, err, test.want)
 		}
-		level, err := readLogLevel(databasePath)
+		_, level, err := readLogSettings(databasePath)
 		if err != nil || level != test.want {
 			t.Fatalf("read after writeLogLevel(%q) = %q, %v; want %q", test.input, level, err, test.want)
 		}
@@ -89,12 +89,12 @@ func TestLogRetentionSettingsMerge(t *testing.T) {
 	if written != 90 {
 		t.Fatalf("writeLogRetentionDays() = %d, want 90", written)
 	}
-	days, err := readLogRetentionDays(databasePath)
+	days, _, err := readLogSettings(databasePath)
 	if err != nil {
-		t.Fatalf("readLogRetentionDays() error = %v", err)
+		t.Fatalf("readLogSettings() retention error = %v", err)
 	}
 	if days != 90 {
-		t.Fatalf("readLogRetentionDays() = %d, want 90", days)
+		t.Fatalf("readLogSettings() retention = %d, want 90", days)
 	}
 	contents, err := os.ReadFile(settingsPath)
 	if err != nil {
@@ -135,7 +135,7 @@ func TestWriteLogRetentionDaysNormalizesAndReturnsSavedValue(t *testing.T) {
 		if err != nil || written != test.want {
 			t.Fatalf("writeLogRetentionDays(%d) = %d, %v; want %d", test.input, written, err, test.want)
 		}
-		days, err := readLogRetentionDays(databasePath)
+		days, _, err := readLogSettings(databasePath)
 		if err != nil || days != test.want {
 			t.Fatalf("read after writeLogRetentionDays(%d) = %d, %v; want %d", test.input, days, err, test.want)
 		}
@@ -146,7 +146,7 @@ func TestLogRetentionDefaultsWhenMissingOrInvalid(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
 	_, settingsPath := authPaths(databasePath)
 
-	days, err := readLogRetentionDays(databasePath)
+	days, _, err := readLogSettings(databasePath)
 	if err != nil || days != 14 {
 		t.Fatalf("absent setting = %d, %v; want %d default", days, err, 14)
 	}
@@ -157,7 +157,7 @@ func TestLogRetentionDefaultsWhenMissingOrInvalid(t *testing.T) {
 	if err := os.WriteFile(settingsPath, []byte(`{`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	days, err = readLogRetentionDays(databasePath)
+	days, _, err = readLogSettings(databasePath)
 	if err != nil || days != 14 {
 		t.Fatalf("invalid document = %d, %v; want %d default", days, err, 14)
 	}
@@ -165,7 +165,7 @@ func TestLogRetentionDefaultsWhenMissingOrInvalid(t *testing.T) {
 	if err := os.WriteFile(settingsPath, []byte(`{"LogRetentionDays": "not-a-number"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	days, err = readLogRetentionDays(databasePath)
+	days, _, err = readLogSettings(databasePath)
 	if err != nil || days != 14 {
 		t.Fatalf("invalid value = %d, %v; want %d default", days, err, 14)
 	}
@@ -173,7 +173,7 @@ func TestLogRetentionDefaultsWhenMissingOrInvalid(t *testing.T) {
 	if err := os.WriteFile(settingsPath, []byte(`{"LogRetentionDays": 400}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	days, err = readLogRetentionDays(databasePath)
+	days, _, err = readLogSettings(databasePath)
 	if err != nil || days != 14 {
 		t.Fatalf("out-of-range value = %d, %v; want %d default", days, err, 14)
 	}

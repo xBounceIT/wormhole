@@ -408,6 +408,9 @@ test('the workspace bridge collects draft status and saves without prompting for
         clear() {}
       },
       backendPath: () => 'backend',
+      observeBackendProcess: () => {},
+      recordDiagnostic: () => {},
+      reportWarning: () => {},
       wormholeDatabasePath: () => 'database',
       electronUserDataPath: () => 'profile',
       spawn: () => {

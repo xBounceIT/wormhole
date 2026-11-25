@@ -394,13 +394,15 @@ func TestDecodeInputRejectsOversizedRequest(t *testing.T) {
 	}
 }
 
-func TestMcpStatusSkipsUnneededProcessInitialization(t *testing.T) {
-	if operationNeedsProcessInitialization("mcp-status") {
-		t.Fatal("mcp-status unexpectedly initializes logging or the workspace schema")
+func TestSettingsOperationsSkipUnneededWorkspaceInitialization(t *testing.T) {
+	for _, operation := range []string{"mcp-status", "logs-info", "open-log-file", "open-logs-folder", "settings-set-log-level", "settings-set-log-retention"} {
+		if operationNeedsWorkspaceInitialization(operation) {
+			t.Fatalf("%s unexpectedly initializes the workspace schema", operation)
+		}
 	}
 	for _, operation := range []string{"startup", "workspace", "ssh"} {
-		if !operationNeedsProcessInitialization(operation) {
-			t.Fatalf("%s unexpectedly skips process initialization", operation)
+		if !operationNeedsWorkspaceInitialization(operation) {
+			t.Fatalf("%s unexpectedly skips workspace initialization", operation)
 		}
 	}
 }
