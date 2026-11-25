@@ -36,10 +36,11 @@ func logsDirectoryPath(databasePath string) string {
 }
 
 func currentDayLogFilePath(databasePath string) string {
-	return filepath.Join(
-		logsDirectoryPath(databasePath),
-		"wormhole-"+time.Now().Format("20060102")+".log",
-	)
+	return dailyLogFilePath(logsDirectoryPath(databasePath), time.Now().Format("20060102"))
+}
+
+func dailyLogFilePath(directory, day string) string {
+	return filepath.Join(directory, logFileNamePrefix+day+logFileNameSuffix)
 }
 
 func normalizeLogRetentionDays(days int) int {
@@ -57,28 +58,24 @@ func normalizeLogLevel(level string) string {
 	return logLevelInfo
 }
 
-// readLogLevel reports the configured minimum log level. Absent, invalid, or unreadable
-// settings fall back to Info, matching the WinUI 3 default.
-func readLogLevel(databasePath string) (string, error) {
+func readLogSettings(databasePath string) (int, string, error) {
 	_, settingsPath := authPaths(databasePath)
 	contents, err := readAuthSettingsFile(settingsPath)
 	if errors.Is(err, os.ErrNotExist) {
-		return defaultLogLevel, nil
+		return defaultLogRetentionDays, defaultLogLevel, nil
 	}
 	if err != nil {
-		return defaultLogLevel, fmt.Errorf("cannot read Wormhole settings: %w", err)
+		return defaultLogRetentionDays, defaultLogLevel, fmt.Errorf("cannot read Wormhole settings: %w", err)
 	}
 	var document map[string]json.RawMessage
-	if err := json.Unmarshal(contents, &document); err != nil || document == nil {
-		return defaultLogLevel, nil
+	if json.Unmarshal(contents, &document) != nil {
+		return defaultLogRetentionDays, defaultLogLevel, nil
 	}
-	if value, ok := document[logLevelKey]; ok {
-		var level string
-		if json.Unmarshal(value, &level) == nil {
-			return normalizeLogLevel(level), nil
-		}
-	}
-	return defaultLogLevel, nil
+	var days int
+	var level string
+	_ = json.Unmarshal(document[logRetentionDaysKey], &days)
+	_ = json.Unmarshal(document[logLevelKey], &level)
+	return normalizeLogRetentionDays(days), normalizeLogLevel(level), nil
 }
 
 // writeLogLevel merges the level into settings.json, preserving every other key, and
@@ -118,30 +115,6 @@ func writeLogLevel(databasePath string, level string) (string, error) {
 		return "", fmt.Errorf("cannot save Wormhole settings: %w", err)
 	}
 	return normalized, nil
-}
-
-// readLogRetentionDays reports how many daily log files to keep. Absent, invalid, or
-// unreadable settings fall back to 14, matching the WinUI 3 default.
-func readLogRetentionDays(databasePath string) (int, error) {
-	_, settingsPath := authPaths(databasePath)
-	contents, err := readAuthSettingsFile(settingsPath)
-	if errors.Is(err, os.ErrNotExist) {
-		return defaultLogRetentionDays, nil
-	}
-	if err != nil {
-		return defaultLogRetentionDays, fmt.Errorf("cannot read Wormhole settings: %w", err)
-	}
-	var document map[string]json.RawMessage
-	if err := json.Unmarshal(contents, &document); err != nil || document == nil {
-		return defaultLogRetentionDays, nil
-	}
-	if value, ok := document[logRetentionDaysKey]; ok {
-		var days int
-		if json.Unmarshal(value, &days) == nil {
-			return normalizeLogRetentionDays(days), nil
-		}
-	}
-	return defaultLogRetentionDays, nil
 }
 
 // writeLogRetentionDays merges the setting into settings.json, preserving every other key
@@ -185,11 +158,7 @@ func writeLogRetentionDays(databasePath string, days int) (int, error) {
 }
 
 func logsInfo(databasePath string) (logsInfoResponse, error) {
-	days, err := readLogRetentionDays(databasePath)
-	if err != nil {
-		return logsInfoResponse{}, err
-	}
-	level, err := readLogLevel(databasePath)
+	days, level, err := readLogSettings(databasePath)
 	if err != nil {
 		return logsInfoResponse{}, err
 	}
@@ -204,11 +173,7 @@ func logsInfo(databasePath string) (logsInfoResponse, error) {
 // ensureCurrentDayLogFile creates the logs directory and today's file when either is
 // missing, mirroring the WinUI 3 "Open today's log" behavior.
 func ensureCurrentDayLogFile(databasePath string) error {
-	path := currentDayLogFilePath(databasePath)
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return fmt.Errorf("cannot create the Wormhole logs directory: %w", err)
-	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	file, err := openDailyLog(currentDayLogFilePath(databasePath))
 	if err != nil {
 		return fmt.Errorf("cannot create today's log file: %w", err)
 	}
@@ -233,6 +198,11 @@ func openLogsDirectory(databasePath string) error {
 	if err := os.MkdirAll(path, 0o700); err != nil {
 		return fmt.Errorf("cannot create the Wormhole logs directory: %w", err)
 	}
+	root, err := openLogDirectory(path)
+	if err != nil {
+		return fmt.Errorf("cannot open the Wormhole logs folder: %w", err)
+	}
+	_ = root.Close()
 	if err := openLocalLogPath(path); err != nil {
 		return fmt.Errorf("cannot open the Wormhole logs folder: %w", err)
 	}

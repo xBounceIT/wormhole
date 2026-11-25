@@ -275,6 +275,8 @@ function updateHarness(mode = 'merge', idle: Promise<void> = Promise.resolve()) 
         error: (...args: unknown[]) => warnings.push(args),
         warn: (...args: unknown[]) => warnings.push(args),
       },
+      reportWarning: (event: string) => warnings.push(event),
+      recordDiagnostic: (...args: unknown[]) => warnings.push(args),
     },
     { filename: 'wormhole-bitwarden-update.js' },
   );
@@ -649,6 +651,8 @@ function popupHarness({
       warn: (...args: unknown[]) => warnings.push(args),
       error: (...args: unknown[]) => warnings.push(args),
     },
+    reportWarning: (event: string) => warnings.push(event),
+    recordDiagnostic: (...args: unknown[]) => warnings.push(args),
     runBitwardenBackend: async (...args: unknown[]) => {
       reports.push(args);
       if (failReport) throw new Error('private report failure');

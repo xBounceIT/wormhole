@@ -1,6 +1,11 @@
 import startupLogo from '../Assets/wormhole-logo-transparent.png';
 import { applyTheme, clearLegacyTheme, getInitialTheme, readLegacyTheme } from './theme';
 
+window.addEventListener('error', () => window.wormhole?.reportRendererFailure('uncaught-error'));
+window.addEventListener('unhandledrejection', () =>
+  window.wormhole?.reportRendererFailure('unhandled-rejection'),
+);
+
 // Resolve the stored/system theme before React renders so the very first painted
 // frame already has the correct background. Deferring this to a post-mount effect
 // leaves a light-theme frame visible until the `.dark` class lands — the startup
@@ -89,6 +94,7 @@ async function mountWorkspace(
       initialWorkspace: workspace,
     });
   } catch (error) {
+    window.wormhole?.reportRendererFailure('workspace-mount');
     showError(error instanceof Error ? error.message : "Wormhole couldn't load the workspace.");
   }
 }

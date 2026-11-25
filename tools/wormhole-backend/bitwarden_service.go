@@ -30,13 +30,13 @@ var (
 func (m *vncManager) handleBitwarden(command backendCommand, expectedGeneration uint64) {
 	if command.Action == "bitwarden.browser-failure" {
 		result, err := reportBitwardenBrowserFailure(command.Value)
-		m.respondResult(command.ID, result, err)
+		m.respondResult(command, result, err)
 		return
 	}
 	if command.Action == "bitwarden.clear-session" {
 		m.clearBitwardenSession()
 		m.cancelPendingVncConnections()
-		m.respondResult(command.ID, map[string]bool{"cleared": true}, nil)
+		m.respondResult(command, map[string]bool{"cleared": true}, nil)
 		return
 	}
 
@@ -50,7 +50,7 @@ func (m *vncManager) handleBitwarden(command backendCommand, expectedGeneration 
 		m.bitwardenOperationMu.Lock()
 		defer m.bitwardenOperationMu.Unlock()
 		if !m.bitwardenGenerationIs(expectedGeneration) {
-			m.respondResult(command.ID, nil, errBitwardenSessionInvalidated)
+			m.respondResult(command, nil, errBitwardenSessionInvalidated)
 			return
 		}
 		// Electron gates these requests on Wormhole authorization. Work queued
@@ -250,7 +250,7 @@ func (m *vncManager) handleBitwarden(command backendCommand, expectedGeneration 
 		result = nil
 		err = errBitwardenSessionInvalidated
 	}
-	m.respondResult(command.ID, result, err)
+	m.respondResult(command, result, err)
 }
 
 // Only the trusted installer may carry a session across executable path changes.

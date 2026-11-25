@@ -189,6 +189,7 @@ test('backend keeps idle-lock Hello alive until native completion or owner cance
     'success',
     'failure',
     'cancel',
+    'cancel-before-timeout',
     'timeout',
     'availability',
     'backup',
@@ -215,6 +216,7 @@ test('backend keeps idle-lock Hello alive until native completion or owner cance
     let timer: (() => void) | undefined;
     let duration: number | undefined;
     let spawns = 0;
+    const diagnostics: string[] = [];
     const controller = new AbortController();
     const run = runInNewContext(
       script,
@@ -226,6 +228,9 @@ test('backend keeps idle-lock Hello alive until native completion or owner cance
         backendMaxRequestBytes: 1024,
         backendMaxBuffer: 1024,
         backendPath: () => 'backend',
+        observeBackendProcess: () => {},
+        backendErrorText: (stderr: string) => stderr.trim(),
+        recordDiagnostic: (_level: string, message: string) => diagnostics.push(message),
         wormholeDatabasePath: () => 'database',
         electronUserDataPath: () => 'profile',
         process: {},
@@ -250,7 +255,7 @@ test('backend keeps idle-lock Hello alive until native completion or owner cance
         ? 'auth-hello-status'
         : outcome === 'backup'
           ? 'backup-export'
-          : outcome === 'timeout'
+          : outcome === 'timeout' || outcome === 'cancel-before-timeout'
             ? 'auth-verify'
             : 'auth-hello-verify';
     const pending = run(
@@ -269,6 +274,15 @@ test('backend keeps idle-lock Hello alive until native completion or owner cance
       timer!();
       await assert.rejects(pending, /did not respond in time/);
       assert.equal(kills, 1);
+      continue;
+    }
+    if (outcome === 'cancel-before-timeout') {
+      controller.abort();
+      child.stdout.emit('data', 'x'.repeat(1025));
+      timer!();
+      await assert.rejects(pending, /cancelled/);
+      assert.equal(kills, 1);
+      assert.deepEqual(diagnostics, []);
       continue;
     }
     assert.equal(

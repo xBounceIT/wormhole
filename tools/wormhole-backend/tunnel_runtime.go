@@ -638,6 +638,7 @@ func (pool *tunnelRuntimePool) progress(entry *sharedTunnelEntry) tunnelProgress
 func (pool *tunnelRuntimePool) establish(entry *sharedTunnelEntry, snapshot tunnelConfigSnapshot) {
 	process, err := pool.start(entry.establish, snapshot)
 	if err == nil {
+		logInfo("VPN tunnel ready (provider=%s)", tunnelName(snapshot.kind))
 		_ = pool.progress(entry)(entry.establish, "ready", "")
 	}
 	pool.mu.Lock()
@@ -864,7 +865,7 @@ func tunnelSidecarStartupFailure(
 			}
 			if tunnelSettingNumber(values, "Mode") == 0 && tunnelSettingBool(values, "UseOtp") {
 				base := tunnelSidecarFailureMessage(executable, stderr, exitCode)
-				return fmt.Errorf("%s; the Stormshield one-time code may have been used or expired during this attempt, so retry with a new code", base)
+				return fmt.Errorf("%w; the Stormshield one-time code may have been used or expired during this attempt, so retry with a new code", base)
 			}
 		case 5:
 			if authFailure {
@@ -876,6 +877,14 @@ func tunnelSidecarStartupFailure(
 	return tunnelSidecarFailureMessage(executable, stderr, exitCode)
 }
 
+type tunnelSidecarError struct {
+	message  string
+	reason   string
+	exitCode int
+}
+
+func (e *tunnelSidecarError) Error() string { return e.message }
+
 // tunnelSidecarFailureMessage turns sidecar startup stderr into a safe, actionable error for the
 // UI. Raw diagnostics can contain credentials or authentication cookies and must
 // never cross IPC or enter application logs. Debug mode adds process metadata only.
@@ -884,6 +893,7 @@ func tunnelSidecarFailureMessage(executable, stderr string, exitCode int) error 
 
 	lower := strings.ToLower(detail)
 	var message string
+	reason := "sidecar"
 	switch {
 	case executable == "wormhole-fortiproxy" && strings.Contains(lower, "fatal: fortinet start: login: fortigate denied ssl vpn host check (http 403)"):
 		message = tunnelBrowserFailureMessages["fortinet-hostcheck-forbidden"]
@@ -892,41 +902,50 @@ func tunnelSidecarFailureMessage(executable, stderr string, exitCode int) error 
 	case executable == "wormhole-fortiproxy" && strings.Contains(lower, "fatal: fortinet start: login: fortigate did not issue an ssl vpn session cookie"):
 		message = "FortiGate did not issue an SSL VPN session cookie after sign-in"
 	case strings.Contains(lower, "forcepoint tls connection failed"):
+		reason = "tls"
 		message = "Forcepoint TLS connection failed; verify the SSL endpoint and the trusted server certificate or SHA-256 pin"
 	case strings.Contains(lower, "forcepoint ssvtp version"):
+		reason = "ssvtp-version"
 		message = "the Forcepoint gateway did not negotiate the supported SSL VPN protocol (SSVTP version 9)"
 	case strings.Contains(lower, "forcepoint requires local security checks") || strings.Contains(lower, "forcepoint endpoint control"):
+		reason = "endpoint-control"
 		message = "the Forcepoint gateway requires endpoint security checks unsupported by the autonomous tunnel"
 	case strings.Contains(lower, "unsupported authentication challenge") && strings.Contains(lower, "forcepoint"):
+		reason = "unsupported-authentication"
 		message = "this Forcepoint SSL tunnel supports username and password authentication only"
 	case strings.Contains(lower, "binding not linked"):
+		reason = "missing-engine"
 		message = "this build is missing the OpenVPN engine, so OpenVPN-based tunnels can't start. Rebuild the sidecar with scripts/Fetch-OvpnProxy.ps1 -RequireReal"
 	case strings.Contains(lower, "no such host"):
+		reason = "dns"
 		message = "we couldn't resolve the VPN gateway host — double-check the server address"
 	case strings.Contains(lower, "connection refused"):
+		reason = "connection-refused"
 		message = "the VPN gateway refused the connection — it may be offline or blocking this client"
 	case strings.Contains(lower, "timeout") || strings.Contains(lower, "timed out"):
+		reason = "timeout"
 		message = "the VPN gateway didn't respond in time — it may be unreachable or overloaded"
 	case strings.Contains(lower, "auth_failed") || strings.Contains(lower, "auth failed") ||
 		strings.Contains(lower, "authentication") || strings.Contains(lower, "login"):
 		if strings.Contains(lower, "fail") || strings.Contains(lower, "reject") ||
 			strings.Contains(lower, "denied") || strings.Contains(lower, "invalid") {
+			reason = "authentication"
 			message = "the VPN gateway rejected the username, password, or authentication step"
 		}
 	case strings.Contains(lower, "profile_ovpn is required") ||
 		strings.Contains(lower, "profile is missing") || strings.Contains(lower, "is missing"):
+		reason = "missing-profile"
 		message = "the VPN profile is incomplete or missing — check the profile and its key material"
 	}
-	var failure error
 	if message != "" {
-		failure = fmt.Errorf("couldn't start the VPN tunnel: %s", message)
+		message = "couldn't start the VPN tunnel: " + message
 	} else {
-		failure = errors.New("couldn't start the VPN tunnel. Check the gateway settings and try again")
+		message = "couldn't start the VPN tunnel. Check the gateway settings and try again"
 	}
 	if debug := strings.TrimSpace(os.Getenv("WORMHOLE_TUNNEL_DEBUG")); debug != "" && debug != "0" {
-		return fmt.Errorf("%s (VPN sidecar %s, exit code %d)", failure, executable, exitCode)
+		message = fmt.Sprintf("%s (VPN sidecar %s, exit code %d)", message, executable, exitCode)
 	}
-	return failure
+	return &tunnelSidecarError{message: message, reason: reason, exitCode: exitCode}
 }
 
 func prepareTunnelAuthentication(

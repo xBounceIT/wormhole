@@ -301,7 +301,7 @@ test('startup keeps optional native and renderer work off the first-frame path',
   assert.match(imports, /import type \{ ElectronChromeExtensions \}/);
   assert.doesNotMatch(imports, /import \{ ElectronChromeExtensions \}/);
   assert.match(extensionLoader, /await import\('electron-chrome-extensions'\)/);
-  assert.match(appReady, /registerIpcHandlers\(sshBackend\);\s*createWindow\(\);/);
+  assert.match(appReady, /registerIpcHandlers\(sshBackend,[\s\S]*?\);\s*createWindow\(\);/);
   assert.doesNotMatch(appReady, /\bawait\b|ensureWebSharedSessionReady|runFirstLaunchMigrations/);
   assert.match(startupReadyHandler, /scheduleUnlockedBackgroundWork\(\)/);
   assert.match(mcpStatus, /return runBackend<McpStatusResponse>\('mcp-status'\)/);
@@ -1070,6 +1070,7 @@ function updateQuitHarness(platform = 'darwin') {
       getFocusedWindow: () => owner,
     };
     const treeTooltips = { closeForWindow() {} };
+    const reportWarning = () => events.push('warning');
     const confirmOnWindowClose = true;
     const windowCloseCoordinators = new WeakMap([[owner, {
       get connectedSessionCount() { return controls.activeCount; },

@@ -1,5 +1,11 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createInterface, type Interface } from 'node:readline';
+import {
+  diagnosticErrorCode,
+  expectBackendExit,
+  observeBackendProcess,
+  type RecordDiagnostic,
+} from './runtime-diagnostics.ts';
 
 export type SerialSettings = {
   baudRate: number;
@@ -295,6 +301,7 @@ function parseSerialBackendEvent(line: string): SerialBackendEvent | undefined {
 type SerialBackendOptions = {
   executable: string;
   args: string[];
+  diagnostics?: RecordDiagnostic;
 };
 
 /** Owns one long-lived Go serial controller and exposes only validated terminal events. */
@@ -325,6 +332,7 @@ export class SerialBackendClient {
       const timeout = setTimeout(() => {
         const waiter = this.openWaiters.get(request.sessionId);
         if (!waiter || waiter.timeout !== timeout) return;
+        this.options.diagnostics?.('ERR', 'Serial connection timed out');
         this.openWaiters.delete(request.sessionId);
         reject(new Error('Serial connection timed out.'));
         try {
@@ -402,6 +410,7 @@ export class SerialBackendClient {
     const child = this.process;
     this.process = undefined;
     if (!child || child.killed) return;
+    expectBackendExit(child);
     child.stdin.end();
     child.kill();
   }
@@ -423,6 +432,7 @@ export class SerialBackendClient {
       }
 
       this.process = child;
+      observeBackendProcess(child, 'serial', this.options.diagnostics);
       const lineReader = createInterface({ input: child.stdout, crlfDelay: Infinity });
       this.lineReader = lineReader;
       lineReader.on('line', (line) => {
@@ -430,10 +440,11 @@ export class SerialBackendClient {
       });
       child.stdin.on('error', (error) => {
         if (this.process !== child) return;
+        this.options.diagnostics?.('ERR', 'Serial input stream failed', {
+          childPid: child.pid,
+          code: diagnosticErrorCode(error),
+        });
         this.failOpenWaiters(new Error(`Serial service connection failed: ${error.message}`));
-      });
-      child.stderr.on('data', () => {
-        // Native diagnostics stay outside the renderer boundary.
       });
       child.once('error', (error) => {
         if (this.process !== child) return;

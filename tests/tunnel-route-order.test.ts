@@ -164,6 +164,7 @@ function harness(protocol: 'ssh' | 'rdp', extra: Record<string, any> = {}) {
   let handler!: (event: any, request: any) => Promise<any>;
   const owner = { isDestroyed: () => false, webContents: { send: () => {} } };
   const sandbox: Record<string, any> = {
+    reportWarning: () => {},
     ipcMain: {
       handle: (_name: string, fn: typeof handler) => {
         handler = fn;

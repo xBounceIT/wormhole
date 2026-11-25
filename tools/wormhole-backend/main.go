@@ -227,8 +227,14 @@ type tunnelRow struct {
 	Kind int64
 }
 
-func operationNeedsProcessInitialization(operation string) bool {
-	return operation != "mcp-status"
+func operationNeedsWorkspaceInitialization(operation string) bool {
+	switch operation {
+	case "mcp-status", "logs-info", "open-log-file", "open-logs-folder",
+		"settings-set-log-level", "settings-set-log-retention":
+		return false
+	default:
+		return true
+	}
 }
 
 func main() {
@@ -268,24 +274,27 @@ func runBackendCLI(args []string, input io.Reader, output io.Writer, errorOutput
 		writeErrorTo(errorOutput, "database path is required")
 		return 1
 	}
-	if operationNeedsProcessInitialization(*operation) {
-		initAppLogging(*databasePath)
-		defer closeAppLog()
+	fail := func(stage string, err error) int {
+		logOperationFailure(stage, err)
+		writeErrorTo(errorOutput, err.Error())
+		return 1
+	}
+	if *operation != "mcp-status" {
+		appLog = newAppLogger(*databasePath, errorOutput)
+		defer appLog.close()
+	}
+	if operationNeedsWorkspaceInitialization(*operation) {
 		if err := ensureElectronWorkspaceSchema(*databasePath); err != nil {
-			writeErrorTo(errorOutput, err.Error())
-			return 1
+			return fail("workspace schema initialization", err)
 		}
 		if err := recoverCredentialPrivateKeyOperations(*databasePath); err != nil {
-			writeErrorTo(errorOutput, err.Error())
-			return 1
+			return fail("credential private-key recovery", err)
 		}
 	}
 	if *operation == "ssh" {
 		logInfo("SSH service started")
 		if err := serveSSH(*databasePath, input, output, *electronUserDataPath); err != nil {
-			logError("SSH service failed: %v", err)
-			writeErrorTo(errorOutput, err.Error())
-			return 1
+			return fail("SSH service", err)
 		}
 		logInfo("SSH service stopped")
 		return 0
@@ -293,9 +302,7 @@ func runBackendCLI(args []string, input io.Reader, output io.Writer, errorOutput
 	if *operation == "serial" {
 		logInfo("serial service started")
 		if err := serveSerial(*databasePath, input, output, *electronUserDataPath); err != nil {
-			logError("serial service failed: %v", err)
-			writeErrorTo(errorOutput, err.Error())
-			return 1
+			return fail("serial service", err)
 		}
 		logInfo("serial service stopped")
 		return 0
@@ -304,14 +311,12 @@ func runBackendCLI(args []string, input io.Reader, output io.Writer, errorOutput
 		// The download streams JSON progress lines to stdout and can run for minutes, so it
 		// deliberately bypasses the one-shot result envelope of the other operations.
 		if err := serveUpdateDownload(*databasePath, input, output); err != nil {
-			writeErrorTo(errorOutput, err.Error())
-			return 1
+			return fail("update-download", err)
 		}
 		return 0
 	}
 	var result any
 	var err error
-	logDebug("service operation %s started", *operation)
 	switch *operation {
 	case "startup":
 		var request startupRequest
@@ -793,6 +798,8 @@ func runBackendCLI(args []string, input io.Reader, output io.Writer, errorOutput
 			days, err = writeLogRetentionDays(*databasePath, request.Days)
 			if err == nil {
 				result = map[string]any{"updated": true, "logRetentionDays": days}
+				appLog.refreshSettings()
+				logInfo("log retention changed (days=%d)", days)
 			}
 		}
 	case "settings-set-log-level":
@@ -805,6 +812,8 @@ func runBackendCLI(args []string, input io.Reader, output io.Writer, errorOutput
 			level, err = writeLogLevel(*databasePath, request.Level)
 			if err == nil {
 				result = map[string]any{"updated": true, "logLevel": level}
+				appLog.refreshSettings()
+				logInfo("log level changed (level=%s)", level)
 			}
 		}
 	case "open-log-file":
@@ -884,9 +893,7 @@ func runBackendCLI(args []string, input io.Reader, output io.Writer, errorOutput
 	case "serve":
 		logInfo("VNC service started")
 		if err := serveBackendIO(*databasePath, input, output, *electronUserDataPath); err != nil {
-			logError("VNC service failed: %v", err)
-			writeErrorTo(errorOutput, err.Error())
-			return 1
+			return fail("native backend service", err)
 		}
 		logInfo("VNC service stopped")
 		return 0
@@ -894,20 +901,23 @@ func runBackendCLI(args []string, input io.Reader, output io.Writer, errorOutput
 		err = runRdpController(*databasePath, *rdpHost, *freerdpPath)
 	default:
 		err = fmt.Errorf("unsupported operation %q", *operation)
+		return fail("unsupported backend operation", err)
 	}
 
 	if err != nil {
-		logError("service operation %s failed: %v", *operation, err)
-		writeErrorTo(errorOutput, err.Error())
-		return 1
+		if *operation == "mcp-status" {
+			appLog = newAppLogger(*databasePath, errorOutput)
+			defer appLog.close()
+		}
+		return fail("service operation "+*operation, err)
 	}
-	logDebug("service operation %s completed", *operation)
 
 	if err := json.NewEncoder(output).Encode(result); err != nil {
-		logError("failed to encode service response: %v", err)
+		logOperationFailure("write response for "+*operation, err)
 		writeErrorTo(errorOutput, "Wormhole could not complete the request")
 		return 1
 	}
+	logDebug("service operation %s completed", *operation)
 	return 0
 }
 
@@ -1071,7 +1081,7 @@ func loadStartupSnapshot(
 	if settingsMigrationErr != nil {
 		// Every settings reader applies the compatibility transform in memory. Persisting the
 		// upgraded document remains best-effort and must not make the application unusable.
-		logWarn("legacy settings migration could not be persisted: %v", settingsMigrationErr)
+		logWarn("legacy settings migration could not be persisted (cause=%s)", diagnosticCause(settingsMigrationErr))
 	} else if settingsMigration.Updated {
 		logInfo("legacy settings migrated to the current schema")
 	}
@@ -1080,7 +1090,7 @@ func loadStartupSnapshot(
 	if migrationErr != nil {
 		// Credential migration is retryable and has never been allowed to make the application
 		// unusable. Keep the bootstrap useful while recording the failure in the native log.
-		logError("credential migration failed during startup: %v", migrationErr)
+		logOperationFailure("startup credential migration", migrationErr)
 	}
 
 	themeMigration, err := migrateLegacyElectronTheme(databasePath, legacyTheme)

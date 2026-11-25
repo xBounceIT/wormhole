@@ -14340,7 +14340,7 @@ function LogLevelSetting({
         {logLevel === 'debug'
           ? 'Debug adds verbose per-operation detail for diagnosing failures.'
           : 'Info logs high-level events (boot, connections, tunnels, errors).'}{' '}
-        Changes apply immediately.
+        Running services pick up changes within one second.
       </p>
       {error ? <p className="text-[11px] text-destructive">{error}</p> : null}
     </SettingsSection>
