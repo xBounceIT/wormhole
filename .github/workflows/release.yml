@@ -4,37 +4,36 @@ on:
   push:
     tags: ['v*']
   workflow_dispatch:
-    inputs:
-      tag:
-        description: 'Existing tag to release (e.g. v0.1.0)'
-        required: true
-        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  group: release-${{ github.ref_name }}
   cancel-in-progress: false
 
 jobs:
   checks:
-    name: Verify release tag
+    name: Resolve release version
+    if: github.ref_type == 'tag' && !github.event.deleted
     runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.event.inputs.tag || github.ref_name }}
-
-      - name: Setup Node.js
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: '24'
-
-      - name: Verify tag matches package version
+      - name: Read version from tag
+        id: release
+        shell: bash
         env:
-          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
-        run: node -e "const expected = 'v' + require('./package.json').version; if (process.env.RELEASE_TAG !== expected) { throw new Error('Release tag ' + process.env.RELEASE_TAG + ' does not match ' + expected); }"
+          LC_ALL: C
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]{0,4})\.(0|[1-9][0-9]{0,4})\.(0|[1-9][0-9]{0,4})$ ]] ||
+             (( BASH_REMATCH[1] > 65535 || BASH_REMATCH[2] > 65535 || BASH_REMATCH[3] > 65535 )); then
+            echo "Release tag must have the form vX.Y.Z with components from 0 to 65535." >&2
+            exit 1
+          fi
+          printf 'tag=%s\nversion=%s\n' "$RELEASE_TAG" "${RELEASE_TAG#v}" >> "$GITHUB_OUTPUT"
 
   build:
     name: Build Electron ${{ matrix.platform }}
@@ -48,7 +47,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.inputs.tag || github.ref_name }}
           submodules: recursive
 
       - name: Setup .NET 10
@@ -72,17 +70,6 @@ jobs:
         uses: ./.github/actions/setup-windows-ovpn
         with:
           architecture: ${{ matrix.platform }}
-
-      - name: Resolve version
-        id: ver
-        shell: pwsh
-        env:
-          INPUT_TAG: ${{ github.event.inputs.tag || github.ref_name }}
-        run: |
-          $tag = $env:INPUT_TAG
-          $version = $tag -replace '^v', ''
-          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
       - name: Install npm dependencies
         run: npm ci
@@ -148,7 +135,7 @@ jobs:
       - name: Build Electron installer
         shell: pwsh
         env:
-          VERSION: ${{ steps.ver.outputs.version }}
+          VERSION: ${{ needs.checks.outputs.version }}
           PLATFORM: ${{ matrix.platform }}
         run: |
           & scripts\Build-ElectronInstaller.ps1 -Architecture $env:PLATFORM -AppVersion $env:VERSION
@@ -166,7 +153,7 @@ jobs:
       - name: Package zip
         shell: pwsh
         env:
-          VERSION: ${{ steps.ver.outputs.version }}
+          VERSION: ${{ needs.checks.outputs.version }}
           PLATFORM: ${{ matrix.platform }}
         run: |
           $zip = "Wormhole-$env:VERSION-win-$env:PLATFORM.zip"
@@ -222,8 +209,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.event.inputs.tag || github.ref_name }}
 
       - name: Setup Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -276,7 +261,9 @@ jobs:
 
       - name: Build ${{ matrix.platform }} packages
         # The artifactBuildCompleted hook embeds update metadata and generates the delta file.
-        run: npm run package -- --${{ matrix.builder_platform }} --${{ matrix.builder_arch }}
+        env:
+          RELEASE_VERSION: ${{ needs.checks.outputs.version }}
+        run: npm run package -- --${{ matrix.builder_platform }} --${{ matrix.builder_arch }} --config.extraMetadata.version="$RELEASE_VERSION"
 
       - name: Verify Linux package outputs
         if: matrix.builder_platform == 'linux'
@@ -403,7 +390,7 @@ jobs:
 
   release:
     name: Publish GitHub Release
-    needs: [build, packages]
+    needs: [checks, build, packages]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -417,11 +404,23 @@ jobs:
       - name: Publish release with generated notes
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          RELEASE_TAG: ${{ needs.checks.outputs.tag }}
+          RELEASE_COMMIT: ${{ github.sha }}
           REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
 
+          verify_release_commit() {
+            local remote_commit
+            remote_commit="$(gh api "repos/$REPOSITORY/commits/refs/tags/$RELEASE_TAG" \
+              --header 'Accept: application/vnd.github.sha')"
+            if [[ "$remote_commit" != "$RELEASE_COMMIT" ]]; then
+              echo "Release tag $RELEASE_TAG no longer points to build commit $RELEASE_COMMIT." >&2
+              exit 1
+            fi
+          }
+
+          verify_release_commit
           if release_json="$(gh release view "$RELEASE_TAG" --repo "$REPOSITORY" --json isDraft,assets 2>/dev/null)"; then
             is_draft="$(jq -r '.isDraft' <<<"$release_json")"
             existing_assets="$(jq -r '.assets[].name' <<<"$release_json")"
@@ -436,15 +435,17 @@ jobs:
                 gh release upload "$RELEASE_TAG" "$asset" --repo "$REPOSITORY"
               fi
             done
-
-            gh release edit "$RELEASE_TAG" \
-              --repo "$REPOSITORY" \
-              --verify-tag \
-              --draft=false
           else
             gh release create "$RELEASE_TAG" \
               --repo "$REPOSITORY" \
               --verify-tag \
+              --draft \
               --generate-notes \
               dist/*
           fi
+
+          verify_release_commit
+          gh release edit "$RELEASE_TAG" \
+            --repo "$REPOSITORY" \
+            --verify-tag \
+            --draft=false
