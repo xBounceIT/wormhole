@@ -173,6 +173,7 @@ export function normalizeTunnelEditorSettings(
       delete settings.Password;
       delete settings.TotpSecret;
     } else {
+      delete settings.UseSamlCallback;
       trimCrlf('Password');
     }
     deleteIfBlank('Realm');
@@ -271,6 +272,9 @@ export function missingTunnelFields(value: {
       if (blank('Host')) missing.push('Host');
       if (!validPort('Port')) missing.push('Port (1-65535)');
       if (settings.UseSingleSignOn === true) {
+        if (settings.UseSamlCallback === true && !blank('Realm')) {
+          missing.push('an empty realm for the FortiGate SAML callback');
+        }
         if (!blank('ServerCertSha256Pin')) {
           missing.push('an empty server certificate pin for SSO');
         }

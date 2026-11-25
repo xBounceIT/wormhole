@@ -9,6 +9,9 @@ import (
 // The editor receives a presence marker, never the gateway-wide PSK. Runtime
 // and encrypted backup readers retain access to the Go-owned settings.
 func tunnelEditorSettings(kind int64, id string, raw json.RawMessage) (json.RawMessage, error) {
+	if kind == 2 {
+		return fortinetSSLEditorSettings(raw)
+	}
 	if kind != 9 {
 		return azureVPNEditorSettings(kind, id, raw)
 	}

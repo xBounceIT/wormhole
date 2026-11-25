@@ -11,6 +11,9 @@ import {
   encodeTunnelOAuthCallback,
   isFortinetIPsecRedirect,
   fortinetIPsecCallbackToken,
+  fortinetSSLCallbackAuthId,
+  fortinetSSLLoopback,
+  isFortinetSSLCallbackSource,
   isMatchingOAuthRedirect,
   isSameCertificateHostname,
   tunnelPromptValueMaxBytes,
@@ -88,6 +91,10 @@ after(async () => {
         popupScript.indexOf('  const inspectNavigationSafely'),
         popupScript.indexOf('  const captureOAuthRedirect'),
       ],
+      [
+        popupScript.indexOf('    const webContentsId = authWindow.webContents.id;'),
+        popupScript.indexOf("authWindow.webContents.on('did-fail-load'"),
+      ],
       [popupScript.indexOf('  let cookieTimer'), popupScript.indexOf('class BrowserAuthBackend')],
       [popupScript.indexOf('  async respondTunnelPrompt('), popupScript.indexOf('readOutput(')],
       [
@@ -151,11 +158,32 @@ function browserAuthHarness(
   let expire!: () => void;
   let expireCleanup: (() => void) | undefined;
   let poll: (() => void) | undefined;
+  let storageClears = 0;
+  let receiveHeaders:
+    | ((
+        details: {
+          url: string;
+          webContentsId: number;
+          resourceType: string;
+          statusCode: number;
+          responseHeaders: Record<string, string[]>;
+        },
+        callback: (result: { cancel?: boolean }) => void,
+      ) => void)
+    | null = null;
   const browserSession = {
     setPermissionRequestHandler() {},
     setPermissionCheckHandler() {},
     setCertificateVerifyProc() {},
+    async clearStorageData() {
+      storageClears++;
+    },
     cookies,
+    webRequest: {
+      onHeadersReceived(listener: typeof receiveHeaders) {
+        receiveHeaders = listener;
+      },
+    },
   };
   class AuthWindow extends EventEmitter {
     static getFocusedWindow() {
@@ -167,6 +195,7 @@ function browserAuthHarness(
     destroyed = false;
     windowOpenHandler?: (details: { url: string }) => { action: string };
     webContents = Object.assign(new EventEmitter(), {
+      id: 7,
       setWindowOpenHandler: (handler: AuthWindow['windowOpenHandler']) => {
         this.windowOpenHandler = handler;
       },
@@ -224,6 +253,9 @@ function browserAuthHarness(
       encodeTunnelOAuthCallback,
       isFortinetIPsecRedirect,
       fortinetIPsecCallbackToken,
+      fortinetSSLCallbackAuthId,
+      fortinetSSLLoopback,
+      isFortinetSSLCallbackSource,
       tunnelPromptValueMaxBytes,
       tunnelBrowserLoadFailure,
       recordDiagnostic: (...args: unknown[]) => diagnostics.push(args),
@@ -292,6 +324,28 @@ function browserAuthHarness(
     diagnostics,
     backend,
     browserSession,
+    get storageClears() {
+      return storageClears;
+    },
+    receiveHeaders: (
+      overrides: Partial<Parameters<NonNullable<typeof receiveHeaders>>[0]> = {},
+    ) => {
+      assert.ok(receiveHeaders);
+      const results: boolean[] = [];
+      receiveHeaders(
+        {
+          url: new URL('/remote/saml/login/', urls[0]).href,
+          webContentsId: window.webContents.id,
+          resourceType: 'mainFrame',
+          statusCode: 302,
+          responseHeaders: { Location: ['http://127.0.0.1:8020/?id=one-shot%2Bvalue'] },
+          ...overrides,
+        },
+        (response) => results.push(response.cancel === true),
+      );
+      assert.equal(results.length, 1);
+      return results[0];
+    },
     enqueue: (overrides: Record<string, unknown>) => {
       enqueue(backend, { ...request, ...overrides });
       return getQueue();
@@ -873,6 +927,175 @@ test('Fortinet cookie completion cannot be replaced by WatchGuard query paramete
   await setImmediate();
   assert.deepEqual(auth.responses, []);
   assert.equal(auth.window.isDestroyed(), false);
+});
+
+test('Fortinet reports a host-check 403 only from the configured gateway and path', async (t) => {
+  const gateway = 'https://vpn.example.test:10443';
+  const auth = browserAuthHarness(t, {
+    ...fortinetEvent,
+    urls: [`${gateway}/remote/saml/start`],
+  });
+  await setImmediate();
+  for (const url of [
+    'https://login.example.test/remote/hostcheck_install',
+    'https://vpn.example.test/remote/hostcheck_install',
+    `${gateway}/remote/other`,
+  ]) {
+    auth.window.webContents.emit('did-navigate', {}, url, 403);
+  }
+  const hostCheck = `${gateway}/remote/hostcheck_install?user=private-user`;
+  auth.window.webContents.emit('did-navigate', {}, hostCheck, 200);
+  await setImmediate();
+  assert.deepEqual(auth.responses, []);
+
+  auth.window.webContents.emit('did-navigate', {}, hostCheck, 403);
+  await setImmediate();
+  assert.equal(auth.responses.length, 1);
+  assert.equal(auth.responses[0].browserFailure, 'fortinet-hostcheck-forbidden');
+  assert.equal(auth.responses[0].cancelled, false);
+  assert.equal(auth.responses[0].value, '');
+  assert.doesNotMatch(JSON.stringify(auth.responses), /private-user/);
+  await auth.finished;
+});
+
+test('Fortinet rechecks for the VPN cookie after a host-check 403 overlaps polling', async (t) => {
+  const gateway = 'https://vpn.example.test';
+  let resolvePoll!: (cookies: BrowserCookie[]) => void;
+  let reads = 0;
+  const auth = browserAuthHarness(
+    t,
+    { ...fortinetEvent, urls: [`${gateway}/remote/saml/start`] },
+    {
+      get: async () => {
+        if (++reads === 1) return [];
+        if (reads === 2) {
+          return new Promise<BrowserCookie[]>((resolve) => {
+            resolvePoll = resolve;
+          });
+        }
+        return [{ name: 'SVPNCOOKIE', value: 'issued-cookie', httpOnly: true }];
+      },
+      remove: async () => {},
+    },
+  );
+  await setImmediate();
+  await auth.tick();
+  auth.window.webContents.emit('did-navigate', {}, `${gateway}/remote/hostcheck_install`, 403);
+  resolvePoll([]);
+  await setImmediate();
+  assert.deepEqual(auth.responses, []);
+
+  await auth.tick();
+  assert.equal(auth.responses.length, 1);
+  assert.equal(auth.responses[0].value, 'issued-cookie');
+  assert.equal(auth.responses[0].browserFailure, undefined);
+  await auth.finished;
+});
+
+const fortinetSSLCallbackEvent = {
+  completion: 'fortinet-ssl',
+  urls: ['https://vpn.example.test:10443/remote/saml/start?redirect=1'],
+};
+
+test('Fortinet SSL captures the gateway callback before a request to localhost', async (t) => {
+  const auth = browserAuthHarness(t, fortinetSSLCallbackEvent);
+  await setImmediate();
+  for (const details of [
+    { url: 'https://other.example.test/remote/saml/login' },
+    { url: 'https://vpn.example.test:10443/remote/other' },
+    { webContentsId: 8 },
+    { resourceType: 'subFrame' },
+    { statusCode: 200 },
+    { responseHeaders: { Location: ['https://login.example.test/'] } },
+  ]) {
+    assert.equal(auth.receiveHeaders(details), false);
+  }
+  assert.deepEqual(auth.responses, []);
+  assert.equal(
+    auth.receiveHeaders({
+      responseHeaders: { Location: ['http://[::1]:8020/?id=one-shot%2Bvalue'] },
+    }),
+    true,
+  );
+  await auth.finished;
+  assert.equal(auth.responses.length, 1);
+  assert.equal(auth.responses[0].value, 'one-shot+value');
+  assert.equal(auth.responses[0].browserFailure, undefined);
+  assert.equal(auth.storageClears, 1);
+});
+
+test('Fortinet SSL rejects an ambiguous callback without forwarding a credential', async (t) => {
+  const auth = browserAuthHarness(t, fortinetSSLCallbackEvent);
+  await setImmediate();
+  assert.equal(
+    auth.receiveHeaders({
+      responseHeaders: { location: ['http://localhost:9020/?id=first&id=second'] },
+    }),
+    true,
+  );
+  await auth.finished;
+  assert.equal(auth.responses[0].browserFailure, 'response');
+  assert.equal(auth.responses[0].value, '');
+});
+
+test('Fortinet SSL allows HTTPS navigation to a locally forwarded gateway', async (t) => {
+  const gateway = 'https://127.0.0.1:10443';
+  const auth = browserAuthHarness(t, {
+    ...fortinetSSLCallbackEvent,
+    urls: [`${gateway}/remote/saml/start?redirect=1`],
+  });
+  await setImmediate();
+  const login = `${gateway}/remote/saml/login/`;
+  assert.equal(auth.receiveHeaders({ responseHeaders: { Location: [login] } }), false);
+  auth.window.webContents.emit('will-redirect', {
+    url: login,
+    preventDefault: () => assert.fail('gateway navigation was blocked'),
+  });
+  assert.deepEqual(auth.responses, []);
+
+  assert.equal(auth.receiveHeaders(), true);
+  assert.equal(auth.window.isDestroyed(), false, 'Chromium is still dispatching the redirect');
+  await auth.finished;
+  assert.equal(auth.responses[0].value, 'one-shot+value');
+});
+
+test('Fortinet SSL blocks loopback navigation from the identity provider', async (t) => {
+  const auth = browserAuthHarness(t, fortinetSSLCallbackEvent);
+  await setImmediate();
+  let prevented = 0;
+  const event = {
+    url: 'http://localhost:9020/?id=one-shot',
+    initiator: { url: 'https://login.example.test/' },
+    preventDefault: () => prevented++,
+  };
+  assert.equal(
+    auth.window.windowOpenHandler?.({ url: 'https://localhost.:9020/?id=one-shot' }).action,
+    'deny',
+  );
+  assert.equal(auth.loads.length, 1);
+  auth.window.webContents.emit('will-navigate', event);
+  auth.window.webContents.emit('will-redirect', event);
+  assert.equal(prevented, 2);
+  assert.deepEqual(auth.responses, []);
+  auth.window.webContents.emit('will-navigate', {
+    ...event,
+    initiator: { url: 'https://vpn.example.test:10443/remote/saml/login' },
+  });
+  await auth.finished;
+  assert.equal(prevented, 3);
+  assert.equal(auth.responses[0].value, 'one-shot');
+});
+
+test('a deferred Fortinet SSL callback discards its ID after a workspace relock', async (t) => {
+  const auth = browserAuthHarness(t, fortinetSSLCallbackEvent);
+  await setImmediate();
+  assert.equal(auth.receiveHeaders(), true);
+  auth.authSession.authorizationEpoch++;
+  await auth.finished;
+  assert.equal(auth.responses.length, 1);
+  assert.equal(auth.responses[0].cancelled, true);
+  assert.equal(auth.responses[0].value, '');
+  assert.equal(auth.storageClears, 1);
 });
 
 test('WatchGuard ignores malformed, unrelated and incomplete navigation callbacks', async (t) => {

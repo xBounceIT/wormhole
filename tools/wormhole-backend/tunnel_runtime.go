@@ -895,6 +895,12 @@ func tunnelSidecarFailureMessage(executable, stderr string, exitCode int) error 
 	var message string
 	reason := "sidecar"
 	switch {
+	case executable == "wormhole-fortiproxy" && strings.Contains(lower, "fatal: fortinet start: login: fortigate denied ssl vpn host check (http 403)"):
+		message = tunnelBrowserFailureMessages["fortinet-hostcheck-forbidden"]
+	case executable == "wormhole-fortiproxy" && strings.Contains(lower, "fatal: fortinet start: login: fortigate saml authentication id exchange failed (http "):
+		message = "FortiGate returned an HTTP error while exchanging the SAML sign-in ID"
+	case executable == "wormhole-fortiproxy" && strings.Contains(lower, "fatal: fortinet start: login: fortigate did not issue an ssl vpn session cookie"):
+		message = "FortiGate did not issue an SSL VPN session cookie after sign-in"
 	case strings.Contains(lower, "forcepoint tls connection failed"):
 		reason = "tls"
 		message = "Forcepoint TLS connection failed; verify the SSL endpoint and the trusted server certificate or SHA-256 pin"
@@ -1189,8 +1195,8 @@ func tunnelSidecarCommand(kind int64, raw json.RawMessage) (string, []byte, erro
 			"password":                 valueUnless(useSSO, stringValue("Password")),
 			"realm":                    valueUnless(useSSO, optionalJSONString(settings, "Realm")),
 			"totp_secret":              valueUnless(useSSO, optionalJSONString(settings, "TotpSecret")),
-			"saml_auth_id":             optionalJSONString(settings, "SamlAuthId"),
-			"svpn_cookie":              optionalJSONString(settings, "SvpnCookie"),
+			"saml_auth_id":             valueUnless(!useSSO, optionalJSONString(settings, "SamlAuthId")),
+			"svpn_cookie":              valueUnless(!useSSO, optionalJSONString(settings, "SvpnCookie")),
 			"trust_server_certificate": tunnelSettingBool(settings, "TrustServerCertificate"),
 			"server_cert_sha256_pin":   optionalJSONString(settings, "ServerCertSha256Pin"),
 		})

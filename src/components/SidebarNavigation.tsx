@@ -12,7 +12,6 @@ export const sidebarNavigationItems = [
   { id: 'sessions', label: 'Sessions', hint: 'Open connections', icon: Terminal },
   { id: 'credentials', label: 'Credentials', hint: 'Stored access profiles', icon: KeyRound },
   { id: 'tunnels', label: 'Tunnels', hint: 'VPN and network routes', icon: Network },
-  { id: 'settings', label: 'Settings', hint: 'Application preferences', icon: Settings },
 ] as const;
 
 export type SidebarPage = (typeof sidebarNavigationItems)[number]['id'];
@@ -20,11 +19,15 @@ export type SidebarPage = (typeof sidebarNavigationItems)[number]['id'];
 export function SidebarNavigation({
   activePage,
   onNavigate,
+  onOpenSettings,
   sessionCount,
+  settingsOpen = false,
 }: {
   activePage: SidebarPage;
   onNavigate: (page: SidebarPage) => void;
+  onOpenSettings: () => void;
   sessionCount: number;
+  settingsOpen?: boolean;
 }) {
   return (
     <nav aria-label="Main navigation">
@@ -51,6 +54,21 @@ export function SidebarNavigation({
               ) : null}
             </SidebarMenuItem>
           ))}
+          <SidebarMenuItem>
+            <Button
+              aria-expanded={settingsOpen}
+              aria-haspopup="dialog"
+              aria-label="Settings"
+              className="h-8 w-full justify-start gap-2 rounded-md border-0 px-2 !text-xs data-active:bg-sidebar-accent data-active:text-sidebar-accent-foreground"
+              data-active={settingsOpen}
+              onClick={onOpenSettings}
+              size="sm"
+              variant="ghost"
+            >
+              <Settings />
+              <span className="truncate">Settings</span>
+            </Button>
+          </SidebarMenuItem>
         </SidebarMenu>
       </SidebarGroup>
     </nav>

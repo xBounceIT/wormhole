@@ -391,7 +391,7 @@ func readTunnel(databasePath string, request tunnelReadRequest) (tunnelDetails, 
 	tunnelMutationMu.RLock()
 	defer tunnelMutationMu.RUnlock()
 	details, err := readTunnelUnlocked(databasePath, request)
-	if err != nil || (details.Kind != 5 && details.Kind != 9) {
+	if err != nil || (details.Kind != 2 && details.Kind != 5 && details.Kind != 9) {
 		return details, err
 	}
 	defer clearBytes(details.Settings)
@@ -774,9 +774,10 @@ func validateTunnelSettings(kind int64, settings map[string]json.RawMessage) err
 	if kind == 2 {
 		delete(settings, "UseExternalBrowser")
 		delete(settings, "SamlRedirectPort")
+		clearFortinetSSLCredentials(settings)
 	}
 	boolFields := map[int64][]string{
-		2: {"UseSingleSignOn", "TrustServerCertificate"},
+		2: {"UseSingleSignOn", "UseSamlCallback", "TrustServerCertificate"},
 		3: {"UseSingleSignOn", "TrustServerCertificate"},
 		4: {"UseSingleSignOn", "UseOtp", "TrustServerCertificate"},
 		6: {"TrustServerCertificate"},
@@ -819,7 +820,11 @@ func validateTunnelSettings(kind int64, settings map[string]json.RawMessage) err
 		}
 		useSSO := tunnelSettingBool(settings, "UseSingleSignOn")
 		if !useSSO {
+			delete(settings, "UseSamlCallback")
 			return required("Username", "Password")
+		}
+		if tunnelSettingBool(settings, "UseSamlCallback") && strings.TrimSpace(tunnelSettingString(settings, "Realm")) != "" {
+			return errors.New("Fortinet SAML callback requires a tunnel without a realm")
 		}
 		if strings.TrimSpace(tunnelSettingString(settings, "ServerCertSha256Pin")) != "" {
 			return errors.New("dedicated-browser Fortinet single sign-on cannot enforce a server certificate pin")

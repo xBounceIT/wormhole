@@ -68,7 +68,6 @@ test('update notifications support startup, dismissal, installation and the chan
     let updateTestControls;
     function UpdateHarness({ initialSettings }) {
       const [authGate, setAuthGate] = useState('unlocked');
-      const [activePage, setActivePage] = useState('sessions');
       const contextMenuOverlayOpen = useContextMenuOverlayOpen();
       ${section(app, '  const [updateCurrentVersion,', '  const [autoCopyOnSelect,')}
       ${section(app, '  const [updateBusy,', '  const treeMovePending =')}
@@ -82,7 +81,7 @@ test('update notifications support startup, dismissal, installation and the chan
       return <>
         <output id="native-surface-state">{contextMenuOverlayOpen ? 'hidden' : 'visible'}</output>
         ${app.slice(mountStart, mountEnd)}
-        {activePage === 'settings' ? <UpdateSettingsHarness update={update} settingsUpdatesRequest={settingsUpdatesRequest}
+        {settingsOpen ? <UpdateSettingsHarness update={update} settingsUpdatesRequest={settingsUpdatesRequest}
           onCheckForUpdates={() => void handleCheckForUpdates()} onInstallUpdate={() => void handleInstallUpdate()}
           onDismissUpdate={handleDismissUpdate} /> : null}
       </>;

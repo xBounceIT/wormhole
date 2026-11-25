@@ -933,7 +933,7 @@ test('SSH host-key trust delegates the retained lifecycle retry to Go', () => {
   );
 });
 
-test('Fortinet editor offers only the dedicated SAML window', () => {
+test('Fortinet offers the isolated SAML callback only when SSO is enabled', () => {
   const fields = sourceBetween(
     appSource,
     'function tunnelEditorFields',
@@ -948,9 +948,15 @@ test('Fortinet editor offers only the dedicated SAML window', () => {
       ['UseExternalBrowser', 'SamlRedirectPort'].includes(field.key),
     ),
   );
+  assert.ok(
+    fieldsForKind(2).some(
+      (field: { key: string; type: string }) =>
+        field.key === 'UseSamlCallback' && field.type === 'switch',
+    ),
+  );
   const editor = sourceBetween(appSource, 'function TunnelEditorDialog', 'function TunnelsPage');
   const fortinet = sourceBetween(editor, '{value.kind === 2 ? (', '{value.kind === 3 ? (');
-  assert.match(fortinet, /rows\('Single sign-on'\)/);
+  assert.match(fortinet, /field.key === 'UseSamlCallback' && !useFortinetSso/);
   assert.match(fortinet, /dedicated window/);
   assert.match(fortinet, /field.key !== 'Realm' && useFortinetSso/);
 });
