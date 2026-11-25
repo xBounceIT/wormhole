@@ -13,6 +13,7 @@ type VirtualCardGridProps<T> = {
   getKey: (item: T) => string;
   renderItem: (item: T) => ReactNode;
   minimumColumnWidth: number;
+  maximumColumnCount?: number;
   rowHeight: number;
   gap: number;
   ariaLabel: string;
@@ -34,6 +35,7 @@ export function VirtualCardGrid<T>({
   getKey,
   renderItem,
   minimumColumnWidth,
+  maximumColumnCount = Infinity,
   rowHeight,
   gap,
   ariaLabel,
@@ -86,7 +88,10 @@ export function VirtualCardGrid<T>({
   }, [resetKey, syncViewport]);
 
   const availableWidth = Math.max(0, viewportState.width - endPadding);
-  const columnCount = virtualGridColumnCount(availableWidth, minimumColumnWidth, gap);
+  const columnCount = Math.min(
+    maximumColumnCount,
+    virtualGridColumnCount(availableWidth, minimumColumnWidth, gap),
+  );
   const contentHeight = virtualGridHeight(items.length, columnCount, rowHeight, gap);
   const range = virtualGridRange(
     items.length,

@@ -36,6 +36,7 @@ import './index.css';
 import { authenticationIdleSeconds } from './auth-idle';
 import { McpApprovalDialog } from './components/McpApprovalDialog';
 import { TerminalLinkDialog } from './components/TerminalLinkDialog';
+import { TunnelProviderIcon } from './components/TunnelProviderIcon';
 import { UpdateNotification } from './components/UpdateNotification';
 import { AppTitlebar } from './components/AppTitlebar';
 import { SidebarLayout } from './components/SidebarLayout';
@@ -251,6 +252,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { Input } from '@/components/ui/input';
+import { InputGroup, InputGroupAddon, InputGroupInput } from '@/components/ui/input-group';
 import { PasswordInput } from '@/components/ui/password-input';
 import { Kbd } from '@/components/ui/kbd';
 import { Label } from '@/components/ui/label';
@@ -1020,13 +1022,6 @@ function formatBitwardenExtensionStatus(state: WormholeBitwardenExtensionState):
   if (state.lastUpdateError) parts.push(`Last update error: ${state.lastUpdateError}.`);
   return parts.join(' ');
 }
-
-type TunnelRecord = {
-  id: string;
-  name: string;
-  kind: string;
-  endpoint?: string;
-};
 
 function measuredRdpSurfaceBounds(sessionId: string): WormholeRdpSurfaceRect | undefined {
   const surface = [...document.querySelectorAll<HTMLElement>('[data-rdp-session-id]')].find(
@@ -1894,7 +1889,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   const [credentialOptions, setCredentialOptions] = useState<CredentialOptionGroups>(() =>
     workspaceCredentialOptions(initialWorkspace),
   );
-  const [tunnels, setTunnels] = useState<TunnelRecord[]>(initialWorkspace.tunnels);
+  const [tunnels, setTunnels] = useState(initialWorkspace.tunnels);
   const [authState, setAuthState] = useState<WormholeAuthState | null>(initialAuthState);
   const [authGate, setAuthGate] = useState<'locked' | 'unlocked'>('unlocked');
   const [lockReason, setLockReason] = useState('Unlock Wormhole to continue.');
@@ -5798,7 +5793,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     setTree(nextTree);
     setCredentials(workspace.credentials as CredentialRecord[]);
     setCredentialOptions(workspaceCredentialOptions(workspace));
-    setTunnels(workspace.tunnels as TunnelRecord[]);
+    setTunnels(workspace.tunnels);
     setExpanded((current) =>
       reconcileExpandedFolderIds(indexConnectionTree(nextTree).folderIds, current),
     );
@@ -12249,7 +12244,7 @@ function TunnelRouteField({
   mode: TunnelMode;
   onChange: (mode: TunnelMode) => void;
   scope: 'connection' | 'folder' | 'quick';
-  tunnels: TunnelRecord[];
+  tunnels: WormholeWorkspaceTunnel[];
 }) {
   const isFolder = scope === 'folder';
   const isQuick = scope === 'quick';
@@ -12985,17 +12980,19 @@ function TunnelEditorDialog({
   tunnels,
   initial,
   open,
+  onCloseAutoFocus,
   onOpenChange,
   onSaved,
 }: {
   tree: TreeNode[];
   isAuthorized: boolean;
   credentials: CredentialRecord[];
-  tunnels: TunnelRecord[];
+  tunnels: WormholeWorkspaceTunnel[];
   initial: TunnelEditorValue;
   open: boolean;
+  onCloseAutoFocus?: (event: Event) => void;
   onOpenChange: (open: boolean) => void;
-  onSaved: (tunnel: TunnelRecord) => void;
+  onSaved: (tunnel: WormholeWorkspaceTunnel) => void;
 }) {
   const [value, setValue] = useState<TunnelEditorValue>(initial);
   const [busy, setBusy] = useState(false);
@@ -13245,6 +13242,7 @@ function TunnelEditorDialog({
     <Dialog onOpenChange={(next) => !busy && onOpenChange(next)} open={open}>
       <DialogContent
         className="flex max-h-[calc(100dvh-2rem)] w-full max-w-[min(48rem,calc(100vw-2rem))] flex-col overflow-hidden border-border/70 bg-card sm:max-w-[min(48rem,calc(100vw-2rem))]"
+        onCloseAutoFocus={onCloseAutoFocus}
         onInteractOutside={(event) => event.preventDefault()}
         showCloseButton={!busy}
       >
@@ -13661,7 +13659,7 @@ function TunnelEditorDialog({
 // Tunnel CRUD, test progress, and editor lifecycle form one backend-owned workflow. Their local
 // states transition independently, so combining them in a reducer would obscure those boundaries.
 // react-doctor-disable-next-line react-doctor/no-giant-component, react-doctor/prefer-useReducer
-function TunnelsPage({
+export function TunnelsPage({
   tree,
   isAuthorized,
   credentials,
@@ -13674,19 +13672,20 @@ function TunnelsPage({
   tree: TreeNode[];
   isAuthorized: boolean;
   credentials: CredentialRecord[];
-  tunnels: TunnelRecord[];
-  onTunnelsLoaded: (tunnels: TunnelRecord[]) => void;
-  onTunnelCreated: (tunnel: TunnelRecord) => void;
-  onTunnelUpdated: (tunnel: TunnelRecord) => void;
+  tunnels: WormholeWorkspaceTunnel[];
+  onTunnelsLoaded: (tunnels: WormholeWorkspaceTunnel[]) => void;
+  onTunnelCreated: (tunnel: WormholeWorkspaceTunnel) => void;
+  onTunnelUpdated: (tunnel: WormholeWorkspaceTunnel) => void;
   onTunnelDeleted: (id: string) => void;
   // react-doctor-disable-next-line react-doctor/prefer-useReducer
 }) {
   const [searchText, setSearchText] = useState('');
+  const [providerFilter, setProviderFilter] = useState<string | null>(null);
   const [editorOpen, setEditorOpen] = useState(false);
   const [editorValue, setEditorValue] = useState<TunnelEditorValue>(blankTunnelEditor);
   const [actionError, setActionError] = useState('');
   const [testState, setTestState] = useState<{
-    tunnel: TunnelRecord;
+    tunnel: WormholeWorkspaceTunnel;
     status: 'idle' | 'connecting' | 'cancelling' | 'connected' | 'notice' | 'cancelled' | 'failed';
     targetProbed?: boolean;
     error?: string;
@@ -13696,24 +13695,41 @@ function TunnelsPage({
   const [testTargetHost, setTestTargetHost] = useState('');
   const [testTargetPort, setTestTargetPort] = useState('');
   const [testInputError, setTestInputError] = useState('');
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const dialogTriggerRef = useRef<HTMLButtonElement>(null);
+  const pendingTunnelEditRef = useRef<{ id: string } | null>(null);
   const testAttemptRef = useRef(0);
   const summaryLoadAttemptRef = useRef(0);
   const deferredSearchText = useDeferredValue(searchText);
+  const searchResultsPending = listSearchResultsArePending(searchText, deferredSearchText);
   const normalizedTunnelSearch = normalizeListSearch(deferredSearchText);
   const tunnelSearchActive = normalizedTunnelSearch.length > 0;
+  const providerCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    if (providerFilter !== null) counts.set(providerFilter, 0);
+    for (const tunnel of tunnels) counts.set(tunnel.kind, (counts.get(tunnel.kind) ?? 0) + 1);
+    return [...counts].sort(([left], [right]) => left.localeCompare(right));
+  }, [providerFilter, tunnels]);
+  const providerTunnels = useMemo(
+    () =>
+      providerFilter === null
+        ? tunnels
+        : tunnels.filter((tunnel) => tunnel.kind === providerFilter),
+    [providerFilter, tunnels],
+  );
   const tunnelSearchIndex = useMemo(
     () =>
       tunnelSearchActive
-        ? tunnels.map((tunnel) => ({
+        ? providerTunnels.map((tunnel) => ({
             item: tunnel,
             text: `${tunnel.name}\u0000${tunnel.kind}\u0000${tunnel.endpoint ?? ''}`.toLowerCase(),
           }))
         : [],
-    [tunnelSearchActive, tunnels],
+    [providerTunnels, tunnelSearchActive],
   );
   const filteredTunnels = useMemo(
-    () => filterListSearchIndex(tunnels, tunnelSearchIndex, normalizedTunnelSearch),
-    [normalizedTunnelSearch, tunnelSearchIndex, tunnels],
+    () => filterListSearchIndex(providerTunnels, tunnelSearchIndex, normalizedTunnelSearch),
+    [normalizedTunnelSearch, providerTunnels, tunnelSearchIndex],
   );
 
   useEffect(() => {
@@ -13758,7 +13774,16 @@ function TunnelsPage({
     });
   }, []);
 
-  function addTunnel() {
+  function restoreDialogFocus(event: Event) {
+    event.preventDefault();
+    const trigger = dialogTriggerRef.current;
+    const target = trigger?.isConnected && !trigger.disabled ? trigger : searchInputRef.current;
+    target?.focus({ preventScroll: true });
+  }
+
+  function addTunnel(trigger: HTMLButtonElement) {
+    pendingTunnelEditRef.current = null;
+    dialogTriggerRef.current = trigger;
     setActionError('');
     setEditorValue(blankTunnelEditor());
     setEditorOpen(true);
@@ -13769,25 +13794,35 @@ function TunnelsPage({
     if (!open) setEditorValue(blankTunnelEditor());
   }
 
-  async function editTunnel(tunnel: TunnelRecord) {
+  async function editTunnel(tunnel: WormholeWorkspaceTunnel, trigger: HTMLButtonElement) {
     const api = window.wormhole;
     if (!api) {
       setActionError('The VPN service is unavailable.');
       return;
     }
+    const request = { id: tunnel.id };
+    pendingTunnelEditRef.current = request;
     setActionError('');
     try {
-      setEditorValue(tunnelEditorFromDetails(await api.readTunnel(tunnel.id)));
+      const details = await api.readTunnel(tunnel.id);
+      if (pendingTunnelEditRef.current !== request) return;
+      dialogTriggerRef.current = trigger;
+      setEditorValue(tunnelEditorFromDetails(details));
       setEditorOpen(true);
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : 'Could not read VPN tunnel.');
+      if (pendingTunnelEditRef.current === request) {
+        setActionError(error instanceof Error ? error.message : 'Could not read VPN tunnel.');
+      }
+    } finally {
+      if (pendingTunnelEditRef.current === request) pendingTunnelEditRef.current = null;
     }
   }
 
-  async function deleteTunnel(tunnel: TunnelRecord) {
+  async function deleteTunnel(tunnel: WormholeWorkspaceTunnel) {
     const api = window.wormhole;
     if (!api || !window.confirm(`Delete VPN tunnel “${tunnel.name}”? This cannot be undone.`))
       return;
+    if (pendingTunnelEditRef.current?.id === tunnel.id) pendingTunnelEditRef.current = null;
     setActionError('');
     try {
       const result = await api.deleteTunnel(tunnel.id);
@@ -13802,8 +13837,10 @@ function TunnelsPage({
     }
   }
 
-  function openTunnelTest(tunnel: TunnelRecord) {
+  function openTunnelTest(tunnel: WormholeWorkspaceTunnel, trigger: HTMLButtonElement) {
     if (testState) return;
+    pendingTunnelEditRef.current = null;
+    dialogTriggerRef.current = trigger;
     setActionError('');
     setTestTargetHost('');
     setTestTargetPort('');
@@ -13923,92 +13960,168 @@ function TunnelsPage({
     setTestInputError('');
   }
 
-  function tunnelSaved(tunnel: TunnelRecord) {
+  function tunnelSaved(tunnel: WormholeWorkspaceTunnel) {
     ++summaryLoadAttemptRef.current;
     if (editorValue.id) onTunnelUpdated(tunnel);
     else onTunnelCreated(tunnel);
   }
 
   return (
-    <section className="flex h-full min-h-0 flex-col overflow-hidden px-6 py-4">
-      <h2 className="shrink-0 text-xl font-semibold tracking-tight">VPN tunnels</h2>
+    <section className="flex h-full min-h-0 flex-col overflow-hidden px-4 pt-6 sm:px-6 sm:pt-8 lg:px-8">
+      <header className="flex shrink-0 flex-wrap items-center justify-between gap-x-6 gap-y-4 pr-2">
+        <div>
+          <h2 className="text-3xl font-semibold tracking-tight">VPN tunnels</h2>
+          <p className="mt-1 text-sm text-muted-foreground">
+            {tunnels.length} {tunnels.length === 1 ? 'tunnel' : 'tunnels'} configured
+          </p>
+        </div>
+        <div className="ml-auto flex min-w-0 flex-[1_1_23rem] items-center justify-end gap-3">
+          <InputGroup className="h-11 max-w-80 flex-[1_1_11rem] rounded-xl">
+            <InputGroupAddon className="pl-3">
+              <Search aria-hidden="true" />
+            </InputGroupAddon>
+            <InputGroupInput
+              aria-label="Search tunnels"
+              className="h-full text-sm"
+              onChange={(event) => setSearchText(event.target.value)}
+              placeholder="Search tunnels"
+              ref={searchInputRef}
+              type="search"
+              value={searchText}
+            />
+          </InputGroup>
+          <Button
+            className="h-11 rounded-xl px-4"
+            onClick={(event) => addTunnel(event.currentTarget)}
+            size="lg"
+          >
+            <Plus aria-hidden="true" />
+            Add VPN tunnel
+          </Button>
+        </div>
+      </header>
 
-      <div className="mt-3 flex shrink-0 flex-wrap items-center gap-2">
-        <Input
-          aria-label="Search tunnels"
-          className="!text-xs min-w-52 max-w-[480px] flex-1"
-          onChange={(event) => setSearchText(event.target.value)}
-          placeholder="Search tunnels"
-          value={searchText}
-        />
-        <Button className="!text-xs" onClick={addTunnel} size="default">
-          <Plus data-icon="inline-start" />
-          Add VPN tunnel
+      <div
+        aria-label="Filter tunnels by provider"
+        className="mt-6 flex shrink-0 flex-wrap gap-2"
+        role="group"
+      >
+        <Button
+          aria-pressed={providerFilter === null}
+          className="h-9 gap-2 rounded-full px-3"
+          onClick={() => setProviderFilter(null)}
+          variant={providerFilter === null ? 'default' : 'outline'}
+        >
+          All <span className="font-normal tabular-nums opacity-75">{tunnels.length}</span>
         </Button>
+        {providerCounts.map(([kind, count]) => (
+          <Button
+            aria-pressed={providerFilter === kind}
+            className="h-9 min-w-0 max-w-full gap-2 rounded-full px-3"
+            key={kind}
+            onClick={() => setProviderFilter(kind)}
+            variant={providerFilter === kind ? 'default' : 'outline'}
+          >
+            <TunnelProviderIcon kind={kind} />
+            <span className="truncate" title={kind}>
+              {kind}
+            </span>
+            <span className="font-normal tabular-nums opacity-75">{count}</span>
+          </Button>
+        ))}
       </div>
-      {actionError ? <p className="mt-2 text-[11px] text-muted-foreground">{actionError}</p> : null}
+      {actionError ? (
+        <p className="mt-2 text-xs text-muted-foreground" role="alert">
+          {actionError}
+        </p>
+      ) : null}
 
-      <div className="min-h-0 flex-1">
+      <div aria-busy={searchResultsPending} className="mt-6 min-h-0 flex-1">
         {filteredTunnels.length === 0 ? (
           <div className="flex h-full items-center justify-center px-6 text-center">
             <div className="max-w-[420px] space-y-3">
               <Network className="mx-auto size-12 text-muted-foreground/50" />
               <h3 className="text-sm font-semibold">
-                {tunnels.length === 0 ? 'No VPN tunnels yet' : 'No tunnels match your search'}
+                {tunnels.length === 0 ? 'No VPN tunnels yet' : 'No matching tunnels'}
               </h3>
               <p className="text-xs leading-relaxed text-muted-foreground">
                 {tunnels.length === 0
                   ? 'Add a VPN tunnel to route a connection through a secure path.'
-                  : 'Try a different tunnel name or provider.'}
+                  : 'Try a different search or select another provider.'}
               </p>
             </div>
           </div>
         ) : (
           <VirtualCardGrid
             ariaLabel="VPN tunnels"
-            bottomPadding={16}
-            className="mt-3 h-full"
+            bottomPadding={20}
+            className="h-full"
             endPadding={8}
-            gap={12}
+            gap={16}
             getKey={(tunnel) => tunnel.id}
             items={filteredTunnels}
-            minimumColumnWidth={260}
+            maximumColumnCount={3}
+            minimumColumnWidth={296}
             renderItem={(tunnel) => (
-              <Card className="h-full max-w-[260px] transition-colors hover:bg-muted/50" size="sm">
-                <CardHeader className="grid grid-cols-[1fr_auto] gap-1">
-                  <CardTitle className="min-w-0 truncate text-xs font-semibold">
-                    {tunnel.name}
-                  </CardTitle>
-                  <CardAction>
-                    <Badge className="shrink-0 text-[10px]" variant="outline">
-                      {tunnel.kind}
-                    </Badge>
-                  </CardAction>
-                  <CardDescription className="flex min-w-0 items-center gap-1.5 text-[11px]">
-                    <Network className="size-3 shrink-0" />
-                    <span className="truncate" title={tunnel.endpoint || undefined}>
-                      {tunnel.endpoint || 'Endpoint unavailable'}
+              <Card className="h-full gap-0 rounded-2xl p-4 transition-colors hover:bg-muted/35 sm:p-5 dark:bg-muted/25 dark:hover:bg-muted/45">
+                <CardHeader className="gap-2 px-0">
+                  <div className="flex min-w-0 items-center gap-3">
+                    <span className="grid size-11 shrink-0 place-items-center rounded-xl border border-border bg-background">
+                      <TunnelProviderIcon className="size-6" kind={tunnel.kind} />
                     </span>
+                    <CardTitle
+                      className="flex-1 truncate font-semibold lg:text-lg"
+                      title={tunnel.name}
+                    >
+                      {tunnel.name}
+                    </CardTitle>
+                    <Badge
+                      className="h-6 max-w-[45%] bg-background"
+                      title={tunnel.kind}
+                      variant="outline"
+                    >
+                      <span className="truncate">{tunnel.kind}</span>
+                    </Badge>
+                  </div>
+                  <CardDescription
+                    className="truncate font-mono text-sm"
+                    title={tunnel.endpoint || undefined}
+                  >
+                    {tunnel.endpoint || 'Endpoint unavailable'}
                   </CardDescription>
                 </CardHeader>
-                <CardFooter className="mt-auto justify-end gap-0.5">
-                  <IconButton label={`Test ${tunnel.name}`} onClick={() => openTunnelTest(tunnel)}>
-                    <FlaskConical />
-                  </IconButton>
-                  <IconButton label={`Edit ${tunnel.name}`} onClick={() => void editTunnel(tunnel)}>
+                <div className="mt-auto flex items-center gap-2 border-t border-border pt-3">
+                  <Button
+                    aria-label={`Test ${tunnel.name}`}
+                    className="mr-auto h-9"
+                    disabled={searchResultsPending}
+                    onClick={(event) => openTunnelTest(tunnel, event.currentTarget)}
+                    variant="ghost"
+                  >
+                    <FlaskConical aria-hidden="true" />
+                    Test
+                  </Button>
+                  <IconButton
+                    className="size-9"
+                    disabled={searchResultsPending}
+                    label={`Edit ${tunnel.name}`}
+                    onClick={(event) => void editTunnel(tunnel, event.currentTarget)}
+                  >
                     <Pencil />
                   </IconButton>
                   <IconButton
+                    className="size-9"
+                    disabled={searchResultsPending}
                     label={`Delete ${tunnel.name}`}
                     onClick={() => void deleteTunnel(tunnel)}
                   >
                     <Trash2 />
                   </IconButton>
-                </CardFooter>
+                </div>
               </Card>
             )}
-            resetKey={normalizedTunnelSearch}
-            rowHeight={140}
+            resetKey={JSON.stringify([providerFilter, normalizedTunnelSearch])}
+            rowHeight={184}
           />
         )}
       </div>
@@ -14020,6 +14133,7 @@ function TunnelsPage({
           tunnels={tunnels}
           initial={editorValue}
           key={editorValue.id ?? `new:${editorValue.kind}`}
+          onCloseAutoFocus={restoreDialogFocus}
           onOpenChange={setTunnelEditorOpen}
           onSaved={tunnelSaved}
           open
@@ -14031,7 +14145,7 @@ function TunnelsPage({
         }}
         open={testState !== null}
       >
-        <DialogContent className="sm:max-w-lg">
+        <DialogContent className="sm:max-w-lg" onCloseAutoFocus={restoreDialogFocus}>
           <DialogHeader>
             <DialogTitle>Test VPN tunnel</DialogTitle>
             <DialogDescription>{testState?.tunnel.name}</DialogDescription>
