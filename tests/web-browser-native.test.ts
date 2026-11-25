@@ -1850,6 +1850,7 @@ test('a VPN reconnect cannot publish active after the relay acknowledgement lose
   const reconnecting = h.command('reconnect-vpn');
   await applyingRoute;
   (h.acquisitions[1] as { onExit: () => void }).onExit();
+  assert.equal(h.events.at(-1).browser.vpnStatus, 'disconnected');
   acknowledge();
   assert.equal(await reconnecting, false);
   assert.equal(record.vpn.endpoint.upstream, undefined);
@@ -1893,6 +1894,7 @@ test('locking during VPN authentication promptly releases the reconnect lease', 
   await h.open();
   const record = h.manager.surfaces.get('browser-1');
   (h.acquisitions[0] as { onExit: () => void }).onExit();
+  const acquire = h.backend.acquireTunnelRoute;
 
   let startAuthentication!: (leaseId: string) => void;
   const authentication = new Promise<string>((resolve) => {
@@ -1914,10 +1916,48 @@ test('locking during VPN authentication promptly releases the reconnect lease', 
   h.manager.cancelTunnelReconnects();
   assert.equal(h.releases.at(-1), lease);
   assert.equal(h.manager.tunnelLeases.isActive('browser-1', lease), false);
+  assert.equal(h.events.at(-1).browser.vpnStatus, 'disconnected');
+
+  h.authSession.isAccessAllowed = true;
+  h.backend.acquireTunnelRoute = acquire;
+  assert.equal(await h.command('reconnect-vpn'), true);
   finishAuthentication();
   await rejected;
-  assert.equal(h.events.at(-1).browser.vpnStatus, 'disconnected');
+  assert.equal(h.events.at(-1).browser.vpnStatus, 'active');
   assert.equal(h.manager.surfaces.get('browser-1'), record);
+});
+
+test('locking cancels a browser reconnect waiting for the previous VPN lease to be released', async () => {
+  const h = browserHarness();
+  await h.open();
+  const record = h.manager.surfaces.get('browser-1');
+  const disconnect = record.vpn.endpoint.disconnect.bind(record.vpn.endpoint);
+  let finishRelease!: () => void;
+  const release = new Promise<void>((resolve) => {
+    finishRelease = resolve;
+  });
+  record.vpn.endpoint.disconnect = async () => {
+    await release;
+    return disconnect();
+  };
+  (h.acquisitions[0] as { onExit: () => void }).onExit();
+  const cancelled = h.command('reconnect-vpn');
+  assert.equal(h.events.at(-1).browser.vpnStatus, 'reconnecting');
+  assert.equal(h.acquisitions.length, 1);
+
+  h.authSession.authorizationEpoch++;
+  h.authSession.isAccessAllowed = false;
+  h.manager.cancelTunnelReconnects();
+  assert.equal(h.events.at(-1).browser.vpnStatus, 'disconnected');
+
+  h.authSession.isAccessAllowed = true;
+  const retry = h.command('reconnect-vpn');
+  finishRelease();
+  assert.equal(await cancelled, false);
+  assert.equal(await retry, true);
+  assert.equal(h.acquisitions.length, 2);
+  assert.equal(h.releases.length, 1);
+  assert.equal(h.events.at(-1).browser.vpnStatus, 'active');
 });
 
 test('a retired browser proxy keeps its port reserved through Chromium cleanup and failed retries', async () => {

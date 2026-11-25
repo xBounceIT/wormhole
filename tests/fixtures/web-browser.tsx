@@ -11,6 +11,7 @@ async function runWebBrowserTests() {
     reconnects: string[] = [];
   const listeners = new Set<(event: any) => void>();
   let rejectCommand = false;
+  let reconnectCommand = async () => {};
   const previewImage =
     'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
   let capturePreview = async (): Promise<string | undefined> => previewImage;
@@ -23,6 +24,7 @@ async function runWebBrowserTests() {
     commandWebSession: async (request: any) => {
       commands.push(request);
       if (rejectCommand) throw new Error('This address cannot use the VPN route.');
+      if (request.operation === 'reconnect-vpn') await reconnectCommand();
     },
     setWebSessionBounds: async (request: any) => {
       bounds.push(request);
@@ -166,6 +168,37 @@ async function runWebBrowserTests() {
   await render({ webBrowser: { ...session.webBrowser, vpnStatus: 'active' } });
   assert.ok(document.body.textContent?.includes("Office's OpenVPN ACTIVE"));
   assert.equal(document.querySelectorAll('[role="tab"]').length, 3);
+
+  for (const interruption of ['lock', 'retry']) {
+    await render({ webBrowser: { ...session.webBrowser, vpnStatus: 'disconnected' } });
+    let rejectReconnect!: (error: Error) => void;
+    reconnectCommand = () =>
+      new Promise<void>((_resolve, reject) => {
+        rejectReconnect = reject;
+      });
+    await click('VPN disconnected. Reconnect?');
+    if (interruption === 'lock') {
+      await render({}, { isAuthorized: false });
+      await render({}, { isAuthorized: true });
+    } else {
+      reconnectCommand = async () => {};
+      await click('VPN disconnected. Reconnect?');
+      await render({ webBrowser: { ...session.webBrowser, vpnStatus: 'active' } });
+    }
+    await React.act(async () => rejectReconnect(new Error('The previous VPN attempt failed.')));
+    assert.equal(document.querySelector('[role="alert"]')?.textContent, undefined);
+  }
+
+  await render({ webBrowser: { ...session.webBrowser, vpnStatus: 'disconnected' } });
+  reconnectCommand = async () => {
+    throw new Error('VPN authentication failed.');
+  };
+  await click('VPN disconnected. Reconnect?');
+  assert.equal(document.querySelector('[role="alert"]')?.textContent, 'VPN authentication failed.');
+  reconnectCommand = async () => {};
+  await click('VPN disconnected. Reconnect?');
+  await render({ webBrowser: { ...session.webBrowser, vpnStatus: 'active' } });
+
   await render({ status: 'failed' });
   assert.ok(!document.body.textContent?.includes('ACTIVE'));
   await render({ status: 'connected' });

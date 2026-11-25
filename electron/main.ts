@@ -6908,10 +6908,7 @@ class WebSurfaceManager {
 
   cancelTunnelReconnects(): void {
     for (const record of this.surfaces.values()) {
-      if (record.vpn?.status === 'reconnecting' && record.tunnelLeaseId) {
-        this.disconnectTunnel(record);
-        void this.releaseTunnel(record.sessionId).catch(() => undefined);
-      }
+      if (record.vpn?.status === 'reconnecting') this.disconnectTunnel(record);
     }
   }
 
@@ -6933,40 +6930,44 @@ class WebSurfaceManager {
       return;
     }
     this.disconnectTunnel(record);
-    void this.releaseTunnel(sessionId).catch(() => undefined);
   }
 
   private disconnectTunnel(record: WebSurfaceRecord): void {
+    const { sessionId, tunnelLeaseId, vpn } = record;
     record.tunnelLeaseId = undefined;
-    const vpn = record.vpn;
-    if (!vpn) return;
-    if (vpn.status === 'active') {
-      vpn.status = 'disconnected';
+    if (!vpn || vpn.status === 'disconnected') return;
+    const wasActive = vpn.status === 'active';
+    vpn.status = 'disconnected';
+    if (wasActive) {
       for (const view of record.tabs.all()) {
         const contents = view.webContents;
         if (contents && !contents.isDestroyed() && contents.isLoadingMainFrame()) contents.stop();
       }
-      this.sendEvent(record.sessionId, record, 'vpn-state');
     }
+    this.sendEvent(sessionId, record, 'vpn-state');
+    if (tunnelLeaseId && this.tunnelLeases.isActive(sessionId, tunnelLeaseId))
+      void this.releaseTunnel(sessionId).catch(() => undefined);
   }
 
   private async reconnectTunnel(record: WebSurfaceRecord): Promise<boolean> {
     const { sessionId, owner, vpn } = record;
     if (!vpn || vpn.status !== 'disconnected') return false;
     const authorizationEpoch = authSession.authorizationEpoch;
+    // Reserve the attempt's identity before waiting for the previous lease to drain.
+    const leaseId = randomUUID();
+    record.tunnelLeaseId = leaseId;
     const isCurrent = () =>
       !record.disposed &&
       !owner.isDestroyed() &&
       this.surfaces.get(sessionId) === record &&
+      record.tunnelLeaseId === leaseId &&
       isAuthorizationEpochCurrent(authorizationEpoch);
     vpn.status = 'reconnecting';
     this.sendEvent(sessionId, record, 'vpn-state');
-    const leaseId = randomUUID();
     try {
       await this.releaseTunnel(sessionId);
       if (!isCurrent()) return false;
       this.tunnelLeases.claim(sessionId, leaseId);
-      record.tunnelLeaseId = leaseId;
       this.tunnelLeaseOwners.set(sessionId, owner);
       const backend = getNativeBackend();
       const route = await backend.acquireTunnelRoute({
@@ -6997,16 +6998,12 @@ class WebSurfaceManager {
       if (!isCurrent() || !this.tunnelLeases.isActive(sessionId, leaseId)) return false;
       record.tunnel = route.tunnel;
       vpn.status = 'active';
+      this.sendEvent(sessionId, record, 'vpn-state');
       return true;
     } finally {
-      if (vpn.status === 'reconnecting') {
-        vpn.status = 'disconnected';
-        if (this.tunnelLeases.isActive(sessionId, leaseId)) {
-          record.tunnelLeaseId = undefined;
-          void this.releaseTunnel(sessionId).catch(() => undefined);
-        }
+      if (record.tunnelLeaseId === leaseId && vpn.status === 'reconnecting') {
+        this.disconnectTunnel(record);
       }
-      if (this.surfaces.get(sessionId) === record) this.sendEvent(sessionId, record, 'vpn-state');
     }
   }
 
