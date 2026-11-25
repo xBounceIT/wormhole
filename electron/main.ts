@@ -439,6 +439,7 @@ type BackendOperation =
   | 'settings-set-connection-tree-expansion'
   | 'bitwarden-onboarding-read'
   | 'bitwarden-onboarding-dismiss'
+  | 'visual-changelog-claim'
   | 'mcp-status'
   | 'extension-read'
   | 'extension-set-enabled'
@@ -9513,6 +9514,15 @@ function registerIpcHandlers(
         currentVersion: app.getVersion(),
         result: latestUpdateCheck ?? null,
       };
+    });
+  });
+
+  ipcMain.handle('visual-changelog:claim', async (_event, hasChangelog: unknown) => {
+    if (typeof hasChangelog !== 'boolean') throw new Error('Visual changelog request is invalid.');
+    await serializeAuthOperation(requireWorkspaceAuth);
+    return runBackend<{ claimed: boolean }>('visual-changelog-claim', {
+      appVersion: app.getVersion(),
+      hasChangelog,
     });
   });
 

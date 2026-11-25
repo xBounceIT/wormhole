@@ -414,6 +414,8 @@ const wormholeBridge = {
       currentVersion: string;
       result: WormholeUpdateCheckResult | null;
     }>,
+  claimVisualChangelog: (hasChangelog: boolean) =>
+    ipcRenderer.invoke('visual-changelog:claim', hasChangelog) as Promise<{ claimed: boolean }>,
   checkForUpdates: () => ipcRenderer.invoke('update:check') as Promise<WormholeUpdateCheckResult>,
   downloadUpdate: (request: {
     installerUrl: string;

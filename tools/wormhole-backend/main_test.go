@@ -108,6 +108,7 @@ func TestRunBackendCLIRejectsMalformedRequestsForEveryInputOperation(t *testing.
 		"settings-set-log-retention",
 		"settings-set-log-level",
 		"bitwarden-onboarding-read",
+		"visual-changelog-claim",
 		"extension-set-enabled",
 		"extension-import-zip",
 		"extension-import-folder",
@@ -395,7 +396,7 @@ func TestDecodeInputRejectsOversizedRequest(t *testing.T) {
 }
 
 func TestSettingsOperationsSkipUnneededWorkspaceInitialization(t *testing.T) {
-	for _, operation := range []string{"mcp-status", "logs-info", "open-log-file", "open-logs-folder", "settings-set-log-level", "settings-set-log-retention"} {
+	for _, operation := range []string{"mcp-status", "logs-info", "open-log-file", "open-logs-folder", "settings-set-log-level", "settings-set-log-retention", "visual-changelog-claim"} {
 		if operationNeedsWorkspaceInitialization(operation) {
 			t.Fatalf("%s unexpectedly initializes the workspace schema", operation)
 		}

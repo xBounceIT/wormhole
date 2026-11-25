@@ -7,11 +7,13 @@ import { ChevronRightIcon, CheckIcon } from 'lucide-react';
 
 type ContextMenuOverlayContextValue = {
   open: boolean;
-  report: (overlayId: string, open: boolean) => void;
+  modalOverlayIds: ReadonlySet<string>;
+  report: (overlayId: string, open: boolean, modal?: boolean) => void;
 };
 
 const ContextMenuOverlayContext = React.createContext<ContextMenuOverlayContextValue>({
   open: false,
+  modalOverlayIds: new Set(),
   report: () => undefined,
 });
 
@@ -23,15 +25,19 @@ function ContextMenuOverlayProvider({
   onOpenChange?: (open: boolean) => void;
 }) {
   const [openOverlayIds, setOpenOverlayIds] = React.useState<Set<string>>(() => new Set());
-  const report = React.useCallback((overlayId: string, open: boolean) => {
-    setOpenOverlayIds((current) => updateOpenOverlayIds(current, overlayId, open));
+  const [modalOverlayIds, setModalOverlayIds] = React.useState<Set<string>>(() => new Set());
+  const report = React.useCallback((overlayId: string, open: boolean, modal?: boolean) => {
+    const update = (current: Set<string>) =>
+      current.has(overlayId) === open ? current : updateOpenOverlayIds(current, overlayId, open);
+    setOpenOverlayIds(update);
+    if (modal) setModalOverlayIds(update);
   }, []);
   const value = React.useMemo(
-    () => ({ open: hasOpenOverlay(openOverlayIds), report }),
-    [openOverlayIds, report],
+    () => ({ open: hasOpenOverlay(openOverlayIds), modalOverlayIds, report }),
+    [openOverlayIds, modalOverlayIds, report],
   );
   // A scoped provider still contributes to native-surface occlusion in its parent.
-  useNativeSurfaceOverlay(value.open);
+  useNativeSurfaceOverlay(value.open, { modal: hasOpenOverlay(modalOverlayIds) });
   React.useEffect(() => {
     onOpenChange?.(value.open);
     return () => onOpenChange?.(false);
@@ -47,14 +53,23 @@ function useContextMenuOverlayOpen(): boolean {
   return React.useContext(ContextMenuOverlayContext).open;
 }
 
+function useOtherModalOverlayOpen(overlayId: string): boolean {
+  const { modalOverlayIds } = React.useContext(ContextMenuOverlayContext);
+  return modalOverlayIds.size > (modalOverlayIds.has(overlayId) ? 1 : 0);
+}
+
 // Custom session dialogs also need to hide Chromium/native surfaces in split panes.
-function useNativeSurfaceOverlay(open: boolean): void {
-  const overlayId = React.useId();
+function useNativeSurfaceOverlay(
+  open: boolean,
+  { id, modal }: { id?: string; modal?: boolean } = {},
+): void {
+  const generatedId = React.useId();
+  const overlayId = id ?? generatedId;
   const { report } = React.useContext(ContextMenuOverlayContext);
   React.useEffect(() => {
-    report(overlayId, open);
-    return () => report(overlayId, false);
-  }, [overlayId, open, report]);
+    report(overlayId, open, modal);
+    return () => report(overlayId, false, modal);
+  }, [overlayId, open, modal, report]);
 }
 
 function ContextMenu({
@@ -308,6 +323,7 @@ export {
   ContextMenuOverlayProvider,
   useContextMenuOverlayOpen,
   useNativeSurfaceOverlay,
+  useOtherModalOverlayOpen,
   ContextMenuTrigger,
   ContextMenuContent,
   ContextMenuItem,

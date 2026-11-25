@@ -38,6 +38,7 @@ import { McpApprovalDialog } from './components/McpApprovalDialog';
 import { TerminalLinkDialog } from './components/TerminalLinkDialog';
 import { TunnelProviderIcon } from './components/TunnelProviderIcon';
 import { UpdateNotification } from './components/UpdateNotification';
+import { VisualChangelog } from './components/VisualChangelog';
 import { AppTitlebar } from './components/AppTitlebar';
 import { SidebarLayout } from './components/SidebarLayout';
 import {
@@ -6998,6 +6999,15 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
 
   return (
     <TooltipProvider delayDuration={300}>
+      <VisualChangelog
+        currentVersion={updateCurrentVersion}
+        enabled={
+          authGate === 'unlocked' &&
+          !visibleAuthPrompt &&
+          !pendingWindowClose &&
+          !mcpApprovals.length
+        }
+      />
       {sshKeyEditor && authGate === 'unlocked' ? (
         <CredentialsPage
           editorOnly

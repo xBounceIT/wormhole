@@ -1,6 +1,8 @@
 import * as React from 'react';
 import { createRoot } from 'react-dom/client';
 import App from '../../src/App';
+import { latestRelease } from '../../src/changelog/latest-release';
+import { VisualChangelogCarousel } from '../../src/components/VisualChangelog';
 import {
   ContextMenuOverlayProvider,
   useContextMenuOverlayOpen,
@@ -29,6 +31,8 @@ function createWormholeMock(options: {
   initialTheme?: 'dark' | 'light';
   updateResult?: WormholeUpdateCheckResult | null;
   idleSeconds?: number;
+  currentVersion?: string;
+  claimVisualChangelog?: (hasChangelog: boolean) => Promise<{ claimed: boolean }>;
 }) {
   let updateListener: ((result: WormholeUpdateCheckResult) => void) | undefined;
   let currentUpdateResult: WormholeUpdateCheckResult | null = options.updateResult ?? null;
@@ -174,9 +178,10 @@ function createWormholeMock(options: {
     },
     setUpdatePreferences: async () => ({ updated: true }),
     updateStatus: async () => ({
-      currentVersion: '2.4.4',
+      currentVersion: options.currentVersion ?? '2.4.4',
       result: currentUpdateResult,
     }),
+    claimVisualChangelog: options.claimVisualChangelog ?? (async () => ({ claimed: false })),
     checkForUpdates: async () =>
       currentUpdateResult ?? {
         currentVersion: '2.4.4',
@@ -534,10 +539,12 @@ window.runSettingsDialogTests = async (mode: 'desktop' | 'compact') => {
     idleTimeoutMinutes?: number | null;
     pinned?: boolean;
     updateResult?: WormholeUpdateCheckResult | null;
+    currentVersion?: string;
+    claimVisualChangelog?: (hasChangelog: boolean) => Promise<{ claimed: boolean }>;
   }) => {
     const mock = createWormholeMock({
+      ...options,
       initialTheme: options.theme,
-      updateResult: options.updateResult,
       idleSeconds: options.idleTimeoutMinutes ? 120 : 0,
     });
     window.wormhole = mock.api;
@@ -587,6 +594,152 @@ window.runSettingsDialogTests = async (mode: 'desktop' | 'compact') => {
     return mock;
   };
 
+  async function assertVisualChangelog() {
+    const carousel = () => query('[data-visual-changelog][data-state="open"]');
+    const title = () => carousel()?.querySelector('h3')?.textContent;
+    const button = (text: string) =>
+      [...carousel()!.querySelectorAll<HTMLButtonElement>('button')].find(
+        (button) => button.textContent?.trim() === text,
+      )!;
+    let claims = 0;
+    const checkVisualChangelog = async (hasChangelog: boolean) => ({
+      claimed: hasChangelog && ++claims === 1,
+    });
+    const { slides, version } = latestRelease;
+
+    for (const currentVersion of [version.replace(/0$/, '1'), `${version}-preview.1`, '0.0.0']) {
+      let checked = false;
+      await mountApp({
+        currentVersion,
+        claimVisualChangelog: async (hasChangelog) => {
+          checked = true;
+          assert.equal(hasChangelog, false);
+          return { claimed: false };
+        },
+      });
+      assert.equal(checked, true, 'Unmatched versions are recorded without claiming slides');
+      assert.equal(carousel(), null);
+    }
+
+    await mountApp({ currentVersion: version, claimVisualChangelog: checkVisualChangelog });
+    await waitFor(() => carousel() !== null, 'Changelog did not open for its release');
+    assert.equal(claims, 1, 'StrictMode must send one claim');
+    assert.equal(overlayState(), 'true', 'Native session surfaces must stay below the dialog');
+    assert.equal(title(), slides[0].title);
+    assert.ok(carousel()?.textContent?.includes(slides[0].subtitle));
+    assert.equal(button('Back').getAttribute('aria-disabled'), 'true');
+    const bounds = carousel()!.getBoundingClientRect();
+    assert.ok(bounds.top >= 0 && bounds.bottom <= innerHeight && bounds.left >= 0);
+
+    if (slides.length > 1) {
+      await clickElement(button('Next'));
+      assert.equal(title(), slides[1]!.title, 'Next must advance the carousel');
+      await clickElement(button('Back'));
+      assert.equal(title(), slides[0].title, 'Back must show the previous slide');
+      await keypress('Right');
+      assert.equal(title(), slides[1]!.title, 'Arrow navigation must retain focus after Back');
+    }
+    await clickElement(carousel()!.querySelector('[data-slot="dialog-close"]')!);
+    await waitFor(() => carousel() === null, 'The close button did not dismiss the changelog');
+    assert.equal(overlayState(), 'false');
+    assert.equal(claims, 1);
+
+    await mountApp({ currentVersion: version, claimVisualChangelog: checkVisualChangelog });
+    assert.equal(claims, 2);
+    assert.equal(carousel(), null, 'A recorded release must stay dismissed after relaunch');
+
+    let resolveClaim!: (value: { claimed: boolean }) => void;
+    const pendingClaim = new Promise<{ claimed: boolean }>((resolve) => {
+      resolveClaim = resolve;
+    });
+    await mountApp({ currentVersion: version, claimVisualChangelog: () => pendingClaim });
+    await React.act(async () =>
+      query<HTMLButtonElement>('button[aria-label="Quick Connect"]')!.click(),
+    );
+    await waitFor(
+      () =>
+        [...document.querySelectorAll('[role="dialog"] [data-slot="dialog-title"]')].some(
+          (title) => title.textContent === 'Quick Connect',
+        ),
+      'Quick Connect did not open',
+    );
+    await React.act(async () => resolveClaim({ claimed: true }));
+    assert.equal(carousel(), null, 'Changelog must wait for the existing dialog');
+    await keypress('Escape');
+    await waitFor(() => carousel() !== null, 'Changelog must open after Quick Connect closes');
+    await clickElement(carousel()!.querySelector('[data-slot="dialog-close"]')!);
+
+    let attempts = 0;
+    await mountApp({
+      currentVersion: version,
+      claimVisualChangelog: async () => {
+        if (++attempts === 1) throw new Error('Settings unavailable');
+        return { claimed: true };
+      },
+    });
+    assert.equal(carousel(), null, 'A failed claim must leave the workspace usable');
+    await React.act(async () => query<HTMLButtonElement>('button[aria-label="Settings"]')!.click());
+    await waitFor(() => dialog() !== null, 'Settings did not open after a failed claim');
+    await keypress('Escape');
+    await waitFor(() => carousel() !== null, 'The next eligible check must retry a failed claim');
+    assert.equal(attempts, 2);
+    await clickElement(carousel()!.querySelector('[data-slot="dialog-close"]')!);
+
+    const gif = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+    const poster = `data:image/svg+xml,${encodeURIComponent(
+      '<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>',
+    )}`;
+    const video = URL.createObjectURL(new MediaSource());
+    const captions = `data:text/vtt,${encodeURIComponent('WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nRelease preview\n')}`;
+    let finished = false;
+    try {
+      await React.act(async () =>
+        root.render(
+          <ContextMenuOverlayProvider>
+            <VisualChangelogCarousel
+              onClose={() => {
+                finished = true;
+              }}
+              open
+              release={{
+                version,
+                slides: [
+                  {
+                    title: 'Animated preview',
+                    subtitle: 'GIF slide',
+                    media: { kind: 'gif', src: gif, poster, alt: 'Preview' },
+                  },
+                  {
+                    title: 'Video preview',
+                    subtitle: 'Video slide',
+                    media: { kind: 'video', src: video, label: 'Demo', captions },
+                  },
+                ],
+              }}
+            />
+          </ContextMenuOverlayProvider>,
+        ),
+      );
+      const image = carousel()!.querySelector('img')!;
+      await image.decode();
+      assert.equal(image.currentSrc, poster, 'Reduced motion must select the static GIF preview');
+      await clickElement(button('Next'));
+      const player = carousel()!.querySelector('video')!;
+      assert.equal(player.controls, true);
+      assert.equal(player.autoplay, false);
+      const captionTrack = player.querySelector('track')!;
+      captionTrack.track.mode = 'hidden';
+      await waitFor(() => captionTrack.readyState === 2, 'The video captions did not load');
+      assert.equal(captionTrack.track.cues?.length, 1);
+      await React.act(async () => player.dispatchEvent(new Event('error')));
+      assert.match(carousel()!.textContent ?? '', /Preview unavailable/);
+      await clickElement(button('Done'));
+      assert.equal(finished, true);
+    } finally {
+      URL.revokeObjectURL(video);
+    }
+  }
+
   const originalBridge = window.wormhole;
   await React.act(async () => window.settingsReducedMotion(true));
   try {
@@ -608,6 +761,7 @@ window.runSettingsDialogTests = async (mode: 'desktop' | 'compact') => {
       await clickElement(query('nav[aria-label="Main navigation"] button[aria-label="Settings"]')!);
       await waitFor(() => dialog() !== null, 'Settings did not open at 640x480');
       assertDialogGeometry(true);
+      await assertVisualChangelog();
       return;
     }
 
