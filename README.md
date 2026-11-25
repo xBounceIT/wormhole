@@ -212,6 +212,16 @@ a portable AppImage plus installable DEB and RPM packages for x86-64 and ARM64.
 Windows releases publish the installer and portable ZIP, while macOS releases
 publish the DMG.
 
+Push a tag in the form `vX.Y.Z` to release the current commit.
+
+```sh
+git tag vX.Y.Z
+git push origin vX.Y.Z
+```
+
+GitHub Actions builds the tagged commit and uses `X.Y.Z` as the version in the
+app and release files.
+
 AppImages are named `Wormhole-<version>-x86_64.AppImage` or
 `Wormhole-<version>-arm64.AppImage`. They use electron-builder's static runtime,
 which does not require the system's libfuse2, and contain AppImageUpdate metadata.

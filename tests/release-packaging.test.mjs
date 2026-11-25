@@ -34,6 +34,13 @@ const windowsOvpnSetup = parse(
 const linuxIconSizes = [16, 24, 32, 48, 64, 96, 128, 256, 512, 1024];
 const projectDir = fileURLToPath(new URL('..', import.meta.url));
 const macIcon = await readFile(new URL('../Assets/Wormhole.icns', import.meta.url));
+const bash =
+  process.platform === 'win32'
+    ? resolve(
+        execFileSync('git', ['--exec-path'], { encoding: 'utf8' }).trim(),
+        '../../../bin/bash.exe',
+      )
+    : 'bash';
 
 function readPngDimensions(data) {
   const pngSignature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
@@ -691,13 +698,6 @@ readelf() {
   return "$MOCK_SECTION_STATUS"
 }
 ${source}`;
-  const bash =
-    process.platform === 'win32'
-      ? resolve(
-          execFileSync('git', ['--exec-path'], { encoding: 'utf8' }).trim(),
-          '../../../bin/bash.exe',
-        )
-      : 'bash';
   const directory = await mkdtemp(join(tmpdir(), 'wormhole-release-appimage-'));
   const content = Buffer.from('AppImage fixture');
   const sha1 = createHash('sha1').update(content).digest('hex');
@@ -785,28 +785,141 @@ test('release packages generate and upload the installer checksums required by t
   );
 });
 
+test('release resolves the version from a stable tag regardless of the checked-in version', async () => {
+  assert.deepEqual(releaseConfig.on.push.tags, ['v*']);
+  assert.equal(
+    releaseJobs.checks.if,
+    "github.event_name == 'workflow_dispatch' || (github.ref_type == 'tag' && !github.event.deleted)",
+  );
+  const tagCheck = releaseJobs.checks.steps.find((step) => step.id === 'release');
+  assert.equal(
+    tagCheck?.env.RELEASE_TAG,
+    "${{ github.event_name == 'push' && github.ref_name || inputs.tag }}",
+  );
+  assert.equal(tagCheck.shell, 'bash');
+  const otherVersion = packageJson.version === '8.12.34' ? '9.12.34' : '8.12.34';
+  const workDir = await mkdtemp(join(tmpdir(), 'wormhole-release-version-'));
+  const output = join(workDir, 'github-output');
+  try {
+    for (const [tag, version] of [
+      [`v${otherVersion}`, otherVersion],
+      [`v${packageJson.version}`, packageJson.version],
+      ['v0.0.0', '0.0.0'],
+      ['v65535.65535.65535', '65535.65535.65535'],
+      ['', null],
+      ['8.12.34', null],
+      ['v8.12', null],
+      ['v08.12.34', null],
+      ['v٨.12.34', null],
+      ['v8.12.34-rc.1', null],
+      ['v65536.12.34', null],
+      ['v8.65536.34', null],
+      ['v8.12.65536', null],
+      ['v18446744073709551616.12.34', null],
+      ['v8.12.34\nversion=9.9.9', null],
+    ]) {
+      await writeFile(output, '');
+      const result = spawnSync(bash, ['-e', '-c', tagCheck.run], {
+        cwd: workDir,
+        encoding: 'utf8',
+        env: { ...process.env, ...tagCheck.env, RELEASE_TAG: tag, GITHUB_OUTPUT: output },
+      });
+      assert.ifError(result.error);
+      assert.equal(result.status, version === null ? 1 : 0, `${tag}: ${result.stderr}`);
+      assert.equal(
+        await readFile(output, 'utf8'),
+        version === null ? '' : `tag=${tag}\nversion=${version}\n`,
+      );
+      if (version === null) assert.match(result.stderr, /Release tag must have the form vX\.Y\.Z/);
+    }
+  } finally {
+    await rm(workDir, { recursive: true, force: true });
+  }
+});
+
+test('all release builds use the tagged commit and embed the resolved version', () => {
+  const { checks, build, packages } = releaseJobs;
+  assert.deepEqual(checks.outputs, {
+    tag: '${{ steps.release.outputs.tag }}',
+    version: '${{ steps.release.outputs.version }}',
+    commit: '${{ steps.source.outputs.commit }}',
+  });
+  const checkout = (job) => job.steps.find((step) => step.uses?.startsWith('actions/checkout@'));
+  assert.equal(checkout(checks).id, 'source');
+  assert.equal(
+    checkout(checks).with.ref,
+    "${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', steps.release.outputs.tag) || '' }}",
+  );
+  for (const job of [build, packages]) {
+    assert.equal(job.needs, 'checks');
+    assert.equal(checkout(job).with.ref, '${{ needs.checks.outputs.commit }}');
+  }
+
+  const version = '${{ needs.checks.outputs.version }}';
+  const installer = build.steps.find((step) => step.run?.includes('Build-ElectronInstaller.ps1'));
+  assert.equal(installer?.env.VERSION, version);
+  assert.match(installer.run, /-AppVersion \$env:VERSION/);
+  const zip = build.steps.find((step) => step.run?.includes('Compress-Archive'));
+  assert.equal(zip?.env.VERSION, version);
+  assert.match(zip.run, /Wormhole-\$env:VERSION-win-\$env:PLATFORM\.zip/);
+  const packageBuild = packages.steps.find((step) => step.run?.startsWith('npm run package --'));
+  assert.equal(packageBuild?.env.RELEASE_VERSION, version);
+  assert.ok(packageBuild.run.includes('--config.extraMetadata.version="$RELEASE_VERSION"'));
+});
+
+test('electron-builder writes the release version into the packaged app manifest', async (t) => {
+  const { extractFile } = await import('@electron/asar');
+  const workDir = await mkdtemp(join(tmpdir(), 'wormhole-release-asar-'));
+  t.after(() => rm(workDir, { recursive: true, force: true }));
+  const manifestPath = join(workDir, 'package.json');
+  const manifest = {
+    name: 'wormhole-release-fixture',
+    version: '1.0.0',
+    description: 'Release version fixture',
+    author: 'Wormhole',
+    main: 'index.js',
+    build: {
+      electronVersion: require('electron/package.json').version,
+      electronDist: 'runtime',
+      npmRebuild: false,
+      files: ['index.js'],
+    },
+  };
+  await mkdir(join(workDir, 'runtime'));
+  await writeFile(join(workDir, 'runtime', 'electron'), 'Electron runtime fixture');
+  await writeFile(join(workDir, 'index.js'), 'module.exports = {};\n');
+  await writeFile(manifestPath, JSON.stringify(manifest));
+
+  const version = '8.12.34';
+  execFileSync(
+    process.execPath,
+    [
+      require.resolve('electron-builder/cli.js'),
+      '--linux',
+      '--x64',
+      '--dir',
+      '--publish',
+      'never',
+      `--config.extraMetadata.version=${version}`,
+    ],
+    { cwd: workDir, timeout: 30_000 },
+  );
+
+  const archive = join(workDir, 'dist', 'linux-unpacked', 'resources', 'app.asar');
+  assert.equal(JSON.parse(extractFile(archive, 'package.json')).version, version);
+  assert.equal(JSON.parse(await readFile(manifestPath, 'utf8')).version, manifest.version);
+});
+
 test('release publication waits for every build and publishes the downloaded assets', () => {
   assert.equal(releaseConfig.permissions.contents, 'read');
   assert.match(packageJson.scripts.package, /--publish never(?:\s|$)/);
   assert.equal(
     releaseConfig.concurrency.group,
-    'release-${{ github.event.inputs.tag || github.ref_name }}',
+    "release-${{ github.event_name == 'push' && github.ref_name || inputs.tag }}",
   );
   assert.equal(releaseConfig.concurrency['cancel-in-progress'], false);
-  assert.equal(releaseJobs.build.needs, 'checks');
-  assert.equal(releaseJobs.packages.needs, 'checks');
-  const tagCheck = releaseJobs.checks.steps.find((step) => step.env?.RELEASE_TAG);
-  assert.equal(tagCheck?.env.RELEASE_TAG, '${{ github.event.inputs.tag || github.ref_name }}');
-  const tagCheckBody = tagCheck?.run.match(/^node -e "([\s\S]*)"$/)?.[1];
-  assert.ok(tagCheckBody, 'release tag validation is missing');
-  const verifyTag = new Function('require', 'process', tagCheckBody);
-  const rootRequire = createRequire(new URL('../package.json', import.meta.url));
-  const checkTag = (tag) => verifyTag(rootRequire, { env: { RELEASE_TAG: tag } });
-  assert.doesNotThrow(() => checkTag(`v${packageJson.version}`));
-  assert.throws(() => checkTag('v0.0.0-mismatched'), /does not match/);
-
   const release = releaseJobs.release;
-  assert.deepEqual([...release.needs].sort(), ['build', 'packages']);
+  assert.deepEqual([...release.needs].sort(), ['build', 'checks', 'packages']);
   assert.equal(release.permissions.contents, 'write');
   const download = release.steps.find((step) =>
     step.uses?.startsWith('actions/download-artifact@'),
@@ -815,10 +928,105 @@ test('release publication waits for every build and publishes the downloaded ass
   assert.equal(download.with['merge-multiple'], true);
   const publish = release.steps.find((step) => step.run?.includes('gh release create'));
   assert.ok(publish, 'release publication step is missing');
+  assert.equal(publish.env.RELEASE_TAG, '${{ needs.checks.outputs.tag }}');
+  assert.equal(publish.env.RELEASE_COMMIT, '${{ needs.checks.outputs.commit }}');
   assert.match(publish.run, /gh release create[\s\S]*?dist\/\*/);
   assert.match(publish.run, /for asset in dist\/\*/);
   assert.match(publish.run, /gh release upload "\$RELEASE_TAG" "\$asset" --repo "\$REPOSITORY"/);
   assert.match(publish.run, /gh release edit[\s\S]*?--draft=false/);
+});
+
+test('publication keeps packages in a draft until the tag still resolves to the build commit', async (t) => {
+  const publish = releaseJobs.release.steps.find((step) => step.run?.includes('gh release create'));
+  const workDir = await mkdtemp(join(tmpdir(), 'wormhole-release-publish-'));
+  t.after(() => rm(workDir, { recursive: true, force: true }));
+  await mkdir(join(workDir, 'dist'));
+  await writeFile(join(workDir, 'dist', 'Wormhole-8.12.34.AppImage'), 'package');
+
+  const commit = 'a'.repeat(40);
+  const movedCommit = 'b'.repeat(40);
+  const resolveTag =
+    'api repos/example/wormhole/commits/refs/tags/v8.12.34 --header Accept: application/vnd.github.sha';
+  const view = 'release view v8.12.34 --repo example/wormhole --json isDraft,assets';
+  const create =
+    'release create v8.12.34 --repo example/wormhole --verify-tag --draft --generate-notes dist/Wormhole-8.12.34.AppImage';
+  const upload =
+    'release upload v8.12.34 dist/Wormhole-8.12.34.AppImage --repo example/wormhole --clobber';
+  const edit = 'release edit v8.12.34 --repo example/wormhole --verify-tag --draft=false';
+
+  const fakeCli = `
+gh() {
+  printf '%s\\n' "$*" >> commands
+  case "$1 $2" in
+    'release view')
+      [[ "$RESUME_DRAFT" == yes ]] || return 1
+      printf '%s\\n' '{"isDraft":true,"assets":[{"name":"Wormhole-8.12.34.AppImage"}]}'
+      ;;
+    'release create'|'release upload') touch uploaded ;;
+    'release edit') return 0 ;;
+    'api '*)
+      local remote_commit="$TAG_BEFORE_UPLOAD"
+      if [[ -f uploaded ]]; then remote_commit="$TAG_AFTER_UPLOAD"; fi
+      if [[ -z "$remote_commit" ]]; then
+        echo "Tag reference could not be resolved." >&2
+        return 1
+      fi
+      printf '%s\\n' "$remote_commit"
+      ;;
+    *) return 2 ;;
+  esac
+}
+jq() {
+  case "$2" in
+    '.isDraft') echo true ;;
+    '.assets[].name') echo Wormhole-8.12.34.AppImage ;;
+    *) return 2 ;;
+  esac
+}
+`;
+  for (const { before, after, resumeDraft, expected, error } of [
+    { before: commit, after: commit, expected: [resolveTag, view, create, resolveTag, edit] },
+    {
+      before: commit,
+      after: commit,
+      resumeDraft: true,
+      expected: [resolveTag, view, upload, resolveTag, edit],
+    },
+    { before: movedCommit, expected: [resolveTag], error: /no longer points/ },
+    { before: '', expected: [resolveTag], error: /could not be resolved/ },
+    {
+      before: commit,
+      after: movedCommit,
+      expected: [resolveTag, view, create, resolveTag],
+      error: /no longer points/,
+    },
+    {
+      before: commit,
+      after: '',
+      expected: [resolveTag, view, create, resolveTag],
+      error: /could not be resolved/,
+    },
+  ]) {
+    await rm(join(workDir, 'uploaded'), { force: true });
+    await writeFile(join(workDir, 'commands'), '');
+    const result = spawnSync(bash, ['-c', fakeCli + publish.run], {
+      cwd: workDir,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        RELEASE_TAG: 'v8.12.34',
+        RELEASE_COMMIT: commit,
+        REPOSITORY: 'example/wormhole',
+        TAG_BEFORE_UPLOAD: before,
+        TAG_AFTER_UPLOAD: after ?? '',
+        RESUME_DRAFT: resumeDraft ? 'yes' : 'no',
+      },
+    });
+    assert.ifError(result.error);
+    assert.equal(result.status, error ? 1 : 0, result.stderr);
+    if (error) assert.match(result.stderr, error);
+    assert.equal(await readFile(join(workDir, 'commands'), 'utf8'), expected.join('\n') + '\n');
+  }
 });
 
 test('workflows pin runner images and third-party action revisions', () => {
