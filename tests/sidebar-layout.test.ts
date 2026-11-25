@@ -120,8 +120,45 @@ test('pinned and auto-hide sidebars preserve layout, focus, menus and saved pref
           if (input.type === 'mouseMove') await window.webContents.capturePage();
           window.webContents.sendInputEvent(input);
         });
+        async function capturePaint() {
+          // Commit the hidden window's pending paint before sampling its physical pixels.
+          await window.webContents.capturePage();
+          await window.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+          return window.webContents.capturePage();
+        }
+        let idleDropColors;
         ipcMain.handle('test:observe', async (_event, stage) => {
           console.log('Sidebar App: ' + stage);
+          if (stage.startsWith('session-drop-')) {
+            const { left, top, radius, ringX, ringY, viewportWidth, viewportHeight } = await window.webContents.executeJavaScript(\`(() => {
+              const canvas = document.querySelector('[data-workspace-canvas] > div');
+              const tablist = document.querySelector('[aria-label="Pane tabs"]').getBoundingClientRect();
+              const { left, top } = canvas.getBoundingClientRect();
+              return { left, top, radius: parseFloat(getComputedStyle(canvas).borderTopLeftRadius), ringX: tablist.right - 16, ringY: tablist.top + 1, viewportWidth: innerWidth, viewportHeight: innerHeight };
+            })()\`);
+            const capture = await capturePaint();
+            const { width, height } = capture.getSize(1);
+            const pixels = capture.toBitmap({ scaleFactor: 1 });
+            const scaleX = width / viewportWidth;
+            const scaleY = height / viewportHeight;
+            const cornerX = Math.floor(left * scaleX);
+            const cornerY = Math.floor(top * scaleY);
+            const assert = require('node:assert/strict');
+            assert.ok(Math.abs(scaleX - nativeScale) < 0.01, 'The corner capture must use the selected native scale');
+            assert.equal(pixels.length, width * height * 4);
+            const colorAt = (x, y) => pixels.readUInt32LE((y * width + x) * 4);
+            const corner = [];
+            for (let y = cornerY; y < Math.ceil((top + radius) * scaleY); y++) {
+              for (let x = cornerX; x < Math.ceil((left + radius) * scaleX); x++) corner.push(colorAt(x, y));
+            }
+            const ring = (colorAt(Math.floor(ringX * scaleX), Math.floor(ringY * scaleY)) >>> 16) & 0xff;
+            if (stage === 'session-drop-idle') idleDropColors = { corner, ring };
+            else {
+              assert.deepEqual(corner, idleDropColors.corner, 'The drop ring must stay out of the rounded canvas corner at ' + nativeScale + 'x');
+              if (stage === 'session-drop-hover') assert.ok(Math.abs(ring - idleDropColors.ring) > 100, 'The drop ring must remain visible on the empty tab bar');
+              else assert.equal(ring, idleDropColors.ring, 'Ending the drag must clear the drop ring');
+            }
+          }
           const checkHandle = stage.startsWith('pinned-');
           if (checkHandle || (process.env.WORMHOLE_TEST_SCREENSHOTS && ['collapsed', 'hover', 'tree-highlight'].includes(stage))) {
             // Freeze motion for stills: capturing a hidden window can resume a stale paint frame.
@@ -132,9 +169,7 @@ test('pinned and auto-hide sidebars preserve layout, focus, menus and saved pref
                 if (scale !== null) {
                   await window.webContents.debugger.sendCommand('Emulation.setDeviceMetricsOverride', { ...viewport, mobile: false, deviceScaleFactor: scale });
                 }
-                await window.webContents.capturePage();
-                await window.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
-                let capture = await window.webContents.capturePage();
+                let capture = await capturePaint();
                 if (process.env.WORMHOLE_TEST_SCREENSHOTS) {
                   const suffix = (nativeScale === 1 ? '' : '-native-' + nativeScale) + (scale === null || scale === 1 ? '' : '-' + scale);
                   require('node:fs').writeFileSync(require('node:path').join(process.env.WORMHOLE_TEST_SCREENSHOTS, 'sidebar-' + stage + suffix + '.png'), capture.toPNG());
@@ -168,9 +203,7 @@ test('pinned and auto-hide sidebars preserve layout, focus, menus and saved pref
                   const extendsDivider = borderPixels.length > 0 && gripPixels.length > borderPixels.length;
                   const centered = centerDelta <= (gripPixels.length + borderPixels.length) % 2;
                   if ((!extendsDivider || !centered) && paint < 5) {
-                    await window.webContents.capturePage();
-                    await window.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
-                    capture = await window.webContents.capturePage();
+                    capture = await capturePaint();
                     continue;
                   }
                   assert.ok(extendsDivider, 'The grip must visibly extend beyond the divider in ' + stage + ' at ' + scale + 'x: border=' + borderPixels + ', grip=' + gripPixels);

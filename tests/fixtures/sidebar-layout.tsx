@@ -1224,6 +1224,29 @@ async function runAppIntegrationTests(handleOnly = false) {
       assert.ok(!canvas.contains(document.elementFromPoint(bounds.left + 1, bounds.top + 1)));
       await window.sidebarObserve('pinned-' + theme);
 
+      const tablist = query('[aria-label="Pane tabs"]');
+      const tablistBounds = tablist.getBoundingClientRect();
+      const dataTransfer = new DataTransfer();
+      await window.sidebarObserve('session-drop-idle');
+      await React.act(async () => {
+        tab.dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer }));
+      });
+      const dragOver = new DragEvent('dragover', {
+        bubbles: true,
+        cancelable: true,
+        clientX: tablistBounds.right - 16,
+        clientY: tablistBounds.top + 8,
+        // Chromium does not expose the drag payload during native dragover.
+        dataTransfer: new DataTransfer(),
+      });
+      await React.act(async () => tablist.dispatchEvent(dragOver));
+      assert.ok(dragOver.defaultPrevented, 'The tab bar must accept the ongoing session drag');
+      await window.sidebarObserve('session-drop-hover');
+      await React.act(async () => {
+        tab.dispatchEvent(new DragEvent('dragend', { bubbles: true, dataTransfer }));
+      });
+      await window.sidebarObserve('session-drop-end');
+
       const quickConnect = query('aside button[aria-label="Quick Connect"]');
       await React.act(async () => quickConnect.focus());
       const tooltip = () => query('[data-slot="tooltip-content"]');
