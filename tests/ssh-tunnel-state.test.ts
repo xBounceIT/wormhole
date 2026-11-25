@@ -92,9 +92,8 @@ test('tunnel failure dispatch disconnects current dependents once and ignores re
   assert.deepEqual(closed, ['ssh', 'vnc', 'web']);
   assert.match(tunnelClosedMessage, /disconnected/);
   const main = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
-  // Process entrypoints are covered by scoped source contracts, with the dispatcher executed above.
+  // Browser VPN exits are exercised through WebSurfaceManager in web-browser-native.test.ts.
   for (const [scope, start] of [
-    ['class WebSurfaceManager', 'tunnelRoute = await openingTunnelBackend.acquireTunnelRoute({'],
     ['class NativeSshBackend', 'const route = await getNativeBackend().acquireTunnelRoute({'],
     ["ipcMain.handle('rdp:start'", 'route = await getNativeBackend().acquireTunnelRoute({'],
   ]) {

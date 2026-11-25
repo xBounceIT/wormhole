@@ -53,6 +53,7 @@ export function WebSurface({
   const bitwardenButtonRef = useRef<HTMLButtonElement>(null);
   const addressRef = useRef<HTMLInputElement>(null);
   const previewIdRef = useRef<string | undefined>(undefined);
+  const vpnReconnectRequest = useRef(0);
   const browser = session.webBrowser;
   const vpnLabel = `${browser?.tunnel?.name ? `${browser.tunnel.name}'s ` : ''}${browser?.tunnel?.kind || 'VPN tunnel'}${session.status === 'connected' ? ' ACTIVE' : ''}`;
   const vpnReconnecting = browser?.vpnStatus === 'reconnecting';
@@ -247,14 +248,23 @@ export function WebSurface({
     };
   }, [session.id]);
 
+  useLayoutEffect(
+    () => () => {
+      vpnReconnectRequest.current++;
+    },
+    [session.id, isAuthorized],
+  );
+
   const command = (
     operation: Parameters<NonNullable<Window['wormhole']>['commandWebSession']>[0]['operation'],
     details: { tabId?: string; url?: string } = {},
   ) => {
+    const reconnectRequest = operation === 'reconnect-vpn' ? ++vpnReconnectRequest.current : 0;
     setCommandError('');
     void window.wormhole
       ?.commandWebSession({ sessionId: session.id, operation, ...details })
       .catch((error: unknown) => {
+        if (reconnectRequest && reconnectRequest !== vpnReconnectRequest.current) return;
         setCommandError(
           error instanceof Error ? error.message : 'The browser could not complete this action.',
         );

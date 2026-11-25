@@ -494,6 +494,7 @@ test('idle lock cancels an earlier Hello before draining security mutations and 
     let helloCalls = 0;
     let firstSignal: AbortSignal | undefined;
     const nativeActions: string[] = [];
+    const webSurfaceActions: string[] = [];
     let holdHello = false;
     let pauseNextEnsure: (() => Promise<void>) | undefined;
     let start!: () => void;
@@ -581,7 +582,10 @@ test('idle lock cancels an earlier Hello before draining security mutations and 
           cancelPendingConnections: () => {},
           setMcpLocked: async () => {},
         },
-        webSurfaces: { hideAll: () => {} },
+        webSurfaces: {
+          cancelTunnelReconnects: () => webSurfaceActions.push('cancelTunnelReconnects'),
+          hideAll: () => webSurfaceActions.push('hideAll'),
+        },
         fortinetIPsecDrafts: new Map([[sender, { id: 'draft' }]]),
         nativeBackend: {
           send: async ({ action }: { action: string }) => nativeActions.push(action),
@@ -615,6 +619,7 @@ test('idle lock cancels an earlier Hello before draining security mutations and 
     assert.equal((await oldConfirmation).succeeded, false);
     await queuedSettings;
     await locked;
+    assert.deepEqual(webSurfaceActions, ['cancelTunnelReconnects', 'hideAll']);
     assert.equal(privateKeySelections.has(sender), false);
     assert.equal(certificateSelections.has(sender), false);
     assert.equal(session.isAccessAllowed, false);
