@@ -10608,7 +10608,7 @@ function SessionsPage({
             onPointerDownCapture={() => {
               if (pane) activateSession(pane.id, session.id);
             }}
-            style={sessionSurfaceStyle(rect, active)}
+            style={sessionSurfaceStyle(rect, active, session.protocol)}
           >
             {session.mcpAccessible && session.mcpAccessError ? (
               <p
@@ -10754,7 +10754,11 @@ function SessionSplitHandle({
   );
 }
 
-function sessionSurfaceStyle(rect: SessionPaneRect | undefined, active: boolean): CSSProperties {
+function sessionSurfaceStyle(
+  rect: SessionPaneRect | undefined,
+  active: boolean,
+  protocol: Protocol,
+): CSSProperties {
   if (!rect) {
     return {
       left: 0,
@@ -10765,11 +10769,23 @@ function sessionSurfaceStyle(rect: SessionPaneRect | undefined, active: boolean)
       pointerEvents: 'none',
     };
   }
+  const bounds =
+    protocol === 'ssh'
+      ? {
+          left: `${rect.x}%`,
+          // Match the h-9 tab strip and the pane's p-px inset.
+          top: `calc(${rect.y}% + var(--spacing) * 9 + 1px)`,
+          width: `${rect.width}%`,
+          height: `calc(${rect.height}% - var(--spacing) * 9 - 1px)`,
+        }
+      : {
+          left: `calc(${rect.x}% + 3px)`,
+          top: `calc(${rect.y}% + 39px)`,
+          width: `calc(${rect.width}% - 6px)`,
+          height: `calc(${rect.height}% - 42px)`,
+        };
   return {
-    left: `calc(${rect.x}% + 3px)`,
-    top: `calc(${rect.y}% + 39px)`,
-    width: `calc(${rect.width}% - 6px)`,
-    height: `calc(${rect.height}% - 42px)`,
+    ...bounds,
     visibility: active ? 'visible' : 'hidden',
     pointerEvents: active ? 'auto' : 'none',
     zIndex: active ? 10 : 0,
@@ -10790,7 +10806,7 @@ function SessionPaneChrome({
   return (
     <div
       aria-label={`Session pane ${rect.paneId}`}
-      className="pointer-events-none absolute border border-transparent"
+      className="pointer-events-none absolute p-px"
       role="group"
       style={{
         left: `${rect.x}%`,

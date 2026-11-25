@@ -19,6 +19,11 @@ test('xterm SSH presentation works in Chromium with WebGL and software fallback'
     app.indexOf('function SshTerminalSurface('),
   );
   assert.ok(component.length > 0);
+  const paneLayout = app.slice(
+    app.indexOf('function sessionSurfaceStyle('),
+    app.indexOf('function SessionDropPreview('),
+  );
+  assert.ok(paneLayout.length > 0);
   const result = await build({
     configFile: false,
     logLevel: 'silent',
@@ -39,7 +44,9 @@ test('xterm SSH presentation works in Chromium with WebGL and software fallback'
         import { sshTerminal } from ${JSON.stringify(fileURLToPath(new URL('../src/xterm-terminal.ts', import.meta.url)).replaceAll('\\', '/'))};
         const copyTextToClipboard = async text => window.copyTerminalTest(text);
         const SshTerminalConnectionState = ({session}) => <div>state {session.status}</div>;
-        export ${component}`;
+        ${component}
+        ${paneLayout}
+        export { SshXtermSurface, SessionPaneChrome, sessionSurfaceStyle };`;
         },
         transform(code, id) {
           if (id === '\0ssh-surface')
@@ -104,7 +111,7 @@ test('xterm SSH presentation works in Chromium with WebGL and software fallback'
       for (const pending of pendingWarmups.splice(0)) pending();
       webFrame.setZoomFactor(1);
     }
-    await window.runTerminalTests().catch(error => { console.error(error.stack); throw error; }); })();
+    await window.runTerminalTests(zoom => webFrame.setZoomFactor(zoom)).catch(error => { console.error(error.stack); throw error; }); })();
     //# sourceURL=wormhole-xterm.js`;
   writeFileSync(
     harness,
@@ -128,7 +135,7 @@ test('xterm SSH presentation works in Chromium with WebGL and software fallback'
         const coverage = await window.webContents.debugger.sendCommand('Profiler.takePreciseCoverage');
         const script = coverage.result.find(item => item.url === 'wormhole-xterm.js');
         const source = ${JSON.stringify(renderer)};
-        const moduleStart = source.indexOf('function sshTerminal('), moduleEnd = source.indexOf('async function run()', moduleStart);
+        const moduleStart = source.indexOf('function sshTerminal('), moduleEnd = source.indexOf('async function run(', moduleStart);
         const names = ['sshTerminal', 'setSshTerminalTheme', 'retainSshTerminals', 'XtermSession', 'setTheme', 'configure', 'attach', 'detach', 'fit', 'focus', 'receive', 'acknowledge', 'drain', 'copy', 'paste', 'key', 'dispose', 'SshXtermSurface'];
         let covered = 0, total = 0;
         for (const name of names) {

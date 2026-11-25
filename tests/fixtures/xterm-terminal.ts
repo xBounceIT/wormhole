@@ -19,7 +19,7 @@ import {
   useContextMenuOverlayOpen,
 } from '../../src/components/ui/context-menu';
 // Compiled from the production App component by the Chromium harness.
-import { SshXtermSurface } from 'virtual:ssh-surface';
+import { SshXtermSurface, SessionPaneChrome, sessionSurfaceStyle } from 'virtual:ssh-surface';
 
 const sleep = (delay = 30) => new Promise((resolve) => setTimeout(resolve, delay));
 
@@ -120,7 +120,7 @@ async function assertWebglFonts(): Promise<void> {
   }
 }
 
-async function run() {
+async function run(setZoomFactor: (zoom: number) => void) {
   window.confirm = () => {
     throw new Error('Native confirmation must not be used');
   };
@@ -463,7 +463,7 @@ async function run() {
   await runSshThemeSettingsTests();
   setSshTerminalTheme(defaultSshTerminalTheme);
   const mounted = document.createElement('div');
-  mounted.style.cssText = 'width:800px;height:400px';
+  mounted.style.cssText = 'position:relative;width:801px;height:401px';
   document.body.append(mounted);
   const root = createRoot(mounted);
   window.copyTerminalTest = (text: string) => copied.push(text);
@@ -488,6 +488,7 @@ async function run() {
     onReconnect: () => {},
     onTrustHostKey: () => {},
   };
+  let paneRect = { paneId: 'ssh', x: 0, y: 0, width: 100, height: 100 };
   const render = async () => {
     await React.act(async () => {
       root.render(
@@ -495,7 +496,19 @@ async function run() {
           ContextMenuOverlayProvider,
           null,
           React.createElement(OverlayProbe),
-          React.createElement(SshXtermSurface, props),
+          React.createElement(SessionPaneChrome, {
+            dropTarget: false,
+            onActivate: () => {},
+            rect: paneRect,
+          }),
+          React.createElement(
+            'div',
+            {
+              className: 'absolute overflow-hidden',
+              style: sessionSurfaceStyle(paneRect, true, 'ssh'),
+            },
+            React.createElement(SshXtermSurface, props),
+          ),
         ),
       );
     });
@@ -510,6 +523,33 @@ async function run() {
   await render();
   const componentRuntime = sshTerminal('component');
   assert.ok(mounted.querySelector('.xterm'));
+  const assertTerminalFillsPane = () => {
+    const pane = mounted.querySelector('[aria-label="Session pane ssh"]')!.getBoundingClientRect();
+    const tabs = mounted.querySelector('[role="tablist"]')!.getBoundingClientRect();
+    const surface = mounted.querySelector('[aria-label="Live SSH terminal"]')!;
+    const host = surface.firstElementChild!;
+    const terminal = host.getBoundingClientRect();
+    assert.deepEqual(
+      [terminal.left, terminal.top, terminal.right, terminal.bottom],
+      [pane.left, tabs.bottom, pane.right, pane.bottom],
+      `SSH terminal background must reach the pane edges and the bottom of the tab strip at DPR ${devicePixelRatio}`,
+    );
+    assert.equal(getComputedStyle(host).backgroundColor, 'rgb(28, 28, 28)');
+  };
+  assertTerminalFillsPane();
+  paneRect = { ...paneRect, x: 50, y: 50, width: 50, height: 50 };
+  await render();
+  try {
+    for (const zoom of [1, 1.25, 1.5]) {
+      setZoomFactor(zoom);
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      assertTerminalFillsPane();
+    }
+  } finally {
+    setZoomFactor(1);
+  }
+  paneRect = { ...paneRect, x: 0, y: 0, width: 100, height: 100 };
+  await render();
   componentRuntime.terminal.input('user input', true);
   assert.equal(inputs.at(-1), 'user input');
   const nativePaste = new DataTransfer();
@@ -742,6 +782,6 @@ async function run() {
   );
 }
 
-(window as unknown as { runTerminalTests: () => Promise<void> }).runTerminalTests = run;
+(window as unknown as { runTerminalTests: typeof run }).runTerminalTests = run;
 (window as unknown as { runTerminalFontTests: () => Promise<void> }).runTerminalFontTests =
   assertWebglFonts;
