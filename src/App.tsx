@@ -10815,9 +10815,10 @@ function SessionPaneChrome({
         height: `${rect.height}%`,
       }}
     >
+      {/* Composite the tabs and their highlight together before clipping to the rounded canvas. */}
       <div
         aria-label="Pane tabs"
-        className={`pointer-events-auto relative z-30 flex h-9 min-w-0 items-stretch overflow-x-auto overflow-y-hidden border-b border-border ${dropTarget ? 'bg-primary/20 ring-2 ring-inset ring-primary' : 'bg-sidebar/55'}`}
+        className={`pointer-events-auto relative z-30 flex h-9 min-w-0 transform-gpu items-stretch overflow-x-auto overflow-y-hidden border-b border-border ${dropTarget ? 'bg-primary/20 ring-2 ring-inset ring-primary' : 'bg-sidebar/55'}`}
         onFocusCapture={onActivate}
         onPointerDown={onActivate}
         role="tablist"
