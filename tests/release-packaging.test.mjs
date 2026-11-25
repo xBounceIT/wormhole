@@ -328,13 +328,20 @@ test('packaged backend resolution uses the universal binary only on macOS', asyn
     /^function backendPath\(\): string \{([\s\S]*?)^\}/m,
   )?.[1];
   assert.ok(backendPathBody, 'backendPath function is missing');
-  const resolveBackendPath = new Function('process', 'findBundledExecutable', backendPathBody);
+  const resolveBackendPath = new Function(
+    'process',
+    'findBundledExecutable',
+    'recordDiagnostic',
+    backendPathBody,
+  );
 
   for (const platform of ['darwin', 'win32', 'linux']) {
     for (const arch of ['x64', 'arm64']) {
       const resolve = (files) =>
-        resolveBackendPath({ platform, arch }, (name) =>
-          files.includes(name) ? `/resources/${name}` : undefined,
+        resolveBackendPath(
+          { platform, arch },
+          (name) => (files.includes(name) ? `/resources/${name}` : undefined),
+          () => {},
         );
       const nativeName = `wormhole-backend-${arch}${platform === 'win32' ? '.exe' : ''}`;
       assert.equal(

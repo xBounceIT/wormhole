@@ -60,6 +60,8 @@ test('real Chromium sibling tabs retain their proxy and never fall back to a dir
       const validateWebTarget = value => value;
       const describeWebNavigationError = () => 'Navigation failed';
       const describeWebLoadFailure = () => 'Page unavailable';
+      const recordDiagnostic = () => {};
+      const reportWarning = () => {};
       const afterBitwardenPopupInputEvent = operation => operation();
       const releaseNativeTunnelLease = async () => {};
       ${controller}

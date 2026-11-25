@@ -3320,10 +3320,7 @@ func TestSSHReconnectFailureLogSeverity(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			databasePath := filepath.Join(t.TempDir(), "wormhole.db")
-			logger, err := newAppLogger(databasePath)
-			if err != nil {
-				t.Fatal(err)
-			}
+			logger := newAppLogger(databasePath, nil)
 			previous := appLog
 			appLog = logger
 			t.Cleanup(func() { logger.close(); appLog = previous })
@@ -3339,7 +3336,7 @@ func TestSSHReconnectFailureLogSeverity(t *testing.T) {
 			t.Cleanup(server.shutdown)
 			server.reconnectAttemptFailed(state, test.err)
 			contents, err := os.ReadFile(currentDayLogFilePath(databasePath))
-			if err != nil {
+			if err != nil && !(test.wantEvent == "" && errors.Is(err, os.ErrNotExist)) {
 				t.Fatal(err)
 			}
 			logs := string(contents)
@@ -3349,14 +3346,14 @@ func TestSSHReconnectFailureLogSeverity(t *testing.T) {
 				}
 				return
 			}
-			if !strings.Contains(logs, "[WRN] SSH automatic reconnect attempt failed: "+safeSSHError(test.err)) {
+			if !strings.Contains(logs, "SSH automatic reconnect attempt failed (cause="+diagnosticCause(test.err)+")") {
 				t.Fatalf("missing reconnect warning: %s", logs)
 			}
 			exhausted := test.wantEvent == "reconnect-failed"
 			if strings.Contains(logs, "[ERR]") != exhausted || strings.Contains(logs, "traceback:") != exhausted {
 				t.Fatalf("unexpected error severity or traceback: %s", logs)
 			}
-			if exhausted && !strings.Contains(logs, "[ERR] SSH automatic reconnect exhausted") {
+			if exhausted && !strings.Contains(logs, "SSH automatic reconnect exhausted") {
 				t.Fatalf("missing terminal failure error: %s", logs)
 			}
 			var event sshWireEvent

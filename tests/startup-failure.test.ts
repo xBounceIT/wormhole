@@ -69,12 +69,15 @@ test('workspace failure IPC releases native resources once and ignores unrelated
         actions.push('shutdown');
         if (scenario === 'shutdown-failed') throw new Error('private');
       },
-      console: {
-        warn: (...args: unknown[]) => {
-          assert.equal(args.length, 1);
-          assert.ok(!String(args[0]).includes('private'));
-          actions.push('warning');
-        },
+      recordDiagnostic: (level: string, event: string) => {
+        assert.equal(level, 'ERR');
+        assert.match(event, /React error boundary/);
+        actions.push('diagnostic');
+      },
+      reportWarning: (...args: unknown[]) => {
+        assert.equal(args.length, 1);
+        assert.ok(!String(args[0]).includes('private'));
+        actions.push('warning');
       },
     });
     handler({ sender: {} });
@@ -86,6 +89,7 @@ test('workspace failure IPC releases native resources once and ignores unrelated
       assert.equal(startupReadyWindows.has(owner), true);
     } else {
       assert.deepEqual(actions, [
+        'diagnostic',
         'active:0',
         'opacity:1',
         'lock',

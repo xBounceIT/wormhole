@@ -102,6 +102,8 @@ type backendResponse struct {
 	TunnelKind         string  `json:"tunnelKind,omitempty"`
 	LeaseID            string  `json:"leaseId,omitempty"`
 	Result             any     `json:"result,omitempty"`
+	diagnosticCause    error
+	diagnosticAction   string
 }
 
 type backendEvent struct {
@@ -134,8 +136,9 @@ type backendEvent struct {
 }
 
 type backendLineWriter struct {
-	mu     sync.Mutex
-	writer *bufio.Writer
+	mu                 sync.Mutex
+	writer             *bufio.Writer
+	reportWriteFailure sync.Once
 }
 
 func newBackendLineWriter(output io.Writer) *backendLineWriter {
@@ -144,13 +147,11 @@ func newBackendLineWriter(output io.Writer) *backendLineWriter {
 
 func (w *backendLineWriter) write(value any) error {
 	if response, ok := value.(backendResponse); ok && !response.OK {
-		message := strings.TrimSpace(response.Error)
-		if message == "" {
-			message = "unspecified backend failure"
+		stage := "backend request"
+		if response.diagnosticAction != "" {
+			stage = response.diagnosticAction
 		}
-		// Every service error crosses this single response boundary. Logging here prevents an
-		// individual protocol or asynchronous handler from accidentally omitting diagnostics.
-		logError("backend request failed: %s", message)
+		logOperationFailure(stage, response.diagnosticCause)
 	}
 	var encoded bytes.Buffer
 	encoder := json.NewEncoder(&encoded)
@@ -158,15 +159,21 @@ func (w *backendLineWriter) write(value any) error {
 	// browser storage areas beyond the channel's line limit without changing their decoded size.
 	encoder.SetEscapeHTML(false)
 	if err := encoder.Encode(value); err != nil {
+		logOperationFailure("encode backend event", err)
 		return err
 	}
 
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if _, err := w.writer.Write(encoded.Bytes()); err != nil {
+		w.reportWriteFailure.Do(func() { logOperationFailure("write backend stream", err) })
 		return err
 	}
-	return w.writer.Flush()
+	err := w.writer.Flush()
+	if err != nil {
+		w.reportWriteFailure.Do(func() { logOperationFailure("flush backend stream", err) })
+	}
+	return err
 }
 
 func serveBackend(databasePath string, electronUserDataPath ...string) error {
@@ -198,7 +205,8 @@ func serveBackendIO(databasePath string, input io.Reader, outputWriter io.Writer
 		}
 		if err != nil {
 			clearBytes(command.IPsecSecret)
-			_ = output.write(backendResponse{OK: false, Error: "invalid Wormhole request"})
+			_ = output.write(backendResponse{OK: false, Error: "invalid Wormhole request",
+				diagnosticAction: "decode native command", diagnosticCause: err})
 			continue
 		}
 		manager.handle(command)
@@ -296,7 +304,9 @@ func newVncManager(
 
 func (m *vncManager) handle(command backendCommand) {
 	if err := validateBackendCommand(command); err != nil {
-		m.respond(command.ID, err)
+		// The action may be arbitrary input until it has passed validation.
+		command.Action = "invalid native command"
+		m.respond(command, err)
 		return
 	}
 
@@ -326,18 +336,18 @@ func (m *vncManager) handle(command backendCommand) {
 	case "tunnel.route-response":
 		m.respondTunnelRoute(command)
 	case "tunnel.ipsec-stage":
-		m.respond(command.ID, m.fortinetIPsecDrafts.stage(command.SessionID, command.IPsecField, command.IPsecSecret))
+		m.respond(command, m.fortinetIPsecDrafts.stage(command.SessionID, command.IPsecField, command.IPsecSecret))
 	case "tunnel.ipsec-discard":
 		m.fortinetIPsecDrafts.discard(command.SessionID)
-		m.respond(command.ID, nil)
+		m.respond(command, nil)
 	case "tunnel.ipsec-clear":
 		m.fortinetIPsecDrafts.clear()
-		m.respond(command.ID, nil)
+		m.respond(command, nil)
 	case "tunnel.ipsec-create", "tunnel.ipsec-update":
 		m.cleanupNative(func() {
 			defer clearBytes(command.IPsecWrite.Settings)
 			result, err := m.fortinetIPsecDrafts.save(m.databasePath, *command.IPsecWrite, command.IPsecReferences, command.Action == "tunnel.ipsec-create")
-			m.respondResult(command.ID, result, err)
+			m.respondResult(command, result, err)
 		})
 	case "backup.export", "backup.import", "mremote.import.commit":
 		m.startBackendOperation(command)
@@ -362,13 +372,15 @@ func (m *vncManager) handle(command backendCommand) {
 		generation := m.bitwardenGeneration()
 		go m.handleBitwarden(command, generation)
 	default:
-		m.respond(command.ID, fmt.Errorf("unsupported request action %q", command.Action))
+		err := fmt.Errorf("unsupported request action %q", command.Action)
+		command.Action = "unsupported native command"
+		m.respond(command, err)
 	}
 }
 
 func (m *vncManager) connect(command backendCommand) {
 	if command.SessionID == "" {
-		m.respond(command.ID, errors.New("VNC session ID is required"))
+		m.respond(command, errors.New("VNC session ID is required"))
 		return
 	}
 
@@ -383,7 +395,7 @@ func (m *vncManager) connect(command backendCommand) {
 		previous.closeAndWait()
 	}
 
-	m.respond(command.ID, nil)
+	m.respond(command, nil)
 	session.start(command, m.database, m.electronUserDataPath)
 }
 
@@ -395,7 +407,7 @@ func (m *vncManager) disconnect(command backendCommand) {
 	if session != nil {
 		session.closeAndWait()
 	}
-	m.respond(command.ID, nil)
+	m.respond(command, nil)
 }
 
 func (m *vncManager) input(command backendCommand, send func(*vncSession) error) {
@@ -403,10 +415,10 @@ func (m *vncManager) input(command backendCommand, send func(*vncSession) error)
 	session := m.sessions[command.SessionID]
 	m.mu.Unlock()
 	if session == nil {
-		m.respond(command.ID, errors.New("VNC session is not connected"))
+		m.respond(command, errors.New("VNC session is not connected"))
 		return
 	}
-	m.respond(command.ID, send(session))
+	m.respond(command, send(session))
 }
 
 func (m *vncManager) remove(session *vncSession) {
@@ -477,7 +489,7 @@ func (m *vncManager) acquireTunnel(command backendCommand) {
 	m.mu.Lock()
 	if m.tunnelLeases[command.SessionID] != nil || m.tunnelStarts[command.SessionID] != nil {
 		m.mu.Unlock()
-		m.respond(command.ID, errors.New("VPN tunnel lease ID is already in use"))
+		m.respond(command, errors.New("VPN tunnel lease ID is already in use"))
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), tunnelStartTimeout)
@@ -602,10 +614,10 @@ func (m *vncManager) respondTunnelPrompt(command backendCommand) {
 	}
 	m.mu.Unlock()
 	if pending == nil || pending.leaseID != command.SessionID {
-		m.respond(command.ID, errors.New("VPN authentication prompt is no longer active"))
+		m.respond(command, errors.New("VPN authentication prompt is no longer active"))
 		return
 	}
-	m.respond(command.ID, nil)
+	m.respond(command, nil)
 	pending.result <- tunnelPromptResult{value: command.Value, cancelled: command.Cancelled, failure: command.BrowserFailure}
 }
 
@@ -655,10 +667,10 @@ func (m *vncManager) respondTunnelRoute(command backendCommand) {
 	}
 	m.mu.Unlock()
 	if pending == nil || pending.leaseID != command.SessionID {
-		m.respond(command.ID, errors.New("VPN tunnel choice is no longer active"))
+		m.respond(command, errors.New("VPN tunnel choice is no longer active"))
 		return
 	}
-	m.respond(command.ID, nil)
+	m.respond(command, nil)
 	pending.result <- tunnelPromptResult{
 		value:     command.Value,
 		cancelled: command.Cancelled || command.Value == "cancel",
@@ -712,12 +724,15 @@ func (m *vncManager) finishTunnelAcquire(
 		}
 		_ = m.output.write(backendResponse{
 			ID: command.ID, OK: false, Error: "VPN tunnel establishment was cancelled",
+			diagnosticAction: "tunnel.acquire", diagnosticCause: context.Canceled,
 		})
 		return
 	}
 	response := backendResponse{ID: command.ID, OK: err == nil, LeaseID: command.SessionID, ConfiguredTunnelID: &command.TunnelConfigID}
 	if err != nil {
 		response.Error = publicBackendError(err)
+		response.diagnosticAction = "tunnel.acquire"
+		response.diagnosticCause = err
 	} else if lease != nil {
 		response.TunnelActive = true
 		response.TunnelName = lease.name
@@ -746,6 +761,7 @@ func (m *vncManager) watchTunnelLease(id string, lease *tunnelRuntime) {
 	delete(m.tunnelForwarders, id)
 	m.mu.Unlock()
 	forwarder.close()
+	logError("VPN sidecar exited while its lease was active (provider=%s)", tunnelName(lease.kind))
 	lease.close()
 	m.emit(backendEvent{Type: "tunnel.failed", SessionID: id})
 }
@@ -764,7 +780,7 @@ func (m *vncManager) releaseTunnel(command backendCommand) {
 	m.mu.Unlock()
 	forwarder.close()
 	if lease == nil && start == nil {
-		m.respond(command.ID, nil)
+		m.respond(command, nil)
 		return
 	}
 	m.cleanup.Add(1)
@@ -779,7 +795,7 @@ func (m *vncManager) releaseTunnel(command backendCommand) {
 		// A successful release acknowledges that the sidecar reference is gone. In particular, the
 		// final lease or cancelled pending acquire cannot race application shutdown or a subsequent
 		// connection attempt.
-		m.respond(command.ID, nil)
+		m.respond(command, nil)
 	}()
 }
 
@@ -794,12 +810,12 @@ func (m *vncManager) bindTunnelForwarder(command backendCommand) {
 	lease := m.tunnelLeases[command.SessionID]
 	if lease == nil {
 		m.mu.Unlock()
-		m.respond(command.ID, errors.New("VPN tunnel lease is not active"))
+		m.respond(command, errors.New("VPN tunnel lease is not active"))
 		return
 	}
 	if m.tunnelForwarders[command.SessionID] != nil {
 		m.mu.Unlock()
-		m.respond(command.ID, errors.New("VPN tunnel forwarder is already active"))
+		m.respond(command, errors.New("VPN tunnel forwarder is already active"))
 		return
 	}
 	forwarder, err := startTunnelForwarder(lease, target)
@@ -808,7 +824,7 @@ func (m *vncManager) bindTunnelForwarder(command backendCommand) {
 	}
 	m.mu.Unlock()
 	if err != nil {
-		m.respond(command.ID, err)
+		m.respond(command, err)
 		return
 	}
 	host, port := forwarder.address()
@@ -822,7 +838,7 @@ func (m *vncManager) probeTunnelTarget(command backendCommand) {
 	lease := m.tunnelLeases[command.SessionID]
 	m.mu.Unlock()
 	if lease == nil {
-		m.respond(command.ID, errors.New("VPN tunnel lease is not active"))
+		m.respond(command, errors.New("VPN tunnel lease is not active"))
 		return
 	}
 
@@ -840,22 +856,20 @@ func (m *vncManager) probeTunnelTarget(command backendCommand) {
 		if connection != nil {
 			_ = connection.Close()
 		}
-		m.respond(command.ID, err)
+		m.respond(command, err)
 	}()
 }
 
-func (m *vncManager) respond(id string, err error) {
-	response := backendResponse{ID: id, OK: err == nil}
-	if err != nil {
-		response.Error = publicBackendError(err)
-	}
-	_ = m.output.write(response)
+func (m *vncManager) respond(command backendCommand, err error) {
+	m.respondResult(command, nil, err)
 }
 
-func (m *vncManager) respondResult(id string, result any, err error) {
-	response := backendResponse{ID: id, OK: err == nil, Result: result}
+func (m *vncManager) respondResult(command backendCommand, result any, err error) {
+	response := backendResponse{ID: command.ID, OK: err == nil, Result: result}
 	if err != nil {
 		response.Error = publicBackendError(err)
+		response.diagnosticCause = err
+		response.diagnosticAction = command.Action
 	}
 	_ = m.output.write(response)
 }
@@ -926,7 +940,6 @@ func (s *vncSession) connect(command backendCommand, database *sql.DB, electronU
 
 	target, err := resolveVncTarget(database, command, electronUserDataPath...)
 	if err != nil {
-		logError("VNC session failed to connect: %v", err)
 		s.fail(err)
 		return
 	}
@@ -1099,7 +1112,7 @@ func (s *vncSession) connect(command backendCommand, database *sql.DB, electronU
 		return
 	}
 	s.emitStatus("connected", "", false)
-	logInfo("VNC session connected: %s:%d", target.host, target.port)
+	logInfo("VNC session connected (host=%q, port=%d)", target.host, target.port)
 
 	listenDone := make(chan error, 1)
 	go func() {
@@ -1471,7 +1484,11 @@ func (s *vncSession) fail(err error) {
 	if !s.claimTerminal() {
 		return
 	}
-	logError("VNC session failed: %v", message)
+	if passwordRequired {
+		logError("VNC session failed (credential retry requested)")
+	} else {
+		logOperationFailure("VNC session", err)
+	}
 	s.emitStatus("failed", message, passwordRequired)
 	// Failures before the long-lived listen loop (DNS/SOCKS/RFB handshake, authentication,
 	// framebuffer setup) do not pass through its normal teardown path. Close here so a failed
@@ -1577,7 +1594,7 @@ func (s *vncSession) disconnected(message string) {
 	if !s.claimTerminal() {
 		return
 	}
-	logInfo("VNC session disconnected: %s", message)
+	logInfo("VNC session disconnected")
 	s.emitStatus("disconnected", message, false)
 	s.close()
 	s.manager.remove(s)

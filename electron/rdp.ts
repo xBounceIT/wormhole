@@ -1,6 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { isRdpFrame, isRdpInput, type RdpInput } from './rdp-framebuffer.ts';
 import { spawn, type ChildProcess, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import {
+  diagnosticErrorCode,
+  expectBackendExit,
+  observeBackendProcess,
+  type RecordDiagnostic,
+} from './runtime-diagnostics.ts';
 import type {
   RdpBackendEvent,
   RdpCommandRequest,
@@ -35,6 +41,7 @@ type RdpBackendClientOptions = {
   executable: string;
   args: string[];
   env?: NodeJS.ProcessEnv;
+  diagnostics?: RecordDiagnostic;
 };
 
 type PendingRequest = {
@@ -71,6 +78,7 @@ export async function stopChildProcess(
   options: ChildProcessStopOptions = {},
 ): Promise<boolean> {
   if (hasExited(child)) return true;
+  expectBackendExit(child);
   try {
     child.stdin?.end();
   } catch {
@@ -382,16 +390,18 @@ export class RdpBackendClient {
       }
 
       this.process = child;
+      observeBackendProcess(child, 'rdp', this.options.diagnostics);
       child.stdout.setEncoding('utf8');
       child.stdout.on('data', (chunk: string | Buffer) => {
         this.readOutputForProcess(child, String(chunk));
       });
-      child.stdin.once('error', () => {
+      child.stdin.once('error', (error) => {
+        if (!this.disposing)
+          this.options.diagnostics?.('ERR', 'RDP input stream failed', {
+            childPid: child.pid,
+            code: diagnosticErrorCode(error),
+          });
         this.handleProcessFailure(child, 'RDP service connection closed.');
-      });
-      child.stderr.on('data', () => {
-        // The Go boundary intentionally emits only sanitized errors. Do not surface or retain
-        // native stderr: FreeRDP and platform helpers can include server/user details there.
       });
       child.once('error', (error) => {
         if (this.process !== child) return;
@@ -434,6 +444,10 @@ export class RdpBackendClient {
       const timer = setTimeout(
         () => {
           this.pending.delete(command.requestId);
+          this.options.diagnostics?.('ERR', 'RDP request timed out', {
+            operation: command.op,
+            childPid: child.pid,
+          });
           reject(new Error('RDP service did not respond.'));
         },
         command.op === 'start' ? startRequestTimeoutMs : requestTimeoutMs,
@@ -583,6 +597,7 @@ export class RdpBackendClient {
       return;
     }
 
+    expectBackendExit(child);
     try {
       await this.sendToProcess(child, { op: 'shutdown', requestId: randomUUID() });
     } catch {
@@ -590,7 +605,8 @@ export class RdpBackendClient {
     }
     this.rejectPending('RDP service stopped.');
     const exited = await stopChildProcess(child);
-    if (!exited) console.warn('[Wormhole] RDP service did not stop within the allowed time.');
+    if (!exited)
+      this.options.diagnostics?.('WRN', 'RDP service did not stop within the allowed time');
     if (this.process === child) this.process = undefined;
   }
 

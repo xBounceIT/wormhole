@@ -36,10 +36,7 @@ func TestBitwardenBrowserFailureAcceptsOnlyFixedClassifications(t *testing.T) {
 
 func TestBitwardenBrowserFailureReachesTheApplicationLogWithoutVaultData(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
-	logger, err := newAppLogger(databasePath)
-	if err != nil {
-		t.Fatal(err)
-	}
+	logger := newAppLogger(databasePath, nil)
 	previous := appLog
 	appLog = logger
 	t.Cleanup(func() { logger.close(); appLog = previous })
@@ -63,7 +60,7 @@ func TestBitwardenBrowserFailureReachesTheApplicationLogWithoutVaultData(t *test
 		t.Fatal(err)
 	}
 	text := string(contents)
-	if !strings.Contains(text, "[ERR] Bitwarden browser operation failed (code=capture/timeout)") {
+	if !strings.Contains(text, "Bitwarden browser operation failed (code=capture/timeout)") {
 		t.Fatal("browser failure is missing from the application log")
 	}
 	if strings.Contains(text, "private-password") || strings.Contains(text, "private-token") {

@@ -64,16 +64,17 @@ type serialWireCommand struct {
 }
 
 type serialWireEvent struct {
-	Type        string            `json:"type"`
-	SessionID   string            `json:"session_id"`
-	Frame       *sshTerminalFrame `json:"frame,omitempty"`
-	PortName    string            `json:"port_name,omitempty"`
-	BaudRate    int               `json:"baud_rate,omitempty"`
-	DataBits    int               `json:"data_bits,omitempty"`
-	StopBits    int               `json:"stop_bits,omitempty"`
-	Parity      int               `json:"parity,omitempty"`
-	FlowControl int               `json:"flow_control,omitempty"`
-	Error       string            `json:"error,omitempty"`
+	Type            string            `json:"type"`
+	SessionID       string            `json:"session_id"`
+	Frame           *sshTerminalFrame `json:"frame,omitempty"`
+	PortName        string            `json:"port_name,omitempty"`
+	BaudRate        int               `json:"baud_rate,omitempty"`
+	DataBits        int               `json:"data_bits,omitempty"`
+	StopBits        int               `json:"stop_bits,omitempty"`
+	Parity          int               `json:"parity,omitempty"`
+	FlowControl     int               `json:"flow_control,omitempty"`
+	Error           string            `json:"error,omitempty"`
+	diagnosticCause error
 }
 
 type serialTarget struct {
@@ -113,14 +114,20 @@ type serialNode struct {
 }
 
 type serialEventWriter struct {
-	mu      sync.Mutex
-	encoder *json.Encoder
+	mu                 sync.Mutex
+	encoder            *json.Encoder
+	reportWriteFailure sync.Once
 }
 
 func (writer *serialEventWriter) write(event serialWireEvent) {
+	if event.Type == "error" {
+		logOperationFailure("serial session", event.diagnosticCause)
+	}
 	writer.mu.Lock()
 	defer writer.mu.Unlock()
-	_ = writer.encoder.Encode(event)
+	if err := writer.encoder.Encode(event); err != nil {
+		writer.reportWriteFailure.Do(func() { logOperationFailure("write serial stream", err) })
+	}
 }
 
 type serialServer struct {
@@ -251,7 +258,7 @@ func (server *serialServer) open(command serialWireCommand) {
 					native.close(false)
 					return
 				}
-				logInfo("serial session connected: %s @ %d baud", target.PortName, target.BaudRate)
+				logInfo("serial session connected (port=%q, baud=%d)", target.PortName, target.BaudRate)
 				native.publishTerminalFrame(native.terminal.initialFrame())
 				native.start()
 				return
@@ -260,11 +267,11 @@ func (server *serialServer) open(command serialWireCommand) {
 
 		pending := server.finishPending(command.SessionID)
 		if pending && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-			logError("serial session failed to connect: %v", publicSerialError(err))
 			server.output.write(serialWireEvent{
-				Type:      "error",
-				SessionID: command.SessionID,
-				Error:     publicSerialError(err),
+				Type:            "error",
+				SessionID:       command.SessionID,
+				Error:           publicSerialError(err),
+				diagnosticCause: err,
 			})
 		}
 	}()
@@ -326,7 +333,7 @@ func (server *serialServer) close(sessionID string) {
 	}
 	if native != nil {
 		if native.portName != "" {
-			logInfo("serial session closed: %s", native.portName)
+			logInfo("serial session closed (port=%q)", native.portName)
 		}
 		native.close(true)
 	}
@@ -827,6 +834,7 @@ func (native *serialNativeSession) readOutput() {
 		}
 		if err != nil {
 			if !native.isClosed() {
+				logOperationFailure("read serial port", err)
 				native.close(true)
 			}
 			return
@@ -900,6 +908,7 @@ func (native *serialNativeSession) writeInput() {
 		case data := <-native.inputQueue:
 			if err := native.writePortData(data); err != nil {
 				if !native.isClosed() {
+					logOperationFailure("write serial port", err)
 					native.close(true)
 				}
 				return

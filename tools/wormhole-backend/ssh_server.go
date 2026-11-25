@@ -165,31 +165,32 @@ type sshWireEvent struct {
 	Protocol            string               `json:"protocol,omitempty"`
 	Fingerprint         string               `json:"fingerprint,omitempty"`
 	Error               string               `json:"error,omitempty"`
-	McpStatus           *mcpStatusResponse   `json:"mcp_status,omitempty"`
-	McpAccessible       *bool                `json:"mcp_accessible,omitempty"`
-	Token               string               `json:"token,omitempty"`
-	HostKeyExpected     string               `json:"host_key_expected,omitempty"`
-	HostKeyReceived     string               `json:"host_key_received,omitempty"`
-	RetainTunnelLease   bool                 `json:"retain_tunnel_lease,omitempty"`
-	Path                string               `json:"path,omitempty"`
-	Entries             []sshSftpEntry       `json:"entries"`
-	QuickPaths          []sshSftpQuickPath   `json:"quick_paths,omitempty"`
-	Truncated           bool                 `json:"truncated"`
-	Pane                string               `json:"pane,omitempty"`
-	Operation           string               `json:"operation,omitempty"`
-	TransferID          string               `json:"transfer_id,omitempty"`
-	ItemID              string               `json:"item_id,omitempty"`
-	TransferState       string               `json:"transfer_state,omitempty"`
-	Direction           string               `json:"direction,omitempty"`
-	DisplayName         string               `json:"display_name,omitempty"`
-	ExpectedBytes       int64                `json:"expected_bytes,omitempty"`
-	BytesTransferred    int64                `json:"bytes_transferred,omitempty"`
-	IncomingSize        int64                `json:"incoming_size"`
-	ExistingSize        int64                `json:"existing_size"`
-	ExistingIsDirectory bool                 `json:"existing_is_directory"`
-	Attempt             int                  `json:"attempt,omitempty"`
-	MaxAttempts         int                  `json:"max_attempts,omitempty"`
-	DelaySeconds        int                  `json:"delay_seconds,omitempty"`
+	diagnosticCause     error
+	McpStatus           *mcpStatusResponse `json:"mcp_status,omitempty"`
+	McpAccessible       *bool              `json:"mcp_accessible,omitempty"`
+	Token               string             `json:"token,omitempty"`
+	HostKeyExpected     string             `json:"host_key_expected,omitempty"`
+	HostKeyReceived     string             `json:"host_key_received,omitempty"`
+	RetainTunnelLease   bool               `json:"retain_tunnel_lease,omitempty"`
+	Path                string             `json:"path,omitempty"`
+	Entries             []sshSftpEntry     `json:"entries"`
+	QuickPaths          []sshSftpQuickPath `json:"quick_paths,omitempty"`
+	Truncated           bool               `json:"truncated"`
+	Pane                string             `json:"pane,omitempty"`
+	Operation           string             `json:"operation,omitempty"`
+	TransferID          string             `json:"transfer_id,omitempty"`
+	ItemID              string             `json:"item_id,omitempty"`
+	TransferState       string             `json:"transfer_state,omitempty"`
+	Direction           string             `json:"direction,omitempty"`
+	DisplayName         string             `json:"display_name,omitempty"`
+	ExpectedBytes       int64              `json:"expected_bytes,omitempty"`
+	BytesTransferred    int64              `json:"bytes_transferred,omitempty"`
+	IncomingSize        int64              `json:"incoming_size"`
+	ExistingSize        int64              `json:"existing_size"`
+	ExistingIsDirectory bool               `json:"existing_is_directory"`
+	Attempt             int                `json:"attempt,omitempty"`
+	MaxAttempts         int                `json:"max_attempts,omitempty"`
+	DelaySeconds        int                `json:"delay_seconds,omitempty"`
 }
 
 type sshSftpEntry struct {
@@ -453,14 +454,21 @@ type sshSftpTransferPlan struct {
 }
 
 type sshEventWriter struct {
-	mu      sync.Mutex
-	encoder *json.Encoder
+	mu                 sync.Mutex
+	encoder            *json.Encoder
+	reportWriteFailure sync.Once
 }
 
 func (writer *sshEventWriter) write(event sshWireEvent) {
+	// Reconnect attempts and exhaustion already log their actual cause and severity.
+	if event.Error != "" && event.Type != "reconnecting" && event.Type != "reconnect-failed" {
+		logOperationFailure("SSH "+event.Type, event.diagnosticCause)
+	}
 	writer.mu.Lock()
 	defer writer.mu.Unlock()
-	_ = writer.encoder.Encode(event)
+	if err := writer.encoder.Encode(event); err != nil {
+		writer.reportWriteFailure.Do(func() { logOperationFailure("write SSH stream", err) })
+	}
 }
 
 func serveSSH(databasePath string, input io.Reader, output io.Writer, electronUserDataPath ...string) error {
@@ -703,7 +711,7 @@ func (server *sshServer) connectSSH(ctx context.Context, state *sshReconnectStat
 			var event *sshWireEvent
 			if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 				failure := sshWireEvent{
-					Type: "error", SessionID: command.SessionID, Error: safeSSHError(err),
+					Type: "error", SessionID: command.SessionID, Error: safeSSHError(err), diagnosticCause: err,
 				}
 				var certificateError *sshCertificateAuthError
 				if errors.As(err, &certificateError) {
@@ -716,8 +724,8 @@ func (server *sshServer) connectSSH(ctx context.Context, state *sshReconnectStat
 				}
 				event = &failure
 			}
-			if server.finishInitialFailure(state, mismatch, event) && event != nil {
-				logError("SSH session failed to connect: %v", safeSSHError(err))
+			if server.finishInitialFailure(state, mismatch, event) && errors.Is(err, context.DeadlineExceeded) {
+				logOperationFailure("SSH connection", err)
 			}
 		} else {
 			server.reconnectAttemptFailed(state, err)
@@ -749,7 +757,7 @@ func (server *sshServer) connectSSH(ctx context.Context, state *sshReconnectStat
 		native.close(false)
 		return
 	}
-	logInfo("SSH session connected: %s@%s:%d", target.username, target.host, target.port)
+	logInfo("SSH session connected (host=%q, port=%d)", target.host, target.port)
 	if server.mcp != nil && !native.sftpOnly {
 		server.mcp.sessionConnected(native)
 	}
@@ -1111,7 +1119,7 @@ func (server *sshServer) close(sessionID string) {
 	}
 	server.cancelTransfersForSession(sessionID)
 	if native != nil {
-		logInfo("SSH session closed: %s@%s:%d", native.mcpSession.Username, native.mcpSession.Host, native.mcpSession.Port)
+		logInfo("SSH session closed (host=%q, port=%d)", native.mcpSession.Host, native.mcpSession.Port)
 		native.close(false)
 	}
 	// Retain targets still open in an editor even when close came from native
@@ -1296,7 +1304,7 @@ func (server *sshServer) scheduleReconnect(state *sshReconnectState, lastError s
 			Attempt: state.attempts, MaxAttempts: sshAutoReconnectMaxAttempts,
 		})
 		server.mu.Unlock()
-		logError("SSH automatic reconnect exhausted for session %s", sessionID)
+		logError("SSH automatic reconnect exhausted for session %q", sessionID)
 		return
 	}
 	state.attempts++
@@ -1325,7 +1333,7 @@ func (server *sshServer) reconnectAttemptFailed(state *sshReconnectState, err er
 		return
 	}
 	message := safeSSHError(err)
-	logWarn("SSH automatic reconnect attempt failed: %v", message)
+	logWarn("SSH automatic reconnect attempt failed (cause=%s)", diagnosticCause(err))
 	var certificateError *sshCertificateAuthError
 	if errors.As(err, &certificateError) && strings.Contains(strings.ToLower(message), "ssh certificate") {
 		server.mu.Lock()
@@ -2079,7 +2087,7 @@ func (driver *sshAutoSudoDriver) finishLocked(priorityInput []byte) {
 	driver.prompt = sshSudoPrompt{}
 	if len(priorityInput) > 0 {
 		if err := driver.session.writeRaw(priorityInput); err != nil {
-			logWarn("SSH auto sudo: credential input could not be queued: %v", err)
+			logWarn("SSH auto sudo: credential input could not be queued (cause=%s)", diagnosticCause(err))
 		} else {
 			logInfo("SSH auto sudo: credential input queued")
 		}
@@ -2719,12 +2727,13 @@ func isSafeTransferName(direction, name string) bool {
 
 func (server *sshServer) writeTransferBatchError(command sshWireCommand, err error) {
 	server.output.write(sshWireEvent{
-		Type:          "sftp.transfer",
-		SessionID:     command.SessionID,
-		TransferID:    command.TransferID,
-		TransferState: "batch-failed",
-		Direction:     command.Direction,
-		Error:         safeSftpError(err),
+		Type:            "sftp.transfer",
+		SessionID:       command.SessionID,
+		TransferID:      command.TransferID,
+		TransferState:   "batch-failed",
+		Direction:       command.Direction,
+		Error:           safeSftpError(err),
+		diagnosticCause: err,
 	})
 }
 
@@ -2752,6 +2761,7 @@ func (server *sshServer) writeTransferEvent(command sshWireCommand, itemID, stat
 	}
 	if err != nil {
 		event.Error = safeSftpError(err)
+		event.diagnosticCause = err
 	}
 	server.output.write(event)
 }

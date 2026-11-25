@@ -152,7 +152,11 @@ func verifyWindowsHello(request authHelloVerifyRequest) authVerificationResponse
 	}
 	result, err := windowsHelloOperation(true, "Unlock Wormhole", ownerWindow)
 	if err != nil {
+		logOperationFailure("Windows Hello verification", err)
 		return authVerificationResponse{Message: "Windows Hello isn't available."}
+	}
+	if result != 0 && result != 6 { // User cancellation is expected.
+		logWarn("Windows Hello verification was declined (result=%d)", result)
 	}
 	switch result {
 	case 0:

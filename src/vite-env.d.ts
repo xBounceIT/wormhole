@@ -841,6 +841,9 @@ interface Window {
     unlockStartup(request: WormholeAuthVerificationRequest): Promise<WormholeStartupUnlock>;
     markStartupReady(): void;
     markWorkspaceFailed(): void;
+    reportRendererFailure(
+      reason: 'uncaught-error' | 'unhandled-rejection' | 'workspace-mount',
+    ): void;
     setTitlebarTheme(theme: 'light' | 'dark'): void;
     loadWorkspace(): Promise<WormholeWorkspaceSnapshot>;
     loadWorkspaceNodeNotes(request: { nodeId: string }): Promise<{ notes: string }>;

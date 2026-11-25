@@ -443,6 +443,7 @@ func authVerify(databasePath string, request authVerifyRequest) (authVerificatio
 		return authVerificationResponse{}, err
 	}
 	if corrupted {
+		logError("saved application lock could not be read")
 		return authVerificationResponse{Message: "Wormhole can't read your saved app lock."}, nil
 	}
 	verifier := authVerifierForFallback(document, method)

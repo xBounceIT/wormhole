@@ -174,11 +174,10 @@ func TestSSHInputFailuresAreLoggedWithoutSecrets(t *testing.T) {
 		for _, failure := range []string{"overflow", "remote write"} {
 			t.Run(level+"/"+failure, func(t *testing.T) {
 				databasePath := filepath.Join(t.TempDir(), "wormhole.db")
-				logger, err := newAppLogger(databasePath)
-				if err != nil {
+				logger := newAppLogger(databasePath, nil)
+				if _, err := writeLogLevel(databasePath, level); err != nil {
 					t.Fatal(err)
 				}
-				logger.level = level
 				previous := appLog
 				appLog = logger
 				t.Cleanup(func() { logger.close(); appLog = previous })
@@ -211,7 +210,7 @@ func TestSSHInputFailuresAreLoggedWithoutSecrets(t *testing.T) {
 					t.Fatal(err)
 				}
 				logs := string(contents)
-				if !strings.Contains(logs, "[ERR] SSH input") || !strings.Contains(logs, `session="failure"`) ||
+				if !strings.Contains(logs, "SSH input") || !strings.Contains(logs, `session="failure"`) ||
 					!strings.Contains(logs, "input_bytes=19") || !strings.Contains(logs, "traceback:") {
 					t.Fatalf("missing safe input diagnostics: %s", logs)
 				}

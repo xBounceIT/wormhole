@@ -661,9 +661,11 @@ func (c *rdpController) readNativeEvents(process *rdpProcess, stdout io.ReadClos
 	defer close(process.nativeEventsDone)
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 8*1024), 64*1024)
+	var reportInvalidEvent sync.Once
 	for scanner.Scan() {
 		var nativeEvent rdpNativeEvent
 		if err := json.Unmarshal(scanner.Bytes(), &nativeEvent); err != nil {
+			reportInvalidEvent.Do(func() { logOperationFailure("decode RDP helper event", err) })
 			continue
 		}
 		event := nativeEvent.rdpEvent
@@ -686,6 +688,9 @@ func (c *rdpController) readNativeEvents(process *rdpProcess, stdout io.ReadClos
 		// The helper may include a request id for command acknowledgements, but it must never
 		// echo profile or password fields across this boundary.
 		writeRdpEvent(event)
+	}
+	if err := scanner.Err(); err != nil {
+		logOperationFailure("read RDP helper stream", err)
 	}
 }
 
@@ -1058,10 +1063,23 @@ func (p *rdpProcess) write(command rdpCommand) error {
 }
 
 func writeRdpEvent(event rdpEvent) {
+	switch event.Type {
+	case "error", "logonError", "fatalError":
+		logError("RDP %s (backend=%s, code=%d, credentialFailure=%t)",
+			event.Type, event.Backend, event.Code, event.CredentialFailure)
+	case "disconnected", "exited":
+		if event.Code != 0 {
+			logError("RDP connection %s with an error (backend=%s, code=%d)", event.Type, event.Backend, event.Code)
+		}
+	}
 	rdpOutputMu.Lock()
 	defer rdpOutputMu.Unlock()
-	_ = json.NewEncoder(os.Stdout).Encode(event)
+	if err := json.NewEncoder(os.Stdout).Encode(event); err != nil {
+		reportRdpWriteFailure.Do(func() { logOperationFailure("write RDP stream", err) })
+	}
 }
+
+var reportRdpWriteFailure sync.Once
 
 func rdpRequestMetadata(data []byte) (string, string) {
 	var envelope struct {
