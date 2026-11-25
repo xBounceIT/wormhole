@@ -254,7 +254,7 @@ export function SidebarLayout({
     <SidebarPinContext.Provider
       value={{ pinned, busy, toggle, visible, sidebarId, buttonRef: pinButton, interactions }}
     >
-      <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex min-h-0 flex-1 flex-col bg-sidebar">
         {header}
         {error ? (
           <p className="shrink-0 px-3 py-2 text-xs text-destructive" role="alert">
@@ -275,7 +275,7 @@ export function SidebarLayout({
             <aside
               aria-hidden={!visible}
               aria-label="Sidebar"
-              className="absolute inset-y-0 left-0 flex flex-col overflow-hidden border-r border-sidebar-border bg-sidebar data-[overlay=true]:shadow-xl"
+              className="absolute inset-y-0 left-0 flex flex-col overflow-hidden border-sidebar-border bg-sidebar data-[overlay=true]:border-r data-[overlay=true]:shadow-xl"
               data-expanded={visible}
               data-overlay={!pinned}
               data-sidebar-surface=""
@@ -290,7 +290,7 @@ export function SidebarLayout({
                 </ContextMenuOverlayProvider>
               </div>
               <div
-                className="relative z-20 shrink-0 border-t border-sidebar-border p-1"
+                className="relative z-20 mx-3 shrink-0 border-t border-sidebar-border py-2"
                 data-sidebar-navigation=""
               >
                 {navigation}
@@ -315,17 +315,22 @@ export function SidebarLayout({
               }}
               panelRef={panelRef}
             />
-            {/* Both 1px borders form the visible divider. */}
+            {/* The canvas border is the divider. Center the grip on that border. */}
             <ResizableHandle
               className={
                 pinned
-                  ? 'z-40 [&>div]:absolute [&>div]:top-1/2 [&>div]:left-0 [&>div]:-translate-1/2'
+                  ? 'z-40 bg-transparent [&>div]:absolute [&>div]:top-1/2 [&>div]:left-[calc(100%+0.5px)] [&>div]:-translate-1/2'
                   : 'hidden'
               }
               disabled={!pinned}
               withHandle
             />
-            <ResizablePanel className="min-h-0" minSize="54%">
+            <ResizablePanel
+              className="min-h-0 rounded-tl-xl border-t border-l border-border bg-background"
+              data-workspace-canvas=""
+              minSize="54%"
+              style={{ overflow: 'hidden' }}
+            >
               {children}
             </ResizablePanel>
           </ResizablePanelGroup>

@@ -140,7 +140,7 @@ test('pinned and auto-hide sidebars preserve layout, focus, menus and saved pref
                   require('node:fs').writeFileSync(require('node:path').join(process.env.WORMHOLE_TEST_SCREENSHOTS, 'sidebar-' + stage + suffix + '.png'), capture.toPNG());
                 }
                 if (checkHandle) {
-                  const bounds = await window.webContents.executeJavaScript('(() => { const separator = document.querySelector("[data-slot=resizable-handle]").getBoundingClientRect(); const grip = document.querySelector("[data-slot=resizable-handle] > div").getBoundingClientRect(); return { left: separator.left, centerX: separator.left + separator.width / 2, centerY: grip.top + grip.height / 2 }; })()');
+                  const bounds = await window.webContents.executeJavaScript('(() => { const canvas = document.querySelector("[data-workspace-canvas] > div"); const dividerLeft = canvas.getBoundingClientRect().left; const borderWidth = parseFloat(getComputedStyle(canvas).borderLeftWidth); const grip = document.querySelector("[data-slot=resizable-handle] > div").getBoundingClientRect(); return { left: dividerLeft, centerX: dividerLeft + borderWidth / 2, centerY: grip.top + grip.height / 2 }; })()');
                   // Hidden-window captures can precede the compositor's updated frame.
                   // Retry rendering, while retaining every physical-pixel assertion.
                   for (let paint = 0; ; paint++) {
@@ -218,7 +218,7 @@ test('pinned and auto-hide sidebars preserve layout, focus, menus and saved pref
     );
     const electron = require('electron') as string;
     const needsDisplay = process.platform === 'linux' && !environment.DISPLAY;
-    for (const scale of [1, 2]) {
+    for (const scale of [1, 1.25, 1.5, 2]) {
       const args = [harnessPath, String(scale)];
       const { stdout, stderr } = await promisify(execFile)(
         needsDisplay ? 'xvfb-run' : electron,
