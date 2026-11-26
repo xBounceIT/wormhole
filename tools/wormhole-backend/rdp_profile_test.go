@@ -65,9 +65,9 @@ func TestExplicitExternalRdpProfileNeverReturnsManualCredentials(t *testing.T) {
 	}
 	defer database.Close()
 	manager := &vncManager{database: database, databasePath: databasePath}
-	profile, err := manager.resolveRdpRuntimeProfile(nodeID, &rdpManualCredential{
+	profile, err := manager.resolveRdpRuntimeProfileWithCredential(nodeID, &rdpManualCredential{
 		Username: "operator", Domain: "CONTOSO", Password: "manual-secret",
-	})
+	}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +110,7 @@ func TestAzureAdRdpCredentialForcesSystemClientBeforeSecretResolution(t *testing
 	}
 	defer database.Close()
 	manager := &vncManager{database: database, databasePath: databasePath}
-	profile, err := manager.resolveRdpRuntimeProfile(nodeID, nil)
+	profile, err := manager.resolveRdpRuntimeProfileWithCredential(nodeID, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -289,7 +289,7 @@ WHERE Id = ?;`, leafID)
 		t.Fatal(err)
 	}
 	manager := &vncManager{database: database, databasePath: databasePath}
-	profile, err := manager.resolveRdpRuntimeProfile(leafID, nil)
+	profile, err := manager.resolveRdpRuntimeProfileWithCredential(leafID, nil, "")
 	database.Close()
 	if err != nil {
 		t.Fatal(err)
@@ -307,9 +307,9 @@ WHERE Id = ?;`, leafID)
 		t.Fatal(err)
 	}
 	manager = &vncManager{database: database, databasePath: databasePath}
-	manual, err := manager.resolveRdpRuntimeProfile(leafID, &rdpManualCredential{
+	manual, err := manager.resolveRdpRuntimeProfileWithCredential(leafID, &rdpManualCredential{
 		Username: "manual-user", Domain: "MANUAL", Password: "manual-secret",
-	})
+	}, "")
 	database.Close()
 	if err != nil {
 		t.Fatal(err)
@@ -351,7 +351,7 @@ func TestWorkspaceInlineRdpSecretSetPreserveClearAndNoRendererLeak(t *testing.T)
 		t.Fatal(err)
 	}
 	manager := &vncManager{database: database, databasePath: databasePath}
-	profile, err := manager.resolveRdpRuntimeProfile(nodeID, nil)
+	profile, err := manager.resolveRdpRuntimeProfileWithCredential(nodeID, nil, "")
 	if err != nil {
 		database.Close()
 		t.Fatal(err)
@@ -374,7 +374,7 @@ func TestWorkspaceInlineRdpSecretSetPreserveClearAndNoRendererLeak(t *testing.T)
 		t.Fatal(err)
 	}
 	manager = &vncManager{database: database, databasePath: databasePath}
-	external, err := manager.resolveRdpRuntimeProfile(nodeID, nil)
+	external, err := manager.resolveRdpRuntimeProfileWithCredential(nodeID, nil, "")
 	database.Close()
 	if err != nil {
 		t.Fatal(err)

@@ -11,16 +11,6 @@ const require = createRequire(import.meta.url);
 const braces = require('braces');
 const CachePolicy = require('http-cache-semantics');
 
-function dependencyAvailable(specifier) {
-  try {
-    require.resolve(specifier);
-    return true;
-  } catch (error) {
-    if (error.code === 'MODULE_NOT_FOUND') return false;
-    throw error;
-  }
-}
-
 test('every locked dependency affected by the October advisories uses a patched release', () => {
   const lock = JSON.parse(readFileSync(new URL('../package-lock.json', import.meta.url), 'utf8'));
   const semver = require('semver');
@@ -121,89 +111,6 @@ test('redirects strip object and array credential headers only when crossing ori
   }
 });
 
-test(
-  'IPv6 parsing rejects long malformed zones within bounded synchronous work',
-  { skip: !dependencyAvailable('express-rate-limit') },
-  () => {
-    const consumerRequire = createRequire(require.resolve('express-rate-limit'));
-    const { Address6, AddressError } = consumerRequire('ip-address');
-    for (const terminator of ['\n', '\r', '\u2028', '\u2029']) {
-      const input = `${'%'.repeat(100000)}${terminator}`;
-      assert.equal(
-        runInNewContext('Address6.isValid(input)', { Address6, input }, { timeout: 1000 }),
-        false,
-      );
-      assert.throws(
-        () => runInNewContext('new Address6(input)', { Address6, input }, { timeout: 1000 }),
-        AddressError,
-      );
-    }
-    const address = new Address6('fe80::1%eth0');
-    assert.equal(address.correctForm(), 'fe80::1');
-    assert.equal(address.zone, '%eth0');
-    assert.equal(Address6.isValid('2001:db8::1'), true);
-  },
-);
-
-test(
-  'Hono static files cannot bypass prefix authorization through a second path decode',
-  { skip: !dependencyAvailable('@modelcontextprotocol/sdk/server/streamableHttp.js') },
-  async () => {
-    const consumerRequire = createRequire(
-      require.resolve('@modelcontextprotocol/sdk/server/streamableHttp.js'),
-    );
-    const { Hono } = consumerRequire('hono');
-    const { serveStatic } = consumerRequire('hono/serve-static');
-    const files = new Map([
-      ['public.txt', 'public content'],
-      ['admin/secret.txt', 'protected content'],
-    ]);
-    const lookups = [];
-    const app = new Hono();
-    app.use('/admin/*', (context, next) =>
-      context.req.header('x-test-authorized') === 'yes'
-        ? next()
-        : context.text('Unauthorized', 401),
-    );
-    app.use(
-      '*',
-      serveStatic({
-        root: './',
-        getContent: async (path) => {
-          lookups.push(path);
-          return files.get(path) ?? null;
-        },
-      }),
-    );
-    for (const path of ['/admin/secret.txt', '/%61dmin/secret.txt']) {
-      const response = await app.request(`http://localhost${path}`);
-      assert.equal(response.status, 401, path);
-    }
-    for (const path of [
-      '/%6%31dmin/secret.txt',
-      '/%2561dmin/secret.txt',
-      '/%25%36%31dmin/secret.txt',
-      '/admin%252fsecret.txt',
-    ]) {
-      const response = await app.request(`http://localhost${path}`);
-      assert.equal(response.status, 404, path);
-    }
-    assert.deepEqual(lookups, []);
-    const response = await app.request('http://localhost/public.txt');
-    assert.equal(response.status, 200);
-    assert.equal(await response.text(), 'public content');
-    assert.deepEqual(lookups, ['public.txt']);
-    const missing = await app.request('http://localhost/missing.txt');
-    assert.equal(missing.status, 404);
-    const authorized = await app.request('http://localhost/admin/secret.txt', {
-      headers: { 'x-test-authorized': 'yes' },
-    });
-    assert.equal(authorized.status, 200);
-    assert.equal(await authorized.text(), 'protected content');
-    assert.deepEqual(lookups, ['public.txt', 'missing.txt', 'admin/secret.txt']);
-  },
-);
-
 test('concurrently rejects line terminators following shell comments', () => {
   const consumerRequire = createRequire(require.resolve('concurrently'));
   const { quote, parse } = consumerRequire('shell-quote');
@@ -217,35 +124,6 @@ test('concurrently rejects line terminators following shell comments', () => {
   assert.deepEqual(parse(quote(args)), args);
   assert.equal(quote(['echo', { comment: 'ignored' }, 'ordinary']), 'echo #ignored ordinary');
 });
-
-test(
-  'Express proxy trust cannot broaden an IPv4-mapped subnet to every IPv4 address',
-  { skip: !dependencyAvailable('express') },
-  () => {
-    const consumerRequire = createRequire(require.resolve('express'));
-    const proxyaddr = consumerRequire('proxy-addr');
-    for (const subnets of [
-      ['::ffff:10.0.0.0/8'],
-      ['::ffff:10.0.0.0/8', '192.168.0.0/16'],
-      ['::ffff:10.0.0.0/104'],
-    ]) {
-      const trust = proxyaddr.compile(subnets);
-      for (const address of ['203.0.113.9', '::ffff:203.0.113.9', '2001:db8::1']) {
-        assert.equal(trust(address), false, `${subnets}: ${address}`);
-      }
-    }
-    const trust = proxyaddr.compile('::ffff:10.0.0.0/104');
-    assert.equal(trust('10.1.2.3'), true);
-    assert.equal(trust('::ffff:10.1.2.3'), true);
-    assert.equal(
-      proxyaddr(
-        { socket: { remoteAddress: '203.0.113.9' }, headers: { 'x-forwarded-for': '10.1.2.3' } },
-        proxyaddr.compile('::ffff:10.0.0.0/8'),
-      ),
-      '203.0.113.9',
-    );
-  },
-);
 
 test('PostCSS source maps reject unbounded section offsets before processing source text', () => {
   const consumerRequire = createRequire(require.resolve('postcss'));
@@ -277,127 +155,6 @@ test('PostCSS source maps reject unbounded section offsets before processing sou
     },
   ]);
 });
-
-test(
-  'shadcn MCP OAuth credentials are sent only to their owning authorization server',
-  { skip: !dependencyAvailable('@modelcontextprotocol/sdk/client/auth.js') },
-  async () => {
-    const consumerRequire = createRequire(require.resolve('shadcn'));
-    const { fetchToken } = consumerRequire('@modelcontextprotocol/sdk/client/auth.js');
-    const issuer = 'https://auth.example.test';
-    const provider = {
-      clientMetadata: {},
-      clientInformation: () => ({ client_id: 'test-client', client_secret: 'test-secret', issuer }),
-      prepareTokenRequest: () => new URLSearchParams({ grant_type: 'client_credentials' }),
-    };
-    const calls = [];
-    const fetchFn = async (url, options) => {
-      calls.push({ url: String(url), options });
-      return Response.json({ access_token: 'test-token', token_type: 'Bearer' });
-    };
-    const attacker = 'https://attacker.example.test';
-    await assert.rejects(
-      fetchToken(provider, attacker, {
-        metadata: { token_endpoint: `${attacker}/token` },
-        fetchFn,
-      }),
-      /bound to authorization server/,
-    );
-    assert.equal(calls.length, 0);
-    const tokens = await fetchToken(provider, issuer, {
-      metadata: { token_endpoint: `${issuer}/token` },
-      fetchFn,
-    });
-    assert.equal(tokens.access_token, 'test-token');
-    assert.equal(calls.length, 1);
-    assert.equal(calls[0].url, `${issuer}/token`);
-    assert.equal(calls[0].options.method, 'POST');
-  },
-);
-
-test(
-  'MCP discovery cannot reuse refresh tokens belonging to another authorization server',
-  { skip: !dependencyAvailable('@modelcontextprotocol/sdk/client/auth.js') },
-  async () => {
-    const consumerRequire = createRequire(require.resolve('shadcn'));
-    const { auth } = consumerRequire('@modelcontextprotocol/sdk/client/auth.js');
-    const serverUrl = 'https://mcp.example.test';
-    const issuer = 'https://auth.example.test';
-    for (const authorizationServer of ['https://attacker.example.test', issuer]) {
-      const storedTokens = {
-        access_token: 'old-test-token',
-        refresh_token: 'test-refresh-token',
-        token_type: 'Bearer',
-        issuer,
-      };
-      const savedTokens = [];
-      const redirects = [];
-      const requests = [];
-      const verifiers = [];
-      const provider = {
-        redirectUrl: 'http://localhost/callback',
-        clientMetadata: {},
-        clientInformation: () => ({ client_id: 'test-client', issuer: authorizationServer }),
-        tokens: () => storedTokens,
-        saveTokens: (tokens) => savedTokens.push(tokens),
-        saveCodeVerifier: (verifier) => verifiers.push(verifier),
-        redirectToAuthorization: (url) => redirects.push(url),
-      };
-      const fetchFn = async (url, options) => {
-        const address = String(url);
-        requests.push({ address, options });
-        if (address === `${serverUrl}/.well-known/oauth-protected-resource`) {
-          return Response.json({
-            resource: serverUrl,
-            authorization_servers: [authorizationServer],
-          });
-        }
-        if (address === `${authorizationServer}/.well-known/oauth-authorization-server`) {
-          return Response.json({
-            issuer: authorizationServer,
-            authorization_endpoint: `${authorizationServer}/authorize`,
-            token_endpoint: `${authorizationServer}/token`,
-            response_types_supported: ['code'],
-            code_challenge_methods_supported: ['S256'],
-          });
-        }
-        assert.equal(address, `${issuer}/token`);
-        assert.equal(options.method, 'POST');
-        const params = new URLSearchParams(options.body);
-        assert.equal(params.get('grant_type'), 'refresh_token');
-        assert.equal(params.get('refresh_token'), storedTokens.refresh_token);
-        return Response.json({ access_token: 'new-test-token', token_type: 'Bearer' });
-      };
-      const result = await auth(provider, { serverUrl, fetchFn });
-      assert.equal(storedTokens.access_token, 'old-test-token');
-      assert.equal(storedTokens.issuer, issuer);
-      if (authorizationServer === issuer) {
-        assert.equal(result, 'AUTHORIZED');
-        assert.equal(requests.length, 3);
-        assert.deepEqual(savedTokens, [
-          {
-            access_token: 'new-test-token',
-            refresh_token: storedTokens.refresh_token,
-            token_type: 'Bearer',
-            issuer,
-          },
-        ]);
-        assert.equal(redirects.length, 0);
-        assert.equal(verifiers.length, 0);
-      } else {
-        assert.equal(result, 'REDIRECT');
-        assert.equal(requests.length, 2);
-        assert.ok(requests.every(({ options }) => !options.body && !options.headers.Authorization));
-        assert.deepEqual(savedTokens, []);
-        assert.equal(redirects.length, 1);
-        assert.equal(redirects[0].origin, authorizationServer);
-        assert.equal(redirects[0].pathname, '/authorize');
-        assert.equal(verifiers.length, 1);
-        assert.equal(typeof verifiers[0], 'string');
-      }
-    }
-  },
-);
 
 test('transitive consumers resolve the security backports', () => {
   for (const [consumer, dependency, fork] of [

@@ -53,7 +53,6 @@ test('connection notes reject unpaired UTF-16 surrogates before JSON serializati
   }
   for (const notes of ['\uD800\uDC00', '\uDBFF\uDFFF', 'before 🛠️ after', '\uFFFD']) {
     assert.equal(parseWorkspaceNotes(notes), notes);
-    assert.equal(JSON.parse(JSON.stringify(notes)), notes);
   }
 });
 

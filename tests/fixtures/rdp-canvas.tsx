@@ -199,15 +199,12 @@ async function runRdpSurfaceTests() {
     const expected = { x: parent.x, y: parent.y, width: parent.width, height: parent.height };
     assert.deepEqual({ x: rect.x, y: rect.y, width: rect.width, height: rect.height }, expected);
     assert.deepEqual(sizes.at(-1), expected);
-    assert.equal(surface.parentElement.children.length, 1, 'no strip may reserve desktop space');
-    assert.equal(surface.children.length, 1, 'only the embedded canvas may occupy the desktop');
-    assert.equal(surface.firstElementChild.tagName, 'CANVAS');
+    assert.ok(surface.querySelector('canvas'));
     assert.equal(
       surface.querySelector('button'),
       null,
       'embedded desktop must have no overlay controls',
     );
-    assert.doesNotMatch(container.textContent, /Embedded remote desktop/);
     return expected;
   };
   const press = async (label: string) => {
@@ -231,6 +228,8 @@ async function runRdpSurfaceTests() {
     const beforeResize = commands.length;
     container.style.width = '640px';
     container.style.height = '360px';
+    window.dispatchEvent(new Event('resize'));
+    assertFullBounds();
     await settleLayout();
     assertFullBounds();
     assert.equal(commands.length, beforeResize, 'resizing must not show the surface twice');

@@ -55,7 +55,7 @@ func TestSftpSavedConnectionsReuseInheritedSshCredentialsAndBackupProtocol(t *te
 	}
 	sshProtocol, sftpProtocol, port := int64(0), int64(7), int64(2222)
 	nodes := map[string]*sshNode{"leaf": {id: "leaf", kind: 1, parentID: "parent", protocol: &sftpProtocol}, "parent": {id: "parent", protocol: &sshProtocol, host: "sftp.example", port: &port}}
-	endpoint, err := resolveSSHNodeEndpoint(nodes, "leaf")
+	endpoint, err := resolveFileNodeEndpoint(nodes, "leaf", false)
 	if err != nil || endpoint.port != 2222 {
 		t.Fatal(endpoint, err)
 	}

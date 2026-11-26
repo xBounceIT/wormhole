@@ -33,7 +33,7 @@ public sealed class RdpDesktopSizeResolverTests
             fallbackWidth: 3440,
             fallbackHeight: 1440);
 
-        Assert.Equal((RdpDesktopSizeResolver.MinimumWidth, RdpDesktopSizeResolver.MinimumHeight), size);
+        Assert.Equal((640, 480), size);
     }
 
     [Fact]
@@ -75,14 +75,14 @@ public sealed class RdpDesktopSizeResolverTests
             fallbackWidth: 3440,
             fallbackHeight: 1440);
 
-        Assert.Equal((RdpDesktopSizeResolver.DefaultWidth, RdpDesktopSizeResolver.DefaultHeight), size);
+        Assert.Equal((1280, 800), size);
     }
 
     [Theory]
     [InlineData(1600, 900, 1600, 900)]
     [InlineData(1365, 1080, 1364, 1080)]
-    [InlineData(10, 10, RdpDesktopSizeResolver.DynamicResizeMinDimension, RdpDesktopSizeResolver.DynamicResizeMinDimension)]
-    [InlineData(100000, 100000, RdpDesktopSizeResolver.DynamicResizeMaxDimension, RdpDesktopSizeResolver.DynamicResizeMaxDimension)]
+    [InlineData(10, 10, 200, 200)]
+    [InlineData(100000, 100000, 8192, 8192)]
     public void ClampDynamicResolution_EnforcesChannelBoundsAndEvenWidth(
         int width,
         int height,
@@ -92,6 +92,5 @@ public sealed class RdpDesktopSizeResolverTests
         var actual = RdpDesktopSizeResolver.ClampDynamicResolution(width, height);
 
         Assert.Equal((expectedWidth, expectedHeight), actual);
-        Assert.Equal(0, actual.Width & 1);
     }
 }

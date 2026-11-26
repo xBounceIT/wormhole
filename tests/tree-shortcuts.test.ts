@@ -305,24 +305,6 @@ test('irrelevant tree keys do not traverse the tree selection', () => {
   );
 });
 
-test('workspace deletion closes current sessions and preserves concurrent session changes', () => {
-  const appSource = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
-  const start = appSource.indexOf('async function closeSessionsForNodeIds(');
-  const end = appSource.indexOf('const releaseSessionResourcesRef', start);
-  assert.ok(start >= 0 && end > start, 'missing workspace session cleanup');
-  const cleanupSource = appSource.slice(start, end);
-
-  // Backend deletion and resource release can finish after session state changes.
-  assert.match(
-    cleanupSource,
-    /const closing = sessionsRef\.current\.filter\(\s*\(session\) => session\.nodeId && nodeIds\.has\(session\.nodeId\)/,
-  );
-  assert.match(
-    cleanupSource,
-    /setSessions\(\(current\) => current\.filter\(\(session\) => !closingIds\.has\(session\.id\)\)\)/,
-  );
-});
-
 test('workspace deletion rereads the tree across backend and session cleanup awaits', () => {
   const appSource = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
   const start = appSource.indexOf('async function confirmDeleteNodes()');

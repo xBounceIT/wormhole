@@ -357,12 +357,6 @@ func buildWebURLWithPath(scheme, host string, port int, httpPath string) (string
 	return uri.String(), nil
 }
 
-// parseWebAddress remains available to callers that only need the network endpoint.
-func parseWebAddress(raw string) (string, int, error) {
-	host, port, _, err := parseWebAddressTarget(raw)
-	return host, port, err
-}
-
 // parseWebAddressTarget is intentionally compatible with the legacy single address field: users
 // can enter host, host:port, an IPv6 literal, or paste an HTTP(S) URL. The selected protocol wins,
 // while the URL path, query, and fragment remain part of the logical browser target.

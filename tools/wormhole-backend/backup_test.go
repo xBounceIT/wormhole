@@ -1290,7 +1290,7 @@ func TestBackupBitwardenCacheUsesLegacyLastEntryWinsNormalization(t *testing.T) 
 		"lastSeenSyncUtc": "invalid", "updatedAtUtc": "invalid",
 	})
 	state := &backupImportState{resolvableCredentials: map[string]struct{}{}}
-	if err := importBackupBitwardenCache(database, []*backupObject{&first, &second}, state); err != nil {
+	if err := importBackupBitwardenCacheContext(t.Context(), database, []*backupObject{&first, &second}, state); err != nil {
 		t.Fatal(err)
 	}
 	var count int
@@ -1543,4 +1543,30 @@ func installBackupTestSecretStore(t *testing.T) {
 		credentialSecretDelete = previousDelete
 		backupUnprotectStoredSecret = previousUnprotect
 	})
+}
+
+func clearBackupPassword(database *sql.DB, id string) error {
+	mutation, err := prepareBackupPasswordMutation(database, id, nil)
+	if err != nil {
+		return err
+	}
+	transaction, err := database.Begin()
+	if err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = transaction.Rollback()
+		}
+	}()
+	if err := mutation.apply(transaction); err != nil {
+		return err
+	}
+	if err := transaction.Commit(); err != nil {
+		return err
+	}
+	committed = true
+	mutation.deletePreviousSecret()
+	return nil
 }

@@ -18,7 +18,13 @@ test('middle-click closes tabs without waiting for native teardown or restoring 
     assert.ok(start >= 0 && end > start, `Missing production section: ${from}`);
     return app.slice(start, end);
   };
-  const modules = ['session-layout', 'session-lifecycle', 'session-tab-state', 'file-protocol']
+  const modules = [
+    'session-layout',
+    'session-lifecycle',
+    'session-tab-state',
+    'file-protocol',
+    'app-shortcuts',
+  ]
     .map((name) => readFileSync(new URL(`../src/${name}.ts`, import.meta.url), 'utf8'))
     .join('\n')
     .replaceAll('export ', '');
@@ -28,7 +34,7 @@ test('middle-click closes tabs without waiting for native teardown or restoring 
     ${slice('function SessionsPage(', 'function SessionSurface({')}
     const IconButton = ({ label, children, ...props }) => <button aria-label={label} {...props}>{children}</button>;
     const SessionTabContextMenu = ({ children }) => children;
-    const SessionSurface = ({ session, isActive }) => <output data-surface={session.id} data-active={isActive}>{session.title}</output>;
+    const SessionSurface = ({ session, isActive, nativeSurfaceActive }) => <output data-surface={session.id} data-active={isActive} data-native-visible={nativeSurfaceActive}>{session.title}</output>;
     const PanelLeft = 'span', Zap = 'span', Bot = 'span', ProtocolIcon = 'span';
     const ArrowRightLeft = 'span', X = 'span', Button = 'button';
     const pendingReleases = [], releaseCalls = [], openedWeb = [], openedSsh = [];
@@ -101,7 +107,7 @@ test('middle-click closes tabs without waiting for native teardown or restoring 
       };
       return <>
         {pendingSessionClose ? <button id="confirm" disabled={sessionCloseBusy} onClick={confirmSessionClose}>Confirm</button> : null}
-        <SessionsPage sessions={sessions} selectedSession={sessions.find(session => session.id === selectedSessionId)}
+        <SessionsPage isWebSurfaceVisible sessions={sessions} selectedSession={sessions.find(session => session.id === selectedSessionId)}
           onCloseSession={closeSession} onSelectSession={setSelectedSessionId} />
       </>;
     }
@@ -231,14 +237,23 @@ test('middle-click closes tabs without waiting for native teardown or restoring 
 
     // Closing a split pane selects the survivor and collapses the empty pane.
     await mount([session('a'), session('b'), session('c')]);
+    const surface = document.querySelector('[data-surface="b"]');
     await React.act(async () => tab('b').dispatchEvent(new KeyboardEvent('keydown', {
       key: 'ArrowRight', altKey: true, shiftKey: true, bubbles: true, cancelable: true,
     })));
     assert.equal(document.querySelectorAll('[role="tablist"]').length, 2);
+    assert.equal(document.querySelector('[data-surface="b"]'), surface, 'moving panes remounted the live session');
+    const keypress = new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true });
+    surface.dispatchEvent(keypress);
+    assert.ok(isWormholeShortcutSuppressed(keypress));
     await nativeClick(tab('b'), 'middle');
     assert.equal(document.querySelectorAll('[role="tablist"]').length, 1);
     assert.ok(ids().includes(controls.selectedSessionId));
     selected(controls.selectedSessionId);
+    await React.act(async () => pendingReleases.splice(0).forEach(item => item.resolve()));
+    await React.act(async () => controls.append(session('b')));
+    assert.equal(document.querySelectorAll('[role="tablist"]').length, 1, 'reopening a tab must not revive its old split');
+    await nativeClick(tab('b'), 'middle');
     await React.act(async () => {
       const a = tab('a'), c = tab('c');
       assert.equal(aux(a).defaultPrevented, true);
@@ -247,6 +262,36 @@ test('middle-click closes tabs without waiting for native teardown or restoring 
     assert.deepEqual(ids(), []);
     assert.equal(controls.selectedSessionId, '');
     await React.act(async () => pendingReleases.splice(0).forEach(item => item.resolve()));
+
+    // A deleted node can take time to disconnect while another tab is opened.
+    await mount([{ ...session('old'), nodeId: 'deleted' }, session('kept')]);
+    const deletion = controls.closeSessionsForNodeIds(new Set(['deleted']));
+    await React.act(async () => controls.append(session('later')));
+    await React.act(async () => controls.setSelectedSessionId('later'));
+    await React.act(async () => {
+      pendingReleases.find(item => item.id === 'native-old').resolve();
+      await deletion;
+    });
+    assert.deepEqual(ids(), ['kept', 'later']);
+    selected('later');
+
+    for (const closeDraggedTab of [false, true]) {
+      await mount([session('dragged'), session('other')]);
+      const workspace = document.querySelector('[aria-label="Session pane workspace"]');
+      const rect = workspace.getBoundingClientRect();
+      const dataTransfer = new DataTransfer();
+      const drag = (target, type) => React.act(async () => target.dispatchEvent(new DragEvent(type, {
+        dataTransfer, bubbles: true, cancelable: true, clientX: rect.right - 10, clientY: rect.bottom - 100,
+      })));
+      await drag(tab('dragged'), 'dragstart');
+      await drag(workspace, 'dragover');
+      assert.match(workspace.textContent, /Drop to split right/);
+      assert.equal(document.querySelector('[data-surface="dragged"]').dataset.nativeVisible, 'false');
+      if (closeDraggedTab) await React.act(async () => controls.closeSession('dragged'));
+      else await drag(tab('dragged'), 'dragend');
+      assert.doesNotMatch(workspace.textContent, /Drop to split/);
+      assert.equal(document.querySelector('[data-active="true"]').dataset.nativeVisible, 'true');
+    }
 
     // A reconnect already waiting for web teardown must not start after its tab closes.
     await mount([session('web', 'https')]);

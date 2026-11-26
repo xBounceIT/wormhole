@@ -20,8 +20,8 @@ const tunnels: Tunnel[] = [
   { id: '11', name: 'Remote Office', kind: 'Other provider' },
 ];
 
-function Harness() {
-  const [records, setRecords] = useState(tunnels);
+function Harness({ initial }: { initial: Tunnel[] }) {
+  const [records, setRecords] = useState(initial);
   return (
     <TooltipProvider>
       <TunnelsPage
@@ -46,13 +46,21 @@ export async function run(columns: number, paneWidth = window.innerWidth) {
   const assert = (globalThis as typeof globalThis & { assert: typeof import('node:assert/strict') })
     .assert;
   const deleted: string[] = [];
+  const updated: Parameters<NonNullable<Window['wormhole']>['updateTunnel']>[0][] = [];
+  const importedProfile = Promise.withResolvers<{ contents: string }>();
+  const initialList = Promise.withResolvers<Tunnel[]>();
   let deletionAllowed = false;
   const readDetails = (id: string) => ({ id, name: 'Dublin', kind: 6, settings: {} });
   let pendingRead: Promise<ReturnType<typeof readDetails>> | undefined;
   Object.assign(window, {
     confirm: () => true,
     wormhole: {
-      listTunnels: async () => tunnels,
+      listTunnels: () => initialList.promise,
+      importOvpnProfile: () => importedProfile.promise,
+      updateTunnel: async (request: (typeof updated)[number]) => {
+        updated.push(request);
+        return request;
+      },
       onTunnelTestProgress: () => () => {},
       readTunnel: async (id: string) => pendingRead ?? readDetails(id),
       deleteTunnel: async (id: string) => {
@@ -68,7 +76,17 @@ export async function run(columns: number, paneWidth = window.innerWidth) {
   const root = createRoot(pane);
   const settleLayout = () =>
     new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
-  await act(async () => root.render(<Harness />));
+  // Wide layouts exercise deletion while a refresh is pending. Smaller
+  // layouts start empty and must populate from the successful bridge reply.
+  await act(async () => root.render(<Harness initial={columns >= 3 ? tunnels : []} />));
+  if (columns < 3) {
+    assert.equal(document.querySelector('[data-slot="card-title"]'), null);
+    await act(async () => initialList.resolve(tunnels));
+    assert.ok(
+      document.querySelector('[aria-label="Edit Berlin"]'),
+      'the bridge reply must populate the tunnel list',
+    );
+  }
   await act(settleLayout);
 
   const providerGroup = document.querySelector('[aria-label="Filter tunnels by provider"]')!;
@@ -122,6 +140,30 @@ export async function run(columns: number, paneWidth = window.innerWidth) {
     Math.abs(search.getBoundingClientRect().top - add.getBoundingClientRect().top) < 2,
     'Search and Add should share one row in the workspace pane',
   );
+  assert.ok(document.querySelector('ul[aria-label="VPN tunnels"]')?.contains(cards()[0]!));
+  const openEditor = async (kind: number, settings = {}) => {
+    pendingRead = Promise.resolve({ id: '3', name: 'Berlin', kind, settings });
+    await click(action('Edit Berlin'));
+    const dialog = document.querySelector<HTMLElement>('[role="dialog"][data-state="open"]')!;
+    const button = (label: string) =>
+      [...dialog.querySelectorAll('button')].find((item) => item.textContent === label)!;
+    return { dialog, button };
+  };
+  if (window.innerHeight <= 560) {
+    const { dialog, button } = await openEditor(3, { Domain: 'example.test' });
+    const field = dialog.querySelector<HTMLElement>('#tunnel-VerifyX509Name')!;
+    field.scrollIntoView({ block: 'center' });
+    const bounds = field.getBoundingClientRect();
+    assert.ok(
+      document.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2) ===
+        field,
+    );
+    const save = button('Save changes');
+    assert.ok(save.getBoundingClientRect().bottom <= window.innerHeight);
+    assert.ok(save.getBoundingClientRect().top >= bounds.bottom);
+    await closeDialog();
+    pendingRead = undefined;
+  }
   if (columns < 3) return;
 
   assert.match(document.body.textContent!, /11 tunnels configured/);
@@ -189,10 +231,86 @@ export async function run(columns: number, paneWidth = window.innerWidth) {
   deletionAllowed = true;
   await click(action('Delete Dublin'));
   assert.deepEqual(deleted, ['5']);
+  await act(async () => initialList.resolve(tunnels));
   assert.equal(document.querySelector('[role="alert"]'), null);
   assert.equal(provider('Cisco Secure Client 0').getAttribute('aria-pressed'), 'true');
   assert.match(document.body.textContent!, /No matching tunnels/);
   await click(provider('All 10'));
   assert.equal(provider('Cisco Secure Client 0'), undefined);
   assert.match(document.body.textContent!, /10 tunnels configured/);
+
+  const providers = [
+    [
+      2,
+      {
+        UseSingleSignOn: 'switch',
+        TrustServerCertificate: 'switch',
+        TotpSecret: 'password',
+        ServerCertSha256Pin: 'text',
+      },
+    ],
+    [3, { TrustServerCertificate: 'switch', VerifyX509Name: 'text' }],
+    [4, { UseOtp: 'checkbox', TrustServerCertificate: 'checkbox' }],
+    [6, { TrustServerCertificate: 'checkbox' }],
+    [
+      7,
+      {
+        Host: 'text',
+        Port: 'number',
+        Username: 'text',
+        Password: 'password',
+        ServerCertSha256Pin: 'text',
+        Mtu: 'number',
+      },
+    ],
+  ] as const;
+  for (const [kind, fields] of providers) {
+    const { dialog } = await openEditor(kind);
+    await click(
+      [...dialog.querySelectorAll('button')].find((item) => /advanced/i.test(item.textContent!))!,
+    );
+    for (const [key, type] of Object.entries(fields)) {
+      const control = dialog.querySelector<HTMLInputElement | HTMLButtonElement>('#tunnel-' + key)!;
+      assert.ok(control.labels?.[0]?.textContent, 'Missing label for ' + key);
+      assert.equal(control.getAttribute('role') ?? control.type, type, key);
+      if (type === 'switch' || type === 'checkbox') {
+        const before = control.getAttribute('aria-checked');
+        await click(control as HTMLButtonElement);
+        assert.equal(control.getAttribute('aria-checked'), before === 'true' ? 'false' : 'true');
+      }
+    }
+    if (kind === 2) {
+      assert.ok(dialog.querySelector('#tunnel-UseSamlCallback'));
+      assert.ok(dialog.querySelector<HTMLInputElement>('#tunnel-Username')!.disabled);
+      assert.equal(dialog.querySelector<HTMLInputElement>('#tunnel-Realm')!.disabled, false);
+      await click(dialog.querySelector<HTMLButtonElement>('#tunnel-UseSingleSignOn')!);
+      assert.equal(dialog.querySelector('#tunnel-UseSamlCallback'), null);
+    }
+    await closeDialog();
+  }
+
+  for (const authMode of [1, 2]) {
+    const { dialog } = await openEditor(3, { AuthMode: authMode });
+    assert.equal(
+      dialog.querySelector('#tunnel-AuthMode')?.textContent,
+      authMode === 1 ? 'Username and password' : 'SAML',
+    );
+    assert.equal(Boolean(dialog.querySelector('#tunnel-Username')), authMode === 1);
+    assert.equal(
+      Boolean(dialog.querySelector('input#tunnel-Password[type="password"]')),
+      authMode === 1,
+    );
+    await closeDialog();
+  }
+
+  const { dialog, button } = await openEditor(1, { ProfileOvpn: 'original profile' });
+  const importButton = button('Import from file…');
+  await click(importButton);
+  assert.equal(importButton.disabled, true);
+  await act(async () => importedProfile.resolve({ contents: 'client\nremote vpn.example.test' }));
+  assert.equal(dialog.querySelector('textarea')!.value, 'client\nremote vpn.example.test');
+  assert.equal(updated.length, 0);
+  await click(button('Save changes'));
+  assert.equal(updated.length, 1);
+  assert.equal(updated[0]!.settings.ProfileOvpn, 'client\nremote vpn.example.test');
 }

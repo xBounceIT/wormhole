@@ -500,10 +500,6 @@ func resolveRdpTargetFromChain(chain []map[string]any) (string, int, error) {
 	return normalizeRdpTarget(host, port)
 }
 
-func (m *vncManager) resolveRdpRuntimeProfile(nodeID string, manual *rdpManualCredential) (rdpProfile, error) {
-	return m.resolveRdpProfile(nodeID, manual, false, "")
-}
-
 func (m *vncManager) resolveRdpRuntimeProfileWithCredential(
 	nodeID string,
 	manual *rdpManualCredential,

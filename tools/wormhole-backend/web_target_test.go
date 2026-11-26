@@ -144,9 +144,9 @@ func TestParseWebAddressCoversLegacyAddressForms(t *testing.T) {
 		{name: "bracketed IPv6", raw: "[fd00::1]", host: "fd00::1"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			host, port, err := parseWebAddress(test.raw)
+			host, port, _, err := parseWebAddressTarget(test.raw)
 			if err != nil || host != test.host || port != test.port {
-				t.Fatalf("parseWebAddress(%q) = %q, %d, %v", test.raw, host, port, err)
+				t.Fatalf("parseWebAddressTarget(%q) = %q, %d, %v", test.raw, host, port, err)
 			}
 		})
 	}
@@ -160,7 +160,7 @@ func TestParseWebAddressCoversLegacyAddressForms(t *testing.T) {
 		":443",
 		"not:an:ipv6",
 	} {
-		if _, _, err := parseWebAddress(raw); err == nil {
+		if _, _, _, err := parseWebAddressTarget(raw); err == nil {
 			t.Fatalf("parseWebAddress accepted %q", raw)
 		}
 	}

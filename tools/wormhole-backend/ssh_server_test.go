@@ -4179,3 +4179,7 @@ func TestDialNativeSSHUsesGoSSHClientForPasswordAndPTY(t *testing.T) {
 		})
 	}
 }
+
+func (native *sshNativeSession) runSftpOperation(command sshWireCommand) error {
+	return native.runSftpOperationForGeneration(command, native.sftpGenerationSnapshot())
+}

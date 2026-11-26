@@ -181,10 +181,17 @@ function browserAuthHarness(
         callback: (result: { cancel?: boolean }) => void,
       ) => void)
     | null = null;
+  type CertificateVerifier = (
+    request: { hostname: string },
+    done: (result: number) => void,
+  ) => void;
+  let verifyCertificate: CertificateVerifier | undefined;
   const browserSession = {
     setPermissionRequestHandler() {},
     setPermissionCheckHandler() {},
-    setCertificateVerifyProc() {},
+    setCertificateVerifyProc(verifier: CertificateVerifier) {
+      verifyCertificate = verifier;
+    },
     async clearStorageData() {
       storageClears++;
     },
@@ -340,6 +347,14 @@ function browserAuthHarness(
     diagnostics,
     backend,
     browserSession,
+    certificateResult(hostname: string) {
+      assert.ok(verifyCertificate);
+      let result: number | undefined;
+      verifyCertificate({ hostname }, (code) => {
+        result = code;
+      });
+      return result;
+    },
     get storageClears() {
       return storageClears;
     },
@@ -1559,16 +1574,25 @@ test('WatchGuard browser profiles isolate cached certificate decisions by origin
   );
 });
 
-test('certificate host matching normalizes DNS spelling and IPv6 brackets without broadening scope', () => {
-  assert.equal(isSameCertificateHostname('FIREBOX.EXAMPLE.TEST', 'firebox.example.test'), true);
-  assert.equal(isSameCertificateHostname('firebox.example.test.', 'firebox.example.test'), true);
-  assert.equal(isSameCertificateHostname('2001:db8::1', '[2001:db8::1]'), true);
-  assert.equal(isSameCertificateHostname('[2001:DB8::1]', '[2001:db8::1]'), true);
-  assert.equal(
-    isSameCertificateHostname('firebox.example.test.evil', 'firebox.example.test'),
-    false,
-  );
-  assert.equal(isSameCertificateHostname('2001:db8::2', '[2001:db8::1]'), false);
+test('WatchGuard delegates certificate verification except for its explicitly trusted gateway', async (t) => {
+  for (const [origin, matching, other] of [
+    [
+      'https://firebox.example.test',
+      ['FIREBOX.EXAMPLE.TEST', 'firebox.example.test.'],
+      'firebox.example.test.evil',
+    ],
+    ['https://[2001:db8::1]', ['2001:db8::1', '[2001:DB8::1]'], '2001:db8::2'],
+  ] as const) {
+    for (const ignoreCertificateErrors of [false, true]) {
+      const auth = browserAuthHarness(t, { urls: [origin], ignoreCertificateErrors });
+      await setImmediate();
+      for (const host of matching)
+        assert.equal(auth.certificateResult(host), ignoreCertificateErrors ? 0 : -3);
+      assert.equal(auth.certificateResult(other), -3);
+      auth.window.destroy();
+      await auth.finished;
+    }
+  }
 });
 
 test('consecutive Fortinet windows use distinct temporary profiles even for the same gateway', async (t) => {

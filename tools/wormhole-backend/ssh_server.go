@@ -2373,10 +2373,6 @@ func (native *sshNativeSession) startSftpOperation(command sshWireCommand) {
 	}()
 }
 
-func (native *sshNativeSession) runSftpOperation(command sshWireCommand) error {
-	return native.runSftpOperationForGeneration(command, native.sftpGenerationSnapshot())
-}
-
 func (native *sshNativeSession) sftpGenerationSnapshot() uint64 {
 	native.sftpMu.Lock()
 	defer native.sftpMu.Unlock()
@@ -4017,10 +4013,6 @@ type sshNodeEndpoint struct {
 	protocol int64
 	host     string
 	port     int
-}
-
-func resolveSSHNodeEndpoint(nodes map[string]*sshNode, nodeID string) (sshNodeEndpoint, error) {
-	return resolveFileNodeEndpoint(nodes, nodeID, false)
 }
 
 func resolveFileNodeEndpoint(nodes map[string]*sshNode, nodeID string, smb bool) (sshNodeEndpoint, error) {

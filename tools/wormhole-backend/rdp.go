@@ -1111,10 +1111,6 @@ func locateFreeRdp(explicit string) (string, error) {
 	return "", errors.New("no compatible Remote Desktop client is installed; install a supported system client and try again")
 }
 
-func freeRdpCandidates() []string {
-	return freeRdpCandidatesForOS(runtime.GOOS)
-}
-
 func freeRdpCandidatesForExecutable(goos, executable string) []string {
 	candidates := freeRdpCandidatesForOS(goos)
 	if goos == "darwin" && executable != "" {

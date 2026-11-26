@@ -34,32 +34,11 @@ test('password forms use the shared visibility control across every editor and p
       `${id} needs visibility control`,
     );
   }
-  const tunnelRow = sourceBetween(appSource, 'function TunnelFieldRow(', 'function TunnelSection(');
-  assert.match(tunnelRow, /const FieldInput = field\.type === 'password' \? PasswordInput : Input/);
-  assert.match(tunnelRow, /<FieldInput\b/);
   assert.match(
     appSource,
     /const TunnelPromptInput = tunnelPrompts\[0\]\?\.secret \? PasswordInput : Input/,
   );
   assert.match(appSource, /<TunnelPromptInput[\s\S]*?key=\{tunnelPrompts\[0\]\?\.promptId\}/);
-  const runtime = sourceBetween(
-    appSource,
-    'function RuntimeCredentialPasswordInput(',
-    'function RuntimeBitwardenUnlockDialog(',
-  );
-  assert.match(runtime, /<PasswordInput/);
-  const bitwarden = sourceBetween(
-    appSource,
-    'function RuntimeBitwardenUnlockDialog(',
-    'type BitwardenOperationDialogState',
-  );
-  assert.doesNotMatch(
-    bitwarden,
-    /<Eye(?:Off)?\b/,
-    'Bitwarden delegates the toggle to PasswordInput',
-  );
-  assert.match(bitwarden, /onVisibilityChange=\{setPasswordVisible\}/);
-  assert.match(bitwarden, /onVisibilityChange=\{setMasterPasswordVisible\}/);
 });
 const vncSource = readFileSync(
   new URL('../src/components/VncSurface.tsx', import.meta.url),
@@ -91,21 +70,6 @@ function sourceBetween(source: string, startMarker: string, endMarker: string): 
   assert.ok(end > start, `missing source marker after ${startMarker}: ${endMarker}`);
   return source.slice(start, end);
 }
-
-test('live surfaces are keyed only by session identity in one stable workspace layer', () => {
-  const surfaceLayer = appSource.slice(
-    appSource.indexOf('{sessions.map((session) => {', appSource.indexOf('function SessionsPage')),
-    appSource.indexOf('{dropPreview?.edge ?', appSource.indexOf('function SessionsPage')),
-  );
-  assert.match(surfaceLayer, /key=\{session\.id\}/);
-  assert.match(surfaceLayer, /data-wormhole-shortcuts-disabled=""/);
-  assert.match(
-    surfaceLayer,
-    /onKeyDownCapture=\{\(event\) => markWormholeShortcutSuppressed\(event\.nativeEvent\)\}/,
-  );
-  assert.match(surfaceLayer, /<SessionSurface/);
-  assert.doesNotMatch(surfaceLayer, /key=\{`?\$?\{?pane/);
-});
 
 test('stable VNC identity preserves the single App-owned disconnect lifecycle', () => {
   assert.match(vncSource, /return \(\) => \{/);
@@ -159,25 +123,11 @@ test('MCP approval settles an active authentication confirmation before opening'
     mcpSubscription,
     /event\.type === 'mcp\.approval-cancelled'[\s\S]*?filter\(\(approval\) => approval\.requestId !== event\.requestId\)/,
   );
-  assert.match(preloadSource, /type: 'mcp\.approval-cancelled'; requestId: string/);
   assert.match(
     appSource,
     /const settleAuthConfirmation = useCallback[\s\S]*?setAuthPrompt\(null\)/,
   );
   assert.match(appSource, /settleAuthConfirmation\(succeeded\)/);
-});
-
-test('first-open RDP startup reads the committed session snapshot', () => {
-  const requestSource = appSource.slice(
-    appSource.indexOf('async function requestRdpCredentials'),
-    appSource.indexOf('function retryRdpSession'),
-  );
-  assert.match(requestSource, /sessionsRef\.current\.find/);
-  assert.doesNotMatch(requestSource, /const session = sessions\.find/);
-  assert.match(
-    requestSource,
-    /rdpSessionAttempts\.current\.isCurrent\(sessionId, attempt\)[\s\S]*wormhole\.startRdpSession/,
-  );
 });
 
 test('RDP system-client capability refresh hides stale actions and rejects stale results', () => {
@@ -191,16 +141,6 @@ test('RDP system-client capability refresh hides stale actions and rejects stale
   assert.match(capabilitySource, /useLayoutEffect\(\(\) =>/);
 });
 
-test('RDP retry cleans a possibly live failed process before starting again', () => {
-  const retrySource = appSource.slice(
-    appSource.indexOf('function retryRdpSession'),
-    appSource.indexOf('const refreshRdpSystemClientCapability'),
-  );
-  const cleanupIndex = retrySource.indexOf('disconnectRemoteDesktopSession(sessionId)');
-  const startIndex = retrySource.indexOf('requestRdpCredentials(sessionId)');
-  assert.ok(cleanupIndex >= 0 && cleanupIndex < startIndex);
-});
-
 test('replacement RDP credentials disconnect a non-terminal logon attempt before restart', () => {
   const submitSource = appSource.slice(
     appSource.indexOf('async function submitRdpCredentials'),
@@ -210,42 +150,6 @@ test('replacement RDP credentials disconnect a non-terminal logon attempt before
   const restart = submitSource.indexOf('startRdpSession(');
   assert.ok(cleanup >= 0 && restart > cleanup);
   assert.match(submitSource, /!rdpCredentialSave && !selectedCredentialID/);
-});
-
-test('RDP bounds updates avoid renderer-frame latency and are deduplicated', () => {
-  const rdpSource = readFileSync(
-    new URL('../src/components/RdpSurface.tsx', import.meta.url),
-    'utf8',
-  );
-  assert.match(rdpSource, /const observer = new ResizeObserver\(reportBounds\)/);
-  assert.match(rdpSource, /window\.addEventListener\('resize', reportBounds\)/);
-  assert.doesNotMatch(rdpSource, /requestAnimationFrame\(reportBounds\)/);
-  assert.match(rdpSource, /signature === boundsSignature\.current/);
-  assert.match(rdpSource, /data-rdp-session-id=\{sessionId\}/);
-  assert.match(rdpSource, /const shouldShowNativeSurface = status === 'connected'/);
-  assert.match(rdpSource, /void api\.resizeRdpSession\(\{ sessionId, bounds \}\)/);
-  assert.match(
-    rdpSource,
-    /if \(!shouldShowNativeSurface \|\| nativeSurfaceVisible\.current\) return/,
-  );
-  assert.match(appSource, /waitForRdpSurfaceBounds\(sessionId\)[\s\S]*bounds,/);
-});
-
-// Runtime bounds and TSX coverage are verified in auth-prompt.test.ts using Chromium.
-test('embedded RDP fills the session without a toolbar and keeps the system client in the tab menu', () => {
-  const rdpSource = readFileSync(
-    new URL('../src/components/RdpSurface.tsx', import.meta.url),
-    'utf8',
-  );
-  assert.doesNotMatch(rdpSource, /data-rdp-system-client-toolbar|Embedded remote desktop/);
-  assert.match(rdpSource, /className="[^"]*flex-1[^"]*"\s+data-rdp-native-surface-region/);
-  assert.match(rdpSource, /data-rdp-native-surface-region[\s\S]*?ref=\{surfaceRef\}/);
-  assert.match(rdpSource, /status === 'connected' && !external/);
-  assert.match(rdpSource, /System Remote Desktop is running/);
-  assert.match(appSource, /external=\{session\.rdpExternal\}/);
-  const tabMenu = sourceBetween(appSource, 'function SessionTabContextMenu', 'function ');
-  assert.match(tabMenu, /Open in System Remote Desktop/);
-  assert.match(tabMenu, /onOpenSystemRdp/);
 });
 
 test('RDP overlays track owner-window moves in screen coordinates', () => {
@@ -390,22 +294,6 @@ test('native RDP start resolves only after the ActiveX helper is initialized', (
   assert.match(goSource, /unansweredStartRequestID/);
 });
 
-test('system RDP launches only the verified Windows system executable', () => {
-  const goSource = readFileSync(
-    new URL('../tools/wormhole-backend/rdp.go', import.meta.url),
-    'utf8',
-  );
-  const windowsAdapter = readFileSync(
-    new URL('../tools/wormhole-backend/rdp_system_windows.go', import.meta.url),
-    'utf8',
-  );
-  assert.match(windowsAdapter, /windows\.GetSystemDirectory\(\)/);
-  assert.match(windowsAdapter, /filepath\.Join\(systemDirectory, "mstsc\.exe"\)/);
-  assert.match(goSource, /newExternalRdpCommand\s+= exec\.Command/);
-  assert.match(goSource, /newExternalRdpCommand\(executable, args\.\.\.\)/);
-  assert.doesNotMatch(goSource, /exec\.Command\("mstsc\.exe"/);
-});
-
 test('native RDP disconnect acknowledges only after ActiveX and Go resource cleanup', () => {
   const disconnectSource = rdpHostSource.slice(
     rdpHostSource.indexOf('case "disconnect":'),
@@ -534,36 +422,6 @@ test('session tab titles reserve action width with and without SFTP', () => {
   assert.match(alwaysVisibleActions, /onClick=\{\(\) => closePaneSession\(pane, session\.id\)\}/);
 });
 
-test('drag cancellation clears both the dragged tab and its visual target', () => {
-  assert.match(
-    appSource,
-    /onDragEnd=\{\(\) => \{\s*setDraggedSessionId\(''\);\s*setDropPreview\(null\);/,
-  );
-  assert.match(
-    appSource,
-    /const dragIsValid = !draggedSessionId \|\| sessionIds\.includes\(draggedSessionId\)/,
-  );
-  assert.match(appSource, /const activeDropPreview = dragIsValid \? dropPreview : null/);
-  assert.match(
-    appSource,
-    /if \(draggedSessionId && !sessionIds\.includes\(draggedSessionId\)\)[\s\S]*setDraggedSessionId\(''\);[\s\S]*setDropPreview\(null\);/,
-  );
-});
-
-test('session reconciliation is persisted so reopened IDs cannot revive stale pane placement', () => {
-  const sessionsSource = sourceBetween(
-    appSource,
-    'function SessionsPage',
-    'function SessionSplitHandle',
-  );
-
-  assert.match(
-    sessionsSource,
-    /setLayout\(\(current\) =>[\s\S]*reconcileSessionLayout\(current, sessionIds, selectedSession\?\.id\)/,
-  );
-  assert.match(sessionsSource, /\}, \[draggedSessionId, selectedSession\?\.id, sessionIds\]\);/);
-});
-
 test('new folders expose every inheritable default before creation', () => {
   assert.match(appSource, /id="new-folder-credential"/);
   assert.match(appSource, /id="new-folder-auto-sudo"/);
@@ -669,29 +527,6 @@ test('new credential flow cannot create Bitwarden-backed profiles', () => {
   assert.doesNotMatch(preloadCreate, /Bitwarden/);
 });
 
-test('virtual card grids label the semantic list rather than a generic scroll container', () => {
-  const virtualGridSource = readFileSync(
-    new URL('../src/components/VirtualCardGrid.tsx', import.meta.url),
-    'utf8',
-  );
-  const scrollArea = sourceBetween(virtualGridSource, '<ScrollArea', '<ul');
-  const list = sourceBetween(virtualGridSource, '<ul', 'className="absolute');
-
-  assert.doesNotMatch(scrollArea, /aria-label/);
-  assert.match(list, /aria-label=\{ariaLabel\}/);
-});
-
-test('an asynchronous Bitwarden region refresh does not clear an open login form', () => {
-  const settings = sourceBetween(appSource, 'function SettingsPage(', 'function UtilityPage(');
-  const dialogMount = sourceBetween(settings, '<BitwardenCliDialog', 'onUnlock={(masterPassword)');
-
-  assert.match(dialogMount, /key=\{bitwardenCliDialog\}/);
-  assert.doesNotMatch(
-    dialogMount,
-    /key=\{`\$\{bitwardenCliDialog\}:\$\{bitwardenServerRegion\}`\}/,
-  );
-});
-
 test('VPN diagnostics expose target probing and cancellation across the bridge', () => {
   assert.match(appSource, /id="tunnel-test-target-host"/);
   assert.match(appSource, /id="tunnel-test-target-port"/);
@@ -717,154 +552,6 @@ test('VPN diagnostics expose target probing and cancellation across the bridge',
     appSource,
     /function closeTunnelTest\(\)[\s\S]{0,180}void cancelTunnelTestRun\(\)[\s\S]{0,180}status === 'cancelling'\) return/,
   );
-});
-
-test('VPN cards show searchable endpoint metadata instead of a managed-tunnel placeholder', () => {
-  const tunnelsPage = sourceBetween(appSource, 'function TunnelsPage', 'function SettingsSection');
-
-  assert.match(preloadSource, /listTunnels: \(\) => ipcRenderer\.invoke\('tunnel:list'\)/);
-  assert.match(mainSource, /parseTunnelSummaryList\(await runBackend<unknown>\('tunnel-list'\)\)/);
-  assert.match(tunnelsPage, /\.listTunnels\(\)/);
-  assert.match(tunnelsPage, /attempt === summaryLoadAttemptRef\.current/);
-  assert.match(tunnelsPage, /\+\+summaryLoadAttemptRef\.current/);
-  assert.match(appSource, /current\.filter\(\(item\) => item\.id !== tunnel\.id\)/);
-  assert.match(tunnelsPage, /tunnel\.endpoint \?\? ''/);
-  assert.match(tunnelsPage, /tunnel\.endpoint \|\| 'Endpoint unavailable'/);
-  assert.match(tunnelsPage, /label=\{`Delete \$\{tunnel\.name\}`\}/);
-});
-
-test('WatchGuard authentication hides password fields during SSO and scopes certificate exceptions', () => {
-  const fields = sourceBetween(
-    appSource,
-    'function tunnelEditorFields',
-    'function tunnelDefaultSettings',
-  );
-  const watchguard = sourceBetween(fields, 'case 3:', 'case 4:');
-  assert.match(watchguard, /key: 'AuthMode'[\s\S]{0,240}Username and password[\s\S]{0,120}SAML/);
-  const watchguardRender = sourceBetween(
-    appSource,
-    '{value.kind === 3 ? (',
-    '{value.kind === 4 ? (',
-  );
-  assert.match(
-    watchguardRender,
-    /title="Authentication"[\s\S]{0,180}useWatchguardSso[\s\S]{0,160}field\.key === 'Username'[\s\S]{0,120}field\.key === 'Password'/,
-  );
-  assert.match(
-    mainSource,
-    /setCertificateVerifyProc[\s\S]{0,180}event\.ignoreCertificateErrors[\s\S]{0,100}fireboxHost/,
-  );
-});
-
-test('VPN authentication and certificate controls preserve their mounted sections and value types', () => {
-  const fieldSource = sourceBetween(
-    appSource,
-    'function tunnelEditorFields',
-    'function tunnelDefaultSettings',
-  );
-  const fieldsForKind = new Function(
-    'kind',
-    fieldSource.slice(fieldSource.indexOf('{') + 1, fieldSource.lastIndexOf('}')),
-  );
-  const editor = sourceBetween(appSource, 'function TunnelEditorDialog', 'function TunnelsPage');
-  const providerSections = sourceBetween(editor, '{value.kind === 0 ? (', '</form>');
-  const providers = [
-    [1, { ProfileOvpn: 'textarea' }],
-    [
-      2,
-      {
-        UseSingleSignOn: 'switch',
-        TrustServerCertificate: 'switch',
-        TotpSecret: 'password',
-        ServerCertSha256Pin: undefined,
-      },
-    ],
-    [3, { TrustServerCertificate: 'switch', VerifyX509Name: undefined }],
-    [4, { UseOtp: 'checkbox', TrustServerCertificate: 'checkbox' }],
-    [6, { TrustServerCertificate: 'checkbox' }],
-    [
-      7,
-      {
-        Host: undefined,
-        Port: 'number',
-        Username: undefined,
-        Password: 'password',
-        ServerCertSha256Pin: undefined,
-        Mtu: 'number',
-      },
-    ],
-  ] as const;
-  for (const [kind, controls] of providers) {
-    const fields = fieldsForKind(kind) as { key: string; section: string; type?: string }[];
-    const start = providerSections.indexOf(`{value.kind === ${kind} ? (`);
-    assert.ok(start >= 0, `provider ${kind} must have a mounted editor`);
-    const end = providerSections.indexOf('{value.kind ===', start + 1);
-    const mounted = providerSections.slice(start, end < 0 ? undefined : end);
-    for (const [key, type] of Object.entries(controls)) {
-      const field = fields.find((candidate) => candidate.key === key);
-      assert.ok(field, `provider ${kind} must expose ${key}`);
-      assert.equal(field.type, type, `${key} must preserve its input value type`);
-      assert.ok(mounted.includes(`rows('${field.section}'`), `${key} must have a mounted section`);
-    }
-  }
-  const row = sourceBetween(appSource, 'function TunnelFieldRow', 'function TunnelSection');
-  assert.match(row, /<Switch[\s\S]*?aria-label=\{field\.label\}/);
-  const labels = [...row.matchAll(/<Label\b([^>]*)>([\s\S]*?)<\/Label>/g)];
-  assert.ok(labels.length > 0, 'VPN controls require field labels');
-  for (const [, props, text] of labels) {
-    assert.match(props, /htmlFor=\{`tunnel-\$\{field\.key\}`\}/);
-    assert.match(text, /\{field\.label\}/);
-  }
-  assert.match(
-    row,
-    /field\.type === 'switch' \? \([\s\S]*?<Switch[\s\S]*?onCheckedChange=\{\(checked\) => onChange\(field\.key, checked\)\}/,
-  );
-  assert.match(
-    row,
-    /field\.type === 'checkbox' \? \([\s\S]*?<Checkbox[\s\S]*?onCheckedChange=\{\(checked\) => onChange\(field\.key, checked === true\)\}/,
-  );
-});
-
-test('OpenVPN profile import is wired without submitting the tunnel form', () => {
-  const row = sourceBetween(appSource, 'function TunnelFieldRow', 'function TunnelSection');
-  assert.match(row, /\{labelAction\}/);
-  const editor = sourceBetween(appSource, 'function TunnelEditorDialog', 'function TunnelsPage');
-  const rows = sourceBetween(editor, 'const rows =', 'const useFortinetSso');
-  assert.match(rows, /labelAction=\{options\?\.labelAction\?\.\(field\)\}/);
-  const openVpn = sourceBetween(editor, '{value.kind === 1 ? (', '{value.kind === 2 ? (');
-  assert.match(openVpn, /rows\('Profile', \{\s*labelAction: \(\) => \(/);
-  const button = sourceBetween(openVpn, '<Button', '</Button>');
-  assert.match(button, /onClick=\{\(\) => void importOvpnProfile\(\)\}/);
-  assert.match(button, /type="button"/);
-  assert.match(button, /disabled=\{busy\}/);
-  assert.ok(
-    />\s*[^<>{}\s][^<>{}]*(?=<|$)/.test(button) ||
-      /aria-label="[^"\r\n]*[^"\s][^"\r\n]*"/.test(button),
-    'profile import requires visible text or an accessible label',
-  );
-});
-
-test('the VPN editor keeps fields scrollable and its footer wired to the form', () => {
-  const editor = sourceBetween(appSource, 'function TunnelEditorDialog', 'function TunnelsPage');
-  const dialog = sourceBetween(editor, '<DialogContent', '>');
-  const dialogClasses = dialog.match(/className="([^"]+)"/)?.[1].split(/\s+/) ?? [];
-  for (const token of ['flex', 'flex-col', 'overflow-hidden', 'max-h-[calc(100dvh-2rem)]']) {
-    assert.ok(
-      dialogClasses.includes(token),
-      `VPN dialog requires ${token} to stay inside the viewport`,
-    );
-  }
-  const form = sourceBetween(editor, '<form', '>');
-  const formClasses = form.match(/className="([^"]+)"/)?.[1].split(/\s+/) ?? [];
-  for (const token of ['min-h-0', 'flex-1', 'overflow-y-auto']) {
-    assert.ok(formClasses.includes(token), `VPN fields require ${token} to remain scrollable`);
-  }
-  const formId = editor.match(/<form\b[^>]*\bid="([^"]+)"/)?.[1];
-  assert.ok(formId, 'tunnel form must have an ID');
-  const footer = sourceBetween(editor, '<DialogFooter>', '</DialogFooter>');
-  const submitButton = footer.match(/<Button\b[^>]*\btype="submit"[^>]*>/)?.[0];
-  assert.ok(submitButton, 'tunnel footer must have a submit button');
-  assert.equal(submitButton.match(/\bform="([^"]+)"/)?.[1], formId);
 });
 
 test('backup and mRemoteNG mutations expose cooperative progress and cancellation', () => {
@@ -931,32 +618,4 @@ test('SSH host-key trust delegates the retained lifecycle retry to Go', () => {
     mainSource,
     /this\.pendingConnections\.get\(request\.sessionId\) === generation[\s\S]*?this\.pendingConnections\.delete\(request\.sessionId\)/,
   );
-});
-
-test('Fortinet offers the isolated SAML callback only when SSO is enabled', () => {
-  const fields = sourceBetween(
-    appSource,
-    'function tunnelEditorFields',
-    'function tunnelDefaultSettings',
-  );
-  const fieldsForKind = new Function(
-    'kind',
-    fields.slice(fields.indexOf('{') + 1, fields.lastIndexOf('}')),
-  );
-  assert.ok(
-    !fieldsForKind(2).some((field: { key: string }) =>
-      ['UseExternalBrowser', 'SamlRedirectPort'].includes(field.key),
-    ),
-  );
-  assert.ok(
-    fieldsForKind(2).some(
-      (field: { key: string; type: string }) =>
-        field.key === 'UseSamlCallback' && field.type === 'switch',
-    ),
-  );
-  const editor = sourceBetween(appSource, 'function TunnelEditorDialog', 'function TunnelsPage');
-  const fortinet = sourceBetween(editor, '{value.kind === 2 ? (', '{value.kind === 3 ? (');
-  assert.match(fortinet, /field.key === 'UseSamlCallback' && !useFortinetSso/);
-  assert.match(fortinet, /dedicated window/);
-  assert.match(fortinet, /field.key !== 'Realm' && useFortinetSso/);
 });

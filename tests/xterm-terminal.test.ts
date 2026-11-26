@@ -16,7 +16,7 @@ test('xterm SSH presentation works in Chromium with WebGL and software fallback'
   const app = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
   const component = app.slice(
     app.indexOf('function SshXtermSurface('),
-    app.indexOf('function SshTerminalSurface('),
+    app.indexOf('function SerialTerminalSurface('),
   );
   assert.ok(component.length > 0);
   const paneLayout = app.slice(
