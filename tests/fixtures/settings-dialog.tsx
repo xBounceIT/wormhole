@@ -689,13 +689,6 @@ window.runSettingsDialogTests = async (mode: 'desktop' | 'compact') => {
     assert.equal(claims, 1, 'StrictMode must send one claim');
     assert.equal(overlayState(), 'true', 'Native session surfaces must stay below the dialog');
     assert.equal(title(), slides[0].title);
-    assert.ok(carousel()?.textContent?.includes(slides[0].subtitle));
-    if (slides[0].media.kind === 'image') {
-      const image = carousel()!.querySelector('img')!;
-      await image.decode();
-      assert.equal(image.alt, slides[0].media.alt);
-      assert.ok(image.naturalWidth > 0 && image.naturalHeight > 0);
-    }
     assert.equal(button('Back').getAttribute('aria-disabled'), 'true');
     const bounds = carousel()!.getBoundingClientRect();
     assert.ok(bounds.top >= 0 && bounds.bottom <= innerHeight && bounds.left >= 0);
@@ -736,7 +729,40 @@ window.runSettingsDialogTests = async (mode: 'desktop' | 'compact') => {
     assert.equal(carousel(), null, 'Changelog must wait for the existing dialog');
     await keypress('Escape');
     await waitFor(() => carousel() !== null, 'Changelog must open after Quick Connect closes');
-    await clickElement(carousel()!.querySelector('[data-slot="dialog-close"]')!);
+    for (const [index, slide] of slides.entries()) {
+      assert.equal(title(), slide.title);
+      assert.ok(carousel()!.textContent?.includes(slide.subtitle));
+      const { media } = slide;
+      if (media.kind !== 'video') {
+        const image = carousel()!.querySelector('img')!;
+        await image.decode();
+        assert.ok(image.alt.trim() && image.alt === media.alt);
+        assert.ok(image.naturalWidth > 0 && image.naturalHeight > 0);
+        const frame = image.closest('picture')!.parentElement!.getBoundingClientRect();
+        const bounds = image.getBoundingClientRect();
+        assert.ok(
+          bounds.left >= frame.left - 1 &&
+            bounds.right <= frame.right + 1 &&
+            bounds.top >= frame.top - 1 &&
+            bounds.bottom <= frame.bottom + 1,
+          `${slide.title} preview (${bounds.width}×${bounds.height}) must fit its frame (${frame.width}×${frame.height})`,
+        );
+        if (media.kind === 'gif') {
+          assert.equal(image.currentSrc, media.poster);
+          await window.settingsReducedMotion(false);
+          await waitFor(
+            () => image.currentSrc === media.src,
+            'The visible slide must select its GIF',
+          );
+          await image.decode();
+          await window.settingsReducedMotion(true);
+          await waitFor(() => image.currentSrc === media.poster, 'The still preview must return');
+          await image.decode();
+        }
+      }
+      await clickElement(button(index === slides.length - 1 ? 'Done' : 'Next'));
+    }
+    await waitFor(() => carousel() === null, 'Done must dismiss the last release slide');
 
     let attempts = 0;
     await mountApp({
