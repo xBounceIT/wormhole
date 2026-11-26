@@ -111,7 +111,7 @@ test('pinned and auto-hide sidebars preserve layout, focus, menus and saved pref
       app.setPath('userData', ${JSON.stringify(directory)});
       app.setPath('sessionData', ${JSON.stringify(directory)});
       app.whenReady().then(async () => {
-        const window = new BrowserWindow({ show: false, width: 1200, height: 800, titleBarStyle: 'hidden',
+        const window = new BrowserWindow({ show: false, width: nativeScale === 1.25 ? 900 : 1200, height: 800, titleBarStyle: 'hidden',
           ...(process.platform !== 'darwin' ? { titleBarOverlay: { color: '#0a0a0a', symbolColor: '#ffffff', height: 48 } } : {}),
           webPreferences: {
           nodeIntegration: true, contextIsolation: false, backgroundThrottling: false,

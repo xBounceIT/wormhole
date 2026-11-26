@@ -7285,7 +7285,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       />
       <div
         aria-hidden={authGate !== 'unlocked'}
-        className="flex h-full min-w-[960px] flex-col bg-background font-sans text-foreground"
+        className="flex h-full min-w-0 flex-col bg-background font-sans text-foreground"
         inert={authGate !== 'unlocked'}
       >
         <SidebarLayout
