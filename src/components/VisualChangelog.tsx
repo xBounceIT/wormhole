@@ -10,7 +10,7 @@ function SlideMedia({ media }: { media: VisualChangelogRelease['slides'][number]
   const mediaClassName = 'block size-full object-contain';
 
   return (
-    <div className="grid aspect-video max-h-[32dvh] w-full place-items-center overflow-hidden rounded-lg bg-[#14171d] ring-1 ring-foreground/10 sm:max-h-[42dvh]">
+    <div className="grid aspect-video max-h-[32dvh] w-full grid-cols-1 grid-rows-1 place-items-center overflow-hidden rounded-lg bg-[#14171d] ring-1 ring-foreground/10 sm:max-h-[42dvh]">
       {failed ? (
         <p className="px-4 text-center text-sm text-zinc-300">Preview unavailable</p>
       ) : media.kind === 'video' ? (
