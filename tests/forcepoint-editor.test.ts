@@ -219,7 +219,7 @@ test('VPN editors align paired controls and Forcepoint displays certificate conf
       const [editorOpen, setTunnelEditorOpen] = useState(true);
       const editorValue = { kind: 9, name: 'VPN', settings: { ...fortinetIPsecDefaults, Host: 'vpn.test' } };
       const tunnelSaved = onTunnelCreated;
-      const restoreDialogFocus = undefined;
+      const restoreTunnelFocus = undefined;
       return <>${tunnelEditorMount}</>;
     }
     function FortinetEditorHarness({ isAuthorized = true, editorInstance = 'original' }) {

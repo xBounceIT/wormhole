@@ -102,7 +102,7 @@ export async function run(columns: number, paneWidth = window.innerWidth) {
     '[aria-label^="Filter tunnels by provider:"]',
   )!;
   const providerMenu = () =>
-    document.querySelector('[data-slot="dropdown-menu-content"][data-state="open"]');
+    document.querySelector<HTMLElement>('[data-slot="dropdown-menu-content"][data-state="open"]');
   const provider = (label: string) =>
     [...(providerMenu()?.querySelectorAll<HTMLElement>('[role="menuitemradio"]') ?? [])].find(
       (item) =>
@@ -121,6 +121,14 @@ export async function run(columns: number, paneWidth = window.innerWidth) {
     (button) => button.textContent === 'Add VPN tunnel',
   )!;
   const click = async (element: HTMLElement) => act(async () => element.click());
+  const nextTask = () => new Promise<void>((done) => setTimeout(done, 0));
+  const waitFor = async (condition: () => boolean, message: string) => {
+    const deadline = performance.now() + 5000;
+    while (!condition()) {
+      assert.ok(performance.now() < deadline, message);
+      await act(async () => new Promise((done) => setTimeout(done, 10)));
+    }
+  };
   const openProviderMenu = async () => {
     await act(async () => {
       providerTrigger.focus();
@@ -130,12 +138,27 @@ export async function run(columns: number, paneWidth = window.innerWidth) {
     });
     assert.ok(providerMenu(), 'The provider menu opens with the keyboard');
   };
-  const selectProvider = async (label: string) => {
+  const selectProvider = async (
+    label: string,
+    expectedFocus: HTMLElement = providerTrigger,
+    afterSelection?: () => void,
+  ) => {
     if (!providerMenu()) await openProviderMenu();
     const option = provider(label);
     assert.ok(option, `Provider option ${label} should be available`);
-    await click(option);
+    // Unmount on selection so a subsequent focus change precedes the menu's deferred autofocus.
+    providerMenu()!.style.animation = 'none';
+    await act(async () => {
+      option.focus();
+      flushSync(() => option.click());
+      afterSelection?.();
+      await nextTask();
+    });
     assert.equal(providerTrigger.getAttribute('aria-expanded'), 'false');
+    assert.ok(
+      document.activeElement === expectedFocus,
+      `After selecting ${label}, focus should be on ${expectedFocus.getAttribute('aria-label') ?? expectedFocus.textContent}`,
+    );
   };
   const changeSearch = (value: string) => {
     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(search, value);
@@ -147,13 +170,17 @@ export async function run(columns: number, paneWidth = window.innerWidth) {
     assert.equal(dialog.querySelector('[data-slot="dialog-title"]')?.textContent, title);
     assert.equal(getComputedStyle(dialog).borderRadius, '16px');
   };
-  const closeDialog = async () => {
-    await click(
-      document.querySelector<HTMLButtonElement>(
-        '[role="dialog"][data-state="open"] [data-slot="dialog-close"]',
-      )!,
+  const dialogClose = () =>
+    document.querySelector<HTMLButtonElement>(
+      '[role="dialog"][data-state="open"] [data-slot="dialog-close"]',
+    )!;
+  const closeDialog = async (target: HTMLElement) => {
+    await click(dialogClose());
+    assert.equal(document.querySelector('[role="dialog"][data-state="open"]'), null);
+    await waitFor(
+      () => document.activeElement === target,
+      `Closing the dialog should return focus to ${target.getAttribute('aria-label') ?? target.textContent}`,
     );
-    await act(settleLayout);
   };
 
   const firstRowTop = cards()[0]!.getBoundingClientRect().top;
@@ -182,7 +209,7 @@ export async function run(columns: number, paneWidth = window.innerWidth) {
     const save = button('Save changes');
     assert.ok(save.getBoundingClientRect().bottom <= window.innerHeight);
     assert.ok(save.getBoundingClientRect().top >= bounds.bottom);
-    await closeDialog();
+    await closeDialog(action('Edit Berlin'));
     pendingRead = undefined;
   }
   const heading = document.querySelector('h2')!;
@@ -391,20 +418,27 @@ export async function run(columns: number, paneWidth = window.innerWidth) {
   assert.deepEqual(names(), ['Berlin']);
   await enterSearch('');
 
-  await selectProvider('Other provider 1');
+  await selectProvider('Other provider 1', add, () => add.focus());
   assert.match(cards()[0]!.textContent!, /Endpoint unavailable/);
   assert.ok(cards()[0]!.querySelector('svg.lucide-network'));
 
-  await selectProvider('Cisco Secure Client 1');
+  await openProviderMenu();
+  const closingMenu = providerMenu()!;
+  closingMenu.style.animationPlayState = 'paused';
+  await click(provider('Cisco Secure Client 1'));
   const staleRead = Promise.withResolvers<ReturnType<typeof readDetails>>();
   pendingRead = staleRead.promise;
   await click(action('Edit Dublin'));
-  add.focus();
   await click(add);
   await act(async () => staleRead.resolve(readDetails('5')));
   assertDialog('Add VPN tunnel');
-  await closeDialog();
-  assert.ok(document.activeElement === add, 'Closing Add should return focus to its button');
+  await closeDialog(add);
+  assert.ok(closingMenu.isConnected, 'The provider menu should still be exiting when Add closes');
+  assert.equal(closingMenu.dataset.state, 'closed');
+  for (const animation of closingMenu.getAnimations()) animation.finish();
+  await waitFor(() => !closingMenu.isConnected, 'The provider menu should unmount after its exit');
+  await act(nextTask);
+  assert.ok(document.activeElement === add, 'A late menu exit must preserve focus restored by Add');
   const staleFailure = Promise.withResolvers<ReturnType<typeof readDetails>>();
   pendingRead = staleFailure.promise;
   const editButton = action('Edit Dublin');
@@ -413,15 +447,32 @@ export async function run(columns: number, paneWidth = window.innerWidth) {
   await click(testButton);
   await act(async () => staleFailure.reject(new Error('Stale VPN read failure')));
   assertDialog('Test VPN tunnel');
-  await closeDialog();
-  assert.ok(document.activeElement === testButton, 'Closing Test should focus its button');
+  await closeDialog(testButton);
   assert.equal(document.querySelector('[role="alert"]'), null);
 
   pendingRead = undefined;
   await click(editButton);
   assertDialog('Edit VPN tunnel');
-  await closeDialog();
-  assert.ok(document.activeElement === editButton, 'Closing Edit should focus its button');
+  await closeDialog(editButton);
+
+  for (const target of [add, search]) {
+    await selectProvider('Cisco Secure Client 1', target, () => {
+      flushSync(() => add.click());
+      assertDialog('Add VPN tunnel');
+      flushSync(() => dialogClose().click());
+      if (target === search) search.focus();
+    });
+  }
+
+  const filteredRead = Promise.withResolvers<ReturnType<typeof readDetails>>();
+  pendingRead = filteredRead.promise;
+  await click(editButton);
+  await enterSearch('no matching tunnel');
+  assert.equal(editButton.isConnected, false);
+  await act(async () => filteredRead.resolve(readDetails('5')));
+  assertDialog('Edit VPN tunnel');
+  await closeDialog(search);
+  await enterSearch('');
 
   const deleteButton = action('Delete Dublin');
   const deleteDialog = () => document.querySelector('[role="alertdialog"][data-state="open"]')!;
@@ -502,7 +553,7 @@ export async function run(columns: number, paneWidth = window.innerWidth) {
       await click(dialog.querySelector<HTMLButtonElement>('#tunnel-UseSingleSignOn')!);
       assert.equal(dialog.querySelector('#tunnel-UseSamlCallback'), null);
     }
-    await closeDialog();
+    await closeDialog(action('Edit Berlin'));
   }
 
   for (const authMode of [1, 2]) {
@@ -516,7 +567,7 @@ export async function run(columns: number, paneWidth = window.innerWidth) {
       Boolean(dialog.querySelector('input#tunnel-Password[type="password"]')),
       authMode === 1,
     );
-    await closeDialog();
+    await closeDialog(action('Edit Berlin'));
   }
 
   const { dialog, button } = await openEditor(1, { ProfileOvpn: 'original profile' });

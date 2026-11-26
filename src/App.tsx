@@ -13879,10 +13879,17 @@ export function TunnelsPage({
     });
   }, []);
 
-  function restoreDialogFocus(event: Event) {
-    event.preventDefault();
+  function restoreTunnelFocus(event: Event) {
+    // A later interaction may have taken focus while the menu or dialog was closing.
+    const active = document.activeElement;
+    if (active && active !== document.body) {
+      event.preventDefault();
+      return;
+    }
     const trigger = dialogTriggerRef.current;
-    const target = trigger?.isConnected && !trigger.disabled ? trigger : searchInputRef.current;
+    if (!trigger) return;
+    event.preventDefault();
+    const target = trigger.isConnected && !trigger.disabled ? trigger : searchInputRef.current;
     target?.focus({ preventScroll: true });
   }
 
@@ -14100,7 +14107,11 @@ export function TunnelsPage({
           value={searchText}
         />
         <div className="flex max-w-full flex-wrap items-center gap-2">
-          <DropdownMenu>
+          <DropdownMenu
+            onOpenChange={(open) => {
+              if (open) dialogTriggerRef.current = null;
+            }}
+          >
             <DropdownMenuTrigger asChild>
               <Button
                 aria-label={`Filter tunnels by provider: ${providerFilterLabel}`}
@@ -14117,6 +14128,7 @@ export function TunnelsPage({
             <DropdownMenuContent
               align="end"
               className="w-60 min-w-0 max-w-(--radix-dropdown-menu-content-available-width)"
+              onCloseAutoFocus={restoreTunnelFocus}
             >
               <DropdownMenuRadioGroup
                 onValueChange={(value) => setProviderFilter(value || null)}
@@ -14236,7 +14248,7 @@ export function TunnelsPage({
           tunnels={tunnels}
           initial={editorValue}
           key={editorValue.id ?? `new:${editorValue.kind}`}
-          onCloseAutoFocus={restoreDialogFocus}
+          onCloseAutoFocus={restoreTunnelFocus}
           onOpenChange={setTunnelEditorOpen}
           onSaved={tunnelSaved}
           open
@@ -14248,7 +14260,7 @@ export function TunnelsPage({
         }}
         open={testState !== null}
       >
-        <DialogContent className="sm:max-w-lg" onCloseAutoFocus={restoreDialogFocus}>
+        <DialogContent className="sm:max-w-lg" onCloseAutoFocus={restoreTunnelFocus}>
           <DialogHeader>
             <DialogTitle>Test VPN tunnel</DialogTitle>
             <DialogDescription>{testState?.tunnel.name}</DialogDescription>
