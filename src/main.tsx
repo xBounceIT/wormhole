@@ -1,4 +1,5 @@
 import startupLogo from '../Assets/wormhole-logo-transparent.png';
+import { tooltipDarkColor, tooltipLightColor } from '../electron/tree-tooltip';
 import { applyTheme, clearLegacyTheme, getInitialTheme, readLegacyTheme } from './theme';
 
 window.addEventListener('error', () => window.wormhole?.reportRendererFailure('uncaught-error'));
@@ -128,6 +129,11 @@ function showUnlock(startup: WormholeStartupSnapshot) {
   visibility.className = 'startup-password-toggle';
   visibility.type = 'button';
   visibility.setAttribute('aria-controls', input.id);
+  const tooltip = document.createElement('span');
+  tooltip.className = 'startup-tooltip';
+  tooltip.setAttribute('role', 'tooltip');
+  tooltip.style.setProperty('--tooltip-dark', tooltipDarkColor);
+  tooltip.style.setProperty('--tooltip-light', tooltipLightColor);
   function setPasswordVisible(visible: boolean) {
     input.type = visible ? 'text' : 'password';
     const label = visible ? 'Hide password' : 'Show password';
@@ -141,14 +147,14 @@ function showUnlock(startup: WormholeStartupSnapshot) {
         }
       </svg>`;
     visibility.setAttribute('aria-label', label);
-    visibility.title = label;
+    tooltip.textContent = label;
     visibility.setAttribute('aria-pressed', String(visible));
   }
   setPasswordVisible(false);
   visibility.addEventListener('click', () => {
     if (!busy) setPasswordVisible(input.type === 'password');
   });
-  passwordField.append(input, visibility);
+  passwordField.append(input, visibility, tooltip);
   const status = document.createElement('p');
   status.className = 'startup-status';
   const submit = document.createElement('button');

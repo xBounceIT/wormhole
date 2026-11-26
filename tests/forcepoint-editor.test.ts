@@ -45,11 +45,21 @@ test('VPN editors align paired controls and Forcepoint displays certificate conf
   const promptHandlerStart = app.indexOf("      if (event.type === 'tunnel.prompt-closed'");
   const promptHandlerEnd = app.indexOf('\n    });', promptHandlerStart);
   assert.ok(promptHandlerStart > 0 && promptHandlerEnd > promptHandlerStart);
-  const controls = ['input', 'label', 'collapsible', 'button', 'dialog', 'select', 'password-input']
+  const controls = [
+    'input',
+    'label',
+    'collapsible',
+    'button',
+    'dialog',
+    'select',
+    'password-input',
+    'confirmation-dialog',
+  ]
     .map((name) =>
       read(`../src/components/ui/${name}.tsx`)
-        .replace(/^import .*;\r?\n/gm, '')
+        .replace(/^import [\s\S]*?;\r?\n/gm, '')
         .replace(/^export\s*\{[\s\S]*?\};\r?\n?/gm, '')
+        .replace(/^export function /gm, 'function ')
         .replace(/^export .*;\r?\n/gm, ''),
     )
     .join('\n');
@@ -59,7 +69,7 @@ test('VPN editors align paired controls and Forcepoint displays certificate conf
     ${read('../src/native-surface-overlay-state.ts').replace(/^export /gm, '')}
     ${section(read('../src/components/ui/context-menu.tsx'), 'type ContextMenuOverlayContextValue', 'function ContextMenu({')}
     ${controls}
-    const { useEffect, useMemo, useRef, useState } = React;
+    const { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } = React;
     ${read('../src/fortinet-ipsec-state.ts').replace(/^export /gm, '')}
     ${section(read('../src/tunnel-state.ts'), 'function userFacingTunnelError(', '// Only treat a test')}
     ${section(app, 'const tunnelKinds =', 'function TunnelRouteField(')}
@@ -356,6 +366,7 @@ test('VPN editors align paired controls and Forcepoint displays certificate conf
     const { randomUUID: newSessionToken } = require('node:crypto');
     const React = require(${JSON.stringify(require.resolve('react'))});
     const { createRoot } = require(${JSON.stringify(require.resolve('react-dom/client'))});
+    const TextTooltip = ({ children }) => children;
     const { Label: LabelPrimitive, Collapsible: CollapsiblePrimitive, Dialog: DialogPrimitive, Select: SelectPrimitive, Slot } = require(${JSON.stringify(require.resolve('radix-ui'))});
     const { ChevronDown, ChevronDownIcon, ChevronUpIcon, Check, CheckIcon, Eye, EyeOff, Plus, XIcon } = require(${JSON.stringify(require.resolve('lucide-react'))});
     const { cva } = require(${JSON.stringify(require.resolve('class-variance-authority'))});

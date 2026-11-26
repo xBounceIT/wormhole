@@ -270,6 +270,7 @@ function browserHarness({ socks = '127.0.0.1:1080', active = true } = {}) {
     visibilityChanges: boolean[] = [];
     boundsChanges: unknown[] = [];
     bounds: unknown;
+    borderRadius = 0;
     constructor(options: any) {
       this.webContents = options.webContents ?? new Contents(options.webPreferences.partition);
     }
@@ -279,6 +280,9 @@ function browserHarness({ socks = '127.0.0.1:1080', active = true } = {}) {
     }
     getBounds() {
       return this.bounds ?? { x: 0, y: 0, width: 1, height: 1 };
+    }
+    setBorderRadius(radius: number) {
+      this.borderRadius = radius;
     }
     setVisible(value: boolean) {
       this.visible = value;
@@ -927,6 +931,37 @@ test('overlay previews retain the page and its VPN lease, coalesce captures and 
   h.manager.close('browser-1');
 });
 
+test('an overlay trailing a close confirmation does not capture the hidden browser', async () => {
+  const h = browserHarness();
+  await h.open();
+  const view = h.manager.surfaces.get('browser-1').view;
+  const bounds = { sessionId: 'browser-1', x: 20, y: 80, width: 900, height: 600, visible: true };
+  let captures = 0;
+  view.webContents.capturePage = async () => {
+    captures++;
+    return {
+      isEmpty: () => false,
+      getSize: () => ({ width: 10, height: 10 }),
+      toJPEG: () => Buffer.from('stale frame'),
+    };
+  };
+  await h.manager.setBounds(h.owner, bounds);
+  await h.manager.setBounds(h.owner, { ...bounds, visible: false });
+  assert.equal(
+    await h.manager.setBounds(h.owner, {
+      ...bounds,
+      visible: false,
+      capturePreview: true,
+      previewId: randomUUID(),
+    }),
+    undefined,
+  );
+  assert.equal(captures, 0);
+  await h.manager.setBounds(h.owner, bounds);
+  assert.equal(view.visible, true);
+  h.manager.close('browser-1');
+});
+
 test('stable bounds and live resizes never hide and re-show the selected native view', async () => {
   const h = browserHarness();
   await h.open();
@@ -940,6 +975,8 @@ test('stable bounds and live resizes never hide and re-show the selected native 
   assert.equal(view.visibilityChanges.length, toggles);
   await h.manager.setBounds(h.owner, { ...bounds, width: 800 });
   assert.equal(view.boundsChanges.length, layouts + 1);
+  await h.manager.setBounds(h.owner, { ...bounds, x: 20.4, width: 800.4 });
+  assert.deepEqual({ ...view.getBounds() }, { x: 20, y: 80, width: 801, height: 600 });
   assert.equal(
     view.visibilityChanges.length,
     toggles,
@@ -1150,11 +1187,13 @@ test('each browser owns its profile and one VPN lease shared by all its tabs', a
     visible: true,
   });
   assert.equal(first.visible, true);
+  assert.equal(first.borderRadius, 12);
   await h.command('new-tab');
   const secondTabId = record.tabs.activeId;
   const second = record.view;
   assert.equal(first.visible, false);
   assert.equal(second.visible, true);
+  assert.equal(second.borderRadius, 12);
   assert.equal(second.webContents.getURL(), 'about:blank');
   assert.equal(record.tabs.snapshot('vpn').tabs[1].url, 'about:blank');
   assert.equal(first.webContents.session, second.webContents.session);

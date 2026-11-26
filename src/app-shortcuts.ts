@@ -1,4 +1,4 @@
-const wormholeShortcutSuppressionSelector = '[data-wormhole-shortcuts-disabled]';
+const wormholeShortcutSuppressionSelector = '[data-wormhole-shortcuts-disabled], dialog:modal';
 const wormholeShortcutSuppressedEvents = new WeakSet<Event>();
 
 type ShortcutEventTarget = EventTarget & {

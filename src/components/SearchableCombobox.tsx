@@ -134,7 +134,6 @@ export function SearchableCombobox({
         <ComboboxInput
           ref={searchInput}
           placeholder={searchPlaceholder}
-          showTrigger={false}
           aria-label={searchPlaceholder}
         />
         <ComboboxEmpty>{emptyMessage}</ComboboxEmpty>

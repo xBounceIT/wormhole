@@ -1,8 +1,8 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type Ref } from 'react';
 import {
   AlertCircle,
-  ChevronLeft,
-  ChevronRight,
+  ArrowLeft,
+  ArrowRight,
   Globe,
   LoaderCircle,
   LockKeyhole,
@@ -13,16 +13,19 @@ import {
 } from 'lucide-react';
 import bitwardenIcon from '../../Assets/Bitwarden/bitwarden-icon.png';
 import { Button } from '@/components/ui/button';
-import { ConnectionStepper, type TunnelProgress } from './ConnectionStepper';
+import { TextTooltip } from '@/components/ui/tooltip';
+import { keepHorizontalItemVisible } from '@/horizontal-scroll';
+import {
+  BrowserConnectionLoading,
+  ConnectionTransition,
+  type BrowserLoadingSession,
+} from './ConnectionTransition';
 
-type WebSessionSurface = {
+type WebSessionSurface = BrowserLoadingSession & {
   id: string;
   protocol: 'sftp' | 'smb' | 'ssh' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial';
-  host: string;
-  port?: number;
   status: 'connecting' | 'connected' | 'failed' | 'closed' | 'placeholder';
   error?: string;
-  tunnelProgress?: TunnelProgress | null;
   webUrl?: string;
   webCanGoBack?: boolean;
   webCanGoForward?: boolean;
@@ -36,18 +39,37 @@ type WebSurfaceProps = {
   isActive: boolean;
   isAuthorized: boolean;
   isOccluded?: boolean;
+  captureWhenOccluded?: boolean;
   bitwardenOpen: boolean;
+  loadingFallbackShown?: boolean;
   onReconnect: (sessionId: string) => void;
 };
 
-export function WebSurface({
+export function WebSurface({ loadingFallbackShown, ...props }: WebSurfaceProps) {
+  const { session } = props;
+  const opening = session.status === 'connecting' || session.status === 'placeholder';
+  const loading = <BrowserConnectionLoading session={session} />;
+  return (
+    <ConnectionTransition
+      connected={session.status === 'connected'}
+      initialPending={loadingFallbackShown ? loading : undefined}
+      pending={opening ? loading : null}
+    >
+      {(covered) => <WebSurfaceContent {...props} connectionCovered={covered} />}
+    </ConnectionTransition>
+  );
+}
+
+function WebSurfaceContent({
   session,
   isActive,
   isAuthorized,
   isOccluded = false,
+  captureWhenOccluded = true,
   bitwardenOpen,
+  connectionCovered,
   onReconnect,
-}: WebSurfaceProps) {
+}: WebSurfaceProps & { connectionCovered: boolean }) {
   const surfaceRef = useRef<HTMLDivElement>(null);
   const tabListRef = useRef<HTMLDivElement>(null);
   const bitwardenButtonRef = useRef<HTMLButtonElement>(null);
@@ -59,12 +81,23 @@ export function WebSurface({
   const vpnReconnecting = browser?.vpnStatus === 'reconnecting';
   const vpnInterrupted = vpnReconnecting || browser?.vpnStatus === 'disconnected';
   const vpnRecoveryLabel = vpnReconnecting ? 'Reconnecting VPN…' : 'VPN disconnected. Reconnect?';
+  const vpnDetails = vpnInterrupted
+    ? vpnReconnecting
+      ? session.tunnelProgress?.detail || vpnRecoveryLabel
+      : vpnRecoveryLabel
+    : browser?.restrictedOrigin
+      ? `${vpnLabel}. VPN access is limited to ${browser.restrictedOrigin}`
+      : browser?.route === 'vpn'
+        ? `${vpnLabel}. All tabs use this browser’s VPN tunnel`
+        : 'No VPN tunnel is attached to this browser. Tabs use the normal network connection.';
   const tab = browser?.tabs.find((candidate) => candidate.id === browser.activeTabId);
-  const available = isActive && isAuthorized && session.status === 'connected';
+  // A WebContentsView is above the renderer, so attach it after the loading layer fades.
+  const available =
+    isActive && isAuthorized && session.status === 'connected' && !connectionCovered;
   const ready = available && !isOccluded;
   const blank = tab?.url === 'about:blank';
   const visible = ready && !blank && !tab?.error;
-  const showPreview = available && isOccluded && !blank && !tab?.error;
+  const showPreview = available && isOccluded && captureWhenOccluded && !blank && !tab?.error;
   const currentAddress =
     tab?.url ||
     session.webUrl ||
@@ -78,11 +111,8 @@ export function WebSurface({
     const list = tabListRef.current;
     const selected = list?.querySelector('[aria-selected="true"]')?.parentElement;
     if (!ready || !list || !selected) return;
-    const viewport = list.getBoundingClientRect();
-    const bounds = selected.getBoundingClientRect();
-    if (bounds.left < viewport.left) list.scrollLeft += bounds.left - viewport.left;
-    else if (bounds.right > viewport.right) list.scrollLeft += bounds.right - viewport.right;
-  }, [ready, tab?.id, tab?.title]);
+    return keepHorizontalItemVisible(list, selected);
+  }, [ready, tab?.id]);
 
   useEffect(() => {
     setAddress(currentAddress === 'about:blank' ? '' : currentAddress);
@@ -143,7 +173,7 @@ export function WebSurface({
     let previousHasBounds: boolean | undefined;
     const previewId = showPreview ? crypto.randomUUID() : undefined;
     previewIdRef.current = previewId;
-    if (!available) setPreview(undefined);
+    if (!available || !captureWhenOccluded) setPreview(undefined);
     const sendBounds = () => {
       frame = 0;
       const bounds = surface.getBoundingClientRect();
@@ -205,7 +235,7 @@ export function WebSurface({
       observer.disconnect();
       window.removeEventListener('resize', scheduleBounds);
     };
-  }, [session.id, pageKey, available, visible, showPreview]);
+  }, [session.id, pageKey, available, visible, showPreview, captureWhenOccluded]);
 
   useLayoutEffect(() => {
     if (!available || !preview || preview.pageKey !== pageKey) return;
@@ -281,7 +311,7 @@ export function WebSurface({
   return (
     <section
       aria-label="Connection browser"
-      className="relative flex h-full min-h-0 flex-col overflow-hidden bg-background"
+      className="connection-browser @container relative flex h-full min-h-0 flex-col overflow-hidden bg-[var(--browser-toolbar)]"
       onKeyDown={(event) => {
         if (!ready || !(event.ctrlKey || event.metaKey)) return;
         const key = event.key.toLowerCase();
@@ -302,58 +332,59 @@ export function WebSurface({
         }
       }}
     >
-      <div className="flex h-9 shrink-0 items-center gap-1 border-b border-border bg-muted/40 px-2">
+      <div className="browser-tab-rail flex h-10 shrink-0 items-center gap-0.5 px-2.5">
         <div
           aria-label="Browser tabs"
-          className="flex min-w-0 items-center gap-1 overflow-x-auto"
+          className="browser-tab-list flex min-w-0 items-start self-stretch overflow-x-auto overflow-y-hidden pt-1"
           ref={tabListRef}
           role="tablist"
         >
           {tabs.map((item, index) => (
             <div
-              className={`group flex h-7 min-w-24 max-w-48 shrink-0 items-center rounded-md border ${item.id === tab?.id ? 'border-border bg-background shadow-sm' : 'border-transparent hover:bg-accent/60'}`}
+              className={`flex h-8 w-[clamp(4rem,30cqw,11rem)] shrink-0 items-center rounded-t-[9px] border-t ${item.id === tab?.id ? 'browser-tab-active relative border-t-foreground/20 bg-[var(--browser-toolbar)] text-foreground' : 'border-transparent text-muted-foreground hover:bg-foreground/5 hover:text-foreground motion-safe:transition-colors'}`}
               key={item.id}
             >
-              <button
-                aria-controls={panelId}
-                aria-selected={item.id === tab?.id}
-                className="flex h-full min-w-0 flex-1 items-center gap-2 rounded-md px-2.5 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                disabled={!ready}
-                id={`web-tab-${item.id}`}
-                onClick={() => command('select-tab', { tabId: item.id })}
-                onKeyDown={(event) => {
-                  const next =
-                    event.key === 'ArrowRight'
-                      ? (index + 1) % tabs.length
-                      : event.key === 'ArrowLeft'
-                        ? (index - 1 + tabs.length) % tabs.length
-                        : event.key === 'Home'
-                          ? 0
-                          : event.key === 'End'
-                            ? tabs.length - 1
-                            : -1;
-                  if (next < 0) return;
-                  event.preventDefault();
-                  command('select-tab', { tabId: tabs[next].id });
-                  document.getElementById(`web-tab-${tabs[next].id}`)?.focus();
-                }}
-                role="tab"
-                tabIndex={item.id === tab?.id ? 0 : -1}
-                title={item.title}
-                type="button"
-              >
-                {item.isLoading ? (
-                  <LoaderCircle className="size-3 shrink-0 animate-spin" />
-                ) : item.error ? (
-                  <AlertCircle className="size-3 shrink-0 text-destructive" />
-                ) : (
-                  <WebTabFavicon favicon={item.favicon} />
-                )}
-                <span className="truncate">{item.title}</span>
-              </button>
+              <TextTooltip text={item.title}>
+                <button
+                  aria-controls={panelId}
+                  aria-selected={item.id === tab?.id}
+                  className="flex h-full min-w-0 flex-1 items-center gap-2 rounded-t-lg pr-1 pl-3 text-xs font-medium outline-none aria-selected:font-semibold focus-visible:inset-ring-2 focus-visible:inset-ring-ring"
+                  disabled={!ready}
+                  id={`web-tab-${item.id}`}
+                  onClick={() => command('select-tab', { tabId: item.id })}
+                  onKeyDown={(event) => {
+                    const next =
+                      event.key === 'ArrowRight'
+                        ? (index + 1) % tabs.length
+                        : event.key === 'ArrowLeft'
+                          ? (index - 1 + tabs.length) % tabs.length
+                          : event.key === 'Home'
+                            ? 0
+                            : event.key === 'End'
+                              ? tabs.length - 1
+                              : -1;
+                    if (next < 0) return;
+                    event.preventDefault();
+                    command('select-tab', { tabId: tabs[next].id });
+                    document.getElementById(`web-tab-${tabs[next].id}`)?.focus();
+                  }}
+                  role="tab"
+                  tabIndex={item.id === tab?.id ? 0 : -1}
+                  type="button"
+                >
+                  {item.isLoading ? (
+                    <LoaderCircle className="size-3 shrink-0 animate-spin" />
+                  ) : item.error ? (
+                    <AlertCircle className="size-3 shrink-0 text-destructive" />
+                  ) : (
+                    <WebTabFavicon favicon={item.favicon} />
+                  )}
+                  <span className="truncate">{item.title}</span>
+                </button>
+              </TextTooltip>
               <button
                 aria-label={`Close ${item.title}`}
-                className="mr-1 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-30 focus-visible:ring-2 focus-visible:ring-ring"
+                className="mr-0.5 grid size-6 shrink-0 place-items-center rounded-full text-muted-foreground outline-none enabled:hover:bg-foreground/10 enabled:hover:text-foreground focus-visible:inset-ring-2 focus-visible:inset-ring-ring disabled:opacity-30"
                 disabled={!ready || tabs.length === 1}
                 onClick={() => command('close-tab', { tabId: item.id })}
                 type="button"
@@ -370,69 +401,51 @@ export function WebSurface({
         >
           <Plus />
         </ToolbarButton>
-        <div aria-live="polite" className="ml-auto max-w-[40%] shrink-0">
-          {vpnInterrupted ? (
-            <button
-              aria-label={vpnRecoveryLabel}
-              className="flex max-w-full items-center gap-1.5 rounded bg-red-700 px-2 py-1 text-[10px] font-medium text-white enabled:cursor-pointer enabled:hover:bg-red-800"
-              disabled={!ready || vpnReconnecting}
-              onClick={() => command('reconnect-vpn')}
-              title={
-                vpnReconnecting
-                  ? session.tunnelProgress?.detail || vpnRecoveryLabel
-                  : vpnRecoveryLabel
-              }
-              type="button"
-            >
-              {vpnReconnecting ? (
-                <LoaderCircle aria-hidden="true" className="size-3.5 shrink-0 animate-spin" />
-              ) : (
-                <AlertCircle aria-hidden="true" className="size-3.5 shrink-0" />
-              )}
-              <span className="truncate">{vpnRecoveryLabel}</span>
-            </button>
-          ) : (
-            <span
-              className="flex items-center gap-1.5 border-l border-border pl-3 pr-1 text-[10px] font-medium text-muted-foreground"
-              title={
-                browser?.restrictedOrigin
-                  ? `${vpnLabel}. VPN access is limited to ${browser.restrictedOrigin}`
-                  : browser?.route === 'vpn'
-                    ? `${vpnLabel}. All tabs use this browser’s VPN tunnel`
-                    : 'No VPN tunnel is attached to this browser. Tabs use the normal network connection.'
-              }
-            >
-              {browser?.route === 'vpn' ? (
-                <ShieldCheck className="size-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
-              ) : (
-                <Globe className="size-3.5" />
-              )}
-              <span className="truncate">
-                {session.status === 'connecting'
-                  ? 'Connecting…'
-                  : browser?.route === 'vpn'
-                    ? vpnLabel
-                    : 'No VPN'}
+        <TextTooltip text={vpnDetails}>
+          <div aria-live="polite" className="ml-auto min-w-0 max-w-[36%] shrink-0">
+            {vpnInterrupted ? (
+              <button
+                aria-label={vpnRecoveryLabel}
+                className="flex h-6 max-w-full items-center gap-1.5 rounded-full bg-red-700 px-2.5 text-[11px] font-medium text-white enabled:cursor-pointer enabled:hover:bg-red-800"
+                disabled={!ready || vpnReconnecting}
+                onClick={() => command('reconnect-vpn')}
+                type="button"
+              >
+                {vpnReconnecting ? (
+                  <LoaderCircle aria-hidden="true" className="size-3.5 shrink-0 animate-spin" />
+                ) : (
+                  <AlertCircle aria-hidden="true" className="size-3.5 shrink-0" />
+                )}
+                <span className="truncate">{vpnRecoveryLabel}</span>
+              </button>
+            ) : (
+              <span className="flex h-6 items-center gap-1.5 rounded-full bg-[var(--browser-toolbar)] px-2.5 text-[11px] font-medium text-muted-foreground">
+                {browser?.route === 'vpn' ? (
+                  <ShieldCheck className="size-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
+                ) : (
+                  <Globe className="size-3.5 shrink-0" />
+                )}
+                <span className="truncate">{browser?.route === 'vpn' ? vpnLabel : 'No VPN'}</span>
               </span>
-            </span>
-          )}
-        </div>
+            )}
+          </div>
+        </TextTooltip>
       </div>
-      <header className="flex h-11 shrink-0 items-center gap-2 border-b border-border bg-card px-2">
-        <div className="flex items-center gap-0.5">
+      <header className="flex min-h-11 shrink-0 items-center gap-1.5 bg-[var(--browser-toolbar)] px-2.5 @max-[340px]:flex-wrap @max-[340px]:py-1.5">
+        <div className="flex shrink-0 items-center gap-0.5 @max-[340px]:mr-auto">
           <ToolbarButton
             disabled={!ready || !(tab?.canGoBack ?? session.webCanGoBack)}
             label="Back"
             onClick={() => command('back')}
           >
-            <ChevronLeft />
+            <ArrowLeft />
           </ToolbarButton>
           <ToolbarButton
             disabled={!ready || !(tab?.canGoForward ?? session.webCanGoForward)}
             label="Forward"
             onClick={() => command('forward')}
           >
-            <ChevronRight />
+            <ArrowRight />
           </ToolbarButton>
           <ToolbarButton
             disabled={!ready || blank}
@@ -443,7 +456,7 @@ export function WebSurface({
           </ToolbarButton>
         </div>
         <form
-          className="flex min-w-0 flex-1 items-center gap-2 rounded-md border border-border bg-muted/25 px-2.5 focus-within:ring-1 focus-within:ring-ring"
+          className="flex h-[34px] min-w-0 flex-1 items-center gap-2 rounded-full border border-transparent bg-[var(--browser-address)] px-3 focus-within:border-ring focus-within:ring-1 focus-within:ring-ring @max-[340px]:order-last @max-[340px]:basis-full"
           onSubmit={(event) => {
             event.preventDefault();
             command('navigate', { url: address });
@@ -452,13 +465,13 @@ export function WebSurface({
           {currentAddress.startsWith('https:') ? (
             <LockKeyhole aria-label="HTTPS" className="size-3.5 shrink-0 text-muted-foreground" />
           ) : (
-            <Globe className="size-3.5 shrink-0 text-muted-foreground" />
+            <Globe aria-hidden="true" className="size-3.5 shrink-0 text-muted-foreground" />
           )}
           <input
             aria-label="Website address"
             autoCapitalize="none"
             autoComplete="off"
-            className="h-7 w-full min-w-0 bg-transparent font-mono text-[11px] outline-none placeholder:text-muted-foreground"
+            className="h-full w-full min-w-0 bg-transparent text-[13px] outline-none placeholder:text-muted-foreground"
             disabled={!ready}
             maxLength={8192}
             onChange={(event) => setAddress(event.target.value)}
@@ -471,7 +484,7 @@ export function WebSurface({
           />
         </form>
         {session.protocol === 'https' ? (
-          <div className="flex shrink-0 items-center gap-0.5 border-l border-border/70 pl-2">
+          <div className="flex shrink-0 items-center gap-0.5">
             <ToolbarButton
               disabled={!visible}
               label="Decrease text size"
@@ -515,12 +528,12 @@ export function WebSurface({
       <div
         aria-label="Web browser canvas"
         aria-labelledby={tab ? `web-tab-${tab.id}` : undefined}
-        className="relative min-h-0 flex-1"
+        className="relative min-h-0 flex-1 overflow-hidden rounded-[var(--workspace-canvas-radius)]"
         id={panelId}
         ref={surfaceRef}
         role="tabpanel"
       >
-        {available && preview?.pageKey === pageKey ? (
+        {available && captureWhenOccluded && preview?.pageKey === pageKey ? (
           <img
             alt=""
             aria-hidden="true"
@@ -530,7 +543,7 @@ export function WebSurface({
         ) : null}
         {ready && blank ? (
           <StatusOverlay>
-            <Globe className="size-9 text-muted-foreground/50" />
+            <Globe className="size-9 text-muted-foreground/50 dark:text-foreground" />
             <p className="text-sm font-medium">New tab</p>
             <p className="max-w-md text-xs leading-relaxed text-muted-foreground">
               Enter an address above to browse
@@ -552,19 +565,6 @@ export function WebSurface({
               Reload page
             </Button>
           </StatusOverlay>
-        ) : null}
-        {session.status === 'connecting' || session.status === 'placeholder' ? (
-          session.tunnelProgress ? (
-            <StatusOverlay>
-              <ConnectionStepper tunnelProgress={session.tunnelProgress} />
-            </StatusOverlay>
-          ) : (
-            <StatusOverlay>
-              <LoaderCircle className="size-7 animate-spin text-primary" />
-              <p className="text-sm font-medium">Opening browser…</p>
-              <p className="max-w-md text-xs leading-relaxed text-muted-foreground">{address}</p>
-            </StatusOverlay>
-          )
         ) : null}
         {session.status === 'failed' ? (
           <StatusOverlay>
@@ -625,7 +625,7 @@ function ToolbarButton({
     <Button
       aria-label={label}
       ref={buttonRef}
-      className="size-7 p-0"
+      className="size-7 rounded-full p-0"
       disabled={disabled}
       onClick={onClick}
       size="icon"

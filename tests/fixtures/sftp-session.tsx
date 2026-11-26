@@ -157,7 +157,7 @@ async function runSftpTreeRequestTests(root: ReturnType<typeof createRoot>) {
     });
     await tick();
     assert.ok(
-      document.querySelector('[title="Permission denied"]'),
+      document.querySelector('button[aria-label$=": Permission denied"]'),
       'Real directory errors must remain visible',
     );
   } finally {
@@ -704,7 +704,6 @@ export async function runSftpSessionTests() {
   const emit = (event: WormholeSshEvent) => {
     for (const listener of listeners) listener(event);
   };
-  window.confirm = () => true;
   window.wormhole = {
     readSftpEditorSettings: async () => settings,
     writeSftpEditorSettings: async (next) => {
@@ -825,6 +824,14 @@ export async function runSftpSessionTests() {
     [...document.querySelectorAll('button')].find(
       (element) => element.textContent?.trim() === text,
     );
+  const confirmAction = async (label: string) => {
+    const dialog = document.querySelector('[role="alertdialog"][data-state="open"]');
+    assert.ok(dialog, `Missing ${label} confirmation`);
+    assert.equal(getComputedStyle(dialog).borderRadius, '16px');
+    await click(
+      [...dialog.querySelectorAll('button')].find((button) => button.textContent?.trim() === label),
+    );
+  };
   const key = async (element: Element, value: string, options: KeyboardEventInit = {}) => {
     await React.act(async () =>
       element.dispatchEvent(
@@ -924,7 +931,7 @@ export async function runSftpSessionTests() {
     const tree = document.querySelector(`[aria-label="${pane} directory tree"]`)!;
     const selected = tree.querySelector('[aria-selected="true"]');
     assert.ok(selected, `${pane} tree must select ${path}`);
-    assert.equal(selected.querySelector('button[title]')?.getAttribute('title'), path);
+    assert.equal(selected.getAttribute('data-sftp-tree-path'), path);
     const treeBounds = tree.getBoundingClientRect();
     const headerBounds = tree.querySelector('[data-sftp-tree-header]')?.getBoundingClientRect();
     if (headerBounds && tree.scrollTop > 0)
@@ -967,6 +974,15 @@ export async function runSftpSessionTests() {
     const fileList = document.querySelector(
       `[aria-label="${pane === 'local' ? 'Local' : 'Remote'} file list"]`,
     )!;
+    const actions = tree
+      .closest('[data-sftp-panel]')!
+      .querySelector('button[aria-label="Refresh"]')!.parentElement!;
+    const actionBounds = actions.getBoundingClientRect();
+    assert.ok(
+      tree.parentElement!.getBoundingClientRect().bottom <= actionBounds.top &&
+        actionBounds.bottom <= fileList.getBoundingClientRect().top,
+      `${pane} file actions must sit between the directory tree and the file list`,
+    );
     const listColumns = [...fileList.querySelectorAll('[role="columnheader"]')].filter((column) =>
       ['Name', 'Size', 'Modified'].includes(column.textContent?.trim() ?? ''),
     );
@@ -1031,9 +1047,7 @@ export async function runSftpSessionTests() {
   );
   for (const name of ['.cache', '.ssh']) {
     const tree = document.querySelector('[aria-label="remote directory tree"]')!;
-    const child = tree
-      .querySelector(`[title="/home/ubuntu/${name}"]`)!
-      .closest('[data-sftp-tree-path]')!;
+    const child = tree.querySelector(`[data-sftp-tree-path="/home/ubuntu/${name}"]`)!;
     const bounds = child.getBoundingClientRect();
     const viewportBounds = tree.getBoundingClientRect();
     assert.ok(
@@ -1087,6 +1101,7 @@ export async function runSftpSessionTests() {
   await click(button('Upload now'));
   assert.ok(document.body.textContent?.includes('Conflict'));
   await click(button('Overwrite remote'));
+  await confirmAction('Overwrite remote');
   assert.ok(document.body.textContent?.includes('Uploaded'));
   await click(button('Upload now'));
   await click(button('Save as'));
@@ -1103,6 +1118,7 @@ export async function runSftpSessionTests() {
   assert.equal(actions.at(-1)?.destinationPath, '/remote/copy.conf');
   await click(button('Upload now'));
   await click(button('Re-download'));
+  await confirmAction('Re-download');
   await click(button('Open folder'));
   await click(button('Stop editing'));
   assert.equal(document.querySelector('[aria-label="Edited files"]'), null);
@@ -1238,8 +1254,8 @@ export async function runSftpSessionTests() {
   await click(treeToggle);
   await tick();
   const failedTreeFolder =
-    document.querySelector('[title="Tree permission denied"]') ??
-    document.querySelector('[title="Tree request rejected"]');
+    document.querySelector('button[aria-label$=": Tree permission denied"]') ??
+    document.querySelector('button[aria-label$=": Tree request rejected"]');
   assert.ok(failedTreeFolder, 'tree errors must leave a navigable retry target');
   await click(failedTreeFolder);
   await key(local, 'F7');
@@ -1269,6 +1285,7 @@ export async function runSftpSessionTests() {
   assert.ok(document.body.textContent?.includes('Configured editor could not start'));
   editFailure = 'binary-file-confirmation-required';
   await key(local, 'F4');
+  await confirmAction('Open in editor');
   assert.ok(actions.some((action) => action.allowBinary));
   await render(
     {
@@ -1288,6 +1305,10 @@ export async function runSftpSessionTests() {
     },
     '',
     null,
+  );
+  assert.equal(
+    getComputedStyle(document.querySelector('dialog[open] [data-dialog-surface]')!).borderRadius,
+    '16px',
   );
   await click(button('Skip'));
   await render({
@@ -1310,7 +1331,7 @@ export async function runSftpSessionTests() {
   assert.ok(document.body.textContent?.includes('Permission denied'));
   await render({ ...browser, status: 'opening', local: undefined });
   await render({ ...browser, status: 'closing' });
-  await React.act(async () => root.render(<SftpEditorSettings />));
+  await React.act(async () => root.render(<SftpEditorSettings allowConfirmation />));
   await tick();
   await click(button('Add editor'));
   await tick();
@@ -1403,10 +1424,12 @@ export async function runSftpSessionTests() {
   await click(button('Recover'));
   await click(button('Upload now'));
   await click(button('Overwrite remote'));
+  await confirmAction('Overwrite remote');
   files = files.map((file) => ({ ...file, recovered: true }));
   await React.act(async () => root.render(<SftpEditedFiles sessionId="sftp-recovery" recovery />));
   await tick();
   await click(button('Discard'));
+  await confirmAction('Discard');
   assert.equal(files.length, 0);
 
   // A failed initial read must be visible rather than an unhandled rejection.
@@ -1497,12 +1520,33 @@ export async function runSftpSessionTests() {
   );
   await tick();
   assert.ok(document.body.textContent?.includes('latest.conf'));
+  await click(button('Discard'));
+  assert.ok(document.querySelector('[role="alertdialog"][data-state="open"]'));
   await React.act(async () =>
     emit({ type: 'sftp.edit', requestId: 'other-tab-discard', sessionId: 'other-tab', edits: [] }),
   );
   await tick();
   assert.ok(!document.body.textContent?.includes('latest.conf'));
   assert.ok(!document.body.textContent?.includes('can be recovered'));
+  await React.act(async () =>
+    emit({
+      type: 'sftp.edit',
+      requestId: 'new-copy',
+      sessionId: 'other-tab',
+      edits: [{ ...latest, id: 'new-edit', name: 'new.conf', recovered: true }],
+    }),
+  );
+  await tick();
+  assert.ok(
+    !document.querySelector('[role="alertdialog"][data-state="open"]'),
+    'A new copy must not resurrect the previous discard prompt',
+  );
+  await click(button('Discard'));
+  assert.match(
+    document.querySelector('[role="alertdialog"][data-state="open"]')!.textContent!,
+    /new\.conf/,
+  );
+  await confirmAction('Cancel');
   window.wormhole!.sftpEdit = originalEdit;
   const originalReadSettings = window.wormhole!.readSftpEditorSettings;
   window.wormhole!.readSftpEditorSettings = async () => {
@@ -1514,7 +1558,7 @@ export async function runSftpSessionTests() {
   await React.act(async () =>
     root.render(
       <>
-        <SftpEditorSettings />
+        <SftpEditorSettings allowConfirmation />
         <SftpRecoveryNotice />
       </>,
     ),

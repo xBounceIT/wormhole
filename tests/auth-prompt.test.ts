@@ -9,6 +9,7 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import tailwindcss from '@tailwindcss/vite';
 import { build, transformWithOxc } from 'vite';
+import { tooltipDarkColor, tooltipLightColor } from '../electron/tree-tooltip.ts';
 
 const require = createRequire(import.meta.url);
 
@@ -165,7 +166,7 @@ test('authentication prompts and window-close controls work in Chromium', async 
   const bitwardenControls = [
     ['input', 'function Input('],
     ['button', 'const buttonVariants ='],
-    ['tooltip', 'function TooltipProvider('],
+    ['tooltip', 'const TooltipProviderContext ='],
   ]
     .map(([name, start]) => {
       const ui = readFileSync(new URL(`../src/components/ui/${name}.tsx`, import.meta.url), 'utf8');
@@ -176,11 +177,11 @@ test('authentication prompts and window-close controls work in Chromium', async 
     })
     .join('\n');
   const bitwardenHarness = `
-    const { BitwardenCliDialog, BitwardenAccessPrompt, TooltipProvider, RuntimeCredentialPasswordInput } = (() => {
+    const { BitwardenCliDialog, BitwardenAccessPrompt, TextTooltip, TooltipProvider, RuntimeCredentialPasswordInput } = (() => {
       ${bitwardenControls}
       ${slice('function IconButton(', 'function CredentialValueRow(')}
       ${slice('function RuntimeCredentialPasswordInput', 'type BitwardenOperationDialogState')}
-      return { BitwardenCliDialog, BitwardenAccessPrompt, TooltipProvider, RuntimeCredentialPasswordInput };
+      return { BitwardenCliDialog, BitwardenAccessPrompt, TextTooltip, TooltipProvider, RuntimeCredentialPasswordInput };
     })();
     ${slice('function backendErrorMessage', 'function formatLocalDateTime')}
     function BitwardenSettingsHarness({ status, initialError, reload, credentialsChanged, bitwardenServerRegion = 'Current' }) {
@@ -417,6 +418,8 @@ test('authentication prompts and window-close controls work in Chromium', async 
   assert.ok(css.length > 0);
   const renderer = `
     const assert = require('node:assert/strict');
+    const tooltipDarkColor = ${JSON.stringify(tooltipDarkColor)};
+    const tooltipLightColor = ${JSON.stringify(tooltipLightColor)};
     const React = require(${JSON.stringify(require.resolve('react'))});
     const { createRoot } = require(${JSON.stringify(require.resolve('react-dom/client'))});
     const { useRef, useCallback, useEffect, useLayoutEffect } = React;
@@ -483,6 +486,7 @@ test('authentication prompts and window-close controls work in Chromium', async 
         });
         try {
           await window.loadURL('data:text/html,<div id="root"></div>');
+          window.webContents.focus();
           window.webContents.debugger.attach('1.3');
           await window.webContents.debugger.sendCommand('Profiler.enable');
           await window.webContents.debugger.sendCommand('Profiler.startPreciseCoverage', {

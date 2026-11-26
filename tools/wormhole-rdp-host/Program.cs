@@ -44,6 +44,7 @@ internal sealed class RdpHostApplicationContext : ApplicationContext
     private int _lastResolutionWidth;
     private int _lastResolutionHeight;
     private bool _closing;
+    private bool _focusOnFirstShow = true;
 
     public RdpHostApplicationContext()
     {
@@ -116,11 +117,11 @@ internal sealed class RdpHostApplicationContext : ApplicationContext
                     Write(new RdpHostEvent("ack", command.RequestId));
                     break;
                 case "show":
-                    if (_form is not null)
+                    if (_form is { } form)
                     {
                         if (command.Bounds.IsUsable)
                         {
-                            if (!_form.SetHostBounds(
+                            if (!form.SetHostBounds(
                                     command.Bounds.X,
                                     command.Bounds.Y,
                                     command.Bounds.Width,
@@ -132,7 +133,12 @@ internal sealed class RdpHostApplicationContext : ApplicationContext
                         }
                         else
                         {
-                            _ = Win32Interop.ShowWindow(_form.Hwnd, Win32Interop.SW_SHOWNA);
+                            _ = Win32Interop.ShowWindow(form.Hwnd, Win32Interop.SW_SHOWNA);
+                        }
+                        if (_focusOnFirstShow)
+                        {
+                            _focusOnFirstShow = false;
+                            form.RequestFocus();
                         }
                     }
                     Write(new RdpHostEvent("ack", command.RequestId));
@@ -242,40 +248,19 @@ internal sealed class RdpHostApplicationContext : ApplicationContext
 
         var form = CreateRealizedHostForm();
         _form = form;
-        var connectionVisible = false;
-        void Reveal(bool focus = false)
-        {
-            connectionVisible = true;
-            try
-            {
-                _ = Win32Interop.ShowWindow(form.Hwnd, Win32Interop.SW_SHOWNA);
-                _ = form.EnsureVisibleAndRedraw();
-                if (focus) form.RequestFocus();
-            }
-            catch
-            {
-                // The OCX can be tearing down concurrently with a terminal event. The Go
-                // process boundary still contains the failure and the next retry creates a new
-                // helper/form.
-            }
-        }
-
         void Conceal()
         {
-            connectionVisible = false;
             try { _ = Win32Interop.ShowWindow(form.Hwnd, Win32Interop.SW_HIDE); }
             catch { /* best-effort during teardown */ }
         }
 
         form.Connected += () =>
         {
-            Reveal(focus: true);
             ScheduleRemoteResolution(_pendingResolutionWidth, _pendingResolutionHeight);
             Write(new RdpHostEvent("connected"));
         };
         form.LoginComplete += () =>
         {
-            Reveal(focus: true);
             ScheduleRemoteResolution(_pendingResolutionWidth, _pendingResolutionHeight);
             Write(new RdpHostEvent("loginComplete"));
         };
@@ -300,15 +285,8 @@ internal sealed class RdpHostApplicationContext : ApplicationContext
         };
         form.LogonError += code => Write(new RdpHostEvent("logonError", Code: code));
         form.AutoReconnecting2 += (_, _, attempt, max) =>
-        {
-            Conceal();
             Write(new RdpHostEvent("autoReconnecting", Attempt: attempt, Max: max));
-        };
-        form.AutoReconnected += () =>
-        {
-            Reveal();
-            Write(new RdpHostEvent("autoReconnected"));
-        };
+        form.AutoReconnected += () => Write(new RdpHostEvent("autoReconnected"));
 
         var hwnd = form.Hwnd;
         ConfigureAsOwnedOverlay(hwnd, owner);
@@ -334,21 +312,10 @@ internal sealed class RdpHostApplicationContext : ApplicationContext
             hwnd,
             command.Bounds.Width,
             command.Bounds.Height);
-        if (!form.SetHostBounds(
-                command.Bounds.X,
-                command.Bounds.Y,
-                command.Bounds.Width,
-                command.Bounds.Height,
-                reveal: true))
-        {
-            throw new InvalidOperationException("native RDP surface activation failed");
-        }
-
         // Start only after every event subscription and the owned Electron overlay relationship
-        // are in place, otherwise an early native event can be lost.
+        // are in place. Only a renderer show command may display the realized HWND.
         ScheduleRemoteResolution(command.Bounds.Width, command.Bounds.Height);
         form.Start();
-        if (!_closing && !connectionVisible) Conceal();
         if (!_closing) Write(new RdpHostEvent("ready", command.RequestId));
     }
 

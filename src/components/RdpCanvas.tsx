@@ -2,7 +2,17 @@ import { useEffect, useRef } from 'react';
 import { createRdpInputQueue, decodeRdpTile, rdpKeyInput, rdpPointerInput } from '../rdp-canvas';
 import type { RdpInput } from '../../electron/rdp-framebuffer';
 
-export function RdpCanvas({ sessionId, enabled }: { sessionId: string; enabled: boolean }) {
+export function RdpCanvas({
+  sessionId,
+  enabled,
+  interactive,
+  onFirstFrame,
+}: {
+  sessionId: string;
+  enabled: boolean;
+  interactive: boolean;
+  onFirstFrame?: () => void;
+}) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const lifecycle = useRef('');
   useEffect(() => {
@@ -10,9 +20,15 @@ export function RdpCanvas({ sessionId, enabled }: { sessionId: string; enabled: 
     const api = window.wormhole;
     const context = canvas?.getContext('2d', { alpha: false });
     if (!canvas || !context || !api) return;
+    let paintedTile = false;
+    let reportedFirstFrame = false;
     const unsubscribe = api.onRdpEvent((event) => {
       if (event.sessionId !== sessionId) return;
       if (event.type === 'frameEnd' && event.lifecycleId && event.paintId) {
+        if (event.lifecycleId === lifecycle.current && paintedTile && !reportedFirstFrame) {
+          reportedFirstFrame = true;
+          onFirstFrame?.();
+        }
         void api
           .sendRdpInput({
             sessionId,
@@ -23,8 +39,11 @@ export function RdpCanvas({ sessionId, enabled }: { sessionId: string; enabled: 
         return;
       }
       if (event.type === 'started' || event.type === 'connected') {
-        if (lifecycle.current !== event.lifecycleId)
+        if (lifecycle.current !== event.lifecycleId) {
           context.clearRect(0, 0, canvas.width, canvas.height);
+          paintedTile = false;
+          reportedFirstFrame = false;
+        }
         lifecycle.current = event.lifecycleId ?? '';
       }
       if (event.type !== 'frame' || !event.frame || !enabled) return;
@@ -45,14 +64,15 @@ export function RdpCanvas({ sessionId, enabled }: { sessionId: string; enabled: 
         event.frame.x,
         event.frame.y,
       );
+      paintedTile = true;
     });
     return unsubscribe;
-  }, [sessionId, enabled]);
+  }, [sessionId, enabled, onFirstFrame]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
     const api = window.wormhole;
-    if (!canvas || !api || !enabled) return;
+    if (!canvas || !api || !interactive) return;
     const queue = createRdpInputQueue(
       async (input, lifecycleId) => {
         if (lifecycleId) await api.sendRdpInput({ sessionId, lifecycleId, input });
@@ -142,11 +162,11 @@ export function RdpCanvas({ sessionId, enabled }: { sessionId: string; enabled: 
       canvas.removeEventListener('contextmenu', menu);
       canvas.removeEventListener('compositionend', composition);
     };
-  }, [sessionId, enabled]);
+  }, [sessionId, interactive]);
   return (
     <canvas
       ref={canvasRef}
-      tabIndex={enabled ? 0 : -1}
+      tabIndex={interactive ? 0 : -1}
       aria-label="Remote desktop"
       className="absolute inset-0 h-full w-full outline-none"
       style={{ visibility: enabled ? 'visible' : 'hidden' }}

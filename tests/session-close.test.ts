@@ -24,6 +24,7 @@ test('middle-click closes tabs without waiting for native teardown or restoring 
     'session-tab-state',
     'file-protocol',
     'app-shortcuts',
+    'horizontal-scroll',
   ]
     .map((name) => readFileSync(new URL(`../src/${name}.ts`, import.meta.url), 'utf8'))
     .join('\n')
@@ -31,11 +32,12 @@ test('middle-click closes tabs without waiting for native teardown or restoring 
   const source = `
     ${modules}
     ${readFileSync(new URL('../electron/web-session-attempt.ts', import.meta.url), 'utf8').replaceAll('export ', '')}
-    ${slice('function SessionsPage(', 'function SessionSurface({')}
+    ${slice('function SessionsPage(', 'function SessionSurface(')}
     const IconButton = ({ label, children, ...props }) => <button aria-label={label} {...props}>{children}</button>;
     const SessionTabContextMenu = ({ children }) => children;
+    const TextTooltip = ({ children }) => children;
     const SessionSurface = ({ session, isActive, nativeSurfaceActive }) => <output data-surface={session.id} data-active={isActive} data-native-visible={nativeSurfaceActive}>{session.title}</output>;
-    const PanelLeft = 'span', Zap = 'span', Bot = 'span', ProtocolIcon = 'span';
+    const Zap = 'span', Bot = 'span', ProtocolIcon = 'span';
     const ArrowRightLeft = 'span', X = 'span', Button = 'button';
     const pendingReleases = [], releaseCalls = [], openedWeb = [], openedSsh = [];
     let windowCloseListener;
@@ -175,7 +177,9 @@ test('middle-click closes tabs without waiting for native teardown or restoring 
     await nativeClick(document.querySelector('[aria-label="Close c"]'), 'middle');
     assert.deepEqual(ids(), []);
     assert.equal(controls.selectedSessionId, '');
-    assert.match(document.body.textContent, /No active sessions/);
+    const emptyCanvas = document.querySelector('[data-session-canvas]');
+    assert.equal(emptyCanvas.firstElementChild.textContent, 'No active sessions');
+    assert.equal(emptyCanvas.querySelector('button').textContent.trim(), 'Quick Connect');
 
     // Stale callbacks and batched closes must not resurrect already removed tabs.
     await mount([session('a'), session('b'), session('c')], { prompts: true });

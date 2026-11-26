@@ -92,6 +92,7 @@ test('pinned and auto-hide sidebars preserve layout, focus, menus and saved pref
     globalThis.IS_REACT_ACT_ENVIRONMENT = true;
     window.sidebarAssert = require('node:assert/strict');
     window.sidebarInput = event => require('electron').ipcRenderer.invoke('test:input', event);
+    window.sidebarHover = (selector, enabled) => require('electron').ipcRenderer.invoke('test:hover', selector, enabled);
     window.sidebarReducedMotion = reduce => require('electron').ipcRenderer.invoke('test:reduced-motion', reduce);
     window.sidebarObserve = stage => require('electron').ipcRenderer.invoke('test:observe', stage);
     ${script.code}
@@ -110,7 +111,7 @@ test('pinned and auto-hide sidebars preserve layout, focus, menus and saved pref
       app.setPath('userData', ${JSON.stringify(directory)});
       app.setPath('sessionData', ${JSON.stringify(directory)});
       app.whenReady().then(async () => {
-        const window = new BrowserWindow({ show: false, width: 1200, height: 800, titleBarStyle: 'hidden',
+        const window = new BrowserWindow({ show: false, width: nativeScale === 1.25 ? 900 : 1200, height: 800, titleBarStyle: 'hidden',
           ...(process.platform !== 'darwin' ? { titleBarOverlay: { color: '#0a0a0a', symbolColor: '#ffffff', height: 48 } } : {}),
           webPreferences: {
           nodeIntegration: true, contextIsolation: false, backgroundThrottling: false,
@@ -119,6 +120,17 @@ test('pinned and auto-hide sidebars preserve layout, focus, menus and saved pref
           // Commit the hidden window's current hit-test regions before native hover input.
           if (input.type === 'mouseMove') await window.webContents.capturePage();
           window.webContents.sendInputEvent(input);
+        });
+        let hoverNodeId;
+        ipcMain.handle('test:hover', async (_event, selector, enabled) => {
+          const debuggerApi = window.webContents.debugger;
+          if (enabled) {
+            const { root } = await debuggerApi.sendCommand('DOM.getDocument');
+            const { nodeId } = await debuggerApi.sendCommand('DOM.querySelector', { nodeId: root.nodeId, selector });
+            if (!nodeId) throw new Error('Hover target not found: ' + selector);
+            hoverNodeId = nodeId;
+          }
+          await debuggerApi.sendCommand('CSS.forcePseudoState', { nodeId: hoverNodeId, forcedPseudoClasses: enabled ? ['hover'] : [] });
         });
         async function capturePaint() {
           // Commit the hidden window's pending paint before sampling its physical pixels.
@@ -129,9 +141,26 @@ test('pinned and auto-hide sidebars preserve layout, focus, menus and saved pref
         let idleDropColors;
         ipcMain.handle('test:observe', async (_event, stage) => {
           console.log('Sidebar App: ' + stage);
+          if (stage === 'session-scroll-middle') {
+            const assert = require('node:assert/strict');
+            const debuggerApi = window.webContents.debugger;
+            const { root } = await debuggerApi.sendCommand('DOM.getDocument');
+            const { nodeId } = await debuggerApi.sendCommand('DOM.querySelector', {
+              nodeId: root.nodeId,
+              selector: '[aria-label="Pane tabs"]',
+            });
+            const { node } = await debuggerApi.sendCommand('DOM.describeNode', { nodeId, depth: 1 });
+            const { model: strip } = await debuggerApi.sendCommand('DOM.getBoxModel', { nodeId });
+            for (const [type, edge] of [['before', 0], ['after', 2]]) {
+              const { backendNodeId } = node.pseudoElements.find(item => item.pseudoType === type);
+              const { model } = await debuggerApi.sendCommand('DOM.getBoxModel', { backendNodeId });
+              assert.ok(Math.abs(model.border[edge] - strip.border[edge]) <= 0.5,
+                type + ' blur must start at the clipping edge');
+            }
+          }
           if (stage.startsWith('session-drop-')) {
             const { left, top, radius, ringX, ringY, viewportWidth, viewportHeight } = await window.webContents.executeJavaScript(\`(() => {
-              const canvas = document.querySelector('[data-workspace-canvas] > div');
+              const canvas = document.querySelector('[data-session-canvas]');
               const tablist = document.querySelector('[aria-label="Pane tabs"]').getBoundingClientRect();
               const { left, top } = canvas.getBoundingClientRect();
               return { left, top, radius: parseFloat(getComputedStyle(canvas).borderTopLeftRadius), ringX: tablist.right - 16, ringY: tablist.top + 1, viewportWidth: innerWidth, viewportHeight: innerHeight };
@@ -159,13 +188,13 @@ test('pinned and auto-hide sidebars preserve layout, focus, menus and saved pref
               else assert.equal(ring, idleDropColors.ring, 'Ending the drag must clear the drop ring');
             }
           }
-          const checkHandle = stage.startsWith('pinned-');
-          if (checkHandle || (process.env.WORMHOLE_TEST_SCREENSHOTS && ['collapsed', 'hover', 'tree-highlight'].includes(stage))) {
+          const checkSeam = stage.startsWith('pinned-');
+          if (checkSeam || (process.env.WORMHOLE_TEST_SCREENSHOTS && (stage.startsWith('workspace-') || ['collapsed', 'hover', 'tree-highlight', 'tab-search', 'tab-search-light'].includes(stage)))) {
             // Freeze motion for stills: capturing a hidden window can resume a stale paint frame.
             const stillStyles = await window.webContents.insertCSS('[data-sidebar-panel], [data-sidebar-surface] { transition: none !important; }');
             try {
               const viewport = await window.webContents.executeJavaScript('({ width: innerWidth, height: innerHeight })');
-              for (const scale of checkHandle ? [1, 1.25, 1.5, 2] : [null]) {
+              for (const scale of checkSeam ? [1, 1.25, 1.5, 2] : [null]) {
                 if (scale !== null) {
                   await window.webContents.debugger.sendCommand('Emulation.setDeviceMetricsOverride', { ...viewport, mobile: false, deviceScaleFactor: scale });
                 }
@@ -174,46 +203,38 @@ test('pinned and auto-hide sidebars preserve layout, focus, menus and saved pref
                   const suffix = (nativeScale === 1 ? '' : '-native-' + nativeScale) + (scale === null || scale === 1 ? '' : '-' + scale);
                   require('node:fs').writeFileSync(require('node:path').join(process.env.WORMHOLE_TEST_SCREENSHOTS, 'sidebar-' + stage + suffix + '.png'), capture.toPNG());
                 }
-                if (checkHandle) {
-                  const bounds = await window.webContents.executeJavaScript('(() => { const canvas = document.querySelector("[data-workspace-canvas] > div"); const dividerLeft = canvas.getBoundingClientRect().left; const borderWidth = parseFloat(getComputedStyle(canvas).borderLeftWidth); const grip = document.querySelector("[data-slot=resizable-handle] > div").getBoundingClientRect(); return { left: dividerLeft, centerX: dividerLeft + borderWidth / 2, centerY: grip.top + grip.height / 2 }; })()');
+                if (checkSeam) {
+                  const seam = await window.webContents.executeJavaScript('(() => { const { left, width, top, height } = document.querySelector("[data-slot=resizable-handle]").getBoundingClientRect(); return { x: left + width / 2, y: top + height / 2 }; })()');
                   // Hidden-window captures can precede the compositor's updated frame.
-                  // Retry rendering, while retaining every physical-pixel assertion.
                   for (let paint = 0; ; paint++) {
-                  const size = capture.getSize(1);
-                  const scaleX = size.width / viewport.width;
-                  const scaleY = size.height / viewport.height;
-                  const left = Math.floor((bounds.left - 6) * scaleX);
-                  const top = Math.floor((bounds.centerY - 24) * scaleY);
-                  const width = Math.ceil(13 * scaleX);
-                  const middleY = Math.floor(bounds.centerY * scaleY) - top;
-                  const pixels = capture.toBitmap({ scaleFactor: 1 });
-                  const colorAt = (x, y) => pixels.readUInt32LE(((top + y) * size.width + left + x) * 4);
-                  const borderColor = colorAt(Math.floor(bounds.centerX * scaleX) - left, 0);
-                  const borderPixels = [];
-                  const gripPixels = [];
-                  for (let x = 0; x < width; x++) {
-                    if (colorAt(x, 0) === borderColor) borderPixels.push(x);
-                    if (colorAt(x, middleY) === borderColor) gripPixels.push(x);
-                  }
-                  const assert = require('node:assert/strict');
-                  assert.ok(Math.abs(scaleX - nativeScale) < 0.01, 'The native capture must exercise the selected physical pixel scale');
-                  assert.equal(pixels.length, size.width * size.height * 4);
-                  // Opposite pixel-width parity permits only the nearest half-pixel center.
-                  const centerDelta = Math.abs(gripPixels[0] + gripPixels.at(-1) - borderPixels[0] - borderPixels.at(-1));
-                  const extendsDivider = borderPixels.length > 0 && gripPixels.length > borderPixels.length;
-                  const centered = centerDelta <= (gripPixels.length + borderPixels.length) % 2;
-                  if ((!extendsDivider || !centered) && paint < 5) {
-                    capture = await capturePaint();
-                    continue;
-                  }
-                  assert.ok(extendsDivider, 'The grip must visibly extend beyond the divider in ' + stage + ' at ' + scale + 'x: border=' + borderPixels + ', grip=' + gripPixels);
-                  assert.ok(centerDelta <= (gripPixels.length + borderPixels.length) % 2, 'Painted grip pixels must be centered on the complete divider in ' + stage + ' at ' + scale + 'x');
-                  break;
+                    const { width, height } = capture.getSize(1);
+                    const scaleX = width / viewport.width;
+                    const scaleY = height / viewport.height;
+                    const pixels = capture.toBitmap({ scaleFactor: 1 });
+                    const assert = require('node:assert/strict');
+                    assert.ok(Math.abs(scaleX - nativeScale) < 0.01);
+                    assert.equal(pixels.length, width * height * 4);
+                    const start = Math.floor((seam.x - 3) * scaleX);
+                    const end = Math.ceil((seam.x + 2) * scaleX);
+                    const rowsMatch = [-24, 0, 24].every(offset => {
+                      const row = Math.floor((seam.y + offset) * scaleY) * width;
+                      const background = pixels.readUInt32LE((row + start) * 4);
+                      for (let x = start + 1; x <= end; x++) {
+                        if (pixels.readUInt32LE((row + x) * 4) !== background) return false;
+                      }
+                      return true;
+                    });
+                    if (!rowsMatch && paint < 5) {
+                      capture = await capturePaint();
+                      continue;
+                    }
+                    assert.ok(rowsMatch, 'Idle sidebar seam must paint as one surface in ' + stage + ' at ' + scale + 'x');
+                    break;
                   }
                 }
               }
             } finally {
-              if (checkHandle) await window.webContents.debugger.sendCommand('Emulation.clearDeviceMetricsOverride');
+              if (checkSeam) await window.webContents.debugger.sendCommand('Emulation.clearDeviceMetricsOverride');
               await window.webContents.removeInsertedCSS(stillStyles);
             }
           }
@@ -226,6 +247,8 @@ test('pinned and auto-hide sidebars preserve layout, focus, menus and saved pref
           await window.webContents.insertCSS(${JSON.stringify(String(css.source))});
           window.webContents.focus();
           window.webContents.debugger.attach('1.3');
+          await window.webContents.debugger.sendCommand('DOM.enable');
+          await window.webContents.debugger.sendCommand('CSS.enable');
           await window.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', {
             features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }],
           });
@@ -235,7 +258,7 @@ test('pinned and auto-hide sidebars preserve layout, focus, menus and saved pref
           const coverage = await window.webContents.debugger.sendCommand('Profiler.takePreciseCoverage');
           const script = coverage.result.find(item => item.url === 'wormhole-sidebar-layout.js');
           if (!script) throw new Error('Missing sidebar renderer coverage');
-          for (const name of nativeScale === 1 ? ['AppTitlebar', 'SidebarLayout', 'SidebarPinButton', 'SidebarNavigation', 'ContextMenuOverlayProvider'] : []) {
+          for (const name of nativeScale === 1 ? ['AppTitlebar', 'SidebarLayout', 'SidebarPinButton', 'SidebarNavigation', 'ContextMenuOverlayProvider', 'SessionTabSearch'] : []) {
             const parent = script.functions.find(item => item.functionName === name);
             if (!parent) throw new Error('Missing coverage for ' + name);
             const range = parent.ranges[0];

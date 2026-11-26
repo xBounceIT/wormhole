@@ -2,6 +2,7 @@ import React, { act } from 'react';
 import '../../src/index.css';
 import { createRoot } from 'react-dom/client';
 import { RdpSurface } from '../../src/components/RdpSurface';
+import { VncSurface } from '../../src/components/VncSurface';
 
 declare const assert: typeof import('node:assert/strict');
 
@@ -129,6 +130,32 @@ export async function runRdpCanvasTests() {
   assert.deepEqual([...context.getImageData(0, 0, 1, 1).data], [0, 255, 0, 255]);
   await render({ isAuthorized: false });
   assert.equal(canvas.style.visibility, 'hidden');
+  await render({ backend: 'freerdp', status: 'starting' });
+  await render({ backend: 'freerdp' });
+  const loading = document.querySelector<HTMLElement>('[data-connection-transition]')!;
+  assert.equal(loading.dataset.connectionTransition, 'pending');
+  assert.match(loading.textContent!, /Waiting for the remote desktop/);
+  assert.equal(commands.at(-1).operation, 'show', 'FreeRDP must send pixels during loading');
+  assert.equal(canvas.tabIndex, -1);
+  await act(async () => {
+    emit({ type: 'connected', lifecycleId: 'third' });
+    emit({ type: 'frameEnd', lifecycleId: 'third', paintId: 1 });
+    emit({ lifecycleId: 'third', frame });
+  });
+  assert.equal(loading.dataset.connectionTransition, 'pending', 'wait for a complete frame');
+  await act(async () => emit({ type: 'frameEnd', lifecycleId: 'third', paintId: 2 }));
+  assert.equal(loading.dataset.connectionTransition, 'exit');
+  assert.deepEqual([...context.getImageData(0, 0, 1, 1).data], [255, 0, 0, 255]);
+  const beforeInput = inputs.length;
+  canvas.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyA', bubbles: true }));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(
+    inputs.length,
+    beforeInput,
+    'the remote desktop must not receive input during the fade',
+  );
+  await act(async () => loading.dispatchEvent(new Event('animationend', { bubbles: true })));
+  assert.equal(canvas.tabIndex, 0);
   await act(async () => root.unmount());
   assert.equal(listeners.size, 0);
   Object.defineProperty(window, 'wormhole', {
@@ -137,6 +164,7 @@ export async function runRdpCanvasTests() {
     value: undefined,
   });
   await runRdpSurfaceTests();
+  await runVncSurfaceTests();
 }
 
 async function runRdpSurfaceTests() {
@@ -236,6 +264,27 @@ async function runRdpSurfaceTests() {
     const beforeDuplicate = sizes.length;
     window.dispatchEvent(new Event('resize'));
     assert.equal(sizes.length, beforeDuplicate, 'unchanged bounds must be deduplicated');
+    container.style.height = '0px';
+    await settleLayout();
+    assert.equal(
+      commands.at(-1).operation,
+      'hide',
+      'Collapsing a visible pane must hide native RDP',
+    );
+    const afterCollapse = commands.length;
+    window.dispatchEvent(new Event('resize'));
+    assert.equal(
+      commands.length,
+      afterCollapse,
+      'Collapse reports must not repeat the hide command',
+    );
+    container.style.height = '360px';
+    await settleLayout();
+    assert.deepEqual(commands.at(-1), {
+      sessionId: 'rdp-layout',
+      operation: 'show',
+      bounds: assertFullBounds(),
+    });
     for (const props of [{ isActive: false }, { isAuthorized: false }]) {
       await mount(props);
       assert.equal(commands.at(-1).operation, 'hide');
@@ -266,15 +315,35 @@ async function runRdpSurfaceTests() {
     assert.match(container.textContent, /Connection refused/);
     await press('Retry connection');
     assert.deepEqual(actions, ['connect', 'system', 'connect', 'system', 'retry']);
+    const metadata = { name: 'Lab desktop', destination: 'desktop.internal', port: 3390 };
+    const transition = () => container.querySelector<HTMLElement>('[data-connection-transition]');
+    await mount({ status: 'starting', ...metadata });
+    const loading = transition();
+    assert.equal(loading?.dataset.connectionTransition, 'pending');
+    assert.equal(loading?.querySelector('h3')?.textContent, 'Lab desktop');
+    assert.match(loading.textContent, /desktop\.internal.*RDP.*Port 3390.*Connecting to RDP/);
+    assert.ok(loading.querySelector('.lucide-loader-circle'));
+    assert.equal(container.querySelector('button'), null);
+    await mount({ status: 'starting', ...metadata, tunnelProgress: { phase: 'authenticating' } });
+    assert.match(loading.textContent, /Authenticating with the VPN gateway/);
+    assert.ok(loading.querySelector('.lucide-key-round'));
+    assert.equal(container.querySelector('button'), null);
+    const beforeFade = commands.length;
+    await mount();
+    assert.equal(transition(), loading);
+    assert.equal(loading.dataset.connectionTransition, 'exit');
+    assert.equal(commands.length, beforeFade, 'native RDP cannot cover the loading fade');
+    await act(async () => loading.dispatchEvent(new Event('animationend', { bubbles: true })));
+    assert.equal(transition(), null);
+    assert.equal(commands.at(-1).operation, 'show');
     await mount({ status: 'starting' });
-    assert.match(container.textContent, /Starting RDP/);
-    assert.equal(container.querySelector('button'), null);
-    await mount({ status: 'starting', tunnelProgress: { phase: 'preparing' } });
-    assert.match(container.textContent, /Preparing VPN configuration/);
-    assert.equal(container.querySelector('button'), null);
+    assert.equal(commands.at(-1).operation, 'hide');
     const beforeZero = commands.length;
     container.style.height = '0px';
     await mount();
+    await act(async () =>
+      transition()?.dispatchEvent(new Event('animationend', { bubbles: true })),
+    );
     await settleLayout();
     window.dispatchEvent(new Event('resize'));
     assert.equal(commands.length, beforeZero, 'zero-size surfaces must not be shown');
@@ -301,5 +370,112 @@ async function runRdpSurfaceTests() {
     assert.equal(sizes.length, afterUnmount, 'unmount must remove resize subscriptions');
     container.style.cssText = originalStyle;
     window.wormhole = originalApi;
+  }
+}
+
+async function runVncSurfaceTests() {
+  const container = document.getElementById('root')!;
+  const root = createRoot(container);
+  const listeners = new Set<(event: WormholeBackendEvent) => void>();
+  const commands: WormholeVncCommand[] = [];
+  window.wormhole = {
+    onBackendEvent: (listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    sendVncCommand: async (command) => {
+      commands.push(command);
+      return { ok: true };
+    },
+  } as Pick<
+    NonNullable<Window['wormhole']>,
+    'onBackendEvent' | 'sendVncCommand'
+  > as Window['wormhole'];
+  const session = { id: 'vnc-layout', title: 'Lab monitor', host: 'monitor.internal', port: 5901 };
+  const render = (connectionGeneration: number) =>
+    act(async () =>
+      root.render(
+        <VncSurface
+          bitwardenUnlockPending={false}
+          connectionGeneration={connectionGeneration}
+          disconnected={false}
+          isAuthorized
+          session={session}
+        />,
+      ),
+    );
+  const emit = (event: Omit<WormholeBackendEvent, 'sessionId'>) =>
+    act(async () => {
+      for (const listener of listeners) listener({ ...event, sessionId: session.id });
+    });
+  const transition = () => container.querySelector<HTMLElement>('[data-connection-transition]');
+
+  try {
+    await render(0);
+    const loading = transition()!;
+    assert.equal(loading.dataset.connectionTransition, 'pending');
+    assert.match(
+      loading.textContent!,
+      /Lab monitor.*monitor\.internal.*VNC.*Port 5901.*Connecting to VNC/,
+    );
+    await emit({ type: 'tunnel.progress', phase: 'ready' });
+    assert.ok(loading.querySelector('.lucide-shield-check'));
+    await emit({ type: 'vnc.status', status: 'connected' });
+    assert.equal(loading.dataset.connectionTransition, 'pending');
+    assert.match(loading.textContent!, /Waiting for the remote desktop/);
+    const desktop = container.querySelector<HTMLElement>('[role="application"]')!;
+    const pressKey = () =>
+      desktop.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'a', code: 'KeyA', bubbles: true }),
+      );
+    assert.equal(desktop.tabIndex, -1);
+    await act(async () => pressKey());
+    assert.equal(commands.filter((command) => command.action === 'vnc.key').length, 0);
+    await emit({
+      type: 'vnc.frame',
+      image: 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7',
+      width: 1,
+      height: 1,
+    });
+    const image = container.querySelector('img')!;
+    await act(async () => {
+      await image.decode();
+    });
+    await act(async () => {
+      await new Promise(requestAnimationFrame);
+    });
+    assert.equal(loading.dataset.connectionTransition, 'exit');
+    assert.equal(image.naturalWidth, 1);
+    await act(async () => loading.dispatchEvent(new Event('animationend', { bubbles: true })));
+    assert.equal(transition(), null);
+    assert.equal(desktop.tabIndex, 0);
+    await act(async () => pressKey());
+    assert.equal(commands.at(-1)?.action, 'vnc.key');
+    await render(1);
+    assert.equal(transition()?.dataset.connectionTransition, 'pending');
+    await emit({ type: 'vnc.status', status: 'failed', message: 'Server unreachable' });
+    assert.equal(transition(), null);
+    assert.match(container.textContent!, /Server unreachable/);
+    const failure = desktop.querySelector<HTMLElement>('.absolute.inset-0')!;
+    const probe = document.createElement('div');
+    probe.className = 'bg-canvas text-foreground';
+    container.append(probe);
+    const themeClasses = document.documentElement.className;
+    try {
+      for (const theme of ['', 'dark', 'dark oled']) {
+        document.documentElement.className = theme;
+        assert.equal(
+          getComputedStyle(failure).backgroundColor,
+          getComputedStyle(probe).backgroundColor,
+        );
+        assert.equal(getComputedStyle(failure).color, getComputedStyle(probe).color);
+      }
+    } finally {
+      document.documentElement.className = themeClasses;
+      probe.remove();
+    }
+  } finally {
+    await act(async () => root.unmount());
+    window.wormhole = undefined;
   }
 }

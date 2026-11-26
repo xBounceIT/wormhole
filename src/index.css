@@ -5,8 +5,16 @@
 
 @custom-variant dark (&:is(.dark *));
 
+@utility selected-surface {
+  @apply bg-background text-foreground shadow-sm;
+  @variant dark {
+    @apply bg-secondary inset-ring-1 inset-ring-foreground/10;
+  }
+}
+
 @theme inline {
   --color-background: var(--background);
+  --color-canvas: var(--canvas);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
   --color-card-foreground: var(--card-foreground);
@@ -41,6 +49,7 @@
 :root {
   color-scheme: light;
   --background: oklch(1 0 0);
+  --canvas: var(--background);
   --foreground: oklch(0.145 0 0);
   --card: oklch(1 0 0);
   --card-foreground: oklch(0.145 0 0);
@@ -51,13 +60,15 @@
   --secondary: oklch(0.97 0 0);
   --secondary-foreground: oklch(0.205 0 0);
   --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
+  --theme-muted-foreground: oklch(0.556 0 0);
+  --muted-foreground: var(--theme-muted-foreground);
   --accent: oklch(0.97 0 0);
   --accent-foreground: oklch(0.205 0 0);
   --destructive: oklch(0.577 0.245 27.325);
   --border: oklch(0.922 0 0);
   --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
+  --theme-ring: oklch(0.708 0 0);
+  --ring: var(--theme-ring);
   --sidebar: oklch(0.985 0 0);
   --sidebar-foreground: oklch(0.145 0 0);
   --sidebar-primary: oklch(0.205 0 0);
@@ -67,11 +78,28 @@
   --sidebar-border: oklch(0.922 0 0);
   --sidebar-ring: oklch(0.708 0 0);
   --radius: 0.625rem;
+  --dialog-radius: var(--radius-2xl);
+  --session-tab-row-height: 42px;
+  --session-tab-pill-height: 34px;
+  --workspace-canvas-offset: calc(var(--session-tab-row-height) + 4px);
+  --workspace-canvas-gutter: 4px;
+  --workspace-canvas-radius: 12px;
+  --compact-scrollbar-size: 4px;
+}
+
+[data-dialog-surface] {
+  border-radius: var(--dialog-radius);
+}
+
+[data-slot='dialog-footer'] {
+  border-end-start-radius: var(--dialog-radius);
+  border-end-end-radius: var(--dialog-radius);
 }
 
 .dark {
   color-scheme: dark;
   --background: oklch(0.145 0 0);
+  --canvas: oklch(0.235 0 0);
   --foreground: oklch(0.985 0 0);
   --card: oklch(0.145 0 0);
   --card-foreground: oklch(0.985 0 0);
@@ -82,13 +110,15 @@
   --secondary: oklch(0.269 0 0);
   --secondary-foreground: oklch(0.985 0 0);
   --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
+  --theme-muted-foreground: var(--foreground);
+  --muted-foreground: var(--theme-muted-foreground);
   --accent: oklch(0.269 0 0);
   --accent-foreground: oklch(0.985 0 0);
   --destructive: oklch(0.704 0.191 22.216);
   --border: oklch(0.269 0 0);
   --input: oklch(0.269 0 0);
-  --ring: oklch(0.556 0 0);
+  --theme-ring: oklch(0.556 0 0);
+  --ring: var(--theme-ring);
   --sidebar: oklch(0.205 0 0);
   --sidebar-foreground: oklch(0.985 0 0);
   --sidebar-primary: oklch(0.985 0 0);
@@ -97,6 +127,13 @@
   --sidebar-accent-foreground: oklch(0.985 0 0);
   --sidebar-border: oklch(0.269 0 0);
   --sidebar-ring: oklch(0.556 0 0);
+}
+
+.oled {
+  --canvas: #101010;
+  --sidebar: #050505;
+  --sidebar-accent: #252525;
+  --sidebar-border: #292929;
 }
 
 @keyframes collapsible-down {
@@ -121,8 +158,300 @@
   animation: none !important;
 }
 
+@media (hover: hover) {
+  [data-connection-tree-row]:hover {
+    @apply rounded-lg bg-sidebar-accent text-sidebar-accent-foreground;
+  }
+}
+
+[data-connection-tree-row][aria-current='true'] {
+  @apply rounded-lg selected-surface;
+}
+
+.oled :is([data-workspace-shell], [data-session-tab-search], [data-settings-dialog]) {
+  --ring: #888888;
+}
+
+.dark:not(.oled) [data-session-tab-search] {
+  --popover: #1b1b1b;
+}
+
+.dark:not(.oled) [data-tunnels-page] {
+  --card: #292929;
+  --border: #565656;
+  --input: #3d3d3d;
+}
+
+.oled [data-tunnels-page] [data-slot='badge'] {
+  @apply border-transparent bg-secondary text-secondary-foreground;
+}
+
+[data-workspace-shell] {
+  --workspace-control-border: #777777;
+  --workspace-sidebar-header-gap: calc(var(--spacing) * 2.5);
+  --workspace-sidebar-heading-height: calc(
+    var(--workspace-canvas-offset) - var(--workspace-sidebar-header-gap)
+  );
+}
+
+.dark [data-workspace-shell] {
+  --workspace-control-border: #363636;
+}
+
+/* Update foregrounds and their backgrounds together when the theme changes. */
+:is([data-workspace-shell], [data-session-tab-search])
+  :is(button, input, [role='checkbox']):not([data-navigation-item]) {
+  transition-property: box-shadow, opacity, translate;
+}
+
+[data-navigation-item] {
+  transition:
+    background-color 200ms ease-out,
+    color 200ms ease-out,
+    box-shadow 200ms ease-out;
+}
+
+[data-navigation-item]:is([data-active='true'], [data-state='active']) {
+  @apply selected-surface font-medium;
+}
+
+[data-theme-changing] [data-navigation-item] {
+  transition: none;
+}
+
+[data-slot='search-field'] {
+  --muted-foreground: var(--theme-muted-foreground);
+  --ring: var(--theme-ring);
+}
+
+[data-workspace-shell]
+  [data-connection-tree]
+  [role='checkbox'][data-state='unchecked']:not(:focus-visible):not(:hover) {
+  border-color: var(--workspace-control-border);
+}
+
+[data-workspace-shell] [data-slot='sidebar-header'] {
+  padding-top: 0;
+  row-gap: var(--workspace-sidebar-header-gap);
+}
+
+[data-workspace-shell] [data-slot='sidebar-header'] > :first-child {
+  flex: none;
+  height: var(--workspace-sidebar-heading-height);
+}
+
+:is(.session-canvas, .session-surface, .workspace-page-canvas) {
+  border-radius: var(--workspace-canvas-radius);
+}
+
+:is(.session-canvas, .workspace-page-canvas) {
+  background: var(--canvas);
+}
+
+.session-canvas {
+  position: absolute;
+  inset: var(--workspace-canvas-offset) var(--workspace-canvas-gutter)
+    var(--workspace-canvas-gutter);
+}
+
+.workspace-page-canvas {
+  margin: var(--workspace-canvas-offset) var(--workspace-canvas-gutter)
+    var(--workspace-canvas-gutter);
+}
+
+.session-tab-strip {
+  --tab-spacing: 4px;
+  --scroll-strip-item-height: var(--session-tab-pill-height);
+  /* Keep tabs on the same baseline with and without the horizontal scrollbar. */
+  height: calc(var(--session-tab-row-height) + 2px);
+  padding-block-start: 4px;
+  scroll-padding-inline: var(--tab-spacing);
+}
+
+.session-tab-list {
+  gap: var(--tab-spacing);
+  padding-inline: var(--tab-spacing);
+}
+
+.compact-scroll-strip {
+  --edge-blur-width: 16px;
+  display: flex;
+  align-items: flex-start;
+  overflow-x: auto;
+  overflow-y: hidden;
+  container: compact-strip / scroll-state;
+}
+
+.compact-scroll-strip::before,
+.compact-scroll-strip::after {
+  content: '';
+  position: sticky;
+  z-index: 1;
+  flex: 0 0 var(--edge-blur-width);
+  height: var(--scroll-strip-item-height);
+  backdrop-filter: blur(2px);
+  background: color-mix(in srgb, var(--scroll-strip-background, var(--sidebar)) 28%, transparent);
+  opacity: 0;
+  pointer-events: none;
+}
+
+.compact-scroll-strip::before {
+  left: 0;
+  margin-right: calc(-1 * var(--edge-blur-width));
+  mask-image: linear-gradient(to right, black, transparent);
+}
+
+.compact-scroll-strip::after {
+  right: 0;
+  margin-left: calc(-1 * var(--edge-blur-width));
+  mask-image: linear-gradient(to left, black, transparent);
+}
+
+@container compact-strip scroll-state(scrollable: left) {
+  .compact-scroll-strip::before {
+    opacity: 1;
+  }
+}
+
+@container compact-strip scroll-state(scrollable: right) {
+  .compact-scroll-strip::after {
+    opacity: 1;
+  }
+}
+
+.compact-scroll-strip::-webkit-scrollbar-track {
+  margin-right: 8px;
+}
+
+:is(.compact-scroll-strip, .browser-tab-list) {
+  scrollbar-color: auto;
+  scrollbar-width: auto;
+}
+
+:is(.compact-scroll-strip, .browser-tab-list)::-webkit-scrollbar {
+  height: var(--compact-scrollbar-size);
+}
+
+:is(.compact-scroll-strip, .browser-tab-list)::-webkit-scrollbar-thumb {
+  border: 0;
+}
+
+.connection-browser {
+  --browser-rail: var(--muted);
+  --browser-toolbar: var(--background);
+  --browser-address: var(--muted);
+}
+
+.dark .connection-browser {
+  --browser-rail: var(--canvas);
+  --browser-toolbar: var(--secondary);
+  --browser-address: var(--background);
+}
+
+.browser-tab-rail {
+  /* Reserve the same join between the active tab and toolbar when the scrollbar appears. */
+  background: linear-gradient(
+    var(--browser-rail) calc(100% - var(--compact-scrollbar-size)),
+    var(--browser-toolbar) 0
+  );
+}
+
+.browser-tab-list {
+  --browser-tab-flare-width: 6px;
+  gap: var(--browser-tab-flare-width);
+  padding-inline: var(--browser-tab-flare-width);
+  scroll-padding-inline: var(--browser-tab-flare-width);
+}
+
+.browser-tab-active::before,
+.browser-tab-active::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  width: var(--browser-tab-flare-width);
+  height: 5px;
+  background: radial-gradient(
+    ellipse 100% 100% at var(--flare-origin) top,
+    transparent 92%,
+    var(--browser-toolbar) 100%
+  );
+  pointer-events: none;
+}
+
+.browser-tab-active::before {
+  --flare-origin: left;
+  right: 100%;
+}
+
+.browser-tab-active::after {
+  --flare-origin: right;
+  left: 100%;
+}
+
+.ssh-terminal .xterm {
+  padding: 4px;
+  background-color: inherit;
+}
+
+.ssh-terminal .xterm .xterm-viewport {
+  background-color: inherit;
+}
+
+[data-connection-transition='exit'] {
+  pointer-events: none;
+  animation: connection-loading-exit 180ms ease-out both;
+}
+
+@keyframes connection-loading-exit {
+  to {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-connection-transition='exit'] {
+    display: none;
+  }
+}
+
+.ssh-terminal .xterm .xterm-scrollable-element > .scrollbar.vertical > .slider {
+  /* Draw the thumb within xterm's existing drag target. */
+  background: transparent;
+
+  &::before {
+    content: '';
+    position: absolute;
+    inset-block: 0;
+    inset-inline-end: 0;
+    width: var(--compact-scrollbar-size);
+    border-radius: 999px;
+    background-color: var(--border);
+    pointer-events: none;
+  }
+
+  &:is(:hover, .active)::before {
+    background-color: var(--muted-foreground);
+  }
+}
+
 [data-sidebar-layout] {
   container-type: inline-size;
+}
+
+[data-sidebar-resize-handle] > div {
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  [data-sidebar-resize-handle]:is(:hover:not(:focus-visible), [data-separator='active']) > div {
+    @apply absolute left-1/2 -translate-x-1/2 -translate-y-1/2;
+    --grip-half-height: calc(var(--spacing) * 3);
+    top: clamp(
+      var(--grip-half-height),
+      var(--sidebar-grip-y, 50%),
+      calc(100% - var(--grip-half-height))
+    );
+  }
 }
 
 [data-sidebar-panel] {
@@ -206,6 +535,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  [data-navigation-item],
   [data-sidebar-panel][data-preview='true'],
   [data-sidebar-surface][data-overlay='true'] {
     transition: none;

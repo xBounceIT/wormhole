@@ -24,6 +24,7 @@ const (
 	applicationThemeSystem applicationTheme = "system"
 	applicationThemeLight  applicationTheme = "light"
 	applicationThemeDark   applicationTheme = "dark"
+	applicationThemeOLED   applicationTheme = "oled"
 )
 
 type themeMigrationResult struct {
@@ -209,6 +210,8 @@ func parseApplicationTheme(value string) (applicationTheme, bool) {
 		return applicationThemeLight, true
 	case string(applicationThemeDark):
 		return applicationThemeDark, true
+	case string(applicationThemeOLED):
+		return applicationThemeOLED, true
 	default:
 		return applicationThemeSystem, false
 	}
@@ -226,6 +229,8 @@ func readApplicationTheme(value json.RawMessage) (applicationTheme, bool) {
 			return applicationThemeLight, true
 		case 2:
 			return applicationThemeDark, true
+		case 3:
+			return applicationThemeOLED, true
 		default:
 			return applicationThemeSystem, false
 		}
@@ -245,6 +250,8 @@ func persistedApplicationTheme(theme applicationTheme) (int, bool) {
 		return 1, true
 	case applicationThemeDark:
 		return 2, true
+	case applicationThemeOLED:
+		return 3, true
 	default:
 		return 0, false
 	}

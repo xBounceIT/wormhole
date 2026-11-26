@@ -223,7 +223,7 @@ test('one tooltip window is reused and host text is assigned safely as text', as
   assert.equal(popup.hidden, 1);
   assert.equal(
     popup.scripts[1],
-    `document.getElementById('tooltip-text').textContent = ${JSON.stringify('<img src=x onerror=alert(1)>"\\\n')}`,
+    `document.documentElement.classList.toggle('app-dark', false); document.getElementById('tooltip-text').textContent = ${JSON.stringify('<img src=x onerror=alert(1)>"\\\n')}`,
   );
 });
 
@@ -521,7 +521,7 @@ public static class NativeStacking {
       app.setPath('sessionData', ${JSON.stringify(directory)});
       const waitUntil = async predicate => {
         const deadline = Date.now() + 5000;
-        while (!predicate()) {
+        while (!(await predicate())) {
           if (Date.now() > deadline) throw new Error('Tooltip window did not reach expected state');
           await new Promise(resolve => setTimeout(resolve, 20));
         }
@@ -554,6 +554,11 @@ public static class NativeStacking {
           assert.deepEqual(popup.getBounds(), { x: content.x + 250, y: content.y + 35, width: 120, height: 40 });
           assert.deepEqual(popup.getContentSize(), [120, 40]);
           assert.equal(await popup.webContents.executeJavaScript("document.querySelector('.tooltip').getBoundingClientRect().height"), 28);
+          const readPalette = () => popup.webContents.executeJavaScript("(() => { const style = getComputedStyle(document.querySelector('.tooltip')); return [style.backgroundColor, style.color, getComputedStyle(document.body, '::before').backgroundColor]; })()");
+          assert.deepEqual(await readPalette(), ['rgb(23, 23, 23)', 'rgb(250, 250, 250)', 'rgb(23, 23, 23)']);
+          manager.setColorScheme(owner, 'dark');
+          await waitUntil(async () => (await readPalette())[0] === 'rgb(250, 250, 250)');
+          assert.deepEqual(await readPalette(), ['rgb(250, 250, 250)', 'rgb(23, 23, 23)', 'rgb(250, 250, 250)']);
           view = new WebContentsView();
           owner.contentView.addChildView(view);
           view.setBounds({ x: 200, y: 0, width: 400, height: 300 });
@@ -574,6 +579,9 @@ public static class NativeStacking {
           await waitUntil(() => popup.isVisible());
           assert.equal(windows.length, 1);
           assert.equal(await popup.webContents.executeJavaScript("document.getElementById('tooltip-text').textContent"), '192.0.2.20');
+          assert.deepEqual(await readPalette(), ['rgb(250, 250, 250)', 'rgb(23, 23, 23)', 'rgb(250, 250, 250)']);
+          manager.setColorScheme(owner, 'light');
+          await waitUntil(async () => (await readPalette())[0] === 'rgb(23, 23, 23)');
           owner.emit('blur');
           assert.equal(popup.isVisible(), false);
           owner.destroy();

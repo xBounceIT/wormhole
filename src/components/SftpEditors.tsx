@@ -4,9 +4,11 @@ import { Input } from './ui/input';
 import { Label } from './ui/label';
 import { Textarea } from './ui/textarea';
 import { Switch } from './ui/switch';
+import { TextTooltip } from './ui/tooltip';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
+import { useConfirmationDialog } from './ui/confirmation-dialog';
 
-export function SftpEditorSettings() {
+export function SftpEditorSettings({ allowConfirmation }: { allowConfirmation: boolean }) {
   const [settings, setSettings] = useState<WormholeSftpEditorSettings>();
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
@@ -179,15 +181,53 @@ export function SftpEditorSettings() {
           {message}
         </p>
       ) : null}
-      <SftpEditedFiles sessionId="sftp-recovery" recovery />
+      <SftpEditedFiles allowConfirmation={allowConfirmation} sessionId="sftp-recovery" recovery />
     </section>
   );
 }
 
+function ConfirmSftpEdit({
+  allowConfirmation,
+  sessionId,
+  title,
+  description,
+  label,
+  variant = 'outline',
+  onConfirm,
+}: {
+  allowConfirmation: boolean;
+  sessionId: string;
+  title: string;
+  description: string;
+  label: string;
+  variant?: 'outline' | 'destructive';
+  onConfirm: () => void;
+}) {
+  // Removing the action (including a conflict resolved in another tab) cancels its prompt.
+  const { confirm, confirmationDialog } = useConfirmationDialog(allowConfirmation, sessionId);
+  return (
+    <>
+      <Button
+        size="sm"
+        variant={variant}
+        onClick={async () => {
+          if (await confirm({ title, description, confirmLabel: label, destructive: true }))
+            onConfirm();
+        }}
+      >
+        {label}
+      </Button>
+      {confirmationDialog}
+    </>
+  );
+}
+
 export function SftpEditedFiles({
+  allowConfirmation = true,
   sessionId,
   recovery = false,
 }: {
+  allowConfirmation?: boolean;
   sessionId: string;
   recovery?: boolean;
 }) {
@@ -312,14 +352,14 @@ export function SftpEditedFiles({
           key={file.id}
           className="flex flex-wrap items-center gap-2 border-t border-border py-2 text-[11px]"
         >
-          <div className="min-w-32 flex-1">
-            <p className="truncate font-medium" title={file.remotePath}>
-              {file.name}
-            </p>
-            <p className="truncate text-muted-foreground" title={file.remotePath}>
-              {file.remotePath} · {file.editor}
-            </p>
-          </div>
+          <TextTooltip text={file.remotePath}>
+            <div className="min-w-32 flex-1">
+              <p className="truncate font-medium">{file.name}</p>
+              <p className="truncate text-muted-foreground">
+                {file.remotePath} · {file.editor}
+              </p>
+            </div>
+          </TextTooltip>
           <span role="status">
             {file.state === 'Uploaded' && file.uploadedAt
               ? `Uploaded ${new Date(file.uploadedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
@@ -361,16 +401,16 @@ export function SftpEditedFiles({
           </Button>
           {file.state === 'Conflict' && !recovery ? (
             <>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => {
-                  if (window.confirm(`Overwrite ${file.remotePath} with your working copy?`))
-                    run({ operation: 'upload', editId: file.id, decision: 'overwrite' });
-                }}
-              >
-                Overwrite remote
-              </Button>
+              <ConfirmSftpEdit
+                allowConfirmation={allowConfirmation}
+                sessionId={sessionId}
+                title="Overwrite remote file?"
+                description={`Replace ${file.remotePath} with your working copy.`}
+                label="Overwrite remote"
+                onConfirm={() =>
+                  run({ operation: 'upload', editId: file.id, decision: 'overwrite' })
+                }
+              />
               <Button
                 size="sm"
                 variant="outline"
@@ -378,29 +418,26 @@ export function SftpEditedFiles({
               >
                 Save as
               </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => {
-                  if (window.confirm('Discard local changes and re-download the remote file?'))
-                    run({ operation: 'reload', editId: file.id, decision: 'discard' });
-                }}
-              >
-                Re-download
-              </Button>
+              <ConfirmSftpEdit
+                allowConfirmation={allowConfirmation}
+                sessionId={sessionId}
+                title="Re-download remote file?"
+                description="Local changes to the working copy will be discarded."
+                label="Re-download"
+                onConfirm={() => run({ operation: 'reload', editId: file.id, decision: 'discard' })}
+              />
             </>
           ) : null}
           {file.recovered ? (
-            <Button
-              size="sm"
+            <ConfirmSftpEdit
+              allowConfirmation={allowConfirmation}
+              sessionId={sessionId}
               variant="destructive"
-              onClick={() => {
-                if (window.confirm(`Permanently discard the working copy of ${file.name}?`))
-                  run({ operation: 'discard', editId: file.id, decision: 'discard' });
-              }}
-            >
-              Discard
-            </Button>
+              title="Discard working copy?"
+              description={`The working copy of ${file.name} will be permanently discarded.`}
+              label="Discard"
+              onConfirm={() => run({ operation: 'discard', editId: file.id, decision: 'discard' })}
+            />
           ) : null}
           {file.error ? <p className="basis-full text-destructive">{file.error}</p> : null}
         </div>

@@ -41,7 +41,7 @@ test('SFTP panes keep drag feedback stable and draw unclipped borders in Chromiu
     )
     .join('\n');
   const fixture = readFileSync(new URL('./fixtures/sftp-pane.tsx', import.meta.url), 'utf8');
-  const paneComponents = ['SftpSearchInput', 'SftpColumnHeader', 'SftpSectionHeader']
+  const paneComponents = ['SearchField', 'SftpColumnHeader', 'SftpSectionHeader']
     .map((name) =>
       readFileSync(new URL(`../src/components/${name}.tsx`, import.meta.url), 'utf8')
         .replace(/^import .*;$/gm, '')
@@ -94,6 +94,9 @@ test('SFTP panes keep drag feedback stable and draw unclipped borders in Chromiu
       await new Promise((resolve) => setTimeout(resolve, 0));
     };
     const Input = 'input', Button = 'button';
+    const { clsx } = require(${JSON.stringify(require.resolve('clsx'))});
+    const { twMerge } = require(${JSON.stringify(require.resolve('tailwind-merge'))});
+    const cn = (...classes) => twMerge(clsx(classes));
     const Checkbox = ({ checked, onCheckedChange, ...props }) => React.createElement('input', {
       ...props, type: 'checkbox', checked, onChange: (event) => onCheckedChange?.(event.target.checked),
     });

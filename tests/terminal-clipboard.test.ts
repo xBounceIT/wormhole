@@ -73,7 +73,10 @@ type TerminalConnectionStateProps = {
   session: {
     id: string;
     status: 'connecting' | 'failed' | 'disconnected';
+    title?: string;
     host?: string;
+    port?: number;
+    serialSettings?: { baudRate: number };
     error?: string;
     credentialId?: string;
     hostKeyMismatch?: { expected: string; received: string };
@@ -105,11 +108,11 @@ const renderConnectionState = runInNewContext(
     SshCertificateEditorContext: {},
     requiresSshCertificateReplacement,
     Button: 'button',
-    LoaderCircle: 'loading-icon',
+    ConnectionLoading: 'connection-loading',
+    protocolLabel: (protocol?: string) => protocol?.toUpperCase(),
     AlertCircle: 'error-icon',
     Terminal: 'terminal-icon',
     RefreshCcw: 'reconnect-icon',
-    ConnectionStepper: 'connection-stepper',
   },
 ) as (props: TerminalConnectionStateProps) => React.ReactElement<Record<string, unknown>>;
 
@@ -125,7 +128,7 @@ function connectionStateElements(
   ];
 }
 
-test('terminal connection states preserve SSH and serial copy, status icons, and reconnect', () => {
+test('terminal connection states show a concise loading status and preserve reconnect', () => {
   for (const isSerial of [false, true]) {
     for (const status of ['connecting', 'failed', 'disconnected'] as const) {
       const reconnects: string[] = [];
@@ -136,42 +139,29 @@ test('terminal connection states preserve SSH and serial copy, status icons, and
       });
       const markup = renderToStaticMarkup(element);
       const protocol = isSerial ? 'Serial' : 'SSH';
-      const expectedTitle =
-        status === 'connecting'
-          ? isSerial
-            ? 'Opening serial port'
-            : 'Connecting to SSH'
-          : `${protocol} ${status === 'failed' ? 'connection failed' : 'session closed'}`;
-      const expectedMessage =
-        status === 'connecting'
-          ? isSerial
-            ? 'Opening the local serial line.'
-            : 'Opening a secure shell session.'
-          : isSerial
-            ? 'The serial port closed the session.'
-            : 'The remote host closed the connection.';
+      if (status === 'connecting') {
+        assert.equal(element.type, 'connection-loading');
+        assert.equal(element.props.protocol, protocol);
+        assert.equal(element.props.status, isSerial ? 'Opening serial port…' : 'Connecting…');
+        assert.equal(element.props.destination, undefined);
+        assert.equal(reconnects.length, 0);
+        continue;
+      }
+      const expectedTitle = `${protocol} ${status === 'failed' ? 'connection failed' : 'session closed'}`;
+      const expectedMessage = isSerial
+        ? 'The serial port closed the session.'
+        : 'The remote host closed the connection.';
       assert.ok(markup.includes(expectedTitle), expectedTitle);
       assert.ok(markup.includes(expectedMessage), expectedMessage);
       assert.ok(markup.includes(isSerial ? 'Serial terminal' : 'Secure shell'));
       assert.ok(markup.includes('inherited target'));
       const elements = connectionStateElements(element);
-      const icon =
-        status === 'connecting'
-          ? 'loading-icon'
-          : status === 'failed'
-            ? 'error-icon'
-            : 'terminal-icon';
+      const icon = status === 'failed' ? 'error-icon' : 'terminal-icon';
       assert.ok(elements.some((child) => child.type === icon));
       const reconnect = elements.find((child) => child.type === 'button');
-      if (status === 'connecting') {
-        assert.equal(reconnect, undefined);
-        assert.ok(
-          markup.includes(isSerial ? 'Opening local serial line' : 'Negotiating secure session'),
-        );
-      } else {
-        (reconnect!.props.onClick as () => void)();
-        assert.deepEqual(reconnects, ['terminal-1']);
-      }
+      assert.equal(typeof reconnect?.props.onClick, 'function');
+      (reconnect!.props.onClick as () => void)();
+      assert.deepEqual(reconnects, ['terminal-1']);
     }
   }
 });
@@ -223,8 +213,8 @@ test('terminal errors retain escaped diagnostics and only failed SSH can trust a
   }
 });
 
-test('only connecting SSH renders the tunnel progress stepper', () => {
-  const tunnelProgress = { phase: 'connecting', message: 'Opening VPN' };
+test('the loading screen shows VPN progress for a tunneled connection', () => {
+  const tunnelProgress = { phase: 'authenticating', detail: 'Opening VPN' };
   for (const isSerial of [false, true]) {
     for (const status of ['connecting', 'failed', 'disconnected'] as const) {
       const element = renderConnectionState({
@@ -232,20 +222,41 @@ test('only connecting SSH renders the tunnel progress stepper', () => {
         isSerial,
         onReconnect: () => undefined,
       });
-      const stepper = connectionStateElements(element).find(
-        (child) => child.type === 'connection-stepper',
+      const connecting = status === 'connecting';
+      assert.equal(
+        element.props.tunnelProgress,
+        connecting && !isSerial ? tunnelProgress : undefined,
       );
-      if (!isSerial && status === 'connecting') {
-        assert.equal(stepper?.props.tunnelProgress, tunnelProgress);
-        assert.equal(
-          connectionStateElements(element).some((child) => child.type === 'button'),
-          false,
-        );
-      } else {
-        assert.equal(stepper, undefined);
-      }
+      assert.equal(
+        element.props.status,
+        connecting ? (isSerial ? 'Opening serial port…' : 'Connecting…') : undefined,
+      );
     }
   }
+  const ready = renderConnectionState({
+    session: { id: 'terminal-3', status: 'connecting', tunnelProgress: { phase: 'ready' } },
+    isSerial: false,
+    onReconnect: () => undefined,
+  });
+  assert.deepEqual(ready.props.tunnelProgress, { phase: 'ready' });
+  assert.equal(ready.props.status, 'Connecting…');
+});
+
+test('serial loading identifies the device and baud rate separately from the activity', () => {
+  const element = renderConnectionState({
+    session: {
+      id: 'serial-1',
+      title: 'Lab console',
+      host: 'COM7',
+      status: 'connecting',
+      serialSettings: { baudRate: 115200 },
+    },
+    isSerial: true,
+    onReconnect: () => undefined,
+  });
+  assert.equal(element.props.name, 'Lab console');
+  assert.equal(element.props.destination, 'COM7');
+  assert.equal(element.props.parameters, '115200 baud');
 });
 
 test('expired SSH certificates deep-link to their saved credential without changing reconnect', () => {

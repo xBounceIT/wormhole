@@ -1,6 +1,6 @@
 import { KeyRound, Network, Settings, Terminal } from 'lucide-react';
 
-import { Button } from '@/components/ui/button';
+import { NavigationItem } from '@/components/ui/navigation-item';
 import {
   SidebarGroup,
   SidebarMenu,
@@ -32,21 +32,19 @@ export function SidebarNavigation({
   return (
     <nav aria-label="Main navigation">
       <SidebarGroup className="p-0">
-        <SidebarMenu>
+        <SidebarMenu className="gap-0.5">
           {sidebarNavigationItems.map(({ id, label, icon: Icon }) => (
             <SidebarMenuItem key={id}>
-              <Button
+              <NavigationItem
                 aria-current={activePage === id ? 'page' : undefined}
                 aria-label={label}
-                className="h-8 w-full justify-start gap-2 rounded-md border-0 px-2 !text-xs data-active:bg-sidebar-accent data-active:text-sidebar-accent-foreground"
                 data-active={activePage === id}
-                onClick={() => onNavigate(id)}
-                size="sm"
-                variant="ghost"
-              >
-                <Icon />
-                <span className="truncate">{label}</span>
-              </Button>
+                icon={Icon}
+                label={label}
+                onClick={() => {
+                  if (id !== activePage) onNavigate(id);
+                }}
+              />
               {id === 'sessions' && sessionCount > 0 ? (
                 <SidebarMenuBadge className="top-1/2 -translate-y-1/2">
                   {sessionCount}
@@ -55,19 +53,15 @@ export function SidebarNavigation({
             </SidebarMenuItem>
           ))}
           <SidebarMenuItem>
-            <Button
+            <NavigationItem
               aria-expanded={settingsOpen}
               aria-haspopup="dialog"
               aria-label="Settings"
-              className="h-8 w-full justify-start gap-2 rounded-md border-0 px-2 !text-xs data-active:bg-sidebar-accent data-active:text-sidebar-accent-foreground"
               data-active={settingsOpen}
+              icon={Settings}
+              label="Settings"
               onClick={onOpenSettings}
-              size="sm"
-              variant="ghost"
-            >
-              <Settings />
-              <span className="truncate">Settings</span>
-            </Button>
+            />
           </SidebarMenuItem>
         </SidebarMenu>
       </SidebarGroup>

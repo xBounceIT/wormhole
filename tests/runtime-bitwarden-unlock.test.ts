@@ -40,6 +40,7 @@ test('runtime Bitwarden unlock shows and hides the password, then resets it', as
     const { createRoot } = require(${JSON.stringify(require.resolve('react-dom/client'))});
     const { useCallback, useLayoutEffect, useRef, useState } = React;
     const passthrough = ({ children }) => children;
+    const TextTooltip = passthrough;
     const Dialog = ({ children, onOpenChange, open }) => {
       globalThis.dialogOnOpenChange = onOpenChange;
       globalThis.dialogOpen = open;

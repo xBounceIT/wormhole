@@ -54,7 +54,7 @@ test('connected events accept omitted SMB fingerprints, validate metadata and us
     "  if (\n    value.type === 'connected'",
     "  if (value.type === 'terminal-output')",
   );
-  const icon = between(app, 'function ProtocolIcon(', 'function protocolTone(');
+  const icon = between(app, 'function ProtocolIcon(', 'function collectFolders(');
   const transformed = await transformWithOxc(icon, 'smb-icons.tsx', {
     jsx: { runtime: 'classic' },
   });

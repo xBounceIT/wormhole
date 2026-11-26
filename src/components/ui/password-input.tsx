@@ -4,6 +4,7 @@ import { Eye, EyeOff } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useDialogOpen } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
+import { TextTooltip } from '@/components/ui/tooltip';
 import { cn } from '@/lib/utils';
 
 function PasswordInput({
@@ -40,23 +41,24 @@ function PasswordInput({
         spellCheck={false}
         type={visible ? 'text' : 'password'}
       />
-      <Button
-        aria-controls={inputId}
-        aria-label={label}
-        aria-pressed={visible}
-        className="absolute inset-y-0 right-0.5 my-auto text-muted-foreground transition-colors active:not-aria-[haspopup]:translate-y-0"
-        disabled={disabled || toggleDisabled}
-        onClick={() => {
-          setVisible(!visible);
-          onVisibilityChange?.(!visible);
-        }}
-        size="icon-sm"
-        title={label}
-        type="button"
-        variant="ghost"
-      >
-        {visible ? <EyeOff /> : <Eye />}
-      </Button>
+      <TextTooltip text={label}>
+        <Button
+          aria-controls={inputId}
+          aria-label={label}
+          aria-pressed={visible}
+          className="absolute inset-y-0 right-0.5 my-auto text-muted-foreground transition-colors active:not-aria-[haspopup]:translate-y-0"
+          disabled={disabled || toggleDisabled}
+          onClick={() => {
+            setVisible(!visible);
+            onVisibilityChange?.(!visible);
+          }}
+          size="icon-sm"
+          type="button"
+          variant="ghost"
+        >
+          {visible ? <EyeOff /> : <Eye />}
+        </Button>
+      </TextTooltip>
     </div>
   );
 }

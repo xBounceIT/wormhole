@@ -12,8 +12,10 @@
         const theme = localStorage.getItem('wormhole-theme') || 'dark';
         const dark =
           theme === 'dark' ||
+          theme === 'oled' ||
           (theme === 'system' && matchMedia('(prefers-color-scheme: dark)').matches);
         document.documentElement.classList.toggle('dark', dark);
+        document.documentElement.classList.toggle('oled', theme === 'oled');
       } catch {
         // The static launch frame safely keeps its dark default when storage is unavailable.
       }

@@ -129,6 +129,11 @@ export async function runWebSurfaceTests() {
   assert.equal(commands.length, 3, 'disabled controls must not send zoom commands');
 
   await render({ session: { ...session, protocol: 'http' } });
+  await act(async () => {
+    document
+      .querySelector('[data-connection-transition="exit"]')
+      ?.dispatchEvent(new Event('animationend', { bubbles: true }));
+  });
   assert.equal(button('Decrease text size'), null);
   assert.equal(button('Increase text size'), null);
   assert.ok(button('Reload'), 'existing HTTP navigation remains available');
@@ -156,16 +161,23 @@ export async function runWebSurfaceTests() {
 function DialogOverlayHarness({ mounted = true, revision = 0 }) {
   const occluded = useContextMenuOverlayOpen();
   const [open, setOpen] = useState(false);
+  const [closePending, setClosePending] = useState(false);
   return (
     <>
       <ContextMenuOverlayProvider>
         <button id="direct-delete" onClick={() => setOpen(true)}>
           Delete directly
         </button>
+        <button id="close-browser" onClick={() => setClosePending(true)}>
+          Close browser
+        </button>
         <ContextMenu>
           <ContextMenuTrigger id="connection-menu">Connection</ContextMenuTrigger>
           <ContextMenuContent>
             <ContextMenuItem onSelect={() => setOpen(true)}>Delete connection</ContextMenuItem>
+            <ContextMenuItem onSelect={() => setClosePending(true)}>
+              Close browser from menu
+            </ContextMenuItem>
           </ContextMenuContent>
         </ContextMenu>
         {mounted && (
@@ -185,6 +197,13 @@ function DialogOverlayHarness({ mounted = true, revision = 0 }) {
             </DialogContent>
           </Dialog>
         )}
+        <Dialog open={closePending} onOpenChange={setClosePending}>
+          <DialogContent role="alertdialog" showCloseButton={false}>
+            <DialogTitle>Disconnect active connection?</DialogTitle>
+            <DialogDescription>Close this browser session?</DialogDescription>
+            <DialogClose>Keep browser open</DialogClose>
+          </DialogContent>
+        </Dialog>
       </ContextMenuOverlayProvider>
       <div style={{ height: 400, width: 700 + revision }}>
         <WebSurface
@@ -196,7 +215,8 @@ function DialogOverlayHarness({ mounted = true, revision = 0 }) {
           }}
           isActive
           isAuthorized
-          isOccluded={occluded}
+          isOccluded={occluded || closePending}
+          captureWhenOccluded={!closePending}
           bitwardenOpen={false}
           onReconnect={() => {}}
         />
@@ -241,7 +261,7 @@ export async function runDialogOverlayTests() {
     await act(async () => target.click());
     await settle();
   };
-  const requestDelete = async (expectPreview = true) => {
+  const openConnectionMenu = async () => {
     await act(async () => {
       document
         .getElementById('connection-menu')
@@ -251,11 +271,12 @@ export async function runDialogOverlayTests() {
     });
     await settle();
     await expectVisibility(false, 'the context menu hides the native session');
+  };
+  const preview = () => document.querySelector('[aria-label="Web browser canvas"] img');
+  const requestDelete = async (expectPreview = true) => {
+    await openConnectionMenu();
     if (expectPreview) {
-      assert.ok(
-        document.querySelector('[aria-label="Web browser canvas"] img'),
-        'the production preview must replace the native page',
-      );
+      assert.ok(preview(), 'the production preview must replace the native page');
     }
     boundsRequests.length = 0;
     await click('Delete connection');
@@ -319,5 +340,27 @@ export async function runDialogOverlayTests() {
   await act(async () => finishNativeCaptures());
   await settle();
   assert.equal(await readNativeVisibility(), true, 'a late capture cannot hide the restored page');
+
+  // Closing the browser must reveal the dialog without waiting for a capture.
+  boundsRequests.length = 0;
+  await act(async () => document.getElementById('close-browser').click());
+  assert.ok(document.querySelector('[role="alertdialog"]'));
+  assert.equal(await readNativeVisibility(), false);
+  assert.ok(!boundsRequests.some((request) => request.capturePreview));
+  assert.equal(preview(), null);
+  await click('Keep browser open');
+  assert.equal(await readNativeVisibility(), true);
+
+  await setNativeCaptureMode('success');
+  await openConnectionMenu();
+  assert.ok(preview(), 'the menu fixture supplies an opaque white preview');
+  boundsRequests.length = 0;
+  await click('Close browser from menu');
+  assert.ok(document.querySelector('[role="alertdialog"]'));
+  assert.equal(await readNativeVisibility(), false);
+  assert.ok(!boundsRequests.some((request) => request.visible || request.capturePreview));
+  assert.equal(preview(), null, 'the close dialog must discard the menu snapshot');
+  await click('Keep browser open');
+  assert.equal(await readNativeVisibility(), true);
   await act(async () => root.unmount());
 }

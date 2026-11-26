@@ -53,6 +53,7 @@ function SheetContent({
     <SheetPortal>
       <SheetOverlay />
       <SheetPrimitive.Content
+        data-dialog-surface=""
         data-slot="sheet-content"
         data-side={side}
         className={cn(

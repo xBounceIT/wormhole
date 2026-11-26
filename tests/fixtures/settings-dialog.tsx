@@ -7,13 +7,17 @@ import {
   ContextMenuOverlayProvider,
   useContextMenuOverlayOpen,
 } from '../../src/components/ui/context-menu';
+import { applyTheme } from '../../src/theme';
+import '../../src/startup.css';
 import '../../src/index.css';
 
 declare global {
   interface Window {
     settingsAssert: typeof import('node:assert/strict');
     settingsInput: (event: Record<string, unknown>) => Promise<void>;
+    settingsHover: (selector: string, enabled: boolean) => Promise<void>;
     settingsReducedMotion: (reduce: boolean) => Promise<void>;
+    settingsSearchPixels: (point: { x: number; y: number }) => Promise<number[]>;
     runSettingsDialogTests: (mode: 'desktop' | 'compact') => Promise<void>;
   }
 }
@@ -28,7 +32,7 @@ function OverlayProbe() {
 }
 
 function createWormholeMock(options: {
-  initialTheme?: 'dark' | 'light';
+  initialTheme?: WormholeAppSettings['theme'];
   updateResult?: WormholeUpdateCheckResult | null;
   idleSeconds?: number;
   currentVersion?: string;
@@ -146,7 +150,7 @@ function createWormholeMock(options: {
     respondTunnelPrompt: async () => {},
     respondTunnelRoute: async () => {},
     readAppSettings: async () => appSettings,
-    setTheme: async (nextTheme: 'system' | 'light' | 'dark') => {
+    setTheme: async (nextTheme: WormholeAppSettings['theme']) => {
       appSettings.theme = nextTheme;
       return { updated: true };
     },
@@ -428,7 +432,44 @@ window.runSettingsDialogTests = async (mode: 'desktop' | 'compact') => {
   const overlayState = () => query('#overlay-state')?.textContent;
   const insetText = () => query('[data-slot="sidebar-inset"]')?.textContent ?? '';
 
-  const clickElement = async (element: HTMLElement) => {
+  function searchAppearance(input: HTMLElement) {
+    const field = input.closest('[data-slot="search-field"]');
+    assert.ok(field);
+    assert.ok(!input.matches(':focus-visible'));
+    const style = getComputedStyle(input);
+    const icon = getComputedStyle(field.querySelector('svg')!);
+    return {
+      height: style.height,
+      radius: style.borderTopLeftRadius,
+      border: style.borderTopColor,
+      background: style.backgroundColor,
+      fontSize: style.fontSize,
+      lineHeight: style.lineHeight,
+      padding: style.paddingInlineStart,
+      placeholder: getComputedStyle(input, '::placeholder').color,
+      iconSize: icon.width,
+      iconOffset: icon.left,
+      iconColor: icon.color,
+    };
+  }
+
+  async function searchBorderPixel(input: HTMLElement, theme: 'light' | 'dark') {
+    const { left, width, top } = input.getBoundingClientRect();
+    const pixels = await window.settingsSearchPixels({
+      x: Math.floor(left + width / 2),
+      y: Math.round(top),
+    });
+    const [outside, before, edge, after, inside] = pixels;
+    assert.ok(
+      [edge, before, after].some(
+        (pixel) =>
+          Math.abs(outside - pixel) >= 7 && (theme === 'light' ? pixel < inside : pixel > inside),
+      ),
+      `${input.getAttribute('aria-label')} must draw a visible ${theme} border. Pixels ${pixels.join(', ')}`,
+    );
+  }
+
+  const moveTo = async (element: HTMLElement) => {
     const rect = element.getBoundingClientRect();
     const x = Math.round(rect.left + rect.width / 2);
     const y = Math.round(rect.top + rect.height / 2);
@@ -440,6 +481,11 @@ window.runSettingsDialogTests = async (mode: 'desktop' | 'compact') => {
         document.elementFromPoint(x, y)?.outerHTML.slice(0, 180) ?? 'null'
       }`,
     );
+    return { x, y };
+  };
+
+  const clickElement = async (element: HTMLElement) => {
+    const { x, y } = await moveTo(element);
     await React.act(async () => {
       await window.settingsInput({ type: 'mouseDown', button: 'left', x, y, clickCount: 1 });
       await window.settingsInput({ type: 'mouseUp', button: 'left', x, y, clickCount: 1 });
@@ -476,6 +522,7 @@ window.runSettingsDialogTests = async (mode: 'desktop' | 'compact') => {
   const assertDialogGeometry = (expectSideBySide = true) => {
     const popup = dialog();
     assert.ok(popup, 'Expected open settings dialog');
+    assert.equal(getComputedStyle(popup).borderRadius, '16px');
     const bounds = popup.getBoundingClientRect();
     assert.ok(bounds.left > 0, `Popup left must leave backdrop margin: ${bounds.left}`);
     assert.ok(bounds.top > 0, `Popup top must leave backdrop margin: ${bounds.top}`);
@@ -532,9 +579,25 @@ window.runSettingsDialogTests = async (mode: 'desktop' | 'compact') => {
     );
   };
 
+  const assertSwitchAlignment = (label: string) => {
+    const toggle = dialog()!.querySelector<HTMLButtonElement>(
+      `[role="switch"][aria-label="${label}"]`,
+    )!;
+    const track = toggle.getBoundingClientRect();
+    const thumb = toggle.querySelector('[data-slot="switch-thumb"]')!.getBoundingClientRect();
+    const text = toggle.previousElementSibling!.getBoundingClientRect();
+    assert.equal(thumb.top - track.top, 1, `${label} needs a 1px inset above the thumb`);
+    assert.equal(track.bottom - thumb.bottom, 1, `${label} needs a 1px inset below the thumb`);
+    assert.ok(
+      Math.abs((track.top + track.bottom) / 2 - (text.top + text.bottom) / 2) < 0.02,
+      `${label} must be centered on its title and description`,
+    );
+    return toggle;
+  };
+
   let mountKey = 0;
   const mountApp = async (options: {
-    theme?: 'dark' | 'light';
+    theme?: WormholeAppSettings['theme'];
     authConfigured?: boolean;
     idleTimeoutMinutes?: number | null;
     pinned?: boolean;
@@ -627,6 +690,12 @@ window.runSettingsDialogTests = async (mode: 'desktop' | 'compact') => {
     assert.equal(overlayState(), 'true', 'Native session surfaces must stay below the dialog');
     assert.equal(title(), slides[0].title);
     assert.ok(carousel()?.textContent?.includes(slides[0].subtitle));
+    if (slides[0].media.kind === 'image') {
+      const image = carousel()!.querySelector('img')!;
+      await image.decode();
+      assert.equal(image.alt, slides[0].media.alt);
+      assert.ok(image.naturalWidth > 0 && image.naturalHeight > 0);
+    }
     assert.equal(button('Back').getAttribute('aria-disabled'), 'true');
     const bounds = carousel()!.getBoundingClientRect();
     assert.ok(bounds.top >= 0 && bounds.bottom <= innerHeight && bounds.left >= 0);
@@ -761,6 +830,7 @@ window.runSettingsDialogTests = async (mode: 'desktop' | 'compact') => {
       await clickElement(query('nav[aria-label="Main navigation"] button[aria-label="Settings"]')!);
       await waitFor(() => dialog() !== null, 'Settings did not open at 640x480');
       assertDialogGeometry(true);
+      assertSwitchAlignment('Confirm before closing Wormhole');
       await assertVisualChangelog();
       return;
     }
@@ -853,6 +923,8 @@ window.runSettingsDialogTests = async (mode: 'desktop' | 'compact') => {
     const searchInput = dialog()!.querySelector<HTMLInputElement>(
       '[aria-label="Search settings"]',
     )!;
+    assert.equal(searchInput.getBoundingClientRect().height, 32);
+    assert.ok(parseFloat(getComputedStyle(searchInput).borderTopLeftRadius) >= 16);
     await setInputValue(searchInput, 'bitwarden');
     assert.deepEqual(
       [...dialog()!.querySelectorAll<HTMLButtonElement>('[role="tab"]')].map((tab) =>
@@ -864,6 +936,12 @@ window.runSettingsDialogTests = async (mode: 'desktop' | 'compact') => {
       dialog()!.querySelector('[role="tabpanel"][data-state="active"] h2')?.textContent,
       'Extensions',
     );
+
+    await clickElement(
+      dialog()!.querySelector<HTMLButtonElement>('[aria-label="Clear settings search"]')!,
+    );
+    assert.equal(searchInput.value, '');
+    assert.ok(document.activeElement === searchInput);
 
     await setInputValue(searchInput, 'does-not-match-anything');
     assert.equal(dialog()!.querySelectorAll('[role="tab"]').length, 0);
@@ -933,6 +1011,24 @@ window.runSettingsDialogTests = async (mode: 'desktop' | 'compact') => {
       dialog()!.querySelector('[role="tabpanel"][data-state="active"] h2')?.textContent,
       'AI Agent (MCP)',
     );
+    const regenerate = [...dialog()!.querySelectorAll<HTMLButtonElement>('button')].find(
+      (button) => button.textContent?.trim() === 'Regenerate',
+    )!;
+    const confirmRegeneration = () => query('[role="alertdialog"][data-state="open"]');
+    await clickElement(regenerate);
+    await waitFor(() => Boolean(confirmRegeneration()), 'MCP confirmation did not open');
+    assert.equal(getComputedStyle(confirmRegeneration()!).borderRadius, '16px');
+    await keypress('Escape');
+    await waitFor(() => !confirmRegeneration(), 'Escape did not close the MCP confirmation');
+    assert.ok(dialog(), 'Cancelling a nested confirmation must keep Settings open');
+    assert.equal(query<HTMLInputElement>('#settings-mcp-token')!.value, '');
+    await clickElement(regenerate);
+    await clickElement(
+      [...confirmRegeneration()!.querySelectorAll<HTMLButtonElement>('button')].find(
+        (button) => button.textContent?.trim() === 'Regenerate token',
+      )!,
+    );
+    assert.equal(query<HTMLInputElement>('#settings-mcp-token')!.value, 'new-token');
     await React.act(async () => mock.emitUpdate({ ...updateRelease, latestVersion: '2.7.0' }));
     await waitFor(
       () => query('[aria-label="Close update notification"]') !== null,
@@ -1029,10 +1125,41 @@ window.runSettingsDialogTests = async (mode: 'desktop' | 'compact') => {
       await mountApp({ theme: 'dark', authConfigured: true, idleTimeoutMinutes: 1, pinned: true });
       await clickElement(query('nav[aria-label="Main navigation"] button[aria-label="Settings"]')!);
       await waitFor(() => dialog() !== null, 'Settings did not open before idle lock');
-      const lockSecurityTab = [
+      let discards = 0;
+      window.wormhole!.sftpEdit = async (sessionId, request) => {
+        if (request.operation === 'discard') discards++;
+        return {
+          type: 'sftp.edit',
+          sessionId,
+          edits: [
+            {
+              id: 'recovered',
+              sessionId,
+              nodeId: 'node',
+              name: 'draft.txt',
+              remotePath: '/draft.txt',
+              editor: 'System',
+              state: 'Recovered',
+              pending: true,
+              recovered: true,
+            },
+          ],
+        };
+      };
+      const fileTransferTab = [
         ...dialog()!.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
-      ].find((item) => item.textContent?.includes('Security'))!;
-      await clickElement(lockSecurityTab);
+      ].find((item) => item.textContent?.includes('File transfer'))!;
+      await clickElement(fileTransferTab);
+      const discard = () =>
+        [...dialog()!.querySelectorAll<HTMLButtonElement>('button')].find(
+          (item) => item.textContent?.trim() === 'Discard',
+        );
+      await waitFor(() => Boolean(discard()), 'Missing recovered SFTP file');
+      await clickElement(discard()!);
+      await waitFor(
+        () => Boolean(query('[role="alertdialog"][data-state="open"]')),
+        'Discard confirmation did not open',
+      );
       assert.equal(activeIdleIntervals.size, 1, 'Expected one active idle check interval');
       timeOffset = 120_000;
       await React.act(async () => {
@@ -1048,7 +1175,15 @@ window.runSettingsDialogTests = async (mode: 'desktop' | 'compact') => {
       assert.ok(lockedDialog !== null, 'Settings dialog must remain mounted while locked');
       assert.equal(lockedDialog.dataset.locked, 'true');
       assert.equal(lockedDialog.inert, true);
+      assert.ok(
+        !query('[role="alertdialog"][data-state="open"]'),
+        'Lock must cancel the pending discard',
+      );
       assert.equal(getComputedStyle(lockedDialog).visibility, 'hidden');
+      assert.equal(
+        getComputedStyle(query('dialog[open] [data-dialog-surface]')!).borderRadius,
+        '16px',
+      );
 
       const lockInput = query<HTMLInputElement>('dialog[open] #auth-secret')!;
       await setInputValue(lockInput, '1234');
@@ -1069,8 +1204,10 @@ window.runSettingsDialogTests = async (mode: 'desktop' | 'compact') => {
       assert.equal(getComputedStyle(dialog()!).visibility, 'visible');
       assert.equal(
         dialog()!.querySelector('[role="tabpanel"][data-state="active"] h2')?.textContent,
-        'Security',
+        'File transfer',
       );
+      assert.equal(discards, 0);
+      assert.ok(!query('[role="alertdialog"][data-state="open"]'));
     } finally {
       window.setInterval = realSetInterval;
       window.clearInterval = realClearInterval;
@@ -1079,9 +1216,204 @@ window.runSettingsDialogTests = async (mode: 'desktop' | 'compact') => {
 
     // 2. Light theme geometry & rendering check.
     await mountApp({ theme: 'light', pinned: true });
+    const connectionsSearch = query('[aria-label="Search connections"]')!;
+    const tabsSearchButton = query('[aria-label="Search open tabs"]')!;
+    await clickElement(tabsSearchButton);
+    const tabsSearch = query('[aria-label="Search open tabs by title"]')!;
+    await waitFor(
+      () => document.activeElement === tabsSearch,
+      'Tab search did not focus its input',
+    );
+    await React.act(async () => tabsSearch.blur());
+    const tabSearchPopoverStyle = getComputedStyle(query('[data-session-tab-search]')!);
+    assert.equal(tabSearchPopoverStyle.backgroundColor, 'oklch(1 0 0)');
+    const lightTabsSearchStyle = searchAppearance(tabsSearch);
+    await searchBorderPixel(tabsSearch, 'light');
+    await searchBorderPixel(connectionsSearch, 'light');
+    applyTheme('dark');
+    assert.equal(tabSearchPopoverStyle.backgroundColor, 'rgb(27, 27, 27)');
+    const darkTabsSearchStyle = searchAppearance(tabsSearch);
+    await searchBorderPixel(tabsSearch, 'dark');
+    await searchBorderPixel(connectionsSearch, 'dark');
+    applyTheme('oled');
+    assert.equal(tabSearchPopoverStyle.backgroundColor, 'oklch(0.145 0 0)');
+    applyTheme('light');
+    await clickElement(tabsSearchButton);
+    const sessionsButton = query('nav[aria-label="Main navigation"] [aria-label="Sessions"]')!;
+    const credentialsSelector = 'nav[aria-label="Main navigation"] [aria-label="Credentials"]';
+    const credentialsButton = query(credentialsSelector)!;
+    const selectedBackground = getComputedStyle(sessionsButton).backgroundColor;
+    const idleBackground = getComputedStyle(credentialsButton).backgroundColor;
+    const pointer = await moveTo(credentialsButton);
+    await window.settingsHover(credentialsSelector, true);
+    const navigationHover = getComputedStyle(credentialsButton).backgroundColor;
+    assert.notEqual(navigationHover, idleBackground);
+    assert.notEqual(navigationHover, selectedBackground);
+    await React.act(async () =>
+      window.settingsInput({ type: 'mouseDown', button: 'left', ...pointer, clickCount: 1 }),
+    );
+    await waitFor(
+      () => getComputedStyle(credentialsButton).backgroundColor !== navigationHover,
+      'Credentials should give immediate feedback while pressed',
+    );
+    assert.equal(sessionsButton.getAttribute('aria-current'), 'page');
+    await React.act(async () =>
+      window.settingsInput({ type: 'mouseUp', button: 'left', ...pointer, clickCount: 1 }),
+    );
+    await waitFor(
+      () => credentialsButton.getAttribute('aria-current') === 'page',
+      'Credentials should activate on a completed click',
+    );
+    assert.equal(getComputedStyle(credentialsButton).backgroundColor, selectedBackground);
+    await window.settingsHover(credentialsSelector, false);
+    await clickElement(sessionsButton);
     await clickElement(query('nav[aria-label="Main navigation"] button[aria-label="Settings"]')!);
     await waitFor(() => dialog() !== null, 'Settings did not open in light theme');
     assertDialogGeometry(true);
+    const confirmTabClose = assertSwitchAlignment('Confirm before closing a connected tab');
+    assertSwitchAlignment('Confirm before closing Wormhole');
+    assert.equal(confirmTabClose.getAttribute('aria-checked'), 'true');
+    await clickElement(confirmTabClose);
+    assert.equal(confirmTabClose.getAttribute('aria-checked'), 'false');
+    assertSwitchAlignment('Confirm before closing a connected tab');
+    const settingsSearch = dialog()!.querySelector<HTMLElement>('[aria-label="Search settings"]')!;
+    const settingsSidebar = dialog()!.querySelector('[aria-label="Settings navigation"]')!;
+    function assertSharedPalette() {
+      const sidebar = getComputedStyle(settingsSidebar).backgroundColor;
+      const canvas = getComputedStyle(settingsSidebar.nextElementSibling!).backgroundColor;
+      for (const selector of ['[data-workspace-shell]', '[data-sidebar-surface]', 'header']) {
+        assert.equal(getComputedStyle(query(selector)!).backgroundColor, sidebar);
+      }
+      assert.equal(getComputedStyle(query('[data-session-canvas]')!).backgroundColor, canvas);
+      return { sidebar, canvas };
+    }
+    assertSharedPalette();
+    const lightSearchStyle = searchAppearance(settingsSearch);
+    await searchBorderPixel(settingsSearch, 'light');
+    assert.equal(lightSearchStyle.fontSize, '14px');
+    assert.deepEqual(searchAppearance(connectionsSearch), lightSearchStyle, 'Connections in light');
+    assert.deepEqual(lightTabsSearchStyle, lightSearchStyle, 'Tabs in light');
+    const category = dialog()!.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')!;
+    const navigation = query('nav[aria-label="Main navigation"] [aria-current="page"]')!;
+    const settingsLauncher = query('nav[aria-label="Main navigation"] [aria-expanded="true"]')!;
+    const inactive = dialog()!.querySelector<HTMLElement>('[role="tab"][aria-selected="false"]')!;
+    const settingsPointer = await moveTo(inactive);
+    const inactiveSelector = `#${CSS.escape(inactive.id)}`;
+    await window.settingsHover(inactiveSelector, true);
+    assert.equal(getComputedStyle(inactive).backgroundColor, navigationHover);
+    await React.act(async () =>
+      window.settingsInput({
+        type: 'mouseDown',
+        button: 'left',
+        ...settingsPointer,
+        clickCount: 1,
+      }),
+    );
+    await waitFor(
+      () => inactive.getAttribute('aria-selected') === 'true',
+      'The Settings category should activate before the mouse button is released',
+    );
+    assert.equal(getComputedStyle(inactive).backgroundColor, selectedBackground);
+    await React.act(async () =>
+      window.settingsInput({ type: 'mouseUp', button: 'left', ...settingsPointer, clickCount: 1 }),
+    );
+    await window.settingsHover(inactiveSelector, false);
+    await clickElement(category);
+    const nextNavigation = navigation.parentElement!.nextElementSibling!.querySelector('button')!;
+    assert.equal(
+      nextNavigation.getBoundingClientRect().top - navigation.getBoundingClientRect().top,
+      inactive.getBoundingClientRect().top - category.getBoundingClientRect().top,
+    );
+    const categoryStyle = getComputedStyle(category);
+    const navStyle = getComputedStyle(navigation);
+    const settingsLauncherStyle = getComputedStyle(settingsLauncher);
+    for (const property of [
+      'height',
+      'columnGap',
+      'paddingInlineStart',
+      'paddingInlineEnd',
+      'borderTopLeftRadius',
+      'fontSize',
+      'fontWeight',
+    ] as const) {
+      assert.equal(navStyle[property], categoryStyle[property], property);
+    }
+    const iconStyle = getComputedStyle(navigation.querySelector('svg')!);
+    const categoryIconStyle = getComputedStyle(category.querySelector('svg')!);
+    assert.equal(iconStyle.width, categoryIconStyle.width);
+    assert.equal(iconStyle.opacity, categoryIconStyle.opacity);
+    assert.equal(navStyle.backgroundColor, categoryStyle.backgroundColor);
+    assert.equal(
+      navStyle.getPropertyValue('--tw-shadow'),
+      categoryStyle.getPropertyValue('--tw-shadow'),
+    );
+    assert.notEqual(categoryStyle.backgroundColor, getComputedStyle(inactive).backgroundColor);
+    assert.notEqual(
+      categoryStyle.getPropertyValue('--tw-shadow'),
+      getComputedStyle(inactive).getPropertyValue('--tw-shadow'),
+    );
+    assert.equal(navStyle.transitionProperty, 'none');
+    assert.equal(categoryStyle.transitionProperty, 'none');
+    assert.equal(settingsLauncherStyle.backgroundColor, categoryStyle.backgroundColor);
+    await React.act(async () => window.settingsReducedMotion(false));
+    assert.equal(navStyle.transitionProperty, 'background-color, color, box-shadow');
+    assert.equal(navStyle.transitionProperty, categoryStyle.transitionProperty);
+    assert.equal(navStyle.transitionDuration, categoryStyle.transitionDuration);
+    const lightBackground = navStyle.backgroundColor;
+    applyTheme('dark');
+    const darkPalette = assertSharedPalette();
+    const darkSearchStyle = searchAppearance(settingsSearch);
+    await searchBorderPixel(settingsSearch, 'dark');
+    assert.deepEqual(searchAppearance(connectionsSearch), darkSearchStyle, 'Connections in dark');
+    assert.deepEqual(darkTabsSearchStyle, darkSearchStyle, 'Tabs in dark');
+    assert.notEqual(navStyle.backgroundColor, lightBackground);
+    assert.equal(navStyle.backgroundColor, categoryStyle.backgroundColor);
+    assert.equal(settingsLauncherStyle.backgroundColor, categoryStyle.backgroundColor);
+    applyTheme('light');
+    assert.equal(navStyle.backgroundColor, lightBackground);
+    assert.equal(categoryStyle.backgroundColor, lightBackground);
+
+    async function chooseTheme(label: 'Dark' | 'OLED') {
+      const trigger = query('#settings-theme')!;
+      await clickElement(trigger);
+      const option = Array.from(document.querySelectorAll<HTMLElement>('[role="option"]')).find(
+        (item) => item.textContent?.trim() === label,
+      );
+      assert.ok(option, `Missing ${label} theme`);
+      await clickElement(option);
+      assert.equal(trigger.textContent?.trim(), label);
+      assert.equal((await window.wormhole!.readAppSettings()).theme, label.toLowerCase());
+    }
+
+    function assertBrightLabels() {
+      const color = getComputedStyle(query('[data-sidebar-surface] h1')!).color;
+      for (const element of [
+        nextNavigation,
+        nextNavigation.querySelector('svg')!,
+        query('[aria-label="Quick Connect"] svg')!,
+        inactive,
+        inactive.querySelector('svg')!,
+        dialog()!.querySelector('label[for="settings-theme"]')!.nextElementSibling!,
+      ]) {
+        const style = getComputedStyle(element);
+        assert.equal(style.color, color);
+        assert.equal(style.opacity, '1');
+      }
+      assert.equal(getComputedStyle(settingsSearch, '::placeholder').color, color);
+      assert.equal(getComputedStyle(connectionsSearch, '::placeholder').color, color);
+    }
+
+    await chooseTheme('OLED');
+    assert.ok(document.documentElement.classList.contains('oled'));
+    assert.deepEqual(assertSharedPalette(), {
+      sidebar: 'rgb(5, 5, 5)',
+      canvas: 'rgb(16, 16, 16)',
+    });
+    assertBrightLabels();
+    await chooseTheme('Dark');
+    assert.ok(!document.documentElement.classList.contains('oled'));
+    assert.deepEqual(assertSharedPalette(), darkPalette);
+    assertBrightLabels();
   } finally {
     await React.act(async () => root.unmount());
     window.wormhole = originalBridge;

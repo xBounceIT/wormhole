@@ -1,7 +1,7 @@
-export type AppTheme = 'system' | 'light' | 'dark';
+export type AppTheme = 'system' | 'light' | 'dark' | 'oled';
 
 export function isAppTheme(value: unknown): value is AppTheme {
-  return value === 'system' || value === 'light' || value === 'dark';
+  return value === 'system' || value === 'light' || value === 'dark' || value === 'oled';
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {

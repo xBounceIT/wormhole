@@ -31,7 +31,9 @@ import {
   type FormEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
+  type RefObject,
 } from 'react';
+import { Tabs as TabsPrimitive } from 'radix-ui';
 import './index.css';
 import { authenticationIdleSeconds } from './auth-idle';
 import { McpApprovalDialog } from './components/McpApprovalDialog';
@@ -41,6 +43,7 @@ import { UpdateNotification } from './components/UpdateNotification';
 import { VisualChangelog } from './components/VisualChangelog';
 import { AppTitlebar } from './components/AppTitlebar';
 import { SidebarLayout } from './components/SidebarLayout';
+import { SessionTabSearch } from './components/SessionTabSearch';
 import {
   SidebarNavigation,
   sidebarNavigationItems,
@@ -194,7 +197,6 @@ import {
   Monitor,
   MoreHorizontal,
   Network,
-  PanelLeft,
   Pencil,
   Plus,
   Power,
@@ -202,7 +204,6 @@ import {
   Puzzle,
   Radio,
   RefreshCcw,
-  Search,
   Shield,
   SlidersHorizontal,
   Terminal,
@@ -243,6 +244,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
+import { useConfirmationDialog } from '@/components/ui/confirmation-dialog';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -252,10 +254,11 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { Input } from '@/components/ui/input';
-import { InputGroup, InputGroupAddon, InputGroupInput } from '@/components/ui/input-group';
+import { SearchField } from '@/components/SearchField';
 import { PasswordInput } from '@/components/ui/password-input';
 import { Kbd } from '@/components/ui/kbd';
 import { Label } from '@/components/ui/label';
+import { NavigationItem } from '@/components/ui/navigation-item';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import {
   Select,
@@ -271,12 +274,19 @@ import {
   SidebarContent,
   SidebarHeader,
   SidebarProvider,
-  SidebarInput,
   SidebarInset,
 } from '@/components/ui/sidebar';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
+import {
+  TextTooltip,
+  Tooltip,
+  TooltipContent,
+  TooltipFocusSuppressionContext,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip';
 import { getTreeRowStyles } from './tree-layout';
+import { keepHorizontalItemVisible, revealHorizontalItem } from './horizontal-scroll';
 import { findParentFolderId } from './tree-parent';
 import { WorkspaceRefreshCoordinator } from './workspace-refresh';
 import {
@@ -309,10 +319,14 @@ import {
   sshCredentialPromptTarget,
 } from './runtime-credential-errors';
 import { RdpSurface } from './components/RdpSurface';
-import { ConnectionStepper } from './components/ConnectionStepper';
+import {
+  BrowserConnectionLoading,
+  ConnectionLoading,
+  ConnectionTransition,
+} from './components/ConnectionTransition';
 import { SearchableCombobox, type SearchableComboboxOption } from './components/SearchableCombobox';
 import { VirtualCardGrid } from './components/VirtualCardGrid';
-import { applyTheme, getSystemTheme, isTheme, type ResolvedTheme, type Theme } from './theme';
+import { applyTheme, getSystemTheme, isTheme, type Theme } from './theme';
 import {
   applyRdpBackendEvent,
   applyRdpSystemClientOpenFailure,
@@ -1124,19 +1138,6 @@ function ProtocolIcon({ protocol, size = 15 }: { protocol: Protocol; size?: numb
   return <Radio size={size} />;
 }
 
-function protocolTone(protocol: Protocol) {
-  return {
-    ssh: 'text-foreground',
-    sftp: 'text-foreground',
-    smb: 'text-foreground',
-    rdp: 'text-muted-foreground',
-    http: 'text-foreground/70',
-    https: 'text-foreground/80',
-    vnc: 'text-muted-foreground/80',
-    serial: 'text-foreground/60',
-  }[protocol];
-}
-
 function collectFolders(nodes: TreeNode[]): TreeNode[] {
   return nodes.flatMap((node) =>
     node.kind === 'folder' ? [node, ...(node.children ? collectFolders(node.children) : [])] : [],
@@ -1312,6 +1313,7 @@ function NodeContextMenu({
 function SessionTabContextMenu({
   session,
   children,
+  restoringFocus,
   onReconnect,
   onRestoreFullView,
   onDisconnect,
@@ -1323,6 +1325,7 @@ function SessionTabContextMenu({
 }: {
   session: Session;
   children: ReactNode;
+  restoringFocus: RefObject<boolean>;
   onReconnect: () => void;
   onRestoreFullView?: () => void;
   onDisconnect: () => void;
@@ -1334,8 +1337,19 @@ function SessionTabContextMenu({
 }) {
   return (
     <ContextMenu>
-      <ContextMenuTrigger asChild>{children}</ContextMenuTrigger>
-      <ContextMenuContent className="w-64">
+      <TooltipFocusSuppressionContext.Provider value={restoringFocus}>
+        <ContextMenuTrigger asChild>{children}</ContextMenuTrigger>
+      </TooltipFocusSuppressionContext.Provider>
+      <ContextMenuContent
+        className="w-64"
+        onCloseAutoFocus={() => {
+          // Radix restores focus synchronously after this callback returns.
+          restoringFocus.current = true;
+          queueMicrotask(() => {
+            restoringFocus.current = false;
+          });
+        }}
+      >
         <ContextMenuItem onSelect={onDuplicate}>
           <Copy />
           Duplicate
@@ -1607,30 +1621,25 @@ function AuthPrompt({
     };
   }, [onDialogElementChange]);
 
+  function hasOpenNestedDialog(dialog: HTMLDialogElement) {
+    return (
+      dialog.querySelector(
+        '[role="dialog"][data-state="open"], [role="alertdialog"][data-state="open"]',
+      ) !== null
+    );
+  }
   useEffect(() => {
     const dialog = dialogRef.current;
     if (!dialog) return;
-    const hasOpenNestedDialog = () =>
-      Boolean(
-        dialog.querySelector(
-          '[role="dialog"][data-state="open"], [role="alertdialog"][data-state="open"]',
-        ),
-      );
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.isComposing || event.key !== 'Escape' || !dialog.open) return;
-      if (hasOpenNestedDialog()) return;
+      if (hasOpenNestedDialog(dialog)) return;
       event.stopPropagation();
       event.preventDefault();
       if (request.kind === 'confirmation') onResultRef.current(false);
     };
-    const handleFocusIn = (event: FocusEvent) => {
-      if (!dialog.open || hasOpenNestedDialog()) return;
-      event.stopPropagation();
-    };
-    dialog.addEventListener('focusin', handleFocusIn);
     window.addEventListener('keydown', handleKeyDown, { capture: true });
     return () => {
-      dialog.removeEventListener('focusin', handleFocusIn);
       window.removeEventListener('keydown', handleKeyDown, { capture: true });
     };
   }, [request.kind]);
@@ -1680,12 +1689,20 @@ function AuthPrompt({
       aria-labelledby="auth-prompt-title"
       className="pointer-events-auto fixed inset-0 z-[100] m-0 h-auto max-h-none w-auto max-w-none border-0 bg-background/85 p-5 backdrop-blur-md open:flex open:items-center open:justify-center"
       closedby={request.kind === 'lock' ? 'none' : 'closerequest'}
+      onFocus={(event) => {
+        // Let controls handle focus before isolating it from the workspace's focus traps.
+        if (event.currentTarget.open && !hasOpenNestedDialog(event.currentTarget))
+          event.stopPropagation();
+      }}
       onCancel={(event) => {
         event.preventDefault();
         if (request.kind === 'confirmation') onResult(false);
       }}
     >
-      <Card className="w-full max-w-[400px] gap-0 border-border/80 bg-card py-0 shadow-[0_24px_80px_rgba(0,0,0,0.45)]">
+      <Card
+        data-dialog-surface=""
+        className="w-full max-w-[400px] gap-0 border-border/80 bg-card py-0 shadow-[0_24px_80px_rgba(0,0,0,0.45)]"
+      >
         <CardHeader className="gap-3 px-5 py-5">
           <div className="flex items-start gap-3">
             <div className="grid size-9 shrink-0 place-items-center rounded-lg border border-border/70 bg-muted/60 text-foreground">
@@ -1741,19 +1758,21 @@ function AuthPrompt({
                   Use the PIN you created in Wormhole, not your Windows PIN.
                 </p>
               ) : null}
-              <PasswordInput
-                ref={secretInputRef}
-                autoFocus={
-                  !isHelloMode || !request.autoWindowsHello || !state.windowsHello.available
-                }
-                autoComplete="current-password"
-                id="auth-secret"
-                inputMode={method === 'pin' ? 'numeric' : undefined}
-                key={authRequestKey}
-                onChange={(event) => setSecret(event.target.value)}
-                placeholder={`Enter your ${method === 'pin' ? 'Wormhole PIN' : 'password'}`}
-                value={secret}
-              />
+              <TooltipProvider portalled={false}>
+                <PasswordInput
+                  ref={secretInputRef}
+                  autoFocus={
+                    !isHelloMode || !request.autoWindowsHello || !state.windowsHello.available
+                  }
+                  autoComplete="current-password"
+                  id="auth-secret"
+                  inputMode={method === 'pin' ? 'numeric' : undefined}
+                  key={authRequestKey}
+                  onChange={(event) => setSecret(event.target.value)}
+                  placeholder={`Enter your ${method === 'pin' ? 'Wormhole PIN' : 'password'}`}
+                  value={secret}
+                />
+              </TooltipProvider>
             </div>
             {status ? (
               <p
@@ -1876,7 +1895,7 @@ function backupOperationErrorMessage(error: unknown): string {
 function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAppProps) {
   const sshTheme = useSshTerminalTheme(initialSettings.sshTerminalTheme);
   const [theme, setTheme] = useState<Theme>(initialSettings.theme);
-  const [systemTheme, setSystemTheme] = useState<ResolvedTheme>(getSystemTheme);
+  const [systemTheme, setSystemTheme] = useState(getSystemTheme);
   const contextMenuOverlayOpen = useContextMenuOverlayOpen();
   const [tree, setTree] = useState<TreeNode[]>(initialWorkspace.tree);
   const connectionTreeIndex = useMemo(() => indexConnectionTree(tree), [tree]);
@@ -6718,7 +6737,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       );
       const hasChildren = Boolean(node.children?.length);
       const isTreeNodeSelected = selectedTreeNodeIds.has(node.id);
-      const isSelected = node.kind === 'folder' && selectedNodeId === node.id;
+      const isSelected = selectedNodeId === node.id;
       const showsMoveCursor = isFolder || isTreeNodeSelected;
       const creationFolderId =
         node.kind === 'folder' ? node.id : connectionTreeIndex.parentFolderIdByNodeId.get(node.id);
@@ -6751,16 +6770,15 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           aria-current={isSelected ? 'true' : undefined}
           aria-keyshortcuts={isFolder ? 'F2 Delete' : 'F2 Delete Enter'}
           className={[
-            'relative z-10 h-8 w-full justify-start gap-1.5 rounded-md px-2 text-left !text-xs font-medium text-sidebar-foreground/80 transition-[background-color,box-shadow,opacity] duration-150 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground focus-visible:ring-inset aria-expanded:bg-transparent aria-expanded:text-sidebar-foreground/80',
+            'relative z-10 h-8 w-full justify-start gap-1.5 rounded-none px-2 text-left !text-xs font-medium text-sidebar-foreground/80 transition-[background-color,box-shadow,opacity] duration-150 focus-visible:ring-inset dark:text-sidebar-foreground',
             showsMoveCursor ? 'cursor-grab active:cursor-grabbing' : 'cursor-default',
-            isSelected
-              ? 'bg-sidebar-accent text-sidebar-accent-foreground aria-expanded:bg-sidebar-accent aria-expanded:text-sidebar-accent-foreground'
-              : '',
+            'aria-expanded:bg-transparent aria-expanded:text-sidebar-foreground/80 dark:aria-expanded:text-sidebar-foreground',
             isDragging ? 'opacity-40' : '',
             activeDropPlacement === 'inside'
               ? 'bg-sidebar-accent/70 text-sidebar-accent-foreground ring-1 ring-inset ring-sidebar-ring'
               : '',
           ].join(' ')}
+          data-connection-tree-row=""
           draggable={treeDragEnabled}
           onClick={() => {
             setSelectedNodeId(node.id);
@@ -6778,12 +6796,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
               {isExpanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
             </span>
           ) : null}
-          <span
-            className={[
-              'grid size-5 shrink-0 place-items-center',
-              isFolder ? 'text-muted-foreground' : `${protocolTone(protocol)} translate-y-px`,
-            ].join(' ')}
-          >
+          <span className="grid size-5 shrink-0 place-items-center text-muted-foreground">
             {isFolder ? (
               isExpanded ? (
                 <FolderOpen size={15} />
@@ -7272,7 +7285,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       />
       <div
         aria-hidden={authGate !== 'unlocked'}
-        className="flex h-full min-w-[960px] flex-col bg-background font-sans text-foreground"
+        className="flex h-full min-w-0 flex-col bg-background font-sans text-foreground"
         inert={authGate !== 'unlocked'}
       >
         <SidebarLayout
@@ -7324,98 +7337,71 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                         <Button
                           aria-keyshortcuts="Control+K Meta+K"
                           aria-label="Quick Connect"
-                          className="size-[30px]"
+                          className="size-[30px] rounded-[9px] text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground dark:hover:bg-sidebar-accent"
                           onClick={openQuickConnect}
                           size="icon-sm"
+                          variant="ghost"
                         >
-                          <Zap />
+                          <Zap aria-hidden="true" />
                         </Button>
                       </TooltipTrigger>
                       <TooltipContent align="end" side="bottom">
                         Quick Connect
-                        <Kbd className="h-4 bg-background/15 text-[10px] text-current">
+                        <Kbd className="h-4 text-[10px]">
                           {window.wormhole?.platform === 'darwin' ? '⌘ K' : 'Ctrl K'}
                         </Kbd>
                       </TooltipContent>
                     </Tooltip>
                   </div>
-                  <div className="relative">
-                    <Search className="pointer-events-none absolute left-2.5 top-1/2 z-10 size-3.5 -translate-y-1/2 text-muted-foreground" />
-                    <SidebarInput
-                      aria-label="Search connections"
-                      className="h-9 bg-sidebar-accent/35 pl-8 pr-8 !text-xs dark:bg-sidebar-accent/35"
-                      onChange={(event) => updateTreeSearchText(event.target.value)}
-                      placeholder="Search connections"
-                      value={searchText}
-                    />
-                    {searchText ? (
-                      <IconButton
-                        label="Clear search"
-                        className="absolute right-1 top-1/2 size-7 -translate-y-1/2 text-muted-foreground"
-                        onClick={() => updateTreeSearchText('')}
-                      >
-                        <X />
-                      </IconButton>
-                    ) : null}
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <div
-                      className="flex items-center gap-1 rounded-lg border border-sidebar-border bg-sidebar-accent/30 p-0.5"
-                      role="group"
-                      aria-label="Folder expansion"
+                  <SearchField
+                    aria-label="Search connections"
+                    onChange={(event) => updateTreeSearchText(event.target.value)}
+                    onClear={() => updateTreeSearchText('')}
+                    placeholder="Search connections"
+                    value={searchText}
+                  />
+                  <div className="flex items-center gap-1 pl-[5px] text-muted-foreground">
+                    <IconButton label="Expand all folders" onClick={() => toggleAllFolders(true)}>
+                      <ChevronDown />
+                    </IconButton>
+                    <IconButton
+                      label="Collapse all folders"
+                      onClick={() => toggleAllFolders(false)}
                     >
-                      <IconButton label="Expand all folders" onClick={() => toggleAllFolders(true)}>
-                        <ChevronDown />
-                      </IconButton>
-                      <IconButton
-                        label="Collapse all folders"
-                        onClick={() => toggleAllFolders(false)}
-                      >
-                        <ChevronUp />
-                      </IconButton>
-                    </div>
-                    <div
-                      className="flex items-center gap-1 rounded-lg border border-sidebar-border bg-sidebar-accent/30 p-0.5"
-                      role="group"
-                      aria-label="Manage connections"
+                      <ChevronUp />
+                    </IconButton>
+                    <DropdownMenu onOpenChange={setSidebarImportMenuOpen}>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <DropdownMenuTrigger asChild>
+                            <Button aria-label="Import connections" size="icon-sm" variant="ghost">
+                              <Upload />
+                            </Button>
+                          </DropdownMenuTrigger>
+                        </TooltipTrigger>
+                        <TooltipContent side="bottom">Import connections</TooltipContent>
+                      </Tooltip>
+                      <DropdownMenuContent align="end" className="w-52">
+                        <DropdownMenuItem onClick={() => setMremoteImportOpen(true)}>
+                          <Upload />
+                          Import from mRemoteNG
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                    <IconButton
+                      aria-keyshortcuts="Control+Shift+N Meta+Shift+N"
+                      label="New folder"
+                      onClick={() => openNewFolder(null)}
                     >
-                      <DropdownMenu onOpenChange={setSidebarImportMenuOpen}>
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <DropdownMenuTrigger asChild>
-                              <Button
-                                aria-label="Import connections"
-                                size="icon-sm"
-                                variant="ghost"
-                              >
-                                <Upload />
-                              </Button>
-                            </DropdownMenuTrigger>
-                          </TooltipTrigger>
-                          <TooltipContent side="bottom">Import connections</TooltipContent>
-                        </Tooltip>
-                        <DropdownMenuContent align="end" className="w-52">
-                          <DropdownMenuItem onClick={() => setMremoteImportOpen(true)}>
-                            <Upload />
-                            Import from mRemoteNG
-                          </DropdownMenuItem>
-                        </DropdownMenuContent>
-                      </DropdownMenu>
-                      <IconButton
-                        aria-keyshortcuts="Control+Shift+N Meta+Shift+N"
-                        label="New folder"
-                        onClick={() => openNewFolder(null)}
-                      >
-                        <FolderPlus />
-                      </IconButton>
-                      <IconButton
-                        aria-keyshortcuts="Control+N Meta+N"
-                        label="New connection"
-                        onClick={() => openNewConnection(null)}
-                      >
-                        <Plus />
-                      </IconButton>
-                    </div>
+                      <FolderPlus />
+                    </IconButton>
+                    <IconButton
+                      aria-keyshortcuts="Control+N Meta+N"
+                      label="New connection"
+                      onClick={() => openNewConnection(null)}
+                    >
+                      <Plus />
+                    </IconButton>
                   </div>
                   {searchText ? (
                     <p className="px-1 text-xs text-muted-foreground">
@@ -7441,7 +7427,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                       >
                         {/* Keep Radix's intrinsic-width content from stretching rows past the viewport. */}
                         <ScrollArea className="min-h-0 flex-1 [&>[data-slot=scroll-area-viewport]>div]:block!">
-                          <div className="pl-1 pr-3">
+                          <div className="pr-3 pl-1.5">
                             {visibleTree.length > 0 ? (
                               renderTree(visibleTree)
                             ) : (
@@ -7469,8 +7455,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
             </SidebarProvider>
           }
         >
-          <SidebarInset className="h-full min-h-0 min-w-0">
-            <SftpRecoveryNotice />
+          <SidebarInset className="h-full min-h-0 min-w-0 bg-transparent pr-2 pb-2 in-[[data-sidebar-layout][data-revealed=false]]:pl-2">
+            <div className="order-last shrink-0" data-sftp-recovery-notice="">
+              <SftpRecoveryNotice />
+            </div>
             {activePage === 'sessions' ? (
               <SshCertificateEditorContext
                 value={(credentialId) => {
@@ -7481,6 +7469,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                 <SessionsPage
                   autoCopyOnSelect={autoCopyOnSelect}
                   bitwardenUnlockPending={bitwardenUnlockPrompt !== null}
+                  captureWebPreview={pendingSessionClose === null}
                   onBitwardenUnlockRequired={(sessionId, reason, retry) =>
                     requestRuntimeBitwardenUnlock(`vnc:${sessionId}`, reason, retry)
                   }
@@ -7536,45 +7525,49 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                   sessions={sessions}
                 />
               </SshCertificateEditorContext>
-            ) : activePage === 'credentials' ? (
-              <CredentialsPage
-                initialCredentials={credentials}
-                isAuthorized={authGate === 'unlocked'}
-                onCreate={createCredential}
-                onDelete={deleteSavedCredential}
-                onUpdate={updateCredential}
-              />
-            ) : activePage === 'tunnels' ? (
-              <TunnelsPage
-                tree={tree}
-                isAuthorized={authGate === 'unlocked'}
-                credentials={credentialOptions.ssh.filter(
-                  (credential) =>
-                    credential.provider === 'Local' &&
-                    credentialCanUseProtocol(credential.kind, 'ssh'),
-                )}
-                onTunnelsLoaded={setTunnels}
-                onTunnelCreated={(tunnel) =>
-                  setTunnels((current) =>
-                    [...current.filter((item) => item.id !== tunnel.id), tunnel].sort(
-                      (left, right) => left.name.localeCompare(right.name),
-                    ),
-                  )
-                }
-                onTunnelDeleted={(id) =>
-                  setTunnels((current) => current.filter((tunnel) => tunnel.id !== id))
-                }
-                onTunnelUpdated={(tunnel) =>
-                  setTunnels((current) =>
-                    current
-                      .map((item) => (item.id === tunnel.id ? tunnel : item))
-                      .sort((left, right) => left.name.localeCompare(right.name)),
-                  )
-                }
-                tunnels={tunnels}
-              />
             ) : (
-              <UtilityPage item={currentPage} sessions={sessions} />
+              <div className="workspace-page-canvas min-h-0 flex-1 overflow-hidden">
+                {activePage === 'credentials' ? (
+                  <CredentialsPage
+                    initialCredentials={credentials}
+                    isAuthorized={authGate === 'unlocked'}
+                    onCreate={createCredential}
+                    onDelete={deleteSavedCredential}
+                    onUpdate={updateCredential}
+                  />
+                ) : activePage === 'tunnels' ? (
+                  <TunnelsPage
+                    tree={tree}
+                    isAuthorized={authGate === 'unlocked'}
+                    credentials={credentialOptions.ssh.filter(
+                      (credential) =>
+                        credential.provider === 'Local' &&
+                        credentialCanUseProtocol(credential.kind, 'ssh'),
+                    )}
+                    onTunnelsLoaded={setTunnels}
+                    onTunnelCreated={(tunnel) =>
+                      setTunnels((current) =>
+                        [...current.filter((item) => item.id !== tunnel.id), tunnel].sort(
+                          (left, right) => left.name.localeCompare(right.name),
+                        ),
+                      )
+                    }
+                    onTunnelDeleted={(id) =>
+                      setTunnels((current) => current.filter((tunnel) => tunnel.id !== id))
+                    }
+                    onTunnelUpdated={(tunnel) =>
+                      setTunnels((current) =>
+                        current
+                          .map((item) => (item.id === tunnel.id ? tunnel : item))
+                          .sort((left, right) => left.name.localeCompare(right.name)),
+                      )
+                    }
+                    tunnels={tunnels}
+                  />
+                ) : (
+                  <UtilityPage item={currentPage} sessions={sessions} />
+                )}
+              </div>
             )}
           </SidebarInset>
         </SidebarLayout>
@@ -7599,7 +7592,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           <DialogContent
             aria-hidden={authGate !== 'unlocked'}
             className={cn(
-              'flex h-[min(680px,calc(100dvh-2.5rem))] w-[min(920px,calc(100vw-2.5rem))] max-w-none flex-col gap-0 overflow-hidden rounded-2xl border border-border/80 bg-popover p-0 text-popover-foreground shadow-2xl ring-1 ring-foreground/10 transition-none sm:max-w-none',
+              'flex h-[min(680px,calc(100dvh-2.5rem))] w-[min(920px,calc(100vw-2.5rem))] max-w-none flex-col gap-0 overflow-hidden border border-border/80 bg-popover p-0 text-popover-foreground shadow-2xl ring-1 ring-foreground/10 transition-none sm:max-w-none',
               authGate !== 'unlocked' && 'invisible',
             )}
             data-locked={authGate !== 'unlocked'}
@@ -7874,42 +7867,27 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                 defaultValue="general"
                 key={connectionTypeForProtocol(newConnectionForm.protocol)}
               >
-                <TabsList
-                  className="h-9 w-full shrink-0 justify-start gap-1 overflow-x-auto overflow-y-hidden rounded-none border-b border-border p-0"
-                  variant="line"
-                >
-                  <TabsTrigger className="flex-none px-3 text-xs after:bottom-0" value="general">
+                <TabsList className="w-full shrink-0 justify-start gap-1 overflow-x-auto overflow-y-hidden rounded-none border-b border-border bg-transparent px-px py-0.5 group-data-horizontal/tabs:h-9">
+                  <TabsTrigger className="flex-none px-3 text-xs" value="general">
                     General
                   </TabsTrigger>
                   {newConnectionForm.protocol === 'serial' ? (
-                    <TabsTrigger className="flex-none px-3 text-xs after:bottom-0" value="serial">
+                    <TabsTrigger className="flex-none px-3 text-xs" value="serial">
                       Serial
                     </TabsTrigger>
                   ) : null}
                   {newConnectionForm.protocol === 'rdp' ? (
                     <>
-                      <TabsTrigger
-                        className="flex-none px-3 text-xs after:bottom-0"
-                        value="display"
-                      >
+                      <TabsTrigger className="flex-none px-3 text-xs" value="display">
                         Display
                       </TabsTrigger>
-                      <TabsTrigger
-                        className="flex-none px-3 text-xs after:bottom-0"
-                        value="resources"
-                      >
+                      <TabsTrigger className="flex-none px-3 text-xs" value="resources">
                         Local Resources
                       </TabsTrigger>
-                      <TabsTrigger
-                        className="flex-none px-3 text-xs after:bottom-0"
-                        value="experience"
-                      >
+                      <TabsTrigger className="flex-none px-3 text-xs" value="experience">
                         Experience
                       </TabsTrigger>
-                      <TabsTrigger
-                        className="flex-none px-3 text-xs after:bottom-0"
-                        value="advanced"
-                      >
+                      <TabsTrigger className="flex-none px-3 text-xs" value="advanced">
                         Advanced
                       </TabsTrigger>
                     </>
@@ -9694,34 +9672,36 @@ function SshTerminalConnectionState({
   const isFailed = session.status === 'failed';
   const nativeProtocol = session.protocol === 'smb' ? 'SMB' : 'SSH';
   const hostKeyMismatch = !isSerial && isFailed ? session.hostKeyMismatch : undefined;
-  const showTunnelStepper = isConnecting && !isSerial && Boolean(session.tunnelProgress);
-  const title = isConnecting
+  if (isConnecting) {
+    const protocol = protocolLabel(session.protocol) ?? (isSerial ? 'Serial' : nativeProtocol);
+    const baudRate = isSerial ? session.serialSettings?.baudRate : undefined;
+    return (
+      <ConnectionLoading
+        name={session.title}
+        protocol={protocol}
+        destination={session.host}
+        inheritedTarget={Boolean(session.nodeId) && !isSerial}
+        port={isSerial ? undefined : session.port}
+        parameters={baudRate ? `${baudRate} baud` : undefined}
+        status={session.error ?? (isSerial ? 'Opening serial port…' : 'Connecting…')}
+        tunnelProgress={isSerial ? undefined : session.tunnelProgress}
+      />
+    );
+  }
+
+  const title = isFailed
     ? isSerial
-      ? 'Opening serial port'
-      : `Connecting to ${nativeProtocol}`
-    : isFailed
-      ? isSerial
-        ? 'Serial connection failed'
-        : `${nativeProtocol} connection failed`
-      : isSerial
-        ? 'Serial session closed'
-        : `${nativeProtocol} session closed`;
+      ? 'Serial connection failed'
+      : `${nativeProtocol} connection failed`
+    : isSerial
+      ? 'Serial session closed'
+      : `${nativeProtocol} session closed`;
   const message = hostKeyMismatch
     ? 'The server identity changed. Verify the new fingerprint before trusting it.'
     : session.error ||
-      (isConnecting
-        ? isSerial
-          ? 'Opening the local serial line.'
-          : session.protocol === 'smb'
-            ? 'Opening an SMB file transfer session.'
-            : 'Opening a secure shell session.'
-        : isSerial
-          ? 'The serial port closed the session.'
-          : 'The remote host closed the connection.');
+      (isSerial ? 'The serial port closed the session.' : 'The remote host closed the connection.');
 
-  return showTunnelStepper ? (
-    <ConnectionStepper tunnelProgress={session.tunnelProgress} />
-  ) : (
+  return (
     <div className="flex w-full max-w-2xl flex-col items-center text-center">
       <div
         className={`mb-5 grid size-14 place-items-center rounded-full border ${
@@ -9730,13 +9710,7 @@ function SshTerminalConnectionState({
             : 'border-white/10 bg-white/[0.06] text-zinc-300'
         }`}
       >
-        {isConnecting ? (
-          <LoaderCircle className="size-6 animate-spin" />
-        ) : isFailed ? (
-          <AlertCircle className="size-6" />
-        ) : (
-          <Terminal className="size-6" />
-        )}
+        {isFailed ? <AlertCircle className="size-6" /> : <Terminal className="size-6" />}
       </div>
       <p className="font-mono text-[9px] uppercase tracking-[0.16em] text-zinc-500">
         {isSerial ? 'Serial terminal' : session.protocol === 'smb' ? 'SMB files' : 'Secure shell'}
@@ -9788,11 +9762,6 @@ function SshTerminalConnectionState({
             </Button>
           </div>
         </div>
-      ) : isConnecting ? (
-        <div className="mt-6 flex items-center gap-2 text-[10px] text-zinc-500">
-          <span className="size-1.5 animate-pulse rounded-full bg-amber-400" />
-          {isSerial ? 'Opening local serial line' : 'Negotiating secure session'}
-        </div>
       ) : (
         <Button
           className="mt-6"
@@ -9831,14 +9800,24 @@ function SshXtermSurface({
   useEffect(() => {
     setTerminalLink(null);
   }, [backendId, session.status, isActive, isAuthorized]);
-  useEffect(() => {
+  useLayoutEffect(() => {
     const surface = surfaceRef.current;
     if (!surface || !backendId || session.status !== 'connected') return;
     const runtime = sshTerminal(backendId);
     runtime.attach(surface);
-    const observer = new ResizeObserver(() => runtime.fit());
+    const fit = () => runtime.fit();
+    const observer = new ResizeObserver(fit);
     observer.observe(surface);
+    let zoomFrame = 0;
+    const fitAfterWindowResize = () => {
+      cancelAnimationFrame(zoomFrame);
+      // xterm updates its cell measurements after Chromium updates the display scale.
+      zoomFrame = requestAnimationFrame(fit);
+    };
+    window.addEventListener('resize', fitAfterWindowResize);
     return () => {
+      window.removeEventListener('resize', fitAfterWindowResize);
+      cancelAnimationFrame(zoomFrame);
       observer.disconnect();
       runtime.detach();
     };
@@ -9885,7 +9864,7 @@ function SshXtermSurface({
     <>
       <div
         aria-label="Live SSH terminal"
-        className="h-full min-h-0 min-w-0 flex-1 overflow-hidden bg-[#090909]"
+        className="ssh-terminal h-full min-h-0 min-w-0 flex-1 overflow-hidden bg-[#090909]"
         ref={surfaceRef}
       />
       {terminalLink && backendId && isActive && isAuthorized ? (
@@ -10182,6 +10161,7 @@ function clearSftpCancelRequestsForBrowser(
 function SessionsPage({
   autoCopyOnSelect,
   bitwardenUnlockPending,
+  captureWebPreview,
   isAuthorized,
   isWebSurfaceVisible,
   sessions,
@@ -10215,6 +10195,7 @@ function SessionsPage({
 }: {
   autoCopyOnSelect: boolean;
   bitwardenUnlockPending: boolean;
+  captureWebPreview: boolean;
   isAuthorized: boolean;
   isWebSurfaceVisible: boolean;
   sessions: Session[];
@@ -10263,6 +10244,8 @@ function SessionsPage({
   onRetryRdp: (id: string) => void;
   onVncStatusChange: (sessionId: string, status: Session['status']) => void;
 }) {
+  const workspace = useRef<HTMLElement>(null);
+  const restoringTabMenuFocus = useRef(false);
   const [bitwardenOpenSessionId, setBitwardenOpenSessionId] = useState('');
   useEffect(() => {
     return window.wormhole?.onBitwardenPopupState((state) => {
@@ -10310,27 +10293,6 @@ function SessionsPage({
     );
   }
 
-  if (!selectedSession || sessions.length === 0) {
-    return (
-      <section className="flex h-full flex-col items-center justify-center bg-background p-8 text-center">
-        <div className="mb-4 grid size-16 place-items-center rounded-full border border-border bg-card text-foreground shadow-sm">
-          <PanelLeft className="size-7" />
-        </div>
-        <p className="mb-1 font-mono text-[9px] uppercase tracking-[0.14em] text-muted-foreground">
-          Sessions
-        </p>
-        <h2 className="text-lg font-semibold tracking-tight">No active sessions</h2>
-        <p className="mb-5 mt-2 max-w-sm text-xs leading-relaxed text-muted-foreground">
-          Pick a connection from the tree or use Quick Connect to start a session.
-        </p>
-        <Button onClick={onOpenQuickConnect}>
-          <Zap data-icon="inline-start" />
-          Quick Connect
-        </Button>
-      </section>
-    );
-  }
-
   const panes = sessionPanes(currentLayout.root);
   const rects = sessionPaneRects(currentLayout.root);
   const dividers = sessionSplitDividers(currentLayout.root);
@@ -10339,6 +10301,31 @@ function SessionsPage({
   const paneBySessionId = new Map(
     panes.flatMap((pane) => pane.tabs.map((sessionId) => [sessionId, pane] as const)),
   );
+  const selectedTabId = selectedSession?.id;
+  const selectedPaneId = currentLayout.activePaneId;
+
+  function findSessionTabScrollTarget(id: string) {
+    const tab = workspace.current?.querySelector<HTMLElement>(
+      `[data-session-tab-id="${CSS.escape(id)}"]`,
+    );
+    const chip = tab?.closest<HTMLElement>('[data-session-tab-index]');
+    const strip = tab?.closest<HTMLElement>('[data-session-tab-bar]');
+    return tab && chip && strip ? { tab, chip, strip } : undefined;
+  }
+
+  useLayoutEffect(() => {
+    const target = selectedTabId ? findSessionTabScrollTarget(selectedTabId) : undefined;
+    if (target) return keepHorizontalItemVisible(target.strip, target.chip);
+  }, [selectedPaneId, selectedTabId]);
+
+  function focusSessionTab(id: string) {
+    const target = findSessionTabScrollTarget(id);
+    if (!target) return false;
+    target.tab.focus({ preventScroll: true });
+    if (document.activeElement !== target.tab) return false;
+    revealHorizontalItem(target.strip, target.chip);
+    return true;
+  }
 
   function activateSession(paneId: string, sessionId: string) {
     updateLayout((current) => selectSession(current, paneId, sessionId));
@@ -10390,8 +10377,7 @@ function SessionsPage({
     );
     if (!rect) return;
     event.preventDefault();
-    const headerHeight = (36 / bounds.height) * 100;
-    if (y <= rect.y + headerHeight) {
+    if ((event.target as HTMLElement).closest('[data-session-tab-bar]')) {
       const tab = (event.target as HTMLElement).closest<HTMLElement>('[data-session-tab-index]');
       setDropPreview({
         paneId: rect.paneId,
@@ -10439,15 +10425,14 @@ function SessionsPage({
       const offset = event.key === 'ArrowLeft' ? -1 : 1;
       const index = pane.tabs.indexOf(sessionId);
       const next = pane.tabs[(index + offset + pane.tabs.length) % pane.tabs.length];
-      activateSession(pane.id, next);
-      document.querySelector<HTMLElement>(`[data-session-tab-id="${CSS.escape(next)}"]`)?.focus();
+      focusSessionTab(next);
     }
   }
 
   return (
     <section
       aria-label="Session pane workspace"
-      className="relative h-full min-h-0 min-w-0 overflow-hidden bg-background"
+      className="relative min-h-0 min-w-0 flex-1 overflow-hidden"
       onDragLeave={(event) => {
         if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDropPreview(null);
       }}
@@ -10456,15 +10441,46 @@ function SessionsPage({
         event.preventDefault();
         finishDrop(activeDraggedSessionId || event.dataTransfer.getData('text/wormhole-session'));
       }}
+      ref={workspace}
     >
-      {panes.map((pane) => {
+      {isAuthorized ? (
+        <div
+          className="absolute top-0 left-[var(--workspace-canvas-gutter)] z-40 flex h-[var(--workspace-sidebar-heading-height)] items-center"
+          data-session-tab-bar=""
+        >
+          <SessionTabSearch
+            activeTabId={selectedSession?.id}
+            onSelect={focusSessionTab}
+            renderIcon={(session) => <ProtocolIcon protocol={session.protocol} />}
+            tabs={sessions}
+          />
+        </div>
+      ) : null}
+      {panes.length === 0 ? (
+        <section
+          className="session-canvas flex flex-col items-center justify-center overflow-auto p-8 text-center"
+          data-session-canvas=""
+        >
+          <h2 className="text-lg font-semibold tracking-tight">No active sessions</h2>
+          <p className="mb-5 mt-2 max-w-sm text-xs leading-relaxed text-muted-foreground">
+            Pick a connection from the tree or use Quick Connect to start a session.
+          </p>
+          <Button className="rounded-full" onClick={onOpenQuickConnect}>
+            <Zap data-icon="inline-start" />
+            Quick Connect
+          </Button>
+        </section>
+      ) : null}
+      {panes.map((pane, paneIndex) => {
         const rect = rectByPane.get(pane.id)!;
         return (
           <SessionPaneChrome
+            dropEdge={activeDropPreview?.paneId === pane.id ? activeDropPreview.edge : undefined}
             dropTarget={activeDropPreview?.paneId === pane.id && !activeDropPreview.edge}
             key={pane.id}
             onActivate={() => updateLayout((current) => focusSessionPane(current, pane.id))}
             rect={rect}
+            reserveSearchSpace={paneIndex === 0}
           >
             {pane.tabs.map((sessionId, tabIndex) => {
               const session = sessionById.get(sessionId);
@@ -10484,10 +10500,11 @@ function SessionsPage({
                   onRestoreFullView={
                     panes.length > 1 ? () => restoreFullView(session.id) : undefined
                   }
+                  restoringFocus={restoringTabMenuFocus}
                   session={session}
                 >
                   <div
-                    className={`relative flex h-9 min-w-[8rem] max-w-[18rem] flex-1 border-r border-border/60 ${tabPresentation.className}`}
+                    className={`group/session-tab relative flex h-[var(--session-tab-pill-height)] min-w-24 max-w-[18rem] shrink-0 rounded-full ${tabPresentation.className}`}
                     data-session-tab-index={tabIndex}
                     onMouseDown={(event) => {
                       if (event.button !== 1) return;
@@ -10500,45 +10517,50 @@ function SessionsPage({
                       closePaneSession(pane, session.id);
                     }}
                   >
-                    <button
-                      aria-label={`${session.title}. ${tabPresentation.accessLabel}Drag to a pane edge to split.`}
-                      aria-selected={active}
-                      className="flex min-w-0 flex-1 cursor-grab items-center gap-2 pl-3 pr-2 text-left !text-xs font-medium outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
-                      data-session-tab-id={session.id}
-                      draggable
-                      onClick={() => activateSession(pane.id, session.id)}
-                      onDragEnd={() => {
-                        setDraggedSessionId('');
-                        setDropPreview(null);
-                      }}
-                      onDragStart={(event) => {
-                        event.dataTransfer.effectAllowed = 'move';
-                        event.dataTransfer.setData('text/wormhole-session', session.id);
-                        setDraggedSessionId(session.id);
-                        activateSession(pane.id, session.id);
-                      }}
-                      onFocus={() => activateSession(pane.id, session.id)}
-                      onKeyDown={(event) => keyboardMove(event, pane, session.id)}
-                      onDoubleClick={() => {
-                        if (panes.length > 1) restoreFullView(session.id);
-                      }}
-                      role="tab"
-                      tabIndex={active ? 0 : -1}
-                      title={`${tabPresentation.accessLabel}Drag to another tab bar to move, or to a pane edge to split. Alt+Shift+Arrow also splits.`}
-                      type="button"
+                    <TextTooltip
+                      text={`${session.title}\n${tabPresentation.accessLabel}Drag to another tab bar to move, or to a pane edge to split. Alt+Shift+Arrow also splits.`}
                     >
-                      <span aria-hidden="true" className="shrink-0">
-                        {tabPresentation.aiAccessible ? (
-                          <Bot size={15} />
-                        ) : (
-                          <ProtocolIcon protocol={session.protocol} />
-                        )}
-                      </span>
-                      <span className="truncate">{session.title}</span>
-                    </button>
+                      <button
+                        aria-label={`${session.title}. ${tabPresentation.accessLabel}Drag to a pane edge to split.`}
+                        aria-selected={active}
+                        className="flex min-w-0 flex-1 cursor-grab items-center gap-2 rounded-full pl-3 pr-2 text-left !text-xs font-medium outline-none aria-selected:font-semibold focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+                        data-session-tab-id={session.id}
+                        draggable
+                        onClick={() => activateSession(pane.id, session.id)}
+                        onDragEnd={() => {
+                          setDraggedSessionId('');
+                          setDropPreview(null);
+                        }}
+                        onDragStart={(event) => {
+                          event.dataTransfer.effectAllowed = 'move';
+                          event.dataTransfer.setData('text/wormhole-session', session.id);
+                          setSessionTabDragImage(event);
+                          setDraggedSessionId(session.id);
+                          activateSession(pane.id, session.id);
+                        }}
+                        onFocus={() => activateSession(pane.id, session.id)}
+                        onKeyDown={(event) => keyboardMove(event, pane, session.id)}
+                        onDoubleClick={() => {
+                          if (panes.length > 1) restoreFullView(session.id);
+                        }}
+                        role="tab"
+                        tabIndex={active ? 0 : -1}
+                        type="button"
+                      >
+                        <span aria-hidden="true" className="shrink-0">
+                          {tabPresentation.aiAccessible ? (
+                            <Bot size={15} />
+                          ) : (
+                            <ProtocolIcon protocol={session.protocol} />
+                          )}
+                        </span>
+                        <span className="truncate">{session.title}</span>
+                      </button>
+                    </TextTooltip>
                     <div className="flex shrink-0 items-center pr-1">
                       {session.canTransfer && session.status === 'connected' ? (
                         <IconButton
+                          className={`size-6 rounded-full text-muted-foreground [&_svg]:size-3 ${active ? '' : '[@media(hover:hover)]:opacity-0 group-hover/session-tab:opacity-100 group-focus-within/session-tab:opacity-100'}`}
                           label={`Open file transfer in new tab for ${session.title}`}
                           onClick={() => onOpenFileTransfer(session.id)}
                         >
@@ -10546,7 +10568,7 @@ function SessionsPage({
                         </IconButton>
                       ) : null}
                       <IconButton
-                        className="text-muted-foreground hover:bg-transparent hover:text-foreground"
+                        className="size-6 rounded-full text-muted-foreground hover:text-foreground [&_svg]:size-3"
                         label={`Close ${session.title}`}
                         onClick={() => closePaneSession(pane, session.id)}
                       >
@@ -10568,7 +10590,7 @@ function SessionsPage({
         return (
           <div
             aria-hidden={!active}
-            className="absolute min-h-0 min-w-0 overflow-hidden"
+            className="session-surface absolute min-h-0 min-w-0 overflow-hidden"
             data-wormhole-shortcuts-disabled=""
             key={session.id}
             onKeyDownCapture={(event) => markWormholeShortcutSuppressed(event.nativeEvent)}
@@ -10589,6 +10611,7 @@ function SessionsPage({
               autoCopyOnSelect={autoCopyOnSelect}
               bitwardenOpen={bitwardenOpenSessionId === session.id}
               bitwardenUnlockPending={bitwardenUnlockPending}
+              captureWebPreview={captureWebPreview}
               isActive={active}
               isAuthorized={isAuthorized}
               nativeSurfaceActive={
@@ -10631,12 +10654,6 @@ function SessionsPage({
         />
       ))}
 
-      {activeDropPreview?.edge ? (
-        <SessionDropPreview
-          edge={activeDropPreview.edge}
-          rect={rectByPane.get(activeDropPreview.paneId)}
-        />
-      ) : null}
       <p aria-live="polite" className="sr-only">
         {activeDropPreview?.edge
           ? `Drop to split ${activeDropPreview.edge}`
@@ -10645,6 +10662,30 @@ function SessionsPage({
             : ''}
       </p>
     </section>
+  );
+}
+
+function setSessionTabDragImage(event: DragEvent<HTMLButtonElement>) {
+  const pill = event.currentTarget.closest<HTMLElement>('[data-session-tab-index]');
+  if (!pill) return;
+  const bounds = pill.getBoundingClientRect();
+  const image = pill.cloneNode(true) as HTMLElement;
+  image.inert = true;
+  const { backgroundColor, color } = getComputedStyle(pill);
+  Object.assign(image.style, {
+    position: 'fixed',
+    inset: '0 auto auto 0',
+    width: `${bounds.width}px`,
+    backgroundColor,
+    color,
+  });
+  // Chromium snapshots the full pill outside the scrolling tab strip.
+  document.body.append(image);
+  requestAnimationFrame(() => image.remove());
+  event.dataTransfer.setDragImage(
+    image,
+    Math.round(event.clientX - bounds.left),
+    Math.round(event.clientY - bounds.top),
   );
 }
 
@@ -10736,23 +10777,15 @@ function sessionSurfaceStyle(
       pointerEvents: 'none',
     };
   }
-  const bounds =
-    protocol === 'ssh'
-      ? {
-          left: `${rect.x}%`,
-          // Match the h-9 tab strip and the pane's p-px inset.
-          top: `calc(${rect.y}% + var(--spacing) * 9 + 1px)`,
-          width: `${rect.width}%`,
-          height: `calc(${rect.height}% - var(--spacing) * 9 - 1px)`,
-        }
-      : {
-          left: `calc(${rect.x}% + 3px)`,
-          top: `calc(${rect.y}% + 39px)`,
-          width: `calc(${rect.width}% - 6px)`,
-          height: `calc(${rect.height}% - 42px)`,
-        };
+  const gutter = 'var(--workspace-canvas-gutter)';
+  const canvasOffset = 'var(--workspace-canvas-offset)';
+  // Browser views clip their own corners. Keep the inset for the other surfaces.
+  const inset = protocol === 'ssh' || protocol === 'http' || protocol === 'https' ? 0 : 4;
   return {
-    ...bounds,
+    left: `calc(${rect.x}% + ${gutter} + ${inset}px)`,
+    top: `calc(${rect.y}% + ${canvasOffset} + ${inset}px)`,
+    width: `max(0px, calc(${rect.width}% - 2 * (${gutter} + ${inset}px)))`,
+    height: `max(0px, calc(${rect.height}% - ${canvasOffset} - ${gutter} - ${inset * 2}px))`,
     visibility: active ? 'visible' : 'hidden',
     pointerEvents: active ? 'auto' : 'none',
     zIndex: active ? 10 : 0,
@@ -10761,19 +10794,23 @@ function sessionSurfaceStyle(
 
 function SessionPaneChrome({
   children,
+  dropEdge,
   dropTarget,
   onActivate,
   rect,
+  reserveSearchSpace,
 }: {
   children: ReactNode;
+  dropEdge?: SessionLayoutEdge;
   dropTarget: boolean;
   onActivate: () => void;
   rect: SessionPaneRect;
+  reserveSearchSpace?: boolean;
 }) {
   return (
     <div
       aria-label={`Session pane ${rect.paneId}`}
-      className="pointer-events-none absolute p-px"
+      className="pointer-events-none absolute"
       role="group"
       style={{
         left: `${rect.x}%`,
@@ -10782,56 +10819,109 @@ function SessionPaneChrome({
         height: `${rect.height}%`,
       }}
     >
-      {/* Composite the tabs and their highlight together before clipping to the rounded canvas. */}
+      <div className="session-canvas overflow-hidden" data-session-canvas="">
+        {dropEdge ? <SessionDropPreview edge={dropEdge} /> : null}
+      </div>
       <div
         aria-label="Pane tabs"
-        className={`pointer-events-auto relative z-30 flex h-9 min-w-0 transform-gpu items-stretch overflow-x-auto overflow-y-hidden border-b border-border ${dropTarget ? 'bg-primary/20 ring-2 ring-inset ring-primary' : 'bg-sidebar/55'}`}
+        className={`compact-scroll-strip session-tab-strip pointer-events-auto absolute inset-x-[var(--workspace-canvas-gutter)] top-0 z-30 max-h-full min-w-0 rounded-lg ${reserveSearchSpace ? 'ml-9' : ''} ${dropTarget ? 'bg-primary/20 ring-2 ring-inset ring-primary' : ''}`}
+        data-session-tab-bar=""
         onFocusCapture={onActivate}
         onPointerDown={onActivate}
         role="tablist"
       >
-        {children}
+        <div className="session-tab-list flex shrink-0" role="presentation">
+          {children}
+        </div>
       </div>
     </div>
   );
 }
 
-function SessionDropPreview({
-  edge,
-  rect,
-}: {
-  edge: SessionLayoutEdge;
-  rect: SessionPaneRect | undefined;
-}) {
-  if (!rect) return null;
-  const style: CSSProperties = {
-    left: `${rect.x + (edge === 'right' ? rect.width / 2 : 0)}%`,
-    top: `${rect.y + (edge === 'bottom' ? rect.height / 2 : 0)}%`,
-    width: `${edge === 'left' || edge === 'right' ? rect.width / 2 : rect.width}%`,
-    height: `${edge === 'top' || edge === 'bottom' ? rect.height / 2 : rect.height}%`,
+function SessionDropPreview({ edge }: { edge: SessionLayoutEdge }) {
+  const previewBounds = {
+    left: 'inset-y-0 left-0 w-1/2',
+    right: 'inset-y-0 right-0 w-1/2',
+    top: 'inset-x-0 top-0 h-1/2',
+    bottom: 'inset-x-0 bottom-0 h-1/2',
   };
   return (
     <div
-      className="pointer-events-none absolute z-40 grid place-items-center border-2 border-primary bg-primary/20 text-xs font-semibold uppercase tracking-wider text-primary"
-      style={style}
+      aria-hidden="true"
+      className={`absolute z-40 grid place-items-center border-2 border-primary bg-primary/20 text-xs font-semibold uppercase tracking-wider text-primary ${previewBounds[edge]}`}
+      data-session-drop-preview=""
     >
       Split {edge}
     </div>
   );
 }
 
-function SessionSurfaceFallback({ protocol }: { protocol: Protocol }) {
+function SessionSurfaceFallback({ session, onShown }: { session: Session; onShown?: () => void }) {
+  useLayoutEffect(() => onShown?.(), [onShown]);
   return (
-    <div className="grid h-full place-items-center text-xs text-muted-foreground" role="status">
-      Loading {protocolLabel(protocol)} session…
+    <div className="grid h-full place-items-center overflow-auto bg-canvas p-5">
+      {session.protocol === 'vnc' ? (
+        <ConnectionLoading
+          destination={session.host}
+          inheritedTarget={Boolean(session.nodeId)}
+          name={session.title}
+          port={session.port ?? (session.nodeId ? undefined : 5900)}
+          protocol="VNC"
+          status="Connecting to VNC…"
+          tunnelProgress={session.tunnelProgress}
+        />
+      ) : (
+        <BrowserConnectionLoading session={session} />
+      )}
     </div>
   );
 }
 
-function SessionSurface({
+function BrowserSessionSurface(props: ComponentProps<typeof WebSurface> & { session: Session }) {
+  const [fallbackShown, setFallbackShown] = useState(false);
+  const rememberFallback = useCallback(() => setFallbackShown(true), []);
+
+  return (
+    <Suspense
+      fallback={<SessionSurfaceFallback onShown={rememberFallback} session={props.session} />}
+    >
+      <WebSurface {...props} loadingFallbackShown={fallbackShown} />
+    </Suspense>
+  );
+}
+
+function SessionSurface(props: Parameters<typeof SessionSurfaceContent>[0]) {
+  const { session, onReconnectSession, onTrustSshHostKey } = props;
+  const fileBrowser = isFileBrowserProtocol(session.protocol);
+  if (!fileBrowser && session.protocol !== 'ssh' && session.protocol !== 'serial') {
+    return <SessionSurfaceContent {...props} />;
+  }
+
+  const hasFileBrowser = fileBrowser && Boolean(session.sftp);
+  const pending =
+    session.status === 'connecting' && !hasFileBrowser ? (
+      <SshTerminalConnectionState
+        isSerial={session.protocol === 'serial'}
+        onReconnect={onReconnectSession}
+        onTrustHostKey={onTrustSshHostKey}
+        session={session}
+      />
+    ) : null;
+  return (
+    <ConnectionTransition
+      connected={fileBrowser ? hasFileBrowser : session.status === 'connected'}
+      pending={pending}
+    >
+      {pending === null ? <SessionSurfaceContent {...props} /> : null}
+    </ConnectionTransition>
+  );
+}
+
+function SessionSurfaceContent({
   autoCopyOnSelect,
   bitwardenOpen,
   bitwardenUnlockPending,
+  captureWebPreview,
   isActive,
   isAuthorized,
   nativeSurfaceActive,
@@ -10859,6 +10949,7 @@ function SessionSurface({
   autoCopyOnSelect: boolean;
   bitwardenOpen: boolean;
   bitwardenUnlockPending: boolean;
+  captureWebPreview: boolean;
   isActive: boolean;
   isAuthorized: boolean;
   nativeSurfaceActive: boolean;
@@ -10917,6 +11008,7 @@ function SessionSurface({
       );
     return (
       <SftpBrowserSurface
+        allowConfirmation={isActive && isAuthorized}
         onClose={() => onCloseSftpBrowser(session.id)}
         onConflict={(transferId, itemId, decision, applyToAll) =>
           onSftpConflict(session.id, transferId, itemId, decision, applyToAll)
@@ -10972,14 +11064,19 @@ function SessionSurface({
   if (session.protocol === 'rdp') {
     return (
       <RdpSurface
+        backend={session.rdpBackend}
         canOpenSystemClient={canOpenRdpSystemClient(session)}
+        destination={session.host}
         error={session.rdpError}
         external={session.rdpExternal}
+        inheritedTarget={Boolean(session.nodeId)}
         isActive={nativeSurfaceActive}
         isAuthorized={isAuthorized}
         onConnect={() => onConnectRdp(session.id)}
         onOpenSystemClient={() => onOpenSystemRdp(session.id)}
         onRetry={() => onRetryRdp(session.id)}
+        name={session.title}
+        port={session.port}
         sessionId={session.id}
         status={session.rdpStatus ?? 'idle'}
         tunnelProgress={session.tunnelProgress}
@@ -10988,7 +11085,7 @@ function SessionSurface({
   }
   if (session.protocol === 'vnc') {
     return (
-      <Suspense fallback={<SessionSurfaceFallback protocol="vnc" />}>
+      <Suspense fallback={<SessionSurfaceFallback session={session} />}>
         <VncSurface
           bitwardenUnlockPending={bitwardenUnlockPending}
           connectionGeneration={session.vncConnectionGeneration ?? 0}
@@ -11009,8 +11106,8 @@ function SessionSurface({
             credentialId: session.credentialId,
             host: session.host,
             port: session.port,
+            title: session.title,
             tunnelConfigId: session.tunnelConfigId,
-            tunnelProgress: session.tunnelProgress,
           }}
         />
       </Suspense>
@@ -11018,16 +11115,15 @@ function SessionSurface({
   }
   if (session.protocol === 'http' || session.protocol === 'https') {
     return (
-      <Suspense fallback={<SessionSurfaceFallback protocol={session.protocol} />}>
-        <WebSurface
-          bitwardenOpen={bitwardenOpen}
-          isActive={isActive}
-          isAuthorized={isAuthorized}
-          isOccluded={!nativeSurfaceActive}
-          onReconnect={onReconnectSession}
-          session={session}
-        />
-      </Suspense>
+      <BrowserSessionSurface
+        bitwardenOpen={bitwardenOpen}
+        captureWhenOccluded={captureWebPreview}
+        isActive={isActive}
+        isAuthorized={isAuthorized}
+        isOccluded={!nativeSurfaceActive}
+        onReconnect={onReconnectSession}
+        session={session}
+      />
     );
   }
   return (
@@ -11522,10 +11618,11 @@ export function CredentialsPage({
           <h2 className="shrink-0 text-xl font-semibold tracking-tight">Credentials</h2>
 
           <div className="mt-4 flex shrink-0 flex-wrap items-center gap-2">
-            <Input
+            <SearchField
               aria-label="Search credentials"
-              className="!text-xs min-w-60 max-w-xl flex-1"
+              className="min-w-60 max-w-xl flex-1"
               onChange={(event) => setSearchText(event.target.value)}
+              onClear={() => setSearchText('')}
               placeholder="Search credentials"
               value={searchText}
             />
@@ -11533,9 +11630,10 @@ export function CredentialsPage({
               <DropdownMenuTrigger asChild>
                 <Button
                   aria-label={`Filter credentials by source: ${credentialSourceFilterLabel}`}
-                  className="!text-xs"
+                  className="!text-xs data-active:selected-surface"
+                  data-active={credentialSourceFilter !== 'all'}
                   size="default"
-                  variant={credentialSourceFilter === 'all' ? 'outline' : 'secondary'}
+                  variant="outline"
                 >
                   <ListFilter data-icon="inline-start" />
                   {credentialSourceFilterLabel}
@@ -11579,7 +11677,7 @@ export function CredentialsPage({
 
           {validSelectedCredentials.size > 0 ? (
             <div className="mt-3 flex shrink-0 flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-muted/30 px-3 py-2">
-              <div className="flex items-center gap-2 text-xs text-foreground/80">
+              <div className="flex items-center gap-2 text-xs text-foreground/80 dark:text-foreground">
                 <Check className="size-3.5" />
                 <span>{validSelectedCredentials.size} credential(s) selected</span>
               </div>
@@ -11614,7 +11712,7 @@ export function CredentialsPage({
             {filteredCredentials.length === 0 ? (
               <div className="flex h-full items-center justify-center px-6 text-center">
                 <div className="max-w-[420px] space-y-3">
-                  <KeyRound className="mx-auto size-12 text-muted-foreground/50" />
+                  <KeyRound className="mx-auto size-12 text-muted-foreground/50 dark:text-foreground" />
                   <h3 className="text-sm font-semibold">
                     {credentialListProjection.emptyState === 'empty'
                       ? 'No credentials yet'
@@ -11900,7 +11998,7 @@ export function CredentialsPage({
                 <div className="grid gap-2">
                   <Label>Private key file</Label>
                   <div className="flex min-w-0 items-center justify-between gap-3 rounded-md border border-input bg-background px-3 py-2">
-                    <span className="min-w-0 truncate text-xs text-foreground/80">
+                    <span className="min-w-0 truncate text-xs text-foreground/80 dark:text-foreground">
                       {credentialForm.privateKeyFileName || 'No private key selected'}
                     </span>
                     <Button
@@ -12065,10 +12163,11 @@ export function CredentialsPage({
                 <div className="grid gap-2 sm:grid-cols-[1fr_auto] sm:items-end">
                   <div className="grid gap-2">
                     <Label htmlFor="credential-bitwarden-search">Search Bitwarden</Label>
-                    <Input
+                    <SearchField
                       id="credential-bitwarden-search"
                       maxLength={2048}
                       onChange={(event) => setBitwardenQuery(event.target.value)}
+                      onClear={() => setBitwardenQuery('')}
                       placeholder="Item name, URI, or username"
                       value={bitwardenQuery}
                     />
@@ -12995,6 +13094,7 @@ function TunnelEditorDialog({
   onSaved: (tunnel: WormholeWorkspaceTunnel) => void;
 }) {
   const [value, setValue] = useState<TunnelEditorValue>(initial);
+  const { confirm, confirmationDialog } = useConfirmationDialog(isAuthorized && open);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [credentialDraft, setCredentialDraft] = useState<FortinetIPsecCredentialDraft | null>(null);
@@ -13185,9 +13285,12 @@ function TunnelEditorDialog({
     if (
       value.id &&
       value.kind !== initial.kind &&
-      !window.confirm(
-        `Change VPN type from ${tunnelKindLabel(initial.kind)} to ${tunnelKindLabel(value.kind)}? The previous provider credentials will be discarded.`,
-      )
+      !(await confirm({
+        title: `Change VPN type from ${tunnelKindLabel(initial.kind)} to ${tunnelKindLabel(value.kind)}?`,
+        description: 'The previous provider credentials will be discarded.',
+        confirmLabel: 'Change VPN type',
+        destructive: true,
+      }))
     ) {
       return;
     }
@@ -13652,6 +13755,7 @@ function TunnelEditorDialog({
           </Button>
         </DialogFooter>
       </DialogContent>
+      {confirmationDialog}
     </Dialog>
   );
 }
@@ -13680,6 +13784,7 @@ export function TunnelsPage({
   // react-doctor-disable-next-line react-doctor/prefer-useReducer
 }) {
   const [searchText, setSearchText] = useState('');
+  const { confirm, confirmationDialog } = useConfirmationDialog(isAuthorized);
   const [providerFilter, setProviderFilter] = useState<string | null>(null);
   const [editorOpen, setEditorOpen] = useState(false);
   const [editorValue, setEditorValue] = useState<TunnelEditorValue>(blankTunnelEditor);
@@ -13820,7 +13925,15 @@ export function TunnelsPage({
 
   async function deleteTunnel(tunnel: WormholeWorkspaceTunnel) {
     const api = window.wormhole;
-    if (!api || !window.confirm(`Delete VPN tunnel “${tunnel.name}”? This cannot be undone.`))
+    if (
+      !api ||
+      !(await confirm({
+        title: `Delete VPN tunnel “${tunnel.name}”?`,
+        description: 'This cannot be undone.',
+        confirmLabel: 'Delete VPN tunnel',
+        destructive: true,
+      }))
+    )
       return;
     if (pendingTunnelEditRef.current?.id === tunnel.id) pendingTunnelEditRef.current = null;
     setActionError('');
@@ -13966,69 +14079,68 @@ export function TunnelsPage({
     else onTunnelCreated(tunnel);
   }
 
+  const providerFilterLabel = providerFilter ?? 'All providers';
+
   return (
-    <section className="flex h-full min-h-0 flex-col overflow-hidden px-4 pt-6 sm:px-6 sm:pt-8 lg:px-8">
-      <header className="flex shrink-0 flex-wrap items-center justify-between gap-x-6 gap-y-4 pr-2">
-        <div>
-          <h2 className="text-3xl font-semibold tracking-tight">VPN tunnels</h2>
-          <p className="mt-1 text-sm text-muted-foreground">
-            {tunnels.length} {tunnels.length === 1 ? 'tunnel' : 'tunnels'} configured
-          </p>
-        </div>
-        <div className="ml-auto flex min-w-0 flex-[1_1_23rem] items-center justify-end gap-3">
-          <InputGroup className="h-11 max-w-80 flex-[1_1_11rem] rounded-xl">
-            <InputGroupAddon className="pl-3">
-              <Search aria-hidden="true" />
-            </InputGroupAddon>
-            <InputGroupInput
-              aria-label="Search tunnels"
-              className="h-full text-sm"
-              onChange={(event) => setSearchText(event.target.value)}
-              placeholder="Search tunnels"
-              ref={searchInputRef}
-              type="search"
-              value={searchText}
-            />
-          </InputGroup>
-          <Button
-            className="h-11 rounded-xl px-4"
-            onClick={(event) => addTunnel(event.currentTarget)}
-            size="lg"
-          >
-            <Plus aria-hidden="true" />
+    <section
+      className="flex h-full min-h-0 flex-col overflow-hidden px-6 pt-5"
+      data-tunnels-page=""
+    >
+      <h2 className="shrink-0 text-xl font-semibold tracking-tight">VPN tunnels</h2>
+
+      <div className="mt-4 flex shrink-0 flex-wrap items-center gap-2">
+        <SearchField
+          aria-label="Search tunnels"
+          className="min-w-[min(100%,15rem)] max-w-xl flex-1"
+          onChange={(event) => setSearchText(event.target.value)}
+          onClear={() => setSearchText('')}
+          placeholder="Search tunnels"
+          ref={searchInputRef}
+          type="search"
+          value={searchText}
+        />
+        <div className="flex max-w-full flex-wrap items-center gap-2">
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                aria-label={`Filter tunnels by provider: ${providerFilterLabel}`}
+                className="max-w-40 !text-xs data-active:selected-surface"
+                data-active={providerFilter !== null}
+                size="default"
+                variant="outline"
+              >
+                <ListFilter data-icon="inline-start" />
+                <span className="truncate">{providerFilterLabel}</span>
+                <ChevronDown data-icon="inline-end" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent
+              align="end"
+              className="w-60 min-w-0 max-w-(--radix-dropdown-menu-content-available-width)"
+            >
+              <DropdownMenuRadioGroup
+                onValueChange={(value) => setProviderFilter(value || null)}
+                value={providerFilter ?? ''}
+              >
+                <DropdownMenuRadioItem className="min-h-7 text-xs" value="">
+                  <span className="min-w-0 flex-1">All providers</span>
+                  <span className="text-muted-foreground tabular-nums">{tunnels.length}</span>
+                </DropdownMenuRadioItem>
+                {providerCounts.map(([kind, count]) => (
+                  <DropdownMenuRadioItem className="min-h-7 text-xs" key={kind} value={kind}>
+                    <TunnelProviderIcon kind={kind} />
+                    <span className="min-w-0 flex-1 truncate">{kind}</span>
+                    <span className="text-muted-foreground tabular-nums">{count}</span>
+                  </DropdownMenuRadioItem>
+                ))}
+              </DropdownMenuRadioGroup>
+            </DropdownMenuContent>
+          </DropdownMenu>
+          <Button className="!text-xs" onClick={(event) => addTunnel(event.currentTarget)}>
+            <Plus aria-hidden="true" data-icon="inline-start" />
             Add VPN tunnel
           </Button>
         </div>
-      </header>
-
-      <div
-        aria-label="Filter tunnels by provider"
-        className="mt-6 flex shrink-0 flex-wrap gap-2"
-        role="group"
-      >
-        <Button
-          aria-pressed={providerFilter === null}
-          className="h-9 gap-2 rounded-full px-3"
-          onClick={() => setProviderFilter(null)}
-          variant={providerFilter === null ? 'default' : 'outline'}
-        >
-          All <span className="font-normal tabular-nums opacity-75">{tunnels.length}</span>
-        </Button>
-        {providerCounts.map(([kind, count]) => (
-          <Button
-            aria-pressed={providerFilter === kind}
-            className="h-9 min-w-0 max-w-full gap-2 rounded-full px-3"
-            key={kind}
-            onClick={() => setProviderFilter(kind)}
-            variant={providerFilter === kind ? 'default' : 'outline'}
-          >
-            <TunnelProviderIcon kind={kind} />
-            <span className="truncate" title={kind}>
-              {kind}
-            </span>
-            <span className="font-normal tabular-nums opacity-75">{count}</span>
-          </Button>
-        ))}
       </div>
       {actionError ? (
         <p className="mt-2 text-xs text-muted-foreground" role="alert">
@@ -14036,11 +14148,11 @@ export function TunnelsPage({
         </p>
       ) : null}
 
-      <div aria-busy={searchResultsPending} className="mt-6 min-h-0 flex-1">
+      <div aria-busy={searchResultsPending} className="mt-4 min-h-0 flex-1">
         {filteredTunnels.length === 0 ? (
           <div className="flex h-full items-center justify-center px-6 text-center">
-            <div className="max-w-[420px] space-y-3">
-              <Network className="mx-auto size-12 text-muted-foreground/50" />
+            <div className="max-w-[420px] space-y-2">
+              <Network className="mx-auto size-8 text-muted-foreground/50 dark:text-foreground" />
               <h3 className="text-sm font-semibold">
                 {tunnels.length === 0 ? 'No VPN tunnels yet' : 'No matching tunnels'}
               </h3>
@@ -14054,55 +14166,47 @@ export function TunnelsPage({
         ) : (
           <VirtualCardGrid
             ariaLabel="VPN tunnels"
-            bottomPadding={20}
+            bottomPadding={16}
             className="h-full"
             endPadding={8}
-            gap={16}
+            gap={12}
             getKey={(tunnel) => tunnel.id}
             items={filteredTunnels}
             maximumColumnCount={3}
-            minimumColumnWidth={296}
+            minimumColumnWidth={256}
             renderItem={(tunnel) => (
-              <Card className="h-full gap-0 rounded-2xl p-4 transition-colors hover:bg-muted/35 sm:p-5 dark:bg-muted/25 dark:hover:bg-muted/45">
-                <CardHeader className="gap-2 px-0">
-                  <div className="flex min-w-0 items-center gap-3">
-                    <span className="grid size-11 shrink-0 place-items-center rounded-xl border border-border bg-background">
-                      <TunnelProviderIcon className="size-6" kind={tunnel.kind} />
-                    </span>
-                    <CardTitle
-                      className="flex-1 truncate font-semibold lg:text-lg"
-                      title={tunnel.name}
-                    >
-                      {tunnel.name}
-                    </CardTitle>
-                    <Badge
-                      className="h-6 max-w-[45%] bg-background"
-                      title={tunnel.kind}
-                      variant="outline"
-                    >
+              <Card className="h-full gap-0 p-3">
+                <CardHeader className="gap-1.5 px-0">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <TunnelProviderIcon kind={tunnel.kind} size="card" />
+                    <TextTooltip text={tunnel.name}>
+                      <CardTitle className="min-w-0 flex-1 truncate text-sm font-semibold">
+                        {tunnel.name}
+                      </CardTitle>
+                    </TextTooltip>
+                    <Badge className="max-w-[45%] bg-background" variant="outline">
                       <span className="truncate">{tunnel.kind}</span>
                     </Badge>
                   </div>
-                  <CardDescription
-                    className="truncate font-mono text-sm"
-                    title={tunnel.endpoint || undefined}
-                  >
-                    {tunnel.endpoint || 'Endpoint unavailable'}
-                  </CardDescription>
+                  <TextTooltip text={tunnel.endpoint}>
+                    <CardDescription className="truncate text-xs">
+                      {tunnel.endpoint || 'Endpoint unavailable'}
+                    </CardDescription>
+                  </TextTooltip>
                 </CardHeader>
-                <div className="mt-auto flex items-center gap-2 border-t border-border pt-3">
+                <div className="mt-auto flex items-center gap-1 border-t border-border pt-2">
                   <Button
                     aria-label={`Test ${tunnel.name}`}
-                    className="mr-auto h-9"
+                    className="mr-auto !text-xs"
                     disabled={searchResultsPending}
                     onClick={(event) => openTunnelTest(tunnel, event.currentTarget)}
+                    size="sm"
                     variant="ghost"
                   >
                     <FlaskConical aria-hidden="true" />
                     Test
                   </Button>
                   <IconButton
-                    className="size-9"
                     disabled={searchResultsPending}
                     label={`Edit ${tunnel.name}`}
                     onClick={(event) => void editTunnel(tunnel, event.currentTarget)}
@@ -14110,7 +14214,6 @@ export function TunnelsPage({
                     <Pencil />
                   </IconButton>
                   <IconButton
-                    className="size-9"
                     disabled={searchResultsPending}
                     label={`Delete ${tunnel.name}`}
                     onClick={() => void deleteTunnel(tunnel)}
@@ -14121,7 +14224,7 @@ export function TunnelsPage({
               </Card>
             )}
             resetKey={JSON.stringify([providerFilter, normalizedTunnelSearch])}
-            rowHeight={184}
+            rowHeight={124}
           />
         )}
       </div>
@@ -14280,6 +14383,7 @@ export function TunnelsPage({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      {confirmationDialog}
     </section>
   );
 }
@@ -14322,9 +14426,9 @@ function SettingsSwitch({
   return (
     <div className="flex items-center justify-between gap-6 border-b border-border/50 py-2.5 last:border-b-0">
       <div className="min-w-0 space-y-1">
-        <p className="text-xs font-medium text-foreground">{label}</p>
+        <p className="text-xs leading-4 font-medium text-foreground">{label}</p>
         {description ? (
-          <p className="text-[11px] leading-relaxed text-muted-foreground">{description}</p>
+          <p className="text-[11px] leading-[18px] text-muted-foreground">{description}</p>
         ) : null}
       </div>
       <Switch
@@ -15517,6 +15621,7 @@ function SettingsPage({
   );
   const [backupSectionError, setBackupSectionError] = useState('');
   const authGateRef = useRef(authGate);
+  const { confirm, confirmationDialog } = useConfirmationDialog(authGate === 'unlocked');
   useLayoutEffect(() => {
     authGateRef.current = authGate;
   }, [authGate]);
@@ -16350,11 +16455,14 @@ function SettingsPage({
   }
 
   async function regenerateMcpToken() {
-    if (mcpBusy || !window.wormhole) return;
+    const api = window.wormhole;
+    if (mcpBusy || !api) return;
     if (
-      !window.confirm(
-        'Regenerate the MCP token? Clients using the current token will stop working until you update them.',
-      )
+      !(await confirm({
+        title: 'Regenerate the MCP token?',
+        description: 'Clients using the current token will stop working until you update them.',
+        confirmLabel: 'Regenerate token',
+      }))
     ) {
       return;
     }
@@ -16362,7 +16470,7 @@ function SettingsPage({
     setMcpError('');
     setMcpMessage('');
     try {
-      const token = await window.wormhole.regenerateMcpToken();
+      const token = await api.regenerateMcpToken();
       if (authGateRef.current !== 'unlocked') {
         setMcpMessage('MCP token regenerated. Reveal it again after unlocking.');
         return;
@@ -16640,6 +16748,7 @@ function SettingsPage({
 
   return (
     <section className="relative flex min-h-0 flex-1 flex-col overflow-hidden sm:flex-row">
+      {confirmationDialog}
       <Tabs
         className="flex min-h-0 flex-1 flex-col gap-0 sm:flex-row"
         onValueChange={(value) => {
@@ -16663,33 +16772,16 @@ function SettingsPage({
             </DialogDescription>
           </div>
           <div className="px-3 pb-3">
-            <div className="relative">
-              <Search className="pointer-events-none absolute top-1/2 left-3 size-3.5 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                aria-label="Search settings"
-                className="h-8 rounded-full border-border/70 bg-background/60 pr-8 pl-8 text-xs shadow-none placeholder:text-muted-foreground/80 dark:bg-input/40"
-                onChange={(event) =>
-                  setSearchState({
-                    request: settingsUpdatesRequest,
-                    query: event.target.value,
-                  })
-                }
-                placeholder="Search"
-                value={searchQuery}
-              />
-              {searchQuery ? (
-                <Button
-                  aria-label="Clear settings search"
-                  className="absolute top-1/2 right-1 size-6 -translate-y-1/2 rounded-full text-muted-foreground hover:text-foreground"
-                  onClick={() => setSearchState({ request: settingsUpdatesRequest, query: '' })}
-                  size="icon-xs"
-                  type="button"
-                  variant="ghost"
-                >
-                  <X aria-hidden="true" className="size-3" />
-                </Button>
-              ) : null}
-            </div>
+            <SearchField
+              aria-label="Search settings"
+              clearLabel="Clear settings search"
+              onChange={(event) =>
+                setSearchState({ request: settingsUpdatesRequest, query: event.target.value })
+              }
+              onClear={() => setSearchState({ request: settingsUpdatesRequest, query: '' })}
+              placeholder="Search"
+              value={searchQuery}
+            />
           </div>
           <ScrollArea className="max-h-40 min-h-0 flex-1 sm:max-h-none [&>[data-slot=scroll-area-viewport]>div]:block!">
             <TabsList
@@ -16700,26 +16792,22 @@ function SettingsPage({
               {filteredGroups.length > 0 ? (
                 filteredGroups.map((group, index) => (
                   <div className={index > 0 ? 'mt-4 space-y-0.5' : 'space-y-0.5'} key={group.label}>
-                    <p className="px-2.5 py-1 text-[11px] font-medium text-muted-foreground/80">
+                    <p className="px-2.5 py-1 text-[11px] font-medium text-muted-foreground/80 dark:text-foreground">
                       {group.label}
                     </p>
                     {group.items.map((item) => {
                       const Icon = settingsCategoryIcons[item.id];
                       return (
-                        <TabsTrigger
-                          className="h-8 flex-none justify-start gap-2.5 rounded-lg border-0 px-2.5 py-1.5 text-[13px] font-normal text-foreground/75 transition-colors after:hidden hover:bg-foreground/[0.05] hover:text-foreground data-[state=active]:bg-foreground/[0.09] data-[state=active]:font-medium data-[state=active]:text-foreground data-[state=active]:shadow-none dark:text-muted-foreground dark:hover:bg-foreground/[0.06] dark:hover:text-foreground dark:data-[state=active]:border-transparent dark:data-[state=active]:bg-foreground/[0.1] dark:data-[state=active]:text-foreground"
-                          key={item.id}
-                          value={item.id}
-                        >
-                          <Icon aria-hidden="true" className="size-4 shrink-0 opacity-80" />
-                          <span className="truncate">{item.label}</span>
-                          {item.id === 'updates' && updateAvailable ? (
-                            <span
-                              aria-hidden="true"
-                              className="ml-auto size-1.5 shrink-0 rounded-full bg-primary"
-                            />
-                          ) : null}
-                        </TabsTrigger>
+                        <TabsPrimitive.Trigger asChild key={item.id} value={item.id}>
+                          <NavigationItem icon={Icon} label={item.label}>
+                            {item.id === 'updates' && updateAvailable ? (
+                              <span
+                                aria-hidden="true"
+                                className="ml-auto size-1.5 shrink-0 rounded-full bg-primary"
+                              />
+                            ) : null}
+                          </NavigationItem>
+                        </TabsPrimitive.Trigger>
                       );
                     })}
                   </div>
@@ -16733,7 +16821,7 @@ function SettingsPage({
           </ScrollArea>
         </aside>
 
-        <div className="relative flex min-h-0 min-w-0 flex-1 flex-col bg-background dark:bg-[oklch(0.235_0_0)]">
+        <div className="relative flex min-h-0 min-w-0 flex-1 flex-col bg-canvas">
           <DialogClose asChild>
             <Button
               aria-label="Close settings"
@@ -16763,7 +16851,7 @@ function SettingsPage({
           ) : null}
 
           <SettingsTabPanel value="file-transfer">
-            <SftpEditorSettings />
+            <SftpEditorSettings allowConfirmation={authGate === 'unlocked'} />
           </SettingsTabPanel>
           <SettingsTabPanel value="general">
             <SettingsSection title="Appearance">
@@ -16773,7 +16861,7 @@ function SettingsPage({
                     Theme
                   </Label>
                   <p className="text-[11px] leading-relaxed text-muted-foreground">
-                    Choose light, dark, or match your system appearance.
+                    Choose Light, Dark, OLED, or match your system appearance.
                   </p>
                 </div>
                 <Select
@@ -16789,6 +16877,7 @@ function SettingsPage({
                     <SelectItem value="system">System default</SelectItem>
                     <SelectItem value="light">Light</SelectItem>
                     <SelectItem value="dark">Dark</SelectItem>
+                    <SelectItem value="oled">OLED</SelectItem>
                   </SelectContent>
                 </Select>
               </div>

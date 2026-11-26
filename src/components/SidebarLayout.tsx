@@ -10,6 +10,7 @@ import {
   type CSSProperties,
   type HTMLAttributes,
   type MouseEvent,
+  type PointerEvent,
   type ReactNode,
   type Ref,
 } from 'react';
@@ -61,7 +62,7 @@ export function SidebarPinButton() {
           aria-keyshortcuts={pinned ? undefined : 'ArrowDown'}
           aria-label={label}
           aria-pressed={pinned}
-          className="transition aria-disabled:opacity-50 [-webkit-app-region:no-drag]"
+          className="transition aria-disabled:opacity-50 aria-expanded:not-hover:bg-transparent [-webkit-app-region:no-drag]"
           data-sidebar-pin=""
           onClick={toggle}
           ref={buttonRef}
@@ -131,6 +132,7 @@ export function SidebarLayout({
   const lastInputWasPointer = useRef(false);
   const hoverExit = useRef<number | undefined>(undefined);
   const sidebarSurface = useRef<HTMLElement>(null);
+  const resizeHandle = useRef<HTMLDivElement>(null);
   const previousPinned = useRef(pinned);
   const sidebarId = useId();
   const visible = pinned || revealed;
@@ -164,6 +166,19 @@ export function SidebarLayout({
     setHovered(true);
     // Recover on movement too, including when an entry event happened before mounting or closing.
     setRevealed(true);
+  }
+
+  function positionResizeGrip(event: PointerEvent<HTMLDivElement>) {
+    const handle = resizeHandle.current;
+    if (!handle || !pinned || pinResizePending) return;
+    if (handle.dataset.separator !== 'active' && !handle.contains(event.target as Node)) return;
+    if (event.pointerType === 'touch') {
+      handle.style.removeProperty('--sidebar-grip-y');
+      return;
+    }
+
+    const offset = event.clientY - handle.getBoundingClientRect().top;
+    handle.style.setProperty('--sidebar-grip-y', `${offset}px`);
   }
 
   const interactions: SidebarInteractions = {
@@ -275,7 +290,7 @@ export function SidebarLayout({
     <SidebarPinContext.Provider
       value={{ pinned, busy, toggle, visible, sidebarId, buttonRef: pinButton, interactions }}
     >
-      <div className="flex min-h-0 flex-1 flex-col bg-sidebar">
+      <div className="flex min-h-0 flex-1 flex-col bg-sidebar" data-workspace-shell="">
         {header}
         {error ? (
           <p className="shrink-0 px-3 py-2 text-xs text-destructive" role="alert">
@@ -293,7 +308,12 @@ export function SidebarLayout({
             } as CSSProperties
           }
         >
-          <ResizablePanelGroup className="h-full min-h-0" orientation="horizontal">
+          <ResizablePanelGroup
+            className="h-full min-h-0"
+            onPointerDownCapture={positionResizeGrip}
+            onPointerMoveCapture={positionResizeGrip}
+            orientation="horizontal"
+          >
             <ResizablePanel
               className="relative"
               collapsedSize="0px"
@@ -334,25 +354,26 @@ export function SidebarLayout({
                   </ContextMenuOverlayProvider>
                 </div>
                 <div
-                  className="relative z-20 mx-3 shrink-0 border-t border-sidebar-border py-2"
+                  className="relative z-20 mx-2.5 shrink-0 border-t border-sidebar-border py-2"
                   data-sidebar-navigation=""
                 >
                   {navigation}
                 </div>
               </aside>
             </ResizablePanel>
-            {/* The canvas border is the divider. Center the grip on that border. */}
             <ResizableHandle
               className={
                 pinned
-                  ? 'z-40 bg-transparent [&>div]:absolute [&>div]:top-1/2 [&>div]:left-[calc(100%+0.5px)] [&>div]:-translate-1/2'
+                  ? 'z-40 w-0 bg-transparent after:w-3 [&>div]:bg-muted-foreground [&>div]:opacity-0 hover:[&>div]:opacity-100 focus-visible:[&>div]:opacity-100 data-[separator=active]:[&>div]:opacity-100'
                   : 'hidden'
               }
+              data-sidebar-resize-handle=""
               disabled={!pinned || pinResizePending}
+              elementRef={resizeHandle}
               withHandle
             />
             <ResizablePanel
-              className="min-h-0 rounded-tl-xl border-t border-l border-border bg-background"
+              className="min-h-0"
               data-workspace-canvas=""
               minSize={`${canvasMinPercent}%`}
               style={{ overflow: 'hidden' }}
