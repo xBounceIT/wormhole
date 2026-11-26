@@ -2,6 +2,8 @@ declare const React: typeof import('react');
 declare const createRoot: typeof import('react-dom/client').createRoot;
 declare const assert: typeof import('node:assert/strict');
 declare const WebSurface: typeof import('../../src/components/WebSurface').WebSurface;
+declare const BrowserSessionSurface: typeof WebSurface;
+declare const resolveBrowser: () => void;
 
 async function runWebBrowserTests() {
   const root = createRoot(document.getElementById('root')!);
@@ -130,7 +132,7 @@ async function runWebBrowserTests() {
   assert.ok(document.body.textContent?.includes("Office's WireGuard ACTIVE"));
   assert.ok(
     document.querySelector(
-      '[title="Office\'s WireGuard ACTIVE. All tabs use this browser’s VPN tunnel"]',
+      '[data-test-tooltip="Office\'s WireGuard ACTIVE. All tabs use this browser’s VPN tunnel"]',
     ),
   );
   const longName = 'Corporate VPN '.repeat(20);
@@ -138,10 +140,12 @@ async function runWebBrowserTests() {
     webBrowser: { ...session.webBrowser, tunnel: { name: longName, kind: 'Cisco Secure Client' } },
   });
   const badge = document.querySelector<HTMLElement>(
-    '[title$="All tabs use this browser’s VPN tunnel"]',
+    '[data-test-tooltip$="All tabs use this browser’s VPN tunnel"]',
   )!;
   const badgeText = badge.querySelector<HTMLElement>('.truncate')!;
-  assert.ok(badge.title.startsWith(`${longName}'s Cisco Secure Client ACTIVE`));
+  assert.ok(
+    badge.getAttribute('data-test-tooltip')?.startsWith(`${longName}'s Cisco Secure Client ACTIVE`),
+  );
   assert.ok(badgeText.scrollWidth > badgeText.clientWidth, 'Long VPN names must truncate');
   assertNewTabPosition();
   await render({
@@ -425,7 +429,7 @@ async function runWebBrowserTests() {
   assert.ok(document.body.textContent?.includes('No VPN'));
   assert.ok(!document.body.textContent?.includes('Stale VPN'));
   assertNewTabPosition();
-  assert.ok(document.querySelector('[title*="No VPN tunnel is attached"]'));
+  assert.ok(document.querySelector('[data-test-tooltip*="No VPN tunnel is attached"]'));
   await click('Stop loading');
   assert.equal(commands.at(-1).operation, 'stop');
   assert.equal(document.querySelector<HTMLButtonElement>('[aria-label="Back"]')!.disabled, true);
@@ -445,7 +449,7 @@ async function runWebBrowserTests() {
   assert.equal(input.value, '');
   assert.ok(
     document.querySelector(
-      '[title="Branch\'s Fortinet ACTIVE. VPN access is limited to https://gateway.internal"]',
+      '[data-test-tooltip="Branch\'s Fortinet ACTIVE. VPN access is limited to https://gateway.internal"]',
     ),
   );
   assert.equal(document.activeElement, input);
@@ -487,10 +491,22 @@ async function runWebBrowserTests() {
   const count = commands.length;
   await key(section, 't', { ctrlKey: true });
   assert.equal(commands.length, count);
-  await render({ status: 'connecting', tunnelProgress: null }, { isAuthorized: true });
-  assert.match(document.body.textContent!, /Opening browser/);
+  const loadingOverlay = () => document.querySelector<HTMLElement>('[data-connection-transition]');
+  await render(
+    { status: 'connecting', title: 'Lab gateway', port: 8443, tunnelProgress: null },
+    { isAuthorized: true },
+  );
+  const loading = loadingOverlay()!;
+  assert.equal(loading.dataset.connectionTransition, 'pending');
+  assert.equal(loading.querySelector('h3')?.textContent, 'Lab gateway');
+  assert.match(loading.textContent!, /gateway\.internal.*HTTPS.*Port 8443.*Opening browser/);
+  assert.ok(loading.querySelector('.lucide-loader-circle'));
+  assert.equal(nativeVisible, false);
   await render({ tunnelProgress: { phase: 'starting', detail: 'Starting VPN' } });
+  assert.match(loading.textContent!, /Starting VPN/);
+  assert.ok(loading.querySelector('.lucide-shield'));
   await render({ status: 'failed', error: 'Tunnel unavailable' });
+  assert.equal(loadingOverlay(), null, 'failure must expose Retry immediately');
   await textClick('Retry');
   assert.deepEqual(reconnects, ['browser']);
   await render({ status: 'failed', error: undefined });
@@ -516,20 +532,44 @@ async function runWebBrowserTests() {
       })),
     },
   });
+  assert.equal(loadingOverlay()?.dataset.connectionTransition, 'exit');
+  assert.equal(nativeVisible, false, 'native browser must stay below the fade');
+  await React.act(async () =>
+    loadingOverlay()?.dispatchEvent(new Event('animationend', { bubbles: true })),
+  );
+  assert.equal(loadingOverlay(), null);
+  assert.equal(nativeVisible, true, 'the live browser is revealed after the fade');
   const crowdedList = document.querySelector('[role="tablist"]')!;
   assert.ok(crowdedList.scrollWidth > crowdedList.clientWidth);
   const assertSelectedTabVisible = () => {
-    const selected = crowdedList
-      .querySelector('[aria-selected="true"]')!
-      .parentElement!.getBoundingClientRect();
+    const activeTab = crowdedList.querySelector('[aria-selected="true"]')!.parentElement!;
+    const selected = activeTab.getBoundingClientRect();
     const viewport = crowdedList.getBoundingClientRect();
+    const leftCurve = parseFloat(getComputedStyle(activeTab, '::before').width);
+    const rightCurve = parseFloat(getComputedStyle(activeTab, '::after').width);
     assert.ok(
-      selected.left >= viewport.left - 1 && selected.right <= viewport.right + 1,
-      'Native tab selection must bring the selected browser tab into view',
+      selected.left - leftCurve >= viewport.left - 1 &&
+        selected.right + rightCurve <= viewport.right + 1,
+      'Tab selection must reveal the selected tab and its curved base',
+    );
+    assert.ok(
+      selected.top >= viewport.top + 3.5 &&
+        selected.bottom <= viewport.top + crowdedList.clientHeight + 0.5,
+      'The horizontal scrollbar must leave room for the full tab',
     );
   };
   assertSelectedTabVisible();
   await render({ webBrowser: { ...session.webBrowser, activeTabId: 'tab-0' } });
+  assertSelectedTabVisible();
+  await render({ webBrowser: { ...session.webBrowser, activeTabId: 'tab-18' } });
+  assertSelectedTabVisible();
+  hostWidth = '380px';
+  await render();
+  await new Promise(requestAnimationFrame);
+  assertSelectedTabVisible();
+  hostWidth = '100%';
+  await render();
+  await new Promise(requestAnimationFrame);
   assertSelectedTabVisible();
   await render({ webBrowser: { ...session.webBrowser, activeTabId: 'tab-31' } });
   assertSelectedTabVisible();
@@ -546,8 +586,88 @@ async function runWebBrowserTests() {
     },
     { bitwardenOpen: false },
   );
-  // Leave a representative browser state for visual inspection.
+  const addressForm = input.form!;
+  const toolbar = input.closest('header')!;
+  const canvas = section.querySelector('[role="tabpanel"]')!;
+  const activeTab = section.querySelector('[role="tab"][aria-selected="true"]')!.parentElement!;
+  assert.equal(getComputedStyle(activeTab).borderTopLeftRadius, '9px');
+  assert.equal(getComputedStyle(activeTab).borderBottomLeftRadius, '0px');
+  for (const side of ['::before', '::after']) {
+    const curve = getComputedStyle(activeTab, side);
+    assert.match(curve.backgroundImage, /^radial-gradient\(/);
+    assert.equal(curve.bottom, '0px');
+    assert.equal(curve.pointerEvents, 'none');
+  }
+  assert.ok(
+    parseFloat(getComputedStyle(addressForm).borderTopLeftRadius) >= addressForm.offsetHeight / 2,
+  );
+  for (const theme of ['', 'dark', 'dark oled']) {
+    document.documentElement.className = theme;
+    const palette = getComputedStyle(section);
+    const railColor = palette.getPropertyValue('--browser-rail').trim();
+    assert.equal(railColor, palette.getPropertyValue(theme ? '--canvas' : '--muted').trim());
+    assert.notEqual(railColor, palette.getPropertyValue('--sidebar').trim());
+    assert.equal(
+      getComputedStyle(activeTab).backgroundColor,
+      getComputedStyle(toolbar).backgroundColor,
+      'The selected tab and navigation must share a surface in every theme',
+    );
+  }
+  document.documentElement.className = 'dark';
+
+  hostWidth = '280px';
+  await render();
+  const toolbarBounds = toolbar.getBoundingClientRect();
+  const addressBounds = addressForm.getBoundingClientRect();
+  for (const button of toolbar.querySelectorAll('button')) {
+    const controls = button.getBoundingClientRect();
+    assert.ok(controls.right <= toolbarBounds.right && controls.bottom <= addressBounds.top);
+  }
+  assert.ok(
+    addressBounds.width >= toolbarBounds.width - 24,
+    'Narrow panes need a full address row',
+  );
+  const pageBounds = canvas.getBoundingClientRect();
+  const browserBounds = section.getBoundingClientRect();
+  assert.equal(pageBounds.top, toolbarBounds.bottom);
+  assert.equal(pageBounds.left, browserBounds.left);
+  assert.equal(pageBounds.right, browserBounds.right);
+  assert.equal(pageBounds.bottom, browserBounds.bottom);
+  assert.equal(bounds.at(-1).y, pageBounds.top);
+  hostWidth = '100%';
+  await render();
   assert.equal(document.documentElement.scrollWidth, window.innerWidth);
+
+  const coldSession = { ...session, id: 'cold', title: 'Cold browser' };
+  const renderCold = (status: 'connecting' | 'connected') =>
+    React.act(async () =>
+      root.render(
+        <div style={{ height: '100vh' }}>
+          <BrowserSessionSurface
+            {...props}
+            session={{ ...coldSession, status }}
+            onReconnect={() => {}}
+          />
+        </div>,
+      ),
+    );
+  await renderCold('connecting');
+  assert.match(document.body.textContent!, /Cold browser.*Opening browser/);
+  assert.equal(nativeVisible, false);
+  await renderCold('connected');
+  assert.equal(document.querySelector('[aria-label="Connection browser"]'), null);
+  await React.act(async () => resolveBrowser());
+  const coldExit = loadingOverlay()!;
+  assert.equal(coldExit.dataset.connectionTransition, 'exit');
+  assert.equal(
+    nativeVisible,
+    false,
+    'a fast connection must keep the native view hidden through the fade',
+  );
+  await React.act(async () => coldExit.dispatchEvent(new Event('animationend', { bubbles: true })));
+  assert.equal(nativeVisible, true);
+
+  // Leave a representative browser state for visual inspection.
   (window as any).unmountWebBrowser = async () => {
     await React.act(async () => root.unmount());
     assert.equal(bounds.at(-1).visible, false);

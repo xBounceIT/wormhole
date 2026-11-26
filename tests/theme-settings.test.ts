@@ -65,13 +65,20 @@ test('native theme updates ignore invalid input, closed windows and macOS traffi
 test('applying a theme sends the actual rendered color scheme to native controls', (t) => {
   const updates: string[] = [];
   let systemDark = false;
-  let darkClass = false;
+  const classes = new Set<string>();
+  let paletteChanges = 0;
   const root = {
     classList: {
+      contains: (name: string) => classes.has(name),
       toggle: (name: string, enabled: boolean) => {
-        assert.equal(name, 'dark');
-        darkClass = enabled;
+        if (enabled) classes.add(name);
+        else classes.delete(name);
       },
+    },
+    dataset: {} as Record<string, string>,
+    getBoundingClientRect: () => {
+      assert.equal(root.dataset.themeChanging, '');
+      paletteChanges++;
     },
     style: { colorScheme: '' },
   };
@@ -100,7 +107,8 @@ test('applying a theme sends the actual rendered color scheme to native controls
       wormhole: {
         setTitlebarTheme: (theme: string) => {
           assert.equal(root.style.colorScheme, theme);
-          assert.equal(darkClass, theme === 'dark');
+          assert.equal(classes.has('dark'), theme === 'dark');
+          assert.equal(root.dataset.themeChanging, undefined);
           updates.push(theme);
         },
       },
@@ -108,11 +116,17 @@ test('applying a theme sends the actual rendered color scheme to native controls
   });
   applyTheme('light');
   applyTheme('dark');
+  applyTheme('oled');
+  assert.ok(classes.has('oled'));
+  assert.equal(paletteChanges, 2);
+  applyTheme('dark');
+  assert.ok(!classes.has('oled'));
+  assert.equal(paletteChanges, 3);
   applyTheme('system');
   systemDark = true;
   applyTheme('system');
   applyTheme('light');
-  assert.deepEqual(updates, ['light', 'dark', 'light', 'dark', 'light']);
+  assert.deepEqual(updates, ['light', 'dark', 'dark', 'dark', 'light', 'dark', 'light']);
   Object.defineProperty(globalThis, 'window', { value: {} });
   assert.doesNotThrow(() => applyTheme('light'));
 });
@@ -141,6 +155,7 @@ test('the real preload and IPC handler update only live application windows', ()
   const end = mainSource.indexOf("  ipcMain.on('startup:ready'", start);
   assert.ok(start >= 0 && end > start);
   const updates: unknown[] = [];
+  const tooltipSchemes: unknown[] = [];
   let destroyed = false;
   const owner = {
     isDestroyed: () => destroyed,
@@ -163,6 +178,12 @@ test('the real preload and IPC handler update only live application windows', ()
         contents === sender ? owner : contents === foreignSender ? foreignWindow : null,
     },
     windowCloseCoordinators: new WeakMap([[owner, {}]]),
+    treeTooltips: {
+      setColorScheme: (window: unknown, theme: unknown) => {
+        assert.equal(window, owner);
+        tooltipSchemes.push(theme);
+      },
+    },
     syncNativeTitlebarTheme,
     process: { platform: 'win32' },
   });
@@ -202,6 +223,7 @@ test('the real preload and IPC handler update only live application windows', ()
     nativeTitlebarOverlay('dark'),
     nativeTitlebarOverlay('light'),
   ]);
+  assert.deepEqual(tooltipSchemes, ['light', 'dark', 'light']);
   bridge = undefined;
   runInNewContext(preload, { ...context, process: { isMainFrame: false } });
   assert.equal(bridge, undefined, 'child frames must not receive the window controls bridge');
@@ -222,6 +244,7 @@ function memoryStorage(initial?: string) {
 
 test('legacy renderer theme accepts only supported values and otherwise uses System', () => {
   assert.equal(readLegacyTheme(memoryStorage('dark')), 'dark');
+  assert.equal(readLegacyTheme(memoryStorage('oled')), 'oled');
   assert.equal(readLegacyTheme(memoryStorage('Light')), null);
   assert.equal(readLegacyTheme(memoryStorage('sepia')), null);
   assert.equal(getInitialTheme(readLegacyTheme(memoryStorage())), 'system');
@@ -237,6 +260,7 @@ test('startup theme migration accepts only its narrow IPC request shape', () => 
   assert.deepEqual(parseThemeStartupRequest(undefined), {});
   assert.deepEqual(parseThemeStartupRequest({}), {});
   assert.deepEqual(parseThemeStartupRequest({ legacyTheme: 'dark' }), { legacyTheme: 'dark' });
+  assert.deepEqual(parseThemeStartupRequest({ legacyTheme: 'oled' }), { legacyTheme: 'oled' });
 
   for (const value of [null, [], new Date(), { unexpected: true }, { legacyTheme: 'sepia' }]) {
     assert.throws(() => parseThemeStartupRequest(value), /settings request|theme is invalid/i);

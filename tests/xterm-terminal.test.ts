@@ -15,15 +15,24 @@ const require = createRequire(import.meta.url);
 test('xterm SSH presentation works in Chromium with WebGL and software fallback', async (context) => {
   const app = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
   const component = app.slice(
-    app.indexOf('function SshXtermSurface('),
+    app.indexOf('function SshTerminalConnectionState('),
     app.indexOf('function SerialTerminalSurface('),
   );
   assert.ok(component.length > 0);
   const paneLayout = app.slice(
     app.indexOf('function sessionSurfaceStyle('),
-    app.indexOf('function SessionDropPreview('),
+    app.indexOf('function SessionSurfaceFallback('),
   );
   assert.ok(paneLayout.length > 0);
+  const sessionSurface = app.slice(
+    app.indexOf('function SessionSurface('),
+    app.indexOf('function discardPrivateKeySelection('),
+  );
+  const protocolLabel = app.slice(
+    app.indexOf('function protocolLabel('),
+    app.indexOf('function ProtocolIcon('),
+  );
+  assert.ok(sessionSurface.length > 0 && protocolLabel.length > 0);
   const result = await build({
     configFile: false,
     logLevel: 'silent',
@@ -38,15 +47,22 @@ test('xterm SSH presentation works in Chromium with WebGL and software fallback'
         },
         load(id) {
           if (id !== '\0ssh-surface') return;
-          return `import { useRef, useEffect, useState } from 'react';
+          return `import { createContext, useContext, useRef, useEffect, useLayoutEffect, useState } from 'react';
+        import { AlertCircle, RefreshCcw, Terminal } from 'lucide-react';
+        import { ConnectionLoading, ConnectionTransition } from '@/components/ConnectionTransition';
+        import { Button } from '@/components/ui/button';
+        import { isFileBrowserProtocol } from '@/file-protocol';
+        import { requiresSshCertificateReplacement } from '@/runtime-credential-errors';
         import ${JSON.stringify(fileURLToPath(new URL('../src/index.css', import.meta.url)).replaceAll('\\', '/'))};
         import { TerminalLinkDialog } from ${JSON.stringify(fileURLToPath(new URL('../src/components/TerminalLinkDialog.tsx', import.meta.url)).replaceAll('\\', '/'))};
         import { sshTerminal } from ${JSON.stringify(fileURLToPath(new URL('../src/xterm-terminal.ts', import.meta.url)).replaceAll('\\', '/'))};
         const copyTextToClipboard = async text => window.copyTerminalTest(text);
-        const SshTerminalConnectionState = ({session}) => <div>state {session.status}</div>;
+        const SshCertificateEditorContext = createContext(null);
+        ${protocolLabel}
         ${component}
         ${paneLayout}
-        export { SshXtermSurface, SessionPaneChrome, sessionSurfaceStyle };`;
+        ${sessionSurface}
+        export { SessionSurface, SessionPaneChrome, sessionSurfaceStyle };`;
         },
         transform(code, id) {
           if (id === '\0ssh-surface')

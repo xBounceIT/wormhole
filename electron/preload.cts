@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import type { SshTerminalTheme } from './terminal-theme-settings.js';
+import type { AppTheme } from './theme-settings.js';
 import type { MRemoteImportOptions } from './mremote-import-contract.js';
 import type { WebBrowserCommand, WebBrowserState } from './web-browser-tabs.js';
 import type { FortinetIPsecEditableSecret } from './fortinet-ipsec-secret.js';
@@ -65,8 +66,7 @@ type WorkspaceRdpSettings = {
 const wormholeBridge = {
   platform: process.platform,
   getPathForFile: (file: File) => webUtils.getPathForFile(file),
-  loadStartup: (legacyTheme?: 'system' | 'light' | 'dark') =>
-    ipcRenderer.invoke('startup:load', { legacyTheme }),
+  loadStartup: (legacyTheme?: AppTheme) => ipcRenderer.invoke('startup:load', { legacyTheme }),
   unlockStartup: (request: { method: 'pin' | 'password'; secret: string }) =>
     ipcRenderer.invoke('startup:unlock', request),
   markStartupReady: () => ipcRenderer.send('startup:ready'),
@@ -325,7 +325,7 @@ const wormholeBridge = {
   }) => ipcRenderer.invoke('tunnel:route-response', request),
   readAppSettings: () =>
     ipcRenderer.invoke('settings:read') as Promise<{
-      theme: 'system' | 'light' | 'dark';
+      theme: AppTheme;
       sshTerminalTheme: SshTerminalTheme;
       promptBeforeTunnelConnect: boolean;
       autoCopyOnSelect: boolean;
@@ -338,7 +338,7 @@ const wormholeBridge = {
       lastUpdateCheck: string | null;
       skippedUpdateVersion: string | null;
     }>,
-  setTheme: (theme: 'system' | 'light' | 'dark') => ipcRenderer.invoke('settings:set-theme', theme),
+  setTheme: (theme: AppTheme) => ipcRenderer.invoke('settings:set-theme', theme),
   setSshTerminalTheme: (theme: SshTerminalTheme) =>
     ipcRenderer.invoke('settings:set-ssh-terminal-theme', theme),
   setPromptBeforeTunnelConnect: (enabled: boolean) =>

@@ -7,12 +7,16 @@ import {
   type FormEvent,
   type PointerEvent,
 } from 'react';
-import { AlertCircle, KeyRound, LoaderCircle, Monitor, RefreshCcw } from 'lucide-react';
+import { AlertCircle, KeyRound, Monitor, RefreshCcw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { PasswordInput } from '@/components/ui/password-input';
 import { formatBitwardenAuthenticationError } from '@/bitwarden-cli-view';
 import { isBitwardenUnlockError } from '@/runtime-credential-errors';
-import { ConnectionStepper, type TunnelProgress } from './ConnectionStepper';
+import {
+  ConnectionLoading,
+  ConnectionTransition,
+  type TunnelProgress,
+} from './ConnectionTransition';
 
 type PointerLocation = Pick<PointerEvent<HTMLDivElement>, 'clientX' | 'clientY'>;
 type PointerCommand = { x: number; y: number; buttons: number };
@@ -20,12 +24,12 @@ type PendingPointerMove = { generation: number; command: PointerCommand };
 
 export type VncSurfaceSession = {
   id: string;
+  title?: string;
   nodeId?: string;
   credentialId?: string;
   tunnelConfigId?: string;
   host: string;
   port?: number;
-  tunnelProgress?: TunnelProgress | null;
 };
 
 type VncStatus = 'idle' | 'connecting' | 'connected' | 'failed' | 'disconnected';
@@ -132,6 +136,7 @@ export function VncSurface({
   const [password, setPassword] = useState('');
   const [tunnelProgress, setTunnelProgress] = useState<TunnelProgress | null>(null);
   const [frame, setFrame] = useState<string>();
+  const [hasLoadedFrame, setHasLoadedFrame] = useState(false);
   const frameSize = useRef({ width: 0, height: 0 });
   const imageRef = useRef<HTMLImageElement>(null);
   const surfaceRef = useRef<HTMLDivElement>(null);
@@ -170,6 +175,7 @@ export function VncSurface({
     setPassword(''); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
     setTunnelProgress(null); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
     setFrame(undefined); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
+    setHasLoadedFrame(false); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
     frameSize.current = { width: 0, height: 0 };
     lastPointer.current = null;
     pointerMoveGeneration.current += 1;
@@ -247,6 +253,7 @@ export function VncSurface({
       setPasswordRequired(false);
       setBitwardenUnlockRequired(false);
       setFrame(undefined);
+      setHasLoadedFrame(false);
       frameSize.current = { width: 0, height: 0 };
       setTunnelProgress(null);
       lastPointer.current = null;
@@ -535,112 +542,119 @@ export function VncSurface({
     status === 'failed' &&
     (passwordRequired || (bitwardenUnlockRequired && !globalBitwardenUnlockPending));
   const displayHost = session.host || 'inherited target';
+  const loading =
+    status === 'idle' || status === 'connecting' || (status === 'connected' && !hasLoadedFrame);
 
   return (
-    <div
-      ref={surfaceRef}
-      aria-label={`VNC session for ${displayHost}`}
-      className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden bg-[#0c0c0c] outline-none focus-visible:ring-2 focus-visible:ring-ring/60"
-      onBlur={releaseKeys}
-      onKeyDown={onKeyDown}
-      onKeyUp={onKeyUp}
-      onPointerCancel={onPointerUp}
-      onPointerDown={onPointerDown}
-      onPointerMove={onPointerMove}
-      onPointerUp={onPointerUp}
-      onWheel={onWheel}
-      role="application"
-      tabIndex={0}
+    <ConnectionTransition
+      connected={status === 'connected'}
+      pending={
+        loading ? (
+          <ConnectionLoading
+            destination={session.host}
+            inheritedTarget={Boolean(session.nodeId)}
+            name={session.title}
+            port={session.port ?? (session.nodeId ? undefined : 5900)}
+            protocol="VNC"
+            status={
+              status === 'connected' ? 'Waiting for the remote desktop…' : 'Connecting to VNC…'
+            }
+            tunnelProgress={status === 'connecting' ? tunnelProgress : undefined}
+          />
+        ) : null
+      }
     >
-      {frame ? (
-        <img
-          ref={imageRef}
-          alt={`Remote desktop from ${displayHost}`}
-          className="max-h-full max-w-full select-none object-contain"
-          draggable={false}
-          src={frame}
-        />
-      ) : null}
+      {(covered) => {
+        const interactive = status === 'connected' && isAuthorized && !covered;
+        return (
+          <div
+            ref={surfaceRef}
+            aria-label={`VNC session for ${displayHost}`}
+            className="relative flex h-full min-h-0 items-center justify-center overflow-hidden bg-[#0c0c0c] outline-none focus-visible:ring-2 focus-visible:ring-ring/60"
+            onBlur={releaseKeys}
+            onKeyDown={interactive ? onKeyDown : undefined}
+            onKeyUp={interactive ? onKeyUp : undefined}
+            onPointerCancel={interactive ? onPointerUp : undefined}
+            onPointerDown={interactive ? onPointerDown : undefined}
+            onPointerMove={interactive ? onPointerMove : undefined}
+            onPointerUp={interactive ? onPointerUp : undefined}
+            onWheel={interactive ? onWheel : undefined}
+            role="application"
+            tabIndex={interactive ? 0 : -1}
+          >
+            {frame ? (
+              <img
+                ref={imageRef}
+                alt={`Remote desktop from ${displayHost}`}
+                className="max-h-full max-w-full select-none object-contain"
+                draggable={false}
+                onLoad={hasLoadedFrame ? undefined : () => setHasLoadedFrame(true)}
+                src={frame}
+              />
+            ) : null}
 
-      {status === 'connecting' ? (
-        <div className="absolute inset-0 grid place-items-center bg-[#0c0c0c] text-center text-muted-foreground">
-          {tunnelProgress ? (
-            <ConnectionStepper tunnelProgress={tunnelProgress} />
-          ) : (
-            <div className="grid justify-items-center gap-3">
-              <LoaderCircle className="size-7 animate-spin" />
-              <div>
-                <p className="text-sm font-medium text-foreground">Connecting to VNC</p>
-                <p className="mt-1 text-xs">
-                  {displayHost}:{session.port ?? 5900}
-                </p>
-              </div>
-            </div>
-          )}
-        </div>
-      ) : null}
-
-      {status === 'failed' || status === 'disconnected' ? (
-        <div className="absolute inset-0 grid place-items-center bg-[#0c0c0c]/95 p-6 text-center">
-          <div className="grid w-full max-w-sm justify-items-center gap-3">
-            {status === 'failed' ? (
-              <AlertCircle className="size-8 text-destructive" />
-            ) : (
-              <Monitor className="size-8 text-muted-foreground" />
-            )}
-            <div>
-              <p className="text-sm font-medium text-foreground">
-                {status === 'failed' ? 'VNC connection failed' : 'VNC disconnected'}
-              </p>
-              <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-                {message ||
-                  (status === 'failed'
-                    ? 'The remote desktop could not be opened.'
-                    : 'The remote host closed the connection.')}
-              </p>
-            </div>
-            {globalBitwardenUnlockPending ? (
-              <p className="text-xs text-muted-foreground">
-                Unlock Bitwarden in the shared prompt to continue this session.
-              </p>
-            ) : showPasswordPrompt ? (
-              <form className="grid w-full gap-2 text-left" onSubmit={submitPassword}>
-                <label className="text-xs font-medium" htmlFor={`vnc-password-${session.id}`}>
-                  {bitwardenUnlockRequired ? 'Bitwarden master password' : 'VNC password'}
-                </label>
-                <div className="flex gap-2">
-                  <PasswordInput
-                    autoFocus
-                    key={bitwardenUnlockRequired ? 'bitwarden' : session.id}
-                    id={`vnc-password-${session.id}`}
-                    onChange={(event) => setPassword(event.target.value)}
-                    placeholder={
-                      bitwardenUnlockRequired ? 'Unlock the Bitwarden vault' : 'Enter password'
-                    }
-                    value={password}
-                  />
-                  <Button disabled={bitwardenUnlockRequired && !password} type="submit">
-                    <KeyRound data-icon="inline-start" />
-                    {bitwardenUnlockRequired ? 'Unlock and connect' : 'Connect'}
-                  </Button>
+            {status === 'failed' || status === 'disconnected' ? (
+              <div className="absolute inset-0 grid place-items-center overflow-auto bg-canvas p-6 text-center text-foreground">
+                <div className="grid w-full max-w-sm justify-items-center gap-3">
+                  {status === 'failed' ? (
+                    <AlertCircle className="size-8 text-destructive" />
+                  ) : (
+                    <Monitor className="size-8 text-muted-foreground" />
+                  )}
+                  <div>
+                    <p className="text-sm font-medium text-foreground">
+                      {status === 'failed' ? 'VNC connection failed' : 'VNC disconnected'}
+                    </p>
+                    <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                      {message ||
+                        (status === 'failed'
+                          ? 'The remote desktop could not be opened.'
+                          : 'The remote host closed the connection.')}
+                    </p>
+                  </div>
+                  {globalBitwardenUnlockPending ? (
+                    <p className="text-xs text-muted-foreground">
+                      Unlock Bitwarden in the shared prompt to continue this session.
+                    </p>
+                  ) : showPasswordPrompt ? (
+                    <form className="grid w-full gap-2 text-left" onSubmit={submitPassword}>
+                      <label className="text-xs font-medium" htmlFor={`vnc-password-${session.id}`}>
+                        {bitwardenUnlockRequired ? 'Bitwarden master password' : 'VNC password'}
+                      </label>
+                      <div className="flex gap-2">
+                        <PasswordInput
+                          autoFocus
+                          key={bitwardenUnlockRequired ? 'bitwarden' : session.id}
+                          id={`vnc-password-${session.id}`}
+                          onChange={(event) => setPassword(event.target.value)}
+                          placeholder={
+                            bitwardenUnlockRequired
+                              ? 'Unlock the Bitwarden vault'
+                              : 'Enter password'
+                          }
+                          value={password}
+                        />
+                        <Button disabled={bitwardenUnlockRequired && !password} type="submit">
+                          <KeyRound data-icon="inline-start" />
+                          {bitwardenUnlockRequired ? 'Unlock and connect' : 'Connect'}
+                        </Button>
+                      </div>
+                    </form>
+                  ) : (
+                    <Button
+                      onClick={() => (disconnected ? onReconnect?.() : void connect())}
+                      variant="outline"
+                    >
+                      <RefreshCcw data-icon="inline-start" />
+                      Reconnect
+                    </Button>
+                  )}
                 </div>
-              </form>
-            ) : (
-              <Button
-                onClick={() => (disconnected ? onReconnect?.() : void connect())}
-                variant="outline"
-              >
-                <RefreshCcw data-icon="inline-start" />
-                Reconnect
-              </Button>
-            )}
+              </div>
+            ) : null}
           </div>
-        </div>
-      ) : null}
-
-      {status === 'idle' ? (
-        <p className="absolute text-xs text-muted-foreground">Preparing the VNC connection…</p>
-      ) : null}
-    </div>
+        );
+      }}
+    </ConnectionTransition>
   );
 }

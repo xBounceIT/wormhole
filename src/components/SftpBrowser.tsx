@@ -1,4 +1,5 @@
 import { SftpEditedFiles } from './SftpEditors';
+import { useConfirmationDialog } from './ui/confirmation-dialog';
 import { SftpDirectoryTree } from './SftpDirectoryTree';
 import { SftpSectionHeader } from './SftpSectionHeader';
 import { sftpShortcut } from '../sftp-tree-state';
@@ -564,6 +565,24 @@ export function SftpFilePane({
         ) : null}
       </div>
 
+      {sessionId && treeVisible && state.path ? (
+        <SftpDirectoryTree
+          sessionId={sessionId}
+          pane={pane}
+          path={state.path}
+          height={treeHeight}
+          onHeightChange={setTreeHeight}
+          search={treeSearch}
+          onSearchChange={setTreeSearch}
+          sortColumn={treeSort.column}
+          ascending={treeSort.ascending}
+          onSort={changeTreeSort}
+          revision={`${revision}:${treeRefresh}`}
+          onNavigate={onNavigate}
+          onDrop={handleDrop}
+        />
+      ) : null}
+
       <div className="flex shrink-0 flex-wrap items-center gap-1">
         <IconButton label="Home" onClick={() => onNavigate('')}>
           <House />
@@ -571,8 +590,8 @@ export function SftpFilePane({
         <IconButton
           label={treeVisible ? 'Hide directory tree' : 'Show directory tree'}
           aria-pressed={treeVisible}
-          variant={treeVisible ? 'default' : 'ghost'}
-          className={treeVisible ? undefined : 'text-muted-foreground'}
+          variant="ghost"
+          className="text-muted-foreground aria-pressed:selected-surface"
           onClick={() => setTreeVisible((current) => !current)}
           type="button"
         >
@@ -611,23 +630,6 @@ export function SftpFilePane({
         {busy ? <LoaderCircle className="ml-2 size-4 animate-spin text-muted-foreground" /> : null}
       </div>
 
-      {sessionId && treeVisible && state.path ? (
-        <SftpDirectoryTree
-          sessionId={sessionId}
-          pane={pane}
-          path={state.path}
-          height={treeHeight}
-          onHeightChange={setTreeHeight}
-          search={treeSearch}
-          onSearchChange={setTreeSearch}
-          sortColumn={treeSort.column}
-          ascending={treeSort.ascending}
-          onSort={changeTreeSort}
-          revision={`${revision}:${treeRefresh}`}
-          onNavigate={onNavigate}
-          onDrop={handleDrop}
-        />
-      ) : null}
       <div
         className="min-h-0 flex-1 overflow-auto rounded-sm border border-border [scrollbar-gutter:stable]"
         onScroll={(event) => {
@@ -910,7 +912,8 @@ export function SftpFilePane({
       {prompt ? (
         <div className="absolute inset-0 z-20 grid place-items-center bg-background/75 p-4 backdrop-blur-[1px]">
           <form
-            className="w-full max-w-xs rounded-lg border border-border bg-card p-4 shadow-xl"
+            className="w-full max-w-xs border border-border bg-card p-4 shadow-xl"
+            data-dialog-surface=""
             onSubmit={(event) => {
               event.preventDefault();
               submitPrompt();
@@ -941,7 +944,10 @@ export function SftpFilePane({
       ) : null}
       {confirmDelete ? (
         <div className="absolute inset-0 z-20 grid place-items-center bg-background/75 p-4 backdrop-blur-[1px]">
-          <div className="w-full max-w-xs rounded-lg border border-border bg-card p-4 shadow-xl">
+          <div
+            className="w-full max-w-xs border border-border bg-card p-4 shadow-xl"
+            data-dialog-surface=""
+          >
             <p className="text-sm font-semibold">Delete selected items?</p>
             <p className="mt-1 text-xs text-muted-foreground">
               {selectedEntries.length} item(s) will be permanently removed.
@@ -1092,7 +1098,10 @@ function SftpConflictOverlay({
         }
       }}
     >
-      <div className="w-full max-w-md rounded-xl border border-border bg-card p-5 shadow-2xl">
+      <div
+        className="w-full max-w-md border border-border bg-card p-5 shadow-2xl"
+        data-dialog-surface=""
+      >
         <p className="font-mono text-[9px] uppercase tracking-[0.16em] text-muted-foreground">
           File exists
         </p>
@@ -1135,6 +1144,7 @@ function SftpConflictOverlay({
 
 export function SftpBrowserSurface({
   session,
+  allowConfirmation = true,
   onClose,
   onNavigate,
   onLocalNavigate,
@@ -1147,6 +1157,7 @@ export function SftpBrowserSurface({
   onTransferRemove,
 }: {
   session: SftpBrowserSession;
+  allowConfirmation?: boolean;
   onClose: () => void;
   onNavigate: (path: string) => void;
   onLocalNavigate: (path: string) => void;
@@ -1172,6 +1183,11 @@ export function SftpBrowserSurface({
   onTransferErrorClear: () => void;
   onTransferRemove: (transferId: string, itemId: string) => void;
 }) {
+  const closing = session.sftp?.status === 'closing';
+  const { confirm, confirmationDialog } = useConfirmationDialog(
+    allowConfirmation && !closing,
+    session.backendSessionId,
+  );
   const [swapped, setSwapped] = useState(false);
   const [editorSettings, setEditorSettings] = useState<WormholeSftpEditorSettings>();
   const [editError, setEditError] = useState('');
@@ -1200,9 +1216,15 @@ export function SftpBrowserSurface({
         editorId,
         allowBinary,
       })
-      .then((result) => {
-        if (result.error?.includes('binary-file-confirmation-required')) {
-          if (window.confirm(`${entry.name} looks like a binary file. Open it in the editor?`))
+      .then(async (result) => {
+        if (!allowBinary && result.error?.includes('binary-file-confirmation-required')) {
+          if (
+            await confirm({
+              title: 'Open binary file?',
+              description: `${entry.name} looks like a binary file. Open it in the editor?`,
+              confirmLabel: 'Open in editor',
+            })
+          )
             editFile(pane, entry, editorId, true);
         } else setEditError(result.error ?? '');
       })
@@ -1226,7 +1248,6 @@ export function SftpBrowserSurface({
     truncated: browser.truncated,
     error: browser.error,
   };
-  const closing = browser.status === 'closing';
   const treeRevision = JSON.stringify([
     browser.refreshRequests,
     browser.transfers
@@ -1357,7 +1378,13 @@ export function SftpBrowserSurface({
           {editError}
         </p>
       ) : null}
-      {session.backendSessionId ? <SftpEditedFiles sessionId={session.backendSessionId} /> : null}
+      {session.backendSessionId ? (
+        <SftpEditedFiles
+          allowConfirmation={allowConfirmation && !closing}
+          sessionId={session.backendSessionId}
+        />
+      ) : null}
+      {confirmationDialog}
       <div className="flex shrink-0 justify-end">
         <Button disabled={closing} onClick={onClose} size="sm">
           Close

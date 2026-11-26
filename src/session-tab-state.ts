@@ -29,8 +29,8 @@ export function sessionTabPresentation(
         ? 'bg-yellow-200 text-yellow-950 dark:bg-yellow-400/25 dark:text-yellow-100'
         : 'bg-yellow-100 text-yellow-900 hover:bg-yellow-200 dark:bg-yellow-400/15 dark:text-yellow-200 dark:hover:bg-yellow-400/25'
       : active
-        ? 'bg-card text-foreground'
-        : 'text-muted-foreground hover:bg-muted/25',
+        ? 'selected-surface'
+        : 'text-muted-foreground hover:bg-accent/60 hover:text-foreground',
   };
 }
 

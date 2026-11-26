@@ -703,7 +703,7 @@ interface WormholeUpdateCheckResult {
 
 interface WormholeAppSettings {
   sshTerminalTheme: import('../electron/terminal-theme-settings').SshTerminalTheme;
-  theme: 'system' | 'light' | 'dark';
+  theme: import('../electron/theme-settings').AppTheme;
   promptBeforeTunnelConnect: boolean;
   autoCopyOnSelect: boolean;
   confirmOnTabClose: boolean;
@@ -837,7 +837,9 @@ interface Window {
   wormhole?: {
     platform: string;
     getPathForFile(file: File): string;
-    loadStartup(legacyTheme?: 'system' | 'light' | 'dark'): Promise<WormholeStartupSnapshot>;
+    loadStartup(
+      legacyTheme?: import('../electron/theme-settings').AppTheme,
+    ): Promise<WormholeStartupSnapshot>;
     unlockStartup(request: WormholeAuthVerificationRequest): Promise<WormholeStartupUnlock>;
     markStartupReady(): void;
     markWorkspaceFailed(): void;
@@ -1113,7 +1115,7 @@ interface Window {
       choice: 'tunnel' | 'direct' | 'cancel';
     }): Promise<void>;
     readAppSettings(): Promise<WormholeAppSettings>;
-    setTheme(theme: 'system' | 'light' | 'dark'): Promise<{ updated: boolean }>;
+    setTheme(theme: import('../electron/theme-settings').AppTheme): Promise<{ updated: boolean }>;
     setSshTerminalTheme(
       theme: import('../electron/terminal-theme-settings').SshTerminalTheme,
     ): Promise<{ updated: boolean }>;

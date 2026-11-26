@@ -16,9 +16,28 @@ test('connection browser tabs, navigation, VPN status and recovery work in Chrom
   const source = readFileSync(new URL('../src/components/WebSurface.tsx', import.meta.url), 'utf8')
     .replace(/^import[\s\S]*?from ['"][^'"]+['"];\r?\n/gm, '')
     .replace(/^export /gm, '');
-  const transformed = await transformWithOxc(source, 'web-browser.tsx', {
-    jsx: { runtime: 'classic' },
-  });
+  const scroll = readFileSync(
+    new URL('../src/horizontal-scroll.ts', import.meta.url),
+    'utf8',
+  ).replace(/^export /gm, '');
+  const transition = readFileSync(
+    new URL('../src/components/ConnectionTransition.tsx', import.meta.url),
+    'utf8',
+  )
+    .replace(/^import[\s\S]*?from ['"][^'"]+['"];\r?\n/gm, '')
+    .replace(/^export /gm, '');
+  const app = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  const deferredSession = app
+    .slice(app.indexOf('function SessionSurfaceFallback('), app.indexOf('function SessionSurface('))
+    .replace('<WebSurface ', '<DeferredWebSurface ');
+  assert.ok(deferredSession.includes('function BrowserSessionSurface('));
+  const transformed = await transformWithOxc(
+    `${scroll}\n${transition}\n${source}\n${deferredSession}`,
+    'web-browser.tsx',
+    {
+      jsx: { runtime: 'classic' },
+    },
+  );
   const fixture = await transformWithOxc(
     readFileSync(new URL('./fixtures/web-browser.tsx', import.meta.url), 'utf8'),
     'web-browser-fixture.tsx',
@@ -41,18 +60,22 @@ test('connection browser tabs, navigation, VPN status and recovery work in Chrom
   assert.ok(css.length > 0);
   const renderer = `
     const React = require(${JSON.stringify(require.resolve('react'))});
-    const { useEffect, useLayoutEffect, useRef, useState } = React;
+    const { Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } = React;
     const { createRoot } = require(${JSON.stringify(require.resolve('react-dom/client'))});
     const assert = require('node:assert/strict');
     // data: fixtures lack the secure origin used by the app's file:/localhost renderer.
     crypto.randomUUID = require('node:crypto').randomUUID;
-    const { AlertCircle, ChevronLeft, ChevronRight, Globe, LoaderCircle, LockKeyhole, Plus, RefreshCcw, ShieldCheck, X } = require(${JSON.stringify(require.resolve('lucide-react'))});
+    const { AlertCircle, ArrowLeft, ArrowRight, Download, Globe, KeyRound, LoaderCircle, LockKeyhole, Plus, RefreshCcw, Shield, ShieldCheck, X } = require(${JSON.stringify(require.resolve('lucide-react'))});
     const bitwardenIcon = ${JSON.stringify(`data:image/png;base64,${readFileSync(new URL('../Assets/Bitwarden/bitwarden-icon.png', import.meta.url)).toString('base64')}`)};
     const Button = ({ size, variant, ...props }) => React.createElement('button', props);
-    const ConnectionStepper = () => React.createElement('span', null, 'Starting VPN');
+    const TextTooltip = ({ text, children }) => React.cloneElement(children, { 'data-test-tooltip': text });
     globalThis.IS_REACT_ACT_ENVIRONMENT = true;
     const style = document.createElement('style'); style.textContent = ${JSON.stringify(css)}; document.head.append(style);
     ${transformed.code}
+    let resolveBrowser;
+    const DeferredWebSurface = React.lazy(() => new Promise(resolve => {
+      resolveBrowser = () => resolve({ default: WebSurface });
+    }));
     ${fixture.code}
     //# sourceURL=wormhole-web-browser.js
   `;
@@ -73,13 +96,14 @@ test('connection browser tabs, navigation, VPN status and recovery work in Chrom
           await window.loadURL('data:text/html,<html class="dark"><div id="root"></div></html>');
           const debuggerApi = window.webContents.debugger;
           debuggerApi.attach('1.3');
+          await debuggerApi.sendCommand('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }] });
           await debuggerApi.sendCommand('Profiler.enable');
           await debuggerApi.sendCommand('Profiler.startPreciseCoverage', { callCount: true, detailed: true });
           await window.webContents.executeJavaScript(${JSON.stringify(renderer)});
           const coverage = await debuggerApi.sendCommand('Profiler.takePreciseCoverage');
           const script = coverage.result.find(item => item.url === 'wormhole-web-browser.js');
           if (!script) throw new Error('Missing browser renderer coverage.');
-          for (const name of ['WebSurface', 'WebTabFavicon', 'ToolbarButton', 'StatusOverlay']) {
+          for (const name of ['WebSurface', 'WebSurfaceContent', 'WebTabFavicon', 'ToolbarButton', 'StatusOverlay']) {
             const parent = script.functions.find(item => item.functionName === name);
             if (!parent) throw new Error('Missing coverage for ' + name);
             const range = parent.ranges[0];

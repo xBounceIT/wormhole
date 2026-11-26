@@ -105,6 +105,18 @@ export async function runSshTunnelEditorTests() {
   assert.ok(
     optionLabels.every((label) => !label?.includes('Unsafe cycle') && !label?.includes('RDP host')),
   );
+  const search = document.querySelector<HTMLInputElement>(
+    '[aria-label="Search SSH connections…"]',
+  )!;
+  assert.ok(search.closest('[data-slot="search-field"]'));
+  const changeQuery = (query: string) =>
+    act(async () => {
+      setter.call(search, query);
+      search.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+  await changeQuery('missing host');
+  assert.equal(document.querySelectorAll('[role="option"]').length, 0);
+  await changeQuery('bastion');
   const directOption = [...document.querySelectorAll<HTMLElement>('[role="option"]')].find((item) =>
     item.textContent?.includes('Direct bastion'),
   )!;

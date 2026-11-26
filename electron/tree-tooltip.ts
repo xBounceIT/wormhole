@@ -1,5 +1,8 @@
 import type { BrowserWindow, BrowserWindowConstructorOptions } from 'electron';
 
+export const tooltipDarkColor = '#171717';
+export const tooltipLightColor = '#fafafa';
+
 export type TreeTooltipRequest = {
   text: string;
   anchor: { x: number; y: number; width: number; height: number };
@@ -19,21 +22,46 @@ const tooltipWindowHeight = 40;
 const tooltipHtml = `<!doctype html>
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
 <style>
+  :root { --tooltip-background: ${tooltipDarkColor}; --tooltip-foreground: ${tooltipLightColor}; }
+  :root.app-dark { --tooltip-background: ${tooltipLightColor}; --tooltip-foreground: ${tooltipDarkColor}; }
   * { box-sizing: border-box; }
   html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: transparent; }
   body { position: relative; display: flex; align-items: center; padding-left: 5px; font: 12px/16px system-ui, sans-serif; }
-  body::before { position: absolute; z-index: 1; top: 50%; left: 1px; width: 10px; height: 10px; content: ''; transform: translateY(-50%) rotate(45deg); border-radius: 2px; background: #fafafa; }
-  .tooltip { position: relative; width: calc(100% - 5px); overflow: hidden; padding: 6px 12px; border-radius: 6px; background: #fafafa; color: #0a0a0a; white-space: nowrap; text-overflow: ellipsis; }
+  body::before { position: absolute; z-index: 1; top: 50%; left: 1px; width: 10px; height: 10px; content: ''; transform: translateY(-50%) rotate(45deg); border-radius: 2px; background: var(--tooltip-background); }
+  .tooltip { position: relative; width: calc(100% - 5px); overflow: hidden; padding: 6px 12px; border-radius: 6px; background: var(--tooltip-background); color: var(--tooltip-foreground); white-space: nowrap; text-overflow: ellipsis; }
   #tooltip-text { position: relative; z-index: 2; }
 </style>
 <div class="tooltip"><span id="tooltip-text"></span></div>`;
 
 export class TreeTooltipManager {
   private readonly records = new Map<number, TreeTooltipRecord>();
+  private readonly darkOwners = new WeakSet<BrowserWindow>();
   private readonly createWindow: (options: BrowserWindowConstructorOptions) => BrowserWindow;
 
   constructor(createWindow: (options: BrowserWindowConstructorOptions) => BrowserWindow) {
     this.createWindow = createWindow;
+  }
+
+  setColorScheme(owner: BrowserWindow, scheme: 'light' | 'dark'): void {
+    const dark = scheme === 'dark';
+    if (this.darkOwners.has(owner) === dark) return;
+    if (dark) this.darkOwners.add(owner);
+    else this.darkOwners.delete(owner);
+
+    const record = this.records.get(owner.id);
+    if (!record) return;
+    void record.ready
+      .then(async () => {
+        if (this.records.get(owner.id) !== record || record.window.isDestroyed()) return;
+        await record.window.webContents.executeJavaScript(this.colorSchemeScript(owner));
+      })
+      .catch(() => {
+        if (this.records.get(owner.id) === record) this.closeForWindow(owner);
+      });
+  }
+
+  private colorSchemeScript(owner: BrowserWindow): string {
+    return `document.documentElement.classList.toggle('app-dark', ${this.darkOwners.has(owner)});`;
   }
 
   show(owner: BrowserWindow, request: TreeTooltipRequest): void {
@@ -49,7 +77,7 @@ export class TreeTooltipManager {
       .then(async () => {
         if (!isCurrent()) return;
         await record.window.webContents.executeJavaScript(
-          `document.getElementById('tooltip-text').textContent = ${JSON.stringify(request.text)}`,
+          `${this.colorSchemeScript(owner)} document.getElementById('tooltip-text').textContent = ${JSON.stringify(request.text)}`,
         );
         if (!isCurrent() || !owner.isVisible() || owner.isMinimized()) return;
 

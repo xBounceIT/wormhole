@@ -1,17 +1,26 @@
-import { useEffect, useRef } from 'react';
-import { ExternalLink, Monitor, RefreshCcw, ShieldAlert, Wifi } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { ExternalLink, Monitor, RefreshCcw, ShieldAlert } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { ConnectionStepper, type TunnelProgress } from './ConnectionStepper';
-import type { RdpUiStatus } from '../rdp-state';
+import {
+  ConnectionLoading,
+  ConnectionTransition,
+  type TunnelProgress,
+} from './ConnectionTransition';
+import type { RdpBackendKind, RdpUiStatus } from '../rdp-state';
 import { RdpCanvas } from './RdpCanvas';
 
 export type { RdpUiStatus } from '../rdp-state';
 
 type RdpSurfaceProps = {
   sessionId: string;
+  name?: string;
+  destination?: string;
+  inheritedTarget?: boolean;
+  port?: number;
   isActive: boolean;
   isAuthorized: boolean;
   status: RdpUiStatus;
+  backend?: RdpBackendKind;
   external?: boolean;
   error?: string;
   tunnelProgress?: TunnelProgress | null;
@@ -22,21 +31,67 @@ type RdpSurfaceProps = {
 };
 
 export function RdpSurface({
+  name,
+  destination,
+  inheritedTarget,
+  port,
+  tunnelProgress,
+  ...surface
+}: RdpSurfaceProps) {
+  const [hasFrame, setHasFrame] = useState(false);
+  const reportFrame = useCallback(() => setHasFrame(true), []);
+  const connected = surface.status === 'connected';
+  if (!connected && hasFrame) setHasFrame(false);
+  const waitingForFrame =
+    connected && surface.backend === 'freerdp' && !surface.external && !hasFrame;
+
+  return (
+    <ConnectionTransition
+      connected={connected}
+      pending={
+        surface.status === 'starting' || waitingForFrame ? (
+          <ConnectionLoading
+            destination={destination}
+            inheritedTarget={inheritedTarget}
+            name={name}
+            port={port}
+            protocol="RDP"
+            status={waitingForFrame ? 'Waiting for the remote desktop…' : 'Connecting to RDP…'}
+            tunnelProgress={waitingForFrame ? undefined : tunnelProgress}
+          />
+        ) : null
+      }
+    >
+      {(covered) => (
+        <RdpSurfaceContent {...surface} connectionCovered={covered} onFirstFrame={reportFrame} />
+      )}
+    </ConnectionTransition>
+  );
+}
+
+function RdpSurfaceContent({
   sessionId,
   isActive,
   isAuthorized,
   status,
+  backend,
   external = false,
   error,
-  tunnelProgress,
+  connectionCovered,
+  onFirstFrame,
   onConnect,
   onOpenSystemClient,
   onRetry,
   canOpenSystemClient,
-}: RdpSurfaceProps) {
+}: RdpSurfaceProps & { connectionCovered: boolean; onFirstFrame: () => void }) {
   const surfaceRef = useRef<HTMLDivElement>(null);
   const nativeSurfaceVisible = useRef(false);
   const boundsSignature = useRef('');
+  const isConnected = status === 'connected';
+  const canvasEnabled = isConnected && !external && isActive && isAuthorized;
+  // FreeRDP paints into the canvas. Only the Windows native window would cover the fade.
+  const shouldShowNativeSurface =
+    isConnected && !external && (backend === 'freerdp' || !connectionCovered);
 
   useEffect(() => {
     const surface = surfaceRef.current;
@@ -53,12 +108,14 @@ export function RdpSurface({
       return;
     }
 
-    const shouldShowNativeSurface = status === 'connected' && !external;
     if (!shouldShowNativeSurface) hideNativeSurface();
 
     const reportBounds = () => {
       const rect = surface.getBoundingClientRect();
-      if (rect.width < 1 || rect.height < 1) return;
+      if (rect.width < 1 || rect.height < 1) {
+        hideNativeSurface();
+        return;
+      }
       const bounds = { x: rect.left, y: rect.top, width: rect.width, height: rect.height };
       const signature = `${bounds.x}:${bounds.y}:${bounds.width}:${bounds.height}`;
       if (signature === boundsSignature.current && nativeSurfaceVisible.current) return;
@@ -85,10 +142,8 @@ export function RdpSurface({
       window.removeEventListener('resize', reportBounds);
       hideNativeSurface();
     };
-  }, [external, isActive, isAuthorized, sessionId, status]);
+  }, [isActive, isAuthorized, sessionId, shouldShowNativeSurface]);
 
-  const isConnected = status === 'connected';
-  const isStarting = status === 'starting';
   const isFailed = status === 'failed';
 
   return (
@@ -104,7 +159,9 @@ export function RdpSurface({
       >
         <RdpCanvas
           sessionId={sessionId}
-          enabled={isConnected && !external && isActive && isAuthorized}
+          enabled={canvasEnabled}
+          interactive={canvasEnabled && !connectionCovered}
+          onFirstFrame={backend === 'freerdp' ? onFirstFrame : undefined}
         />
         {isConnected && external ? (
           <div className="relative z-10 flex max-w-sm flex-col items-center px-6 text-center text-white">
@@ -120,51 +177,32 @@ export function RdpSurface({
             </p>
           </div>
         ) : null}
-        {!isConnected ? (
+        {!isConnected && status !== 'starting' ? (
           <div className="relative z-10 flex max-w-sm flex-col items-center px-6 text-center text-white">
-            {isStarting && tunnelProgress ? (
-              <ConnectionStepper tunnelProgress={tunnelProgress} />
-            ) : (
-              <>
-                <div className="mb-4 grid size-14 place-items-center rounded-full border border-white/10 bg-white/[0.06] text-white/75">
-                  {isFailed ? <ShieldAlert className="size-6" /> : <Monitor className="size-6" />}
-                </div>
-                <p className="font-mono text-[9px] uppercase tracking-[0.16em] text-white/45">
-                  Remote desktop
-                </p>
-                <h3 className="mt-2 text-sm font-semibold">
-                  {isStarting
-                    ? 'Starting RDP…'
-                    : isFailed
-                      ? 'RDP connection failed'
-                      : 'RDP session is disconnected'}
-                </h3>
-                <p className="mt-2 text-xs leading-relaxed text-white/50">
-                  {isStarting
-                    ? 'Preparing the remote desktop connection.'
-                    : error || 'Connect to open the remote desktop in this tab.'}
-                </p>
-                {isStarting ? (
-                  <div className="mt-5 flex items-center gap-2 text-[10px] text-white/45">
-                    <Wifi className="size-3.5 animate-pulse" />
-                    Negotiating secure session
-                  </div>
-                ) : (
-                  <div className="mt-5 flex flex-wrap justify-center gap-2">
-                    <Button onClick={isFailed ? onRetry : onConnect} size="sm" variant="secondary">
-                      <RefreshCcw data-icon="inline-start" />
-                      {isFailed ? 'Retry connection' : 'Connect'}
-                    </Button>
-                    {canOpenSystemClient ? (
-                      <Button onClick={onOpenSystemClient} size="sm" variant="outline">
-                        <ExternalLink data-icon="inline-start" />
-                        Open in System Remote Desktop
-                      </Button>
-                    ) : null}
-                  </div>
-                )}
-              </>
-            )}
+            <div className="mb-4 grid size-14 place-items-center rounded-full border border-white/10 bg-white/[0.06] text-white/75">
+              {isFailed ? <ShieldAlert className="size-6" /> : <Monitor className="size-6" />}
+            </div>
+            <p className="font-mono text-[9px] uppercase tracking-[0.16em] text-white/45">
+              Remote desktop
+            </p>
+            <h3 className="mt-2 text-sm font-semibold">
+              {isFailed ? 'RDP connection failed' : 'RDP session is disconnected'}
+            </h3>
+            <p className="mt-2 text-xs leading-relaxed text-white/50">
+              {error || 'Connect to open the remote desktop in this tab.'}
+            </p>
+            <div className="mt-5 flex flex-wrap justify-center gap-2">
+              <Button onClick={isFailed ? onRetry : onConnect} size="sm" variant="secondary">
+                <RefreshCcw data-icon="inline-start" />
+                {isFailed ? 'Retry connection' : 'Connect'}
+              </Button>
+              {canOpenSystemClient ? (
+                <Button onClick={onOpenSystemClient} size="sm" variant="outline">
+                  <ExternalLink data-icon="inline-start" />
+                  Open in System Remote Desktop
+                </Button>
+              ) : null}
+            </div>
           </div>
         ) : null}
       </div>

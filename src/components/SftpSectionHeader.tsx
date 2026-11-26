@@ -2,7 +2,7 @@ import { useId, useLayoutEffect, useRef, useState } from 'react';
 import { Search, X } from 'lucide-react';
 import { type SftpSortColumn } from '../sftp-state';
 import { SftpColumnHeader } from './SftpColumnHeader';
-import { SftpSearchInput } from './SftpSearchInput';
+import { SearchField } from './SearchField';
 import { Button } from './ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
 
@@ -87,12 +87,11 @@ export function SftpSectionHeader({
             aria-colspan={kind === 'tree' ? 3 : 5}
             className="flex h-full min-w-0 items-center pl-3 pr-11"
           >
-            <SftpSearchInput
+            <SearchField
+              aria-label={label}
+              className="flex-1 font-normal normal-case tracking-normal"
               id={inputId}
-              inputRef={input}
-              label={label}
-              value={search}
-              onChange={onSearchChange}
+              onChange={(event) => onSearchChange(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key === 'Escape') {
                   event.preventDefault();
@@ -100,6 +99,10 @@ export function SftpSectionHeader({
                   closeSearch();
                 }
               }}
+              placeholder="Search…"
+              ref={input}
+              type="search"
+              value={search}
             />
             {toggle}
           </div>

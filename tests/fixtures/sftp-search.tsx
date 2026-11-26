@@ -248,14 +248,18 @@ export async function runSftpSearchTests(
           view === 'tree' ? `Search ${pane} directory tree` : `Search ${pane} folder`,
         );
         const fieldBounds = field.getBoundingClientRect();
-        assert.equal(getComputedStyle(field).fontSize, '11px', 'Expanded search must stay compact');
+        assert.equal(fieldBounds.height, 32);
+        assert.ok(parseFloat(getComputedStyle(field).borderTopLeftRadius) >= 16);
         const headerBounds = sectionHeader(pane, view).getBoundingClientRect();
         assert.ok(
-          fieldBounds.width >= headerBounds.width - 60 && fieldBounds.height >= 24,
+          fieldBounds.width >= headerBounds.width - 60,
           'Expanded search must use the section width',
         );
         assert.ok(
-          fieldBounds.left >= headerBounds.left && fieldBounds.right <= headerBounds.right + 1,
+          fieldBounds.left >= headerBounds.left &&
+            fieldBounds.right <= headerBounds.right + 1 &&
+            fieldBounds.top >= headerBounds.top &&
+            fieldBounds.bottom <= headerBounds.bottom,
         );
         assert.equal(
           document.activeElement?.getAttribute('id'),

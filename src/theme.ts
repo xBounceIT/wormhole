@@ -1,19 +1,17 @@
-export type Theme = 'system' | 'light' | 'dark';
-export type ResolvedTheme = Exclude<Theme, 'system'>;
+import { isAppTheme, type AppTheme } from '../electron/theme-settings.ts';
+
+export type Theme = AppTheme;
+export { isAppTheme as isTheme };
 
 export const themeStorageKey = 'wormhole-theme';
 
 type ThemeStorage = Pick<Storage, 'getItem' | 'removeItem'>;
 
-export function isTheme(value: string | null): value is Theme {
-  return value === 'system' || value === 'light' || value === 'dark';
-}
-
 export function readLegacyTheme(storage?: ThemeStorage): Theme | null {
   if (!storage && typeof window === 'undefined') return null;
   try {
     const storedTheme = (storage ?? window.localStorage).getItem(themeStorageKey);
-    return isTheme(storedTheme) ? storedTheme : null;
+    return isAppTheme(storedTheme) ? storedTheme : null;
   } catch {
     return null;
   }
@@ -32,7 +30,7 @@ export function getInitialTheme(legacyTheme: Theme | null): Theme {
   return legacyTheme ?? 'system';
 }
 
-export function getSystemTheme(): ResolvedTheme {
+export function getSystemTheme(): 'light' | 'dark' {
   if (typeof window === 'undefined') return 'light';
 
   return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
@@ -47,7 +45,19 @@ export function getSystemTheme(): ResolvedTheme {
 export function applyTheme(theme: Theme): void {
   const resolved = theme === 'system' ? getSystemTheme() : theme;
   const root = document.documentElement;
-  root.classList.toggle('dark', resolved === 'dark');
-  root.style.colorScheme = resolved;
-  window.wormhole?.setTitlebarTheme(resolved);
+  const oled = resolved === 'oled';
+  const dark = resolved !== 'light';
+  const colorScheme = dark ? 'dark' : 'light';
+  const changed =
+    root.classList.contains('dark') !== dark || root.classList.contains('oled') !== oled;
+  if (changed) root.dataset.themeChanging = '';
+  root.classList.toggle('dark', dark);
+  root.classList.toggle('oled', oled);
+  root.style.colorScheme = colorScheme;
+  if (changed) {
+    // Commit the new palette before re-enabling the navigation interaction transitions.
+    root.getBoundingClientRect();
+    delete root.dataset.themeChanging;
+  }
+  window.wormhole?.setTitlebarTheme(colorScheme);
 }

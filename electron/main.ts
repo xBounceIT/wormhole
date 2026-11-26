@@ -353,7 +353,7 @@ const rdpConnectingLifecycles = new Map<string, string>();
 const vncSessionAttempts = new WebSessionAttemptTracker();
 const rdpSurfacePlacements = new Map<
   string,
-  { owner: BrowserWindow; rendererBounds: RdpSurfaceRect }
+  { owner: BrowserWindow; rendererBounds: RdpSurfaceRect; showRequest?: symbol }
 >();
 const rdpOwnerSyncTasks = new Map<number, NodeJS.Immediate>();
 let serialBackend: SerialBackendClient | undefined;
@@ -5416,6 +5416,12 @@ class WebSurfaceManager {
         record.preview.id !== request.previewId ||
         record.preview.authorizationEpoch !== authorizationEpoch
       ) {
+        // A dialog can release preview suppression before its overlay has cleared.
+        // A hidden Chromium view cannot supply a fresh frame for that handoff.
+        if (!record.view.getVisible()) {
+          record.preview = undefined;
+          return;
+        }
         record.preview = {
           id: request.previewId!,
           tabId,
@@ -5438,11 +5444,13 @@ class WebSurfaceManager {
       return image;
     }
     record.preview = undefined;
+    const x = Math.round(request.x);
+    const y = Math.round(request.y);
     const bounds = {
-      x: Math.round(request.x),
-      y: Math.round(request.y),
-      width: Math.round(request.width),
-      height: Math.round(request.height),
+      x,
+      y,
+      width: Math.max(1, Math.round(request.x + request.width) - x),
+      height: Math.max(1, Math.round(request.y + request.height) - y),
     };
     const previous = record.view.getBounds();
     if (
@@ -7177,6 +7185,7 @@ class WebSurfaceManager {
     tabId: string,
     view: WebContentsView,
   ): void {
+    view.setBorderRadius(12); // Match --workspace-canvas-radius in the renderer.
     const contents = view.webContents;
     let faviconRequest: AbortController | undefined;
     let faviconSource: string | undefined;
@@ -8801,8 +8810,10 @@ function registerIpcHandlers(
   });
   ipcMain.on('window:set-titlebar-theme', (event, value: unknown) => {
     const owner = BrowserWindow.fromWebContents(event.sender);
-    if (!owner || !windowCloseCoordinators.has(owner)) return;
+    if (!owner || owner.isDestroyed() || !windowCloseCoordinators.has(owner)) return;
+    if (value !== 'light' && value !== 'dark') return;
     syncNativeTitlebarTheme(owner, value, process.platform);
+    treeTooltips.setColorScheme(owner, value);
   });
 
   ipcMain.on('startup:ready', (event) => {
@@ -11272,8 +11283,36 @@ function registerIpcHandlers(
     if (!ownerWindow) throw new Error('RDP owner window is unavailable.');
     assertRdpSurfaceOwner(ownerWindow, rdpSurfacePlacements.get(request.sessionId)?.owner);
     if (request.bounds) rememberRdpSurfacePlacement(ownerWindow, request.sessionId, request.bounds);
-    const bounds = request.bounds ? toScreenBounds(ownerWindow, request.bounds) : undefined;
+    const placement = rdpSurfacePlacements.get(request.sessionId);
     const client = getRdpClient();
+    if (operation === 'show') {
+      const showRequest = Symbol();
+      if (placement) placement.showRequest = showRequest;
+      const lifecycleId = client.currentLifecycleId(request.sessionId);
+      const authorizationEpoch = authSession.authorizationEpoch;
+      return serializeAuthOperation(async () => {
+        await requireWorkspaceAuth();
+        // Hide bypasses the authorization queue. A delayed reveal must not undo it or show a
+        // replacement lifecycle. Use any geometry reported while the reveal was queued.
+        if (
+          rdpSurfacePlacements.get(request.sessionId)?.showRequest !== showRequest ||
+          !isAuthorizationEpochCurrent(authorizationEpoch) ||
+          !lifecycleId ||
+          client.currentLifecycleId(request.sessionId) !== lifecycleId ||
+          ownerWindow.isDestroyed()
+        ) {
+          return;
+        }
+        return client.command(
+          operation,
+          request.sessionId,
+          nativeWindowHandle(ownerWindow),
+          currentRdpSurfaceScreenBounds(ownerWindow, request.sessionId),
+          lifecycleId,
+        );
+      });
+    }
+    if (placement && operation !== 'focus') placement.showRequest = undefined;
     const lifecycleId =
       operation === 'disconnect' ? client.currentLifecycleId(request.sessionId) : undefined;
     let resumeStarts: (() => void) | undefined;
@@ -11288,7 +11327,7 @@ function registerIpcHandlers(
         operation,
         request.sessionId,
         nativeWindowHandle(ownerWindow),
-        bounds,
+        request.bounds && toScreenBounds(ownerWindow, request.bounds),
         lifecycleId,
       );
     if (operation === 'hide' || operation === 'disconnect') {
@@ -11451,10 +11490,12 @@ function rememberRdpSurfacePlacement(
   sessionId: string,
   rendererBounds: RdpSurfaceRect,
 ): void {
-  assertRdpSurfaceOwner(owner, rdpSurfacePlacements.get(sessionId)?.owner);
+  const previous = rdpSurfacePlacements.get(sessionId);
+  assertRdpSurfaceOwner(owner, previous?.owner);
   rdpSurfacePlacements.set(sessionId, {
     owner,
     rendererBounds: { ...rendererBounds },
+    showRequest: previous?.showRequest,
   });
 }
 

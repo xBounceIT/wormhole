@@ -51,6 +51,7 @@ test('RDP renders pixels and owns input, visibility and lifecycle inside its tab
       try {
         await window.loadURL('data:text/html,<style>html,body,%23root{height:100%;margin:0}</style><div id="root"></div>');
         window.webContents.debugger.attach('1.3');
+        await window.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }] });
         await window.webContents.debugger.sendCommand('Profiler.enable');
         await window.webContents.debugger.sendCommand('Profiler.startPreciseCoverage', { callCount: true, detailed: true });
         await window.webContents.executeJavaScript(${JSON.stringify(renderer)});

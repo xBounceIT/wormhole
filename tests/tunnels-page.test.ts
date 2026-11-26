@@ -43,7 +43,8 @@ test('VPN tunnels lay out responsively and combine provider, search, and card ac
     writeFileSync(
       harness,
       `const { app, BrowserWindow } = require('electron');
-const { readFileSync } = require('node:fs');
+const assert = require('node:assert/strict');
+const { readFileSync, writeFileSync } = require('node:fs');
 const { join } = require('node:path');
 const source = readFileSync(join(__dirname, 'renderer.js'), 'utf8');
 const css = readFileSync(join(__dirname, 'renderer.css'), 'utf8');
@@ -51,7 +52,7 @@ app.setPath('userData', __dirname);
 app.setPath('sessionData', __dirname);
 app.on('window-all-closed', () => {});
 app.whenReady().then(async () => {
-  for (const [width, height, columns, paneWidth] of [[980, 640, 1, 380], [1440, 900, 3], [800, 620, 2], [500, 560, 1]]) {
+  for (const [width, height, columns, paneWidth] of [[980, 640, 1, 380], [980, 640, 2, 600], [1440, 900, 3], [800, 620, 2], [500, 560, 1]]) {
     const window = new BrowserWindow({
       width, height, useContentSize: true, show: false,
       webPreferences: { nodeIntegration: true, contextIsolation: false, backgroundThrottling: false },
@@ -69,6 +70,24 @@ app.whenReady().then(async () => {
         \${source}
         TunnelsPageTests.run(\${columns}, \${paneWidth});
       \`);
+      const debuggerApi = window.webContents.debugger;
+      await debuggerApi.sendCommand('DOM.enable');
+      await debuggerApi.sendCommand('CSS.enable');
+      const cardSelector = '[data-tunnels-page] [data-slot=card]';
+      await window.webContents.insertCSS(cardSelector + ' { transition: none !important; }');
+      const cardBackground = () => window.webContents.executeJavaScript(
+        'getComputedStyle(document.querySelector(' + JSON.stringify(cardSelector) + ')).backgroundColor',
+      );
+      const background = await cardBackground();
+      const { root } = await debuggerApi.sendCommand('DOM.getDocument');
+      const { nodeId } = await debuggerApi.sendCommand('DOM.querySelector', { nodeId: root.nodeId, selector: cardSelector });
+      await debuggerApi.sendCommand('CSS.forcePseudoState', { nodeId, forcedPseudoClasses: ['hover'] });
+      assert.equal(await cardBackground(), background, 'Tunnel card background must stay the same on hover');
+      await debuggerApi.sendCommand('CSS.forcePseudoState', { nodeId, forcedPseudoClasses: [] });
+      if (process.env.WORMHOLE_TEST_SCREENSHOTS) {
+        const capture = await window.webContents.capturePage();
+        writeFileSync(join(process.env.WORMHOLE_TEST_SCREENSHOTS, 'tunnels-' + (paneWidth ?? width) + '.png'), capture.toPNG());
+      }
     } finally {
       window.destroy();
     }

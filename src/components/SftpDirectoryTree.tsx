@@ -1,6 +1,7 @@
 import { hasSftpDragPayload } from '../sftp-dnd';
 import { formatSftpDate } from '../sftp-format';
 import { SftpSectionHeader } from './SftpSectionHeader';
+import { TextTooltip } from './ui/tooltip';
 import { type SftpSortColumn } from '../sftp-state';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { ChevronDown, ChevronRight, FolderOpen, LoaderCircle } from 'lucide-react';
@@ -224,21 +225,24 @@ export function SftpDirectoryTree({
                     <ChevronRight className="size-3" />
                   )}
                 </button>
-                <button
-                  type="button"
-                  title={row.error ?? row.path}
-                  onClick={() => {
-                    if (row.status === 'failed') setTree((current) => invalidateSftpTree(current));
-                    onNavigate(row.path);
-                  }}
-                  className="grid min-w-0 grid-cols-[1.5rem_minmax(0,1fr)] items-center gap-x-2.5 text-left"
-                >
-                  <FolderOpen className="size-3.5 shrink-0 justify-self-center text-amber-400" />
-                  <span className="flex min-w-0 items-center gap-1">
-                    <span className="truncate">{row.name}</span>
-                    {row.error ? <span className="shrink-0 text-destructive">!</span> : null}
-                  </span>
-                </button>
+                <TextTooltip text={row.error ?? row.path}>
+                  <button
+                    aria-label={row.error ? `${row.name}: ${row.error}` : undefined}
+                    type="button"
+                    onClick={() => {
+                      if (row.status === 'failed')
+                        setTree((current) => invalidateSftpTree(current));
+                      onNavigate(row.path);
+                    }}
+                    className="grid min-w-0 grid-cols-[1.5rem_minmax(0,1fr)] items-center gap-x-2.5 text-left"
+                  >
+                    <FolderOpen className="size-3.5 shrink-0 justify-self-center text-amber-400" />
+                    <span className="flex min-w-0 items-center gap-1">
+                      <span className="truncate">{row.name}</span>
+                      {row.error ? <span className="shrink-0 text-destructive">!</span> : null}
+                    </span>
+                  </button>
+                </TextTooltip>
               </div>
               <span role="gridcell" aria-colindex={2} />
               <span role="gridcell" aria-colindex={3} className="truncate text-muted-foreground">

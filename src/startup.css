@@ -252,6 +252,44 @@ input {
   pointer-events: none;
 }
 
+.startup-tooltip {
+  position: absolute;
+  z-index: 1;
+  top: calc(100% + 4px);
+  right: 4px;
+  width: max-content;
+  background: var(--tooltip-dark);
+  color: var(--tooltip-light);
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 16px;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.dark .startup-tooltip {
+  background: var(--tooltip-light);
+  color: var(--tooltip-dark);
+}
+
+.startup-tooltip::before {
+  position: absolute;
+  top: -3px;
+  right: 10px;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  background: inherit;
+  content: '';
+  transform: rotate(45deg);
+}
+
+.startup-password-toggle:not(:disabled):is(:hover, :focus-visible) + .startup-tooltip {
+  visibility: visible;
+  transition: visibility 0s 300ms;
+}
+
 .startup-password-toggle:hover:not(:disabled) {
   background: #27272a;
   color: #f3f4f6;

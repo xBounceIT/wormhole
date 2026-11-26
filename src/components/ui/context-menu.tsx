@@ -32,9 +32,10 @@ function ContextMenuOverlayProvider({
     setOpenOverlayIds(update);
     if (modal) setModalOverlayIds(update);
   }, []);
+  const open = hasOpenOverlay(openOverlayIds);
   const value = React.useMemo(
-    () => ({ open: hasOpenOverlay(openOverlayIds), modalOverlayIds, report }),
-    [openOverlayIds, modalOverlayIds, report],
+    () => ({ open, modalOverlayIds, report }),
+    [open, modalOverlayIds, report],
   );
   // A scoped provider still contributes to native-surface occlusion in its parent.
   useNativeSurfaceOverlay(value.open, { modal: hasOpenOverlay(modalOverlayIds) });
@@ -67,7 +68,8 @@ function useNativeSurfaceOverlay(
   const overlayId = id ?? generatedId;
   const { report } = React.useContext(ContextMenuOverlayContext);
   React.useEffect(() => {
-    report(overlayId, open, modal);
+    if (!open) return;
+    report(overlayId, true, modal);
     return () => report(overlayId, false, modal);
   }, [overlayId, open, modal, report]);
 }

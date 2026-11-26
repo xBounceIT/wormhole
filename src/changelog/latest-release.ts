@@ -1,3 +1,4 @@
+import connectionWorkspace from './media/connection-workspace.webp';
 import vpnTunnels from './media/vpn-tunnels.webp';
 import settings from './media/settings.webp';
 
@@ -20,6 +21,16 @@ export type VisualChangelogRelease = {
 export const latestRelease: VisualChangelogRelease = {
   version: '2.5.0',
   slides: [
+    {
+      title: 'Find your way between open connections',
+      subtitle:
+        'Use the arrow beside the session tabs to search by name. Drag a tab to the edge of a pane to work on two connections side by side.',
+      media: {
+        kind: 'image',
+        src: connectionWorkspace,
+        alt: 'An SSH terminal and a browser run side by side, with each pane’s session tabs above it and the connection tree on the left.',
+      },
+    },
     {
       title: 'Find the right VPN tunnel faster',
       subtitle: 'Search your tunnels or filter by provider. Test or edit a tunnel from its card.',

@@ -256,8 +256,10 @@ func TestApplicationThemeReadsWinUIAndLegacyRepresentationsSafely(t *testing.T) 
 		"winui-system":   {value: 0, present: true, want: applicationThemeSystem},
 		"winui-light":    {value: 1, present: true, want: applicationThemeLight},
 		"winui-dark":     {value: 2, present: true, want: applicationThemeDark},
+		"numeric-oled":   {value: 3, present: true, want: applicationThemeOLED},
 		"string-system":  {value: "System", present: true, want: applicationThemeSystem},
 		"string-light":   {value: "light", present: true, want: applicationThemeLight},
+		"string-oled":    {value: "OLED", present: true, want: applicationThemeOLED},
 		"invalid-number": {value: 42, present: true, want: applicationThemeSystem},
 		"invalid-string": {value: "sepia", present: true, want: applicationThemeSystem},
 		"invalid-type":   {value: true, present: true, want: applicationThemeSystem},
@@ -287,30 +289,43 @@ func TestWriteApplicationThemeUsesWinUIEnumAndPreservesOtherSettings(t *testing.
 		"FutureSetting":              map[string]any{"enabled": true},
 	})
 
-	if err := writeApplicationTheme(databasePath, applicationThemeDark); err != nil {
-		t.Fatal(err)
-	}
-
 	_, settingsPath := authPaths(databasePath)
-	contents, err := os.ReadFile(settingsPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var document map[string]json.RawMessage
-	if err := json.Unmarshal(contents, &document); err != nil {
-		t.Fatal(err)
-	}
-	if string(document[themeKey]) != "2" {
-		t.Fatalf("persisted Theme = %s, want WinUI enum value 2", document[themeKey])
-	}
-	var futureSetting map[string]bool
-	if err := json.Unmarshal(document["FutureSetting"], &futureSetting); err != nil {
-		t.Fatal(err)
-	}
-	if string(document["AppAuthenticationMode"]) != "2" ||
-		string(document["AppAuthenticationFutureKey"]) != `"keep-auth"` ||
-		!futureSetting["enabled"] {
-		t.Fatalf("theme save dropped unrelated settings: %s", contents)
+	for _, test := range []struct {
+		theme applicationTheme
+		saved string
+	}{
+		{applicationThemeDark, "2"},
+		{applicationThemeOLED, "3"},
+		{applicationThemeSystem, "0"},
+		{applicationThemeLight, "1"},
+	} {
+		if err := writeApplicationTheme(databasePath, test.theme); err != nil {
+			t.Fatal(err)
+		}
+		settings, err := readAppSettings(databasePath)
+		if err != nil || settings.Theme != test.theme {
+			t.Fatalf("read theme = %q, want %q, error = %v", settings.Theme, test.theme, err)
+		}
+		contents, err := os.ReadFile(settingsPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var document map[string]json.RawMessage
+		if err := json.Unmarshal(contents, &document); err != nil {
+			t.Fatal(err)
+		}
+		if string(document[themeKey]) != test.saved {
+			t.Fatalf("persisted Theme = %s, want %s", document[themeKey], test.saved)
+		}
+		var futureSetting map[string]bool
+		if err := json.Unmarshal(document["FutureSetting"], &futureSetting); err != nil {
+			t.Fatal(err)
+		}
+		if string(document["AppAuthenticationMode"]) != "2" ||
+			string(document["AppAuthenticationFutureKey"]) != `"keep-auth"` ||
+			!futureSetting["enabled"] {
+			t.Fatalf("theme save dropped unrelated settings: %s", contents)
+		}
 	}
 }
 

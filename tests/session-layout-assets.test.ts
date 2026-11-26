@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { stripTypeScriptTypes } from 'node:module';
 import test from 'node:test';
+import { runInNewContext } from 'node:vm';
 
 const appSource = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
 
@@ -280,6 +282,86 @@ test('native RDP prompts and dynamic resolution use the measured connection surf
   assert.doesNotMatch(rdpHostFormSource, /PerformLayout\(\)/);
 });
 
+test('ActiveX remains hidden through startup and leaves the reveal to the renderer', () => {
+  const start = sourceBetween(
+    rdpHostSource,
+    'private void Start(',
+    'private void ScheduleRemoteResolution',
+  );
+  assert.match(start, /form\.Start\(\)/);
+  assert.doesNotMatch(start, /SW_SHOW|reveal:\s*true|RequestFocus\(\)/);
+  const show = sourceBetween(rdpHostSource, 'case "show":', 'case "hide":');
+  assert.match(show, /reveal:\s*true/);
+  assert.match(show, /if \(_focusOnFirstShow\)[\s\S]*RequestFocus\(\)/);
+});
+
+test('queued RDP reveals honor current visibility, geometry, lifecycle and authorization', async () => {
+  const commandSource = sourceBetween(
+    mainSource,
+    "ipcMain.handle('rdp:command'",
+    'function getRdpClient',
+  ).replace(/\r?\n}\s*$/, '');
+  const placementSource = sourceBetween(
+    mainSource,
+    'function rememberRdpSurfacePlacement(',
+    'function clearRdpSurfacePlacements(',
+  );
+  const program = stripTypeScriptTypes(`${commandSource}\n${placementSource}`);
+  for (const change of ['hide', 'replace', 'lock', 'resize'] as const) {
+    const initialBounds = { x: 0, y: 0, width: 800, height: 600 };
+    const newBounds = { ...initialBounds, width: 1024 };
+    const owner = { isDestroyed: () => false };
+    const calls: Array<{ operation: string; bounds: unknown; lifecycleId: string }> = [];
+    const authSession = { authorizationEpoch: 1 };
+    const authorization = Promise.withResolvers<void>();
+    let lifecycleId = 'first';
+    let handler!: (event: { sender: unknown }, request: Record<string, unknown>) => Promise<void>;
+    const sandbox = {
+      ipcMain: {
+        handle: (_name, nextHandler) => {
+          handler = nextHandler;
+        },
+      },
+      parseRdpCommandRequest: (request) => request,
+      valueAsString: (request, key) => request[key],
+      BrowserWindow: { fromWebContents: () => owner },
+      assertRdpSurfaceOwner: (candidate, current) => {
+        if (current) assert.equal(candidate, current);
+      },
+      rdpSurfacePlacements: new Map(),
+      authSession,
+      isAuthorizationEpochCurrent: (epoch) => epoch === authSession.authorizationEpoch,
+      requireWorkspaceAuth: () => authorization.promise,
+      serializeAuthOperation: (operation) => operation(),
+      toScreenBounds: (_owner, bounds) => bounds,
+      getRdpClient: () => ({
+        currentLifecycleId: () => lifecycleId,
+        command: async (operation, _id, _window, bounds, id) => {
+          calls.push({ operation, bounds: bounds && { ...bounds }, lifecycleId: id });
+        },
+      }),
+      nativeWindowHandle: () => '123',
+      rememberRdpSurfacePlacement: null as
+        | ((owner: unknown, sessionId: string, bounds: unknown) => void)
+        | null,
+    };
+    runInNewContext(program, sandbox);
+    const event = { sender: {} };
+    const reveal = handler(event, { operation: 'show', sessionId: 'rdp', bounds: initialBounds });
+    if (change === 'hide') await handler(event, { operation: 'hide', sessionId: 'rdp' });
+    if (change === 'replace') lifecycleId = 'second';
+    if (change === 'lock') authSession.authorizationEpoch++;
+    if (change === 'resize') sandbox.rememberRdpSurfacePlacement!(owner, 'rdp', newBounds);
+    authorization.resolve();
+    await reveal;
+    assert.deepEqual(
+      calls.filter((call) => call.operation === 'show'),
+      change === 'resize' ? [{ operation: 'show', bounds: newBounds, lifecycleId: 'first' }] : [],
+      change,
+    );
+  }
+});
+
 test('native RDP start resolves only after the ActiveX helper is initialized', () => {
   const goSource = readFileSync(
     new URL('../tools/wormhole-backend/rdp.go', import.meta.url),
@@ -310,7 +392,7 @@ test('native overlays hide during drag or resize and return when resizing ends',
     appSource,
     /active && isWebSurfaceVisible && !activeDraggedSessionId && !resizingSplitId/,
   );
-  const webSurface = sourceBetween(appSource, '<WebSurface', '/>');
+  const webSurface = sourceBetween(appSource, '<BrowserSessionSurface', '/>');
   assert.match(webSurface, /isActive=\{isActive\}/);
   assert.match(webSurface, /isAuthorized=\{isAuthorized\}/);
   assert.match(webSurface, /isOccluded=\{!nativeSurfaceActive\}/);
@@ -318,14 +400,18 @@ test('native overlays hide during drag or resize and return when resizing ends',
   assert.match(appSource, /isFileBrowserProtocol\(session\.protocol\)/);
   assert.match(appSource, /return \(\s*<SftpBrowserSurface/);
 
-  // The native view must leave the six-pixel split handle reachable before resizing starts.
+  // Browser views clip their own canvas corners. Other native views keep the additional inset.
   const surfaceStyle = sourceBetween(
     appSource,
     'function sessionSurfaceStyle',
     'function SessionPaneChrome',
   );
-  assert.match(surfaceStyle, /left: `calc\(\$\{rect\.x\}% \+ 3px\)`/);
-  assert.match(surfaceStyle, /width: `calc\(\$\{rect\.width\}% - 6px\)`/);
+  assert.match(
+    surfaceStyle,
+    /const inset = protocol === 'ssh' \|\| protocol === 'http' \|\| protocol === 'https' \? 0 : 4/,
+  );
+  assert.match(surfaceStyle, /left: `calc\(\$\{rect\.x\}% \+ \$\{gutter\} \+ \$\{inset\}px\)`/);
+  assert.match(surfaceStyle, /width: .*rect\.width.*2 \* \(\$\{gutter\} \+ \$\{inset\}px\)/);
 
   const handleMount = sourceBetween(appSource, '<SessionSplitHandle', '/>');
   assert.match(handleMount, /onResizeStart=\{\(\) => setResizingSplitId\(divider\.splitId\)\}/);
@@ -402,7 +488,9 @@ test('session tab titles reserve action width with and without SFTP', () => {
   assert.match(titleButton, /<span className="truncate">\{session\.title\}<\/span>/);
 
   const actions = mount.slice(mount.indexOf('</button>') + '</button>'.length);
-  const actionContainer = actions.match(/^\s*<div className="([^"]+)">([\s\S]*?)<\/div>/);
+  const actionContainer = actions.match(
+    /^\s*<\/TextTooltip>\s*<div className="([^"]+)">([\s\S]*?)<\/div>/,
+  );
   assert.ok(actionContainer, 'actions must be siblings of the title button');
   const actionClasses = actionContainer[1].split(/\s+/);
   for (const token of ['flex', 'shrink-0']) {
@@ -417,6 +505,7 @@ test('session tab titles reserve action width with and without SFTP', () => {
   );
   assert.match(sftpAction, /label=\{`Open file transfer in new tab for \$\{session\.title\}`\}/);
   assert.match(sftpAction, /onClick=\{\(\) => onOpenFileTransfer\(session\.id\)\}/);
+  assert.match(sftpAction, /\[@media\(hover:hover\)\]:opacity-0/);
   const alwaysVisibleActions = actionContainer[2].slice(actionContainer[2].indexOf(') : null}'));
   assert.match(alwaysVisibleActions, /label=\{`Close \$\{session\.title\}`\}/);
   assert.match(alwaysVisibleActions, /onClick=\{\(\) => closePaneSession\(pane, session\.id\)\}/);

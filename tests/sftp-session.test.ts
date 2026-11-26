@@ -37,9 +37,9 @@ test('File transfer tabs browse trees, route shortcuts and manage editor saves i
           if (id !== '\0sftp-session-surface') return;
           // Exercise the actual SFTP routing and status JSX without App's native lifecycles.
           return `import { createContext, useContext } from 'react';
-import { AlertCircle, LoaderCircle, RefreshCcw, Terminal } from 'lucide-react';
+import { AlertCircle, RefreshCcw, Terminal } from 'lucide-react';
 import { SftpBrowserSurface } from '@/components/SftpBrowser';
-import { ConnectionStepper } from '@/components/ConnectionStepper';
+import { ConnectionLoading, ConnectionTransition } from '@/components/ConnectionTransition';
 import { Button } from '@/components/ui/button';
 import { requiresSshCertificateReplacement } from '@/runtime-credential-errors';
 import { isFileBrowserProtocol } from '@/file-protocol';
@@ -134,7 +134,7 @@ app.whenReady().then(async () => {
     await window.webContents.debugger.sendCommand('Profiler.stopPreciseCoverage');
     const script = coverage.result.find(item => item.url === 'wormhole-sftp-session.js');
     assert.ok(script);
-    for (const name of ['IconButton', 'SftpBrowserSurface', 'SftpDirectoryTree', 'SftpSearchInput', 'SftpColumnHeader', 'SftpSectionHeader', 'SftpEditorSettings', 'SftpEditedFiles', 'SftpRecoveryNotice']) {
+    for (const name of ['IconButton', 'SftpBrowserSurface', 'SftpDirectoryTree', 'SearchField', 'SftpColumnHeader', 'SftpSectionHeader', 'SftpEditorSettings', 'SftpEditedFiles', 'SftpRecoveryNotice']) {
       const fn = script.functions.find(item => item.functionName === name);
       assert.ok(fn, 'Missing ' + name);
       const ranges = script.functions.flatMap(item => item.ranges).filter(range => range.startOffset >= fn.ranges[0].startOffset && range.endOffset <= fn.ranges[0].endOffset);

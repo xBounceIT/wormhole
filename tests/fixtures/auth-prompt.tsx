@@ -173,6 +173,15 @@ async function runAuthPromptTests() {
   assert.equal(verifications, 0, 'unavailable Hello must not open verification');
   assert.equal(document.activeElement.id, 'auth-secret');
   assert.doesNotMatch(text(), /will open now/);
+  const passwordToggle = document.querySelector<HTMLButtonElement>(
+    'button[aria-controls="auth-secret"]',
+  )!;
+  await React.act(async () => passwordToggle.focus());
+  assert.ok(
+    document.querySelector('dialog:modal [role="tooltip"]'),
+    'Password tooltip must be inside the native modal',
+  );
+  await React.act(async () => document.getElementById('auth-secret')!.focus());
 
   const initialCheck = deferred();
   check = () => initialCheck.promise;
@@ -786,13 +795,23 @@ async function runStartupUnlockTests() {
     const toggle = root.querySelector<HTMLButtonElement>('button[aria-controls="startup-secret"]');
     assert.equal(input.type, 'password');
     assert.equal(toggle.getAttribute('aria-label'), 'Show password');
-    assert.equal(toggle.title, 'Show password');
+    const tooltip = root.querySelector('[role="tooltip"]')!;
+    assert.equal(toggle.title, '');
+    assert.equal(tooltip.textContent, 'Show password');
     assert.equal(toggle.textContent.trim(), '', 'startup visibility uses an icon without text');
     assert.equal(toggle.type, 'button', 'visibility must not submit the login form');
     assert.equal(toggle.querySelector('svg').getAttribute('aria-hidden'), 'true');
     assert.ok(toggle.querySelector('circle'), 'masked password shows the eye icon');
     for (const dark of [false, true]) {
       document.documentElement.classList.toggle('dark', dark);
+      assert.equal(
+        getComputedStyle(tooltip).backgroundColor,
+        dark ? 'rgb(250, 250, 250)' : 'rgb(23, 23, 23)',
+      );
+      assert.equal(
+        getComputedStyle(tooltip).color,
+        dark ? 'rgb(23, 23, 23)' : 'rgb(250, 250, 250)',
+      );
       const icon = toggle.querySelector('svg');
       assert.equal(toggle.getBoundingClientRect().width, 28);
       assert.equal(toggle.getBoundingClientRect().height, 28);
@@ -809,7 +828,7 @@ async function runStartupUnlockTests() {
     assert.equal(input.value, 'test-only-secret');
     assert.equal(toggle.getAttribute('aria-pressed'), 'true');
     assert.equal(toggle.getAttribute('aria-label'), 'Hide password');
-    assert.equal(toggle.title, 'Hide password');
+    assert.equal(tooltip.textContent, 'Hide password');
     assert.equal(toggle.textContent.trim(), '');
     assert.equal(toggle.querySelector('circle'), null, 'visible password shows the crossed eye');
     assert.notEqual(toggle.innerHTML, eyeMarkup);

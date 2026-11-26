@@ -262,7 +262,7 @@ test('Wormhole window handlers honor session shortcut suppression', () => {
   const eventFor = (target: EventTarget | null) => ({ target }) as Event;
 
   assert.equal(isWormholeShortcutSuppressed(eventFor(sessionTarget)), true);
-  assert.equal(receivedSelector, '[data-wormhole-shortcuts-disabled]');
+  assert.equal(receivedSelector, '[data-wormhole-shortcuts-disabled], dialog:modal');
   assert.equal(isWormholeShortcutSuppressed(eventFor(ordinaryTarget)), false);
   assert.equal(isWormholeShortcutSuppressed(eventFor(null)), false);
 

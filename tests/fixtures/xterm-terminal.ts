@@ -19,7 +19,7 @@ import {
   useContextMenuOverlayOpen,
 } from '../../src/components/ui/context-menu';
 // Compiled from the production App component by the Chromium harness.
-import { SshXtermSurface, SessionPaneChrome, sessionSurfaceStyle } from 'virtual:ssh-surface';
+import { SessionSurface, SessionPaneChrome, sessionSurfaceStyle } from 'virtual:ssh-surface';
 
 const sleep = (delay = 30) => new Promise((resolve) => setTimeout(resolve, delay));
 
@@ -480,13 +480,22 @@ async function run(setZoomFactor: (zoom: number) => void) {
     else inputs.push(data);
   };
   let props = {
-    session: { id: 'ui', backendSessionId: 'component', status: 'connected' },
+    session: {
+      id: 'ui',
+      protocol: 'ssh',
+      title: 'Build host',
+      host: 'shell.example.test',
+      port: 2222,
+      backendSessionId: 'component',
+      status: 'connecting',
+      tunnelProgress: null as { phase: string } | null,
+    },
     isActive: true,
     isAuthorized: true,
     autoCopyOnSelect: false,
-    onInput: receiveInput,
-    onReconnect: () => {},
-    onTrustHostKey: () => {},
+    onSshInput: receiveInput,
+    onReconnectSession: () => {},
+    onTrustSshHostKey: () => {},
   };
   let paneRect = { paneId: 'ssh', x: 0, y: 0, width: 100, height: 100 };
   const render = async () => {
@@ -504,10 +513,10 @@ async function run(setZoomFactor: (zoom: number) => void) {
           React.createElement(
             'div',
             {
-              className: 'absolute overflow-hidden',
+              className: 'session-surface absolute overflow-hidden',
               style: sessionSurfaceStyle(paneRect, true, 'ssh'),
             },
-            React.createElement(SshXtermSurface, props),
+            React.createElement(SessionSurface, props),
           ),
         ),
       );
@@ -521,29 +530,102 @@ async function run(setZoomFactor: (zoom: number) => void) {
     );
   }
   await render();
+  const pending = mounted.querySelector<HTMLElement>('[data-connection-transition="pending"]')!;
+  const layout = pending.firstElementChild!;
+  assert.equal(getComputedStyle(layout).backgroundColor, 'rgba(0, 0, 0, 0)');
+  assert.equal(getComputedStyle(layout).borderTopWidth, '0px');
+  assert.deepEqual(
+    [...layout.children].map((child) => child.textContent),
+    ['Build host', 'shell.example.test', 'SSH·Port 2222', 'Connecting…'],
+  );
+  const status = pending.querySelector('[role="status"]')!;
+  const directIcon = status.querySelector('.lucide-loader-circle')!;
+  const motionReduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  assert.equal(getComputedStyle(directIcon).animationName, motionReduced ? 'none' : 'spin');
+  props = { ...props, session: { ...props.session, tunnelProgress: { phase: 'authenticating' } } };
+  await render();
+  assert.equal(status.textContent, 'Authenticating with the VPN gateway…');
+  assert.ok(status.querySelector('.lucide-key-round'));
+  props = { ...props, session: { ...props.session, tunnelProgress: { phase: 'ready' } } };
+  await render();
+  assert.equal(status.textContent, 'VPN tunnel ready. Connecting…');
+  assert.ok(status.querySelector('.lucide-shield-check'));
+  assert.equal(mounted.querySelector('.xterm'), null);
+  props = { ...props, session: { ...props.session, tunnelProgress: null, status: 'connected' } };
+  await render();
+  const exiting = mounted.querySelector<HTMLElement>('[data-connection-transition="exit"]')!;
+  assert.equal(exiting, pending, 'the loading panel must survive the first terminal paint');
+  assert.ok(exiting.inert);
+  assert.equal(getComputedStyle(exiting).pointerEvents, 'none');
+  if (motionReduced) {
+    assert.equal(getComputedStyle(exiting).display, 'none');
+  } else {
+    assert.equal(getComputedStyle(exiting).animationName, 'connection-loading-exit');
+  }
+  assert.ok(mounted.querySelector('.xterm'));
+  const revealDeadline = performance.now() + 1500;
+  while (exiting.isConnected && performance.now() < revealDeadline) {
+    await React.act(() => new Promise((resolve) => setTimeout(resolve, 30)));
+  }
+  assert.equal(mounted.querySelector('[data-connection-transition]'), null);
   const componentRuntime = sshTerminal('component');
   assert.ok(mounted.querySelector('.xterm'));
-  const assertTerminalFillsPane = () => {
-    const pane = mounted.querySelector('[aria-label="Session pane ssh"]')!.getBoundingClientRect();
-    const tabs = mounted.querySelector('[role="tablist"]')!.getBoundingClientRect();
+  const assertTerminalFitsPane = () => {
+    const canvas = mounted.querySelector('[data-session-canvas]')!.getBoundingClientRect();
+    const tabStrip = mounted.querySelector('[role="tablist"]')!;
+    const tabs = tabStrip.getBoundingClientRect();
     const surface = mounted.querySelector('[aria-label="Live SSH terminal"]')!;
     const host = surface.firstElementChild!;
     const terminal = host.getBoundingClientRect();
+    const surfaceFrame = getComputedStyle(surface.parentElement!);
+    assert.equal(surfaceFrame.borderRadius, '12px');
+    assert.equal(surfaceFrame.overflow, 'hidden');
     assert.deepEqual(
       [terminal.left, terminal.top, terminal.right, terminal.bottom],
-      [pane.left, tabs.bottom, pane.right, pane.bottom],
-      `SSH terminal background must reach the pane edges and the bottom of the tab strip at DPR ${devicePixelRatio}`,
+      [canvas.left, canvas.top, canvas.right, canvas.bottom],
+      `SSH terminal background must reach each edge of the detached canvas at DPR ${devicePixelRatio}`,
     );
-    assert.equal(getComputedStyle(host).backgroundColor, 'rgb(28, 28, 28)');
+    assert.ok(
+      canvas.top > tabs.bottom,
+      'A visible gap must separate the canvas from its tab strip',
+    );
+    const background = getComputedStyle(host).backgroundColor;
+    assert.equal(background, 'rgb(28, 28, 28)');
+    assert.equal(
+      getComputedStyle(host.querySelector('.xterm-viewport')!).backgroundColor,
+      background,
+      'the viewport must blend with the terminal background at the edges',
+    );
+    const thumb = surface.querySelector<HTMLElement>('.scrollbar.vertical > .slider')!;
+    const thumbStyle = getComputedStyle(thumb, '::before');
+    const tabThumbStyle = getComputedStyle(tabStrip, '::-webkit-scrollbar-thumb');
+    assert.equal(thumb.offsetWidth, 14, 'the full scrollbar drag target must remain available');
+    assert.equal(thumbStyle.width, getComputedStyle(tabStrip, '::-webkit-scrollbar').height);
+    assert.equal(thumbStyle.borderTopLeftRadius, tabThumbStyle.borderTopLeftRadius);
+    assert.equal(thumbStyle.backgroundColor, tabThumbStyle.backgroundColor);
+    assert.equal(getComputedStyle(thumb).backgroundColor, 'rgba(0, 0, 0, 0)');
+    const screen = surface.querySelector('.xterm-screen')!.getBoundingClientRect();
+    const insets = [
+      screen.left - canvas.left,
+      screen.top - canvas.top,
+      canvas.right - screen.right,
+      canvas.bottom - screen.bottom,
+    ];
+    assert.ok(
+      insets.every((inset) => inset >= 3.5),
+      `SSH cells must clear all four rounded corners at DPR ${devicePixelRatio}, got insets ${insets} for ${componentRuntime.terminal.rows} rows`,
+    );
   };
-  assertTerminalFillsPane();
+  assertTerminalFitsPane();
   paneRect = { ...paneRect, x: 50, y: 50, width: 50, height: 50 };
   await render();
   try {
     for (const zoom of [1, 1.25, 1.5]) {
       setZoomFactor(zoom);
-      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-      assertTerminalFillsPane();
+      await new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      );
+      assertTerminalFitsPane();
     }
   } finally {
     setZoomFactor(1);
@@ -567,7 +649,7 @@ async function run(setZoomFactor: (zoom: number) => void) {
   const otherInput = document.createElement('input');
   document.body.append(otherInput);
   otherInput.focus();
-  props = { ...props, onInput: (id, data, paste) => receiveInput(id, data, paste) };
+  props = { ...props, onSshInput: (id, data, paste) => receiveInput(id, data, paste) };
   await render();
   assert.equal(document.activeElement, otherInput, 'background state updates stole focus');
   props = { ...props, isActive: false, isAuthorized: false };
@@ -759,10 +841,15 @@ async function run(setZoomFactor: (zoom: number) => void) {
   await render();
   assert.equal(dialog(), null);
   await requestLink();
-  for (const status of ['connecting', 'failed', 'disconnected']) {
+  for (const [status, message] of [
+    ['connecting', 'Connecting…'],
+    ['failed', 'SSH connection failed'],
+    ['disconnected', 'SSH session closed'],
+  ]) {
     props = { ...props, session: { ...props.session, status } };
     await render();
-    assert.ok(mounted.textContent!.includes('state ' + status));
+    assert.ok(mounted.textContent!.includes(message));
+    assert.equal(mounted.querySelector('[data-connection-transition="exit"]'), null);
     assert.equal(mounted.querySelector('.xterm'), null);
   }
   props = {

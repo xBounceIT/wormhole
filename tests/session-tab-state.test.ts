@@ -140,6 +140,7 @@ test('the tab menu offers AI disconnect for approved SSH sessions and system lau
   type Element = React.ReactElement<{ children?: React.ReactNode; onSelect?: () => void }>;
   const menu = runInNewContext(`${transformed.code}\nSessionTabContextMenu;`, {
     React,
+    TooltipFocusSuppressionContext: React.createContext<{ current: boolean } | null>(null),
     canDisconnectSessionAiAgent,
     canDisconnectRemoteDesktopSession: () => false,
     canOpenRdpSystemClient,
@@ -190,6 +191,7 @@ test('the tab menu offers AI disconnect for approved SSH sessions and system lau
   for (const session of cases) {
     const tree = menu({
       session,
+      restoringFocus: { current: false },
       children: React.createElement('button', null, 'Tab'),
       onDisconnectAiAgent: () => {
         disconnections++;
