@@ -249,10 +249,6 @@ var tcpFlagNames = [...]struct {
 	{tcpFlagCwr, "CWR"},
 }
 
-func summarizeIPPacket(pkt []byte) string {
-	return parsePacketSummary(pkt).text
-}
-
 func parsePacketSummary(pkt []byte) packetSummary {
 	if len(pkt) < 1 {
 		return packetSummary{text: "malformed len=0"}

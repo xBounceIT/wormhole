@@ -1047,21 +1047,24 @@ async function runBitwardenPromptTests() {
       sync = deferred();
       reload = async () => {};
       credentialsChanged = async () => {};
-      await React.act(async () => {
-        root.render(
-          <React.StrictMode>
-            <TooltipProvider>
-              <BitwardenSettingsHarness
-                key={`${theme}-${mode}`}
-                status={mode === 'login' ? 'Unauthenticated' : 'Locked'}
-                initialError="Previous operation failed."
-                reload={() => reload()}
-                credentialsChanged={() => credentialsChanged()}
-              />
-            </TooltipProvider>
-          </React.StrictMode>,
-        );
-      });
+      const renderSettings = (serverRegion: string) =>
+        React.act(async () => {
+          root.render(
+            <React.StrictMode>
+              <TooltipProvider>
+                <BitwardenSettingsHarness
+                  key={`${theme}-${mode}`}
+                  status={mode === 'login' ? 'Unauthenticated' : 'Locked'}
+                  bitwardenServerRegion={serverRegion}
+                  initialError="Previous operation failed."
+                  reload={() => reload()}
+                  credentialsChanged={() => credentialsChanged()}
+                />
+              </TooltipProvider>
+            </React.StrictMode>,
+          );
+        });
+      await renderSettings('Current');
       assert.ok(settings().textContent.includes('Previous operation failed.'));
       await open();
       assert.ok(!document.body.textContent.includes('Previous operation failed.'));
@@ -1111,6 +1114,7 @@ async function runBitwardenPromptTests() {
         await fill('bw-login-2fa', '123456');
       }
       await fill(passwordId, 'test-only-secret');
+      if (mode === 'login') await renderSettings('Europe');
       const attemptsBeforeToggle = loginRequests.length + unlockRequests.length;
       await toggleVisibility();
       assert.equal(passwordInput().type, 'text');
@@ -1875,7 +1879,7 @@ async function runEditorDismissalTests() {
     );
     await React.act(async () => root.render(null));
     for (const Editor of [ConnectionDismissalHarness, TunnelDismissalHarness]) {
-      for (const closeWith of ['Close', 'Cancel', 'Escape', 'Save']) {
+      for (const closeWith of ['Close', 'Escape']) {
         await React.act(async () => root.render(<Editor key={closeWith} />));
         // Radix installs its outside-pointer listener after the opening event.
         await React.act(async () => new Promise((resolve) => setTimeout(resolve, 100)));

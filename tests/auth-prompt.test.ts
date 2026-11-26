@@ -38,19 +38,14 @@ test('authentication prompts and window-close controls work in Chromium', async 
       const contentEnd = source.indexOf('<DialogHeader>', contentStart);
       assert.ok(anchor >= 0 && contentStart > anchor && contentEnd > contentStart);
       return `
-        function ${name}() {
+        function ${name}({ onCloseAutoFocus }) {
           const [open, setOpen] = React.useState(true);
           const busy = false;
-          const onCloseAutoFocus = undefined;
           return <Dialog open={open} onOpenChange={setOpen}>
             ${source.slice(contentStart, contentEnd)}
               <DialogTitle>Editor draft</DialogTitle>
               <DialogDescription>Draft persistence regression</DialogDescription>
-              <form onSubmit={event => { event.preventDefault(); setOpen(false); }}>
-                <input aria-label="Draft name" defaultValue="" />
-                <button type="button" onClick={() => setOpen(false)}>Cancel</button>
-                <button type="submit">Save</button>
-              </form>
+              <input aria-label="Draft name" defaultValue="" />
             </DialogContent>
           </Dialog>;
         }
@@ -188,10 +183,9 @@ test('authentication prompts and window-close controls work in Chromium', async 
       return { BitwardenCliDialog, BitwardenAccessPrompt, TooltipProvider, RuntimeCredentialPasswordInput };
     })();
     ${slice('function backendErrorMessage', 'function formatLocalDateTime')}
-    function BitwardenSettingsHarness({ status, initialError, reload, credentialsChanged }) {
+    function BitwardenSettingsHarness({ status, initialError, reload, credentialsChanged, bitwardenServerRegion = 'Current' }) {
       const bitwardenCliStatus = { status };
       const bitwardenEnabled = true;
-      const bitwardenServerRegion = 'Current';
       const currentBitwardenServerRegion = 'US';
       const [bitwardenBusy, setBitwardenBusy] = useState(false);
       const [bitwardenError, setBitwardenError] = useState(initialError);

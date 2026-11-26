@@ -5,6 +5,7 @@ import { runInNewContext } from 'node:vm';
 import test from 'node:test';
 import * as React from 'react';
 import { transformWithOxc } from 'vite';
+import { canOpenRdpSystemClient } from '../src/session-lifecycle.ts';
 import { SftpConnectionIcon } from '../src/components/SftpConnectionIcon.ts';
 import {
   applySessionMcpAccess,
@@ -127,7 +128,7 @@ test('shared pane tabs render MCP presentation and new connections discard old g
   assert.match(app, /nodeId: editingId,\s+backendSessionId,\s+mcpAccessible: false/);
 });
 
-test('the tab menu disconnects the AI agent only for a live approved SSH session', async () => {
+test('the tab menu offers AI disconnect for approved SSH sessions and system launch for supported RDP sessions', async () => {
   const app = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
   const source = app.slice(
     app.indexOf('function SessionTabContextMenu('),
@@ -141,7 +142,7 @@ test('the tab menu disconnects the AI agent only for a live approved SSH session
     React,
     canDisconnectSessionAiAgent,
     canDisconnectRemoteDesktopSession: () => false,
-    canOpenRdpSystemClient: () => false,
+    canOpenRdpSystemClient,
     SftpConnectionIcon,
     ...Object.fromEntries(
       [
@@ -201,6 +202,20 @@ test('the tab menu disconnects the AI agent only for a live approved SSH session
     action?.props.onSelect?.();
   }
   assert.equal(disconnections, 1);
+
+  let systemStarts = 0;
+  for (const supported of [false, true]) {
+    const tree = menu({
+      session: { protocol: 'rdp', rdpStatus: 'connected', rdpSystemClientSupported: supported },
+      onOpenSystemRdp: () => systemStarts++,
+    });
+    const open = items(tree).find((item) =>
+      React.Children.toArray(item.props.children).includes('Open in System Remote Desktop'),
+    );
+    assert.equal(Boolean(open), supported);
+    open?.props.onSelect?.();
+  }
+  assert.equal(systemStarts, 1);
 });
 
 test('AI disconnect targets the current backend session and waits for authoritative access events', async () => {

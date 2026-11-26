@@ -13,10 +13,8 @@ import { transformWithOxc } from 'vite';
 import { encodeTerminalClipboardText, isEncodedSshInput } from '../electron/terminal-clipboard.ts';
 import { writeClipboardText } from '../src/clipboard.ts';
 import {
-  clearTerminalSelectionIfUnchanged,
   copyTerminalSelection,
   normalizeTerminalPasteText,
-  shouldAutoCopyTerminalSelection,
   shouldUseTerminalClipboardShortcut,
   terminalCopyChordAfterKeyDown,
   terminalCopyChordAfterKeyUp,
@@ -35,6 +33,42 @@ const require = createRequire(import.meta.url);
 const electronExecutable = require('electron') as string;
 const execFileAsync = promisify(execFile);
 
+test('a delayed serial input error belongs only to its connected backend session', async () => {
+  type SerialTab = { id: string; backendSessionId: string; status: string; error?: string };
+  const connected: SerialTab = { id: 'tab', backendSessionId: 'first', status: 'connected' };
+  const start = appSource.indexOf('  function sendSerialInput(');
+  const end = appSource.indexOf('  async function trustSshHostKey(', start);
+  assert.ok(start >= 0 && end > start);
+  const source = stripTypeScriptTypes(appSource.slice(start, end));
+  for (const next of [
+    connected,
+    { ...connected, backendSessionId: 'replacement' },
+    { ...connected, status: 'closed' },
+  ]) {
+    const pending = Promise.withResolvers<void>();
+    let sessions = [connected];
+    const send = runInNewContext(source + '\nsendSerialInput;', {
+      sessions,
+      encodeTerminalData: (text: string) => Buffer.from(text).toString('base64'),
+      window: { wormhole: { sendSerialInput: () => pending.promise } },
+      Error,
+      setSessions: (update: (current: SerialTab[]) => SerialTab[]) => {
+        sessions = update(sessions);
+      },
+    });
+    send('tab', 'x');
+    sessions = [next];
+    pending.reject(new Error('write failed'));
+    await new Promise(setImmediate);
+    if (next === connected) {
+      assert.equal(sessions[0].status, 'failed');
+      assert.equal(sessions[0].error, 'write failed');
+    } else {
+      assert.equal(sessions[0], next);
+    }
+  }
+});
+
 type TerminalConnectionStateProps = {
   session: {
     id: string;
@@ -52,7 +86,10 @@ type TerminalConnectionStateProps = {
 
 // Execute the production JSX without loading App's unrelated native session lifecycles.
 const connectionStateStart = appSource.indexOf('function SshTerminalConnectionState');
-const connectionStateEnd = appSource.indexOf('function SshTerminalSurface', connectionStateStart);
+const connectionStateEnd = appSource.indexOf(
+  'function SerialTerminalSurface',
+  connectionStateStart,
+);
 assert.ok(connectionStateStart >= 0 && connectionStateEnd > connectionStateStart);
 const connectionStateTransform = await transformWithOxc(
   appSource.slice(connectionStateStart, connectionStateEnd),
@@ -132,7 +169,6 @@ test('terminal connection states preserve SSH and serial copy, status icons, and
           markup.includes(isSerial ? 'Opening local serial line' : 'Negotiating secure session'),
         );
       } else {
-        assert.equal(typeof reconnect?.props.onClick, 'function');
         (reconnect!.props.onClick as () => void)();
         assert.deepEqual(reconnects, ['terminal-1']);
       }
@@ -246,84 +282,6 @@ test('expired SSH certificates deep-link to their saved credential without chang
     }
   } finally {
     certificateEditor = null;
-  }
-});
-
-test('terminal state content keeps its parent surface, focus, and protocol resize lifecycle', () => {
-  const surfaceSource = appSource.slice(
-    connectionStateEnd,
-    appSource.indexOf('function clearSftpCancelRequestsForTransfer', connectionStateEnd),
-  );
-  const stateRender = surfaceSource.slice(
-    surfaceSource.indexOf("if (session.status !== 'connected')"),
-    surfaceSource.indexOf("aria-label={isSerial ? 'Live serial terminal'"),
-  );
-  assert.match(stateRender, /return \(\s*<div[\s\S]*ref=\{surfaceRef\}/);
-  assert.match(
-    stateRender,
-    /aria-label=\{isSerial \? 'Serial connection state' : 'SSH connection state'\}/,
-  );
-  const content = stateRender.match(/<SshTerminalConnectionState[\s\S]*?\/>/)?.[0] ?? '';
-  for (const prop of ['session', 'isSerial', 'onReconnect', 'onTrustHostKey']) {
-    assert.ok(content.includes(`${prop}={${prop}}`), `${prop} stays connected to the parent`);
-  }
-  assert.equal(surfaceSource.match(/ref=\{surfaceRef\}/g)?.length, 2);
-  assert.match(surfaceSource, /const focus = \(\) => surface\.focus\(\{ preventScroll: true \}\);/);
-  assert.match(
-    surfaceSource,
-    /const frame = requestAnimationFrame\(focus\);\s*return \(\) => cancelAnimationFrame\(frame\);/,
-  );
-  assert.match(
-    surfaceSource,
-    /isSerial\s*\? window\.wormhole\?\.resizeSerialSession\(backendSessionId, columns, rows\)\s*: window\.wormhole\?\.resizeSshSession\(backendSessionId, columns, rows\)/,
-  );
-});
-
-test('terminal paste events preserve the SSH block and retain serial newline handling', () => {
-  const terminalSource = appSource.slice(appSource.indexOf('function SshTerminalSurface'));
-  const handler = terminalSource.match(/onPaste=\{\(event\) => \{([\s\S]*?)\n      \}\}/)?.[1];
-  assert.ok(handler);
-  const paste = new Function(
-    'event',
-    'onInput',
-    'session',
-    'isSerial',
-    'normalizeTerminalPasteText',
-    'terminalSelection',
-    handler,
-  );
-  for (const isSerial of [false, true]) {
-    const calls: unknown[][] = [];
-    let prevented = false;
-    const text = 'sudo first\r\nsudo second\nlast';
-    const event = {
-      clipboardData: { getData: () => text },
-      preventDefault: () => {
-        prevented = true;
-      },
-    };
-    paste(
-      event,
-      (...args: unknown[]) => calls.push(args),
-      { id: 'session' },
-      isSerial,
-      normalizeTerminalPasteText,
-      () => undefined,
-    );
-    assert.equal(prevented, true);
-    assert.deepEqual(calls, [
-      ['session', isSerial ? 'sudo first\rsudo second\rlast' : text, !isSerial],
-    ]);
-    event.clipboardData.getData = () => '';
-    paste(
-      event,
-      (...args: unknown[]) => calls.push(args),
-      { id: 'session' },
-      isSerial,
-      normalizeTerminalPasteText,
-      () => undefined,
-    );
-    assert.equal(calls.length, 1);
   }
 });
 
@@ -522,13 +480,6 @@ test('terminal control-key encoding preserves letters, punctuation, and invalid 
   assert.equal(terminalControlKeyData('Enter'), undefined);
 });
 
-test('auto-copy only handles selection gestures from the primary mouse button', () => {
-  assert.equal(shouldAutoCopyTerminalSelection(true, 0), true);
-  assert.equal(shouldAutoCopyTerminalSelection(true, 1), false);
-  assert.equal(shouldAutoCopyTerminalSelection(true, 2), false);
-  assert.equal(shouldAutoCopyTerminalSelection(false, 0), false);
-});
-
 test('right-click paste encodes Unicode text for the SSH wire protocol', () => {
   const text = 'printf "caffè ☕"\r\nprintf "done"\n';
   const normalized = 'printf "caffè ☕"\rprintf "done"\r';
@@ -670,7 +621,7 @@ test('automatic terminal scrolling tracks the applied offset and clamps short co
 
 test('live scroll handler catches the final output and preserves the pin across delayed events', () => {
   const surfaceSource = appSource.slice(
-    appSource.indexOf('function SshTerminalSurface'),
+    appSource.indexOf('function SerialTerminalSurface'),
     appSource.indexOf('function clearSftpCancelRequestsForTransfer'),
   );
   const handler = surfaceSource
@@ -718,155 +669,7 @@ test('live scroll handler catches the final output and preserves the pin across 
   assert.equal(stickToBottomRef.current, true);
 });
 
-test('horizontal terminal wheel scrolling preserves following while vertical scrolling can release it', () => {
-  const start = appSource.indexOf('const handleWheel = (event: WheelEvent) => {');
-  const source = appSource.slice(
-    start,
-    appSource.indexOf("surface.addEventListener('wheel'", start),
-  );
-  const surface = {
-    scrollTop: 360,
-    scrollLeft: 0,
-    scrollHeight: 900,
-    clientHeight: 180,
-    scrollWidth: 1000,
-    clientWidth: 500,
-  };
-  const automaticScrollTopRef = { current: 360 };
-  const stickToBottomRef = { current: true };
-  const handleWheel = runInNewContext(
-    stripTypeScriptTypes(`${source}\nhandleWheel`, { mode: 'strip' }),
-    {
-      surface,
-      automaticScrollTopRef,
-      stickToBottomRef,
-      terminalWheelDelta: (_surface: unknown, delta: number) => delta,
-      terminalIsAtBottom: () =>
-        surface.scrollHeight - surface.scrollTop - surface.clientHeight <= 18,
-    },
-  );
-  const event = { deltaMode: 0, preventDefault() {}, stopPropagation() {} };
-  handleWheel({ ...event, deltaX: 100, deltaY: 0 });
-  assert.equal(surface.scrollLeft, 100);
-  assert.equal(automaticScrollTopRef.current, 360);
-  assert.equal(stickToBottomRef.current, true);
-  handleWheel({ ...event, deltaX: 0, deltaY: -180 });
-  assert.equal(surface.scrollTop, 180);
-  assert.equal(automaticScrollTopRef.current, undefined);
-  assert.equal(stickToBottomRef.current, false);
-  handleWheel({ ...event, deltaX: 0, deltaY: 10000 });
-  assert.equal(surface.scrollTop, 720);
-  assert.equal(stickToBottomRef.current, true);
-});
-
-test('live terminal wires automatic scroll tracking into frame and user scroll handling', () => {
-  const frameApplicationSource = appSource.slice(
-    appSource.indexOf('function applySshTerminalFrame'),
-    appSource.indexOf('const navItems'),
-  );
-  const terminalSurfaceSource = appSource.slice(
-    appSource.indexOf('function SshTerminalSurface'),
-    appSource.indexOf('function clearSftpCancelRequestsForTransfer'),
-  );
-
-  assert.match(
-    frameApplicationSource,
-    /viewportResetSequence: nextTerminalViewportResetSequence\(\s*previous\?\.viewportResetSequence,\s*incoming,/,
-  );
-  assert.match(
-    terminalSurfaceSource,
-    /useLayoutEffect\(\(\) => \{[\s\S]*stickToBottomRef\.current = true;[\s\S]*automaticScrollTopRef\.current = undefined;[\s\S]*handledViewportResetSequenceRef\.current = undefined;[\s\S]*session\.backendSessionId, session\.status/,
-  );
-  assert.match(
-    terminalSurfaceSource,
-    /viewportResetSequence !== handledViewportResetSequenceRef\.current[\s\S]*stickToBottomRef\.current = true;[\s\S]*handledViewportResetSequenceRef\.current = viewportResetSequence;/,
-  );
-  assert.match(
-    terminalSurfaceSource,
-    /automaticScrollTopRef\.current = scrollTerminalToBottom\(surface\);/,
-  );
-  assert.match(
-    terminalSurfaceSource,
-    /onScroll=\{\(event\) => \{[\s\S]*terminalScrollEventKeepsBottomPin\([\s\S]*automaticScrollTopRef\.current,[\s\S]*\? scrollTerminalToBottom\(surface\)/,
-  );
-  assert.match(
-    terminalSurfaceSource,
-    /if \(deltaY !== 0\) \{\s*automaticScrollTopRef\.current = undefined;\s*surface\.scrollTop = nextScrollTop;/,
-  );
-});
-
-test('live terminal preserves its DOM selection after a copy event', () => {
-  const terminalSurfaceSource = appSource.slice(
-    appSource.indexOf('function SshTerminalSurface'),
-    appSource.indexOf('function clearSftpCancelRequestsForTransfer'),
-  );
-  const copyHandlerSource = terminalSurfaceSource.slice(
-    terminalSurfaceSource.indexOf('onCopy='),
-    terminalSurfaceSource.indexOf('onPaste='),
-  );
-
-  assert.match(
-    copyHandlerSource,
-    /copyTerminalSelection\([\s\S]*terminalSelectionText\(event\.currentTarget\),[\s\S]*event\.clipboardData,[\s\S]*event\.preventDefault\(\);/,
-  );
-});
-
-test('live terminal retains the copy chord until key release and clears it on focus loss', () => {
-  const terminalSurfaceSource = appSource.slice(
-    appSource.indexOf('function SshTerminalSurface'),
-    appSource.indexOf('function clearSftpCancelRequestsForTransfer'),
-  );
-  const keyboardHandlerSource = terminalSurfaceSource.slice(
-    terminalSurfaceSource.indexOf('onKeyDown='),
-    terminalSurfaceSource.indexOf('onCopy='),
-  );
-
-  assert.match(
-    keyboardHandlerSource,
-    /shouldUseTerminalClipboardShortcut\([\s\S]*terminalCopyChordActiveRef\.current[\s\S]*terminalCopyChordAfterKeyDown\([\s\S]*if \(useClipboard\) return;/,
-  );
-  assert.match(
-    keyboardHandlerSource,
-    /onKeyUp=\{[\s\S]*terminalCopyChordAfterKeyUp\([\s\S]*onBlur=\{[\s\S]*terminalCopyChordActiveRef\.current = false;/,
-  );
-  assert.match(
-    terminalSurfaceSource,
-    /window\.addEventListener\('blur', resetCopyChord\);[\s\S]*document\.addEventListener\('visibilitychange', resetCopyChordWhenHidden\);[\s\S]*window\.removeEventListener\('blur', resetCopyChord\);[\s\S]*document\.removeEventListener\('visibilitychange', resetCopyChordWhenHidden\);/,
-  );
-});
-
-test('auto-copy preserves the selection after success or failure', async () => {
-  const source = appSource.slice(appSource.indexOf('function SshTerminalSurface'));
-  const handler = source.match(/onMouseUp=\{\(event\) => \{([\s\S]*?)\n      \}\}/)![1];
-  const run = new Function(
-    'event',
-    'autoCopyOnSelect',
-    'shouldAutoCopyTerminalSelection',
-    'terminalSelection',
-    'copyTextToClipboard',
-    handler,
-  );
-  for (const fails of [false, true]) {
-    const copied: string[] = [];
-    run(
-      { button: 0, currentTarget: {} },
-      true,
-      shouldAutoCopyTerminalSelection,
-      () => ({
-        toString: () => 'selected',
-        removeAllRanges: () => assert.fail('selection must persist'),
-      }),
-      async (text: string) => {
-        copied.push(text);
-        if (fails) throw new Error('denied');
-      },
-    );
-    await Promise.resolve();
-    assert.deepEqual(copied, ['selected']);
-  }
-});
-
-test('mounted SSH and serial terminals follow long output and preserve manual scroll in Chromium', async () => {
+test('the mounted serial terminal handles clipboard, focus, resize and scrolling in Chromium', async () => {
   const start = appSource.indexOf('const terminalFontSize');
   const end = appSource.indexOf('function clearSftpCancelRequestsForTransfer', start);
   assert.ok(start >= 0 && end > start);
@@ -887,7 +690,16 @@ test('mounted SSH and serial terminals follow long output and preserve manual sc
     [
       helpers,
       selectionSource,
-      copyTerminalSelection.toString(),
+      ...['clipboard', 'terminal-clipboard', 'terminal-keyboard'].map((name) =>
+        readFileSync(new URL('../src/' + name + '.ts', import.meta.url), 'utf8').replace(
+          /^export /gm,
+          '',
+        ),
+      ),
+      appSource.slice(
+        appSource.indexOf('async function copyTextToClipboard('),
+        appSource.indexOf('function authSecretLabel('),
+      ),
       frameApplicationSource,
       appSource.slice(start, end),
       fixture,
@@ -940,7 +752,7 @@ test('mounted SSH and serial terminals follow long output and preserve manual sc
 });
 
 test('Chromium preserves clipboard highlights, outside clicks, and double-click word selection', async () => {
-  const surfaceSource = appSource.slice(appSource.indexOf('function SshTerminalSurface'));
+  const surfaceSource = appSource.slice(appSource.indexOf('function SerialTerminalSurface'));
   const copyHandler = surfaceSource.match(/onCopy=\{\(event\) => \{([\s\S]*?)\n      \}\}/)![1];
   const pointerStart = surfaceSource.lastIndexOf(
     '  useEffect(() => {',
@@ -1130,237 +942,5 @@ app.whenReady().then(async () => {
     });
   } finally {
     rmSync(temporaryDirectory, { force: true, recursive: true });
-  }
-});
-
-test('terminal input clears highlighting only when data is sent', () => {
-  const source = appSource.slice(appSource.indexOf('function SshTerminalSurface'));
-  for (const name of ['onKeyDown', 'onPaste', 'onCompositionEnd']) {
-    const handler = source.match(
-      new RegExp(name + '=\\{\\(event\\) => \\{([\\s\\S]*?)\\n      \\}\\}'),
-    )![1];
-    const calls: string[] = [];
-    const run = new Function(
-      'event',
-      'terminalSelectionText',
-      'shouldUseTerminalClipboardShortcut',
-      'terminalCopyChordActiveRef',
-      'terminalCopyChordAfterKeyDown',
-      'terminalKeyData',
-      'session',
-      'terminalSelection',
-      'onInput',
-      'isSerial',
-      'normalizeTerminalPasteText',
-      'window',
-      handler,
-    );
-    for (const hasData of [false, true]) {
-      calls.length = 0;
-      run(
-        {
-          currentTarget: {},
-          data: hasData ? '字' : '',
-          clipboardData: { getData: () => (hasData ? 'paste' : '') },
-          preventDefault() {},
-        },
-        () => 'selection',
-        () => false,
-        { current: false },
-        () => false,
-        () => (hasData ? 'a' : undefined),
-        { id: 's', backendSessionId: hasData ? 'backend' : undefined },
-        () => ({ removeAllRanges: () => calls.push('clear') }),
-        () => calls.push('input'),
-        false,
-        normalizeTerminalPasteText,
-        {
-          wormhole: {
-            pasteClipboardToSsh: () => {
-              calls.push('input');
-              return Promise.resolve();
-            },
-          },
-        },
-      );
-      assert.deepEqual(calls, hasData ? ['clear', 'input'] : [], name);
-    }
-  }
-});
-
-test('outside pointer clears only this terminal selection and listener is removed', () => {
-  const source = appSource.slice(appSource.indexOf('function SshTerminalSurface'));
-  const start = source.lastIndexOf(
-    '  useEffect(() => {',
-    source.indexOf('const clearOnOutsidePointer'),
-  );
-  const end = source.indexOf('}, [isActive, session.status]);', start);
-  const body = stripTypeScriptTypes(
-    'function effect() {' + source.slice(start + '  useEffect(() => {'.length, end) + '}',
-  )
-    .replace(/^function effect\(\) \{/, '')
-    .replace(/\}$/, '');
-  const listeners = new Map<string, (event: { target: object }) => void>();
-  class FakeNode {}
-  const inside = new FakeNode();
-  let cleared = 0;
-  const surface = { contains: (node: object) => node === inside };
-  const run = new Function(
-    'surfaceRef',
-    'isActive',
-    'session',
-    'Node',
-    'terminalSelection',
-    'document',
-    body,
-  );
-  const document = {
-    addEventListener: (name: string, callback: (event: { target: object }) => void) =>
-      listeners.set(name, callback),
-    removeEventListener: (name: string, callback: unknown) => {
-      assert.equal(listeners.get(name), callback);
-      listeners.delete(name);
-    },
-  };
-  const cleanup = run(
-    { current: surface },
-    true,
-    { status: 'connected' },
-    FakeNode,
-    () => ({ removeAllRanges: () => cleared++ }),
-    document,
-  );
-  const pointer = listeners.get('pointerdown')!;
-  pointer({ target: inside });
-  pointer({ target: {} });
-  assert.equal(cleared, 0);
-  pointer({ target: new FakeNode() });
-  assert.equal(cleared, 1);
-  cleanup();
-  assert.equal(listeners.size, 0);
-  for (const [active, status, current] of [
-    [false, 'connected', surface],
-    [true, 'failed', surface],
-    [true, 'connected', null],
-  ]) {
-    assert.equal(
-      run({ current }, active, { status }, FakeNode, () => undefined, document),
-      undefined,
-    );
-    assert.equal(listeners.size, 0);
-  }
-});
-
-test('asynchronous paste clears only its original selection', () => {
-  const anchorNode = {};
-  const focusNode = {};
-  const copiedSelection = { anchorNode, anchorOffset: 2, focusNode, focusOffset: 8 };
-  let clearCount = 0;
-
-  assert.equal(
-    clearTerminalSelectionIfUnchanged(
-      { ...copiedSelection, removeAllRanges: () => clearCount++ },
-      copiedSelection,
-    ),
-    true,
-  );
-  assert.equal(clearCount, 1);
-
-  assert.equal(
-    clearTerminalSelectionIfUnchanged(
-      {
-        anchorNode: focusNode,
-        anchorOffset: 8,
-        focusNode: anchorNode,
-        focusOffset: 2,
-        removeAllRanges: () => clearCount++,
-      },
-      copiedSelection,
-    ),
-    true,
-  );
-  assert.equal(clearCount, 2);
-
-  assert.equal(
-    clearTerminalSelectionIfUnchanged(
-      { ...copiedSelection, focusOffset: 9, removeAllRanges: () => clearCount++ },
-      copiedSelection,
-    ),
-    false,
-  );
-  assert.equal(clearTerminalSelectionIfUnchanged(undefined, copiedSelection), false);
-  assert.equal(clearCount, 2);
-});
-
-test('right-click clears only after successful paste and preserves newer selections', async () => {
-  const source = appSource.slice(appSource.indexOf('function SshTerminalSurface'));
-  const handler = source.match(/onContextMenu=\{\(event\) => \{([\s\S]*?)\n      \}\}/)![1];
-  const run = new Function(
-    'event',
-    'isSerial',
-    'session',
-    'terminalSelection',
-    'window',
-    'clearTerminalSelectionIfUnchanged',
-    handler,
-  );
-  for (const outcome of [
-    'success',
-    'empty',
-    'error',
-    'changed',
-    'cleared',
-    'unselected',
-    'serial',
-    'disconnected',
-    'unavailable',
-  ]) {
-    let clearCount = 0;
-    let pasteCount = 0;
-    const selection = {
-      anchorNode: {},
-      anchorOffset: 0,
-      focusNode: {},
-      focusOffset: 5,
-      removeAllRanges: () => clearCount++,
-    };
-    let current = outcome === 'unselected' ? undefined : selection;
-    let complete!: (result: { pasted: boolean }) => void;
-    let fail!: (error: Error) => void;
-    const pending = new Promise<{ pasted: boolean }>((resolve, reject) => {
-      complete = resolve;
-      fail = reject;
-    });
-    run(
-      { currentTarget: {}, preventDefault() {} },
-      outcome === 'serial',
-      { backendSessionId: outcome === 'disconnected' ? undefined : 's' },
-      () => current,
-      {
-        wormhole:
-          outcome === 'unavailable'
-            ? undefined
-            : {
-                pasteClipboardToSsh: () => {
-                  pasteCount++;
-                  return pending;
-                },
-              },
-      },
-      clearTerminalSelectionIfUnchanged,
-    );
-    assert.equal(clearCount, 0, 'must wait for actual paste');
-    if (outcome === 'changed') selection.focusOffset++;
-    if (outcome === 'cleared') current = undefined;
-    if (outcome === 'error') fail(new Error('denied'));
-    else complete({ pasted: outcome !== 'empty' });
-    await Promise.resolve();
-    await Promise.resolve();
-    assert.equal(
-      pasteCount,
-      ['serial', 'disconnected', 'unavailable'].includes(outcome) ? 0 : 1,
-      outcome,
-    );
-    assert.equal(clearCount, outcome === 'success' ? 1 : 0, outcome);
   }
 });

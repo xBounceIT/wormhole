@@ -10,7 +10,7 @@ import (
 func TestSummarizeIPPacketIPv4TCPSYN(t *testing.T) {
 	pkt := ipv4TCPPacket([4]byte{192, 0, 2, 6}, [4]byte{198, 51, 100, 50}, 49152, 22, tcpFlagSyn)
 
-	got := summarizeIPPacket(pkt)
+	got := parsePacketSummary(pkt).text
 
 	assertSummaryContains(t, got, "IPv4 TCP")
 	assertSummaryContains(t, got, "192.0.2.6:49152 -> 198.51.100.50:22")
@@ -20,7 +20,7 @@ func TestSummarizeIPPacketIPv4TCPSYN(t *testing.T) {
 func TestSummarizeIPPacketIPv4TCPSYNACK(t *testing.T) {
 	pkt := ipv4TCPPacket([4]byte{198, 51, 100, 50}, [4]byte{192, 0, 2, 6}, 22, 49152, tcpFlagSyn|tcpFlagAck)
 
-	got := summarizeIPPacket(pkt)
+	got := parsePacketSummary(pkt).text
 
 	assertSummaryContains(t, got, "IPv4 TCP")
 	assertSummaryContains(t, got, "198.51.100.50:22 -> 192.0.2.6:49152")
@@ -30,7 +30,7 @@ func TestSummarizeIPPacketIPv4TCPSYNACK(t *testing.T) {
 func TestSummarizeIPPacketIPv4TCPRST(t *testing.T) {
 	pkt := ipv4TCPPacket([4]byte{198, 51, 100, 50}, [4]byte{192, 0, 2, 6}, 22, 49152, tcpFlagRst|tcpFlagAck)
 
-	got := summarizeIPPacket(pkt)
+	got := parsePacketSummary(pkt).text
 
 	assertSummaryContains(t, got, "IPv4 TCP")
 	assertSummaryContains(t, got, "flags=ACK,RST")
@@ -39,7 +39,7 @@ func TestSummarizeIPPacketIPv4TCPRST(t *testing.T) {
 func TestSummarizeIPPacketIPv4ICMPUnreachable(t *testing.T) {
 	pkt := ipv4ICMPPacket([4]byte{198, 51, 100, 1}, [4]byte{192, 0, 2, 6}, 3, 1)
 
-	got := summarizeIPPacket(pkt)
+	got := parsePacketSummary(pkt).text
 
 	assertSummaryContains(t, got, "IPv4 ICMP")
 	assertSummaryContains(t, got, "198.51.100.1 -> 192.0.2.6")
@@ -145,33 +145,33 @@ func TestPacketSummaryMalformedAndUnknownPackets(t *testing.T) {
 		{packet: []byte{0x60}, want: "IPv6 malformed"},
 	}
 	for _, test := range tests {
-		assertSummaryContains(t, summarizeIPPacket(test.packet), test.want)
+		assertSummaryContains(t, parsePacketSummary(test.packet).text, test.want)
 	}
 }
 
 func TestPacketSummaryIPv4Protocols(t *testing.T) {
 	src := [4]byte{192, 0, 2, 1}
 	dst := [4]byte{198, 51, 100, 2}
-	assertSummaryContains(t, summarizeIPPacket(ipv4UDPPacket(src, dst, 5353, 53)), "UDP 192.0.2.1:5353 -> 198.51.100.2:53")
+	assertSummaryContains(t, parsePacketSummary(ipv4UDPPacket(src, dst, 5353, 53)).text, "UDP 192.0.2.1:5353 -> 198.51.100.2:53")
 
 	malformedUDP := make([]byte, 24)
 	malformedUDP[0] = 0x45
 	malformedUDP[9] = 17
 	copy(malformedUDP[12:16], src[:])
 	copy(malformedUDP[16:20], dst[:])
-	assertSummaryContains(t, summarizeIPPacket(malformedUDP), "UDP malformed")
+	assertSummaryContains(t, parsePacketSummary(malformedUDP).text, "UDP malformed")
 
 	malformedTCP := append([]byte(nil), malformedUDP...)
 	malformedTCP[9] = 6
-	assertSummaryContains(t, summarizeIPPacket(malformedTCP), "TCP malformed")
+	assertSummaryContains(t, parsePacketSummary(malformedTCP).text, "TCP malformed")
 
 	malformedICMP := append([]byte(nil), malformedUDP[:21]...)
 	malformedICMP[9] = 1
-	assertSummaryContains(t, summarizeIPPacket(malformedICMP), "ICMP malformed")
+	assertSummaryContains(t, parsePacketSummary(malformedICMP).text, "ICMP malformed")
 
 	unknown := append([]byte(nil), malformedUDP...)
 	unknown[9] = 99
-	assertSummaryContains(t, summarizeIPPacket(unknown), "proto=99")
+	assertSummaryContains(t, parsePacketSummary(unknown).text, "proto=99")
 }
 
 func TestPacketSummaryIPv6Protocols(t *testing.T) {
@@ -181,26 +181,26 @@ func TestPacketSummaryIPv6Protocols(t *testing.T) {
 	binary.BigEndian.PutUint16(tcp[0:2], 1234)
 	binary.BigEndian.PutUint16(tcp[2:4], 443)
 	tcp[13] = tcpFlagSyn | tcpFlagAck
-	assertSummaryContains(t, summarizeIPPacket(ipv6Packet(src, dst, 6, tcp)), "IPv6 TCP [2001:db8::1]:1234 -> [2001:db8::2]:443")
+	assertSummaryContains(t, parsePacketSummary(ipv6Packet(src, dst, 6, tcp)).text, "IPv6 TCP [2001:db8::1]:1234 -> [2001:db8::2]:443")
 
 	udp := make([]byte, 8)
 	binary.BigEndian.PutUint16(udp[0:2], 5353)
 	binary.BigEndian.PutUint16(udp[2:4], 53)
-	assertSummaryContains(t, summarizeIPPacket(ipv6Packet(src, dst, 17, udp)), "IPv6 UDP")
-	assertSummaryContains(t, summarizeIPPacket(ipv6Packet(src, dst, 58, []byte{1, 4})), "ICMPv6")
-	assertSummaryContains(t, summarizeIPPacket(ipv6Packet(src, dst, 99, nil)), "next=99")
+	assertSummaryContains(t, parsePacketSummary(ipv6Packet(src, dst, 17, udp)).text, "IPv6 UDP")
+	assertSummaryContains(t, parsePacketSummary(ipv6Packet(src, dst, 58, []byte{1, 4})).text, "ICMPv6")
+	assertSummaryContains(t, parsePacketSummary(ipv6Packet(src, dst, 99, nil)).text, "next=99")
 }
 
 func TestPacketSummaryNormalizesHeaderLengths(t *testing.T) {
 	pkt := ipv4TCPPacket([4]byte{1, 1, 1, 1}, [4]byte{2, 2, 2, 2}, 10, 20, 0)
 	binary.BigEndian.PutUint16(pkt[2:4], 10)
-	assertSummaryContains(t, summarizeIPPacket(pkt), "flags=none")
+	assertSummaryContains(t, parsePacketSummary(pkt).text, "flags=none")
 	binary.BigEndian.PutUint16(pkt[2:4], 500)
-	assertSummaryContains(t, summarizeIPPacket(pkt), "IPv4 TCP")
+	assertSummaryContains(t, parsePacketSummary(pkt).text, "IPv4 TCP")
 
 	v6 := ipv6Packet(netip.MustParseAddr("::1").As16(), netip.MustParseAddr("::2").As16(), 17, make([]byte, 8))
 	binary.BigEndian.PutUint16(v6[4:6], 500)
-	assertSummaryContains(t, summarizeIPPacket(v6), "IPv6 UDP")
+	assertSummaryContains(t, parsePacketSummary(v6).text, "IPv6 UDP")
 }
 
 func TestTCPFlagStringIncludesEveryFlag(t *testing.T) {

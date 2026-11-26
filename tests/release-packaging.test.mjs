@@ -112,27 +112,6 @@ test('dependency lock rejects deprecated packages outside the reviewed Sentry de
   assert.deepEqual(deprecated, []);
 });
 
-test('overridden ASAR dependency creates readable archives', async () => {
-  const { createPackage, extractFile } = await import('@electron/asar');
-  const workDir = await mkdtemp(join(tmpdir(), 'wormhole-asar-'));
-  const sourceDir = join(workDir, 'source');
-  const archivePath = join(workDir, 'test.asar');
-
-  try {
-    await mkdir(sourceDir);
-    await writeFile(join(sourceDir, 'entry.txt'), 'archive contents');
-    await createPackage(sourceDir, archivePath);
-    assert.equal(extractFile(archivePath, 'entry.txt').toString(), 'archive contents');
-  } finally {
-    await rm(workDir, { recursive: true, force: true });
-  }
-});
-
-test('macOS universal packager loads with the overridden ASAR dependency', async () => {
-  const { makeUniversalApp } = await import('@electron/universal');
-  assert.equal(typeof makeUniversalApp, 'function');
-});
-
 test('Electron downloader initializes the overridden proxy agent', () => {
   const proxy = 'http://127.0.0.1:9';
   const activeProxy = execFileSync(

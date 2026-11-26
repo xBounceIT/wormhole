@@ -3,12 +3,20 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"net/netip"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"golang.org/x/net/dns/dnsmessage"
+	"gvisor.dev/gvisor/pkg/tcpip"
+	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
+	"gvisor.dev/gvisor/pkg/tcpip/link/loopback"
+	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
+	"gvisor.dev/gvisor/pkg/tcpip/stack"
+	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 )
 
 func TestResolveHostV4_NoDnsFailsClosedForHostnames(t *testing.T) {
@@ -306,12 +314,151 @@ func TestQueryServersUntilAnswerWithTCPFallback_UDPTimeoutAndTCPTimeoutReportsBo
 	}
 }
 
+func TestDNSCancellationStopsBeforeTheNextServer(t *testing.T) {
+	servers := []netip.Addr{netip.MustParseAddr("10.0.0.1"), netip.MustParseAddr("10.0.0.2")}
+	name := dnsmessage.MustNewName("host.example.")
+	for _, transport := range []string{"udp", "tcp"} {
+		t.Run(transport, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			negative := &dnsResponseError{errors.New("name does not exist")}
+			reject := func(_ context.Context, server netip.Addr, _ dnsmessage.Name, _ time.Duration) (netip.Addr, string, error) {
+				if server != servers[0] {
+					t.Fatal("queried another server after cancellation")
+				}
+				cancel()
+				return netip.Addr{}, "", negative
+			}
+			udp, tcp := reject, reject
+			if transport == "tcp" {
+				udp = func(context.Context, netip.Addr, dnsmessage.Name, time.Duration) (netip.Addr, string, error) {
+					return netip.Addr{}, "", errDNSUDPTruncated
+				}
+			}
+			_, _, err := queryServersUntilAnswerWithTCPFallback(ctx, servers, name, "host.example", time.Second, udp, tcp)
+			if ctx.Err() == nil || !errors.Is(err, negative) {
+				t.Fatalf("expected cancellation after the negative response, got %v", err)
+			}
+		})
+	}
+}
+
+func TestDNSLookupStopsRetransmittingAtTheCallerDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const budget = 3500 * time.Millisecond
+		ctx, cancel := context.WithTimeout(t.Context(), budget)
+		defer cancel()
+		lost := errors.New("DNS transport unavailable")
+		attempts := 0
+		start := time.Now()
+		query := func(context.Context, netip.Addr, dnsmessage.Name, time.Duration) (netip.Addr, string, error) {
+			attempts++
+			if attempts > 2 && time.Now().Equal(start) {
+				t.Fatal("lookup retried without waiting for a new slot")
+			}
+			return netip.Addr{}, "", lost
+		}
+		addr, err := resolveViaVPNQueryWithFallback(ctx, []netip.Addr{netip.MustParseAddr("10.0.0.1")}, "host.example", query, query)
+		if addr.IsValid() || !errors.Is(err, lost) {
+			t.Fatalf("exhausted lookup returned %v, %v", addr, err)
+		}
+		if attempts <= 2 || time.Since(start) != budget {
+			t.Fatalf("got %d attempts over %s; want retries until %s", attempts, time.Since(start), budget)
+		}
+	})
+}
+
+func TestDNSCancellationInterruptsPendingUDPRead(t *testing.T) {
+	s, link, err := newNetstack(netip.MustParseAddr("10.0.0.2"), 1500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		_, _, err := queryAOne(ctx, s, netip.MustParseAddr("10.0.0.1"), dnsmessage.MustNewName("host.example."), 5*time.Second)
+		result <- err
+	}()
+	ready, stop := context.WithTimeout(t.Context(), time.Second)
+	defer stop()
+	packet := link.ReadContext(ready)
+	if packet == nil {
+		t.Fatal("DNS query never reached the VPN link")
+	}
+	packet.DecRef()
+	cancel()
+	select {
+	case err := <-result:
+		if err == nil {
+			t.Fatal("cancelled lookup returned an answer")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancelled lookup remained blocked waiting for the DNS server")
+	}
+}
+
+func TestDNSCancellationInterruptsEstablishedTCPRead(t *testing.T) {
+	s := stack.New(stack.Options{
+		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol},
+		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol},
+		HandleLocal:        true,
+	})
+	defer s.Close()
+	if err := s.CreateNIC(1, loopback.New()); err != nil {
+		t.Fatal(err)
+	}
+	server := netip.MustParseAddr("127.0.0.1")
+	address := tcpip.AddrFrom4(server.As4()).WithPrefix()
+	if err := s.AddProtocolAddress(1, tcpip.ProtocolAddress{Protocol: ipv4.ProtocolNumber, AddressWithPrefix: address}, stack.AddressProperties{}); err != nil {
+		t.Fatal(err)
+	}
+	s.SetRouteTable([]tcpip.Route{{Destination: address.Subnet(), NIC: 1}})
+	listener, err := gonet.ListenTCP(s, tcpip.FullAddress{NIC: 1, Addr: address.Address, Port: 53}, ipv4.ProtocolNumber)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		_, _, err := queryAOneTCPByName(ctx, s, server, dnsmessage.MustNewName("host.example."), 5*time.Second)
+		result <- err
+	}()
+	expire := time.AfterFunc(3*time.Second, func() { _ = listener.Close() })
+	defer expire.Stop()
+	conn, err := listener.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	var length [2]byte
+	if _, err := io.ReadFull(conn, length[:]); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if err == nil {
+			t.Fatal("cancelled lookup returned an answer")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancelled lookup remained blocked on the established DNS connection")
+	}
+}
+
 func TestQueryServersUntilAnswerWithTCPFallback_AuthoritativeNegativeDoesNotTryTCP(t *testing.T) {
-	servers := []netip.Addr{netip.MustParseAddr("10.72.0.1")}
+	servers := []netip.Addr{netip.MustParseAddr("10.72.0.1"), netip.MustParseAddr("10.72.0.2")}
 	qname := dnsmessage.MustNewName("nope.dynartis.local.")
 
-	var tcpCalls int
+	var udpCalls, tcpCalls int
 	udp := func(_ context.Context, _ netip.Addr, _ dnsmessage.Name, _ time.Duration) (netip.Addr, string, error) {
+		udpCalls++
 		return netip.Addr{}, "", &dnsResponseError{errors.New("DNS rcode NameError")}
 	}
 	tcp := func(_ context.Context, _ netip.Addr, _ dnsmessage.Name, _ time.Duration) (netip.Addr, string, error) {
@@ -319,12 +466,17 @@ func TestQueryServersUntilAnswerWithTCPFallback_AuthoritativeNegativeDoesNotTryT
 		return netip.Addr{}, "", nil
 	}
 
-	_, _, err := queryServersUntilAnswerWithTCPFallback(context.Background(), servers, qname, "nope.dynartis.local", time.Millisecond, udp, tcp)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	_, _, err := queryServersUntilAnswerWithTCPFallback(ctx, servers, qname, "nope.dynartis.local", time.Millisecond, udp, tcp)
 	if err == nil {
 		t.Fatal("expected authoritative negative response to fail")
 	}
 	if !strings.Contains(err.Error(), "NameError") {
 		t.Fatalf("expected NXDOMAIN-style error to surface, got: %v", err)
+	}
+	if udpCalls != len(servers) {
+		t.Fatalf("authoritative negatives triggered %d UDP queries for %d servers", udpCalls, len(servers))
 	}
 	if tcpCalls != 0 {
 		t.Fatalf("authoritative UDP response must not try TCP fallback; got %d TCP call(s)", tcpCalls)
@@ -352,7 +504,10 @@ func TestQueryServersUntilAnswer_RetransmitsPastTransientLoss(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	addr, cname, err := queryServersUntilAnswer(ctx, servers, qname, "dyn-ar-cdb01.dynartis.local", 5*time.Millisecond, query)
+	tcp := func(context.Context, netip.Addr, dnsmessage.Name, time.Duration) (netip.Addr, string, error) {
+		return netip.Addr{}, "", errors.New("DNS TCP timeout")
+	}
+	addr, cname, err := queryServersUntilAnswerWithTCPFallback(ctx, servers, qname, "dyn-ar-cdb01.dynartis.local", 5*time.Millisecond, query, tcp)
 	if err != nil {
 		t.Fatalf("expected resolution to survive transient loss, got error: %v", err)
 	}
@@ -364,89 +519,6 @@ func TestQueryServersUntilAnswer_RetransmitsPastTransientLoss(t *testing.T) {
 	}
 	if calls <= len(servers) {
 		t.Errorf("expected a retransmit beyond the first round, only %d attempts", calls)
-	}
-}
-
-// An authoritative negative (NXDOMAIN-style response error) must fail fast: re-asking a
-// server that already answered can't change the result, so we must NOT spin retransmitting
-// for the whole budget. This keeps "host genuinely doesn't exist" from taking 6s to report.
-func TestQueryServersUntilAnswer_AuthoritativeNegativeFailsFast(t *testing.T) {
-	servers := []netip.Addr{netip.MustParseAddr("10.72.0.1"), netip.MustParseAddr("10.72.0.2")}
-	qname := dnsmessage.MustNewName("nope.dynartis.local.")
-
-	var calls int
-	query := func(_ context.Context, _ netip.Addr, _ dnsmessage.Name, _ time.Duration) (netip.Addr, string, error) {
-		calls++
-		return netip.Addr{}, "", &dnsResponseError{errors.New("DNS rcode NameError")}
-	}
-
-	// Generous budget: if response errors were (wrongly) retransmitted, calls would balloon
-	// well past one per server.
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	_, _, err := queryServersUntilAnswer(ctx, servers, qname, "nope.dynartis.local", 50*time.Millisecond, query)
-	if err == nil {
-		t.Fatal("expected an error for an authoritative negative")
-	}
-	if calls != len(servers) {
-		t.Errorf("authoritative negative must not retransmit: got %d calls, want %d (one per server)", calls, len(servers))
-	}
-}
-
-// When every attempt is lost for the entire budget, the lookup retransmits repeatedly and
-// then surfaces the last transport error (not a bare context error) once the budget is spent.
-func TestQueryServersUntilAnswer_AllLossRetriesThenReportsLastError(t *testing.T) {
-	servers := []netip.Addr{netip.MustParseAddr("10.72.0.1")}
-	qname := dnsmessage.MustNewName("dyn-ar-cdb01.dynartis.local.")
-
-	var calls int
-	query := func(_ context.Context, _ netip.Addr, _ dnsmessage.Name, _ time.Duration) (netip.Addr, string, error) {
-		calls++
-		return netip.Addr{}, "", errors.New("DNS read: i/o timeout")
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
-	defer cancel()
-	_, _, err := queryServersUntilAnswer(ctx, servers, qname, "dyn-ar-cdb01.dynartis.local", 20*time.Millisecond, query)
-	if err == nil {
-		t.Fatal("expected an error when every attempt is lost")
-	}
-	if !strings.Contains(err.Error(), "i/o timeout") {
-		t.Errorf("expected the last transport error to surface, got: %v", err)
-	}
-	if calls < 2 {
-		t.Errorf("expected multiple retransmit attempts within the budget, got %d", calls)
-	}
-}
-
-// Failover within a single round: when the first server drops the datagram, the loop must
-// advance to the second server in the SAME pass and resolve there — not only via a later
-// retransmit round. This is the original "advance on read-timeout" property.
-func TestQueryServersUntilAnswer_FailsOverToSecondServerWithinRound(t *testing.T) {
-	servers := []netip.Addr{netip.MustParseAddr("10.72.0.1"), netip.MustParseAddr("10.72.0.2")}
-	qname := dnsmessage.MustNewName("dyn-ar-cdb01.dynartis.local.")
-	want := netip.AddrFrom4([4]byte{10, 155, 50, 7})
-
-	var calls int
-	query := func(_ context.Context, srv netip.Addr, _ dnsmessage.Name, _ time.Duration) (netip.Addr, string, error) {
-		calls++
-		if srv == servers[0] {
-			return netip.Addr{}, "", errors.New("DNS read: i/o timeout") // first server lost
-		}
-		return want, "", nil // second server answers
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	addr, _, err := queryServersUntilAnswer(ctx, servers, qname, "dyn-ar-cdb01.dynartis.local", 5*time.Millisecond, query)
-	if err != nil {
-		t.Fatalf("expected failover to the second server, got: %v", err)
-	}
-	if addr != want {
-		t.Errorf("addr: got %v want %v", addr, want)
-	}
-	if calls != 2 {
-		t.Errorf("expected exactly 2 calls (failover within one round), got %d", calls)
 	}
 }
 
@@ -467,7 +539,7 @@ func TestResolveViaVPNQuery_FollowsCNAMEChain(t *testing.T) {
 
 	for _, host := range []string{"host.dynartis.local", "host.dynartis.local."} {
 		t.Run(host, func(t *testing.T) {
-			addr, err := resolveViaVPNQuery(context.Background(), servers, host, query)
+			addr, err := resolveViaVPNQueryWithFallback(t.Context(), servers, host, query, query)
 			if err != nil {
 				t.Fatalf("expected the CNAME chain to resolve, got: %v", err)
 			}
@@ -489,7 +561,7 @@ func TestResolveViaVPNQuery_CNAMELoopBounded(t *testing.T) {
 		return netip.Addr{}, "loop.dynartis.local.", nil // always a CNAME, never an A
 	}
 
-	_, err := resolveViaVPNQuery(context.Background(), servers, "loop.dynartis.local", query)
+	_, err := resolveViaVPNQueryWithFallback(t.Context(), servers, "loop.dynartis.local", query, query)
 	if err == nil {
 		t.Fatal("expected an error when a CNAME chain never terminates")
 	}

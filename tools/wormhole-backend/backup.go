@@ -1665,14 +1665,6 @@ func importBackupTunnelsContext(
 	return inserted, nil
 }
 
-func importBackupBitwardenCache(
-	database *sql.DB,
-	entries []*backupObject,
-	state *backupImportState,
-) error {
-	return importBackupBitwardenCacheContext(context.Background(), database, entries, state)
-}
-
 func importBackupBitwardenCacheContext(
 	ctx context.Context,
 	database *sql.DB,
@@ -2403,32 +2395,6 @@ func storeBackupPassword(database *sql.DB, id, password string) error {
 		if !committed {
 			_ = transaction.Rollback()
 			mutation.discardNewSecret()
-		}
-	}()
-	if err := mutation.apply(transaction); err != nil {
-		return err
-	}
-	if err := transaction.Commit(); err != nil {
-		return err
-	}
-	committed = true
-	mutation.deletePreviousSecret()
-	return nil
-}
-
-func clearBackupPassword(database *sql.DB, id string) error {
-	mutation, err := prepareBackupPasswordMutation(database, id, nil)
-	if err != nil {
-		return err
-	}
-	transaction, err := database.Begin()
-	if err != nil {
-		return err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_ = transaction.Rollback()
 		}
 	}()
 	if err := mutation.apply(transaction); err != nil {

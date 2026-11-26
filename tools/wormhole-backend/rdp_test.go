@@ -45,7 +45,7 @@ func init() {
 func rdpExternalFixtureCommand(t *testing.T, executable string, args ...string) *exec.Cmd {
 	t.Helper()
 	if executable != os.Args[0] {
-		return exec.Command(executable, args...) // Preserve unstartable-executable cases.
+		t.Fatalf("external launcher ignored the resolved system client: %q", executable)
 	}
 	if !reflect.DeepEqual(args, []string{"/v:rdp.example:3389"}) {
 		t.Fatalf("external client received an unexpected target: %q", args)
@@ -600,35 +600,30 @@ func TestRdpRequestMetadataSurvivesTypedCommandDecodeErrors(t *testing.T) {
 	}
 }
 
-func TestFreeRdpCandidatesIncludeTheMacSDLClients(t *testing.T) {
-	candidates := freeRdpCandidatesForOS("darwin")
-	if !contains(candidates, "sdl-freerdp") || !contains(candidates, "sdl-freerdp3") {
-		t.Fatalf("macOS SDL FreeRDP clients were not discovered: %#v", candidates)
-	}
-}
-
 func TestFreeRdpBundledClientPrecedesSystemClients(t *testing.T) {
 	executable := filepath.Join(t.TempDir(), "Wormhole App", "Contents", "Resources", "wormhole-backend-universal")
 	candidates := freeRdpCandidatesForExecutable("darwin", executable)
-	if candidates[0] != filepath.Join(filepath.Dir(executable), "freerdp", "sdl-freerdp") {
+	bundled := filepath.Join(filepath.Dir(executable), "freerdp", "sdl-freerdp")
+	if len(candidates) == 0 || candidates[0] != bundled {
 		t.Fatalf("bundled client is not first: %v", candidates)
 	}
-	if !slices.Equal(candidates[1:], freeRdpCandidatesForOS("darwin")) {
+	if !slices.Contains(candidates[1:], "sdl-freerdp") || !slices.Contains(candidates[1:], "sdl-freerdp3") {
 		t.Fatal("system client fallback changed")
 	}
 	for _, goos := range []string{"linux", "windows"} {
-		if !slices.Equal(freeRdpCandidatesForExecutable(goos, executable), freeRdpCandidatesForOS(goos)) {
-			t.Fatalf("bundled macOS client leaked onto %s", goos)
+		system := freeRdpCandidatesForExecutable(goos, executable)
+		if slices.Contains(system, bundled) || !slices.Contains(system, "xfreerdp") || !slices.Contains(system, "xfreerdp3") {
+			t.Fatalf("unexpected system clients for %s: %v", goos, system)
 		}
 	}
-	if !slices.Equal(freeRdpCandidatesForExecutable("darwin", ""), freeRdpCandidatesForOS("darwin")) {
+	if !slices.Contains(freeRdpCandidatesForExecutable("darwin", ""), "sdl-freerdp") {
 		t.Fatal("missing executable should retain system discovery")
 	}
 }
 
 func TestLocateFreeRdpRetainsSystemDiscoveryAndExplicitOverride(t *testing.T) {
 	directory := t.TempDir()
-	name := freeRdpCandidates()[0]
+	name := "xfreerdp"
 	if runtime.GOOS == "windows" {
 		name += ".exe"
 		t.Setenv("PATHEXT", ".EXE")
@@ -1175,7 +1170,9 @@ func TestRdpExternalLauncherSupervisesSystemClient(t *testing.T) {
 		t.Fatalf("failed external launch left processes behind: %#v", controller.processes)
 	}
 
-	systemRdpClientExecutableForController = func() (string, error) { return "missing-system-rdp.exe", nil }
+	missingClient := filepath.Join(t.TempDir(), "missing-system-rdp.exe")
+	systemRdpClientExecutableForController = func() (string, error) { return missingClient, nil }
+	newExternalRdpCommand = exec.Command
 	controller.startExternalRdp(rdpCommand{RequestID: "start-failure", SessionID: "start-failure", Profile: rdpProfile{Host: "rdp.example"}})
 	if len(controller.processes) != 0 {
 		t.Fatalf("unstartable external launch left processes behind: %#v", controller.processes)
@@ -1247,9 +1244,6 @@ INSERT INTO Nodes (Id, ParentId, Name, TunnelEnabled, TunnelConfigId) VALUES
 }
 
 func TestRdpPortableHelpersCoverEveryPolicyBranch(t *testing.T) {
-	if candidates := freeRdpCandidates(); len(candidates) == 0 {
-		t.Fatal("current platform returned no FreeRDP candidates")
-	}
 	for speed, expected := range map[int]string{
 		1: "modem", 2: "broadband-low", 3: "satellite", 4: "broadband-high",
 		5: "wan", 6: "lan", 0: "auto", 99: "auto",

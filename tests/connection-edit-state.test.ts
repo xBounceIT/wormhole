@@ -842,6 +842,50 @@ function rdpLifecycleHarness() {
   return { source, tracker, context, effects, action };
 }
 
+test('opening a newly added saved RDP tab starts the client with its measured bounds', async () => {
+  const { source, context, action } = rdpLifecycleHarness();
+  const selected: string[] = [];
+  const pages: string[] = [];
+  const launches: Array<{ sessionId: string; bounds: unknown }> = [];
+  context.sessions = [];
+  context.sessionsRef.current = [];
+  context.setSelectedSessionId = (id: string) => selected.push(id);
+  context.setActivePage = (page: string) => pages.push(page);
+  context.window.wormhole.startRdpSession = (request: (typeof launches)[number]) =>
+    launches.push(request);
+  context.startRdpSession = action('function startRdpSession(', 'function retryRdpSession(');
+  const open = action('async function requestRdpCredentials(', 'function startRdpSession(');
+  await open(source.id);
+  assert.deepEqual(selected, []);
+  context.sessionsRef.current = [source];
+  await open(source.id);
+  await new Promise(setImmediate);
+  assert.deepEqual(selected, [source.id]);
+  assert.deepEqual(pages, ['sessions']);
+  assert.equal(launches.length, 1);
+  assert.equal(launches[0].sessionId, source.id);
+  assert.deepEqual(launches[0].bounds, { x: 0, y: 0, width: 1024, height: 768 });
+});
+
+test('retrying a failed RDP tab waits for successful disconnection before requesting credentials', async () => {
+  const { source, context, effects, action } = rdpLifecycleHarness();
+  source.rdpStatus = 'failed';
+  const retry = action('function retryRdpSession(', 'const refreshRdpSystemClientCapability');
+  context.requestRdpCredentials = (id: string) => effects.push('retry ' + id);
+  for (const success of [false, true]) {
+    const pending = Promise.withResolvers<boolean>();
+    context.disconnectRemoteDesktopSession = (id: string) => {
+      effects.push('disconnect ' + id);
+      return pending.promise;
+    };
+    retry(source.id);
+    assert.deepEqual(effects.splice(0), ['disconnect ' + source.id]);
+    pending.resolve(success);
+    await new Promise(setImmediate);
+    assert.deepEqual(effects.splice(0), success ? ['retry ' + source.id] : []);
+  }
+});
+
 test('RDP lifecycle entry points invalidate pending editor work before awaiting native I/O', async () => {
   const { source, tracker, action } = rdpLifecycleHarness();
   const cases: [string, string, unknown[]][] = [

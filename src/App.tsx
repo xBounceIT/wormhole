@@ -100,7 +100,6 @@ import {
   updateStatusMessage,
 } from './update-state';
 import {
-  clearTerminalSelectionIfUnchanged,
   copyTerminalSelection,
   normalizeTerminalPasteText,
   shouldAutoCopyTerminalSelection,
@@ -5701,7 +5700,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       .catch((error: unknown) => {
         setSessions((current) =>
           current.map((candidate) =>
-            candidate.id === sessionId
+            candidate.id === sessionId &&
+            candidate.backendSessionId === session.backendSessionId &&
+            candidate.status === 'connected'
               ? {
                   ...candidate,
                   status: 'failed',
@@ -9901,25 +9902,20 @@ function SshXtermSurface({
   );
 }
 
-function SshTerminalSurface({
+function SerialTerminalSurface({
   session,
   isActive,
   autoCopyOnSelect,
   onInput,
   onReconnect,
-  onTrustHostKey,
-  isSerial = false,
 }: {
   session: Session;
   isActive: boolean;
   autoCopyOnSelect: boolean;
-  onInput: (sessionId: string, value: string, paste?: boolean) => void;
+  onInput: (sessionId: string, value: string) => void;
   onReconnect: (sessionId: string) => void;
-  onTrustHostKey?: (sessionId: string, mismatch: NonNullable<Session['hostKeyMismatch']>) => void;
-  isSerial?: boolean;
 }) {
   const surfaceRef = useRef<HTMLDivElement>(null);
-  const resizeSignatureRef = useRef('');
   const stickToBottomRef = useRef(true);
   const automaticScrollTopRef = useRef<number | undefined>(undefined);
   const handledViewportResetSequenceRef = useRef<number | undefined>(undefined);
@@ -9937,42 +9933,28 @@ function SshTerminalSurface({
     )
       return;
 
-    resizeSignatureRef.current = '';
-    let retryFrame: number | undefined;
+    let lastSize = '';
     const resize = () => {
+      if (surface.clientHeight < terminalLineHeight) return;
+      const cellWidth = measureTerminalCellWidth();
+      if (surface.clientWidth < cellWidth) return;
       if (stickToBottomRef.current) {
         automaticScrollTopRef.current = scrollTerminalToBottom(surface);
       }
-      const cellWidth = measureTerminalCellWidth();
-      if (surface.clientWidth < cellWidth || surface.clientHeight < terminalLineHeight) {
-        if (retryFrame === undefined) {
-          retryFrame = requestAnimationFrame(() => {
-            retryFrame = undefined;
-            resize();
-          });
-        }
-        return;
-      }
-      const columns = Math.max(1, Math.floor(surface.clientWidth / cellWidth));
-      const rows = Math.max(1, Math.floor(surface.clientHeight / terminalLineHeight));
+      const columns = Math.min(500, Math.floor(surface.clientWidth / cellWidth));
+      const rows = Math.min(500, Math.floor(surface.clientHeight / terminalLineHeight));
       const signature = `${columns}x${rows}`;
-      if (signature === resizeSignatureRef.current) return;
-      resizeSignatureRef.current = signature;
-      const resizeRequest = isSerial
-        ? window.wormhole?.resizeSerialSession(backendSessionId, columns, rows)
-        : window.wormhole?.resizeSshSession(backendSessionId, columns, rows);
-      void resizeRequest?.catch(() => {
+      if (signature === lastSize) return;
+      lastSize = signature;
+      void window.wormhole?.resizeSerialSession(backendSessionId, columns, rows).catch(() => {
         // A resize can race with a close; the closed event owns the visible session state.
       });
     };
     const observer = new ResizeObserver(resize);
     observer.observe(surface);
     resize();
-    return () => {
-      observer.disconnect();
-      if (retryFrame !== undefined) cancelAnimationFrame(retryFrame);
-    };
-  }, [isActive, isSerial, session.backendSessionId, session.status]);
+    return () => observer.disconnect();
+  }, [isActive, session.backendSessionId, session.status]);
 
   useLayoutEffect(() => {
     stickToBottomRef.current = true;
@@ -10083,23 +10065,18 @@ function SshTerminalSurface({
   if (session.status !== 'connected') {
     return (
       <div
-        aria-label={isSerial ? 'Serial connection state' : 'SSH connection state'}
+        aria-label="Serial connection state"
         className="flex h-full min-h-0 min-w-0 flex-1 items-center justify-center overflow-auto bg-[#090909] px-6 py-10 text-zinc-100"
         ref={surfaceRef}
       >
-        <SshTerminalConnectionState
-          isSerial={isSerial}
-          onReconnect={onReconnect}
-          onTrustHostKey={onTrustHostKey}
-          session={session}
-        />
+        <SshTerminalConnectionState isSerial onReconnect={onReconnect} session={session} />
       </div>
     );
   }
 
   return (
     <div
-      aria-label={isSerial ? 'Live serial terminal' : 'Live SSH terminal'}
+      aria-label="Live serial terminal"
       className="terminal-scrollbar h-full min-h-0 min-w-0 flex-1 cursor-text overflow-x-auto overflow-y-auto overscroll-contain bg-[#090909] text-[#e5e7eb] outline-none"
       onClick={(event) => event.currentTarget.focus({ preventScroll: true })}
       onMouseDown={selectTerminalDoubleClick}
@@ -10143,7 +10120,7 @@ function SshTerminalSurface({
         if (!text) return;
         event.preventDefault();
         terminalSelection(event.currentTarget)?.removeAllRanges();
-        onInput(session.id, isSerial ? normalizeTerminalPasteText(text) : text, !isSerial);
+        onInput(session.id, normalizeTerminalPasteText(text));
       }}
       onMouseUp={(event) => {
         if (!shouldAutoCopyTerminalSelection(autoCopyOnSelect, event.button)) return;
@@ -10152,26 +10129,6 @@ function SshTerminalSurface({
         const text = selection?.toString() ?? '';
         if (!selection || !text) return;
         void copyTextToClipboard(text).catch(() => undefined);
-      }}
-      onContextMenu={(event) => {
-        if (isSerial || !session.backendSessionId) return;
-        event.preventDefault();
-        const surface = event.currentTarget;
-        const selection = terminalSelection(surface);
-        const previousSelection = selection && {
-          anchorNode: selection.anchorNode,
-          anchorOffset: selection.anchorOffset,
-          focusNode: selection.focusNode,
-          focusOffset: selection.focusOffset,
-        };
-        void window.wormhole
-          ?.pasteClipboardToSsh(session.backendSessionId)
-          .then(({ pasted }) => {
-            if (pasted && previousSelection) {
-              clearTerminalSelectionIfUnchanged(terminalSelection(surface), previousSelection);
-            }
-          })
-          .catch(() => undefined);
       }}
       onCompositionEnd={(event) => {
         if (!event.data) return;
@@ -11003,10 +10960,9 @@ function SessionSurface({
   }
   if (session.protocol === 'serial') {
     return (
-      <SshTerminalSurface
+      <SerialTerminalSurface
         autoCopyOnSelect={autoCopyOnSelect}
         isActive={isActive}
-        isSerial
         onInput={onSerialInput}
         onReconnect={onReconnectSession}
         session={session}
