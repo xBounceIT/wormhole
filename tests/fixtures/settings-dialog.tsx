@@ -1409,6 +1409,17 @@ window.runSettingsDialogTests = async (mode: 'desktop' | 'compact') => {
       await clickElement(option);
       assert.equal(trigger.textContent?.trim(), label);
       assert.equal((await window.wormhole!.readAppSettings()).theme, label.toLowerCase());
+      // Chromium reports interpolated colors in Oklab while a label is transitioning.
+      await waitFor(
+        () =>
+          !document
+            .getAnimations()
+            .some(
+              (animation) =>
+                animation instanceof CSSTransition && animation.transitionProperty === 'color',
+            ),
+        `Label colors did not settle after selecting ${label}`,
+      );
     }
 
     function assertBrightLabels() {
