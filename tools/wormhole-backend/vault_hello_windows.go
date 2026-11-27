@@ -31,8 +31,11 @@ var (
 )
 
 func inVaultHelloApartment(ctx context.Context, run func() error) error {
-	if isRemoteSession() {
-		return errVaultHelloRemote
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := windowsHelloSession(); err != nil {
+		return err
 	}
 	return inVaultCredentialApartment(ctx, run)
 }

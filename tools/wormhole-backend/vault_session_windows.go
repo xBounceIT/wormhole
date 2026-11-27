@@ -35,7 +35,40 @@ var (
 	wtsPostQuit          = wtsWindowDLL.NewProc("PostQuitMessage")
 	wtsRegisterSession   = wtsServiceDLL.NewProc("WTSRegisterSessionNotification")
 	wtsUnregisterSession = wtsServiceDLL.NewProc("WTSUnRegisterSessionNotification")
+	wtsQuerySession      = wtsServiceDLL.NewProc("WTSQuerySessionInformationW")
 )
+
+// WTSClientProtocolType reports the actual protocol of the process session,
+// including remote displays for which SM_REMOTESESSION can report a local session.
+func currentWindowsHelloSession() error {
+	const currentSession = 0xffffffff
+	const clientProtocolType = 16
+	var protocol *uint16
+	var size uint32
+	ok, _, _ := wtsQuerySession.Call(0, currentSession, clientProtocolType,
+		uintptr(unsafe.Pointer(&protocol)), uintptr(unsafe.Pointer(&size)))
+	if ok == 0 {
+		return errVaultHelloUnavailable
+	}
+	if protocol != nil {
+		defer windows.WTSFreeMemory(uintptr(unsafe.Pointer(protocol)))
+	}
+	return windowsHelloProtocol(protocol, size)
+}
+
+func windowsHelloProtocol(protocol *uint16, size uint32) error {
+	if protocol == nil || size != uint32(unsafe.Sizeof(*protocol)) {
+		return errVaultHelloUnavailable
+	}
+	switch *protocol {
+	case 0: // Physical console.
+		return nil
+	case 2: // RDP.
+		return errVaultHelloRemote
+	default:
+		return errVaultHelloUnavailable
+	}
+}
 
 type wtsWindowMessage struct {
 	window         uintptr

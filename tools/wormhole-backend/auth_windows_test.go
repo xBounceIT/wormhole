@@ -85,13 +85,13 @@ func TestComMethodRejectsInvalidPointersAndSlots(t *testing.T) {
 }
 
 func TestWindowsHelloStatusAndVerificationMapNativeResults(t *testing.T) {
-	previousRemote := windowsHelloRemote
+	previousSession := windowsHelloSession
 	previousOperation := windowsHelloOperation
 	t.Cleanup(func() {
-		windowsHelloRemote = previousRemote
+		windowsHelloSession = previousSession
 		windowsHelloOperation = previousOperation
 	})
-	windowsHelloRemote = func() bool { return false }
+	windowsHelloSession = func() error { return nil }
 
 	statusTests := []struct {
 		result    uint32
@@ -160,12 +160,23 @@ func TestWindowsHelloStatusAndVerificationMapNativeResults(t *testing.T) {
 		t.Fatalf("invalid owner mapped to %#v", response)
 	}
 
-	windowsHelloRemote = func() bool { return true }
+	windowsHelloOperation = func(bool, string, uintptr) (uint32, error) {
+		t.Fatal("Hello should not start outside a confirmed console session")
+		return 0, nil
+	}
+	windowsHelloSession = func() error { return errVaultHelloRemote }
 	if status := checkWindowsHello(); status.Available || !containsFold(status.Message, "Remote Desktop") {
 		t.Fatalf("remote status = %#v", status)
 	}
 	if response := verifyWindowsHello(authHelloVerifyRequest{OwnerWindow: "42"}); response.Succeeded || !containsFold(response.Message, "Remote Desktop") {
 		t.Fatalf("remote verification = %#v", response)
+	}
+	windowsHelloSession = func() error { return errVaultHelloUnavailable }
+	if status := checkWindowsHello(); status.Available || !containsFold(status.Message, "available") {
+		t.Fatalf("unknown session status = %#v", status)
+	}
+	if response := verifyWindowsHello(authHelloVerifyRequest{OwnerWindow: "42"}); response.Succeeded || !containsFold(response.Message, "available") {
+		t.Fatalf("unknown session verification = %#v", response)
 	}
 }
 

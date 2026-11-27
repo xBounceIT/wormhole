@@ -5,10 +5,8 @@ package main
 import (
 	"errors"
 	"fmt"
-	"os"
 	"runtime"
 	"strconv"
-	"strings"
 	"syscall"
 	"time"
 	"unicode/utf16"
@@ -36,11 +34,10 @@ var (
 	windowsCreateString    = combase.NewProc("WindowsCreateString")
 	windowsDeleteString    = combase.NewProc("WindowsDeleteString")
 	getLastInputInfo       = user32.NewProc("GetLastInputInfo")
-	getSystemMetrics       = user32.NewProc("GetSystemMetrics")
 	kernel32ForIdle        = syscall.NewLazyDLL("kernel32.dll")
 	getTickCount64         = kernel32ForIdle.NewProc("GetTickCount64")
 	moveFileEx             = kernel32ForIdle.NewProc("MoveFileExW")
-	windowsHelloRemote     = isRemoteSession
+	windowsHelloSession    = currentWindowsHelloSession
 	windowsHelloOperation  = callWindowsHelloOperation
 	windowsHelloQuery      = comQueryInterface
 	windowsHelloStatus     = readWindowsHelloStatus
@@ -105,7 +102,6 @@ var (
 )
 
 const (
-	remoteSessionMetric       = 0x1000
 	asyncStarted              = 0
 	asyncCompleted            = 1
 	asyncCanceled             = 2
@@ -118,8 +114,8 @@ func unqueriedWindowsHelloStatus() authHelloStatus {
 }
 
 func checkWindowsHello() authHelloStatus {
-	if windowsHelloRemote() {
-		return authHelloStatus{Message: remoteDesktopHelloMessage}
+	if err := windowsHelloSession(); err != nil {
+		return authHelloStatus{Message: windowsHelloSessionMessage(err)}
 	}
 
 	result, err := windowsHelloOperation(false, "", 0)
@@ -143,8 +139,8 @@ func checkWindowsHello() authHelloStatus {
 }
 
 func verifyWindowsHello(request authHelloVerifyRequest) authVerificationResponse {
-	if windowsHelloRemote() {
-		return authVerificationResponse{Message: remoteDesktopHelloMessage}
+	if err := windowsHelloSession(); err != nil {
+		return authVerificationResponse{Message: windowsHelloSessionMessage(err)}
 	}
 	ownerWindow, err := parseOwnerWindow(request.OwnerWindow)
 	if err != nil {
@@ -378,12 +374,11 @@ func comRelease(object uintptr) {
 	}
 }
 
-func isRemoteSession() bool {
-	result, _, _ := getSystemMetrics.Call(remoteSessionMetric)
-	if result != 0 {
-		return true
+func windowsHelloSessionMessage(err error) string {
+	if errors.Is(err, errVaultHelloRemote) {
+		return remoteDesktopHelloMessage
 	}
-	return strings.HasPrefix(strings.ToUpper(os.Getenv("SESSIONNAME")), "RDP-")
+	return "Windows Hello isn't available."
 }
 
 func systemIdleSeconds() int64 {

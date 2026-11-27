@@ -1849,7 +1849,8 @@ file, slot and root version twice. Both signatures must agree and verify as
 RSA PKCS#1 v1.5 with SHA‑256 before Go can wrap the root. Proof bytes are wiped
 in Go and the Windows adapter. The startup projection carries the slot type
 and ID. The native Windows adapter uses the owner window on build 26100 and
-later and refuses Remote Desktop sessions.
+later. It queries Windows Terminal Services for the current session protocol
+before opening a Hello prompt. Only a confirmed console session is eligible.
 
 On Windows, the startup screen offers Hello for an enrolled local vault. Main
 supplies the native HWND and cancels authentication if its window closes,

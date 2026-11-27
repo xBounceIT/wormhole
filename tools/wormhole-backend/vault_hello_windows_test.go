@@ -12,6 +12,26 @@ import (
 	"github.com/xBounceIT/wormhole/tools/wormhole-backend/internal/vault"
 )
 
+func TestWindowsVaultHelloRefusesUnconfirmedConsoleBeforeWinRT(t *testing.T) {
+	previous := windowsHelloSession
+	t.Cleanup(func() { windowsHelloSession = previous })
+	for _, want := range []error{errVaultHelloRemote, errVaultHelloUnavailable} {
+		windowsHelloSession = func() error { return want }
+		if err := inVaultHelloApartment(t.Context(), func() error {
+			t.Fatal("ineligible session entered WinRT")
+			return nil
+		}); err != want {
+			t.Fatalf("wrong session disposition: %v", err)
+		}
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	windowsHelloSession = func() error { t.Fatal("cancelled request queried WTS"); return nil }
+	if err := platformVaultHelloAvailable(ctx); err != context.Canceled {
+		t.Fatal("cancellation did not stop the capability query", err)
+	}
+}
+
 func TestWindowsVaultHelloRejectsInvalidWindow(t *testing.T) {
 	if window, err := vaultHelloOwnerWindow(0); window != 0 || err != vault.ErrPolicy {
 		t.Fatal("an invalid owner reached WinRT", err)

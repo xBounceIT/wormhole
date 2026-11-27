@@ -15,6 +15,38 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+func TestWindowsHelloRequiresConsoleProtocol(t *testing.T) {
+	console, rdp, legacy, unknown := uint16(0), uint16(2), uint16(1), uint16(65535)
+	for _, tc := range []struct {
+		protocol *uint16
+		size     uint32
+		want     error
+	}{
+		{&console, 2, nil},
+		{&rdp, 2, errVaultHelloRemote},
+		{&legacy, 2, errVaultHelloUnavailable},
+		{&unknown, 2, errVaultHelloUnavailable},
+		{nil, 2, errVaultHelloUnavailable},
+		{&console, 0, errVaultHelloUnavailable},
+		{&console, 1, errVaultHelloUnavailable},
+		{&console, 4, errVaultHelloUnavailable},
+	} {
+		if got := windowsHelloProtocol(tc.protocol, tc.size); got != tc.want {
+			t.Errorf("protocol %v, size %d: %v, want %v", tc.protocol, tc.size, got, tc.want)
+		}
+	}
+}
+
+func TestWindowsHelloSessionIgnoresInheritedSessionName(t *testing.T) {
+	initial := currentWindowsHelloSession()
+	for _, name := range []string{"RDP-Tcp#7", "Console", ""} {
+		t.Setenv("SESSIONNAME", name)
+		if err := currentWindowsHelloSession(); err != initial {
+			t.Fatalf("inherited name changed native session result from %v to %v", initial, err)
+		}
+	}
+}
+
 func TestWindowsSessionNotificationsOnlyLockTheOwningSession(t *testing.T) {
 	if unsafe.Sizeof(wtsWindowMessage{}) != 48 {
 		t.Fatal("incorrect native Windows message layout")
