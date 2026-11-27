@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { Session } from 'node:inspector/promises';
 import { execFile } from 'node:child_process';
-import { mkdtemp, mkdir, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -404,21 +404,28 @@ test('OS startup keeps open retries bound to admitted owner and ignores disposed
 
 test(
   'typed client creates and reopens an actual OS-owned Go vault and projects isolated setup only in maintenance',
-  { timeout: 120_000, skip: process.platform !== 'win32' },
+  {
+    timeout: 120_000,
+    skip: process.platform !== 'win32' && !process.env.WORMHOLE_TEST_NATIVE_DEFAULT_BACKEND,
+  },
   async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'wormhole-default-os-')),
+    const prefix = join(await realpath(tmpdir()), 'wormhole-default-os-'),
+      directory = await mkdtemp(prefix),
       root = fileURLToPath(new URL('../', import.meta.url)),
       data = join(directory, 'data'),
       database = join(data, 'workspace.db'),
-      executable = join(directory, process.platform === 'win32' ? 'backend.exe' : 'backend');
-    await mkdir(data);
-    await promisify(execFile)('go', ['build', '-o', executable, '.'], {
-      cwd: join(root, 'tools/wormhole-backend'),
-      windowsHide: true,
-      timeout: 120_000,
-    });
+      prebuilt = process.env.WORMHOLE_TEST_NATIVE_DEFAULT_BACKEND,
+      executable = prebuilt || join(directory, 'backend.exe');
     let host: VaultBackendHost | undefined, client: VaultBackendClient | undefined;
     try {
+      await mkdir(data);
+      if (!prebuilt) {
+        await promisify(execFile)('go', ['build', '-o', executable, '.'], {
+          cwd: join(root, 'tools/wormhole-backend'),
+          windowsHide: true,
+          timeout: 120_000,
+        });
+      }
       const make = () =>
         new VaultBackendHost(
           () => new VaultBackendClient({ executable, databasePath: database, userDataPath: data }),
@@ -451,7 +458,7 @@ test(
     } finally {
       await host?.stop();
       await client?.lock();
-      assert.ok(directory.startsWith(join(tmpdir(), 'wormhole-default-os-')));
+      assert.ok(directory.startsWith(prefix));
       await rm(directory, { recursive: true, force: true });
     }
   },

@@ -148,7 +148,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends --yes xvfb xauth
+          sudo apt-get install --no-install-recommends --yes xvfb xauth gnome-keyring
           # Ubuntu 24.04 requires a per-executable profile for Chromium's user namespace sandbox.
           sudo apparmor_parser -r <<EOF
           abi <abi/4.0>,
@@ -157,6 +157,36 @@ jobs:
             userns,
           }
           EOF
+
+      - name: Create and reopen a Default vault using native OS custody
+        shell: bash
+        run: |
+          set -euo pipefail
+          export WORMHOLE_TEST_NATIVE_DEFAULT_BACKEND
+          WORMHOLE_TEST_NATIVE_DEFAULT_BACKEND=$(node -p "require('node:path').resolve('dist-electron/wormhole-backend-'+process.arch+(process.platform==='win32'?'.exe':''))")
+          native_test=(node --experimental-strip-types --test tests/vault-unprotected.test.ts)
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            export XDG_DATA_HOME XDG_RUNTIME_DIR
+            XDG_DATA_HOME=$(mktemp -d "$RUNNER_TEMP/vault-keyring-data-XXXXXX")
+            XDG_RUNTIME_DIR=$(mktemp -d "$RUNNER_TEMP/vault-keyring-run-XXXXXX")
+            dbus-run-session -- bash -euo pipefail -c '
+              openssl rand -hex 32 | tr -d "\n" | gnome-keyring-daemon --unlock --components=secrets >/dev/null
+              gnome-keyring-daemon --start --components=secrets >/dev/null
+              exec "$@"
+            ' _ "${native_test[@]}"
+          else
+            if [[ "$RUNNER_OS" == macOS ]]; then
+              # The hosted runner uses an isolated keychain for the test's random vault factor.
+              previous=$(security default-keychain -d user | sed -E 's/^[[:space:]]*"([^"]+)"[[:space:]]*$/\1/')
+              [[ -f "$previous" ]]
+              keychain="$RUNNER_TEMP/vault-default-fixture.keychain-db"
+              security create-keychain -p '' "$keychain"
+              trap 'security default-keychain -d user -s "$previous"; security delete-keychain "$keychain"' EXIT
+              security unlock-keychain -p '' "$keychain"
+              security default-keychain -d user -s "$keychain"
+            fi
+            "${native_test[@]}"
+          fi
 
       - name: Verify Linux managed package ownership
         if: runner.os == 'Linux'
