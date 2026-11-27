@@ -73,8 +73,12 @@ func validateSftpEditorSettings(settings sftpEditorSettings) error {
 }
 
 func readSftpEditorSettings(databasePath string) (sftpEditorSettings, error) {
-	settings := defaultSftpEditorSettings()
 	_, settingsPath := authPaths(databasePath)
+	return readSftpEditorSettingsFile(settingsPath)
+}
+
+func readSftpEditorSettingsFile(settingsPath string) (sftpEditorSettings, error) {
+	settings := defaultSftpEditorSettings()
 	contents, err := readAuthSettingsFile(settingsPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return settings, nil

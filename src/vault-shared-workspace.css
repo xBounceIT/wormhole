@@ -1,0 +1,219 @@
+.startup-card.shared-workspace {
+  width: min(1560px, 100%);
+  height: calc(100vh - 48px);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.shared-workspace-layout {
+  display: grid;
+  grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
+  flex: 1;
+  min-height: 0;
+  gap: 16px;
+}
+.shared-workspace-catalog {
+  min-height: 0;
+  overflow: auto;
+  padding-right: 12px;
+  border-right: 1px solid #2a2a2a;
+}
+.shared-workspace-sessions {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+}
+.shared-catalog-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.shared-catalog-actions .startup-button {
+  width: auto;
+  min-height: 30px;
+  padding: 4px 10px;
+  margin: 0;
+}
+.shared-catalog-access {
+  font-size: 11px;
+  color: #a1a1aa;
+}
+.shared-sessions {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  width: 100%;
+  border: 1px solid #2a2a2a;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #0a0a0a;
+}
+.shared-session-tabs {
+  display: flex;
+  overflow-x: auto;
+  min-height: 40px;
+  flex-shrink: 0;
+  border-bottom: 1px solid #2a2a2a;
+}
+.shared-session-tab {
+  display: flex;
+  flex-shrink: 0;
+  border-right: 1px solid #2a2a2a;
+}
+.shared-session-tab[data-active='true'] {
+  background: #202025;
+  box-shadow: inset 0 -2px #60a5fa;
+}
+.shared-session-tab button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px;
+  border: 0;
+  color: #e5e7eb;
+  background: transparent;
+  font-size: 12px;
+  cursor: pointer;
+}
+.shared-session-tab button[role='tab'] span:nth-child(2) {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.shared-session-tab small {
+  color: #a1a1aa;
+  font-size: 10px;
+}
+.shared-session-indicator {
+  display: block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #a1a1aa;
+}
+.shared-session-indicator[data-status='connected'] {
+  background: #6ee7b7;
+}
+.shared-session-indicator[data-status='failed'] {
+  background: #fca5a5;
+}
+.shared-session-panel {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+.shared-session-route {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  padding: 8px 12px;
+  border-bottom: 1px solid #2a2a2a;
+  color: #a1a1aa;
+  font-size: 11px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.shared-session-route code {
+  font-family: 'Cascadia Mono', Consolas, monospace;
+  color: #e5e7eb;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.shared-terminal-surface {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+.shared-file-surface {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  overflow: hidden;
+}
+.shared-session-empty {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 24px;
+  color: #a1a1aa;
+  text-align: center;
+  font-size: 13px;
+}
+.shared-session-empty strong {
+  color: #f3f4f6;
+  font-size: 16px;
+  font-weight: 500;
+}
+.shared-session-empty p {
+  max-width: 420px;
+  margin: 0;
+  line-height: 1.5;
+}
+.shared-session-empty .startup-button {
+  width: auto;
+  padding: 8px 20px;
+}
+.shared-session-notice {
+  color: #fcd34d;
+  padding: 8px 12px;
+  font-size: 12px;
+  margin: 0;
+}
+.shared-sessions button:focus-visible {
+  outline: 2px solid #60a5fa;
+  outline-offset: -3px;
+}
+:root:not(.dark) .shared-workspace-catalog {
+  border-color: #e5e7eb;
+}
+@media (max-width: 780px) {
+  .startup-shell:has(> .shared-workspace) {
+    overflow-y: auto;
+  }
+  .startup-card.shared-workspace {
+    align-self: start;
+    height: auto;
+    min-height: calc(100vh - 48px);
+  }
+  .shared-workspace-layout {
+    grid-template-columns: 1fr;
+  }
+  .shared-workspace-catalog {
+    max-height: 280px;
+    border-right: 0;
+    border-bottom: 1px solid #2a2a2a;
+    padding: 0 0 12px;
+  }
+  .shared-workspace-sessions {
+    min-height: 480px;
+  }
+  .shared-session-panel {
+    min-height: 400px;
+  }
+}
+
+.shared-vnc-surface {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+.shared-vnc-surface[hidden] {
+  display: none;
+}
+
+.shared-rdp-surface > [data-rdp-session-id] {
+  flex: 1;
+  width: 100%;
+}

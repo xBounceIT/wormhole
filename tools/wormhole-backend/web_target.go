@@ -115,6 +115,7 @@ func resolveDirectWebTarget(request webTargetRequest) (webTargetResponse, error)
 		Port:             port,
 		IgnoreCertErrors: request.Protocol == "https" && request.IgnoreCertErrors,
 		TunnelConfigID:   tunnelID,
+		path:             httpPath,
 	}, nil
 }
 

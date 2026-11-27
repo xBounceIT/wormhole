@@ -386,6 +386,7 @@ test('the workspace bridge collects draft status and saves without prompting for
       tunnelBrowserAuthQueue: Promise.resolve(),
       __dirname: '/electron',
       path,
+      createApplicationWindow: () => assert.fail('unexpected window creation'),
       BrowserWindow: {
         fromWebContents: (contents: unknown) => (contents === sender ? owner : undefined),
       },

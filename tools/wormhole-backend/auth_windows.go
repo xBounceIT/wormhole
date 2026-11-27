@@ -329,6 +329,7 @@ func readWindowsHelloResult(operation uintptr) (uint32, error) {
 	return result, err
 }
 
+//go:uintptrescapes
 func comCall(object uintptr, slot int, arguments ...uintptr) (uintptr, error) {
 	method, err := comMethod(object, slot)
 	if err != nil {

@@ -3,6 +3,8 @@ import { EventEmitter } from 'node:events';
 import { readFileSync } from 'node:fs';
 import { stripTypeScriptTypes } from 'node:module';
 import path from 'node:path';
+import { createInterface } from 'node:readline';
+import { PassThrough } from 'node:stream';
 import test from 'node:test';
 
 import { selectDialogVisuals } from '../src/dialog-lifecycle.ts';
@@ -24,9 +26,11 @@ import {
 } from '../electron/native-auth-window.ts';
 import { stopChildProcess } from '../electron/rdp.ts';
 import { KeyedSingleFlight } from '../electron/keyed-single-flight.ts';
+import { stricterVaultProfile } from '../electron/vault-security.ts';
 import { drainSshBackendSessionIds } from '../electron/ssh-backend-lifecycle.ts';
 import { TunnelLeaseRegistry } from '../electron/tunnel-lease-registry.ts';
 import {
+  completeWindowsUpdateHandoff,
   isSafeUpdateInstallerPath,
   launchDownloadedUpdate,
   updateInstallAction,
@@ -908,6 +912,26 @@ test('update installers use verified platform-specific cache and launch contract
     assert.equal(updateInstallAction(platform), action);
   }
   assert.equal(updateInstallerExtension('freebsd'), undefined);
+  for (const name of ['Wormhole-2.0.1-linux-amd64.deb', 'Wormhole-2.0.1-linux-aarch64.rpm']) {
+    assert.equal(
+      isSafeUpdateInstallerPath(path.join(cacheRoot, name), cacheRoot, 'linux', true),
+      true,
+    );
+    assert.equal(isSafeUpdateInstallerPath(path.join(cacheRoot, name), cacheRoot, 'linux'), false);
+    assert.equal(
+      isSafeUpdateInstallerPath(path.join(cacheRoot, 'nested', name), cacheRoot, 'linux', true),
+      false,
+    );
+  }
+  assert.equal(
+    isSafeUpdateInstallerPath(
+      path.join(cacheRoot, 'Wormhole-2.0.1-x86_64.AppImage'),
+      cacheRoot,
+      'linux',
+      true,
+    ),
+    false,
+  );
   assert.equal(updateInstallAction('freebsd'), undefined);
   assert.equal(
     isSafeUpdateInstallerPath(
@@ -931,18 +955,14 @@ test('update installers use verified platform-specific cache and launch contract
     mainSource.indexOf("ipcMain.handle('update:download'"),
     mainSource.indexOf("ipcMain.handle('update:install'"),
   );
-  assert.match(downloadHandler, /expected\?\.isUpdateAvailable/);
-  assert.match(downloadHandler, /installerSha256\.toLowerCase\(\)/);
-  assert.match(downloadHandler, /installerUrl !== expected\.installerUrl/);
+  assert.match(downloadHandler, /updateMatchesLatest\(\{ installerUrl, installerFileName/);
+  assert.match(downloadHandler, /signedManifest: latestUpdateManifest/);
 
   const installerHandler = mainSource.slice(
     mainSource.indexOf('async function handleDownloadedUpdate'),
     mainSource.indexOf('function scheduleStartupUpdateCheck'),
   );
-  assert.match(installerHandler, /await new Promise<void>/);
-  assert.match(installerHandler, /child\.once\('error', reject\)/);
-  assert.match(installerHandler, /child\.once\('spawn'/);
-  assert.match(installerHandler, /launchDownloadedUpdate\(installerPath, process\.platform/);
+  assert.match(installerHandler, /launchDownloadedUpdate\(handoffPath, process\.platform/);
   assert.match(installerHandler, /openPath: \(installerPath\) => shell\.openPath\(installerPath\)/);
   assert.match(installerHandler, /await requestUpdateQuit\(launch\)/);
   assert.match(installerHandler, /skipQuitConfirmation = true;\s*try\s*\{\s*app\.quit\(\)/);
@@ -1018,8 +1038,78 @@ test('AppImage handoff reveals the download and rejects unsupported platforms', 
   assert.deepEqual(revealed, ['verified.AppImage']);
 });
 
-// Exercise the actual main-process handoff and before-quit listener together. The Electron
-// entrypoint is excluded from loaded-module coverage; these stubs preserve its event ordering.
+test('Windows installer decisions are single-use and expire on timeout or worker exit', async () => {
+  for (const failure of [
+    'oversized',
+    'oversized-request',
+    'invalid',
+    'early-exit',
+    'timeout',
+    'launch-timeout',
+    'pipe',
+    'cancel',
+    'duplicate',
+  ] as const) {
+    const input = new PassThrough();
+    let sent = '';
+    input.on('data', (chunk) => {
+      sent += chunk.toString();
+    });
+    const child = Object.assign(new EventEmitter(), {
+      stdin: input,
+      stdout: new PassThrough(),
+      kill: () => true,
+    });
+    const pending = Promise.withResolvers<(restart: boolean) => void>();
+    const worker = child as unknown as Parameters<typeof completeWindowsUpdateHandoff>[0];
+    const result = completeWindowsUpdateHandoff(
+      worker,
+      failure === 'oversized-request' ? { value: 'é'.repeat(8192) } : {},
+      async (publisher, commit) => {
+        assert.equal(publisher, true);
+        pending.resolve(commit);
+        if (failure === 'cancel') throw Error('Vault locked');
+      },
+      failure === 'timeout' || failure === 'launch-timeout' ? 25 : 1000,
+    );
+    if (failure === 'oversized-request') {
+      await assert.rejects(result, /Invalid installer verification request/);
+      assert.equal(sent, '');
+      continue;
+    }
+    if (failure === 'oversized') child.stdout.write('VVV');
+    else if (failure === 'invalid') child.stdout.write('Z\n');
+    else if (failure === 'pipe') input.emit('error', Error('pipe closed'));
+    else {
+      child.stdout.write('P');
+      child.stdout.write('\n');
+      const commit = await pending.promise;
+      if (failure === 'early-exit') child.emit('close', 0);
+      if (failure === 'launch-timeout') {
+        commit(true);
+        await assert.rejects(result, /did not confirm the installer launch/);
+        assert.equal(sent, '{}\nR');
+        continue;
+      }
+      if (failure === 'duplicate') {
+        commit(false);
+        assert.throws(() => commit(true), /expired/);
+        child.emit('close', 0);
+        await result;
+        assert.equal(sent, '{}\nC');
+        continue;
+      }
+      await assert.rejects(result);
+      assert.throws(() => commit(true), /expired/);
+      assert.equal(sent, '{}\n');
+      continue;
+    }
+    await assert.rejects(result);
+    assert.equal(sent, '{}\n');
+  }
+});
+
+// Exercise the actual main-process handoff and before-quit listener together.
 function updateQuitHarness(platform = 'darwin') {
   const source = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
   const section = (start: string, end: string) => {
@@ -1036,12 +1126,23 @@ function updateQuitHarness(platform = 'darwin') {
     shutdownFailure: false,
     spawnFailure: false,
     openError: '',
+    verified: true,
+    publisherVerification: false,
+    publisherVerified: false,
+    expectedPublisher: false,
+    profile: undefined as 'standard' | 'default' | 'hardened' | 'paranoid' | undefined,
+    installerMode: '',
+    managed: false,
+    managedPackagePath: undefined as string | undefined,
+    revealedPath: '',
+    updateAvailable: true,
     activeCount: 0,
     confirmResult: true,
     quitFailure: false,
     prepare: async () => {},
     finish: async () => {},
     open: async () => {},
+    verify: async () => {},
     flush: async () => {},
   };
   const app = new EventEmitter() as EventEmitter & { quit(): void };
@@ -1058,10 +1159,14 @@ function updateQuitHarness(platform = 'darwin') {
   };
   const harness = new Function(
     stripTypeScriptTypes(`function makeHarness(dependencies) {
-    const { app, events, controls, launchDownloadedUpdate, updateInstallAction, KeyedSingleFlight, process } = dependencies;
+    const { app, events, controls, completeWindowsUpdateHandoff, launchDownloadedUpdate, updateInstallAction, KeyedSingleFlight, path, process } = dependencies;
     let isQuitting = false;
     let skipQuitConfirmation = false;
     let pendingUpdateQuit;
+    let downloadedUpdate;
+    const request = { installerUrl: 'release', installerFileName: 'installer', installerSha256: 'hash', installerSize: 32 };
+    const latestUpdateCheck = { ...request, get isUpdateAvailable() { return controls.updateAvailable; },
+      get updatePolicy() { return controls.managed ? 'managed' : undefined; } };
     const updateInstallTasks = new KeyedSingleFlight();
     let startupUpdateTimer, startupBackgroundTimer, updateDownloadChild, bitwardenBackgroundTimer;
     const owner = {};
@@ -1094,18 +1199,43 @@ function updateQuitHarness(platform = 'darwin') {
     };
     const shell = {
       openPath: async () => { events.push('open'); await controls.open(); return controls.openError; },
-      showItemInFolder: () => { events.push('reveal'); },
+      showItemInFolder: (file) => { controls.revealedPath = file; events.push('reveal'); },
     };
-    const spawn = () => {
-      events.push('spawn');
+    const runBackend = async (operation, selected) => {
+      if (operation !== 'update-verify-installer' || Object.entries(request).some(([key, value]) => selected[key] !== value) || selected.requirePublisher !== controls.expectedPublisher)
+        throw Error('Unexpected verification request');
+      events.push('verify');
+      await controls.verify();
+      return { verified: controls.verified, publisherVerified: controls.publisherVerified, managedPackagePath: controls.managedPackagePath };
+    };
+    const requireUpdateScope = () => {};
+    const requireUpdateInstaller = async () => controls.profile;
+    let latestUpdatePublisherVerification = false;
+    const backendPath = () => 'backend.exe';
+    const wormholeDatabasePath = () => 'workspace.db';
+    const spawn = (executable, args) => {
+      if (executable !== backendPath() || args.join(' ') !== '--operation update-install-windows --database workspace.db')
+        throw Error('Unexpected installer worker');
       const child = new dependencies.EventEmitter();
-      child.unref = () => {};
-      queueMicrotask(() => controls.spawnFailure
-        ? child.emit('error', new Error('Installer unavailable'))
-        : child.emit('spawn'));
+      child.stdin = new dependencies.PassThrough();
+      child.stdout = new dependencies.PassThrough();
+      child.kill = () => {};
+      child.stdin.once('data', async chunk => {
+        const result = await runBackend('update-verify-installer', JSON.parse(chunk));
+        if (!result.verified) return child.emit('close', 1);
+        child.stdin.once('data', mode => {
+          controls.installerMode = mode.toString();
+          events.push('spawn');
+          queueMicrotask(() => child.emit('close', controls.spawnFailure ? 1 : 0));
+        });
+        child.stdout.write(result.publisherVerified ? 'P\\n' : 'V\\n');
+      });
       return child;
     };
-    const webSurfaces = { flushAndCloseAll: async () => { events.push('flush'); await controls.flush(); } };
+    const webSurfaces = {
+      checkpointVaultCookies: async () => {},
+      flushAndCloseAll: async () => { events.push('flush'); await controls.flush(); },
+    };
     const withBitwardenBrowserTimeout = promise => promise;
     const requestRendererTeardown = async () => {};
     const shutdownNativeResources = async () => {
@@ -1115,20 +1245,45 @@ function updateQuitHarness(platform = 'darwin') {
     const console = { warn() { events.push('warning'); } };
     ${section('async function handleDownloadedUpdate', 'function scheduleStartupUpdateCheck')}
     ${section('let quitCleanupStarted = false;', "app.on('window-all-closed'")}
-    return { install: handleDownloadedUpdate, state: () => ({ isQuitting, skipQuitConfirmation, quitCleanupStarted }) };
-  }`) + ';return makeHarness;',
+    return {
+      install(path) {
+        downloadedUpdate ??= { path, request };
+        latestUpdatePublisherVerification = controls.publisherVerification;
+        return handleDownloadedUpdate(downloadedUpdate, () => true);
+      },
+      state: () => ({ isQuitting, skipQuitConfirmation, quitCleanupStarted }),
+    };
+  }`) + ';return makeHarness;\n//# sourceURL=wormhole-update-quit-fixture.js',
   )()({
     app,
     events,
     controls,
+    completeWindowsUpdateHandoff,
     launchDownloadedUpdate,
     updateInstallAction,
     KeyedSingleFlight,
     process: { platform },
+    path,
     EventEmitter,
+    PassThrough,
   });
   return { ...harness, controls, events, app };
 }
+
+test('Windows checks the final profile before asking the installer to relaunch Wormhole', async () => {
+  for (const profile of ['hardened', 'paranoid'] as const) {
+    const harness = updateQuitHarness('win32');
+    harness.controls.profile = 'hardened';
+    harness.controls.publisherVerification = true;
+    harness.controls.expectedPublisher = true;
+    harness.controls.publisherVerified = true;
+    harness.controls.verify = async () => {
+      harness.controls.profile = profile;
+    };
+    assert.deepEqual(await harness.install('installer.exe'), { appWillQuit: true });
+    assert.equal(harness.controls.installerMode, profile === 'paranoid' ? 'C' : 'R');
+  }
+});
 
 test('cancelled update quit rejects the handoff, restores confirmation, and permits retry', async () => {
   const harness = updateQuitHarness();
@@ -1202,10 +1357,11 @@ test('installer handoff waits for both edit-close preparation and finalization',
     assert.deepEqual(harness.events, ['quit-request', 'prepare', 'finish']);
     finalized.resolve();
     assert.deepEqual(await installing, { appWillQuit: true });
-    assert.deepEqual(harness.events.slice(0, 4), [
+    assert.deepEqual(harness.events.slice(0, 5), [
       'quit-request',
       'prepare',
       'finish',
+      'verify',
       platform === 'darwin' ? 'open' : 'spawn',
     ]);
   }
@@ -1220,6 +1376,7 @@ test('native cleanup failures complete update quit after preserving file edits',
       'quit-request',
       'prepare',
       'finish',
+      'verify',
       platform === 'darwin' ? 'open' : 'spawn',
       'flush',
       'shutdown',
@@ -1279,11 +1436,15 @@ test('failed installer handoffs preserve native services and permit retry', asyn
     const harness = updateQuitHarness(platform);
     if (platform === 'darwin') harness.controls.openError = 'Installer unavailable';
     else harness.controls.spawnFailure = true;
-    await assert.rejects(harness.install('installer'), /Installer unavailable/);
+    await assert.rejects(
+      harness.install('installer'),
+      /Installer unavailable|verified Windows installer could not be started/,
+    );
     assert.deepEqual(harness.events, [
       'quit-request',
       'prepare',
       'finish',
+      'verify',
       platform === 'darwin' ? 'open' : 'spawn',
     ]);
     assert.deepEqual(harness.state(), {
@@ -1296,6 +1457,52 @@ test('failed installer handoffs preserve native services and permit retry', asyn
     assert.deepEqual(await harness.install('installer'), { appWillQuit: true });
     assert.equal(harness.events.filter((event) => event === 'exited').length, 1);
   }
+});
+
+test('installer handoff revalidates cached bytes and rejects changed update metadata', async () => {
+  for (const platform of ['darwin', 'win32', 'linux']) {
+    const harness = updateQuitHarness(platform);
+    const launch = platform === 'darwin' ? 'open' : platform === 'win32' ? 'spawn' : 'reveal';
+    harness.controls.verified = false;
+    await assert.rejects(harness.install('installer'), /could not be verified/);
+    assert.equal(harness.events.at(-1), 'verify');
+    assert.equal(harness.events.includes(launch), false);
+    harness.controls.updateAvailable = false;
+    await assert.rejects(harness.install('installer'), /selected update changed/);
+    assert.equal(harness.events.filter((event) => event === 'verify').length, 1);
+    harness.controls.verified = true;
+    harness.controls.updateAvailable = true;
+    harness.controls.verify = async () => {
+      harness.controls.updateAvailable = false;
+    };
+    await assert.rejects(harness.install('installer'), /could not be verified/);
+    assert.equal(harness.events.includes(launch), false);
+    harness.controls.updateAvailable = true;
+    harness.controls.verify = async () => {};
+    assert.deepEqual(await harness.install('installer'), { appWillQuit: platform !== 'linux' });
+    assert.equal(harness.events.filter((event) => event === launch).length, 1);
+  }
+});
+
+test('installer handoff requires the publisher result on configured builds and Standard', async () => {
+  for (const configured of [false, true]) {
+    const harness = updateQuitHarness('win32');
+    harness.controls.publisherVerification = configured;
+    harness.controls.profile = configured ? 'default' : 'standard';
+    harness.controls.expectedPublisher = true;
+    await assert.rejects(harness.install('installer'), /publisher could not be verified/);
+    assert.equal(harness.events.includes('spawn'), false);
+    harness.controls.publisherVerified = true;
+    assert.deepEqual(await harness.install('installer'), { appWillQuit: true });
+    assert.equal(harness.events.filter((event) => event === 'spawn').length, 1);
+  }
+  const stricter = updateQuitHarness('win32');
+  stricter.controls.profile = 'default';
+  stricter.controls.verify = async () => {
+    stricter.controls.profile = 'standard';
+  };
+  await assert.rejects(stricter.install('installer'), /publisher could not be verified/);
+  assert.equal(stricter.events.includes('spawn'), false);
 });
 
 test('an ordinary quit during DMG opening joins the prepared update shutdown', async () => {
@@ -1327,15 +1534,403 @@ test('ordinary quit wins a race before the update operation starts', async () =>
   assert.equal(harness.events.filter((event) => event === 'exited').length, 1);
 });
 
+test('managed Linux handoff reveals the native staging file and rejects a cached or malformed receipt', async () => {
+  const cache = '/home/test/cache/installer';
+  for (const candidate of [
+    undefined,
+    cache,
+    'installer',
+    '/var/../tmp/installer',
+    '/var/lib/wormhole/updates/other',
+  ]) {
+    const harness = updateQuitHarness('linux');
+    harness.controls.managed = true;
+    harness.controls.managedPackagePath = candidate;
+    await assert.rejects(harness.install(cache), /staged system package/);
+    assert.equal(harness.controls.revealedPath, '');
+  }
+  const harness = updateQuitHarness('linux');
+  harness.controls.managed = true;
+  harness.controls.managedPackagePath = '/var/lib/wormhole/updates/installer';
+  assert.deepEqual(await harness.install(cache), { appWillQuit: false });
+  assert.equal(harness.controls.revealedPath, harness.controls.managedPackagePath);
+});
+
 test('Linux reveal and unsupported platforms never request main-process quit', async () => {
   const linux = updateQuitHarness('linux');
   for (let attempt = 0; attempt < 2; attempt++) {
     assert.deepEqual(await linux.install('installer.AppImage'), { appWillQuit: false });
   }
-  assert.deepEqual(linux.events, ['reveal', 'reveal']);
+  assert.deepEqual(linux.events, ['verify', 'reveal', 'verify', 'reveal']);
   const unsupported = updateQuitHarness('freebsd');
   await assert.rejects(unsupported.install('installer'), /not supported/);
-  assert.deepEqual(unsupported.events, []);
+  assert.deepEqual(unsupported.events, ['verify']);
+});
+
+test('update IPC keeps the manifest in main and requires a completed download of the selected file', async () => {
+  const source = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
+  const section = (start: string, end: string) => {
+    const from = source.indexOf(start);
+    const to = source.indexOf(end, from);
+    assert.ok(from >= 0 && to > from, `Missing main-process section: ${start}`);
+    return source.slice(from, to);
+  };
+  const cache = path.resolve('cache', 'updates');
+  const trusted = { sender: {} };
+  const release = {
+    isUpdateAvailable: true,
+    installerUrl: 'https://github.com/wormhole/setup.exe',
+    installerFileName: 'setup.exe',
+    installerSha256: 'c'.repeat(64),
+    installerSize: 123,
+    signedManifest: 'manifest-from-the-backend',
+    publisherVerification: undefined as boolean | undefined,
+    managed: undefined as boolean | undefined,
+    lastUpdateCheck: undefined as string | undefined,
+  };
+  const expected = path.join(cache, release.installerFileName);
+  const handlers = new Map<string, (event: unknown, value: unknown) => Promise<unknown>>();
+  const progress: number[][] = [];
+  const fetches: string[] = [];
+  const checkRequests: unknown[] = [];
+  const signals: AbortSignal[] = [];
+  const preferences: unknown[] = [];
+  const broadcasts: unknown[] = [];
+  const launches: string[] = [];
+  const external: string[] = [];
+  const timers = new Set<() => void>();
+  const controls = {
+    workspaceId: undefined as string | undefined,
+    epoch: 1,
+    locked: false,
+    migration: false,
+    profile: 'default',
+    floor: 'default' as string | undefined,
+    fetch: async () => release,
+    autoCheck: true,
+  };
+  class DownloadProcess extends EventEmitter {
+    readonly stdin = new PassThrough();
+    readonly stdout = new PassThrough();
+    readonly stderr = new PassThrough();
+    sent = '';
+    killed = false;
+    constructor() {
+      super();
+      this.stdin.on('data', (chunk) => (this.sent += chunk.toString()));
+    }
+    kill() {
+      this.killed = true;
+    }
+    line(message: object) {
+      this.stdout.write(JSON.stringify(message) + '\n');
+    }
+    finish(code: number) {
+      this.emit('close', code);
+    }
+  }
+  const downloads: DownloadProcess[] = [];
+  const harness = new Function(
+    stripTypeScriptTypes(`function createUpdateHarness(d) {
+    const { path, createInterface } = d;
+    const app = { getVersion: () => '2.0.0' };
+    const runBackend = async (operation, request, _timeout, signal) => {
+      d.fetches.push(operation);
+      d.checkRequests.push(request);
+      if (signal) d.signals.push(signal);
+      return d.controls.fetch();
+    };
+    const authSession = {
+      get isAccessAllowed() { return !d.controls.locked; },
+      get authorizationEpoch() { return d.controls.epoch; },
+    };
+    const vaultBackend = {
+      get isVaultWorkspace() { return !!d.controls.workspaceId; },
+      get unlockedWorkspaceId() { return d.controls.locked ? undefined : d.controls.workspaceId; },
+      get requiresLegacyMigration() { return d.controls.migration; },
+      security: async () => ({ effective: d.controls.profile }),
+      preferences: async () => ({ autoCheckForUpdates: d.controls.autoCheck }),
+      updatePreferences: async (request) => d.preferences.push(request),
+    };
+    const vaultLockMonitor = { get effectiveProfile() { return d.controls.floor; } };
+    const stricterVaultProfile = d.stricterVaultProfile;
+    const broadcastUpdateResult = value => d.broadcasts.push(value);
+    const broadcastUpdateProgress = (_, downloaded, total) => d.progress.push([downloaded, total]);
+    const ipcMain = { handle: (channel, handler) => d.handlers.set(channel, handler) };
+    const isTrustedVaultSender = event => event === d.trusted;
+    const isRecord = value => !!value && typeof value === 'object';
+    const isSafeInstallerPath = value => d.isSafeUpdateInstallerPath(value, d.cache, 'win32');
+    const updateCacheRoot = () => d.cache;
+    const backendPath = () => 'backend';
+    const wormholeDatabasePath = () => 'database';
+    const electronUserDataPath = () => 'data';
+    const backendMaxBuffer = 1024;
+    const startupUpdateDelayMs = 10_000;
+    const setTimeout = callback => { d.timers.add(callback); return callback; };
+    const clearTimeout = callback => { d.timers.delete(callback); };
+    const isAuthorizationEpochCurrent = epoch => !d.controls.locked && d.controls.epoch === epoch;
+    const shell = { openExternal: async url => d.external.push(url) };
+    const spawn = () => { const child = new d.DownloadProcess(); d.downloads.push(child); return child; };
+    const handleDownloadedUpdate = download => d.launches.push(download.path);
+    let isQuitting = false, quitCleanupStarted = false, authLockRequested = false;
+    let updateCheckInFlight, latestUpdateCheck, latestUpdateManifest, latestUpdateScope, updateProfileFloor, downloadedUpdate, updateDownloadChild;
+    let latestUpdatePublisherVerification = false;
+    let startupUpdateTimer, startupUpdateScheduled;
+    ${section('function captureUpdateScope', 'function broadcastUpdateResult')}
+    ${section('function downloadUpdateInstaller', 'async function handleDownloadedUpdate')}
+    ${section('function updateMatchesLatest', 'function requestUpdateQuit')}
+    ${section('function scheduleStartupUpdateCheck', 'async function runUserDeletion')}
+    ${section("ipcMain.handle('update:status'", "ipcMain.handle('settings:logs-info'")}
+    return { performUpdateCheck, retireVaultUpdates, scheduleStartupUpdateCheck, captureUpdateScope };
+  }`) + '; return createUpdateHarness;\n//# sourceURL=wormhole-update-ipc-fixture.js',
+  )()({
+    path,
+    createInterface,
+    fetches,
+    checkRequests,
+    signals,
+    release,
+    broadcasts,
+    progress,
+    handlers,
+    trusted,
+    isSafeUpdateInstallerPath,
+    cache,
+    DownloadProcess,
+    downloads,
+    launches,
+    external,
+    timers,
+    controls,
+    preferences,
+    stricterVaultProfile,
+  });
+  const download = handlers.get('update:download')!;
+  const install = handlers.get('update:install')!;
+  const status = handlers.get('update:status')!;
+  const check = handlers.get('update:check')!;
+  const openRelease = handlers.get('update:open-release')!;
+  await assert.rejects(status({}, undefined), /invalid update request/i);
+  await assert.rejects(check({}, undefined), /invalid update request/i);
+  await assert.rejects(download(trusted, release), /request is invalid/);
+  const checked = harness.performUpdateCheck();
+  assert.equal(harness.performUpdateCheck(), checked);
+  const publicRelease = await checked;
+  assert.equal(Object.hasOwn(publicRelease, 'signedManifest'), false);
+  assert.deepEqual(broadcasts, [publicRelease]);
+  assert.deepEqual(fetches, ['update-check']);
+
+  const otherFile = path.join(cache, 'other.exe');
+  await assert.rejects(download({}, publicRelease), /request is invalid/);
+  for (const bad of [
+    {},
+    { ...publicRelease, installerFileName: '../setup.exe' },
+    { ...publicRelease, installerUrl: 'http://github.com/setup.exe' },
+    { ...publicRelease, installerSha256: 'invalid' },
+    { ...publicRelease, installerSize: 0 },
+    { ...publicRelease, installerSize: 1.5 },
+    { ...publicRelease, installerSize: 21 },
+  ])
+    await assert.rejects(download(trusted, bad), /request is invalid/);
+  assert.equal(downloads.length, 0);
+  await assert.rejects(install(trusted, { path: expected }), /download the selected update/i);
+
+  const unsuccessful = download(trusted, publicRelease);
+  await new Promise(setImmediate);
+  downloads.at(-1)!.line({ type: 'complete', path: expected });
+  downloads.at(-1)!.finish(1);
+  await assert.rejects(unsuccessful, /download failed/);
+  for (const [paths, message] of [
+    [[], /before completing/],
+    [[otherFile], /could not be confirmed/],
+    [[expected, expected], /duplicate completion/],
+  ] as const) {
+    const pending = download(trusted, publicRelease);
+    await new Promise(setImmediate);
+    const child = downloads.at(-1)!;
+    for (const path of paths) child.line({ type: 'complete', path });
+    child.finish(0);
+    await assert.rejects(pending, message);
+  }
+
+  const pending = download(trusted, {
+    ...publicRelease,
+    installerSha256: release.installerSha256.toUpperCase(),
+    signedManifest: 'from-renderer',
+  });
+  await new Promise(setImmediate);
+  const child = downloads.at(-1)!;
+  assert.equal(JSON.parse(child.sent).signedManifest, release.signedManifest);
+  assert.equal(JSON.parse(child.sent).installerSha256, release.installerSha256);
+  assert.equal(JSON.parse(child.sent).currentVersion, '2.0.0');
+  await assert.rejects(download(trusted, publicRelease), /already in progress/);
+  child.stdout.write('\nmalformed\nnull\n');
+  child.line({ type: 'progress', downloaded: 20, total: 123 });
+  child.line({ type: 'complete', path: expected });
+  await assert.rejects(install(trusted, { path: expected }), /download the selected update/i);
+  child.finish(0);
+  assert.equal(await pending, expected);
+  assert.deepEqual(progress, [[20, 123]]);
+  await assert.rejects(install({}, { path: expected }), /installer path is invalid/i);
+  await assert.rejects(
+    install(trusted, { path: path.join(cache, 'nested', 'setup.exe') }),
+    /installer path is invalid/i,
+  );
+  await assert.rejects(install(trusted, { path: otherFile }), /download the selected update/i);
+  await install(trusted, { path: expected });
+  assert.deepEqual(launches, [expected]);
+
+  controls.migration = true;
+  assert.throws(() => harness.performUpdateCheck(), /unavailable/);
+  controls.migration = false;
+  controls.workspaceId = 'vault';
+  controls.locked = true;
+  assert.throws(() => harness.performUpdateCheck(), /locked/);
+  await assert.rejects(download(trusted, publicRelease), /locked/);
+  controls.locked = false;
+  controls.floor = undefined;
+  await assert.rejects(harness.performUpdateCheck(), /security policy/);
+  controls.floor = 'default';
+  controls.fetch = async () => ({ ...release, lastUpdateCheck: '2026-11-25T22:00:00Z' });
+  const signed = await harness.performUpdateCheck();
+  assert.equal(signed.isUpdateAvailable, true);
+  assert.equal(fetches.at(-1), 'update-check-release');
+  assert.deepEqual(preferences, [{ lastUpdateCheck: '2026-11-25T22:00:00Z' }]);
+  const protectedDownload = download(trusted, signed);
+  await new Promise(setImmediate);
+  const protectedChild = downloads.at(-1)!;
+  controls.epoch++;
+  harness.retireVaultUpdates();
+  assert.equal(protectedChild.killed, true);
+  protectedChild.line({ type: 'complete', path: expected });
+  protectedChild.finish(0);
+  await assert.rejects(protectedDownload, /workspace changed/);
+  await assert.rejects(install(trusted, { path: expected }), /download the selected update/i);
+
+  controls.fetch = async () => ({ ...release, signedManifest: '' });
+  const unsigned = await harness.performUpdateCheck();
+  assert.equal(unsigned.isUpdateAvailable, false);
+  assert.equal(unsigned.installerUrl, undefined);
+  await assert.rejects(download(trusted, publicRelease), /policy/);
+
+  controls.fetch = async () => release;
+  controls.floor = 'standard';
+  const standard = await harness.performUpdateCheck();
+  assert.equal(standard.updatePolicy, 'notify');
+  assert.equal(standard.isUpdateAvailable, false);
+  assert.equal(standard.installerSha256, undefined);
+  controls.fetch = async () => ({ ...release, publisherVerification: true });
+  const pinnedStandard = await harness.performUpdateCheck();
+  assert.equal(pinnedStandard.isUpdateAvailable, true);
+  assert.equal(Object.hasOwn(pinnedStandard, 'publisherVerification'), false);
+  assert.equal(Object.hasOwn(pinnedStandard, 'signedManifest'), false);
+  controls.fetch = async () => release;
+  const releasePage = 'https://github.com/xBounceIT/wormhole/releases/tag/v9.8.7';
+  await assert.rejects(openRelease(trusted, 'https://example.invalid'), /invalid/i);
+  await openRelease(trusted, releasePage);
+  assert.deepEqual(external, [releasePage]);
+  controls.profile = 'hardened';
+  assert.equal((await harness.performUpdateCheck()).updatePolicy, 'notify');
+  assert.deepEqual(checkRequests.at(-1), { currentVersion: '2.0.0', managedMode: 'preferred' });
+  controls.profile = 'paranoid';
+  const checkCount = fetches.length;
+  const managed = (await check(trusted, undefined)) as {
+    updatePolicy: string;
+    isUpdateAvailable: boolean;
+  };
+  assert.equal(managed.updatePolicy, 'managed');
+  assert.equal(managed.isUpdateAvailable, false);
+  assert.equal(fetches.length, checkCount + 1);
+  assert.deepEqual(checkRequests.at(-1), { currentVersion: '2.0.0', managedMode: 'required' });
+  const managedStatus = (await status(trusted, undefined)) as { result: { updatePolicy: string } };
+  assert.equal(managedStatus.result.updatePolicy, 'managed');
+  await assert.rejects(openRelease(trusted, releasePage), /unavailable/i);
+
+  controls.fetch = async () => ({
+    ...release,
+    managed: true,
+    installerUrl: `managed-update:${release.installerFileName}`,
+  });
+  const approved = await harness.performUpdateCheck();
+  assert.equal(approved.updatePolicy, 'managed');
+  assert.equal(approved.isUpdateAvailable, true);
+  assert.equal(Object.hasOwn(approved, 'managed'), false);
+  assert.equal(Object.hasOwn(approved, 'signedManifest'), false);
+  await assert.rejects(download(trusted, publicRelease), /invalid/i);
+  const managedDownload = download(trusted, approved);
+  await new Promise(setImmediate);
+  const managedChild = downloads.at(-1)!;
+  const managedRequest = JSON.parse(managedChild.sent);
+  assert.equal(managedRequest.installerUrl, approved.installerUrl);
+  assert.equal(managedRequest.signedManifest, release.signedManifest);
+  managedChild.line({ type: 'complete', path: expected });
+  managedChild.finish(0);
+  assert.equal(await managedDownload, expected);
+  await install(trusted, { path: expected });
+  assert.deepEqual(launches, [expected, expected]);
+  controls.fetch = async () => release;
+
+  controls.profile = controls.floor = 'default';
+  assert.equal(
+    (await harness.performUpdateCheck()).updatePolicy,
+    'managed',
+    'observed policy applies until a new unlock',
+  );
+  controls.epoch++;
+  const old = Promise.withResolvers<typeof release>();
+  controls.fetch = () => old.promise;
+  const staleCheck = harness.performUpdateCheck();
+  await new Promise(setImmediate);
+  const oldSignal = signals.at(-1)!;
+  controls.epoch++;
+  controls.fetch = async () => release;
+  assert.equal((await harness.performUpdateCheck()).isUpdateAvailable, true);
+  assert.equal(oldSignal.aborted, true);
+  const publishes = broadcasts.length;
+  old.resolve({ ...release, lastUpdateCheck: '2026-11-25T22:01:00Z' });
+  await assert.rejects(staleCheck, /workspace changed/);
+  assert.equal(broadcasts.length, publishes);
+  assert.equal(preferences.length, 1);
+
+  const delayed = Promise.withResolvers<typeof release>();
+  controls.fetch = () => delayed.promise;
+  const changingPolicy = harness.performUpdateCheck();
+  await new Promise(setImmediate);
+  controls.profile = 'standard';
+  delayed.resolve({ ...release, lastUpdateCheck: '2026-11-25T22:02:00Z' });
+  await assert.rejects(changingPolicy, /update policy changed/);
+  assert.equal(preferences.length, 1);
+  controls.profile = 'default';
+  controls.epoch++;
+  controls.fetch = async () => release;
+
+  const scope = harness.captureUpdateScope();
+  const fireTimer = () => {
+    const next = timers.values().next().value!;
+    timers.delete(next);
+    next();
+  };
+  harness.scheduleStartupUpdateCheck({ autoCheckForUpdates: false }, scope);
+  assert.equal(timers.size, 0);
+  harness.scheduleStartupUpdateCheck({ autoCheckForUpdates: true }, scope);
+  harness.scheduleStartupUpdateCheck({ autoCheckForUpdates: true }, scope);
+  assert.equal(timers.size, 1);
+  const beforeAutomatic = fetches.length;
+  controls.autoCheck = false;
+  fireTimer();
+  await new Promise(setImmediate);
+  assert.equal(fetches.length, beforeAutomatic);
+  controls.autoCheck = true;
+  harness.scheduleStartupUpdateCheck({ autoCheckForUpdates: true }, scope);
+  fireTimer();
+  await new Promise(setImmediate);
+  assert.equal(fetches.length, beforeAutomatic + 1);
+  harness.retireVaultUpdates();
+  harness.scheduleStartupUpdateCheck({ autoCheckForUpdates: true }, scope);
+  controls.locked = true;
+  fireTimer();
+  await new Promise(setImmediate);
+  assert.equal(fetches.length, beforeAutomatic + 1);
 });
 
 test('update availability uses the backend version decision from the same result', () => {

@@ -17,11 +17,14 @@ test('the real bootstrap mounts an authorized workspace without starting the opt
     source.indexOf('function showUnlock('),
   );
   const bootstrap = source.slice(
-    source.indexOf('async function bootstrap()'),
+    source.indexOf('async function bootstrap('),
     source.lastIndexOf('void bootstrap();'),
   );
   const { code } = await transformWithOxc(
-    'let startupRequest;\n' + mount + bootstrap + '\nbootstrap;',
+    'let startupRequest, disposeWorkspace; let startupGeneration = 0;\n' +
+      mount +
+      bootstrap +
+      '\nbootstrap;',
     'bootstrap.ts',
   );
   const workspace = { tree: [] };
@@ -42,6 +45,7 @@ test('the real bootstrap mounts an authorized workspace without starting the opt
           ? { ...snapshot, workspace: undefined }
           : snapshot;
     const api = {
+      loadVaultStartup: async () => ({ slots: null, cosmetics: { theme: 'system' } }),
       loadStartup: async () => {
         if (scenario === 'failure') throw new Error('Startup unavailable');
         return result;

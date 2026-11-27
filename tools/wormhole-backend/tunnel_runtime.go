@@ -252,6 +252,8 @@ func bridgeTunnelConnections(client, remote net.Conn) {
 	done := make(chan struct{})
 	go func() {
 		_, _ = io.Copy(remote, client)
+		_ = remote.Close()
+		_ = client.Close()
 		close(done)
 	}()
 	_, _ = io.Copy(client, remote)
@@ -692,6 +694,17 @@ func (pool *tunnelRuntimePool) release(entry *sharedTunnelEntry) {
 }
 
 func startSingleTunnelProcess(ctx context.Context, snapshot tunnelConfigSnapshot) (*tunnelProcess, error) {
+	defer func() { clearBytes(snapshot.settings) }()
+	// Probe before invoking vendor authentication, including cached SSO/refresh
+	// paths. Never substitute a direct route on failure.
+	var openVPNPath string
+	if tunnelRequiresOpenVPN(snapshot.kind) {
+		var err error
+		openVPNPath, err = requireOpenVPN(ctx)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if err := reportTunnelProgress(ctx, "preparing", ""); err != nil {
 		return nil, err
 	}
@@ -712,7 +725,6 @@ func startSingleTunnelProcess(ctx context.Context, snapshot tunnelConfigSnapshot
 			return nil, err
 		}
 	}
-	defer clearBytes(snapshot.settings)
 	if err := reportTunnelProgress(ctx, "authenticating", ""); err != nil {
 		return nil, err
 	}
@@ -739,9 +751,12 @@ func startSingleTunnelProcess(ctx context.Context, snapshot tunnelConfigSnapshot
 		return nil, err
 	}
 	defer clearBytes(config)
-	path, err := findTunnelSidecar(executable)
-	if err != nil {
-		return nil, err
+	path := openVPNPath
+	if path == "" {
+		path, err = findTunnelSidecar(executable)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	if err := reportTunnelProgress(ctx, "starting", ""); err != nil {

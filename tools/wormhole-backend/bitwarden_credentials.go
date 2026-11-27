@@ -226,7 +226,7 @@ func bitwardenVirtualCredentialID(itemID string, protocol int64) string {
 }
 
 func resolveBitwardenCredentialReference(
-	database *sql.DB,
+	database sqlMetadataReader,
 	credentialID string,
 	protocol int64,
 ) (bitwardenCredentialReference, bool, error) {
@@ -283,7 +283,7 @@ func resolveBitwardenCredentialReference(
 	}
 	credentialColumn := "SshCredentialId"
 	if protocol == smbProtocolValue {
-		entries, err := loadBitwardenCredentialCache(database)
+		entries, err := loadBitwardenCredentialCacheFromQueryer(database)
 		if err != nil {
 			return bitwardenCredentialReference{}, false, err
 		}

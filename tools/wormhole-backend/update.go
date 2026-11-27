@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/xBounceIT/wormhole/tools/wormhole-backend/internal/updateauth"
 )
 
 const (
@@ -22,7 +24,7 @@ const (
 	updateCheckTimeout         = 30 * time.Second
 	updateDownloadTimeout      = 30 * time.Minute
 	updateDownloadBufferSize   = 81920
-	updateMaxInstallerBytes    = 2 * 1024 * 1024 * 1024
+	updateMaxInstallerBytes    = updateauth.MaxInstallerBytes
 	updateProgressReportStep   = 0.01
 	updateProgressReportWindow = 100 * time.Millisecond
 	updateStalePartialPartAge  = 24 * time.Hour
@@ -32,6 +34,10 @@ var updateInstallerCachePatterns = []string{
 	"Wormhole-*-win-*-setup.exe",
 	"Wormhole-*-x86_64.AppImage",
 	"Wormhole-*-arm64.AppImage",
+	"Wormhole-*-linux-amd64.deb",
+	"Wormhole-*-linux-arm64.deb",
+	"Wormhole-*-linux-x86_64.rpm",
+	"Wormhole-*-linux-aarch64.rpm",
 	"Wormhole-*-mac-*-setup.dmg",
 }
 
@@ -41,25 +47,30 @@ var updateApiBaseURL = "https://api.github.com"
 
 type updateCheckRequest struct {
 	CurrentVersion string `json:"currentVersion"`
+	ManagedMode    string `json:"managedMode,omitempty"`
 }
 
 // updateCheckResponse is shared by every Electron host. isNewerRelease is the authoritative
 // version comparison; installer fields are populated only for a verified asset matching the
 // running operating system and architecture.
 type updateCheckResponse struct {
-	CurrentVersion    string `json:"currentVersion"`
-	LatestVersion     string `json:"latestVersion,omitempty"`
-	IsNewerRelease    bool   `json:"isNewerRelease"`
-	IsUpdateAvailable bool   `json:"isUpdateAvailable"`
-	CheckFailed       bool   `json:"checkFailed"`
-	ReleaseTag        string `json:"releaseTag,omitempty"`
-	ReleaseName       string `json:"releaseName,omitempty"`
-	ReleaseUrl        string `json:"releaseUrl,omitempty"`
-	ReleaseNotes      string `json:"releaseNotes,omitempty"`
-	InstallerUrl      string `json:"installerUrl,omitempty"`
-	InstallerFileName string `json:"installerFileName,omitempty"`
-	InstallerSize     *int64 `json:"installerSize,omitempty"`
-	InstallerSha256   string `json:"installerSha256,omitempty"`
+	CurrentVersion        string `json:"currentVersion"`
+	LatestVersion         string `json:"latestVersion,omitempty"`
+	IsNewerRelease        bool   `json:"isNewerRelease"`
+	IsUpdateAvailable     bool   `json:"isUpdateAvailable"`
+	CheckFailed           bool   `json:"checkFailed"`
+	ReleaseTag            string `json:"releaseTag,omitempty"`
+	ReleaseName           string `json:"releaseName,omitempty"`
+	ReleaseUrl            string `json:"releaseUrl,omitempty"`
+	ReleaseNotes          string `json:"releaseNotes,omitempty"`
+	InstallerUrl          string `json:"installerUrl,omitempty"`
+	InstallerFileName     string `json:"installerFileName,omitempty"`
+	InstallerSize         *int64 `json:"installerSize,omitempty"`
+	InstallerSha256       string `json:"installerSha256,omitempty"`
+	SignedManifest        []byte `json:"signedManifest,omitempty"`
+	PublisherVerification bool   `json:"publisherVerification,omitempty"`
+	Managed               bool   `json:"managed,omitempty"`
+	LastUpdateCheck       string `json:"lastUpdateCheck,omitempty"`
 }
 
 type githubRelease struct {
@@ -83,6 +94,19 @@ type updateDownloadRequest struct {
 	InstallerFileName string `json:"installerFileName"`
 	InstallerSha256   string `json:"installerSha256"`
 	InstallerSize     int64  `json:"installerSize"`
+	CurrentVersion    string `json:"currentVersion,omitempty"`
+	SignedManifest    []byte `json:"signedManifest,omitempty"`
+}
+
+type updateVerifyRequest struct {
+	updateDownloadRequest
+	RequirePublisher bool `json:"requirePublisher,omitempty"`
+}
+
+type updateVerifyResponse struct {
+	Verified           bool   `json:"verified"`
+	PublisherVerified  bool   `json:"publisherVerified,omitempty"`
+	ManagedPackagePath string `json:"managedPackagePath,omitempty"`
 }
 
 type updateDownloadProgress struct {
@@ -261,18 +285,20 @@ func rotateInstallerCache(databasePath string, keepFileName string) {
 	}
 }
 
-func stripMarkOfTheWeb(path string) {
-	if runtime.GOOS != "windows" {
-		return
+func checkForUpdate(databasePath string, request updateCheckRequest) (updateCheckResponse, error) {
+	result, err := checkUpdateRelease(databasePath, request, false)
+	if err == nil && result.LastUpdateCheck != "" {
+		err = writeSettingsValues(databasePath, map[string]any{lastUpdateCheckKey: result.LastUpdateCheck})
+		if err != nil {
+			return updateCheckResponse{CurrentVersion: result.CurrentVersion, CheckFailed: true}, err
+		}
 	}
-	// Deleting the alternate data stream is exactly what the WinUI app does (File.Delete on
-	// "path:Zone.Identifier") so a downloaded installer never triggers SmartScreen blocks.
-	_ = os.Remove(path + ":Zone.Identifier")
+	return result, err
 }
 
-// checkForUpdate queries the GitHub latest release, mirrors UpdateService.CheckAsync, and
-// persists the LastUpdateCheck marker only after a parseable GitHub answer.
-func checkForUpdate(databasePath string, request updateCheckRequest) (updateCheckResponse, error) {
+// The release worker reads no workspace database or ownership state. Each
+// workspace owner records its own check after the release worker returns.
+func checkUpdateRelease(databasePath string, request updateCheckRequest, signedOnly bool) (updateCheckResponse, error) {
 	cleanupStalePartialDownloads(databasePath)
 
 	currentText := strings.TrimSpace(request.CurrentVersion)
@@ -313,53 +339,52 @@ func checkForUpdate(databasePath string, request updateCheckRequest) (updateChec
 		return failed(), fmt.Errorf("cannot parse the GitHub release: %w", err)
 	}
 
-	// Only a parseable GitHub answer counts as a check for throttling purposes.
-	now := time.Now().UTC().Format(time.RFC3339)
-	if err := writeSettingsValues(databasePath, map[string]any{"LastUpdateCheck": now}); err != nil {
-		return failed(), err
+	result := updateCheckResponse{
+		CurrentVersion:  currentVersion.String(),
+		LastUpdateCheck: time.Now().UTC().Format(time.RFC3339),
 	}
 
 	if release.Draft || release.Prerelease {
-		return updateCheckResponse{CurrentVersion: currentVersion.String()}, nil
+		return result, nil
 	}
 	latestVersion, ok := parseAppVersion(release.TagName)
 	if !ok {
-		return updateCheckResponse{CurrentVersion: currentVersion.String()}, nil
+		return result, nil
 	}
+	result.LatestVersion = latestVersion.String()
 	if !currentVersion.lessThan(latestVersion) {
-		return updateCheckResponse{
-			CurrentVersion: currentVersion.String(),
-			LatestVersion:  latestVersion.String(),
-		}, nil
+		return result, nil
 	}
-	newerRelease := updateCheckResponse{
-		CurrentVersion: currentVersion.String(),
-		LatestVersion:  latestVersion.String(),
-		IsNewerRelease: true,
-		ReleaseTag:     release.TagName,
-		ReleaseName:    release.Name,
-		ReleaseUrl:     release.HtmlUrl,
-		ReleaseNotes:   release.Body,
+	result.IsNewerRelease = true
+	result.ReleaseTag = release.TagName
+	result.ReleaseName = release.Name
+	result.ReleaseUrl = release.HtmlUrl
+	result.ReleaseNotes = release.Body
+	if updateManifestPublicKeyHex != "" {
+		return checkSignedUpdate(result, arch), nil
+	}
+	if signedOnly || nativePublisherIdentity() != "" {
+		return result, nil
 	}
 
 	asset := findInstallerAsset(release, runtime.GOOS, arch)
 	if asset == nil || strings.TrimSpace(asset.BrowserDownloadUrl) == "" ||
 		asset.Size <= 0 || asset.Size > updateMaxInstallerBytes {
-		return newerRelease, nil
+		return result, nil
 	}
 
 	assetSize := asset.Size
 	sha256Sidecar := fetchSha256Sidecar(client, release, asset)
 	if sha256Sidecar == "" {
-		return newerRelease, nil
+		return result, nil
 	}
 
-	newerRelease.IsUpdateAvailable = true
-	newerRelease.InstallerUrl = asset.BrowserDownloadUrl
-	newerRelease.InstallerFileName = asset.Name
-	newerRelease.InstallerSize = &assetSize
-	newerRelease.InstallerSha256 = sha256Sidecar
-	return newerRelease, nil
+	result.IsUpdateAvailable = true
+	result.InstallerUrl = asset.BrowserDownloadUrl
+	result.InstallerFileName = asset.Name
+	result.InstallerSize = &assetSize
+	result.InstallerSha256 = sha256Sidecar
+	return result, nil
 }
 
 // fetchSha256Sidecar looks for "{installerName}.sha256" among the release assets and parses the
@@ -403,30 +428,26 @@ func fetchSha256Sidecar(client *http.Client, release githubRelease, installerAss
 // non-zero exit, which the Electron main process surfaces to the renderer.
 func serveUpdateDownload(databasePath string, input io.Reader, output io.Writer) error {
 	var request updateDownloadRequest
-	if err := decodeInputReader(input, &request); err != nil {
+	if err := decodeInputLimit(input, &request, 16*1024); err != nil {
 		return err
 	}
-	installerURL := strings.TrimSpace(request.InstallerUrl)
-	installerFileName := strings.TrimSpace(request.InstallerFileName)
-	if installerURL == "" || installerFileName == "" {
-		return errors.New("update download request is invalid")
+	if err := validateUpdateDownload(&request); err != nil {
+		return err
 	}
-	if filepath.Base(installerFileName) != installerFileName ||
-		installerFileName == "." || installerFileName == ".." {
-		return errors.New("update download file name is invalid")
-	}
-	expectedSha := strings.ToLower(strings.TrimSpace(request.InstallerSha256))
-	if len(expectedSha) != sha256.Size*2 {
-		return errors.New("update download requires a valid SHA-256 digest")
-	}
-	if _, err := hex.DecodeString(expectedSha); err != nil {
-		return errors.New("update download requires a valid SHA-256 digest")
-	}
-	if request.InstallerSize <= 0 || request.InstallerSize > updateMaxInstallerBytes {
-		return errors.New("update download size is invalid")
-	}
-
 	cleanupStalePartialDownloads(databasePath)
+	source, contentLength, err := openUpdateDownload(request)
+	if err != nil {
+		return err
+	}
+	defer source.Close()
+	if contentLength > 0 && contentLength != request.InstallerSize {
+		return fmt.Errorf(
+			"installer download size is invalid: expected %d bytes, got %d",
+			request.InstallerSize, contentLength,
+		)
+	}
+	installerFileName := request.InstallerFileName
+
 	cacheDirectory := updateCacheDirectory(databasePath)
 	if err := os.MkdirAll(cacheDirectory, 0o700); err != nil {
 		return fmt.Errorf("cannot create the update cache directory: %w", err)
@@ -436,26 +457,6 @@ func serveUpdateDownload(databasePath string, input io.Reader, output io.Writer)
 	_ = os.Remove(partPath)
 	_ = os.Remove(finalPath)
 
-	httpRequest, err := http.NewRequest(http.MethodGet, installerURL, nil)
-	if err != nil {
-		return fmt.Errorf("cannot build the installer download request: %w", err)
-	}
-	httpRequest.Header.Set("User-Agent", "Wormhole-Electron")
-	response, err := (&http.Client{Timeout: updateDownloadTimeout}).Do(httpRequest)
-	if err != nil {
-		return fmt.Errorf("cannot download the installer: %w", err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return fmt.Errorf("installer download returned %s", response.Status)
-	}
-
-	if response.ContentLength > 0 && response.ContentLength != request.InstallerSize {
-		return fmt.Errorf(
-			"installer download size is invalid: expected %d bytes, got %d",
-			request.InstallerSize, response.ContentLength,
-		)
-	}
 	total := request.InstallerSize
 
 	file, err := os.OpenFile(partPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
@@ -473,7 +474,7 @@ func serveUpdateDownload(databasePath string, input io.Reader, output io.Writer)
 		_ = os.Remove(partPath)
 	}
 	for {
-		read, readErr := response.Body.Read(buffer)
+		read, readErr := source.Read(buffer)
 		if read > 0 {
 			if downloaded+int64(read) > request.InstallerSize {
 				removePartial()
@@ -516,11 +517,11 @@ func serveUpdateDownload(databasePath string, input io.Reader, output io.Writer)
 	}
 
 	computedSha := hex.EncodeToString(hash.Sum(nil))
-	if computedSha != expectedSha {
+	if computedSha != request.InstallerSha256 {
 		_ = os.Remove(partPath)
 		return fmt.Errorf(
 			"SHA-256 mismatch for %s. Expected %s, got %s.",
-			installerFileName, expectedSha, computedSha,
+			installerFileName, request.InstallerSha256, computedSha,
 		)
 	}
 	if err := os.Rename(partPath, finalPath); err != nil {
@@ -533,9 +534,32 @@ func serveUpdateDownload(databasePath string, input io.Reader, output io.Writer)
 			return fmt.Errorf("cannot make the downloaded AppImage executable: %w", err)
 		}
 	}
-	stripMarkOfTheWeb(finalPath)
 	rotateInstallerCache(databasePath, installerFileName)
 	return encoder.Encode(updateDownloadComplete{Type: "complete", Path: finalPath})
+}
+
+func openUpdateDownload(request updateDownloadRequest) (io.ReadCloser, int64, error) {
+	if isManagedUpdateURL(request.InstallerUrl) {
+		return openManagedUpdateInstaller(request)
+	}
+	httpRequest, err := http.NewRequest(http.MethodGet, request.InstallerUrl, nil)
+	if err != nil {
+		return nil, 0, fmt.Errorf("cannot build the installer download request: %w", err)
+	}
+	httpRequest.Header.Set("User-Agent", "Wormhole-Electron")
+	client := &http.Client{Timeout: updateDownloadTimeout}
+	if updateManifestPublicKeyHex != "" {
+		client = signedUpdateClient(updateDownloadTimeout)
+	}
+	response, err := client.Do(httpRequest)
+	if err != nil {
+		return nil, 0, fmt.Errorf("cannot download the installer: %w", err)
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		response.Body.Close()
+		return nil, 0, fmt.Errorf("installer download returned %s", response.Status)
+	}
+	return response.Body, response.ContentLength, nil
 }
 
 func shouldReportDownloadProgress(downloaded, total int64, lastReportedProgress float64, lastReportedAt time.Time) bool {

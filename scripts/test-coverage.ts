@@ -4,6 +4,8 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
+export const coverageThreshold = 80;
+
 export interface GoCoverage {
   covered: number;
   total: number;
@@ -83,7 +85,10 @@ function runTypeScriptCoverage(repositoryRoot: string): void {
   );
 }
 
-export function parseGoCoverage(contents: string): GoCoverage {
+export function parseGoCoverage(
+  contents: string,
+  visit?: (position: string, statements: number, executed: boolean) => void,
+): GoCoverage {
   const lines = contents.split(/\r?\n/);
   if (!/^mode: (?:atomic|count|set)$/.test(lines[0] ?? '')) {
     throw new Error('Go coverage profile has an invalid header.');
@@ -95,13 +100,13 @@ export function parseGoCoverage(contents: string): GoCoverage {
     if (line.trim() === '') {
       continue;
     }
-    const match = /^.+:\d+\.\d+,\d+\.\d+\s+(\d+)\s+(\d+)$/.exec(line);
+    const match = /^(.+:\d+\.\d+,\d+\.\d+)\s+(\d+)\s+(\d+)$/.exec(line);
     if (!match) {
       throw new Error(`Go coverage profile contains an invalid block: ${line}`);
     }
 
-    const statements = Number(match[1]);
-    const executions = Number(match[2]);
+    const statements = Number(match[2]);
+    const executions = Number(match[3]);
     if (!Number.isSafeInteger(statements) || !Number.isSafeInteger(executions)) {
       throw new Error(`Go coverage profile contains invalid counters: ${line}`);
     }
@@ -112,12 +117,68 @@ export function parseGoCoverage(contents: string): GoCoverage {
     if (executions > 0) {
       covered += statements;
     }
+    visit?.(match[1], statements, executions > 0);
   }
 
   if (total === 0) {
     throw new Error('Go coverage profile contains no statements.');
   }
   return { covered, total };
+}
+
+// All inputs come from the same checkout. Include OS-specific files and count
+// a portable statement once if any runner executed its block.
+export function mergeGoCoverage(profiles: readonly string[]): string {
+  if (profiles.length === 0) throw new Error('No Go coverage profiles to merge.');
+  const blocks = new Map<string, { statements: number; executed: boolean }>();
+  for (const profile of profiles) {
+    parseGoCoverage(profile, (position, statements, executed) => {
+      const previous = blocks.get(position);
+      if (previous && previous.statements !== statements) {
+        throw new Error(`Inconsistent Go statement counts at ${position}`);
+      }
+      blocks.set(position, { statements, executed: executed || previous?.executed === true });
+    });
+  }
+  const lines = ['mode: set'];
+  for (const position of [...blocks.keys()].sort()) {
+    const { statements, executed } = blocks.get(position)!;
+    lines.push(`${position} ${statements} ${Number(executed)}`);
+  }
+  return lines.join('\n') + '\n';
+}
+
+export function mergeVaultCoverageMatrix(directory: string): string {
+  const runners = readdirSync(directory);
+  const profiles: string[] = [];
+  for (const os of ['Linux', 'Windows', 'macOS']) {
+    const native = runners.filter((name) => name.startsWith(`vault-go-${os}-`));
+    if (native.length === 0) throw new Error(`Missing vault coverage from ${os}`);
+    const files = ['vault.coverage', 'vault-entry.coverage'];
+    if (os === 'Linux')
+      files.push(...[16, 17, 18].map((major) => `vault-postgres-${major}.coverage`));
+    if (os === 'Windows') files.push('vault-postgres.coverage', 'vault-desktop.coverage');
+    for (const runner of native) {
+      for (const file of files) profiles.push(readFileSync(join(directory, runner, file), 'utf8'));
+    }
+  }
+  return mergeGoCoverage(profiles);
+}
+
+export function meetsCoverageThreshold(coverage: GoCoverage, threshold: number): boolean {
+  if (
+    !Number.isSafeInteger(coverage.covered) ||
+    !Number.isSafeInteger(coverage.total) ||
+    coverage.covered < 0 ||
+    coverage.total <= 0 ||
+    coverage.covered > coverage.total ||
+    !Number.isFinite(threshold) ||
+    threshold < 0 ||
+    threshold > 100
+  ) {
+    throw new Error('Coverage totals and threshold must be valid.');
+  }
+  return coverage.covered * 100 >= coverage.total * threshold;
 }
 
 export function runGoCoverage(repositoryRoot: string, runCommand: typeof run = run): void {
@@ -134,12 +195,13 @@ export function runGoCoverage(repositoryRoot: string, runCommand: typeof run = r
   try {
     for (const [index, modulePath] of goModules.entries()) {
       const profilePath = join(temporaryDirectory, `module-${index}.out`);
-      // The SQLite-backed Windows suite can exceed five minutes before coverage instrumentation.
-      runCommand(
-        'go',
-        ['test', '-timeout=10m', './...', `-coverprofile=${profilePath}`],
-        modulePath,
-      );
+      // The backend's filesystem tests record hundreds of thousands of cache
+      // inputs. Replaying those observations can take longer than a fresh run.
+      const flags =
+        basename(modulePath) === 'wormhole-backend'
+          ? ['-count=1', '-timeout=35m']
+          : ['-timeout=10m'];
+      runCommand('go', ['test', ...flags, './...', `-coverprofile=${profilePath}`], modulePath);
 
       const moduleCoverage = parseGoCoverage(readFileSync(profilePath, 'utf8'));
       covered += moduleCoverage.covered;

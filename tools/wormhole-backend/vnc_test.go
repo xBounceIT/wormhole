@@ -1238,7 +1238,8 @@ func serveFakeVnc(listener net.Listener, inputs chan<- string) error {
 	}, "")
 }
 
-func serveFakeVncWithFormat(listener net.Listener, inputs chan<- string, serverFormat [16]byte, password string) error {
+func serveFakeVncWithFormat(listener net.Listener, inputs chan<- string, serverFormat [16]byte, password string, forceAuthentication ...bool) error {
+	requiresAuth := password != "" || (len(forceAuthentication) > 0 && forceAuthentication[0])
 	connection, err := listener.Accept()
 	if err != nil {
 		return err
@@ -1249,7 +1250,7 @@ func serveFakeVncWithFormat(listener net.Listener, inputs chan<- string, serverF
 	// RFB 3.3 None has no SecurityResult. Exercise 3.8 with VNCAuth instead:
 	// go-vnc currently skips the mandatory SecurityResult for 3.8 None.
 	version := "RFB 003.003\n"
-	if password != "" {
+	if requiresAuth {
 		version = "RFB 003.008\n"
 	}
 	if _, err := io.WriteString(connection, version); err != nil {
@@ -1262,7 +1263,7 @@ func serveFakeVncWithFormat(listener net.Listener, inputs chan<- string, serverF
 	if string(clientVersion) != version {
 		return fmt.Errorf("unexpected client version %q", clientVersion)
 	}
-	if password == "" {
+	if !requiresAuth {
 		if err := binary.Write(connection, binary.BigEndian, uint32(1)); err != nil {
 			return err
 		}

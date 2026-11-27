@@ -113,7 +113,7 @@ const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 test('main process uses the native tooltip manager and closes auxiliary windows before quit', () => {
   const main = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
-  assert.match(main, /new TreeTooltipManager\(\(options\) => new BrowserWindow\(options\)\)/);
+  assert.match(main, /new TreeTooltipManager\(createApplicationWindow\)/);
   const quit = main.slice(main.indexOf("app.on('before-quit'"));
   const closeTooltips = quit.indexOf('treeTooltips.closeForWindow(window)');
   assert.ok(closeTooltips >= 0 && closeTooltips < quit.indexOf('requestRendererCloseConfirmation'));
@@ -141,9 +141,10 @@ for (const channel of [
     assert.equal(depth, 0);
     const broadcast = stripTypeScriptTypes(main.slice(start, end + 1));
     const received: string[] = [];
-    const window = (name: string, destroyed = false) => ({
+    const window = (name: string, destroyed = false, contentsDestroyed = destroyed) => ({
       isDestroyed: () => destroyed,
       webContents: {
+        isDestroyed: () => contentsDestroyed,
         send: (sentChannel: string, payload: unknown) => {
           assert.equal(sentChannel, channel);
           assert.equal(payload, event);
@@ -154,6 +155,7 @@ for (const channel of [
     const primary = window('primary');
     const secondary = window('secondary');
     const closed = window('closed', true);
+    const closing = channel === 'update:result' ? [window('closing renderer', false, true)] : [];
     const tooltip = window('tooltip');
     const otherAuxiliary = window('other-auxiliary');
     const event = { type: 'vnc.frame', data: 'frame-payload' };
@@ -162,9 +164,9 @@ for (const channel of [
       received.length = 0;
       runInNewContext(broadcast, {
         BrowserWindow: {
-          getAllWindows: () => [tooltip, primary, closed, otherAuxiliary, secondary],
+          getAllWindows: () => [tooltip, primary, closed, ...closing, otherAuxiliary, secondary],
         },
-        windowCloseCoordinators: new Set([primary, secondary, closed]),
+        windowCloseCoordinators: new Set([primary, secondary, closed, ...closing]),
         event,
         message: event,
         result: event,

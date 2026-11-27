@@ -255,7 +255,7 @@ function parseTerminalFrame(value: unknown): SerialTerminalFrame | undefined {
   };
 }
 
-function parseSerialBackendEvent(line: string): SerialBackendEvent | undefined {
+export function parseSerialBackendEvent(line: string): SerialBackendEvent | undefined {
   let value: unknown;
   try {
     value = JSON.parse(line);

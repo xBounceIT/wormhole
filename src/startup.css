@@ -203,12 +203,122 @@ input {
   margin-top: 18px;
 }
 
+.shared-invitation-off input[type='checkbox'] {
+  width: auto;
+  height: auto;
+  padding: 0;
+  margin-inline-start: 0.5rem;
+}
+
+.shared-certificate-renewal textarea,
+.shared-invitation-form textarea {
+  width: 100%;
+  min-height: 68px;
+  resize: vertical;
+}
+
+.shared-invitation-form [hidden] {
+  display: none;
+}
+
+.shared-invitation-form > p {
+  overflow-wrap: anywhere;
+}
+
 .startup-form label {
   font-size: 12px;
   font-weight: 500;
 }
 
-.startup-form input {
+.shared-setup-card {
+  width: min(590px, 100%);
+  max-height: calc(100dvh - 48px);
+  overflow: auto;
+}
+
+.shared-setup-card fieldset {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.shared-setup-card [hidden] {
+  display: none;
+}
+
+.shared-administration-list {
+  overflow-wrap: anywhere;
+  padding-inline-start: 1.25rem;
+}
+
+.shared-administration-list p {
+  margin-block: 0.25rem 0.75rem;
+}
+
+.shared-reset-targets {
+  display: grid;
+  gap: 8px;
+  max-height: 320px;
+  overflow: auto;
+  padding-inline-start: 0;
+  list-style: none;
+}
+
+.shared-reset-targets > li,
+.shared-reset-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+}
+
+.shared-reset-targets > li {
+  justify-content: space-between;
+}
+
+.shared-reset-targets label {
+  display: flex;
+  gap: 8px;
+  overflow-wrap: anywhere;
+}
+
+.shared-setup-card pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.shared-setup-card textarea {
+  width: 100%;
+  min-height: 80px;
+  padding: 8px 11px;
+  border: 1px solid #71717a;
+  border-radius: 7px;
+  resize: vertical;
+  background: inherit;
+  color: inherit;
+}
+
+.shared-setup-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.shared-setup-results:not(:empty) {
+  padding-inline-start: 18px;
+  margin-block: 12px;
+  list-style: disc;
+  font-size: 13px;
+}
+
+.startup-form input,
+.shared-certificate-renewal textarea,
+.shared-invitation-form textarea,
+.startup-form select,
+.vault-ssh-credentials-form textarea {
   width: 100%;
   height: 36px;
   padding: 0 11px;
@@ -219,7 +329,11 @@ input {
   color: inherit;
 }
 
-.startup-form input:focus {
+.startup-form input:focus,
+.shared-certificate-renewal textarea:focus,
+.shared-invitation-form textarea:focus,
+.startup-form select:focus,
+.vault-ssh-credentials-form textarea:focus {
   border-color: #a1a1aa;
   box-shadow: 0 0 0 3px rgb(161 161 170 / 16%);
 }
@@ -313,7 +427,11 @@ input {
   opacity: 0.55;
 }
 
-:root:not(.dark) .startup-form input {
+:root:not(.dark) .startup-form input,
+:root:not(.dark) .shared-certificate-renewal textarea,
+:root:not(.dark) .shared-invitation-form textarea,
+:root:not(.dark) .startup-form select,
+:root:not(.dark) .vault-ssh-credentials-form textarea {
   border-color: #d1d5db;
   background: #ffffff;
 }
@@ -358,4 +476,131 @@ input {
   .startup-logo-shine {
     display: none;
   }
+}
+
+.vault-recovery-code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  padding: 1rem;
+  border: 1px solid currentColor;
+  border-radius: 0.5rem;
+  user-select: text;
+  font: 1.05rem/1.7 monospace;
+}
+
+.vault-create [hidden] {
+  display: none !important;
+}
+.vault-stored-notes {
+  user-select: none;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overflow: auto;
+  max-height: 55vh;
+  text-align: left;
+}
+
+.vault-vnc-password-target,
+.vault-ssh-credentials-target,
+.vault-rdp-credentials-target {
+  overflow-wrap: anywhere;
+}
+
+.vault-ssh-credentials-form textarea {
+  min-height: 76px;
+  padding: 8px 11px;
+  resize: vertical;
+}
+
+.shared-node-editor {
+  width: min(38rem, 94vw);
+  max-height: 88vh;
+  border: 1px solid GrayText;
+  border-radius: 0.5rem;
+  padding: 1rem 1.25rem;
+  background: Canvas;
+  color: CanvasText;
+}
+
+.shared-node-editor::backdrop {
+  background: rgb(0 0 0 / 55%);
+}
+
+.shared-node-editor fieldset {
+  display: grid;
+  gap: 0.75rem;
+  min-width: 0;
+  padding: 0;
+  margin: 1rem 0;
+  border: 0;
+}
+
+.shared-node-editor fieldset > div {
+  display: flex;
+  align-items: end;
+  gap: 0.75rem;
+}
+
+.shared-node-editor fieldset label:first-child {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+  gap: 0.25rem;
+}
+
+.shared-node-editor input:not([type='checkbox']),
+.shared-node-editor select {
+  width: 100%;
+  min-width: 0;
+  padding: 0.375rem;
+  font: inherit;
+}
+
+.shared-catalog-list {
+  list-style: none;
+  padding: 0;
+  max-height: 45vh;
+  overflow: auto;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
+.shared-transport-notice {
+  border: 1px solid currentColor;
+  border-radius: 6px;
+  padding: 8px 12px;
+  text-align: left;
+  font-size: 0.85rem;
+}
+
+.shared-catalog-list li {
+  padding: 0.5rem 0;
+}
+
+.shared-catalog-list span {
+  display: block;
+  font-size: 0.85em;
+}
+
+.vault-rdp-credentials-card {
+  max-height: calc(100dvh - 48px);
+  overflow-y: auto;
+}
+.vault-rdp-credentials-card h1 {
+  font-size: 20px;
+  margin: 0;
+}
+.vault-rdp-credentials-card > p {
+  font-size: 12px;
+  line-height: 1.45;
+  margin: 8px 0;
+}
+.vault-rdp-credentials-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.vault-rdp-credentials-actions .startup-button-secondary {
+  width: auto;
+  margin-top: 2px;
 }

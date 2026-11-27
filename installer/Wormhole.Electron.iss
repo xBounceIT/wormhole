@@ -56,16 +56,91 @@ Name: "{commondesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: 
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: unchecked
 
-[Registry]
-Root: HKLM; Subkey: "Software\Microsoft\Windows\Windows Error Reporting\LocalDumps\{#MyAppExeName}"; ValueType: expandsz; ValueName: "DumpFolder"; ValueData: "%LOCALAPPDATA%\Wormhole\crashdumps"; Flags: uninsdeletevalue
-Root: HKLM; Subkey: "Software\Microsoft\Windows\Windows Error Reporting\LocalDumps\{#MyAppExeName}"; ValueType: dword; ValueName: "DumpCount"; ValueData: "10"; Flags: uninsdeletevalue
-Root: HKLM; Subkey: "Software\Microsoft\Windows\Windows Error Reporting\LocalDumps\{#MyAppExeName}"; ValueType: dword; ValueName: "DumpType"; ValueData: "1"; Flags: uninsdeletevalue
-
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
 Filename: "{app}\{#MyAppExeName}"; Flags: nowait runasoriginaluser; Check: ShouldRestartApp
 
 [Code]
+const
+  LegacyLocalDumps = 'Software\Microsoft\Windows\Windows Error Reporting\LocalDumps\{#MyAppExeName}';
+  WerExclusions = 'Software\Microsoft\Windows\Windows Error Reporting\ExcludedApplications';
+  InstallerState = 'Software\Wormhole\Installer';
+  WerExclusionOwner = 'OwnsWerExclusion';
+
+procedure RemoveLegacyLocalDumps;
+var
+  Names, Subkeys: TArrayOfString;
+  Folder: String;
+  Count, DumpType: Cardinal;
+begin
+  { WER LocalDumps operate independently of in-process crash handling.
+    Remove the previous installer's exact defaults and leave customized policies alone. }
+  if not RegGetValueNames(HKLM, LegacyLocalDumps, Names) then Exit;
+  if GetArrayLength(Names) <> 3 then Exit;
+  if not RegGetSubkeyNames(HKLM, LegacyLocalDumps, Subkeys) then Exit;
+  if GetArrayLength(Subkeys) <> 0 then Exit;
+  if not RegQueryStringValue(HKLM, LegacyLocalDumps, 'DumpFolder', Folder) then Exit;
+  if not RegQueryDWordValue(HKLM, LegacyLocalDumps, 'DumpCount', Count) then Exit;
+  if not RegQueryDWordValue(HKLM, LegacyLocalDumps, 'DumpType', DumpType) then Exit;
+  if (CompareText(Folder, '%LOCALAPPDATA%\Wormhole\crashdumps') <> 0) or
+    (Count <> 10) or (DumpType <> 1) then Exit;
+  RegDeleteValue(HKLM, LegacyLocalDumps, 'DumpFolder');
+  RegDeleteValue(HKLM, LegacyLocalDumps, 'DumpCount');
+  RegDeleteValue(HKLM, LegacyLocalDumps, 'DumpType');
+  RegDeleteKeyIfEmpty(HKLM, LegacyLocalDumps);
+end;
+
+procedure InstallWerExclusion;
+begin
+  { Use the native view for x64 and ARM64, including when Setup runs as a
+    32-bit process. DWORD 1 is the entry emitted by WerAddExcludedApplication. }
+  if RegValueExists(HKLM64, WerExclusions, '{#MyAppExeName}') then Exit;
+  if not RegWriteDWordValue(HKLM64, InstallerState, WerExclusionOwner, 1) then
+  begin
+    Log('Could not record ownership of the Wormhole WER exclusion.');
+    Exit;
+  end;
+  if not RegWriteDWordValue(HKLM64, WerExclusions, '{#MyAppExeName}', 1) then
+  begin
+    RegDeleteValue(HKLM64, InstallerState, WerExclusionOwner);
+    RegDeleteKeyIfEmpty(HKLM64, InstallerState);
+    Log('Could not register the Wormhole WER exclusion.');
+  end;
+end;
+
+procedure RemoveOwnedWerExclusion;
+var
+  Owner, Value: Cardinal;
+begin
+  if not RegQueryDWordValue(HKLM64, InstallerState, WerExclusionOwner, Owner) then Exit;
+  if Owner <> 1 then Exit;
+  if RegQueryDWordValue(HKLM64, WerExclusions, '{#MyAppExeName}', Value) and
+    (Value = 1) then
+  begin
+    if not RegDeleteValue(HKLM64, WerExclusions, '{#MyAppExeName}') then
+    begin
+      Log('Could not remove the installer-owned Wormhole WER exclusion.');
+      Exit;
+    end;
+  end;
+  RegDeleteValue(HKLM64, InstallerState, WerExclusionOwner);
+  RegDeleteKeyIfEmpty(HKLM64, InstallerState);
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then
+  begin
+    RemoveLegacyLocalDumps;
+    InstallWerExclusion;
+  end;
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usPostUninstall then RemoveOwnedWerExclusion;
+end;
+
 function CmdLineParamExists(const Value: string): Boolean;
 var
   I: Integer;

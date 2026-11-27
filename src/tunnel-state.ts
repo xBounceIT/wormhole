@@ -453,3 +453,10 @@ export function appendTunnelTestLog(
   const next = [...entries, `[${timestamp.toLocaleTimeString()}] ${safeDetail}`];
   return next.length > maximum ? next.slice(-maximum) : next;
 }
+export function tunnelKindAvailable(
+  kind: number,
+  capabilities: { openVpn: boolean } | null,
+): boolean {
+  if (!Number.isInteger(kind) || kind < 0 || kind > 9) return false;
+  return ![1, 3, 4, 5].includes(kind) || capabilities?.openVpn === true;
+}

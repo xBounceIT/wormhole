@@ -19,7 +19,7 @@ import (
 
 // Exercise actual SSH subsystem isolation, including cancellation of pending
 // SFTP requests, rather than replacing the production client opener with a fake.
-func newSftpSSHTestClient(t *testing.T, handlers *sftp.Handlers) *ssh.Client {
+func newSftpSSHTestClient(t *testing.T, handlers *sftp.Handlers, subsystemHooks ...func()) *ssh.Client {
 	t.Helper()
 	_, key, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -64,6 +64,9 @@ func newSftpSSHTestClient(t *testing.T, handlers *sftp.Handlers) *ssh.Client {
 					if request.Type != "subsystem" {
 						_ = request.Reply(false, nil)
 						continue
+					}
+					for _, hook := range subsystemHooks {
+						hook()
 					}
 					_ = request.Reply(true, nil)
 					if handlers != nil {

@@ -16,9 +16,9 @@ export function UpdateNotification({
   busy: boolean;
   status: string;
   downloadProgress: number | null;
-  onUpdate: () => void;
+  onUpdate?: () => void;
   onDismiss: () => void;
-  onViewChanges: () => void;
+  onViewChanges?: () => void;
 }) {
   useNativeSurfaceOverlay(true);
 
@@ -46,9 +46,6 @@ export function UpdateNotification({
           <h3 className="text-sm leading-snug font-semibold" id="update-notification-title">
             Wormhole v{version} is now available
           </h3>
-          <p className="text-xs leading-relaxed text-muted-foreground">
-            Update to use the best version of Wormhole
-          </p>
         </div>
       </div>
       {status ? (
@@ -75,12 +72,16 @@ export function UpdateNotification({
         </div>
       ) : null}
       <div className="flex shrink-0 flex-wrap items-center gap-2">
-        <Button disabled={busy} onClick={onUpdate} size="sm">
-          Update now
-        </Button>
-        <Button onClick={onViewChanges} size="sm" variant="ghost">
-          View changes
-        </Button>
+        {onUpdate ? (
+          <Button disabled={busy} onClick={onUpdate} size="sm">
+            Update now
+          </Button>
+        ) : null}
+        {onViewChanges ? (
+          <Button onClick={onViewChanges} size="sm" variant="ghost">
+            View changes
+          </Button>
+        ) : null}
       </div>
     </Card>
   );

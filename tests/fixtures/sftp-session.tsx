@@ -1,3 +1,4 @@
+import { VaultSftpRecovery } from '../../src/components/VaultSftpRecovery';
 import * as React from 'react';
 import { createRoot } from 'react-dom/client';
 import { SftpBrowserSurface, SftpFilePane } from '../../src/components/SftpBrowser';
@@ -1648,5 +1649,201 @@ export async function runSftpSessionTests() {
     'smb',
   );
   assert.ok(document.body.textContent?.includes('Closing SMB browser'));
+  await runVaultRecoveryTests(root);
   await React.act(async () => root.unmount());
+}
+
+async function runVaultRecoveryTests(root: ReturnType<typeof createRoot>) {
+  const original = window.wormhole!,
+    confirm = window.confirm;
+  const a = '11111111-1111-4111-8111-111111111111',
+    b = '22222222-2222-4222-8222-222222222222';
+  const first = {
+    id: '33333333-3333-4333-8333-333333333333',
+    nodeId: a,
+    sessionId: 'old',
+    name: 'offline.conf',
+    remotePath: '/etc/offline.conf',
+    editor: 'Fixture',
+    state: 'Recovered',
+    pending: true,
+    recovered: true,
+  };
+  let scopeFail = false,
+    recordFail = false,
+    actionFail = false,
+    busy = false,
+    catalogFail = false,
+    scopeAfter = 'eeeeeeee-1111-4111-8111-111111111111';
+  let delayed: ((v: any) => void) | undefined;
+  const calls: any[] = [];
+  window.wormhole = {
+    ...original,
+    loadVaultCatalog: async () => {
+      if (catalogFail) throw Error('catalog failed');
+      return { nodes: [{ id: a, name: 'Original server' }], credentials: [], tunnels: [] } as any;
+    },
+    readVaultSftpRecoveryScopes: async (after = '') => {
+      calls.push(['scopes', after]);
+      if (scopeFail) throw Error('scope unavailable');
+      return {
+        nodeIds: after
+          ? ['ffffffff-1111-4111-8111-111111111111']
+          : [
+              a,
+              b,
+              ...Array.from(
+                { length: 61 },
+                (_, index) => (0x33333333 + index).toString(16) + '-1111-4111-8111-111111111111',
+              ),
+              scopeAfter || 'eeeeeeee-1111-4111-8111-111111111111',
+            ],
+        after: after ? '' : scopeAfter,
+      };
+    },
+    vaultSftpRecovery: async (q: any) => {
+      calls.push(q);
+      if (q.operation !== 'list') {
+        if (actionFail) throw Error('action unavailable');
+        return { edits: [], after: '', busy };
+      }
+      if (recordFail) throw 'unknown failure';
+      if (delayed) {
+        return new Promise((resolve) => {
+          delayed = resolve;
+        });
+      }
+      return {
+        edits: busy
+          ? []
+          : [
+              {
+                ...first,
+                id: q.after ? '44444444-4444-4444-8444-444444444444' : first.id,
+                nodeId: q.nodeId,
+                name: q.nodeId !== a ? 'other.conf' : q.after ? 'more.conf' : first.name,
+              },
+            ],
+        after: q.after ? '' : first.id,
+        busy,
+      };
+    },
+  } as any;
+  const tick = () => React.act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+  const click = async (text: string) => {
+    const button = [...document.querySelectorAll('button')].find((b) => b.textContent === text)!;
+    assert.ok(button, text);
+    await React.act(async () => button.click());
+    await tick();
+  };
+  const choose = async (id: string) => {
+    const select = document.querySelector(
+      'select[aria-label="Recovery connection"]',
+    ) as HTMLSelectElement;
+    await React.act(async () => {
+      select.value = id;
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await tick();
+  };
+  try {
+    await React.act(async () => root.render(<VaultSftpRecovery />));
+    await tick();
+    assert.ok(document.body.textContent?.includes('offline.conf'));
+    assert.ok(document.body.textContent?.includes('Original server'));
+    await click('More retained files');
+    assert.ok(document.body.textContent?.includes('more.conf'));
+    await click('Open folder');
+    assert.equal(calls.at(-1).operation, 'reveal');
+    actionFail = true;
+    await click('Open folder');
+    assert.ok(document.body.textContent?.includes('action unavailable'));
+    actionFail = false;
+    window.confirm = () => false;
+    const count = calls.length;
+    await click('Discard');
+    assert.equal(calls.length, count);
+    window.confirm = () => true;
+    await click('Discard');
+    assert.ok(![...document.querySelectorAll('p')].some((p) => p.textContent === 'offline.conf'));
+    assert.ok(document.body.textContent?.includes('more.conf'));
+    busy = true;
+    await click('Open folder');
+    assert.ok(document.body.textContent?.includes('This connection is active'));
+    await click('Refresh recovery');
+    assert.ok(document.body.textContent?.includes('This connection is active'));
+    busy = false;
+    recordFail = true;
+    await click('Refresh recovery');
+    assert.ok(document.body.textContent?.includes('Recovery is unavailable'));
+    recordFail = false;
+    scopeFail = true;
+    await click('Refresh recovery');
+    assert.ok(document.body.textContent?.includes('scope unavailable'));
+    scopeFail = false;
+    await click('Refresh recovery');
+    await click('Next connections');
+    assert.ok(document.body.textContent?.includes('other.conf'));
+    assert.ok(
+      ![...document.querySelectorAll('button')].some((b) => b.textContent === 'Next connections'),
+    );
+    await click('Refresh recovery');
+    await choose(b);
+    assert.ok(document.body.textContent?.includes('other.conf'));
+    // Late records cannot replace a newer selection or revive an unmounted view.
+    delayed = () => {};
+    const select = document.querySelector('select') as HTMLSelectElement;
+    await React.act(async () => {
+      select.value = a;
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    const old = delayed!;
+    delayed = undefined;
+    await choose(b);
+    await React.act(async () => old({ edits: [first], after: '', busy: false }));
+    assert.ok(document.body.textContent?.includes('other.conf'));
+    assert.ok(![...document.querySelectorAll('p')].some((p) => p.textContent === 'offline.conf'));
+    delayed = () => {};
+    await React.act(async () => {
+      select.value = a;
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    const retired = delayed!;
+    delayed = undefined;
+    await React.act(async () => root.render(<div>closed recovery</div>));
+    await React.act(async () => retired({ edits: [first], after: '', busy: false }));
+    assert.equal(document.body.textContent, 'closed recovery');
+    catalogFail = true;
+    scopeAfter = '';
+    await React.act(async () => root.render(<VaultSftpRecovery />));
+    await tick();
+    assert.ok(document.body.textContent?.includes('Unavailable connection'));
+    await React.act(async () => root.render(<SftpRecoveryNotice vault />));
+    await tick();
+    assert.equal(document.body.textContent, '');
+    // Scope replies after unmount must not start another record read.
+    let finish!: (v: any) => void;
+    window.wormhole!.readVaultSftpRecoveryScopes = () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      });
+    await React.act(async () => root.render(<VaultSftpRecovery />));
+    await tick();
+    const before = calls.length;
+    await React.act(async () => root.render(<div>gone</div>));
+    await React.act(async () => finish({ nodeIds: [a], after: '' }));
+    assert.equal(calls.length, before);
+    // Mount the shared Settings entry point in vault mode, not only the leaf panel.
+    window.wormhole!.readVaultSftpRecoveryScopes = async () => ({ nodeIds: [], after: '' });
+    window.wormhole!.sftpEdit = async () => {
+      throw Error('legacy recovery entered');
+    };
+    await React.act(async () => root.render(<SftpEditorSettings vault />));
+    await tick();
+    assert.ok(document.querySelector('[aria-label="Vault file recovery"]'));
+    assert.ok(document.body.textContent?.includes('No recovery archives on this page.'));
+  } finally {
+    window.wormhole = original;
+    window.confirm = confirm;
+  }
 }

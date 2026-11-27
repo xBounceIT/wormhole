@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
 import { promisify } from 'node:util';
-import { transformWithOxc } from 'vite';
+import { build, transformWithOxc } from 'vite';
 
 const require = createRequire(import.meta.url);
 
@@ -29,7 +29,22 @@ test('middle-click closes tabs without waiting for native teardown or restoring 
     .map((name) => readFileSync(new URL(`../src/${name}.ts`, import.meta.url), 'utf8'))
     .join('\n')
     .replaceAll('export ', '');
+  const helperBuild = await build({
+    configFile: false,
+    logLevel: 'silent',
+    build: {
+      write: false,
+      minify: false,
+      lib: { entry: resolve('src/web-connect.ts'), formats: ['iife'], name: 'WebConnect' },
+    },
+  });
+  const helperChunks = (Array.isArray(helperBuild) ? helperBuild : [helperBuild])
+    .flatMap((output) => output.output)
+    .filter((item) => item.type === 'chunk');
+  assert.equal(helperChunks.length, 1);
   const source = `
+    ${helperChunks[0].code}
+    const { webConnectRequest } = WebConnect;
     ${modules}
     ${readFileSync(new URL('../electron/web-session-attempt.ts', import.meta.url), 'utf8').replaceAll('export ', '')}
     ${slice('function SessionsPage(', 'function SessionSurface(')}
@@ -56,6 +71,7 @@ test('middle-click closes tabs without waiting for native teardown or restoring 
     };
     let controls;
     function Harness({ initial, confirm = false, prompts = false }) {
+      const authState = { mode: 'local' };
       const [authGate, setAuthGate] = useState('unlocked');
       const [sessions, setSessions] = useState(initial);
       const sessionsRef = useRef(sessions);

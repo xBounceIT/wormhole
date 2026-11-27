@@ -3,15 +3,11 @@
 package main
 
 import (
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
-
-	"github.com/zalando/go-keyring"
 )
 
 const protectedSecretEncoding = "windows-dpapi-v1"
@@ -92,52 +88,19 @@ func unprotectAuthDocument(storePath string, protected []byte) ([]byte, error) {
 func deleteAuthProtectionKey(storePath string) {
 	// The verifier document is already gone at this point. A keychain cleanup failure cannot
 	// recover any verifier, and must not turn a successfully disabled auth setting into an error.
-	_ = keyring.Delete(authKeyringService, authKeyringAccount(storePath))
+	_ = desktopProtectedKeys.remove(authKeyringService, authKeyringAccount(storePath))
 }
 
 func authDocumentProtectionKey(storePath string, create bool) ([]byte, error) {
-	return keyringProtectionKey(authKeyringService, authKeyringAccount(storePath), create)
+	return desktopProtectedKeys.protectionKey(authKeyringService, authKeyringAccount(storePath), create)
 }
 
 func fileProtectionKey(path string, create bool) ([]byte, error) {
-	return keyringProtectionKey(fileKeyringService, protectedFileKeyringAccount(path), create)
+	return desktopProtectedKeys.protectionKey(fileKeyringService, protectedFileKeyringAccount(path), create)
 }
 
 func deleteFileProtectionKey(path string) {
-	_ = keyring.Delete(fileKeyringService, protectedFileKeyringAccount(path))
-}
-
-func keyringProtectionKey(service, account string, create bool) ([]byte, error) {
-	encoded, err := keyring.Get(service, account)
-	if err == nil {
-		return decodeAuthProtectionKey(encoded)
-	}
-	if !errors.Is(err, keyring.ErrNotFound) {
-		return nil, errCredentialSecretStoreUnavailable
-	}
-	if !create {
-		return nil, fmt.Errorf("system keychain is unavailable: %w", err)
-	}
-
-	key := make([]byte, authProtectionKeyLength)
-	if _, err := rand.Read(key); err != nil {
-		return nil, errors.New("cannot generate an authentication protection key")
-	}
-	encoded = base64.RawStdEncoding.EncodeToString(key)
-	if err := keyring.Set(service, account, encoded); err != nil {
-		clearBytes(key)
-		return nil, errCredentialSecretStoreUnavailable
-	}
-	return key, nil
-}
-
-func decodeAuthProtectionKey(encoded string) ([]byte, error) {
-	key, err := base64.RawStdEncoding.DecodeString(encoded)
-	if err != nil || len(key) != authProtectionKeyLength {
-		clearBytes(key)
-		return nil, errors.New("system keychain contains an invalid authentication key")
-	}
-	return key, nil
+	_ = desktopProtectedKeys.remove(fileKeyringService, protectedFileKeyringAccount(path))
 }
 
 func authKeyringAccount(storePath string) string {

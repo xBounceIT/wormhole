@@ -81,8 +81,15 @@ type stderrLogger struct{}
 func (stderrLogger) Logf(format string, args ...any) { logf(format, args...) }
 
 func main() {
+	capabilities := flag.Bool("capabilities", false, "report engine availability without reading configuration")
 	mock := flag.Bool("mock", false, "skip OpenVPN handshake; dial via OS sockets (CI / tests only). Equivalent to passing \"mock\": true in the stdin config.")
 	flag.Parse()
+	if *capabilities {
+		if writeCapabilities(os.Stdout) != nil {
+			os.Exit(1)
+		}
+		return
+	}
 
 	if err := run(*mock); err != nil {
 		logf("fatal: %v", err)

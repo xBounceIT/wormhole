@@ -25,9 +25,11 @@ type RdpSurfaceProps = {
   error?: string;
   tunnelProgress?: TunnelProgress | null;
   onConnect: () => void;
-  onOpenSystemClient: () => void;
+  onOpenSystemClient?: () => void;
+  onEnterCredentials?: () => void;
   onRetry: () => void;
   canOpenSystemClient: boolean;
+  onReady?: (bounds: WormholeRdpSurfaceRect) => void;
 };
 
 export function RdpSurface({
@@ -81,8 +83,10 @@ function RdpSurfaceContent({
   onFirstFrame,
   onConnect,
   onOpenSystemClient,
+  onEnterCredentials,
   onRetry,
   canOpenSystemClient,
+  onReady,
 }: RdpSurfaceProps & { connectionCovered: boolean; onFirstFrame: () => void }) {
   const surfaceRef = useRef<HTMLDivElement>(null);
   const nativeSurfaceVisible = useRef(false);
@@ -97,14 +101,14 @@ function RdpSurfaceContent({
     const surface = surfaceRef.current;
     const api = window.wormhole;
 
-    const hideNativeSurface = () => {
-      if (!nativeSurfaceVisible.current) return;
+    const hideNativeSurface = (force = false) => {
+      if (!nativeSurfaceVisible.current && !force) return;
       nativeSurfaceVisible.current = false;
       void api?.commandRdpSession({ sessionId, operation: 'hide' }).catch(() => undefined);
     };
 
     if (!surface || !api || !isActive || !isAuthorized) {
-      hideNativeSurface();
+      hideNativeSurface(true);
       return;
     }
 
@@ -120,6 +124,7 @@ function RdpSurfaceContent({
       const signature = `${bounds.x}:${bounds.y}:${bounds.width}:${bounds.height}`;
       if (signature === boundsSignature.current && nativeSurfaceVisible.current) return;
       boundsSignature.current = signature;
+      onReady?.(bounds);
       // The native STA host coalesces resize commands just before applying HWND geometry. Do not
       // await an older native acknowledgement here: doing so makes a slow ActiveX layout frame
       // hold the next, newer rectangle outside the only queue that can safely supersede it.
@@ -140,9 +145,9 @@ function RdpSurfaceContent({
     return () => {
       observer.disconnect();
       window.removeEventListener('resize', reportBounds);
-      hideNativeSurface();
+      hideNativeSurface(true);
     };
-  }, [isActive, isAuthorized, sessionId, shouldShowNativeSurface]);
+  }, [isActive, isAuthorized, onReady, sessionId, shouldShowNativeSurface]);
 
   const isFailed = status === 'failed';
 
@@ -196,6 +201,11 @@ function RdpSurfaceContent({
                 <RefreshCcw data-icon="inline-start" />
                 {isFailed ? 'Retry connection' : 'Connect'}
               </Button>
+              {onEnterCredentials ? (
+                <Button onClick={onEnterCredentials} size="sm" variant="outline">
+                  Enter credentials securely
+                </Button>
+              ) : null}
               {canOpenSystemClient ? (
                 <Button onClick={onOpenSystemClient} size="sm" variant="outline">
                   <ExternalLink data-icon="inline-start" />

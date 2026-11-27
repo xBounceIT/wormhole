@@ -30,6 +30,17 @@ jobs:
       - run: npm run build:rdp:macos
       - name: Build the embedded RDP canvas adapter
         run: npm run build:rdp-canvas
+      - name: Build the universal Touch ID helper and reject a direct caller
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run build:touch-id:macos
+          helper='dist-electron/wormhole-touch-id/Wormhole Vault Touch ID.app/Contents/MacOS/WormholeVaultTouchID'
+          set +e
+          printf '\001\001' | "$helper" | tee "$RUNNER_TEMP/wormhole-touch-id-direct.out" >/dev/null
+          statuses=("${PIPESTATUS[@]}")
+          set -e
+          [[ ${statuses[1]} == 1 && ! -s "$RUNNER_TEMP/wormhole-touch-id-direct.out" ]]
       - name: Verify relocated client without Homebrew on PATH
         shell: bash
         run: |
@@ -91,6 +102,259 @@ jobs:
         run: |
           & scripts\Fetch-OvpnProxy.ps1 -Arch $env:PLATFORM -RequireReal
           if ($LASTEXITCODE -ne 0) { throw "OpenVPN sidecar build failed with exit $LASTEXITCODE" }
+  vault-foundation:
+    name: Vault foundation (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+          - runner: windows-2025
+          - runner: macos-26
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: tools/wormhole-backend/go.mod
+          cache: false
+
+      - name: Setup Node.js for the coverage verifier
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+
+      - name: Install Electron test dependencies
+        run: |
+          npm ci
+          node -e "require('electron')"
+
+      - name: Build the desktop test surfaces
+        run: |
+          npm run build:electron
+          npm run build:renderer
+
+      - name: Install private Linux clipboard test display
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends --yes xvfb xauth
+
+      - name: Verify Linux managed package ownership
+        if: runner.os == 'Linux'
+        shell: bash
+        working-directory: tools/wormhole-backend
+        run: |
+          set -euo pipefail
+          stage=/var/lib/wormhole/updates
+          sudo install -d -o root -g root -m 0755 "$stage"
+          printf 'managed package fixture' > "$RUNNER_TEMP/managed-package"
+          sudo install -o root -g root -m 0644 "$RUNNER_TEMP/managed-package" "$stage/ci-protected.deb"
+          sudo install -o root -g root -m 0666 "$RUNNER_TEMP/managed-package" "$stage/ci-writable.deb"
+          sudo ln -s ci-protected.deb "$stage/ci-linked.deb"
+          WORMHOLE_TEST_MANAGED_PACKAGE_STAGE=1 go test -count=1 -run '^TestLinuxMachinePackageHandoff$' .
+
+      - name: Select the signed Windows publisher fixture
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $fixture = (Get-Command node.exe).Source
+          $signature = Get-AuthenticodeSignature -LiteralPath $fixture
+          if ($signature.Status -ne 'Valid') { throw 'The Node.js publisher fixture must have a trusted signature.' }
+          $spki = $signature.SignerCertificate.PublicKey.ExportSubjectPublicKeyInfo()
+          $pin = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($spki)).ToLowerInvariant()
+          "WORMHOLE_TEST_AUTHENTICODE_INSTALLER=$fixture" >> $env:GITHUB_ENV
+          "WORMHOLE_TEST_AUTHENTICODE_SPKI=$pin" >> $env:GITHUB_ENV
+
+      - name: Test vault primitives and lifecycle
+        working-directory: tools/wormhole-backend
+        run: |
+          go vet -unsafeptr=false ./internal/encvfs
+          go test -timeout=3m -run '^TestManagedUpdate|^TestManagedLinuxPackage|^TestWindowsInstallerHandoff|^TestWindowsUpdateConfirmation' .
+          go test -timeout=2m -coverprofile=vault.coverage ./internal/vault ./internal/securemem ./internal/encvfs ./internal/vaultwire ./internal/vaultstore ./internal/localvault ./internal/resolver ./internal/ospolicy ./internal/secretclipboard ./internal/updateauth ./cmd/sign-update-manifest
+          go test -timeout=35m -coverprofile=vault-entry.coverage .
+
+      - name: Test OpenVPN capability build variants
+        working-directory: tools/wormhole-ovpnproxy
+        run: |
+          go test -timeout=2m ./...
+          go test -tags ovpn3 capabilities.go engine_ovpn3.go capabilities_test.go engine_ovpn3_test.go
+
+      - name: Test Electron vault client and native process interoperability
+        run: |
+          node --input-type=module <<'JS'
+          import { readFileSync } from 'node:fs';
+          import { spawnSync } from 'node:child_process';
+          const script = JSON.parse(readFileSync('package.json', 'utf8')).scripts['test:vault-client'];
+          if (!script.startsWith('node --experimental-strip-types --test ')) throw new Error('Unexpected vault test command');
+          const files = script.slice('node --experimental-strip-types --test '.length).split(' ');
+          const result = spawnSync(process.execPath, [
+            '--experimental-strip-types', '--experimental-test-coverage',
+            '--test-concurrency=1',
+            '--test-coverage-lines=80', '--test-coverage-branches=80', '--test-coverage-functions=80',
+            '--test-coverage-include=electron/vault-*.ts', '--test-coverage-include=electron/child-process-exit.ts', '--test-coverage-include=electron/sealed-ssh.ts', '--test-coverage-include=electron/sealed-vnc.ts', '--test-coverage-include=electron/sealed-route.ts',
+            '--test-coverage-include=src/vault-*-recipient.ts', '--test-coverage-include=src/vault-bitwarden-extension-*.ts','--test-coverage-include=src/vault-bitwarden-document-endpoint.ts', '--test-coverage-include=scripts/Build-VaultBitwardenBridge.mjs', '--test-coverage-include=src/vault-vnc-password-sender.ts', '--test-coverage-include=src/vault-delete-selection.ts', '--test-coverage-include=src/vnc-connect.ts',
+            '--test', ...files,
+          ], { stdio: 'inherit' });
+          if (result.error) throw result.error;
+          process.exit(result.status ?? 1);
+          JS
+
+      - name: Enforce vault foundation coverage
+        run: |
+          node --experimental-strip-types --input-type=module <<'JS'
+          import { readFileSync } from 'node:fs';
+          import { parseGoCoverage, meetsCoverageThreshold } from './scripts/test-coverage.ts';
+          const profile = readFileSync('tools/wormhole-backend/vault.coverage', 'utf8').split(/\r?\n/);
+          for (const name of ['vault', 'securemem', 'encvfs', 'vaultwire', 'vaultstore', 'localvault', 'resolver', 'ospolicy', 'secretclipboard']) {
+            const selected = [profile[0], ...profile.slice(1).filter(line => line.includes('/internal/' + name + '/'))];
+            const coverage = parseGoCoverage(selected.join('\n'));
+            console.log(name, coverage);
+            if (!meetsCoverageThreshold(coverage, 80)) throw new Error(name + ' coverage below 80%');
+          }
+          for (const file of ['localvault/bitwarden_transfer.go', 'vault/bitwarden_transfer.go', 'localvault/bitwarden_browser.go', 'localvault/web_plan.go', 'vault/vnc_manual.go', 'localvault/vnc_manual.go', 'vault/clipboard_release.go', 'localvault/clipboard_release.go', 'secretclipboard/pasteboard.go', ...(process.platform === 'darwin' ? ['secretclipboard/native_darwin.go'] : []), 'localvault/tunnel_editor_display.go', 'vault/notes_display.go', 'localvault/reauthentication.go', 'localvault/migration_report.go', 'vault/recovery_display.go', 'vault/ssh_bundle.go', 'localvault/ssh_bundle.go', 'vault/local_policy.go', 'vaultstore/profile.go', 'localvault/policy.go', 'localvault/security.go', 'localvault/integrity.go', 'vault/local_migration.go', 'ospolicy/policy.go', process.platform === 'win32' ? 'ospolicy/policy_windows.go' : 'ospolicy/policy_unix.go']) {
+            const coverage = parseGoCoverage([profile[0], ...profile.slice(1).filter(line => line.includes('/internal/' + file + ':'))].join('\n'));
+            console.log(file, coverage);
+            if (!meetsCoverageThreshold(coverage, 80)) throw new Error(file + ' coverage below 80%');
+          }
+          const entry = readFileSync('tools/wormhole-backend/vault-entry.coverage', 'utf8').split(/\r?\n/);
+          for (const file of ['process_exit.go', process.platform === 'win32' ? 'process_exit_windows.go' : 'process_exit_other.go', 'vault_bitwarden_transfer.go', 'vault_web_plan.go', 'vault_vnc_manual.go', 'vault_vnc_auth.go', 'vault_vnc_handshake.go', 'vault_vnc_process.go', 'vault_vnc_bundle.go', 'vault_clipboard_release.go', 'vault_clipboard.go', 'vault_tunnel_display.go', 'vault_tunnel_editor.go', 'vault_credential_editor.go', 'vault_reauthentication.go', 'vault_migration_credential_keys.go', 'vault_migration_secret_service.go', process.platform === 'win32' ? 'vault_migration_credential_keys_windows.go' : process.platform === 'darwin' ? 'credential_secret_darwin.go' : 'vault_migration_credential_keys_linux.go', 'vault_migration_retirement.go', 'vault_migration_file_key.go', process.platform === 'win32' ? 'vault_migration_file_key_windows.go' : 'vault_migration_file_key_other.go', 'vault_migration_database.go', 'vault_migration_choices.go', 'vault_notes.go', 'vault_connection.go', 'vault_connection_metadata.go', 'vault_folder.go', 'vault_node_delete.go', 'vault_enrollment.go', 'vault_migration_inventory.go', 'vault_preferences.go', 'vault_ssh_bundle.go', 'vault_ssh_process.go', 'workspace_ownership.go', 'vault_slot_file.go', 'vault_bootstrap.go', 'vault_unlock.go', 'vault_catalog.go', 'vault_workspace.go', 'vault_startup.go', 'vault_security.go', 'vault_credentials.go', 'vault_legacy_credentials.go', 'vault_legacy_nodes.go', 'vault_legacy_tunnels.go', 'vault_legacy_local_state.go', 'vault_legacy_orphans.go', 'vault_migration_stage.go', 'vault_migration_snapshot.go', 'vault_tunnels.go', 'vault_nodes.go', 'resolver_snapshots.go', 'resolver_shadow.go', 'resolver_legacy_metadata.go', 'resolver_legacy_capture.go', 'resolver_legacy_rdp.go', 'resolver_legacy_vnc.go', 'resolver_baseline.go', 'resolver_migration.go', 'tunnel_capabilities.go', process.platform === 'win32' ? 'vault_publish_windows.go' : 'vault_publish_other.go']) {
+            const coverage = parseGoCoverage([entry[0], ...entry.slice(1).filter(line => line.includes('/' + file + ':'))].join('\n'));
+            console.log(file, coverage);
+            if (!meetsCoverageThreshold(coverage, 80)) throw new Error(file + ' coverage below 80%');
+          }
+          if (process.platform === 'win32') {
+            const coverage = parseGoCoverage([entry[0], ...entry.slice(1).filter(line => line.includes('/vault_service.go:'))].join('\n'));
+            console.log('vault entrypoint', coverage);
+            if (!meetsCoverageThreshold(coverage, 80)) throw new Error('Vault entrypoint coverage below 80%');
+          }
+          JS
+
+      - name: Install the supported Linux PostgreSQL test versions
+        if: runner.os == 'Linux'
+        run: |
+          echo 'deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt noble-pgdg main' | sudo tee /etc/apt/sources.list.d/pgdg.list
+          echo 'create_main_cluster = false' | sudo tee -a /etc/postgresql-common/createcluster.conf
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes postgresql-16 postgresql-17 postgresql-18
+
+      - name: Verify PostgreSQL deployment and device admission on the native host
+        if: runner.os == 'Linux' || runner.os == 'Windows'
+        shell: pwsh
+        working-directory: tools/wormhole-backend
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $installations = if ($IsWindows) { $env:PGBIN } else { 16,17,18 | ForEach-Object { "/usr/lib/postgresql/$_/bin" } }
+          if (!$installations) { throw 'PostgreSQL installation is missing' }
+          foreach ($pgBin in $installations) {
+            if (![IO.Path]::IsPathFullyQualified($pgBin)) { throw 'Expected an absolute PostgreSQL binary directory' }
+            $version = & (Join-Path $pgBin 'postgres') --version
+            if ($version -notmatch '^postgres \(PostgreSQL\) (\d+)\.') { throw 'Unknown PostgreSQL server version' }
+            $major = [int]$Matches[1]
+            if ($major -lt 16 -or ($IsLinux -and $pgBin -ne "/usr/lib/postgresql/$major/bin")) { throw "Unexpected PostgreSQL major version $major" }
+            $profile = if ($IsLinux) { "vault-postgres-$major.coverage" } else { 'vault-postgres.coverage' }
+            $env:WORMHOLE_TEST_POSTGRES_BIN = $pgBin
+            $env:WORMHOLE_TEST_POSTGRES_SCRATCH = Join-Path $env:RUNNER_TEMP "wormhole-postgres-$major"
+            go test -count=1 -race -timeout=10m "-coverprofile=$profile" -run '^TestPostgres(NativeTransportIntegration|AtomicSchemaDeployment|SchemaDeploymentWithDelegatedDBA|WorkspaceNetworkRules|WorkspaceAccess|AuditPartitionMaintenance|AdminInventoryAuthorizesEveryPage|GeneratedSCRAMVerifierIntegration|SessionAdmissionIntegration|StatementLoggingAdmission|VerifiedBundleSessionTransport|WorkspaceImportCommitsAtomically)$' ./internal/sharedpg
+          }
+
+      - name: Verify protected PostgreSQL profiles through Electron on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $env:WORMHOLE_TEST_POSTGRES_BIN = $env:PGBIN
+          $env:WORMHOLE_TEST_SETUP_BACKEND = Join-Path $env:RUNNER_TEMP 'wormhole-wizard.exe'
+          $env:GOCOVERDIR = (New-Item -ItemType Directory -Force -Path (Join-Path $env:RUNNER_TEMP 'wizard-coverage')).FullName
+          go -C tools/wormhole-backend build -cover '-coverpkg=.,./internal/sharedpg' -o $env:WORMHOLE_TEST_SETUP_BACKEND .
+          node --experimental-strip-types --test tests/vault-shared-setup-postgres.test.ts
+          go tool covdata textfmt "-i=$env:GOCOVERDIR" '-o=tools/wormhole-backend/vault-desktop.coverage'
+
+      - name: Upload native Go coverage
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: vault-go-${{ runner.os }}-${{ matrix.runner }}
+          path: |
+            tools/wormhole-backend/vault.coverage
+            tools/wormhole-backend/vault-entry.coverage
+            tools/wormhole-backend/vault-postgres*.coverage
+            tools/wormhole-backend/vault-desktop.coverage
+          if-no-files-found: error
+          overwrite: true
+
+  vault-merged-coverage:
+    name: Merge vault Go coverage across platforms
+    needs: vault-foundation
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: vault-go-*
+          path: vault-coverage-inputs
+      - name: Combine statement coverage
+        run: |
+          node --experimental-strip-types --input-type=module <<'JS'
+          import { appendFileSync, writeFileSync } from 'node:fs';
+          import { mergeVaultCoverageMatrix, parseGoCoverage } from './scripts/test-coverage.ts';
+          const merged = mergeVaultCoverageMatrix('vault-coverage-inputs');
+          const { covered, total } = parseGoCoverage(merged);
+          writeFileSync('vault-merged.coverage', merged);
+          appendFileSync(process.env.GITHUB_STEP_SUMMARY,
+            `Vault Go coverage across Linux, Windows and macOS: ${covered}/${total} statements (${(100 * covered / total).toFixed(2)}%).\n`);
+          JS
+      - name: Publish merged Go profile
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: merged-vault-coverage
+          path: vault-merged.coverage
+          if-no-files-found: error
+          overwrite: true
+
+  vault-storage-durability:
+    name: Vault storage durability (${{ matrix.os }}/${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: windows-2025, os: windows, arch: amd64 }
+          - { runner: windows-11-arm, os: windows, arch: arm64 }
+          - { runner: ubuntu-24.04, os: linux, arch: amd64 }
+          - { runner: ubuntu-24.04-arm, os: linux, arch: arm64 }
+          - { runner: macos-26-intel, os: darwin, arch: amd64 }
+          - { runner: macos-26, os: darwin, arch: arm64 }
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: tools/wormhole-backend/go.mod
+          architecture: ${{ matrix.arch == 'amd64' && 'x64' || 'arm64' }}
+          cache: false
+
+      - name: Test the native encrypted SQLite VFS
+        working-directory: tools/wormhole-backend
+        shell: bash
+        env:
+          GOTOOLCHAIN: local
+        run: |
+          test "$(go env GOHOSTOS)/$(go env GOHOSTARCH)" = "${{ matrix.os }}/${{ matrix.arch }}"
+          go vet -unsafeptr=false ./internal/encvfs
+          go test -timeout=3m -count=2 ./internal/encvfs
+          go test -timeout=5m -count=1 -run '^TestVaultRootRotation(KeepsEncryptedStorageAcrossRestarts|RestagesAfterPreCopyInterruption|IntentSurvivesProcessKill)$' .
+          go test -timeout=3m -count=1 -run '^TestEncryptedBackup' ./internal/localvault
 
   linux-backend-contract:
     name: Linux credential storage contract

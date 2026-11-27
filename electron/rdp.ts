@@ -1,3 +1,5 @@
+import { hasChildExited as hasExited } from './child-process-exit.ts';
+import { confirmNativeProcessExit } from './vault-process-exit.ts';
 import { randomUUID } from 'node:crypto';
 import { isRdpFrame, isRdpInput, type RdpInput } from './rdp-framebuffer.ts';
 import { spawn, type ChildProcess, type ChildProcessWithoutNullStreams } from 'node:child_process';
@@ -64,17 +66,21 @@ const maxRdpSurfaceDimension = 16_384;
 export type ChildProcessStopOptions = {
   gracefulTimeoutMs?: number;
   forceKillTimeoutMs?: number;
+  nativeExecutable?: string;
+  // A supervisor must confirm its own descendants' retirement before exiting.
+  // Keep it alive and return false when that confirmation has not arrived.
+  forceKill?: false;
 };
 
 const defaultGracefulTimeoutMs = 10_000;
 const defaultForceKillTimeoutMs = 3_000;
 
-/** Closes stdin, waits for process exit, then force-kills and waits once more if necessary. */
+/** Closes stdin and waits for exit; force-kills on timeout unless the owner forbids it. */
 export async function stopChildProcess(
   child: Pick<
     ChildProcess,
     'stdin' | 'exitCode' | 'signalCode' | 'once' | 'removeListener' | 'kill'
-  >,
+  > & { readonly pid?: number },
   options: ChildProcessStopOptions = {},
 ): Promise<boolean> {
   if (hasExited(child)) return true;
@@ -87,16 +93,17 @@ export async function stopChildProcess(
   if (await waitForChildExit(child, options.gracefulTimeoutMs ?? defaultGracefulTimeoutMs)) {
     return true;
   }
+  if (options.nativeExecutable && confirmNativeProcessExit(options.nativeExecutable, child))
+    return true;
+  if (options.forceKill === false) return false;
   try {
     child.kill();
   } catch {
     // The process may have exited between the timeout and the kill request.
   }
-  return waitForChildExit(child, options.forceKillTimeoutMs ?? defaultForceKillTimeoutMs);
-}
-
-function hasExited(child: Pick<ChildProcess, 'exitCode' | 'signalCode'>): boolean {
-  return child.exitCode !== null || child.signalCode !== null;
+  if (await waitForChildExit(child, options.forceKillTimeoutMs ?? defaultForceKillTimeoutMs))
+    return true;
+  return !!options.nativeExecutable && confirmNativeProcessExit(options.nativeExecutable, child);
 }
 
 function waitForChildExit(
@@ -136,6 +143,7 @@ export class RdpBackendClient {
   private outputBuffer = '';
   private starting: Promise<void> | undefined;
   private disposing: Promise<void> | undefined;
+  private shutdownUnconfirmed = false;
 
   constructor(options: RdpBackendClientOptions) {
     this.options = options;
@@ -324,9 +332,12 @@ export class RdpBackendClient {
 
   async dispose(): Promise<void> {
     if (this.disposing) return this.disposing;
-    this.disposing = this.disposeCurrentProcess().finally(() => {
-      this.disposing = undefined;
-    });
+    this.shutdownUnconfirmed = true;
+    this.disposing = Promise.resolve()
+      .then(() => this.disposeCurrentProcess())
+      .finally(() => {
+        this.disposing = undefined;
+      });
     return this.disposing;
   }
 
@@ -373,7 +384,14 @@ export class RdpBackendClient {
 
   private async ensureProcess(): Promise<void> {
     if (this.disposing) throw new Error('RDP service is stopping.');
-    if (this.process && !this.process.killed) return;
+    if (this.shutdownUnconfirmed) throw new Error('RDP service shutdown is unconfirmed.');
+    if (this.process) {
+      if (hasExited(this.process)) this.process = undefined;
+      else if (this.process.killed) {
+        this.shutdownUnconfirmed = true;
+        throw new Error('RDP service shutdown is unconfirmed.');
+      } else return;
+    }
     if (this.starting) return this.starting;
 
     this.starting = new Promise<void>((resolve, reject) => {
@@ -406,7 +424,7 @@ export class RdpBackendClient {
       child.once('error', (error) => {
         if (this.process !== child) return;
         reject(toError(error, 'Could not start the RDP service.'));
-        this.handleProcessFailure(child, 'RDP service failed to start.');
+        this.handleProcessFailure(child, 'RDP service failed to start.', child.pid === undefined);
       });
       child.once('close', () => {
         this.handleProcessFailure(child, 'RDP service stopped.');
@@ -420,6 +438,8 @@ export class RdpBackendClient {
   }
 
   private send(command: Omit<RdpWireCommand, 'requestId'>): Promise<RdpBackendEvent> {
+    if (this.disposing || this.shutdownUnconfirmed)
+      return Promise.reject(new Error('RDP service shutdown is unconfirmed.'));
     const child = this.process;
     if (!child || child.killed || !child.stdin.writable) {
       return Promise.reject(new Error('RDP service is not running.'));
@@ -574,17 +594,24 @@ export class RdpBackendClient {
     this.lifecycleGenerations.delete(sessionId);
   }
 
-  private handleProcessFailure(child: ChildProcessWithoutNullStreams, message: string): void {
+  private handleProcessFailure(
+    child: ChildProcessWithoutNullStreams,
+    message: string,
+    neverStarted = false,
+  ): void {
     if (this.process !== child) return;
-    this.process = undefined;
     this.outputBuffer = '';
-    try {
-      if (!child.killed) child.kill();
-    } catch {
-      // The process can already be gone when its close event reaches this handler.
-    }
     this.rejectPending(message);
     this.terminateSessions(-1, 'The RDP controller exited unexpectedly.');
+    if (neverStarted || hasExited(child)) {
+      this.process = undefined;
+      this.shutdownUnconfirmed = false;
+      return;
+    }
+    this.shutdownUnconfirmed = true;
+    void this.dispose().catch(() =>
+      console.warn('[Wormhole] RDP service termination is unconfirmed.'),
+    );
   }
 
   private async disposeCurrentProcess(): Promise<void> {
@@ -594,6 +621,7 @@ export class RdpBackendClient {
     this.bounds.clear();
     if (!child) {
       this.rejectPending('RDP service stopped.');
+      this.shutdownUnconfirmed = false;
       return;
     }
 
@@ -604,10 +632,13 @@ export class RdpBackendClient {
       // The process may already have exited. Closing stdin remains safe and idempotent.
     }
     this.rejectPending('RDP service stopped.');
-    const exited = await stopChildProcess(child);
-    if (!exited)
+    const exited = await stopChildProcess(child, { nativeExecutable: this.options.executable });
+    if (!exited) {
       this.options.diagnostics?.('WRN', 'RDP service did not stop within the allowed time');
+      throw new Error('RDP service termination could not be confirmed.');
+    }
     if (this.process === child) this.process = undefined;
+    this.shutdownUnconfirmed = false;
   }
 
   private terminateSessions(code?: number, message?: string): void {

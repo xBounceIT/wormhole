@@ -117,9 +117,21 @@ test('pinned and auto-hide sidebars preserve layout, focus, menus and saved pref
           webPreferences: {
           nodeIntegration: true, contextIsolation: false, backgroundThrottling: false,
         } });
+        // Changing hidden-window device metrics can briefly invalidate Chromium's
+        // root surface. Wait for a committed frame on that specific transient
+        // error; retain every existing physical-pixel assertion and final error.
+        const captureCurrentSurface = async () => {
+          for (let attempt = 0; ; attempt++) {
+            try { return await window.webContents.capturePage(); }
+            catch (error) {
+              if (!String(error).includes('UnknownVizError') || attempt >= 5) throw error;
+              await window.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+            }
+          }
+        };
         ipcMain.handle('test:input', async (_event, input) => {
           // Commit the hidden window's current hit-test regions before native hover input.
-          if (input.type === 'mouseMove') await window.webContents.capturePage();
+          if (input.type === 'mouseMove') await captureCurrentSurface();
           window.webContents.sendInputEvent(input);
         });
         ipcMain.handle('test:viewport', async (_event, width) => {

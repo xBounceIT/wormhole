@@ -336,6 +336,12 @@ async function runRdpSurfaceTests() {
     await act(async () => loading.dispatchEvent(new Event('animationend', { bubbles: true })));
     assert.equal(transition(), null);
     assert.equal(commands.at(-1).operation, 'show');
+    await mount({ status: 'starting', isActive: false });
+    assert.equal(
+      commands.at(-1).operation,
+      'hide',
+      'inactive pending connections must retain hidden intent',
+    );
     await mount({ status: 'starting' });
     assert.equal(commands.at(-1).operation, 'hide');
     const beforeZero = commands.length;
@@ -346,7 +352,10 @@ async function runRdpSurfaceTests() {
     );
     await settleLayout();
     window.dispatchEvent(new Event('resize'));
-    assert.equal(commands.length, beforeZero, 'zero-size surfaces must not be shown');
+    assert.ok(
+      commands.slice(beforeZero).every((command) => command.operation === 'hide'),
+      'zero-size surfaces must not be shown',
+    );
     container.style.height = '360px';
     rejectCommands = true;
     await settleLayout();

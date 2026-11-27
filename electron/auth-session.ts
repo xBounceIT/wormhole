@@ -9,6 +9,7 @@ export class AuthSession {
   private configured = false;
   private unlocked = false;
   private epoch = 0;
+  private lockHolds = 0;
   private readonly unlockListeners = new Set<UnlockListener>();
 
   get isInitialized(): boolean {
@@ -16,7 +17,7 @@ export class AuthSession {
   }
 
   get isAccessAllowed(): boolean {
-    return this.initialized && (!this.configured || this.unlocked);
+    return this.lockHolds === 0 && this.initialized && (!this.configured || this.unlocked);
   }
 
   get authorizationEpoch(): number {
@@ -49,7 +50,7 @@ export class AuthSession {
   }
 
   requireVerificationEpoch(verificationEpoch: number): void {
-    if (verificationEpoch !== this.epoch) {
+    if (this.lockHolds > 0 || verificationEpoch !== this.epoch) {
       throw new Error('Wormhole was locked during verification. Please unlock again.');
     }
   }
@@ -62,9 +63,22 @@ export class AuthSession {
     }
   }
 
+  // Keep all callers denied while asynchronous lock cleanup drains mutations.
+  // A legacy settings response cannot bypass this barrier by disabling auth.
+  holdLock(): () => void {
+    this.lockHolds++;
+    this.epoch++;
+    let held = true;
+    return () => {
+      if (!held) return;
+      held = false;
+      this.lockHolds--;
+    };
+  }
+
   requireUnlocked(): void {
     if (!this.initialized) throw new Error('Authentication state is not initialized.');
-    if (this.configured && !this.unlocked) {
+    if (this.lockHolds > 0 || (this.configured && !this.unlocked)) {
       throw new Error('Authentication is required before accessing the Wormhole workspace.');
     }
   }

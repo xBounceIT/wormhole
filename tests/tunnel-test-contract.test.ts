@@ -5,11 +5,21 @@ import {
   isTunnelIdentifier,
   isTunnelTestHost,
   parseTunnelDetailsResponse,
+  parseTunnelCapabilities,
   parseTunnelSummaryList,
   parseTunnelTestRequest,
 } from '../electron/tunnel-test-contract.ts';
 
 const tunnelID = '11111111-2222-3333-4444-555555555555';
+
+test('VPN capabilities project only a validated boolean', () => {
+  assert.deepEqual(parseTunnelCapabilities({ openVpn: true, privateKey: 'must-not-cross' }), {
+    openVpn: true,
+  });
+  assert.deepEqual(parseTunnelCapabilities({ openVpn: false }), { openVpn: false });
+  for (const value of [null, [], {}, { openVpn: 'true' }, { openVpn: 1 }])
+    assert.throws(() => parseTunnelCapabilities(value));
+});
 
 test('tunnel test IPC accepts an omitted probe or one complete bounded target', () => {
   assert.deepEqual(parseTunnelTestRequest({ id: tunnelID, attempt: 1 }), {

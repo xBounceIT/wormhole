@@ -31,4 +31,5 @@ export function mountWorkspaceApp(container: HTMLElement, props: WorkspaceAppPro
       </WorkspaceErrorBoundary>
     </StrictMode>,
   );
+  return () => workspaceRoot.unmount();
 }

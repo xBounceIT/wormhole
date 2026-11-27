@@ -90,13 +90,16 @@ test('saved connection create and edit flows initialize, load and submit notes t
   assert.match(editing, /notes: node\.notes \?\? ''/);
   assert.match(
     editing,
-    /setConnectionNotesReady\(!window\.wormhole \|\| node\.persisted === false\)/,
+    /setConnectionNotesReady\(\s*authState\?\.mode === 'vault' \|\| !window\.wormhole \|\| node\.persisted === false,?\s*\)/,
   );
   const submission = section(
     'async function submitNewConnection(',
     'async function submitFolderDetails(',
   );
-  assert.match(submission, /if \(editorBusy \|\| !connectionNotesReady\) return/);
+  assert.match(
+    submission,
+    /if \(editorBusy \|\| connectionSavePending\.current \|\| !connectionNotesReady\) return/,
+  );
   assert.match(
     section('async function submitNewConnection(', 'async function submitFolderDetails('),
     /notes: newConnectionForm\.notes/,

@@ -149,7 +149,7 @@ func (server *sshServer) sftpTreeList(command sshWireCommand) {
 	client, generation := native.sftpClient, native.sftpGeneration
 	native.treeRequests++
 	native.sftpMu.Unlock()
-	go func() {
+	if !server.startSftpWork(func() {
 		// Count queued and publishing requests too, bounding workers even if stdout stalls.
 		defer func() { native.sftpMu.Lock(); native.treeRequests--; native.sftpMu.Unlock() }()
 		select {
@@ -171,7 +171,12 @@ func (server *sshServer) sftpTreeList(command sshWireCommand) {
 			kind = "sftp.local.ready"
 		}
 		server.output.write(sshWireEvent{Type: kind, SessionID: native.id, RequestID: command.RequestID, Pane: command.Pane, Path: path, Entries: directories, Truncated: truncated})
-	}()
+	}) {
+		native.sftpMu.Lock()
+		native.treeRequests--
+		native.sftpMu.Unlock()
+		writeFailure(errSftpTreeBusy)
+	}
 }
 
 func (native *sshNativeSession) currentSftpTree(generation uint64) bool {

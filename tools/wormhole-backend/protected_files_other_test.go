@@ -14,6 +14,7 @@ import (
 
 func TestMain(m *testing.M) {
 	keyring.MockInit()
+	desktopProtectedKeys = legacyProtectedKeyring()
 	os.Exit(m.Run())
 }
 

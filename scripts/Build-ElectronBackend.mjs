@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildMacOvpnProxy } from './build-macos-ovpnproxy.mjs';
+import { backendGoToolchain } from './backend-go-toolchain.mjs';
 
 const scriptRoot = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.dirname(scriptRoot);
@@ -13,25 +14,67 @@ const goos = process.platform === 'win32' ? 'windows' : process.platform;
 const goarch = architecture === 'arm64' ? 'arm64' : 'amd64';
 const suffix = goos === 'windows' ? '.exe' : '';
 const binaryPath = path.join(stagingDir, `wormhole-backend-${architecture}${suffix}`);
-// The macOS credential implementation calls Keychain through Security.framework. It must be
-// built natively with the Apple SDK; the Windows and Linux backends remain pure Go.
+// macOS calls Keychain through Security.framework and the vault clipboard through AppKit.
+// Build natively with the Apple SDK; the Windows and Linux backends remain pure Go.
 const cgoEnabled = goos === 'darwin' ? '1' : '0';
+const manifestKey = process.env.WORMHOLE_UPDATE_MANIFEST_PUBLIC_KEY ?? '';
+const windowsPublisher = process.env.WORMHOLE_WINDOWS_PUBLISHER_SPKI ?? '';
+const macPublisherTeam = process.env.WORMHOLE_MACOS_PUBLISHER_TEAM_ID ?? '';
+const ldflags = ['-s', '-w'];
+if (manifestKey) {
+  if (manifestKey.length !== 64 || /[^0-9a-f]/.test(manifestKey) || /^0+$/.test(manifestKey)) {
+    throw new Error('Invalid WORMHOLE_UPDATE_MANIFEST_PUBLIC_KEY.');
+  }
+  ldflags.push('-X', `main.updateManifestPublicKeyHex=${manifestKey}`);
+}
+if (goos === 'windows' && windowsPublisher) {
+  if (
+    !manifestKey ||
+    windowsPublisher.length !== 64 ||
+    /[^0-9a-f]/.test(windowsPublisher) ||
+    /^0+$/.test(windowsPublisher)
+  ) {
+    throw new Error(
+      'Invalid WORMHOLE_WINDOWS_PUBLISHER_SPKI or missing update manifest public key.',
+    );
+  }
+  ldflags.push('-X', `main.updateWindowsPublisherSPKI=${windowsPublisher}`);
+}
+if (goos === 'darwin' && macPublisherTeam) {
+  if (
+    !manifestKey ||
+    macPublisherTeam.length !== 10 ||
+    /[^A-Z0-9]/.test(macPublisherTeam) ||
+    macPublisherTeam === '0000000000'
+  ) {
+    throw new Error(
+      'Invalid WORMHOLE_MACOS_PUBLISHER_TEAM_ID or missing update manifest public key.',
+    );
+  }
+  ldflags.push('-X', `main.updateDarwinPublisherTeamID=${macPublisherTeam}`);
+}
 
+const toolchain = backendGoToolchain();
 mkdirSync(stagingDir, { recursive: true });
 rmSync(binaryPath, { force: true });
 
 console.log(`BUILD wormhole-backend (${goos}/${architecture})`);
-const result = spawnSync('go', ['build', '-trimpath', '-ldflags', '-s -w', '-o', binaryPath, '.'], {
-  cwd: sourceDir,
-  env: {
-    ...process.env,
-    CGO_ENABLED: cgoEnabled,
-    GOARCH: goarch,
-    GOOS: goos,
+const result = spawnSync(
+  'go',
+  ['build', '-trimpath', '-ldflags', ldflags.join(' '), '-o', binaryPath, '.'],
+  {
+    cwd: sourceDir,
+    env: {
+      ...process.env,
+      GOTOOLCHAIN: toolchain,
+      CGO_ENABLED: cgoEnabled,
+      GOARCH: goarch,
+      GOOS: goos,
+    },
+    stdio: 'inherit',
+    windowsHide: true,
   },
-  stdio: 'inherit',
-  windowsHide: true,
-});
+);
 
 if (result.error) {
   throw new Error(`Could not start Go: ${result.error.message}`);

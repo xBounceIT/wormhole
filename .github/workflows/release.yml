@@ -20,6 +20,9 @@ jobs:
     outputs:
       tag: ${{ steps.release.outputs.tag }}
       version: ${{ steps.release.outputs.version }}
+      update-manifest-public-key: ${{ steps.update-key.outputs.public-key }}
+      windows-publisher-spki: ${{ steps.update-key.outputs.windows-publisher-spki }}
+      macos-publisher-team: ${{ steps.update-key.outputs.macos-publisher-team }}
     steps:
       - name: Read version from tag
         id: release
@@ -34,6 +37,30 @@ jobs:
             exit 1
           fi
           printf 'tag=%s\nversion=%s\n' "$RELEASE_TAG" "${RELEASE_TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify release manifest public key
+        id: update-key
+        env:
+          PUBLIC_KEY: ${{ vars.WORMHOLE_UPDATE_MANIFEST_PUBLIC_KEY }}
+          WINDOWS_PUBLISHER: ${{ vars.WORMHOLE_WINDOWS_PUBLISHER_SPKI }}
+          MACOS_PUBLISHER: ${{ vars.WORMHOLE_MACOS_PUBLISHER_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$PUBLIC_KEY" =~ ^[0-9a-f]{64}$ || "$PUBLIC_KEY" =~ ^0+$ ]]; then
+            echo 'Configure WORMHOLE_UPDATE_MANIFEST_PUBLIC_KEY before creating a release.' >&2
+            exit 1
+          fi
+          printf 'public-key=%s\n' "$PUBLIC_KEY" >> "$GITHUB_OUTPUT"
+          if [[ -n "$WINDOWS_PUBLISHER" ]] && [[ ! "$WINDOWS_PUBLISHER" =~ ^[0-9a-f]{64}$ || "$WINDOWS_PUBLISHER" =~ ^0+$ ]]; then
+            echo 'WORMHOLE_WINDOWS_PUBLISHER_SPKI must be a SHA-256 public-key pin.' >&2
+            exit 1
+          fi
+          printf 'windows-publisher-spki=%s\n' "$WINDOWS_PUBLISHER" >> "$GITHUB_OUTPUT"
+          if [[ -n "$MACOS_PUBLISHER" ]] && [[ ! "$MACOS_PUBLISHER" =~ ^[A-Z0-9]{10}$ || "$MACOS_PUBLISHER" == '0000000000' ]]; then
+            echo 'WORMHOLE_MACOS_PUBLISHER_TEAM_ID must be an Apple Team ID.' >&2
+            exit 1
+          fi
+          printf 'macos-publisher-team=%s\n' "$MACOS_PUBLISHER" >> "$GITHUB_OUTPUT"
 
   build:
     name: Build Electron ${{ matrix.platform }}
@@ -95,6 +122,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "VPN sidecar build failed with exit $LASTEXITCODE" }
 
       - name: Build Go backend for ${{ matrix.platform }}
+        env:
+          WORMHOLE_UPDATE_MANIFEST_PUBLIC_KEY: ${{ needs.checks.outputs.update-manifest-public-key }}
+          WORMHOLE_WINDOWS_PUBLISHER_SPKI: ${{ needs.checks.outputs.windows-publisher-spki }}
         run: node scripts/Build-ElectronBackend.mjs --arch ${{ matrix.platform }}
 
       - name: Build native helpers
@@ -142,13 +172,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Electron installer build failed with exit $LASTEXITCODE" }
           Move-Item "installer\output\Wormhole-*-setup.exe" .
 
-      - name: Generate SHA-256 sidecars
-        shell: pwsh
-        run: |
-          Get-ChildItem "Wormhole-*-setup.exe" | ForEach-Object {
-            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant()
-            "$hash  $($_.Name)" | Set-Content -LiteralPath "$($_.Name).sha256" -Encoding ascii
-          }
+      - name: Upload installer for finalization
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-setup-input-${{ matrix.platform }}
+          path: Wormhole-${{ needs.checks.outputs.version }}-win-${{ matrix.platform }}-setup.exe
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Package zip
         shell: pwsh
@@ -159,14 +189,128 @@ jobs:
           $zip = "Wormhole-$env:VERSION-win-$env:PLATFORM.zip"
           Compress-Archive -Path "artifacts/electron-app/$env:PLATFORM/Wormhole/*" -DestinationPath $zip
 
-      - name: Upload artifact
+      - name: Measure installed Windows payload
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ needs.checks.outputs.tag }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          $root = Join-Path $env:GITHUB_WORKSPACE "artifacts/electron-app/$env:PLATFORM/Wormhole"
+          $inventory = go -C tools/wormhole-backend run ./cmd/sign-update-manifest inventory-installation $env:RELEASE_TAG "windows/$env:PLATFORM" $root
+          if ($LASTEXITCODE -ne 0 -or -not $inventory) { throw 'Windows installation inventory failed.' }
+          $path = Join-Path $env:RUNNER_TEMP "installation-windows-$env:PLATFORM.json"
+          $inventory | Set-Content -LiteralPath $path -Encoding utf8 -NoNewline
+
+      - name: Upload Windows installation inventory
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: installation-inventory-windows-${{ matrix.platform }}
+          path: ${{ runner.temp }}/installation-windows-${{ matrix.platform }}.json
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload portable Windows package
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: wormhole-win-${{ matrix.platform }}
+          path: Wormhole-${{ needs.checks.outputs.version }}-win-${{ matrix.platform }}.zip
+          if-no-files-found: error
+
+  windows-installers:
+    name: Finalize Windows installer (${{ matrix.platform }})
+    needs: [checks, build]
+    runs-on: windows-2025
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [x64, arm64]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: needs.checks.outputs.windows-publisher-spki != ''
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        if: needs.checks.outputs.windows-publisher-spki != ''
+        with:
+          go-version-file: tools/wormhole-backend/go.mod
+          cache: false
+
+      - name: Download Windows installer
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: windows-setup-input-${{ matrix.platform }}
+          path: ${{ runner.temp }}/windows-installer
+
+      - name: Select installer
+        id: installer
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ needs.checks.outputs.tag }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          $name = "Wormhole-$($env:RELEASE_TAG.Substring(1))-win-$env:PLATFORM-setup.exe"
+          $file = Get-Item -LiteralPath (Join-Path $env:RUNNER_TEMP "windows-installer/$name") -ErrorAction Stop
+          if ($file -isnot [IO.FileInfo] -or $file.LinkType -or $file.Length -eq 0) { throw 'Invalid Windows installer.' }
+          "path=$($file.FullName)" >> $env:GITHUB_OUTPUT
+
+      - name: Download pinned Authenticode tool
+        if: needs.checks.outputs.windows-publisher-spki != ''
+        shell: pwsh
+        run: |
+          $tool = Join-Path $env:RUNNER_TEMP 'AzureSignTool-x64.exe'
+          Invoke-WebRequest 'https://github.com/vcsjones/AzureSignTool/releases/download/v7.0.1/AzureSignTool-x64.exe' -OutFile $tool
+          if ((Get-FileHash -Algorithm SHA256 -LiteralPath $tool).Hash -ne 'DC85A3F24BCD5978C63FCFD167A9B41313AF9116722B99B831400F05F387FCBA') {
+            throw 'Unexpected Authenticode tool digest.'
+          }
+
+      - name: Sign Windows installer
+        if: needs.checks.outputs.windows-publisher-spki != ''
+        shell: pwsh
+        env:
+          INSTALLER: ${{ steps.installer.outputs.path }}
+          VAULT_NAME: ${{ vars.WORMHOLE_WINDOWS_KEY_VAULT_NAME }}
+          CERTIFICATE: ${{ vars.WORMHOLE_WINDOWS_KEY_VAULT_CERTIFICATE }}
+          AZURE_TOKEN_CREDENTIALS: EnvironmentCredential
+          AZURE_TENANT_ID: ${{ vars.WORMHOLE_WINDOWS_SIGNING_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ vars.WORMHOLE_WINDOWS_SIGNING_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.WORMHOLE_WINDOWS_SIGNING_CLIENT_SECRET }}
+        run: |
+          if ($env:VAULT_NAME -notmatch '\A[a-zA-Z][a-zA-Z0-9-]{1,22}[a-zA-Z0-9]\z' -or $env:CERTIFICATE -notmatch '\A[a-zA-Z0-9-]{1,127}\z') {
+            throw 'Configure the Windows signing vault and certificate.'
+          }
+          if (-not $env:AZURE_TENANT_ID -or -not $env:AZURE_CLIENT_ID -or -not $env:AZURE_CLIENT_SECRET) {
+            throw 'Configure the Windows signing identity.'
+          }
+          $tool = Join-Path $env:RUNNER_TEMP 'AzureSignTool-x64.exe'
+          & $tool sign -q -kvm -kvu "https://$env:VAULT_NAME.vault.azure.net" -kvc $env:CERTIFICATE -fd sha256 -tr 'http://timestamp.digicert.com' -td sha256 $env:INSTALLER
+          if ($LASTEXITCODE -ne 0) { throw 'Windows installer signing failed.' }
+
+      - name: Verify Windows installer publisher
+        if: needs.checks.outputs.windows-publisher-spki != ''
+        shell: pwsh
+        working-directory: tools/wormhole-backend
+        env:
+          WINDOWS_PUBLISHER: ${{ needs.checks.outputs.windows-publisher-spki }}
+          INSTALLER: ${{ steps.installer.outputs.path }}
+        run: |
+          go run ./cmd/verify-update-publisher $env:WINDOWS_PUBLISHER $env:INSTALLER
+          if ($LASTEXITCODE -ne 0) { throw 'Windows installer publisher verification failed.' }
+
+      - name: Generate SHA-256 sidecar
+        shell: pwsh
+        env:
+          INSTALLER: ${{ steps.installer.outputs.path }}
+        run: |
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $env:INSTALLER).Hash.ToLowerInvariant()
+          "$hash  $([IO.Path]::GetFileName($env:INSTALLER))" | Set-Content -LiteralPath "$env:INSTALLER.sha256" -Encoding ascii
+
+      - name: Upload final Windows installer
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wormhole-setup-win-${{ matrix.platform }}
           path: |
-            Wormhole-*.zip
-            Wormhole-*-setup.exe
-            Wormhole-*.sha256
+            ${{ steps.installer.outputs.path }}
+            ${{ steps.installer.outputs.path }}.sha256
           if-no-files-found: error
 
   packages:
@@ -230,6 +374,8 @@ jobs:
 
       - name: Build native Go components
         if: matrix.backend_arch != 'universal'
+        env:
+          WORMHOLE_UPDATE_MANIFEST_PUBLIC_KEY: ${{ needs.checks.outputs.update-manifest-public-key }}
         run: node scripts/Build-ElectronBackend.mjs --arch ${{ matrix.backend_arch }}
 
       - name: Set up macOS OpenVPN toolchain
@@ -238,6 +384,9 @@ jobs:
 
       - name: Build universal macOS Go components
         if: matrix.backend_arch == 'universal'
+        env:
+          WORMHOLE_UPDATE_MANIFEST_PUBLIC_KEY: ${{ needs.checks.outputs.update-manifest-public-key }}
+          WORMHOLE_MACOS_PUBLISHER_TEAM_ID: ${{ needs.checks.outputs.macos-publisher-team }}
         run: npm run build:backend:universal
 
       - name: Set up macOS RDP toolchain
@@ -248,6 +397,10 @@ jobs:
         if: matrix.builder_platform == 'mac'
         run: npm run build:rdp:macos
 
+      - name: Build bundled universal Touch ID helper
+        if: matrix.builder_platform == 'mac'
+        run: npm run build:touch-id:macos
+
       - name: Verify bundled RDP command-line compatibility
         if: matrix.builder_platform == 'mac'
         working-directory: tools/wormhole-backend
@@ -255,15 +408,110 @@ jobs:
           WORMHOLE_RDP_SMOKE_CLIENT: ${{ github.workspace }}/dist-electron/freerdp/sdl-freerdp
         run: go test -run '^TestBundledMacFreeRdpCommandLine$' -count=1 .
 
-      - name: Install AppImage delta tooling
+      - name: Install Linux package verification tools
         if: matrix.builder_platform == 'linux'
-        run: sudo apt-get update && sudo apt-get install --no-install-recommends --yes zsync
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends --yes zsync rpm2cpio cpio
 
       - name: Build ${{ matrix.platform }} packages
+        if: matrix.builder_platform != 'mac'
         # The artifactBuildCompleted hook embeds update metadata and generates the delta file.
         env:
           RELEASE_VERSION: ${{ needs.checks.outputs.version }}
         run: npm run package -- --${{ matrix.builder_platform }} --${{ matrix.builder_arch }} --config.extraMetadata.version="$RELEASE_VERSION"
+
+      - name: Prepare macOS notarization credentials
+        id: mac-notary
+        if: matrix.builder_platform == 'mac' && needs.checks.outputs.macos-publisher-team != ''
+        shell: bash
+        env:
+          LC_ALL: C
+          MACOS_PUBLISHER: ${{ needs.checks.outputs.macos-publisher-team }}
+          NOTARY_PROFILE: ${{ vars.WORMHOLE_MACOS_NOTARY_PROFILE }}
+          NOTARY_KEYCHAIN: ${{ vars.WORMHOLE_MACOS_NOTARY_KEYCHAIN }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$NOTARY_PROFILE" ]]; then
+            [[ -n "$APPLE_ID" && -n "$APPLE_APP_SPECIFIC_PASSWORD" ]] || { echo 'Provide an Apple notary Keychain profile or the Apple release credentials.' >&2; exit 1; }
+            [[ ! "$APPLE_APP_SPECIFIC_PASSWORD" =~ [[:cntrl:]] ]] || { echo 'Invalid Apple app-specific password.' >&2; exit 1; }
+            export NOTARY_PROFILE="wormhole-release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            export NOTARY_KEYCHAIN="${NOTARY_KEYCHAIN:-$HOME/Library/Keychains/login.keychain-db}"
+            [[ -f "$NOTARY_KEYCHAIN" ]] || { echo 'The macOS notarization Keychain is unavailable.' >&2; exit 1; }
+            # Use the tool's interactive password prompt through a private PTY.
+            /usr/bin/expect <<'EXPECT'
+          log_user 0
+          set timeout 120
+          set password $env(APPLE_APP_SPECIFIC_PASSWORD)
+          unset env(APPLE_APP_SPECIFIC_PASSWORD)
+          spawn -noecho /usr/bin/xcrun notarytool store-credentials $env(NOTARY_PROFILE) --apple-id $env(APPLE_ID) --team-id $env(MACOS_PUBLISHER) --keychain $env(NOTARY_KEYCHAIN)
+          expect {
+            -nocase -re {App-specific password[^:\r\n]*:} { send -- "$password\r"; unset password }
+            timeout { exit 1 }
+            eof { exit 1 }
+          }
+          expect {
+            eof {
+              set status [wait]
+              if {[llength $status] != 4 || [lindex $status 2] != 0 || [lindex $status 3] != 0} { exit 1 }
+            }
+            timeout { exit 1 }
+          }
+          EXPECT
+          fi
+          [[ "$NOTARY_PROFILE" != *$'\n'* && "$NOTARY_PROFILE" != *$'\r'* && "$NOTARY_KEYCHAIN" != *$'\n'* && "$NOTARY_KEYCHAIN" != *$'\r'* ]] || exit 1
+          printf 'profile=%s\nkeychain=%s\n' "$NOTARY_PROFILE" "$NOTARY_KEYCHAIN" >> "$GITHUB_OUTPUT"
+
+      - name: Build macOS packages
+        if: matrix.builder_platform == 'mac'
+        shell: bash
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          WORMHOLE_TOUCH_ID_PROFILE_BASE64: ${{ secrets.WORMHOLE_TOUCH_ID_PROFILE_BASE64 }}
+          MACOS_PUBLISHER: ${{ needs.checks.outputs.macos-publisher-team }}
+          APPLE_KEYCHAIN_PROFILE: ${{ steps.mac-notary.outputs.profile }}
+          APPLE_KEYCHAIN: ${{ steps.mac-notary.outputs.keychain }}
+        run: |
+          set -euo pipefail
+          flags=()
+          if [[ -n "$MACOS_PUBLISHER" ]]; then
+            [[ -n "$CSC_LINK" && -n "$APPLE_KEYCHAIN_PROFILE" ]] || { echo 'Pinned macOS releases require a Developer ID certificate and a Keychain notarization profile.' >&2; exit 1; }
+            [[ -z "$APPLE_TEAM_ID" || "$APPLE_TEAM_ID" == "$MACOS_PUBLISHER" ]] || { echo 'The signing Team ID differs from the pinned Team ID.' >&2; exit 1; }
+            export APPLE_TEAM_ID="$MACOS_PUBLISHER"
+            unset APPLE_ID APPLE_APP_SPECIFIC_PASSWORD
+            flags+=(--config.forceCodeSigning=true --config.dmg.sign=true)
+          elif [[ -n "$WORMHOLE_TOUCH_ID_PROFILE_BASE64" ]]; then
+            for name in CSC_LINK APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
+              [[ -n "${!name}" ]] || { echo "Touch ID release configuration requires $name." >&2; exit 1; }
+            done
+            flags+=(--config.forceCodeSigning=true)
+          fi
+          npm run package -- --mac --universal "${flags[@]}"
+
+      - name: Notarize and verify the signed macOS disk image
+        if: matrix.builder_platform == 'mac' && needs.checks.outputs.macos-publisher-team != ''
+        shell: bash
+        env:
+          MACOS_PUBLISHER: ${{ needs.checks.outputs.macos-publisher-team }}
+          APPLE_KEYCHAIN_PROFILE: ${{ steps.mac-notary.outputs.profile }}
+          APPLE_KEYCHAIN: ${{ steps.mac-notary.outputs.keychain }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          images=( "$GITHUB_WORKSPACE"/release/Wormhole-*-mac-universal-setup.dmg )
+          [[ ${#images[@]} -eq 1 && -f "${images[0]}" && ! -L "${images[0]}" ]] || { echo 'Expected one signed macOS installer.' >&2; exit 1; }
+          image="${images[0]}"
+          credentials=(--keychain-profile "$APPLE_KEYCHAIN_PROFILE")
+          if [[ -n "$APPLE_KEYCHAIN" ]]; then credentials+=(--keychain "$APPLE_KEYCHAIN"); fi
+          result="$(/usr/bin/xcrun notarytool submit "$image" "${credentials[@]}" --wait --output-format json)"
+          node -e 'const { status } = JSON.parse(process.argv[1]); if (status !== "Accepted") process.exit(1)' "$result"
+          /usr/bin/xcrun stapler staple "$image"
+          /usr/bin/xcrun stapler validate "$image"
+          go -C tools/wormhole-backend run ./cmd/verify-update-publisher "$MACOS_PUBLISHER" "$image"
 
       - name: Verify Linux package outputs
         if: matrix.builder_platform == 'linux'
@@ -366,6 +614,58 @@ jobs:
             exit 1
           fi
 
+      - name: Measure installed Linux payload
+        if: matrix.builder_platform == 'linux'
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.checks.outputs.tag }}
+          BUILDER_ARCH: ${{ matrix.builder_arch }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          deb=(release/*.deb)
+          rpm=(release/*.rpm)
+          [[ ${#deb[@]} -eq 1 && ${#rpm[@]} -eq 1 ]]
+          scratch="$(mktemp -d)"
+          trap 'rm -rf "$scratch"' EXIT
+          mkdir "$scratch/deb" "$scratch/rpm"
+          dpkg-deb --extract "${deb[0]}" "$scratch/deb"
+          rpm2cpio "${rpm[0]}" | (cd "$scratch/rpm" && cpio --extract --make-directories --quiet --no-absolute-filenames)
+          go build -C tools/wormhole-backend -o "$scratch/measure" ./cmd/sign-update-manifest
+          for format in deb rpm; do
+            root="$scratch/$format/opt/Wormhole"
+            test -f "$root/wormhole"
+            "$scratch/measure" inventory-installation "$RELEASE_TAG" "linux/$BUILDER_ARCH" "$root" > "$scratch/$format.json"
+          done
+          cmp "$scratch/deb.json" "$scratch/rpm.json"
+          cp "$scratch/deb.json" "$RUNNER_TEMP/installation-linux-$BUILDER_ARCH.json"
+
+      - name: Measure installed macOS payload
+        if: matrix.builder_platform == 'mac'
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.checks.outputs.tag }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          images=(release/Wormhole-*-mac-universal-setup.dmg)
+          [[ ${#images[@]} -eq 1 ]]
+          scratch="$(mktemp -d)"
+          trap 'rm -rf "$scratch"' EXIT
+          mkdir "$scratch/mount"
+          /usr/bin/hdiutil attach -readonly -nobrowse -noautoopen -mountpoint "$scratch/mount" "${images[0]}"
+          trap '/usr/bin/hdiutil detach "$scratch/mount" && rm -rf "$scratch"' EXIT
+          go -C tools/wormhole-backend run ./cmd/sign-update-manifest inventory-installation "$RELEASE_TAG" darwin/universal \
+            "$scratch/mount/Wormhole.app" > "$RUNNER_TEMP/installation-darwin-universal.json"
+
+      - name: Upload installation inventory
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: installation-inventory-${{ matrix.platform }}
+          path: ${{ runner.temp }}/installation-*.json
+          if-no-files-found: error
+          retention-days: 1
+
       - name: Generate installer SHA-256 sidecar
         shell: pwsh
         run: |
@@ -388,9 +688,77 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  sign:
+    name: Sign release manifests
+    needs: [checks, windows-installers, packages]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: tools/wormhole-backend/go.mod
+          cache: false
+
+      - name: Build manifest signer
+        working-directory: tools/wormhole-backend
+        run: go build -trimpath -o "$RUNNER_TEMP/wormhole-sign-update-manifest" ./cmd/sign-update-manifest
+
+      - name: Download final installers
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          pattern: wormhole-*
+          merge-multiple: true
+
+      - name: Download installation inventories
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: inventory
+          pattern: installation-inventory-*
+          merge-multiple: true
+
+      - name: Sign installer sizes and hashes
+        env:
+          RELEASE_TAG: ${{ needs.checks.outputs.tag }}
+          PUBLIC_KEY: ${{ needs.checks.outputs.update-manifest-public-key }}
+          WORMHOLE_UPDATE_MANIFEST_SEED: ${{ secrets.WORMHOLE_UPDATE_MANIFEST_SEED }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$WORMHOLE_UPDATE_MANIFEST_SEED" |
+            env -u WORMHOLE_UPDATE_MANIFEST_SEED "$RUNNER_TEMP/wormhole-sign-update-manifest" "$RELEASE_TAG" "$GITHUB_WORKSPACE/dist" "$PUBLIC_KEY"
+          printf '%s\n' "$WORMHOLE_UPDATE_MANIFEST_SEED" |
+            env -u WORMHOLE_UPDATE_MANIFEST_SEED "$RUNNER_TEMP/wormhole-sign-update-manifest" sign-system-manifest "$RELEASE_TAG" "$GITHUB_WORKSPACE/dist" "$PUBLIC_KEY"
+          for target in darwin/universal linux/arm64 linux/x64 windows/arm64 windows/x64; do
+            name="${target/\//-}"
+            printf '%s\n' "$WORMHOLE_UPDATE_MANIFEST_SEED" |
+              env -u WORMHOLE_UPDATE_MANIFEST_SEED "$RUNNER_TEMP/wormhole-sign-update-manifest" sign-installation \
+                "$RELEASE_TAG" "$target" "$GITHUB_WORKSPACE/inventory/installation-$name.json" "$PUBLIC_KEY" \
+                > "$GITHUB_WORKSPACE/dist/Wormhole-InstallationProof-v1-$name.json"
+          done
+
+      - name: Upload signed installation proofs
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wormhole-installation-proofs
+          path: dist/Wormhole-InstallationProof-v1-*.json
+          if-no-files-found: error
+
+      - name: Upload signed update manifest
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wormhole-update-manifest
+          path: |
+            dist/Wormhole-UpdateManifest-v1.json
+            dist/Wormhole-UpdateManifest-v2.json
+          if-no-files-found: error
+
   release:
     name: Publish GitHub Release
-    needs: [checks, build, packages]
+    needs: [checks, sign]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -399,6 +767,7 @@ jobs:
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: dist
+          pattern: wormhole-*
           merge-multiple: true
 
       - name: Publish release with generated notes
@@ -409,6 +778,11 @@ jobs:
           REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
+          test -s dist/Wormhole-UpdateManifest-v1.json
+          test -s dist/Wormhole-UpdateManifest-v2.json
+          for name in darwin-universal linux-arm64 linux-x64 windows-arm64 windows-x64; do
+            test -s "dist/Wormhole-InstallationProof-v1-$name.json"
+          done
 
           verify_release_commit() {
             local remote_commit
@@ -425,16 +799,17 @@ jobs:
             is_draft="$(jq -r '.isDraft' <<<"$release_json")"
             existing_assets="$(jq -r '.assets[].name' <<<"$release_json")"
 
-            for asset in dist/*; do
-              asset_name="$(basename "$asset")"
-              if grep -Fqx "$asset_name" <<<"$existing_assets"; then
-                if [[ "$is_draft" == "true" ]]; then
-                  gh release upload "$RELEASE_TAG" "$asset" --repo "$REPOSITORY" --clobber
+            if [[ "$is_draft" == "false" ]]; then
+              for asset in dist/*; do
+                if ! grep -Fqx "${asset##*/}" <<<"$existing_assets"; then
+                  echo "Published release is missing ${asset##*/}. Create a new release to update its signed files." >&2
+                  exit 1
                 fi
-              else
-                gh release upload "$RELEASE_TAG" "$asset" --repo "$REPOSITORY"
-              fi
-            done
+              done
+              exit 0
+            fi
+            [[ "$is_draft" == "true" ]]
+            gh release upload "$RELEASE_TAG" dist/* --repo "$REPOSITORY" --clobber
           else
             gh release create "$RELEASE_TAG" \
               --repo "$REPOSITORY" \

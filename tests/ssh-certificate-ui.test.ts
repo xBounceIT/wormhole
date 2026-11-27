@@ -56,7 +56,7 @@ test('SSH authentication layouts support quick connect, saved create/edit and ce
           const coverage=await window.webContents.debugger.sendCommand('Profiler.takePreciseCoverage');
           const script=coverage.result.find(item=>item.url==='wormhole-ssh-certificate-ui.js');
           if(!script)throw new Error('Missing SSH certificate renderer coverage');
-          for(const name of ['selectPrivateKey','selectCertificate','credentialDraftFor','sshAuthenticationTypeForCredential','filterCredentialsByAuthentication']){
+          for(const name of ['selectPrivateKey','selectCertificate','credentialDraftFor','sshAuthenticationTypeForCredential','filterCredentialsByAuthentication','submitVaultCredential']){
             const functions=script.functions.filter(item=>item.functionName===name);
             const ranges=functions.flatMap(item=>item.ranges);
             const percent=100*ranges.filter(item=>item.count>0).length/ranges.length;

@@ -65,6 +65,23 @@ test('idle check failure and up-to-date messages follow the current result', () 
   assert.equal(updateStatusMessage('', available), '');
 });
 
+test('managed release notices preserve operation errors and only offer approved packages', () => {
+  const managed = { ...available, updatePolicy: 'managed' as const };
+  assert.equal(updateStatusMessage('', managed), 'Your administrator approved Wormhole 2.1.6.');
+  assert.equal(
+    updateStatusMessage('Installer verification failed', managed),
+    'Installer verification failed',
+  );
+  assert.equal(shouldOfferUpdate(managed, null), true);
+  const noPackage = { ...managed, isUpdateAvailable: false, latestVersion: '' };
+  assert.equal(updateStatusMessage('', noPackage), 'Updates are managed by your administrator.');
+  assert.equal(shouldOfferUpdate(noPackage, null), false);
+  assert.equal(
+    updateStatusMessage('', { ...noPackage, checkFailed: true }),
+    'The managed update could not be verified. Contact your administrator.',
+  );
+});
+
 test('a release without a verified installer keeps its version and changelog on the update page', () => {
   const result = { ...available, isUpdateAvailable: false };
   assert.equal(hasNewerReleaseWithoutInstaller(result), true);

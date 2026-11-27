@@ -55,7 +55,11 @@ test('authentication prompts and window-close controls work in Chromium', async 
     .join('\n');
   const notesLabel = source.indexOf('<Label htmlFor="connection-notes">');
   const notesStart = source.lastIndexOf("{connectionEditorMode === 'saved' ? (", notesLabel);
-  const notesEnd = source.indexOf(') : null}', notesLabel) + ') : null}'.length;
+  const notesEnd =
+    source.indexOf(
+      '                    ) : null}',
+      source.indexOf('value={newConnectionForm.notes}', notesLabel),
+    ) + '                    ) : null}'.length;
   assert.ok(notesStart >= 0 && notesEnd > notesLabel);
   const notesEffectStart = source.indexOf(
     '  useEffect(() => {',
@@ -69,6 +73,8 @@ test('authentication prompts and window-close controls work in Chromium', async 
   const notesHarness = `
     function ConnectionNotesHarness({ mode = 'saved', initialNotes = '', nodeId = null, open = true }) {
       const connectionEditorMode = mode;
+      const authState = { mode: 'pin' };
+      const nativeSavedConnection = false;
       const [newConnectionForm, setNewConnectionForm] = useState({ notes: initialNotes });
       const [connectionNotesReady, setConnectionNotesReady] = useState(!nodeId);
       const [editorError, setEditorError] = useState('');
@@ -251,7 +257,7 @@ test('authentication prompts and window-close controls work in Chromium', async 
       function requestSavedSshCredentials() {
         const promptTarget = 'saved';
         const request = { nodeId: 'node', sessionId: 'ssh-backend-session' };
-        ${slice("          if (promptTarget === 'saved' && request.nodeId) {", "          } else if (promptTarget === 'quick') {")}
+        ${slice("if (promptTarget === 'saved' && request.nodeId) {", "} else if (promptTarget === 'quick') {")}
         }
       }
       return <TooltipProvider>

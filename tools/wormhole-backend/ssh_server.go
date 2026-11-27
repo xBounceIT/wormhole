@@ -355,6 +355,9 @@ type sshServer struct {
 	transfers  map[string]*sshSftpTransfer
 	transferWG sync.WaitGroup
 
+	sealedClosed    func(*sshNativeSession)
+	sftpWork        *sftpWorkGroup
+	sealedEdits     *sealedSFTPEdits
 	localQuickPaths localQuickPathCache
 }
 
@@ -457,6 +460,7 @@ type sshEventWriter struct {
 	mu                 sync.Mutex
 	encoder            *json.Encoder
 	reportWriteFailure sync.Once
+	sealed bool
 }
 
 func (writer *sshEventWriter) write(event sshWireEvent) {
@@ -466,6 +470,9 @@ func (writer *sshEventWriter) write(event sshWireEvent) {
 	}
 	writer.mu.Lock()
 	defer writer.mu.Unlock()
+	if writer.sealed {
+		event = boundSealedSFTPEntries(event)
+	}
 	if err := writer.encoder.Encode(event); err != nil {
 		writer.reportWriteFailure.Do(func() { logOperationFailure("write SSH stream", err) })
 	}
@@ -1022,6 +1029,12 @@ func (server *sshServer) sftpTransfer(command sshWireCommand) {
 		server.writeTransferBatchError(command, errors.New("SFTP transfer is already running"))
 		return
 	}
+	if server.sftpWork != nil && len(server.transfers) >= sealedSFTPTransferLimit {
+		server.transferMu.Unlock()
+		cancel()
+		server.writeTransferBatchError(command, errors.New("too many SFTP transfers"))
+		return
+	}
 	server.transfers[transfer.id] = transfer
 	server.transferMu.Unlock()
 
@@ -1245,6 +1258,11 @@ func (server *sshServer) remove(native *sshNativeSession) {
 }
 
 func (server *sshServer) nativeClosed(native *sshNativeSession) {
+	if server.sealedClosed != nil {
+		server.remove(native)
+		server.sealedClosed(native)
+		return
+	}
 	server.mu.Lock()
 	if server.sessions[native.id] != native {
 		server.mu.Unlock()
@@ -2139,7 +2157,14 @@ func (native *sshNativeSession) startSftpOpen(requestID string) {
 		native.startSftpListWithGeneration("", generation, requestID)
 		return
 	}
-	go native.openSftp(generation, requestID)
+	if !native.server.startSftpWork(func() { native.openSftp(generation, requestID) }) {
+		native.sftpMu.Lock()
+		if native.sftpGeneration == generation {
+			native.sftpOpening = false
+		}
+		native.sftpMu.Unlock()
+		native.server.writeSftpRequestError(native.id, requestID, "too many SFTP requests")
+	}
 }
 
 func (native *sshNativeSession) openSftp(generation uint64, requestID string) {
@@ -2211,7 +2236,9 @@ func (native *sshNativeSession) startSftpListWithGeneration(requestedPath string
 	sequence := native.sftpListSeq
 	native.sftpMu.Unlock()
 
-	go native.listSftp(requestedPath, generation, sequence, requestID)
+	if !native.server.startSftpWork(func() { native.listSftp(requestedPath, generation, sequence, requestID) }) {
+		native.server.writeSftpRequestError(native.id, requestID, "too many SFTP requests", requestedPath)
+	}
 }
 
 func (native *sshNativeSession) listSftp(requestedPath string, generation, sequence uint64, requestID string) {
@@ -2291,7 +2318,7 @@ func (native *sshNativeSession) startLocalList(requestedPath, requestID string) 
 	if server == nil {
 		return
 	}
-	go func() {
+	if !server.startSftpWork(func() {
 		quickPaths := server.localQuickPaths.get()
 		entries, truncated, err := readLocalDirectory(path)
 		if err != nil {
@@ -2311,7 +2338,9 @@ func (native *sshNativeSession) startLocalList(requestedPath, requestID string) 
 			Entries:    entries,
 			Truncated:  truncated,
 		})
-	}()
+	}) {
+		native.writeLocalSftpError(requestID, path, errors.New("too many SFTP requests"))
+	}
 }
 
 func (server *sshServer) writeSftpLocalError(sessionID, requestID, path string, err error) {
@@ -2352,8 +2381,11 @@ func (native *sshNativeSession) writeLocalSftpError(requestID, path string, err 
 }
 
 func (native *sshNativeSession) startSftpOperation(command sshWireCommand) {
+	if native.server == nil {
+		return
+	}
 	generation := native.sftpGenerationSnapshot()
-	go func() {
+	if !native.server.startSftpWork(func() {
 		err := native.runSftpOperationForGeneration(command, generation)
 		if native.server == nil || native.isClosed() {
 			return
@@ -2370,7 +2402,9 @@ func (native *sshNativeSession) startSftpOperation(command sshWireCommand) {
 			event.Error = safeSftpError(err)
 		}
 		native.server.output.write(event)
-	}()
+	}) {
+		native.server.writeSftpOperationError(command, errors.New("too many SFTP requests"))
+	}
 }
 
 func (native *sshNativeSession) sftpGenerationSnapshot() uint64 {
@@ -4123,106 +4157,11 @@ func loadFileTargetWithCredentialOverrides(
 	if err != nil {
 		return sshTarget{}, err
 	}
-	root := nodes[normalizeID(nodeID)]
-	if root == nil || root.kind == 0 {
-		return sshTarget{}, errors.New("SSH connection was not found")
-	}
-	endpoint, err := resolveFileNodeEndpoint(nodes, root.id, smb)
+	target, inline, err := resolveLegacyFileMetadata(nodes, nodeID, smb)
 	if err != nil {
 		return sshTarget{}, err
 	}
-
-	username := ""
-	usernameSet := false
-	credentialID := ""
-	credentialResolved := root.useInlinePassword
-	identityBoundary := false
-	credentialContextPending := false
-	var credentialContextProtocol *int64
-	knownFingerprint := ""
-	autoSudo := false
-	autoSudoSet := false
-	tunnelEnabled := false
-	tunnelSet := false
-	tunnelConfigID := ""
-	current := root
-	seen := make(map[string]struct{})
-	trustContext := make(map[string]sshNode)
-	for current != nil {
-		if _, duplicate := seen[current.id]; duplicate {
-			return sshTarget{}, errors.New("SSH connection tree contains a cycle")
-		}
-		seen[current.id] = struct{}{}
-		trustContext[current.id] = *current
-		if !identityBoundary && !usernameSet && (current.usernameSet || strings.TrimSpace(current.username) != "") {
-			username = strings.TrimSpace(current.username)
-			usernameSet = true
-		}
-		if knownFingerprint == "" && strings.TrimSpace(current.knownHostFingerprint) != "" {
-			knownFingerprint = strings.TrimSpace(current.knownHostFingerprint)
-		}
-		if !autoSudoSet && current.autoSudo != nil {
-			autoSudo = *current.autoSudo
-			autoSudoSet = true
-		}
-		if !tunnelSet && current.tunnelEnabled != nil {
-			tunnelEnabled = *current.tunnelEnabled
-			tunnelSet = true
-		}
-		if tunnelConfigID == "" && current.tunnelConfigID != "" {
-			tunnelConfigID = current.tunnelConfigID
-		}
-		if !credentialResolved {
-			if current.credentialMode != nil {
-				if *current.credentialMode != 0 {
-					credentialResolved = true
-					if *current.credentialMode == 2 { // saved
-						credentialID = current.credentialID
-						if credentialID != "" {
-							identityBoundary = true
-							credentialContextPending = true
-						}
-					}
-				}
-			} else if current.credentialID != "" {
-				credentialResolved = true
-				credentialID = current.credentialID
-				identityBoundary = true
-				credentialContextPending = true
-			}
-		}
-		if credentialContextPending && credentialContextProtocol == nil && current.protocol != nil {
-			value := *current.protocol
-			credentialContextProtocol = &value
-		}
-		if current.parentID == "" {
-			break
-		}
-		current = nodes[current.parentID]
-	}
-
-	if tunnelSet && tunnelEnabled && tunnelConfigID == "" {
-		return sshTarget{}, errors.New("SSH connection enables a VPN tunnel but no tunnel is configured")
-	}
-	if credentialContextProtocol != nil && sshCredentialProtocol(*credentialContextProtocol) != sshCredentialProtocol(endpoint.protocol) {
-		credentialID = ""
-	}
-
-	target := sshTarget{
-		credentialProtocol:   sshCredentialProtocol(endpoint.protocol),
-		nodeTrustContext:     trustContext,
-		credentialID:         credentialID,
-		nodeID:               root.id,
-		title:                root.name,
-		host:                 endpoint.host,
-		port:                 endpoint.port,
-		username:             username,
-		knownHostFingerprint: knownFingerprint,
-		autoSudo:             autoSudo,
-	}
-	if tunnelSet && tunnelEnabled {
-		target.tunnelConfigID = tunnelConfigID
-	}
+	credentialID := target.credentialID
 	if credentialOverride {
 		applySSHCredentialOverride(
 			&target,
@@ -4249,8 +4188,8 @@ func loadFileTargetWithCredentialOverrides(
 		); err != nil {
 			return sshTarget{}, err
 		}
-	} else if root.useInlinePassword {
-		secret, err := readCredentialSecret(database, root.id, electronUserDataPath...)
+	} else if inline {
+		secret, err := readCredentialSecret(database, target.nodeID, electronUserDataPath...)
 		if err != nil {
 			return sshTarget{}, fmt.Errorf("could not read the SSH password: %w", err)
 		}
@@ -4273,10 +4212,22 @@ func loadFileTargetWithCredentialOverrides(
 	if target.username == "" {
 		return sshTarget{}, errors.New("SSH connection has no username")
 	}
+	if !credentialOverride && credentialIDOverride == "" {
+		source, selected := "none", ""
+		if inline {
+			source, selected = "inline", target.nodeID
+		} else if target.credentialID != "" {
+			source, selected = "saved", target.credentialID
+		}
+		// Both actions use this exact legacy walk, including SFTP opened on an SSH node.
+		observeLegacyResolution(database,
+			legacyResolutionSnapshot(target.nodeID, "ssh", selected, target.username, "", source),
+			legacyResolutionSnapshot(target.nodeID, "sftp", selected, target.username, "", source))
+	}
 	return target, nil
 }
 
-func loadSSHNodes(database *sql.DB) (map[string]*sshNode, error) {
+func loadSSHNodes(database sqlMetadataReader) (map[string]*sshNode, error) {
 	exists, err := tableExists(database, "Nodes")
 	if err != nil {
 		return nil, err

@@ -601,9 +601,11 @@ func importWatchguardBundle(bundle []byte) (string, error) {
 		}
 		contents, err := io.ReadAll(io.LimitReader(archive, watchguardMaxEntryBytes+1))
 		if err != nil || len(contents) > watchguardMaxEntryBytes {
+			clearBytes(contents)
 			return "", errors.New("WatchGuard profile bundle entry exceeded the safety limit")
 		}
 		files[strings.ToLower(filepath.Base(strings.ReplaceAll(header.Name, "\\", "/")))] = string(contents)
+		clearBytes(contents)
 	}
 	for _, name := range []string{"client.ovpn", "ca.crt", "client.crt", "client.pem"} {
 		if strings.TrimSpace(files[name]) == "" {

@@ -104,10 +104,10 @@ func TestSftpEditDispatchAndCrashScanRejectMalformedCopies(t *testing.T) {
 	if len(recovery.edits) != 1 {
 		t.Fatal("invalid recovery manifest accepted")
 	}
-	if err := protectSftpEditDirectory(filepath.Join(root, "ordinary-file")); err == nil {
+	if err := protectPrivateDirectory(filepath.Join(root, "ordinary-file")); err == nil {
 		t.Fatal("non-directory protected root accepted")
 	}
-	if err := protectSftpEditDirectory(filepath.Join(root, "missing")); err == nil {
+	if err := protectPrivateDirectory(filepath.Join(root, "missing")); err == nil {
 		t.Fatal("missing protected root accepted")
 	}
 }

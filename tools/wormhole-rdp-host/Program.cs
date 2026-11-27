@@ -35,6 +35,8 @@ internal sealed class RdpHostApplicationContext : ApplicationContext
     private readonly Control _dispatcher;
     private readonly List<string> _pendingResizeRequestIds = [];
     private RdpHostForm? _form;
+    private NativeControlReference? _nativeControl;
+    private string? _nativeControlRequest;
     private RdpHostCommand? _pendingResize;
     private bool _resizeDispatchScheduled;
     private FormsTimer? _resolutionTimer;
@@ -45,14 +47,17 @@ internal sealed class RdpHostApplicationContext : ApplicationContext
     private int _lastResolutionHeight;
     private bool _closing;
     private bool _focusOnFirstShow = true;
+    private bool _surfaceRequestedVisible = true;
 
-    public RdpHostApplicationContext()
+    public RdpHostApplicationContext() : this(readCommands: true) { }
+
+    internal RdpHostApplicationContext(bool readCommands)
     {
         // A hidden control gives the reader thread a stable STA dispatch target. The ActiveX
         // form is created, configured, and disposed only from this UI thread.
         _dispatcher = new Control();
         _dispatcher.CreateControl();
-        _ = Task.Run(ReadCommandsAsync);
+        if (readCommands) _ = Task.Run(ReadCommandsAsync);
     }
 
     private async Task ReadCommandsAsync()
@@ -110,13 +115,24 @@ internal sealed class RdpHostApplicationContext : ApplicationContext
             switch (command.Op)
             {
                 case "start":
+                case "startProtected":
                     Start(command);
+                    break;
+                case "connect":
+                    if (_nativeControl is null || _form is null || command.RequestId != _nativeControlRequest)
+                        throw new InvalidOperationException("native RDP control handoff is stale");
+                    _nativeControl.Dispose();
+                    _nativeControl = null;
+                    _nativeControlRequest = null;
+                    _form.Start();
+                    if (!_closing) Write(new RdpHostEvent("ready", command.RequestId));
                     break;
                 case "resize":
                     ApplyResize(command);
                     Write(new RdpHostEvent("ack", command.RequestId));
                     break;
                 case "show":
+                    _surfaceRequestedVisible = true;
                     if (_form is { } form)
                     {
                         if (command.Bounds.IsUsable)
@@ -144,6 +160,7 @@ internal sealed class RdpHostApplicationContext : ApplicationContext
                     Write(new RdpHostEvent("ack", command.RequestId));
                     break;
                 case "hide":
+                    _surfaceRequestedVisible = false;
                     if (_form is not null) _ = Win32Interop.ShowWindow(_form.Hwnd, Win32Interop.SW_HIDE);
                     Write(new RdpHostEvent("ack", command.RequestId));
                     break;
@@ -168,7 +185,7 @@ internal sealed class RdpHostApplicationContext : ApplicationContext
             // Never serialize exception text from the ActiveX stack: some COM providers include
             // server/user data in their messages. The UI only needs a stable, secret-free error.
             Write(new RdpHostEvent("error", command.RequestId, "native Windows RDP host operation failed"));
-            if (command.Op == "start") CloseHost();
+            if (command.Op is "start" or "startProtected" or "connect") CloseHost();
         }
     }
 
@@ -246,6 +263,8 @@ internal sealed class RdpHostApplicationContext : ApplicationContext
             throw new InvalidOperationException("Electron owner window handle is missing");
         }
 
+        if (command.Op == "startProtected") Win32Interop.RequireCrashReportingSuppression();
+        _surfaceRequestedVisible = command.Visible ?? true;
         var form = CreateRealizedHostForm();
         _form = form;
         void Conceal()
@@ -290,6 +309,7 @@ internal sealed class RdpHostApplicationContext : ApplicationContext
 
         var hwnd = form.Hwnd;
         ConfigureAsOwnedOverlay(hwnd, owner);
+        if (command.Op == "startProtected") form.RequireContentProtection();
         var profile = command.Profile.ToRdpConnectionProfile();
         _dynamicResolution =
             !profile.RdpFullScreen && RdpScreenSizes.IsFullConnectionContent(profile.RdpScreenSize);
@@ -306,17 +326,25 @@ internal sealed class RdpHostApplicationContext : ApplicationContext
         }
         form.Configure(
             profile,
-            command.Profile.Password,
+            command.Profile.CredentialsProvided,
             command.Profile.GatewayUsername,
-            command.Profile.GatewayPassword,
             hwnd,
             command.Bounds.Width,
             command.Bounds.Height);
         // Start only after every event subscription and the owned Electron overlay relationship
         // are in place. Only a renderer show command may display the realized HWND.
         ScheduleRemoteResolution(command.Bounds.Width, command.Bounds.Height);
-        form.Start();
-        if (!_closing) Write(new RdpHostEvent("ready", command.RequestId));
+        if (command.NativeCredentialBridge)
+        {
+            _nativeControl = form.ExportNativeControl();
+            _nativeControlRequest = command.RequestId;
+            Write(new RdpHostEvent("nativeControl", command.RequestId, NativeControl: _nativeControl.Data));
+        }
+        else
+        {
+            form.Start();
+            if (!_closing) Write(new RdpHostEvent("ready", command.RequestId));
+        }
     }
 
     private void ScheduleRemoteResolution(int width, int height)
@@ -389,6 +417,9 @@ internal sealed class RdpHostApplicationContext : ApplicationContext
         _closing = true;
         try
         {
+            _nativeControl?.Dispose();
+            _nativeControl = null;
+            _nativeControlRequest = null;
             _form?.Disconnect();
             _form?.Dispose();
         }
@@ -488,6 +519,8 @@ internal sealed class RdpHostCommand
     public string Op { get; set; } = string.Empty;
     public string RequestId { get; set; } = string.Empty;
     public string OwnerWindow { get; set; } = string.Empty;
+    public bool NativeCredentialBridge { get; set; }
+    public bool? Visible { get; set; }
     public RdpHostBounds Bounds { get; set; }
     public RdpHostProfile Profile { get; set; } = new();
 }
@@ -507,10 +540,9 @@ internal sealed class RdpHostProfile
     public int Port { get; set; } = 3389;
     public string? Username { get; set; }
     public string? Domain { get; set; }
-    public string? Password { get; set; }
+    public bool CredentialsProvided { get; set; }
     public string? GatewayHostname { get; set; }
     public string? GatewayUsername { get; set; }
-    public string? GatewayPassword { get; set; }
     public string? ScreenSize { get; set; }
     public bool FullScreen { get; set; }
     public int ColorDepth { get; set; } = 32;
@@ -582,4 +614,5 @@ internal sealed record RdpHostEvent(
     int Code = 0,
     int Attempt = 0,
     int Max = 0,
-    int ExtendedDisconnectReason = 0);
+    int ExtendedDisconnectReason = 0,
+    byte[]? NativeControl = null);

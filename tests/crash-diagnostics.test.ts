@@ -22,6 +22,7 @@ import {
   defaultCrashDiagnosticsPolicy,
   initializeLocalCrashDiagnostics,
   resolveCrashDiagnosticsPaths,
+  VaultCrashCapturePolicy,
   type CrashDiagnosticsPolicy,
 } from '../electron/crash-diagnostics.ts';
 
@@ -118,17 +119,41 @@ test('crash diagnostics starts local-only capture before scanning and records sa
   }
 });
 
-test('the main process initializes crash capture before Electron readiness', () => {
+test('legacy crash capture is gated by native startup before Electron readiness', () => {
   const source = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
-  const initialization = source.indexOf('initializeLocalCrashDiagnostics({');
+  const initialization = source.indexOf(
+    "if (vaultMigrationBoot.legacyLocalCrashCapture) vaultCrashCapture.apply('default');",
+  );
   const readiness = source.indexOf('app.whenReady()');
-  const firstWindow = source.indexOf('new BrowserWindow({');
 
   assert.notEqual(initialization, -1);
   assert.notEqual(readiness, -1);
-  assert.notEqual(firstWindow, -1);
   assert.equal(initialization < readiness, true);
-  assert.equal(initialization < firstWindow, true);
+});
+
+test('Crashpad stays off in a fresh process admitting strict profiles and starts once for lower profiles', () => {
+  let starts = 0;
+  const policy = new VaultCrashCapturePolicy(() => starts++);
+  policy.apply('hardened');
+  policy.apply('paranoid');
+  assert.equal(starts, 0);
+  policy.apply('standard');
+  policy.apply('default');
+  assert.equal(starts, 1);
+  assert.throws(() => policy.apply('hardened'), /requires a fresh app process/);
+  assert.throws(() => policy.apply('paranoid'), /requires a fresh app process/);
+});
+
+test('a failed Crashpad start requires a fresh process before a strict unlock', () => {
+  let starts = 0;
+  const policy = new VaultCrashCapturePolicy(() => {
+    starts++;
+    throw Error('Crashpad startup failed');
+  });
+  assert.throws(() => policy.apply('default'), /Crashpad startup failed/);
+  assert.throws(() => policy.apply('paranoid'), /requires a fresh app process/);
+  policy.apply('standard');
+  assert.equal(starts, 1);
 });
 
 test('Windows diagnostics use the shared bounded LocalAppData directory', () => {

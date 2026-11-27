@@ -10,6 +10,7 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { Script } from 'node:vm';
+import { build } from 'vite';
 
 const require = createRequire(import.meta.url);
 
@@ -59,11 +60,46 @@ test('real Chromium sibling tabs retain their proxy and never fall back to a dir
     const tlsPort = Number(new URL(address).port);
     assert.ok(tlsPort > 0 && tlsPort <= 65535);
     const harnessPath = join(directory, 'routing.cjs');
+    const vaultModule = join(directory, 'vault-web.cjs');
+    const vaultEntry = join(directory, 'vault-entry.ts');
+    writeFileSync(
+      vaultEntry,
+      [
+        'export { VaultWebConnections, parseVaultWebRequest } from ' +
+          JSON.stringify(resolve('electron/vault-web-connections.ts')) +
+          ';',
+        'export { VaultWebIpc } from ' + JSON.stringify(resolve('electron/vault-web-ipc.ts')) + ';',
+        'export { vaultID } from ' + JSON.stringify(resolve('electron/vault-contract.ts')) + ';',
+        'export { webPlan, webRequest } from ' +
+          JSON.stringify(resolve('tests/fixtures/vault-web.ts')) +
+          ';',
+      ].join('\n'),
+    );
+    const output = await build({
+      configFile: false,
+      logLevel: 'silent',
+      build: {
+        ssr: true,
+        write: false,
+        minify: false,
+        rolldownOptions: {
+          input: vaultEntry,
+          output: { format: 'cjs' },
+          external: ['node:crypto'],
+        },
+      },
+    });
+    const chunks = (Array.isArray(output) ? output : [output])
+      .flatMap((o) => o.output)
+      .filter((o) => o.type === 'chunk');
+    assert.equal(chunks.length, 1);
+    writeFileSync(vaultModule, chunks[0].code);
     writeFileSync(
       harnessPath,
       `
       const assert = require('node:assert/strict');
       const { randomUUID } = require('node:crypto');
+      const { VaultWebConnections, parseVaultWebRequest, VaultWebIpc, vaultID, webPlan, webRequest } = require(${JSON.stringify(vaultModule)});
       const net = require('node:net');
       const http = require('node:http');
       const dgram = require('node:dgram');
@@ -80,6 +116,7 @@ test('real Chromium sibling tabs retain their proxy and never fall back to a dir
       const webMaxUrlLength = 4096;
       const isQuitting = false;
       const authLockRequested = false;
+      const tunnelClosedMessage = 'The VPN connection stopped.';
       const validateWebTarget = value => value;
       const describeWebNavigationError = () => 'Navigation failed';
       const describeWebLoadFailure = () => 'Page unavailable';
@@ -337,12 +374,102 @@ test('real Chromium sibling tabs retain their proxy and never fall back to a dir
           await manager.command(owner, { sessionId: 'routed', operation: 'navigate', url: 'http://127.0.0.1:' + targetPort + '/via-proxy' });
           await waitFor(() => requests.includes('/via-proxy'));
           assert.ok(proxied.includes('127.0.0.1'));
+          // Run the actual vault preparation actor and browser controller against real Chromium.
+          // Only native Go planning/route transport are faked here (covered by native-client tests).
+          const seed = webPlan(webRequest(), true), routedNode = randomUUID(), directNode = randomUUID();
+          const workspaceId = seed.binding.workspaceId;
+          let routeClosed, leases = 0, quickAdmissions = 0, quickRetirements = 0;
+          const quickRefs = new Map();
+          const closed = new Promise(resolve => { routeClosed = resolve; });
+          const nativePlan = q => {
+            const routed = q.nodeId === routedNode || Boolean(quickRefs.get(q.nodeId)?.tunnelId), p = webPlan(q, routed);
+            Object.assign(p.binding, { protocol: 'http', host: routed ? 'gateway.internal' : '127.0.0.1', port: targetPort,
+              tunnelConfigId: routed ? seed.binding.tunnelConfigId : '' });
+            p.route = routed ? { ...seed.route, ...p.binding } : null;
+            p.target = { url: 'http://' + p.binding.host + ':' + targetPort + (routed ? '/vault-routed' : '/vault-direct'),
+              protocol: 'http', host: p.binding.host, port: targetPort, ignoreCertErrors: false,
+              ...(routed ? { tunnelConfigId: p.binding.tunnelConfigId } : {}) };
+            if (quickRefs.has(q.nodeId)) p.temporary = true;
+            return p;
+          };
+          const nativeConnections = new VaultWebConnections({ workspaceId: () => workspaceId,
+            authorized: epoch => epoch === 2, plan: async q => nativePlan(q),
+            quickTarget: async (target, sessionId, epoch, accepted) => {
+              assert.equal(accepted(), true); quickAdmissions++;
+              const id = randomUUID(); quickRefs.set(id, target);
+              return { reference: { workspaceId, id, sessionId, epoch }, release: async () => {
+                if (!quickRefs.has(id)) return;
+                const token = nativeManager.vaultSessionOwners.get(sessionId);
+                if (token?.partition) {
+                  assert.equal(token.views?.size ?? 0, 0, 'No running view may outlive target retirement');
+                  assert.equal((await electronSession.fromPartition(token.partition).cookies.get({})).length, 0,
+                    'Profile cookies retire before native target authority');
+                }
+                quickRefs.delete(id); quickRetirements++;
+              } };
+            },
+            routes: {
+              acquire: async (q, epoch, ownerActive) => {
+                assert.equal(ownerActive(), true); leases++;
+                const binding = nativePlan({ ...q, epoch, workspaceId, credentialOverride: '', requestId: randomUUID() }).route;
+                const endpoint = '127.0.0.1:' + proxy.address().port;
+                return { binding, endpoint, active: true, closed, release: async () => routeClosed() };
+              }, close: async () => routeClosed(), closeAll: async () => routeClosed(),
+            },
+          });
+          const nativeManager = new WebSurfaceManager({ active: () => true, connections: nativeConnections });
+          // Both production lifetimes are singletons. Give this second test
+          // instance its own partition sequence instead of reusing legacy profiles.
+          nativeManager.isolatedPartitionSequence = 100;
+          const nativeOwners = new Set([owner.webContents]);
+          const nativeIpc = new VaultWebIpc({ workspace: () => true,
+            trusted: event => nativeOwners.has(event.sender), authorize: async run => run(),
+            open: (contents, request, current) => nativeManager.open(BrowserWindow.fromWebContents(contents), request, current),
+            close: (contents, id) => nativeManager.closeForContents(contents, id),
+            closeAll: () => nativeManager.stopVaultSessions(),
+          });
+          const nativeId = randomUUID();
+          const nativeResponse = await nativeIpc.open({ sender: owner.webContents }, { sessionId: nativeId, nodeId: routedNode, attempt: 1 });
+          assert.equal(nativeResponse.proxyUrl, undefined);
+          assert.equal(nativeResponse.browser.route, 'vpn');
+          const nativeRecord = nativeManager.surfaces.get(nativeId), nativeFirst = nativeRecord.view.webContents;
+          await waitFor(() => nativeFirst.getTitle() === 'Gateway' && !nativeFirst.isLoading());
+          await nativeFirst.executeJavaScript("document.cookie = 'nativeVault=private-session'; window.onbeforeunload = () => false; true");
+          await nativeManager.command(owner, { sessionId: nativeId, operation: 'new-tab' });
+          await nativeManager.command(owner, { sessionId: nativeId, operation: 'navigate', url: 'http://gateway.internal:' + targetPort + '/help' });
+          await waitFor(() => nativeRecord.view.webContents.getTitle() === 'Help');
+          const nativeSecond = nativeRecord.view.webContents, nativeSession = nativeFirst.session;
+          assert.equal(nativeSecond.session, nativeSession);
+          assert.equal(leases, 1);
+          const quickId = randomUUID();
+          await nativeIpc.open({ sender: owner.webContents }, { sessionId: quickId, attempt: 1, quickTarget: {
+            protocol: 'http', host: 'gateway.internal', port: targetPort, credentialId: '',
+            tunnelId: seed.binding.tunnelConfigId, sshAutoSudo: false, httpPath: '/vault-routed', ignoreCertificateErrors: false, rdp: null } });
+          const quickRecord = nativeManager.surfaces.get(quickId), quickFirst = quickRecord.view.webContents;
+          await waitFor(() => quickFirst.getTitle() === 'Gateway' && !quickFirst.isLoading());
+          await quickFirst.executeJavaScript("document.cookie = 'nativeQuick=private-session'; true");
+          const quickFirstId = quickRecord.tabs.activeId;
+          await nativeManager.command(owner, { sessionId: quickId, operation: 'new-tab' });
+          await nativeManager.command(owner, { sessionId: quickId, operation: 'navigate', url: 'http://gateway.internal:' + targetPort + '/help' });
+          await waitFor(() => quickRecord.view.webContents.getTitle() === 'Help');
+          const quickSecond = quickRecord.view.webContents;
+          assert.match(await quickSecond.executeJavaScript('document.cookie'), /nativeQuick=private-session/);
+          await nativeManager.command(owner, { sessionId: quickId, operation: 'close-tab', tabId: quickFirstId });
+          await waitFor(() => quickFirst.isDestroyed());
+          assert.equal(quickSecond.isDestroyed(), false);
+          assert.equal(leases, 2, 'Each browser owns one shared route, regardless of tab count');
+          assert.equal(quickAdmissions, 1); assert.equal(quickRetirements, 0);
+          assert.match(await nativeSecond.executeJavaScript('document.cookie'), /nativeVault=private-session/);
+          assert.match(await nativeSession.resolveProxy('http://127.0.0.1:' + targetPort), /^SOCKS5 /);
           const loopbackTab = record.view.webContents;
           await waitFor(() => loopbackTab.getURL().endsWith('/via-proxy') && !loopbackTab.isLoading());
           await first.executeJavaScript("document.querySelector('h1').textContent = 'Unsaved browser state'");
           const oldProxy = proxy;
           const oldProxyPort = proxy.address().port;
           exitSocks();
+          oldProxy.removeAllListeners('connection');
+          oldProxy.on('connection', (socket) => socket.destroy());
+          for (const socket of sockets) socket.destroy();
           assert.equal(record.vpn.status, 'disconnected');
           assert.equal(first.isDestroyed(), false);
           // A page may hide broken images in onerror: a missing broken-image badge is not proof
@@ -350,6 +477,30 @@ test('real Chromium sibling tabs retain their proxy and never fall back to a dir
           const failedSvg = await first.executeJavaScript('new Promise(resolve => { const image = new Image(); image.onload = () => resolve({ loaded: true }); image.onerror = () => { image.style.display = "none"; resolve({ loaded: false, hidden: image.style.display === "none", width: image.naturalWidth }); }; image.src = ' + JSON.stringify(externalSvg + '?disconnected') + '; })');
           assert.deepEqual(failedSvg, { loaded: false, hidden: true, width: 0 });
           assert.equal(requests.includes('/external-button.svg?disconnected'), false, 'External SVG requests must fail closed when the VPN stops');
+          await nativeManager.command(owner, { sessionId: nativeId, operation: 'navigate', url: 'http://127.0.0.1:' + targetPort + '/vault-no-direct-fallback' });
+          await waitFor(() => nativeRecord.tabs.snapshot('vpn').tabs.some(tab => tab.error));
+          assert.equal(requests.includes('/vault-no-direct-fallback'), false);
+          routeClosed();
+          await waitFor(() => nativeFirst.isDestroyed() && nativeSecond.isDestroyed(), 'Native route loss closes every tab');
+          await nativeIpc.closeAll();
+          assert.equal((await nativeSession.cookies.get({})).length, 0, 'Lock removes native authentication cookies');
+          assert.equal(quickRetirements, 1); assert.equal(quickRefs.size, 0);
+          const directId = randomUUID();
+          await nativeIpc.open({ sender: owner.webContents }, { sessionId: directId, nodeId: directNode, attempt: 1 });
+          const nativeDirect = nativeManager.surfaces.get(directId).view.webContents, directSession = nativeDirect.session;
+          await waitFor(() => nativeDirect.getTitle() === 'Gateway' && !nativeDirect.isLoading());
+          const quickDirectId = randomUUID();
+          await nativeIpc.open({ sender: owner.webContents }, { sessionId: quickDirectId, attempt: 1, quickTarget: { protocol: 'http', host: '127.0.0.1', port: targetPort, credentialId: '', tunnelId: '', sshAutoSudo: false, httpPath: '/vault-direct', ignoreCertificateErrors: false, rdp: null } });
+          const quickDirect = nativeManager.surfaces.get(quickDirectId).view.webContents;
+          await waitFor(() => quickDirect.getTitle() === 'Gateway' && !quickDirect.isLoading());
+          assert.equal(await directSession.resolveProxy('http://127.0.0.1:' + targetPort), 'DIRECT');
+          await directSession.cookies.set({ url: 'http://127.0.0.1:' + targetPort, name: 'nativeDirect', value: 'private-session' });
+          owner.webContents.reload();
+          await waitFor(() => nativeDirect.isDestroyed(), 'Root reload closes native direct tab');
+          await nativeIpc.closeAll();
+          assert.equal((await directSession.cookies.get({})).length, 0);
+          assert.equal(quickAdmissions, 2); assert.equal(quickRetirements, 2); assert.equal(quickRefs.size, 0);
+          await waitFor(() => !owner.webContents.isLoading());
           await assert.rejects(manager.command(owner, { sessionId: 'routed', operation: 'navigate', url: 'http://127.0.0.1:' + targetPort + '/no-direct-fallback' }), /Reconnect the VPN/);
           await loopbackTab.executeJavaScript("location.href = '/no-direct-fallback'; true");
           assert.equal(await loopbackTab.executeJavaScript("fetch('/no-direct-fallback').then(() => 'loaded', () => 'blocked')"), 'blocked');
@@ -450,6 +601,21 @@ test('real Chromium sibling tabs retain their proxy and never fall back to a dir
           assert.equal(manager.surfaces.has('direct'), true);
           manager.close('forwarder');
           await waitFor(async () => (await forwarderSession.resolveProxy(origin + '/help')) === 'SOCKS5 127.0.0.1:0', 'Retired forwarder proxy');
+          const closingOwner = new BrowserWindow({ show: false });
+          await closingOwner.loadURL('data:text/html,<title>Closing browser owner</title>');
+          const closingContents = closingOwner.webContents; nativeOwners.add(closingContents);
+          const closingId = randomUUID();
+          await nativeIpc.open({ sender: closingContents }, { sessionId: closingId, attempt: 1,
+            quickTarget: { protocol: 'http', host: '127.0.0.1', port: targetPort, credentialId: '', tunnelId: '', sshAutoSudo: false, httpPath: '/vault-direct', ignoreCertificateErrors: false, rdp: null } });
+          const closingView = nativeManager.surfaces.get(closingId).view.webContents;
+          await waitFor(() => closingView.getTitle() === 'Gateway' && !closingView.isLoading());
+          closingOwner.destroy();
+          await waitFor(() => closingView.isDestroyed());
+          await nativeIpc.closeAll();
+          assert.equal(quickAdmissions, 3); assert.equal(quickRetirements, 3);
+          assert.equal(nativeManager.vaultSessionOwners.size, 0);
+          assert.equal(quickRefs.size, 0);
+
         } finally {
           manager.closeForWindow(owner);
           owner.destroy();

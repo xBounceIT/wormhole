@@ -437,6 +437,20 @@ func TestLogCLIWorksWhenWorkspaceSchemaCannotOpen(t *testing.T) {
 	}
 }
 
+func TestVaultUpdateFailureSkipsLegacyLogs(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "wormhole.db")
+	if err := os.WriteFile(vaultSlotPath(path), []byte("vault marker"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := runBackendCLI([]string{"--database", path, "--operation", "update-download"}, strings.NewReader("{invalid"), &stdout, &stderr); code != 1 {
+		t.Fatal("invalid download accepted")
+	}
+	if _, err := os.Stat(logsDirectoryPath(path)); !os.IsNotExist(err) {
+		t.Fatal("vault update created legacy diagnostics", err)
+	}
+}
+
 func TestCLIEarlyAndStreamingFailuresAreLogged(t *testing.T) {
 	for _, test := range []struct {
 		operation       string

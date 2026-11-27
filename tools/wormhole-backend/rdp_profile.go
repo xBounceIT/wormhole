@@ -4,52 +4,18 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"regexp"
 	"runtime"
 	"strings"
 	"unicode"
-	"unicode/utf8"
+
+	"github.com/xBounceIT/wormhole/tools/wormhole-backend/internal/vault"
 )
 
 const rdpProtocolValue = int64(1)
 
-var rdpCustomSizePattern = regexp.MustCompile(`^(\d{3,5})[xX](\d{3,5})$`)
-var rdpDriveListPattern = regexp.MustCompile(`^[A-Za-z](?:\s*,\s*[A-Za-z])*$`)
-
 // workspaceRdpSettings is safe workspace metadata. Passwords are intentionally absent and are
 // resolved only in the Go runtime profile immediately before a connection starts.
-type workspaceRdpSettings struct {
-	Domain               string `json:"domain"`
-	ScreenSize           string `json:"screenSize"`
-	FullScreen           bool   `json:"fullScreen"`
-	ColorDepth           int    `json:"colorDepth"`
-	UseAllMonitors       bool   `json:"useAllMonitors"`
-	AudioMode            int    `json:"audioMode"`
-	AudioCaptureMode     int    `json:"audioCaptureMode"`
-	KeyboardHookMode     int    `json:"keyboardHookMode"`
-	RedirectClipboard    bool   `json:"redirectClipboard"`
-	RedirectPrinters     bool   `json:"redirectPrinters"`
-	RedirectSmartCards   bool   `json:"redirectSmartCards"`
-	RedirectPorts        bool   `json:"redirectPorts"`
-	RedirectDevices      bool   `json:"redirectDevices"`
-	RedirectDrives       string `json:"redirectDrives"`
-	ConnectionSpeed      int    `json:"connectionSpeed"`
-	DesktopBackground    bool   `json:"desktopBackground"`
-	FontSmoothing        bool   `json:"fontSmoothing"`
-	DesktopComposition   bool   `json:"desktopComposition"`
-	WindowDrag           bool   `json:"windowDrag"`
-	MenuAnimation        bool   `json:"menuAnimation"`
-	VisualStyles         bool   `json:"visualStyles"`
-	BitmapCaching        bool   `json:"bitmapCaching"`
-	AutoReconnect        bool   `json:"autoReconnect"`
-	ServerAuthentication int    `json:"serverAuthentication"`
-	GatewayUsageMethod   int    `json:"gatewayUsageMethod"`
-	GatewayHostname      string `json:"gatewayHostname"`
-	GatewayCredentialID  string `json:"gatewayCredentialId"`
-	GatewayBypassLocal   bool   `json:"gatewayBypassLocal"`
-	GatewayUseSameCreds  bool   `json:"gatewayUseSameCreds"`
-	UseExternalClient    bool   `json:"useExternalClient"`
-}
+type workspaceRdpSettings = vault.RDPSettings
 
 type rdpManualCredential struct {
 	Username string
@@ -141,7 +107,7 @@ func rdpExternalClientRequirement(
 }
 
 func rdpExternalClientRequirementFromDatabase(
-	database *sql.DB,
+	database sqlMetadataReader,
 	request rdpExternalClientRequirementRequest,
 ) (rdpExternalClientRequirementResponse, error) {
 	required := runtime.GOOS == "windows" && isAzureAdRdpIdentity(request.Username, request.Domain)
@@ -170,7 +136,7 @@ func rdpExternalClientRequirementFromDatabase(
 }
 
 func resolveRdpCredentialIdentityMetadata(
-	database *sql.DB,
+	database sqlMetadataReader,
 	credentialID string,
 ) (string, string, bool, error) {
 	var username, domain sql.NullString
@@ -195,103 +161,14 @@ FROM CredentialProfiles WHERE lower(Id) = ? LIMIT 1;`, normalizeID(credentialID)
 	return reference.Username, reference.Domain, true, nil
 }
 
-func defaultWorkspaceRdpSettings() workspaceRdpSettings {
-	return workspaceRdpSettings{
-		ScreenSize: "fitToWindow", ColorDepth: 32, KeyboardHookMode: 2,
-		RedirectClipboard: true, ConnectionSpeed: 7, DesktopBackground: true,
-		FontSmoothing: true, DesktopComposition: true, WindowDrag: true,
-		MenuAnimation: true, VisualStyles: true, BitmapCaching: true,
-		AutoReconnect: true, ServerAuthentication: 2, GatewayBypassLocal: true,
-	}
-}
-
+func defaultWorkspaceRdpSettings() workspaceRdpSettings { return vault.DefaultRDPSettings() }
 func normalizeWorkspaceRdpSettings(value *workspaceRdpSettings) (workspaceRdpSettings, error) {
-	if value == nil {
-		return defaultWorkspaceRdpSettings(), nil
-	}
-	settings := *value
-	settings.Domain = strings.TrimSpace(settings.Domain)
-	settings.ScreenSize = strings.TrimSpace(settings.ScreenSize)
-	settings.GatewayHostname = strings.TrimSpace(settings.GatewayHostname)
-	settings.GatewayCredentialID = normalizeID(settings.GatewayCredentialID)
-	settings.RedirectDrives = normalizeRdpDriveList(settings.RedirectDrives)
-	if settings.ScreenSize == "" {
-		settings.ScreenSize = "fitToWindow"
-	}
-	if !validRdpScreenSize(settings.ScreenSize) || !validRdpText(settings.Domain, 512) ||
-		(settings.GatewayHostname != "" && !validRdpHostText(settings.GatewayHostname)) {
-		return workspaceRdpSettings{}, errors.New("RDP text settings are invalid")
-	}
-	if settings.GatewayUsageMethod == 1 && settings.GatewayHostname == "" {
-		return workspaceRdpSettings{}, errors.New("RDP Gateway hostname is required")
-	}
-	if settings.GatewayCredentialID != "" && !validCredentialID(settings.GatewayCredentialID) {
-		return workspaceRdpSettings{}, errors.New("RDP Gateway credential id is invalid")
-	}
-	if !containsRdpInt([]int{15, 16, 24, 32}, settings.ColorDepth) ||
-		settings.AudioMode < 0 || settings.AudioMode > 2 ||
-		settings.AudioCaptureMode < 0 || settings.AudioCaptureMode > 1 ||
-		settings.KeyboardHookMode < 0 || settings.KeyboardHookMode > 2 ||
-		settings.ConnectionSpeed < 1 || settings.ConnectionSpeed > 7 ||
-		settings.ServerAuthentication < 0 || settings.ServerAuthentication > 2 ||
-		settings.GatewayUsageMethod < 0 || settings.GatewayUsageMethod > 3 {
-		return workspaceRdpSettings{}, errors.New("RDP numeric settings are invalid")
-	}
-	if settings.RedirectDrives != "" && settings.RedirectDrives != "all" &&
-		(!rdpDriveListPattern.MatchString(settings.RedirectDrives) || len(settings.RedirectDrives) > 128) {
-		return workspaceRdpSettings{}, errors.New("RDP drive redirection is invalid")
-	}
-	return settings, nil
+	return vault.NormalizeRDPSettings(value)
 }
-
-func validRdpText(value string, maximum int) bool {
-	return utf8.RuneCountInString(value) <= maximum && !strings.ContainsAny(value, "\r\n\x00")
-}
-
-func validRdpHostText(value string) bool {
-	return validRdpText(value, rdpMaxHostLength) && !strings.ContainsFunc(value, func(character rune) bool {
-		return unicode.IsControl(character) || unicode.IsSpace(character)
-	})
-}
-
-func validRdpScreenSize(value string) bool {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "fittowindow", "full connection content", "full screen":
-		return true
-	}
-	match := rdpCustomSizePattern.FindStringSubmatch(value)
-	if len(match) != 3 {
-		return false
-	}
-	var width, height int
-	_, widthErr := fmt.Sscan(match[1], &width)
-	_, heightErr := fmt.Sscan(match[2], &height)
-	return widthErr == nil && heightErr == nil && width >= 640 && width <= 16384 && height >= 480 && height <= 16384
-}
-
-func normalizeRdpDriveList(value string) string {
-	value = strings.TrimSpace(value)
-	if strings.EqualFold(value, "all") {
-		return "all"
-	}
-	if value == "" {
-		return ""
-	}
-	parts := strings.Split(value, ",")
-	for index := range parts {
-		parts[index] = strings.ToUpper(strings.TrimSpace(parts[index]))
-	}
-	return strings.Join(parts, ",")
-}
-
-func containsRdpInt(values []int, candidate int) bool {
-	for _, value := range values {
-		if value == candidate {
-			return true
-		}
-	}
-	return false
-}
+func validRdpText(value string, maximum int) bool { return vault.ValidRDPText(value, maximum) }
+func validRdpHostText(value string) bool          { return vault.ValidRDPHost(value) }
+func validRdpScreenSize(value string) bool        { return vault.ValidRDPScreenSize(value) }
+func normalizeRdpDriveList(value string) string   { return vault.NormalizeRDPDriveList(value) }
 
 var rdpInheritedColumns = []string{
 	"Id", "ParentId", "Name", "Kind", "Protocol", "Host", "Port", "Username",
@@ -306,7 +183,7 @@ var rdpInheritedColumns = []string{
 	"RdpGatewayUseSameCreds", "RdpUseExternalClient",
 }
 
-func loadRdpNodeChain(database *sql.DB, nodeID string) ([]map[string]any, error) {
+func loadRdpNodeChain(database sqlMetadataReader, nodeID string) ([]map[string]any, error) {
 	columns, err := tableColumns(database, "Nodes")
 	if err != nil {
 		return nil, err
@@ -420,47 +297,7 @@ func workspaceRdpSettingsFromChain(chain []map[string]any) workspaceRdpSettings 
 // preserve every valid value while applying the documented defaults to malformed legacy fields;
 // new writes remain strict through normalizeWorkspaceRdpSettings.
 func normalizePersistedWorkspaceRdpSettings(settings workspaceRdpSettings) workspaceRdpSettings {
-	defaults := defaultWorkspaceRdpSettings()
-	if !validRdpText(settings.Domain, 512) {
-		settings.Domain = defaults.Domain
-	}
-	if !validRdpScreenSize(settings.ScreenSize) {
-		settings.ScreenSize = defaults.ScreenSize
-	}
-	if !containsRdpInt([]int{15, 16, 24, 32}, settings.ColorDepth) {
-		settings.ColorDepth = defaults.ColorDepth
-	}
-	if settings.AudioMode < 0 || settings.AudioMode > 2 {
-		settings.AudioMode = defaults.AudioMode
-	}
-	if settings.AudioCaptureMode < 0 || settings.AudioCaptureMode > 1 {
-		settings.AudioCaptureMode = defaults.AudioCaptureMode
-	}
-	if settings.KeyboardHookMode < 0 || settings.KeyboardHookMode > 2 {
-		settings.KeyboardHookMode = defaults.KeyboardHookMode
-	}
-	if settings.ConnectionSpeed < 1 || settings.ConnectionSpeed > 7 {
-		settings.ConnectionSpeed = defaults.ConnectionSpeed
-	}
-	if settings.ServerAuthentication < 0 || settings.ServerAuthentication > 2 {
-		settings.ServerAuthentication = defaults.ServerAuthentication
-	}
-	if settings.GatewayUsageMethod < 0 || settings.GatewayUsageMethod > 3 ||
-		(settings.GatewayUsageMethod == 1 && strings.TrimSpace(settings.GatewayHostname) == "") {
-		settings.GatewayUsageMethod = defaults.GatewayUsageMethod
-	}
-	if settings.GatewayHostname != "" && !validRdpHostText(settings.GatewayHostname) {
-		settings.GatewayHostname = defaults.GatewayHostname
-		settings.GatewayUsageMethod = defaults.GatewayUsageMethod
-	}
-	if settings.GatewayCredentialID != "" && !validCredentialID(settings.GatewayCredentialID) {
-		settings.GatewayCredentialID = defaults.GatewayCredentialID
-	}
-	if settings.RedirectDrives != "" && settings.RedirectDrives != "all" &&
-		(!rdpDriveListPattern.MatchString(settings.RedirectDrives) || len(settings.RedirectDrives) > 128) {
-		settings.RedirectDrives = defaults.RedirectDrives
-	}
-	return settings
+	return vault.NormalizePersistedRDPSettings(settings)
 }
 
 func workspaceRdpTargetFromChain(chain []map[string]any) (string, int) {
@@ -546,132 +383,12 @@ func (m *vncManager) resolveRdpProfile(
 	forSystemClient bool,
 	credentialIDOverride string,
 ) (rdpProfile, error) {
-	chain, err := loadRdpNodeChain(m.database, nodeID)
-	if err != nil {
-		return rdpProfile{}, err
-	}
-	firstString := func(column string) string {
-		for _, row := range chain {
-			if row[column] != nil {
-				return strings.TrimSpace(workspaceNodeValueString(row[column]))
-			}
-		}
-		return ""
-	}
-	firstInt := func(column string) (int, bool) {
-		for _, row := range chain {
-			if row[column] == nil {
-				continue
-			}
-			value, ok := workspaceNodeValueInt64(row[column])
-			return int(value), ok
-		}
-		return 0, false
-	}
-	host, port, err := resolveRdpTargetFromChain(chain)
-	if err != nil {
-		return rdpProfile{}, err
-	}
-	settings := workspaceRdpSettingsFromChain(chain)
-	username, domain, err := resolveNodeRdpIdentity(m.database, nodeID)
-	if err != nil {
-		return rdpProfile{}, err
-	}
-	profile := rdpProfile{
-		NodeID: nodeID, Name: firstString("Name"), Host: host, Port: port,
-		Username: username, Domain: domain, ScreenSize: settings.ScreenSize,
-		FullScreen: settings.FullScreen, ColorDepth: settings.ColorDepth,
-		UseAllMonitors: settings.UseAllMonitors, AudioMode: settings.AudioMode,
-		AudioCaptureMode: settings.AudioCaptureMode, KeyboardHookMode: settings.KeyboardHookMode,
-		RedirectClipboard: settings.RedirectClipboard, RedirectPrinters: settings.RedirectPrinters,
-		RedirectSmartCards: settings.RedirectSmartCards, RedirectPorts: settings.RedirectPorts,
-		RedirectDevices: settings.RedirectDevices, RedirectDrives: settings.RedirectDrives,
-		ConnectionSpeed: settings.ConnectionSpeed, DesktopBackground: settings.DesktopBackground,
-		FontSmoothing: settings.FontSmoothing, DesktopComposition: settings.DesktopComposition,
-		WindowDrag: settings.WindowDrag, MenuAnimation: settings.MenuAnimation,
-		VisualStyles: settings.VisualStyles, BitmapCaching: settings.BitmapCaching,
-		AutoReconnect: settings.AutoReconnect, ServerAuthentication: rdpIntPointer(settings.ServerAuthentication),
-		GatewayUsageMethod: settings.GatewayUsageMethod, GatewayHostname: settings.GatewayHostname,
-		GatewayBypassLocal: settings.GatewayBypassLocal, GatewayUseSameCreds: settings.GatewayUseSameCreds,
-		UseExternalClient: settings.UseExternalClient && runtime.GOOS == "windows",
-	}
-	if enabled, ok := firstInt("TunnelEnabled"); ok {
-		value := enabled != 0
-		profile.TunnelEnabled = &value
-	}
-	profile.TunnelConfigID = normalizeTunnelID(firstString("TunnelConfigId"))
-	var credentialID string
-	credentialID = normalizeID(credentialIDOverride)
-	credentialOverride := credentialID != ""
-	if manual != nil {
-		profile.Username = strings.TrimSpace(manual.Username)
-		profile.Domain = strings.TrimSpace(manual.Domain)
-		profile.Password = manual.Password
-	} else if credentialID == "" && !profile.UseExternalClient && !forSystemClient {
-		credentialID, err = resolveNodeCredentialID(m.database, nodeID, rdpProtocolValue)
-		if err != nil {
-			return rdpProfile{}, err
-		}
-	}
-	if !profile.UseExternalClient && !forSystemClient {
-		requirement, requirementErr := rdpExternalClientRequirementFromDatabase(m.database, rdpExternalClientRequirementRequest{
-			Username: profile.Username, Domain: profile.Domain, CredentialID: credentialID,
+	return resolveLegacyRDPProfile(m.database, nodeID, manual, forSystemClient, credentialIDOverride,
+		m.resolveRdpCredential,
+		func(id string) (string, bool, error) { return readStoredSecret(m.database, id, m.electronUserDataPath) },
+		func(id, credential string, inline bool, profile rdpProfile, settings workspaceRdpSettings) {
+			observeLegacyRDP(m.database, id, credential, inline, profile, settings)
 		})
-		if requirementErr != nil {
-			return rdpProfile{}, requirementErr
-		}
-		profile.UseExternalClient = requirement.Required
-	}
-	if profile.UseExternalClient || forSystemClient {
-		// The system client has no supported secret-bearing launch contract. Do not resolve or
-		// return credentials that mstsc cannot consume; Windows will use its own credential UI.
-		clearRdpExternalClientCredentials(&profile)
-		return profile, nil
-	}
-
-	if manual == nil {
-		inline, _ := workspaceNodeValueInt64(chain[0]["UseInlinePassword"])
-		if inline != 0 {
-			if secret, found, secretErr := readStoredSecret(m.database, nodeID, m.electronUserDataPath); secretErr != nil {
-				return rdpProfile{}, fmt.Errorf("inline RDP credential is unavailable: %w", secretErr)
-			} else if found {
-				profile.Password = secret
-			}
-		} else if credentialID != "" {
-			credential, credentialErr := m.resolveRdpCredential(credentialID)
-			if credentialErr != nil {
-				return rdpProfile{}, credentialErr
-			}
-			if credentialOverride || profile.Username == "" {
-				profile.Username = credential.Username
-			}
-			if credentialOverride || profile.Domain == "" {
-				profile.Domain = credential.Domain
-			}
-			profile.Password = credential.Password
-		}
-	}
-	if profile.Domain == "" {
-		profile.Username, profile.Domain = splitRdpDomainUsername(profile.Username)
-	}
-
-	if settings.GatewayUsageMethod != 0 {
-		if settings.GatewayUseSameCreds {
-			profile.GatewayUsername = profile.Username
-			profile.GatewayPassword = profile.Password
-		} else if settings.GatewayCredentialID != "" {
-			gateway, gatewayErr := m.resolveRdpCredential(settings.GatewayCredentialID)
-			if gatewayErr != nil {
-				return rdpProfile{}, fmt.Errorf("RDP Gateway credential is unavailable: %w", gatewayErr)
-			}
-			profile.GatewayUsername = gateway.Username
-			if gateway.Domain != "" && !strings.Contains(gateway.Username, "\\") {
-				profile.GatewayUsername = gateway.Domain + "\\" + gateway.Username
-			}
-			profile.GatewayPassword = gateway.Password
-		}
-	}
-	return profile, nil
 }
 
 func rdpIntPointer(value int) *int { return &value }

@@ -46,6 +46,15 @@ func parseWorkspaceNotesJSON(raw json.RawMessage) (*string, error) {
 	if err := validateWorkspaceNotes(notes); err != nil {
 		return nil, err
 	}
+	if !validJSONUnicodeEscapes(raw) {
+		return nil, errors.New("workspace connection notes are invalid")
+	}
+	return notes, nil
+}
+
+// Call only after JSON syntax has been validated. Unlike encoding/json, the
+// protected display must reject unpaired surrogates instead of replacing them.
+func validJSONUnicodeEscapes(raw []byte) bool {
 	for i := 0; i < len(raw); i++ {
 		if raw[i] != '\\' {
 			continue
@@ -58,21 +67,21 @@ func parseWorkspaceNotesJSON(raw json.RawMessage) (*string, error) {
 		unit, _ := strconv.ParseUint(string(raw[i+1:i+5]), 16, 16)
 		i += 4
 		if unit >= 0xDC00 && unit <= 0xDFFF {
-			return nil, errors.New("workspace connection notes are invalid")
+			return false
 		}
 		if unit < 0xD800 || unit > 0xDBFF {
 			continue
 		}
 		if i+6 >= len(raw) || raw[i+1] != '\\' || raw[i+2] != 'u' {
-			return nil, errors.New("workspace connection notes are invalid")
+			return false
 		}
 		low, _ := strconv.ParseUint(string(raw[i+3:i+7]), 16, 16)
 		if low < 0xDC00 || low > 0xDFFF {
-			return nil, errors.New("workspace connection notes are invalid")
+			return false
 		}
 		i += 6
 	}
-	return notes, nil
+	return true
 }
 
 func (request *workspaceNodeWriteRequest) UnmarshalJSON(raw []byte) error {

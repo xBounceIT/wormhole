@@ -95,6 +95,7 @@ type startupUnlockSnapshot struct {
 
 type treeNode struct {
 	ID                   string                `json:"id"`
+	RowVersion           string                `json:"rowVersion,omitempty"`
 	Name                 string                `json:"name"`
 	Kind                 string                `json:"kind"`
 	Protocol             string                `json:"protocol,omitempty"`
@@ -154,6 +155,7 @@ type credentialsForProtocolRequest struct {
 }
 
 type credentialRecord struct {
+	RowVersion          string                  `json:"rowVersion,omitempty"`
 	ID                  string                  `json:"id"`
 	Name                string                  `json:"name"`
 	Protocol            string                  `json:"protocol"`
@@ -185,10 +187,11 @@ type credentialMetadataQueryer interface {
 }
 
 type tunnelRecord struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	Kind     string `json:"kind"`
-	Endpoint string `json:"endpoint,omitempty"`
+	RowVersion string `json:"rowVersion,omitempty"`
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Kind       string `json:"kind"`
+	Endpoint   string `json:"endpoint,omitempty"`
 }
 
 type nodeRow struct {
@@ -238,23 +241,53 @@ func operationNeedsWorkspaceInitialization(operation string) bool {
 }
 
 func main() {
-	os.Exit(runBackendCLI(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
+	var releaseWorkspace func()
+	// os.Exit deliberately skips this defer. Keep the native handle reachable
+	// until process death, including cancelled workers still finishing I/O.
+	defer func() {
+		if releaseWorkspace != nil {
+			releaseWorkspace()
+		}
+	}()
+	os.Exit(runBackendCLIWithOwnership(os.Args[1:], os.Stdin, os.Stdout, os.Stderr, &releaseWorkspace))
 }
 
 func runBackendCLI(args []string, input io.Reader, output io.Writer, errorOutput io.Writer) int {
+	var releaseWorkspace func()
+	defer func() {
+		if releaseWorkspace != nil {
+			releaseWorkspace()
+		}
+	}()
+	return runBackendCLIWithOwnership(args, input, output, errorOutput, &releaseWorkspace)
+}
+
+// The caller retains the lease until its native process exits, or releases it
+// explicitly when embedding a synchronous invocation in tests.
+func runBackendCLIWithOwnership(args []string, input io.Reader, output io.Writer, errorOutput io.Writer, releaseWorkspace *func()) int {
 	flags := flag.NewFlagSet("wormhole-backend", flag.ContinueOnError)
 	flags.SetOutput(errorOutput)
 	operation := flags.String("operation", "workspace", "backend operation: startup, startup-unlock, workspace, workspace-duplicate-node, workspace-delete-node, workspace-delete-nodes, workspace-show-credentials, backup-*, credential-*, tunnel-*, workspace-node-*, workspace-update-node-*, web-target, migrate, mcp-status, ssh, serial, ssh-trust-host-key, logs-info, settings-set-log-retention, settings-set-log-level, open-log-file, open-logs-folder, serve, rdp, extension-*, bitwarden-*, or auth-*")
 	databasePath := flags.String("database", "", "path to the Wormhole SQLite database")
 	electronUserDataPath := flags.String("electron-user-data", "", "path to the Electron user-data directory")
+	migrationSessionData := flags.String("migration-session-data", "", "isolated native Chromium session-data directory for migration")
+	touchIDChannel := flags.Bool("touch-id-channel", false, "inherit the private Touch ID connection on descriptor 3")
+	sealedSSHBitwarden := flags.Bool("sealed-ssh-bitwarden", false, "resolve one sealed SSH Bitwarden ticket in serve")
+	sealedVNCBitwarden := flags.Bool("sealed-vnc-bitwarden", false, "resolve one sealed VNC Bitwarden ticket in serve")
+	sealedRDPBitwarden := flags.Bool("sealed-rdp-bitwarden", false, "resolve one sealed RDP Bitwarden ticket in serve")
+	sealedBitwardenCLIUnlock := flags.Bool("sealed-bitwarden-unlock", false, "unlock the CLI with one sealed password in serve")
 	credentialReader := flags.String("credential-reader", "", "path to the Windows Credential Manager reader")
 	rdpHost := flags.String("rdp-host", "", "path to the Windows ActiveX RDP host")
 	freerdpPath := flags.String("freerdp", "", "path to the FreeRDP client")
+	processID := flags.Uint64("process-id", 0, "owned child PID for native exit proof")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
 		}
 		return 2
+	}
+	if *operation == "process-exit-proof" {
+		return runProcessExitProof(*processID, output, errorOutput)
 	}
 	decodeInput := func(target any) error {
 		return decodeInputReader(input, target)
@@ -270,8 +303,180 @@ func runBackendCLI(args []string, input io.Reader, output io.Writer, errorOutput
 		}
 		return 0
 	}
+	if *operation == "tunnel-capabilities" {
+		if json.NewEncoder(output).Encode(readTunnelCapabilities(context.Background())) != nil {
+			return 1
+		}
+		return 0
+	}
+	if *operation == "vault-session-monitor" {
+		return runVaultSessionMonitor(input, output)
+	}
+	if *operation == "vault-touch-id-broker" {
+		return runVaultTouchIDBroker(errorOutput)
+	}
+	if *operation == "serve" {
+		modes := 0
+		for _, enabled := range []bool{*sealedSSHBitwarden, *sealedVNCBitwarden, *sealedRDPBitwarden, *sealedBitwardenCLIUnlock} {
+			if enabled {
+				modes++
+			}
+		}
+		if modes > 1 {
+			writeErrorTo(errorOutput, "vault_bitwarden_unavailable")
+			return 1
+		}
+		if *sealedSSHBitwarden {
+			return runVaultConnectionBitwardenServe(*databasePath, input, output, errorOutput, "ssh")
+		}
+		if *sealedVNCBitwarden {
+			return runVaultConnectionBitwardenServe(*databasePath, input, output, errorOutput, "vnc")
+		}
+		if *sealedRDPBitwarden {
+			return runVaultConnectionBitwardenServe(*databasePath, input, output, errorOutput, "rdp")
+		}
+		if *sealedBitwardenCLIUnlock {
+			return runVaultBitwardenCLIUnlock(*databasePath, input, output, errorOutput)
+		}
+	}
+	if *operation == "tunnel-sealed" {
+		return runSealedTunnelCLI(input, output, errorOutput)
+	}
+	if *operation == "tunnel-fallback-sealed" {
+		return runSealedTunnelModeCLI(input, output, errorOutput, true)
+	}
+	if *operation == "tunnel-primary-sealed" {
+		return runSealedTunnelActorCLI(input, output, errorOutput, openSealedTunnelConfiguration, true)
+	}
+	if *operation == "vault-vpn-browser" {
+		return runVPNSSOBrowserCLI(input, output, errorOutput)
+	}
+	if *operation == "ssh-host-probe" {
+		return runSSHHostProbeCLI(input, output, errorOutput)
+	}
+	if *operation == "vnc-manual-sealed" {
+		return runSealedVNCModeCLI(input, output, errorOutput, true)
+	}
+	if *operation == "rdp-manual-sealed" {
+		return runSealedRDPModeCLI(input, output, errorOutput, true)
+	}
+	if *operation == "rdp-sealed" {
+		return runSealedRDPCLI(input, output, errorOutput)
+	}
+	if *operation == "serial-sealed" {
+		return runSealedSerialCLI(input, output, errorOutput)
+	}
+	if *operation == "vnc-sealed" {
+		return runSealedVNCCLI(input, output, errorOutput)
+	}
+	if *operation == "ssh-sealed" || *operation == "ssh-manual-account-sealed" || *operation == "ssh-manual-passphrase-sealed" {
+		options := sealedSFTPEditOptions{UserDataPath: *electronUserDataPath}
+		if *databasePath != "" {
+			_, options.SettingsPath = authPaths(*databasePath)
+		}
+		mode := ""
+		if *operation == "ssh-manual-account-sealed" {
+			mode = "account"
+		}
+		if *operation == "ssh-manual-passphrase-sealed" {
+			mode = "passphrase"
+		}
+		return runSealedSSHModeCLI(input, output, errorOutput, mode, options)
+	}
 	if *databasePath == "" {
 		writeErrorTo(errorOutput, "database path is required")
+		return 1
+	}
+	// The vault has its own lifecycle and must never run legacy startup migrations
+	// or initialize logs before an authenticated database open.
+	if *operation == "vault-startup" {
+		return runVaultStartupCLI(*databasePath, output, errorOutput)
+	}
+	if *operation == "vault-migration" {
+		if *migrationSessionData == "" {
+			writeErrorTo(errorOutput, "vault_service_stopped")
+			return 1
+		}
+		return runVaultLaunchCLI(*databasePath, input, output, errorOutput, vaultLaunchOptions{userDataPath: *electronUserDataPath, migrationSessionData: *migrationSessionData, touchIDChannel: *touchIDChannel})
+	}
+	if *operation == "vault" {
+		return runVaultLaunchCLI(*databasePath, input, output, errorOutput, vaultLaunchOptions{userDataPath: *electronUserDataPath, touchIDChannel: *touchIDChannel})
+	}
+	// Release preferences, transport and the installer cache are independent of SQL ownership.
+	switch *operation {
+	case "visual-changelog-claim":
+		var request struct {
+			AppVersion   string `json:"appVersion"`
+			HasChangelog bool   `json:"hasChangelog"`
+		}
+		if err := decodeInputLimit(input, &request, 1024); err != nil {
+			writeErrorTo(errorOutput, err.Error())
+			return 1
+		}
+		claimed, err := claimVisualChangelog(*databasePath, request.AppVersion, request.HasChangelog)
+		if err != nil {
+			writeErrorTo(errorOutput, err.Error())
+			return 1
+		}
+		if json.NewEncoder(output).Encode(map[string]bool{"claimed": claimed}) != nil {
+			return 1
+		}
+		return 0
+	case "update-check-release":
+		var request updateCheckRequest
+		if err := decodeInputLimit(input, &request, 1024); err != nil {
+			writeErrorTo(errorOutput, err.Error())
+			return 1
+		}
+		result, err := checkVaultUpdateRelease(*databasePath, request)
+		if err != nil {
+			writeErrorTo(errorOutput, err.Error())
+			return 1
+		}
+		if err := json.NewEncoder(output).Encode(result); err != nil {
+			return 1
+		}
+		return 0
+	case "update-download":
+		if err := serveUpdateDownload(*databasePath, input, output); err != nil {
+			// Only legacy workspaces own a plaintext diagnostics directory.
+			if release, lockErr := acquireWorkspaceOwnership(*databasePath, false); lockErr == nil {
+				defer release()
+				if requireLegacyWorkspace(*databasePath) == nil {
+					logger := newAppLogger(*databasePath, errorOutput)
+					logger.write("ERR", "update-download failed (cause=%s)", diagnosticCause(err))
+					logger.close()
+				}
+			}
+			writeErrorTo(errorOutput, err.Error())
+			return 1
+		}
+		return 0
+	case "update-install-windows":
+		if err := serveWindowsUpdateHandoff(*databasePath, input, output); err != nil {
+			writeErrorTo(errorOutput, err.Error())
+			return 1
+		}
+		return 0
+	case "update-verify-installer":
+		result, err := verifyCachedUpdate(*databasePath, input)
+		if err != nil {
+			writeErrorTo(errorOutput, err.Error())
+			return 1
+		}
+		if err := json.NewEncoder(output).Encode(result); err != nil {
+			return 1
+		}
+		return 0
+	}
+	lease, ownershipErr := acquireWorkspaceOwnership(*databasePath, false)
+	if ownershipErr != nil {
+		writeErrorTo(errorOutput, ownershipErr.Error())
+		return 1
+	}
+	*releaseWorkspace = lease
+	if err := requireLegacyWorkspace(*databasePath); err != nil {
+		writeErrorTo(errorOutput, err.Error())
 		return 1
 	}
 	fail := func(stage string, err error) int {
@@ -305,14 +510,6 @@ func runBackendCLI(args []string, input io.Reader, output io.Writer, errorOutput
 			return fail("serial service", err)
 		}
 		logInfo("serial service stopped")
-		return 0
-	}
-	if *operation == "update-download" {
-		// The download streams JSON progress lines to stdout and can run for minutes, so it
-		// deliberately bypasses the one-shot result envelope of the other operations.
-		if err := serveUpdateDownload(*databasePath, input, output); err != nil {
-			return fail("update-download", err)
-		}
 		return 0
 	}
 	var result any
@@ -839,17 +1036,6 @@ func runBackendCLI(args []string, input io.Reader, output io.Writer, errorOutput
 		if err == nil {
 			result = map[string]bool{"updated": true}
 		}
-	case "visual-changelog-claim":
-		var request struct {
-			AppVersion   string `json:"appVersion"`
-			HasChangelog bool   `json:"hasChangelog"`
-		}
-		err = decodeInput(&request)
-		if err == nil {
-			var claimed bool
-			claimed, err = claimVisualChangelog(*databasePath, request.AppVersion, request.HasChangelog)
-			result = map[string]bool{"claimed": claimed}
-		}
 	case "extension-read":
 		result, err = readBitwardenExtensionState(*databasePath)
 	case "extension-set-enabled":
@@ -978,6 +1164,9 @@ func writeErrorTo(writer io.Writer, message string) {
 }
 
 func openDatabase(databasePath string, readOnly bool) (*sql.DB, error) {
+	if err := requireLegacyWorkspace(databasePath); err != nil {
+		return nil, err
+	}
 	if readOnly {
 		if _, err := os.Stat(databasePath); err != nil {
 			if errors.Is(err, os.ErrNotExist) {
@@ -1401,7 +1590,7 @@ func addIDRows(ids map[string]struct{}, rows *sql.Rows) error {
 	return nil
 }
 
-func tableExists(database *sql.DB, tableName string) (bool, error) {
+func tableExists(database sqlMetadataReader, tableName string) (bool, error) {
 	var present int
 	err := database.QueryRow("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1;", tableName).Scan(&present)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -1413,7 +1602,7 @@ func tableExists(database *sql.DB, tableName string) (bool, error) {
 	return present == 1, nil
 }
 
-func tableColumns(database *sql.DB, tableName string) (map[string]struct{}, error) {
+func tableColumns(database sqlMetadataReader, tableName string) (map[string]struct{}, error) {
 	rows, err := database.Query("PRAGMA table_info(" + tableName + ");")
 	if err != nil {
 		return nil, fmt.Errorf("cannot inspect the %s schema: %w", tableName, err)

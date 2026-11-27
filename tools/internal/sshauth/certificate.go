@@ -92,6 +92,11 @@ func CertificateSigner(cert *ssh.Certificate, signer ssh.Signer, now time.Time) 
 func ValidateCertificateKey(cert *ssh.Certificate, key []byte, passphrase string) error {
 	password := []byte(passphrase)
 	defer clear(password)
+	return ValidateCertificateKeyBytes(cert, key, password)
+}
+
+// ValidateCertificateKeyBytes borrows a mutable passphrase from native vault callers.
+func ValidateCertificateKeyBytes(cert *ssh.Certificate, key, password []byte) error {
 	signer, err := ParsePrivateKey(key, password)
 	var missing *ssh.PassphraseMissingError
 	if errors.As(err, &missing) {

@@ -165,6 +165,8 @@ function harness(protocol: 'ssh' | 'rdp', extra: Record<string, any> = {}) {
   const owner = { isDestroyed: () => false, webContents: { send: () => {} } };
   const sandbox: Record<string, any> = {
     reportWarning: () => {},
+    vaultBackend: { unlockedWorkspaceId: undefined },
+    vaultRdpIpc: { handles: () => false },
     ipcMain: {
       handle: (_name: string, fn: typeof handler) => {
         handler = fn;
@@ -246,6 +248,8 @@ function harness(protocol: 'ssh' | 'rdp', extra: Record<string, any> = {}) {
           finishEditClose: async () => {},
           terminalDelivery: { remove: () => {} },
           terminalOwners: new Map(),
+          terminalAdmissions: new Map(),
+          hasProtectedReservation: () => false,
           pendingConnections: new Map(),
           activeSessions: new Set(),
           closingConnections: new KeyedSingleFlight<string, void>(),

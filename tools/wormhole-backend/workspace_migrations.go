@@ -345,6 +345,13 @@ WHERE HttpPath IS NOT NULL
 				})
 			},
 		},
+		{
+			id: "0022_effective_credential_snapshot",
+			ensure: func(ctx context.Context, connection *sql.Conn) error {
+				_, err := connection.ExecContext(ctx, resolverSnapshotSchema)
+				return err
+			},
+		},
 	}
 	for _, migration := range migrations {
 		if err := applyWorkspaceMigration(ctx, connection, migration); err != nil {

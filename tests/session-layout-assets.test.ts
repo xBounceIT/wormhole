@@ -165,7 +165,7 @@ test('RDP overlays track owner-window moves in screen coordinates', () => {
   );
   assert.match(mainSource, /placement\.rendererBounds/);
   assert.match(mainSource, /toScreenBounds\(owner, placement\.rendererBounds\)/);
-  assert.match(mainSource, /rdpClient\.resize\(\{ sessionId, bounds \}, ownerWindow\)/);
+  assert.match(mainSource, /rdpClient\?\.resize\(\{ sessionId, bounds \}, ownerWindow\)/);
 });
 
 test('RDP main lifecycle ignores request responses and stale process generations', () => {
@@ -191,10 +191,9 @@ test('renderer reload settles RDP processes and every broker tunnel lease', () =
     'function shutdownNativeResources()',
     'authSession.onUnlocked',
   );
-  assert.match(
-    shutdownSource,
-    /Promise\.allSettled\(\[sshBackend\.dispose\(\), rdpClient\?\.dispose\(\)\]\)/,
-  );
+  const disposals = sourceBetween(shutdownSource, 'Promise.allSettled([', ']);');
+  for (const operation of ['sshBackend.dispose()', 'rdpClient?.dispose()', 'vaultBackend.stop()'])
+    assert.ok(disposals.includes(operation), `${operation} participates in shutdown`);
   assert.match(shutdownSource, /await releaseAllRdpTunnels\(\)/);
   const rdpCleanup = shutdownSource.indexOf('releaseAllRdpTunnels()');
   const backendStop = shutdownSource.indexOf('backend?.stop(true)');
@@ -325,6 +324,7 @@ test('queued RDP reveals honor current visibility, geometry, lifecycle and autho
           handler = nextHandler;
         },
       },
+      vaultRdpIpc: { handles: () => false },
       parseRdpCommandRequest: (request) => request,
       valueAsString: (request, key) => request[key],
       BrowserWindow: { fromWebContents: () => owner },
@@ -631,7 +631,7 @@ test('new credential flow cannot create Bitwarden-backed profiles', () => {
   const credentialsPage = sourceBetween(
     appSource,
     'function CredentialsPage(',
-    'function tunnelKindLabel',
+    'function TunnelRouteField(',
   );
   const providerSelector = sourceBetween(
     credentialsPage,

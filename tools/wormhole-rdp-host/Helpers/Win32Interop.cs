@@ -14,6 +14,41 @@ internal static class Win32Interop
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 
+    [DllImport("user32.dll", ExactSpelling = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetWindowDisplayAffinity(IntPtr hWnd, uint affinity);
+
+    [DllImport("user32.dll", ExactSpelling = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool GetWindowDisplayAffinity(IntPtr hWnd, out uint affinity);
+
+    internal const uint WDA_EXCLUDEFROMCAPTURE = 0x00000011;
+    internal const uint SEM_NOGPFAULTERRORBOX = 0x0002;
+
+    [DllImport("kernel32.dll", ExactSpelling = true)]
+    internal static extern uint GetErrorMode();
+
+    [DllImport("kernel32.dll", ExactSpelling = true)]
+    private static extern uint SetErrorMode(uint mode);
+
+    internal static void RequireCrashReportingSuppression()
+    {
+        _ = SetErrorMode(GetErrorMode() | SEM_NOGPFAULTERRORBOX);
+        if ((GetErrorMode() & SEM_NOGPFAULTERRORBOX) == 0)
+        {
+            throw new InvalidOperationException("native RDP crash reporting suppression is unavailable");
+        }
+    }
+
+    internal static void RequireCaptureExclusion(IntPtr window)
+    {
+        if (!SetWindowDisplayAffinity(window, WDA_EXCLUDEFROMCAPTURE) ||
+            !GetWindowDisplayAffinity(window, out var actual) || actual != WDA_EXCLUDEFROMCAPTURE)
+        {
+            throw new InvalidOperationException("native RDP capture exclusion is unavailable");
+        }
+    }
+
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool SetWindowPos(
