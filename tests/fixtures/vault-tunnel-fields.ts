@@ -203,20 +203,6 @@ export function runVaultTunnelFieldTests() {
   f.clearSubmitted();
   f.dispose();
   assert.ok(changes > 0);
-  // Keep one real provider mounted for the screenshot and layout checks.
-  f = setup(
-    2,
-    {
-      Host: 'vpn.example.com',
-      Port: 443,
-      UseSingleSignOn: false,
-      UseExternalBrowser: true,
-      SamlRedirectPort: 8020,
-    },
-    ['Password'],
-  );
-  assert.ok(card.scrollWidth <= card.clientWidth);
-  return f.dispose;
   const ipsec = setup(
     9,
     { Host: 'vpn.test', UserAuth: 2, AuthMethod: 0 },
@@ -245,9 +231,23 @@ export function runVaultTunnelFieldTests() {
   ipsec.set('Phase2ByteLifetime', true);
   assert.equal(ipsec.row('Phase2LifetimeKb').hidden, false);
   assert.equal(ipsec.input('FallbackTunnelId').querySelectorAll('option').length, 2);
-  ipsec.fields.dispose();
+  ipsec.dispose();
   const legacyIpsec = setup(9, {}, ['PreSharedKey']);
   assert.equal(legacyIpsec.input('UserAuth').value, '3');
   assert.equal((legacyIpsec.input('AutoProposals') as HTMLInputElement).checked, true);
-  legacyIpsec.fields.dispose();
+  legacyIpsec.dispose();
+  // Keep one real provider mounted for the screenshot and layout checks.
+  f = setup(
+    2,
+    {
+      Host: 'vpn.example.com',
+      Port: 443,
+      UseSingleSignOn: false,
+      UseExternalBrowser: true,
+      SamlRedirectPort: 8020,
+    },
+    ['Password'],
+  );
+  assert.ok(card.scrollWidth <= card.clientWidth);
+  return f.dispose;
 }

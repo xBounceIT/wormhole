@@ -88,7 +88,7 @@ test('stable VNC identity preserves the single App-owned disconnect lifecycle', 
   assert.match(vncSource, /if \(!request\.authLifetime\.isAuthorized\) return/);
   assert.match(
     vncSource,
-    /const promptAllowed =\s*unlockRequired && bitwardenUnlockRequestRef\.current\.authLifetime\.isAuthorized/,
+    /const promptAllowed =\s*unlockRequired &&\s*bitwardenUnlockRequestRef\.current\.authLifetime\.isAuthorized\s*&&\s*!bitwardenUnlockRequestRef\.current\.authLifetime\.vault/,
   );
   assert.match(vncSource, /isAuthorized && bitwardenUnlockRequired && bitwardenUnlockPending/);
   assert.match(vncSource, /const message = formatBitwardenAuthenticationError\(error, 'unlock'\)/);

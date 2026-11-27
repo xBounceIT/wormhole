@@ -327,9 +327,9 @@ export function VncSurface({
       pendingPointerMove.current = null;
       pressedKeys.current.clear();
       buttons.current = 0;
-      let command: WormholeVncCommand;
+      let request: ReturnType<typeof sendCommand>;
       try {
-        command = vncConnectRequest(
+        const command = vncConnectRequest(
           target,
           vault,
           providedPassword,
@@ -338,21 +338,23 @@ export function VncSurface({
               manualPasswordMode.current.sessionId === target.id &&
               manualPasswordMode.current.enabled),
         );
+        if (vault && command.action === 'vnc.connect') {
+          manualPasswordMode.current = {
+            sessionId: target.id,
+            enabled: command.manualPassword === true,
+          };
+          onStatusChangeRef.current?.('connecting', command.manualPassword === true);
+        } else {
+          onStatusChangeRef.current?.('connecting');
+        }
+        request = sendCommand(command);
       } catch (error) {
-        updateStatus('failed');
-        setMessage(error instanceof Error ? error.message : 'The VNC request is invalid.');
-        return;
+        request = Promise.resolve({
+          ok: false,
+          error: error instanceof Error ? error.message : 'The VNC request is invalid.',
+        });
       }
-      if (vault && command.action === 'vnc.connect') {
-        manualPasswordMode.current = {
-          sessionId: target.id,
-          enabled: command.manualPassword === true,
-        };
-        onStatusChangeRef.current?.('connecting', command.manualPassword === true);
-      } else {
-        onStatusChangeRef.current?.('connecting');
-      }
-      const response = await sendCommand(command);
+      const response = await request;
       if (connectAttempt.current !== attempt || response.ok) return;
       const message = response.error ?? 'The VNC request could not be completed.';
       updateStatus('failed');
