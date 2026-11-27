@@ -20,6 +20,51 @@ const fields = Object.fromEntries(
   Object.keys(sharedEditFields).map((key) => [key, key === 'name' ? 'Office' : null]),
 );
 
+test('slot choices bind each page to a writable item, snapshot and exclusive cursor', () => {
+  const snapshot = { ...read, workspaceId, epoch: '1', changeSeq: '0' };
+  const browse = { ...snapshot, slotAfter: '' };
+  const slot = { id: workspaceId, name: 'Office access', protocol: 'rdp', allowSelfService: true };
+  const slotPage = { kind: 'slots', entries: [slot], next: { id: slot.id } };
+  const reply = { status: 'slot-choices', ...snapshot, slotPage };
+  for (const slotAfter of ['', nodeId]) {
+    const request = { ...snapshot, slotAfter };
+    assert.deepEqual(parseSharedNodeEditRequest(request), request);
+    assert.deepEqual(parseSharedNodeEditReply(reply, request), reply);
+  }
+  const empty = { ...reply, slotPage: { kind: 'slots', entries: [] } };
+  assert.deepEqual(parseSharedNodeEditReply(empty, { ...browse, slotAfter: slot.id }), empty);
+  assert.equal(parseSharedNodeEditReply(reply, { ...browse, slotAfter: slot.id }), undefined);
+  for (const value of [
+    { ...write, slotAfter: '' },
+    { ...read, slotAfter: '' },
+    { ...browse, slotAfter: null },
+    { ...browse, slotAfter: { id: nodeId } },
+    { ...browse, slotAfter: 'bad' },
+    { ...browse, authentication: {} },
+  ])
+    assert.equal(parseSharedNodeEditRequest(value), undefined);
+  for (const value of [
+    { ...reply, nodeId: workspaceId },
+    { ...reply, revision: '7' },
+    { ...reply, workspaceId: nodeId },
+    { ...reply, epoch: '2' },
+    { ...reply, changeSeq: '1' },
+    { ...reply, fields },
+    { status: 'authentication-required' },
+    { ...reply, status: 'ready' },
+    ...[
+      { ...slotPage, kind: 'accounts' },
+      { ...slotPage, next: { id: nodeId } },
+      { ...slotPage, entries: [slot, slot] },
+      { ...slotPage, entries: Array(26).fill(slot) },
+      { ...slotPage, entries: [{ ...slot, credentialId: nodeId }] },
+    ].map((slotPage) => ({ ...reply, slotPage })),
+  ])
+    assert.equal(parseSharedNodeEditReply(value, browse), undefined);
+  for (const request of [read, write])
+    assert.equal(parseSharedNodeEditReply(reply, request), undefined);
+});
+
 test('catalog edits carry only typed public changes and a complete snapshot', () => {
   assert.deepEqual(parseSharedNodeEditRequest(read), read);
   assert.deepEqual(parseSharedNodeEditRequest(write), write);

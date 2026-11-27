@@ -27,6 +27,10 @@ type sharedNodeMoveSession interface {
 	CommitNodeMove(context.Context, sharedpg.TrustState, *sharedpg.NodeEdit, *uuid.UUID, *vault.UserKeys) (*sharedpg.NodeMoveReceipt, error)
 }
 
+type sharedNodeSlotSession interface {
+	NodeSlotChoices(context.Context, sharedpg.TrustState, *sharedpg.NodeEdit, uuid.UUID) (sharedpg.TrustState, *sharedpg.AdminSlotPage, error)
+}
+
 type sharedMoveDestination struct {
 	id       *uuid.UUID
 	revision uint64
@@ -68,15 +72,16 @@ func sharedNodeEditFields(n *vaultstore.NodeMetadata) map[string]any {
 }
 
 type sharedNodeEditReply struct {
-	Status             string         `json:"status"`
-	NodeID             string         `json:"nodeId,omitempty"`
-	Revision           string         `json:"revision,omitempty"`
-	Workspace          string         `json:"workspaceId,omitempty"`
-	Epoch              string         `json:"epoch,omitempty"`
-	Sequence           string         `json:"changeSeq,omitempty"`
-	Fields             map[string]any `json:"fields,omitempty"`
-	CanMove            bool           `json:"canMove,omitempty"`
-	UsesInlinePassword bool           `json:"usesInlinePassword,omitempty"`
+	Status             string                  `json:"status"`
+	NodeID             string                  `json:"nodeId,omitempty"`
+	Revision           string                  `json:"revision,omitempty"`
+	Workspace          string                  `json:"workspaceId,omitempty"`
+	Epoch              string                  `json:"epoch,omitempty"`
+	Sequence           string                  `json:"changeSeq,omitempty"`
+	Fields             map[string]any          `json:"fields,omitempty"`
+	CanMove            bool                    `json:"canMove,omitempty"`
+	UsesInlinePassword bool                    `json:"usesInlinePassword,omitempty"`
+	SlotPage           *sharedpg.AdminSlotPage `json:"slotPage,omitempty"`
 }
 
 func (h *vaultFoundationHandler) sharedNodeEdit(ctx context.Context, raw []byte) (json.RawMessage, error) {
@@ -86,18 +91,23 @@ func (h *vaultFoundationHandler) sharedNodeEdit(ctx context.Context, raw []byte)
 		return nil, vaultwire.ErrProtocol
 	}
 	var id, version string
-	var workspace, epoch, sequence *string
+	var workspace, epoch, sequence, slotAfter *string
 	var patch json.RawMessage
-	if decodeVaultObject(action, map[string]any{"nodeId": &id, "revision": &version, "changes": &patch, "workspaceId": &workspace, "epoch": &epoch, "changeSeq": &sequence}, "nodeId", "revision") != nil || !vaultCredentialID(id) ||
-		(patch == nil && (encoded != nil || workspace != nil || epoch != nil || sequence != nil)) ||
-		(patch != nil && (workspace == nil || !vaultCredentialID(*workspace) || epoch == nil || sequence == nil)) {
+	if decodeVaultObject(action, map[string]any{"nodeId": &id, "revision": &version, "changes": &patch, "workspaceId": &workspace,
+		"epoch": &epoch, "changeSeq": &sequence, "slotAfter": &slotAfter}, "nodeId", "revision") != nil || !vaultCredentialID(id) ||
+		(slotAfter != nil && (patch != nil || (*slotAfter != "" && !vaultCredentialID(*slotAfter)))) || (encoded != nil && patch == nil) {
+		return nil, vaultwire.ErrProtocol
+	}
+	scoped := patch != nil || slotAfter != nil
+	if (scoped && (workspace == nil || !vaultCredentialID(*workspace) || epoch == nil || sequence == nil)) ||
+		(!scoped && (workspace != nil || epoch != nil || sequence != nil)) {
 		return nil, vaultwire.ErrProtocol
 	}
 	rev, err := vaultCredentialRevision(version, false)
 	if err != nil || (patch != nil && rev == math.MaxInt64) {
 		return nil, vaultwire.ErrProtocol
 	}
-	if patch != nil {
+	if scoped {
 		if _, err := vaultCredentialRevision(*epoch, false); err != nil {
 			return nil, err
 		}
@@ -149,7 +159,7 @@ func (h *vaultFoundationHandler) sharedNodeEdit(ctx context.Context, raw []byte)
 		if runtime.Security.Effective != vault.Default && runtime.Security.Effective != vault.Standard {
 			return nil
 		}
-		if patch != nil && *workspace != pending.WorkspaceID.String() {
+		if scoped && *workspace != pending.WorkspaceID.String() {
 			return nil
 		}
 		next, item, err := session.ReadNodeEdit(ctx, *pending, node, rev)
@@ -167,15 +177,33 @@ func (h *vaultFoundationHandler) sharedNodeEdit(ctx context.Context, raw []byte)
 		inline := desired.Kind == 1 && desired.UseInlinePassword != nil && *desired.UseInlinePassword
 		readEpoch, readSequence := item.Snapshot()
 		currentEpoch, currentSequence := strconv.FormatUint(readEpoch, 10), strconv.FormatUint(readSequence, 10)
+		if scoped && (*epoch != currentEpoch || *sequence != currentSequence) {
+			return nil
+		}
+		if slotAfter != nil {
+			picker, ok := c.session.(sharedNodeSlotSession)
+			if !ok || inline {
+				return nil
+			}
+			after := uuid.Nil
+			if *slotAfter != "" {
+				after = uuid.MustParse(*slotAfter)
+			}
+			next, page, err := picker.NodeSlotChoices(ctx, *pending, item, after)
+			if next.Revision != 0 {
+				*pending = next
+			}
+			if err == nil && page != nil {
+				reply = sharedNodeEditReply{Status: "slot-choices", NodeID: id, Revision: version, Workspace: pending.WorkspaceID.String(), Epoch: currentEpoch, Sequence: currentSequence, SlotPage: page}
+			}
+			return err
+		}
 		if patch == nil {
 			reply = sharedNodeEditReply{Status: "ready", NodeID: id, Revision: version, Workspace: pending.WorkspaceID.String(), Epoch: currentEpoch, Sequence: currentSequence, Fields: fields, UsesInlinePassword: inline}
 			if mover != nil {
 				reply.CanMove, err = mover.NodeMovingSupported(ctx)
 			}
 			return err
-		}
-		if *epoch != currentEpoch || *sequence != currentSequence {
-			return nil
 		}
 		if destination != nil {
 			if mover == nil {

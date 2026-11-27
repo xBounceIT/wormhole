@@ -4,7 +4,7 @@ LANGUAGE plpgsql SET search_path=pg_catalog,pg_temp AS $bindings$
 DECLARE leaf record; member record; path text; paths text[]; chain jsonb; base jsonb; plan jsonb;
     gateway_settings jsonb; slot jsonb; unassigned_slot uuid; affected integer:=0; visited integer:=0; node_mask integer;
 BEGIN
-    FOR leaf IN
+{{DIRECT_SELECTION_BINDING}}    FOR leaf IN
         WITH RECURSIVE subtree(id,kind,boundary_id) AS (
             SELECT n.id,n.kind,n.boundary_id FROM wormhole_data.nodes n WHERE n.id=p_root
             UNION

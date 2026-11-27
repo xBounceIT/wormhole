@@ -507,9 +507,57 @@ test('shared input and startup screens consume factors and keep admission separa
             saved.changes.host===null&&saved.changes.port===444&&saved.changes.protocol===4&&saved.changes.tunnelEnabled===true&&Object.keys(saved.changes).length===4,'wrong shared edit');
           if(mode==='late-save'){dialog.dispatchEvent(new Event('cancel',{cancelable:true}));check(dialog.open,'closed while saving');remove();finishSave({status:'saved'});await tick();check(!card.childElementCount,'late save reopened catalog');}
           else if(mode==='saved')check(!dialog.isConnected,'saved dialog remained open');
-          else {check(dialog.textContent.includes('Refresh')||dialog.textContent.includes('refresh'),'missing save failure');dialog.querySelector('[type=button]').click();}
+          else {check(dialog.textContent.includes('Refresh')||dialog.textContent.includes('refresh'),'missing save failure');
+            [...dialog.querySelectorAll('button')].find(button=>button.textContent==='Close').click();check(!dialog.isConnected,'failed edit could not be dismissed');}
         }
         remove();card.remove();
+      }
+      for(const mode of ['choose','empty','denied','error','disposed','late-error']) {
+        const card=document.createElement('section');document.body.append(card);
+        const row={id:vaultId,name:'Office',kind:1,editRevision:'4',parentId:null};
+        const values=Object.fromEntries(Object.keys(sharedEditFields).map(key=>[key,null]));
+        Object.assign(values,{name:row.name,credentialMode:2,credentialId:vaultId});
+        const snapshot={nodeId:row.id,revision:'4',workspaceId:slotId,epoch:'2',changeSeq:'5'};
+        const pages=[],writes=[];let releasePage;
+        const edit=async request=>{
+          if(request.changes){writes.push(request);return {status:'saved'};}
+          if(!('slotAfter' in request))return {...snapshot,status:'ready',fields:values};
+          pages.push(request);
+          if(mode==='disposed'||mode==='late-error')await new Promise(resolve=>{releasePage=resolve;});
+          if(mode==='error'||mode==='late-error')throw Error('internal diagnostic');
+          if(mode==='denied')return {status:'unavailable'};
+          const second=!!request.slotAfter;
+          const entry={id:second?slotId:vaultId,name:second?'Office access':'<b>Remote</b>',protocol:second?'rdp':'ssh',allowSelfService:false};
+          return {...snapshot,status:'slot-choices',slotPage:{kind:'slots',entries:mode==='empty'?[]:[entry],
+            ...(second||mode==='empty'?{}:{next:{id:entry.id}})}};
+        };
+        const dispose=openSharedNodeEditor(card,row,edit,()=>{});await tick();
+        const button=text=>[...card.querySelectorAll('button')].find(b=>b.textContent===text);
+        const browse=button('Choose slot by name…'),save=button('Save changes');
+        browse.click();browse.onclick();await tick();
+        check(pages.length===1&&pages[0].slotAfter===''&&Object.entries(snapshot).every(([k,v])=>pages[0][k]===v),'wrong initial slot scope');
+        const list=card.querySelector('[aria-label="Available credential slots"]');
+        if(releasePage){
+          dispose();releasePage();await tick();check(!card.childElementCount&&list.options.length===0,'late slot page changed the retired editor');
+        }else if(mode==='denied'||mode==='error'){
+          check(!browse.hidden&&!browse.disabled&&list.hidden&&card.textContent.includes('enter the slot ID')&&!card.textContent.includes('internal diagnostic'),'missing manual slot fallback');
+          browse.click();await tick();check(pages.length===2&&save.disabled,'slot retry changed form');
+        }else if(mode==='empty'){
+          check(list.hidden&&save.disabled&&card.textContent.includes('No visible credential slots'),'empty slot page enabled save');
+        }else{
+          const prev=button('Previous slots'),next=button('Next slots');
+          check(document.activeElement===list&&prev.hidden&&!next.hidden&&save.disabled&&!list.querySelector('b')&&list.options[1].text==='<b>Remote</b> · SSH','incorrect signed slot presentation');
+          next.click();await tick();check(!prev.hidden&&next.hidden&&list.options[1].text==='Office access · RDP','missing second slot page');
+          prev.click();await tick();next.click();await tick();
+          check(pages.map(p=>p.slotAfter).join(',')===['',vaultId,'',vaultId].join(','),'incorrect slot pagination');
+          const name=card.querySelector('fieldset input');name.value='Edited';name.dispatchEvent(new Event('input',{bubbles:true}));
+          list.value=slotId;list.dispatchEvent(new Event('change',{bubbles:true}));
+          check(!save.disabled&&!writes.length,'selecting a slot triggered a write');save.click();await tick();
+          const change=writes[0]?.changes;
+          check(writes.length===1&&change.name==='Edited'&&change.credentialMode===3&&change.credentialSlotId===slotId&&change.credentialId===null&&Object.keys(change).length===4,'wrong slot edit submitted');
+        }
+        if(mode!=='choose')check(!writes.length,'slot browsing wrote to catalog');
+        dispose();card.remove();
       }
       for(const mode of ['folder','root','stale','denied','disposed','older']) {
         const card=document.createElement('section');document.body.append(card);
@@ -648,7 +696,7 @@ test('shared input and startup screens consume factors and keep admission separa
     const harness = join(directory, 'main.cjs');
     writeFileSync(
       harness,
-      `const {app,BrowserWindow}=require('electron');const assert=require('node:assert/strict');app.whenReady().then(async()=>{const window=new BrowserWindow({show:false,webPreferences:{sandbox:true,contextIsolation:true,nodeIntegration:false}});try{await window.loadURL('about:blank');const debug=window.webContents.debugger;debug.attach('1.3');await debug.sendCommand('Profiler.enable');await debug.sendCommand('Profiler.startPreciseCoverage',{callCount:true,detailed:true});const outcome=await window.webContents.executeJavaScript(${JSON.stringify(renderer)});assert.equal(outcome?.testFailure,undefined);const report=await debug.sendCommand('Profiler.takePreciseCoverage');const script=report.result.find(s=>s.url==='wormhole-shared-screens.js');assert.ok(script);for(const name of ['mountSharedAuthenticationScreen','mountSharedInitialJoinScreen','mountSharedStartup','mountSharedCatalogScreen','openSharedNodeEditor','mountMovePicker','editControl','mountSharedCertificateRenewal']){const fn=script.functions.find(f=>f.functionName===name);assert.ok(fn);const extent=fn.ranges[0];const ranges=script.functions.filter(f=>f.ranges[0].startOffset>=extent.startOffset&&f.ranges[0].endOffset<=extent.endOffset).flatMap(f=>f.ranges);const coverage=100*ranges.filter(r=>r.count>0).length/ranges.length;console.log(name+': '+coverage.toFixed(2)+'% V8 blocks');assert.ok(coverage>=${coverageThreshold});}}finally{window.destroy();}app.quit();}).catch(error=>{console.error(error);app.exit(1);});`,
+      `const {app,BrowserWindow}=require('electron');const assert=require('node:assert/strict');app.whenReady().then(async()=>{const window=new BrowserWindow({show:false,webPreferences:{sandbox:true,contextIsolation:true,nodeIntegration:false}});try{await window.loadURL('about:blank');const debug=window.webContents.debugger;debug.attach('1.3');await debug.sendCommand('Profiler.enable');await debug.sendCommand('Profiler.startPreciseCoverage',{callCount:true,detailed:true});const outcome=await window.webContents.executeJavaScript(${JSON.stringify(renderer)});assert.equal(outcome?.testFailure,undefined);const report=await debug.sendCommand('Profiler.takePreciseCoverage');const script=report.result.find(s=>s.url==='wormhole-shared-screens.js');assert.ok(script);for(const name of ['mountSharedAuthenticationScreen','mountSharedInitialJoinScreen','mountSharedStartup','mountSharedCatalogScreen','openSharedNodeEditor','mountSlotPicker','mountMovePicker','editControl','mountSharedCertificateRenewal']){const fn=script.functions.find(f=>f.functionName===name);assert.ok(fn);const extent=fn.ranges[0];const ranges=script.functions.filter(f=>f.ranges[0].startOffset>=extent.startOffset&&f.ranges[0].endOffset<=extent.endOffset).flatMap(f=>f.ranges);const coverage=100*ranges.filter(r=>r.count>0).length/ranges.length;console.log(name+': '+coverage.toFixed(2)+'% V8 blocks');assert.ok(coverage>=${coverageThreshold});}}finally{window.destroy();}app.quit();}).catch(error=>{console.error(error);app.exit(1);});`,
     );
     const { ELECTRON_RUN_AS_NODE: _node, ...env } = process.env;
     const electron = require('electron') as string,

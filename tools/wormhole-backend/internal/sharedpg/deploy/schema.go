@@ -10,7 +10,15 @@ import (
 //go:embed migrations/0093_admin_credential_slots.sql
 var adminCredentialSlotsTemplate string
 
-var adminCredentialSlotsMigration = strings.Replace(adminCredentialSlotsTemplate, "{{WEB_SUSPENSION_RESTORE_DEFINITION}}", renderWebSuspensionRestore("93"), 1)
+//go:embed fragments/visible_slot_page.sql
+var visibleSlotPage string
+
+func renderSlotPageMigration(template, version string) string {
+	return strings.NewReplacer("{{VISIBLE_SLOT_PAGE}}", strings.TrimRight(visibleSlotPage, "\r\n"),
+		"{{WEB_SUSPENSION_RESTORE_DEFINITION}}", renderWebSuspensionRestore(version)).Replace(template)
+}
+
+var adminCredentialSlotsMigration = renderSlotPageMigration(adminCredentialSlotsTemplate, "93")
 
 //go:embed migrations/0094_account_group_roles.sql
 var accountGroupRolesTemplate string
@@ -34,6 +42,11 @@ var slotBindingMigration = strings.NewReplacer(
 	"{{NODE_EDIT_BINDINGS}}", nodeEditBindings(97),
 	"{{WEB_SUSPENSION_RESTORE_DEFINITION}}", renderWebSuspensionRestore("97"),
 ).Replace(slotBindingTemplate)
+
+//go:embed migrations/0098_node_slot_choices.sql
+var nodeSlotChoicesTemplate string
+
+var nodeSlotChoicesMigration = strings.Replace(renderSlotPageMigration(nodeSlotChoicesTemplate, "98"), "{{NODE_EDIT_BINDINGS}}", nodeEditBindings(98), 1)
 
 // This order matches the individual DBA upgrade scripts. A fresh deployment
 // uses the same migrations in a single transaction.
@@ -63,7 +76,7 @@ var schemaMigrations = [...]string{
 	accountReenrollmentRedemptionMigration, webSessionViewsMigration, webConnectionPlanMigration, webTunnelReleaseMigration, webSuspensionInventoryMigration,
 	auditMaintenanceMigration, unencryptedClientsMigration, sshHostPinMigration, updateNodeMigration, moveNodeMigration, suspensionRotationReceiptsMigration,
 	rowSecurityMigration, deviceConnectionLimitMigration, adminCredentialSlotsMigration, accountGroupRolesMigration, createCredentialSlotMigration, publicAPILimitsMigration,
-	slotBindingMigration,
+	slotBindingMigration, nodeSlotChoicesMigration,
 }
 
 const SchemaVersion = len(schemaMigrations)

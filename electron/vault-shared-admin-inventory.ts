@@ -39,8 +39,13 @@ type Entry = {
   source?: string;
 };
 type Page = { kind: AdminInventoryKind; entries: Entry[]; next?: Cursor };
-export type AdminInventoryReply =
-  | { status: 'ready'; page: Page }
+export type CredentialSlotPage = {
+  kind: 'slots';
+  entries: CredentialSlot[];
+  next?: { id: string };
+};
+export type AdminInventoryReply<T extends Page = Page> =
+  | { status: 'ready'; page: T }
   | { status: 'unavailable' | 'unsupported' };
 
 const date = (value: unknown): value is string =>
@@ -164,6 +169,14 @@ function validEntry(value: unknown, kind: AdminInventoryKind): value is Entry {
   }
 }
 
+export function parseAdminInventoryReply(
+  value: unknown,
+  request: AdminInventoryRequest & { kind: 'slots' },
+): AdminInventoryReply<CredentialSlotPage> | undefined;
+export function parseAdminInventoryReply(
+  value: unknown,
+  request: AdminInventoryRequest,
+): AdminInventoryReply | undefined;
 export function parseAdminInventoryReply(
   value: unknown,
   request: AdminInventoryRequest,

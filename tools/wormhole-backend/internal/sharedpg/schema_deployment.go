@@ -45,11 +45,11 @@ var deploymentCatalogSQL string
 // Pinned from the fresh superuser and delegated installations in the real
 // schema deployment tests. These fingerprints contain no workspace identities.
 const (
-	catalogSchemaVersion       = 97
-	standardDeploymentCatalog  = "3iv6XuPi4VfcJHmFdPnGIHamZf1nzj4Z4MarLmX6fr4="
-	delegatedDeploymentCatalog = "iIlKMC8XIzb8kpV8OMTq/mLiTvxdxrthqMVfjn7goPI="
-	standardRLSCatalog         = "+MARTypsamTvDHQ9FnPaukYkjq0W2kSbxNTsfVtdyvU="
-	delegatedRLSCatalog        = "Lx6S1FwKSem7yHZWmhwWTb/gaDU5aMZFlXsUDHK5hW4="
+	catalogSchemaVersion       = 98
+	standardDeploymentCatalog  = "CRUOV0rCddH1ZCQFKPvkSBraDe9lK+JhjlzDn+II42c="
+	delegatedDeploymentCatalog = "dkQ6P1XuyEN3QSqEkZtlkM5hYjzknPY7OARceGvTFIs="
+	standardRLSCatalog         = "BXOR0mV7ZH3emT/C1InbV798pUNS7iDnJal7HNiC9wQ="
+	delegatedRLSCatalog        = "Al3R0cHyn19HFTATL8xZ8okECn6Mq8DEz0treJDVqJs="
 )
 
 // SchemaDeployment is a DBA observation for Check deployment, not proof of

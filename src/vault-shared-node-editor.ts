@@ -12,6 +12,76 @@ import {
 type EditPort = NonNullable<Window['wormhole']>['editSharedNode'];
 type FolderPagePort = NonNullable<Window['wormhole']>['loadSharedCatalogPage'];
 
+function mountSlotPicker(
+  row: HTMLElement,
+  page: (after: string) => ReturnType<EditPort>,
+  choose: (id: string) => void,
+  current: () => boolean,
+) {
+  const browse = document.createElement('button');
+  browse.type = 'button';
+  browse.textContent = 'Choose slot by name…';
+  const list = document.createElement('select');
+  list.setAttribute('aria-label', 'Available credential slots');
+  const previous = document.createElement('button'),
+    next = document.createElement('button');
+  previous.type = next.type = 'button';
+  previous.textContent = 'Previous slots';
+  next.textContent = 'Next slots';
+  const notice = document.createElement('span');
+  notice.setAttribute('role', 'status');
+  list.hidden = previous.hidden = next.hidden = true;
+  row.append(browse, list, previous, next, notice);
+  let cursors = [''],
+    following: string | undefined;
+  async function load(history: string[]) {
+    if (!current() || browse.disabled) return;
+    browse.disabled = list.disabled = previous.disabled = next.disabled = true;
+    list.replaceChildren();
+    notice.textContent = 'Loading credential slots…';
+    try {
+      const result = await page(history.at(-1)!);
+      if (!current()) return;
+      if (result.status !== 'slot-choices') throw Error('unavailable');
+      const { entries, next: cursor } = result.slotPage;
+      cursors = history;
+      following = cursor?.id;
+      list.replaceChildren(new Option('Select a credential slot', ''));
+      for (const entry of entries) {
+        const option = new Option(entry.name + ' · ' + entry.protocol.toUpperCase(), entry.id);
+        option.title = entry.id;
+        list.add(option);
+      }
+      browse.hidden = true;
+      list.hidden = !entries.length;
+      previous.hidden = history.length === 1;
+      next.hidden = !following;
+      notice.textContent = entries.length ? '' : 'No visible credential slots on this page.';
+    } catch {
+      if (!current()) return;
+      list.hidden = previous.hidden = next.hidden = true;
+      browse.hidden = false;
+      notice.textContent =
+        'Could not load slots for this revision. Refresh the catalog or enter the slot ID.';
+    } finally {
+      if (current()) {
+        browse.disabled = list.disabled = previous.disabled = next.disabled = false;
+        if (!list.hidden) list.focus();
+      }
+    }
+  }
+  browse.onclick = () => void load(['']);
+  previous.onclick = () => {
+    if (cursors.length > 1) void load(cursors.slice(0, -1));
+  };
+  next.onclick = () => {
+    if (following) void load([...cursors, following]);
+  };
+  list.onchange = () => {
+    if (current() && !list.disabled && list.value) choose(list.value);
+  };
+}
+
 function mountMovePicker(
   fields: HTMLFieldSetElement,
   node: SharedCatalogNode,
@@ -100,6 +170,9 @@ function editControl(key: SharedEditKey, initial: SharedEditValue) {
     label.append(select);
     return {
       row,
+      set: (value: string | null) => {
+        select.value = value ?? '';
+      },
       read: () =>
         select.value === ''
           ? null
@@ -140,6 +213,10 @@ function editControl(key: SharedEditKey, initial: SharedEditValue) {
   row.append(inheritLabel);
   return {
     row,
+    set: (value: string | null) => {
+      inherit.checked = input.disabled = value === null;
+      input.value = value ?? '';
+    },
     read: () =>
       inherit.checked ? null : field.type === 'port' ? input.valueAsNumber : input.value,
   };
@@ -207,11 +284,11 @@ export function openSharedNodeEditor(
       );
     }
     const controls = keys.map((key) => {
-      const { row, read } = editControl(key, ready.fields[key]);
+      const { row, read, set } = editControl(key, ready.fields[key]);
       fields.append(row);
       // HTML controls normalize some stored strings when displaying them.
       // Compare with the initial control value to preserve untouched metadata.
-      return { key, read, initial: read() };
+      return { key, row, read, set, initial: read() };
     });
     let moving = false,
       destination: SharedMoveParent | undefined;
@@ -261,6 +338,20 @@ export function openSharedNodeEditor(
       save.disabled = writing || !parseSharedNodeEditRequest({ ...snapshot, changes: changes() });
       move.disabled = writing || (!moving && Object.keys(changes()).length > 0);
     };
+    const slot = controls.find((c) => c.key === 'credentialSlotId');
+    if (slot) {
+      mountSlotPicker(
+        slot.row,
+        (slotAfter) => edit({ ...snapshot, slotAfter }),
+        (id) => {
+          controls.find((c) => c.key === 'credentialMode')?.set?.('3');
+          controls.find((c) => c.key === 'credentialId')?.set?.(null);
+          slot.set?.(id);
+          validate();
+        },
+        () => active && !moving && !writing && !fields.disabled,
+      );
+    }
     form.oninput = validate;
     form.onchange = validate;
     status.textContent = '';

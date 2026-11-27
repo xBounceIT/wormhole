@@ -2826,7 +2826,12 @@ export class VaultBackendHost {
     const request = parseSharedNodeEditRequest(value);
     const device = this.selectedWorkspace,
       workspace = this.unlockedWorkspaceId;
-    if (!request || !device || !workspace || (request.changes && request.workspaceId !== workspace))
+    if (
+      !request ||
+      !device ||
+      !workspace ||
+      ('workspaceId' in request && request.workspaceId !== workspace)
+    )
       throw Error('Invalid shared node edit.');
     const owner = () =>
       accepted() && this.selectedWorkspace === device && this.unlockedWorkspaceId === workspace;

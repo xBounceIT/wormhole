@@ -470,7 +470,7 @@ app.whenReady().then(async()=>{
          assert.equal(visible,true,'protected notes dialog did not display the imported note');
        }finally{notes.cancel();await opened;}
        assert.equal(admission.administrator,true);
-       const {registerSharedAdministrationIpc}=await import(${fromDist('vault-shared-ipc.js')});
+       const {registerSharedAdministrationIpc,registerSharedNodeEditIpc}=await import(${fromDist('vault-shared-ipc.js')});
        let adminWindow;
        const administration=new VaultSharedSetupDialog({host,ipc:ipcMain,pickExport:async()=>null,
          url:${JSON.stringify(pathToFileURL(join(root, 'dist', 'vault-shared-setup.html')).href)},
@@ -485,6 +485,12 @@ app.whenReady().then(async()=>{
        registerSharedAdministrationIpc({host,ipc:ipcMain,dialog:administration,parent:()=>window,
          currentDeviceRevoked:()=>{currentDeviceRevocations++},
          trusted:event=>event.sender===window.webContents&&event.senderFrame===event.sender.mainFrame});
+       registerSharedNodeEditIpc({host,ipc:ipcMain,dialog:{open:()=>{throw Error('Unexpected authentication on read')}},
+         parent:()=>window,trusted:event=>event.sender===window.webContents&&event.senderFrame===event.sender.mainFrame});
+       const slotPage=(edit,slotAfter='')=>{
+         const {nodeId,revision,workspaceId,epoch,changeSeq}=edit;
+         return window.webContents.executeJavaScript('window.wormhole.editSharedNode('+JSON.stringify({nodeId,revision,workspaceId,epoch,changeSeq,slotAfter})+')');
+       };
        assert.equal(await window.webContents.executeJavaScript('typeof window.vaultSharedSetup'),'undefined');
        const adminOpened=window.webContents.executeJavaScript('window.wormhole.openSharedAdministration()');
        void adminOpened.catch(()=>{});
@@ -521,17 +527,27 @@ app.whenReady().then(async()=>{
          const inlineEditor=await host.sharedNodeEdit({nodeId:imported.id,revision:imported.editRevision},()=>true,noFactors);
          assert.equal(inlineEditor.status,'ready');
          assert.equal(inlineEditor.usesInlinePassword,true);
+         assert.deepEqual(await slotPage(inlineEditor),{status:'unavailable'});
          assert.equal((await host.sharedNodeEdit({nodeId:imported.id,revision:inlineEditor.revision,workspaceId:inlineEditor.workspaceId,
            epoch:inlineEditor.epoch,changeSeq:inlineEditor.changeSeq,changes:{credentialMode:3,credentialSlotId:publicId}},()=>true,noFactors)).status,
            'unavailable','an inline password would still take precedence over the saved slot');
          const editor=await readSelection(selected.editRevision);
          assert.equal(editor.status,'ready');
          assert.equal(editor.usesInlinePassword,undefined);
+         const choices=await slotPage(editor);
+         assert.equal(choices.status,'slot-choices');
+         for(const key of ['nodeId','revision','workspaceId','epoch','changeSeq'])assert.equal(choices[key],editor[key]);
+         assert.deepEqual(choices.slotPage,{kind:'slots',entries:[
+           {id:publicId,name:'Operations remote desktop',protocol:'rdp',allowSelfService:true}
+         ]});
+         const chosenId=choices.slotPage.entries[0].id;
+         assert.deepEqual((await slotPage(editor,chosenId)).slotPage,{kind:'slots',entries:[]});
          const choose=changes=>host.sharedNodeEdit({workspaceId:editor.workspaceId,nodeId:editor.nodeId,revision:editor.revision,
-           epoch:editor.epoch,changeSeq:editor.changeSeq,changes:{credentialMode:3,credentialSlotId:publicId,...changes}},()=>true,noFactors);
+           epoch:editor.epoch,changeSeq:editor.changeSeq,changes:{credentialMode:3,credentialSlotId:chosenId,...changes}},()=>true,noFactors);
          assert.equal((await choose({})).status,'unavailable','an SSH connection accepted an RDP slot');
          const saved=await choose({protocol:1,port:3389});
          assert.equal(saved.status,'saved');
+         assert.deepEqual(await slotPage(editor),{status:'unavailable'});
          const bound=await readSelection(saved.revision);
          assert.equal(bound.status,'ready');
          assert.equal(bound.fields.credentialSlotId,publicId);
@@ -678,7 +694,7 @@ app.whenReady().then(async()=>{
          await waitForAdmin('document.body.textContent.includes("Device revoked.")');
          assert.equal(currentDeviceRevocations,1);
          await assert.rejects(native.sharedRuntime());
-       }finally{await administration.cancel();await adminOpened;}
+       }finally{ipcMain.removeHandler('vault:shared-node-edit');await administration.cancel();await adminOpened;}
      }
      if(!suspensionRestart&&mode!=='admin-group-suspension'&&mode!=='admin-reopen'&&mode!=='admin-revoke-live'){
        const {registerSharedCertificateRenewalIpc,registerSharedRecoveryBackupIpc,registerSharedRecoveryInspectionIpc,registerSharedAccountResetIpc}=await import(${fromDist('vault-shared-ipc.js')});

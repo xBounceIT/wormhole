@@ -20,6 +20,9 @@ var nodeEditBindingsTemplate string
 //go:embed fragments/node_edit_slot_authority.sql
 var nodeEditSlotAuthority string
 
+//go:embed fragments/node_direct_selection.sql
+var nodeDirectSelection string
+
 //go:embed fragments/node_edit_verify_seals.sql
 var nodeEditVerifySeals string
 
@@ -45,7 +48,7 @@ func readNodeEdit(includeFolderFields bool) string {
 }
 
 func nodeEditBindings(version int) string {
-	var arg, typ, mask, replace, slotCheck string
+	var arg, typ, mask, replace, slotCheck, directSelection string
 	users := "NOT u.disabled AND\n            (u.id=p_actor OR (wormhole_data.effective_permissions(u.id,leaf.id)&2)=2)"
 	if version >= 89 {
 		arg, typ = ",p_previous_masks jsonb", ",jsonb"
@@ -63,7 +66,10 @@ func nodeEditBindings(version int) string {
 		// while rejecting an incompatible resulting binding.
 		slotCheck = "\n" + strings.TrimRight(nodeEditSlotAuthority, "\r\n")
 	}
-	return strings.NewReplacer("{{REPLACE_BINDINGS}}", replace, "{{MASK_ARG}}", arg, "{{MASK_TYPE}}", typ,
+	if version >= 98 {
+		directSelection = strings.TrimRight(nodeDirectSelection, "\r\n") + "\n"
+	}
+	return strings.NewReplacer("{{DIRECT_SELECTION_BINDING}}", directSelection, "{{REPLACE_BINDINGS}}", replace, "{{MASK_ARG}}", arg, "{{MASK_TYPE}}", typ,
 		"{{PRIOR_MASK}}", mask, "{{BINDING_USERS}}", users, "{{UNASSIGNED_SLOT_CHECK}}", slotCheck).Replace(strings.TrimSpace(nodeEditBindingsTemplate))
 }
 

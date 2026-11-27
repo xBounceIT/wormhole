@@ -5,6 +5,10 @@ import {
   vaultRecord,
   vaultRevision,
 } from './vault-contract.ts';
+import {
+  parseAdminInventoryReply,
+  type CredentialSlotPage,
+} from './vault-shared-admin-inventory.ts';
 
 export const sharedEditFields = {
   name: { label: 'Name', type: 'name', max: 1024 },
@@ -53,12 +57,23 @@ export type SharedEditValue = string | number | boolean | null;
 export type SharedEditValues = Record<SharedEditKey, SharedEditValue>;
 export type SharedMoveParent = { id: string; revision: string } | null;
 export type SharedNodeChanges = Partial<SharedEditValues> | { parent: SharedMoveParent };
+type EditSnapshot = { workspaceId: string; epoch: string; changeSeq: string };
 export type SharedNodeEditRequest = { nodeId: string; revision: string } & (
-  | { changes?: undefined }
-  | { workspaceId: string; epoch: string; changeSeq: string; changes: SharedNodeChanges }
+  | { changes?: undefined; slotAfter?: undefined }
+  | (EditSnapshot &
+      (
+        | { changes: SharedNodeChanges; slotAfter?: undefined }
+        | { slotAfter: string; changes?: undefined }
+      ))
 );
 export type SharedNodeEditReply =
   | { status: 'unavailable' | 'authentication-required' }
+  | (EditSnapshot & {
+      status: 'slot-choices';
+      nodeId: string;
+      revision: string;
+      slotPage: CredentialSlotPage;
+    })
   | {
       status: 'ready';
       nodeId: string;
@@ -102,19 +117,38 @@ function validValues(input: unknown, complete: boolean): boolean {
 }
 export function parseSharedNodeEditRequest(v: unknown): SharedNodeEditRequest | undefined {
   if (!vaultRecord(v) || !vaultID(v.nodeId) || !vaultRevision(v.revision)) return;
-  if (!('changes' in v))
+  const browsing = 'slotAfter' in v;
+  if (!('changes' in v) && !browsing)
     return vaultFields(v, ['nodeId', 'revision'])
       ? { nodeId: v.nodeId, revision: v.revision }
       : undefined;
   if (
-    !vaultFields(v, ['nodeId', 'revision', 'workspaceId', 'epoch', 'changeSeq', 'changes']) ||
-    v.revision === '9223372036854775807' ||
+    !vaultFields(v, [
+      'nodeId',
+      'revision',
+      'workspaceId',
+      'epoch',
+      'changeSeq',
+      browsing ? 'slotAfter' : 'changes',
+    ]) ||
+    (!browsing && v.revision === '9223372036854775807') ||
     !vaultID(v.workspaceId) ||
     !vaultRevision(v.epoch) ||
     !vaultRevision(v.changeSeq, true) ||
     v.changeSeq.startsWith('-')
   )
     return;
+  const snapshot = {
+    nodeId: v.nodeId,
+    revision: v.revision,
+    workspaceId: v.workspaceId,
+    epoch: v.epoch,
+    changeSeq: v.changeSeq,
+  };
+  if (browsing) {
+    if (v.slotAfter !== '' && !vaultID(v.slotAfter)) return;
+    return { ...snapshot, slotAfter: v.slotAfter };
+  }
   let changes: SharedNodeChanges;
   if (vaultRecord(v.changes) && vaultFields(v.changes, ['parent'])) {
     const parent = v.changes.parent;
@@ -130,14 +164,7 @@ export function parseSharedNodeEditRequest(v: unknown): SharedNodeEditRequest | 
     else return;
   } else if (validValues(v.changes, false)) changes = { ...v.changes };
   else return;
-  return {
-    nodeId: v.nodeId,
-    revision: v.revision,
-    workspaceId: v.workspaceId,
-    epoch: v.epoch,
-    changeSeq: v.changeSeq,
-    changes,
-  };
+  return { ...snapshot, changes };
 }
 export function parseSharedNodeEditReply(
   v: unknown,
@@ -148,6 +175,43 @@ export function parseSharedNodeEditReply(
     return vaultFields(v, ['status']) ? { status: v.status } : undefined;
   }
   if (v.nodeId !== q.nodeId || !vaultRevision(v.revision)) return;
+  if (q.slotAfter !== undefined) {
+    if (
+      v.status !== 'slot-choices' ||
+      !vaultFields(v, [
+        'status',
+        'nodeId',
+        'revision',
+        'workspaceId',
+        'epoch',
+        'changeSeq',
+        'slotPage',
+      ]) ||
+      v.revision !== q.revision ||
+      v.workspaceId !== q.workspaceId ||
+      v.epoch !== q.epoch ||
+      v.changeSeq !== q.changeSeq
+    )
+      return;
+    const result = parseAdminInventoryReply(
+      { status: 'ready', page: v.slotPage },
+      {
+        kind: 'slots',
+        ...(q.slotAfter ? { next: { id: q.slotAfter } } : {}),
+      },
+    );
+    if (result?.status === 'ready')
+      return {
+        status: 'slot-choices',
+        nodeId: q.nodeId,
+        revision: q.revision,
+        workspaceId: q.workspaceId,
+        epoch: q.epoch,
+        changeSeq: q.changeSeq,
+        slotPage: result.page,
+      };
+    return;
+  }
   if (
     v.status === 'saved' &&
     q.changes &&

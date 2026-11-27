@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
+	"slices"
 	"strconv"
 	"testing"
 
@@ -15,6 +16,16 @@ import (
 	"github.com/xBounceIT/wormhole/tools/wormhole-backend/internal/vault"
 	"github.com/xBounceIT/wormhole/tools/wormhole-backend/internal/vaultstore"
 )
+
+func TestNodeSlotChoicesRejectsForeignEditor(t *testing.T) {
+	trust := TrustState{WorkspaceID: uuid.New(), UserID: uuid.New()}
+	for _, edit := range []*NodeEdit{nil, {workspace: uuid.New(), user: trust.UserID}, {workspace: trust.WorkspaceID, user: uuid.New()}} {
+		_, page, err := (*Session)(nil).NodeSlotChoices(context.Background(), trust, edit, uuid.Nil)
+		if err != ErrConfiguration || page != nil {
+			t.Fatal("slot page accepted an unrelated editor", err)
+		}
+	}
+}
 
 func checkImportedNodeEdit(t *testing.T, ctx context.Context, db *pgconn.PgConn, s *Session, trust TrustState, node uuid.UUID, actor *vault.UserKeys) {
 	t.Helper()
@@ -191,8 +202,8 @@ func checkInheritedFolderEdit(t *testing.T, ctx context.Context, db *pgconn.PgCo
 		if err != nil {
 			t.Fatal(err)
 		}
-		query(`INSERT INTO wormhole_data.nodes(id,parent_id,kind,name,protocol,host,credential_mode,credential_id,credential_slot_id,boundary_id,seal_suite,seal_signer_key_id,seal_signer_key_version,seal)
-            SELECT n.id,n.parent_id,n.kind,n.name,n.protocol,n.host,n.credential_mode,n.credential_id,n.credential_slot_id,$2::uuid,2,$3::uuid,$4::int,decode($5,'hex')
+		query(`INSERT INTO wormhole_data.nodes(id,parent_id,kind,name,protocol,host,credential_mode,credential_id,credential_slot_id,use_inline_password,boundary_id,seal_suite,seal_signer_key_id,seal_signer_key_version,seal)
+            SELECT n.id,n.parent_id,n.kind,n.name,n.protocol,n.host,n.credential_mode,n.credential_id,n.credential_slot_id,n.use_inline_password,$2::uuid,2,$3::uuid,$4::int,decode($5,'hex')
             FROM jsonb_populate_record(NULL::wormhole_data.nodes,wormhole_data.import_columns($1::jsonb)) n`,
 			string(raw), boundary.String(), signer.ID.String(), strconv.FormatUint(uint64(signer.Version), 10), hex.EncodeToString(seal.Signature))
 		t.Cleanup(func() { query(`DELETE FROM wormhole_data.nodes WHERE id=$1::uuid`, n.ID) })
@@ -291,13 +302,87 @@ func checkInheritedFolderEdit(t *testing.T, ctx context.Context, db *pgconn.PgCo
 		n := leaf
 		n.ID = uuid.NewString()
 		insertNode(t, n)
+		t.Run("member-slot-choices", func(t *testing.T) {
+			query(`UPDATE wormhole_data.users SET is_admin=false WHERE id=$1::uuid`, trust.UserID.String())
+			t.Cleanup(func() { query(`UPDATE wormhole_data.users SET is_admin=true WHERE id=$1::uuid`, trust.UserID.String()) })
+			next, edit, err := session.ReadNodeEdit(ctx, trust, uuid.MustParse(n.ID), 1)
+			if err != nil || edit == nil {
+				t.Fatal("member could not read writable node", err)
+			}
+			trust = next
+			id := uuid.MustParse(slot.ID)
+			next, page, err := session.NodeSlotChoices(ctx, trust, edit, uuid.Nil)
+			if err != nil || page == nil || !slices.ContainsFunc(page.Entries, func(entry AdminCredentialSlot) bool { return entry.ID == id && entry.Name == slot.Name }) ||
+				next.Catalog["slot/"+slot.ID].Revision != 1 {
+				t.Fatal("member could not choose certified slot", err)
+			}
+			trust = next
+			_, page, err = session.NodeSlotChoices(ctx, trust, edit, id)
+			if err != nil || page == nil || slices.ContainsFunc(page.Entries, func(entry AdminCredentialSlot) bool { return entry.ID == id }) {
+				t.Fatal("resumed slot page repeated its cursor", err)
+			}
+			query(`UPDATE wormhole_data.boundary_grants SET permissions=2 WHERE boundary_id=$1::uuid AND user_id=$2::uuid`, boundary.String(), trust.UserID.String())
+			t.Cleanup(func() {
+				query(`UPDATE wormhole_data.boundary_grants SET permissions=31 WHERE boundary_id=$1::uuid AND user_id=$2::uuid`, boundary.String(), trust.UserID.String())
+			})
+			if _, page, err = session.NodeSlotChoices(ctx, trust, edit, uuid.Nil); err != nil || page != nil {
+				t.Fatal("stale editor could read a new slot page", err)
+			}
+			next, edit, err = session.ReadNodeEdit(ctx, trust, uuid.MustParse(n.ID), 1)
+			if err != nil || edit == nil {
+				t.Fatal("refresh editor", err)
+			}
+			_, page, err = session.NodeSlotChoices(ctx, next, edit, uuid.Nil)
+			if err != nil || page == nil || slices.ContainsFunc(page.Entries, func(entry AdminCredentialSlot) bool { return entry.ID == id }) {
+				t.Fatal("slot without boundary View was listed", err)
+			}
+			// The API independently checks the node grant, including when a caller
+			// already knows the current revision and catalog sequence.
+			query(`UPDATE wormhole_data.grants SET permissions=1 WHERE node_id=$1::uuid`, folder)
+			t.Cleanup(func() { query(`UPDATE wormhole_data.grants SET permissions=15 WHERE node_id=$1::uuid`, folder) })
+			row := query(`SELECT change_seq FROM wormhole_data.workspace_meta WHERE singleton`)
+			args := [][]byte{[]byte(n.ID), []byte("1"), strconv.AppendUint(nil, edit.epoch, 10), row.Rows[0][0], nil}
+			err = session.queryAdministration(ctx, next, nodeSlotChoicesSQL, args, 2048, 4, func(row [][]byte) error {
+				if string(row[0]) != "unavailable" || row[3] != nil {
+					return ErrAdmissionResponse
+				}
+				return nil
+			})
+			if err != nil {
+				t.Fatal("slot picker accepted a read-only node", err)
+			}
+		})
 		selectSlot(n, 1, 1, 0) // RDP cannot use an SSH slot.
+		emptyFolder := vaultstore.NodeMetadata{ID: uuid.NewString(), Name: "Future connections", Kind: 0, ParentID: &folder}
+		insertNode(t, emptyFolder)
 		query(`UPDATE wormhole_data.boundary_grants SET permissions=2 WHERE boundary_id=$1::uuid AND user_id=$2::uuid`, boundary.String(), trust.UserID.String())
 		t.Cleanup(func() {
 			query(`UPDATE wormhole_data.boundary_grants SET permissions=31 WHERE boundary_id=$1::uuid AND user_id=$2::uuid`, boundary.String(), trust.UserID.String())
 		})
 		selectSlot(n, 1, 0, 0)
+		selectSlot(emptyFolder, 1, 0, 0)
 		query(`UPDATE wormhole_data.boundary_grants SET permissions=31 WHERE boundary_id=$1::uuid AND user_id=$2::uuid`, boundary.String(), trust.UserID.String())
+		selectSlot(emptyFolder, 1, 0, 2)
+		t.Run("connection-with-own-password", func(t *testing.T) {
+			present := true
+			inlineNode := vaultstore.NodeMetadata{ID: uuid.NewString(), Name: "Inline connection", ParentID: &folder, Kind: 1, Protocol: &protocol, UseInlinePassword: &present}
+			insertNode(t, inlineNode)
+			record := sharedcatalog.NodeFieldsRecord{NodeID: inlineNode.ID, Fields: []vaultstore.CredentialField{{Field: "inlinePassword", Present: true, Version: 1}}}
+			fieldSeal, err := sharedcatalog.SignSelection(trust.WorkspaceID, boundary, record, 1, signer, key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			encoded, err := json.Marshal(record.Fields)
+			if err != nil {
+				t.Fatal(err)
+			}
+			query(`INSERT INTO wormhole_data.node_secret_manifests(node_id,fields,boundary_id,row_version,deleted,seal_suite,seal_signer_key_id,seal_signer_key_version,seal)
+				VALUES($1::uuid,$2::jsonb,$3::uuid,1,false,2,$4::uuid,$5::int,decode($6,'hex'))`,
+				inlineNode.ID, string(encoded), boundary.String(), signer.ID.String(), strconv.FormatUint(uint64(signer.Version), 10), hex.EncodeToString(fieldSeal.Signature))
+			t.Cleanup(func() { query(`DELETE FROM wormhole_data.node_secret_manifests WHERE node_id=$1::uuid`, inlineNode.ID) })
+			selectSlot(inlineNode, 1, 0, 0)
+			commit(t, inlineNode.ID, 1, "name", "Renamed inline connection", 2)
+		})
 		selectSlot(n, 1, 0, 2)
 		selectSlot(n, 2, 6, 0)
 		selectSlot(n, 2, 7, 3) // SFTP shares the SSH credential family.
