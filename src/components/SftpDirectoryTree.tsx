@@ -20,21 +20,7 @@ import {
 const minTreeHeight = 80;
 const maxTreeHeight = 400;
 
-export function SftpDirectoryTree({
-  sessionId,
-  pane,
-  path,
-  revision,
-  height,
-  onHeightChange,
-  search,
-  onSearchChange,
-  sortColumn,
-  ascending,
-  onSort,
-  onNavigate,
-  onDrop,
-}: {
+type SftpDirectoryTreeProps = {
   sessionId: string;
   pane: 'local' | 'remote';
   path: string;
@@ -48,13 +34,33 @@ export function SftpDirectoryTree({
   onSort: (column: SftpSortColumn) => void;
   onNavigate: (path: string) => void;
   onDrop: (event: React.DragEvent<HTMLElement>, path: string) => void;
-}) {
+};
+
+export function SftpDirectoryTree(props: SftpDirectoryTreeProps) {
+  return <DirectoryTreeContent key={props.pane + ':' + props.sessionId} {...props} />;
+}
+
+function DirectoryTreeContent({
+  sessionId,
+  pane,
+  path,
+  revision,
+  height,
+  onHeightChange,
+  search,
+  onSearchChange,
+  sortColumn,
+  ascending,
+  onSort,
+  onNavigate,
+  onDrop,
+}: SftpDirectoryTreeProps) {
   const [tree, setTree] = useState(() => revealSftpTreePath(createSftpTree(pane), path));
-  const [treeRevision, setTreeRevision] = useState(revision);
-  if (tree.path !== path) setTree((current) => revealSftpTreePath(current, path));
-  if (treeRevision !== revision) {
-    setTreeRevision(revision);
-    setTree(invalidateSftpTree);
+  const [lastRevision, setLastRevision] = useState(revision);
+  if (tree.path !== path || lastRevision !== revision) {
+    const next = tree.path === path ? tree : revealSftpTreePath(tree, path);
+    setTree(lastRevision === revision ? next : invalidateSftpTree(next));
+    if (lastRevision !== revision) setLastRevision(revision);
   }
   const viewport = useRef<HTMLDivElement>(null);
   const pending = useRef(new Map<string, string>());

@@ -378,28 +378,37 @@ async function runVncSurfaceTests() {
   const root = createRoot(container);
   const listeners = new Set<(event: WormholeBackendEvent) => void>();
   const commands: WormholeVncCommand[] = [];
+  let unlockRetry: (() => void) | undefined;
+  let finishUnlock!: () => void;
   window.wormhole = {
     onBackendEvent: (listener) => {
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
+    unlockBitwardenCli: () =>
+      new Promise((resolve) => {
+        finishUnlock = () => resolve({ unlocked: true });
+      }),
     sendVncCommand: async (command) => {
       commands.push(command);
       return { ok: true };
     },
   } as Pick<
     NonNullable<Window['wormhole']>,
-    'onBackendEvent' | 'sendVncCommand'
+    'onBackendEvent' | 'sendVncCommand' | 'unlockBitwardenCli'
   > as Window['wormhole'];
   const session = { id: 'vnc-layout', title: 'Lab monitor', host: 'monitor.internal', port: 5901 };
-  const render = (connectionGeneration: number) =>
+  const render = (connectionGeneration: number, isAuthorized = true, disconnected = false) =>
     act(async () =>
       root.render(
         <VncSurface
           bitwardenUnlockPending={false}
+          onBitwardenUnlockRequired={(_reason, retry) => {
+            unlockRetry = retry;
+          }}
           connectionGeneration={connectionGeneration}
-          disconnected={false}
-          isAuthorized
+          disconnected={disconnected}
+          isAuthorized={isAuthorized}
           session={session}
         />,
       ),
@@ -474,6 +483,65 @@ async function runVncSurfaceTests() {
       document.documentElement.className = themeClasses;
       probe.remove();
     }
+    const passwordField = () =>
+      container.querySelector<HTMLInputElement>('#vnc-password-vnc-layout');
+    const requestPassword = () =>
+      emit({ type: 'vnc.status', status: 'failed', passwordRequired: true });
+    await requestPassword();
+    const field = passwordField()!;
+    assert.ok(field);
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(
+        field,
+        'test-password',
+      );
+      field.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    assert.equal(field.value, 'test-password');
+    await render(1, false);
+    assert.equal(passwordField(), null);
+    await render(1);
+    await requestPassword();
+    assert.equal(passwordField()?.value, '');
+    assert.equal(
+      commands.filter((command) => command.action === 'vnc.connect').length,
+      2,
+      'locking must not reconnect the desktop',
+    );
+
+    await emit({ type: 'vnc.status', status: 'failed', message: 'Bitwarden vault is locked' });
+    const unlockField = passwordField()!;
+    assert.ok(unlockRetry);
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(
+        unlockField,
+        'test-only',
+      );
+      unlockField.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      unlockField.form!.requestSubmit();
+    });
+    assert.equal(unlockField.value, '');
+    await render(1, false);
+    await render(1);
+    await act(async () => {
+      unlockRetry!();
+      finishUnlock();
+    });
+    assert.equal(
+      commands.filter((command) => command.action === 'vnc.connect').length,
+      2,
+      'retired unlock actions must not reconnect',
+    );
+
+    await render(1, true, true);
+    await requestPassword();
+    assert.match(container.textContent!, /The session was disconnected/);
+    assert.equal(passwordField(), null);
+    await render(2);
+    assert.equal(commands.filter((command) => command.action === 'vnc.connect').length, 3);
+    assert.equal(transition()?.dataset.connectionTransition, 'pending');
   } finally {
     await act(async () => root.unmount());
     window.wormhole = undefined;

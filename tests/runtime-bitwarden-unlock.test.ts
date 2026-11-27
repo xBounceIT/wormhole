@@ -15,10 +15,10 @@ test('runtime Bitwarden unlock shows and hides the password, then resets it', as
   const start = source.indexOf('function RuntimeBitwardenUnlockDialog(');
   const end = source.indexOf('function BitwardenCliDialog(', start);
   assert.ok(start >= 0 && end > start);
-  const secretHelpers = source.slice(
-    source.indexOf('function clearSecretInput('),
-    source.indexOf('function credentialSelectionFor('),
-  );
+  const secretHelpers = readFileSync(
+    new URL('../src/secret-input.ts', import.meta.url),
+    'utf8',
+  ).replace(/^export /gm, '');
   const passwordInput = readFileSync(
     new URL('../src/components/ui/password-input.tsx', import.meta.url),
     'utf8',

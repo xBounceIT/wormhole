@@ -1,4 +1,4 @@
-import * as React from 'react';
+import { useSyncExternalStore } from 'react';
 
 const mobileQuery = '(width < 768px)';
 
@@ -9,7 +9,7 @@ function subscribe(onChange: () => void) {
 }
 
 export function useIsMobile() {
-  return React.useSyncExternalStore(
+  return useSyncExternalStore(
     subscribe,
     () => window.matchMedia(mobileQuery).matches,
     () => false,

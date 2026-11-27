@@ -83,17 +83,20 @@ test('stable VNC identity preserves the single App-owned disconnect lifecycle', 
   );
   assert.match(releaseSource, /vnc\.disconnect/);
   assert.match(vncSource, /const connectAttempt = useRef\(0\)/);
-  assert.match(vncSource, /expectedConnectAttempt[\s\S]*connectAttempt\.current/);
+  assert.match(vncSource, /connectAttempt\.current !== attempt \|\| response\.ok/);
   assert.match(vncSource, /onStatusChangeRef\.current\?\.\(nextStatus\)/);
-  assert.match(vncSource, /if \(!request\.isAuthorized\) return/);
+  assert.match(vncSource, /if \(!request\.authLifetime\.isAuthorized\) return/);
   assert.match(
     vncSource,
-    /const promptAllowed = unlockRequired && bitwardenUnlockRequestRef\.current\.isAuthorized/,
+    /const promptAllowed =\s*unlockRequired && bitwardenUnlockRequestRef\.current\.authLifetime\.isAuthorized/,
   );
   assert.match(vncSource, /isAuthorized && bitwardenUnlockRequired && bitwardenUnlockPending/);
   assert.match(vncSource, /const message = formatBitwardenAuthenticationError\(error, 'unlock'\)/);
   assert.match(vncSource, /setBitwardenUnlockRequired\(promptAllowed\)/);
-  assert.match(vncSource, /if \(promptAllowed\) notifyBitwardenUnlockRequired\(message\)/);
+  assert.match(
+    vncSource,
+    /if \(!isCurrent\(\)\) return;\s*const message = formatBitwardenAuthenticationError/,
+  );
   assert.match(appSource, /<VncSurface[\s\S]*isAuthorized=\{isAuthorized\}/);
   assert.match(
     appSource,
@@ -388,10 +391,7 @@ test('native RDP disconnect acknowledges only after ActiveX and Go resource clea
 });
 
 test('native overlays hide during drag or resize and return when resizing ends', () => {
-  assert.match(
-    appSource,
-    /active && isWebSurfaceVisible && !activeDraggedSessionId && !resizingSplitId/,
-  );
+  assert.match(appSource, /active && isWebSurfaceVisible && !draggedSessionId && !resizingSplitId/);
   const webSurface = sourceBetween(appSource, '<BrowserSessionSurface', '/>');
   assert.match(webSurface, /isActive=\{isActive\}/);
   assert.match(webSurface, /isAuthorized=\{isAuthorized\}/);
@@ -539,6 +539,45 @@ test('folder writes retain their submitted target when a dialog is reopened mid-
   assert.doesNotMatch(newFolderSource, /parentId: newFolderParentId\.current/);
 });
 
+test('the backup picker retires selections when the workspace lifetime changes', async () => {
+  const registration = stripTypeScriptTypes(
+    sourceBetween(
+      mainSource,
+      "ipcMain.handle('backup:select-import'",
+      "ipcMain.on('backup:clear-import'",
+    ),
+  );
+  for (const changeAt of ['none', 'picker', 'inspection']) {
+    const authSession = { authorizationEpoch: 1 };
+    const selections = new Map();
+    let inspections = 0;
+    const pick = runInNewContext(registration, {
+      ipcMain: { handle: (_channel: string, handler: unknown) => handler },
+      authSession,
+      serializeAuthOperation: (operation: () => Promise<unknown>) => operation(),
+      requireWorkspaceAuth: async () => {},
+      isAuthorizationEpochCurrent: (epoch: number) => authSession.authorizationEpoch === epoch,
+      backupImportSelections: selections,
+      BrowserWindow: { fromWebContents: () => null },
+      showCoordinatedOpenDialog: async () => {
+        if (changeAt === 'picker') authSession.authorizationEpoch++;
+        return { canceled: false, filePaths: ['/example.json'] };
+      },
+      runBackend: async () => {
+        inspections++;
+        if (changeAt === 'inspection') authSession.authorizationEpoch++;
+        return { encrypted: false };
+      },
+      parseBackupInspectResponse: (result: unknown) => result,
+      path: { basename: () => 'example.json' },
+    });
+    const selection = await pick({ sender: 'owner' });
+    assert.equal(inspections, changeAt === 'picker' ? 0 : 1);
+    assert.equal(selection?.fileName, changeAt === 'none' ? 'example.json' : undefined);
+    assert.equal(selections.has('owner'), changeAt === 'none');
+  }
+});
+
 test('opening update settings does not remount and orphan active settings operations', () => {
   const settingsMount = sourceBetween(
     appSource,
@@ -553,7 +592,7 @@ test('opening update settings does not remount and orphan active settings operat
   );
   assert.match(
     settingsSource,
-    /if \(authGate === 'unlocked'\) return;[\s\S]*setMcpState\(null\);[\s\S]*setMcpToken\(''\);[\s\S]*setMcpTokenRevealed\(false\);/,
+    /if \(authGate !== 'unlocked'\) \{[\s\S]*setMcpState\(null\);[\s\S]*setMcpToken\(''\);[\s\S]*setMcpTokenRevealed\(false\);/,
   );
   for (const operation of [
     'revealMcpToken',
@@ -566,7 +605,7 @@ test('opening update settings does not remount and orphan active settings operat
       `async function ${operation}`,
       operation === 'copyMcpConfig' ? 'async function openCurrentLogFile' : 'async function',
     );
-    assert.match(operationSource, /authGateRef\.current !== 'unlocked'/);
+    assert.match(operationSource, /!isCurrentUnlock\(\)/);
   }
 });
 

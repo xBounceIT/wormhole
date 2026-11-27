@@ -1151,6 +1151,30 @@ window.runSettingsDialogTests = async (mode: 'desktop' | 'compact') => {
       await mountApp({ theme: 'dark', authConfigured: true, idleTimeoutMinutes: 1, pinned: true });
       await clickElement(query('nav[aria-label="Main navigation"] button[aria-label="Settings"]')!);
       await waitFor(() => dialog() !== null, 'Settings did not open before idle lock');
+      const selectSettingsTab = (name: string) =>
+        clickElement(
+          [...dialog()!.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find((tab) =>
+            tab.textContent?.includes(name),
+          )!,
+        );
+      let resolveToken!: (value: string) => void;
+      let resolvePicker!: (value: WormholeBackupImportSelection) => void;
+      window.wormhole!.getMcpToken = () =>
+        new Promise((resolve) => {
+          resolveToken = resolve;
+        });
+      window.wormhole!.selectBackupForImport = () =>
+        new Promise((resolve) => {
+          resolvePicker = resolve;
+        });
+      await selectSettingsTab('MCP');
+      await clickElement(query('#settings-mcp-token')!.parentElement!.querySelector('button')!);
+      await selectSettingsTab('Backup & Restore');
+      await clickElement(
+        [...dialog()!.querySelectorAll<HTMLButtonElement>('button')].find(
+          (button) => button.textContent?.trim() === 'Import backup…',
+        )!,
+      );
       let discards = 0;
       window.wormhole!.sftpEdit = async (sessionId, request) => {
         if (request.operation === 'discard') discards++;
@@ -1232,6 +1256,18 @@ window.runSettingsDialogTests = async (mode: 'desktop' | 'compact') => {
         dialog()!.querySelector('[role="tabpanel"][data-state="active"] h2')?.textContent,
         'File transfer',
       );
+      await React.act(async () => {
+        resolvePicker({
+          fileName: 'retired-selection.json',
+          encrypted: false,
+          schemaVersion: 1,
+          exportedAt: '',
+        });
+        resolveToken('retired-test-token');
+      });
+      assert.ok(!document.body.textContent?.includes('retired-selection.json'));
+      await selectSettingsTab('MCP');
+      assert.equal(query<HTMLInputElement>('#settings-mcp-token')!.value, '');
       assert.equal(discards, 0);
       assert.ok(!query('[role="alertdialog"][data-state="open"]'));
     } finally {

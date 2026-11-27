@@ -1,3 +1,4 @@
+import { takeOneShotSecret } from '../src/secret-input.ts';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { stripTypeScriptTypes } from 'node:module';
@@ -412,10 +413,12 @@ test('SSH key credential import keeps key paths and material behind the native b
   );
   assert.match(appSource, /disabled=\{busy \|\| privateKeySelecting\}/);
   assert.match(appSource, /takeOneShotSecret\(sshKeyPassphraseInput\.current\)/);
-  assert.match(appSource, /input\.value = '';/);
+  const secretInput = { value: 'sample' } as HTMLInputElement;
+  assert.equal(takeOneShotSecret(secretInput), 'sample');
+  assert.equal(takeOneShotSecret(secretInput), '');
   assert.match(
     appSource,
-    /clearSecretInput\(credentialKeyPassphraseInput\.current\);\s+setEditorOpen\(false\)/,
+    /clearSecretInput\(credentialKeyPassphraseInput\.current\);\s+credentialKeyPassphraseInput\.current = input/,
   );
   assert.match(
     appSource,

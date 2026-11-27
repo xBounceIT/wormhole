@@ -135,11 +135,12 @@ export function SidebarLayout({
   const resizeHandle = useRef<HTMLDivElement>(null);
   const previousPinned = useRef(pinned);
   const sidebarId = useId();
+  const visible = pinned || revealed;
   const shouldKeepOpen = keepOpen || menuOpen;
+
   // A portaled menu may extend beyond the sidebar. Keep its owning surface mounted and visible.
-  const nextRevealed = hovered || focused || (shouldKeepOpen && revealed);
-  if (nextRevealed !== revealed) setRevealed(nextRevealed);
-  const visible = pinned || nextRevealed;
+  const shouldReveal = hovered || focused || (shouldKeepOpen && revealed);
+  if (revealed !== shouldReveal) setRevealed(shouldReveal);
   useEffect(() => () => window.clearTimeout(hoverExit.current), []);
   useEffect(() => {
     // Chromium matches :focus-visible on text inputs even when the pointer focuses them.
@@ -161,8 +162,9 @@ export function SidebarLayout({
     // Portaled menus are outside this surface even though React events bubble through it.
     if (!event.currentTarget.contains(event.target as Node)) return;
     window.clearTimeout(hoverExit.current);
-    // Recover on movement too, including when an entry event happened before mounting or closing.
     setHovered(true);
+    // Recover on movement too, including when an entry event happened before mounting or closing.
+    setRevealed(true);
   }
 
   function positionResizeGrip(event: PointerEvent<HTMLDivElement>) {
@@ -195,11 +197,13 @@ export function SidebarLayout({
       if (event.key === 'ArrowDown' && event.target === pinButton.current) {
         event.preventDefault();
         setFocused(true);
+        setRevealed(true);
       } else if (event.key === 'Escape' && !shouldKeepOpen && visible) {
         event.preventDefault();
         pinButton.current?.focus();
         setFocused(false);
         setHovered(false);
+        setRevealed(false);
       }
     },
     onMouseEnter: revealOnHover,

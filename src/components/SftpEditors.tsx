@@ -230,7 +230,7 @@ type SftpEditedFilesProps = {
 
 export function SftpEditedFiles(props: SftpEditedFilesProps) {
   return (
-    <SessionEditedFiles
+    <EditedFileList
       key={`${props.recovery ? 'recovery' : 'session'}:${props.sessionId}`}
       {...props}
     />
@@ -254,7 +254,7 @@ function mergeEditedFiles(base: WormholeSftpEditView[], updates: WormholeSftpEdi
   return [...files.values()];
 }
 
-function SessionEditedFiles({
+function EditedFileList({
   allowConfirmation = true,
   sessionId,
   recovery = false,
