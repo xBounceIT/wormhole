@@ -99,9 +99,10 @@ func postgresTestClusterTLS(t *testing.T, enableTLS bool) (Settings, []byte) {
 	}
 	port := uint16(listener.Addr().(*net.TCPAddr).Port)
 	_ = listener.Close()
-	// Keep statement text and parameter values out of server logs, including
-	// failed test statements. No password appears in arguments or a pwfile.
-	config := "\nlisten_addresses = '127.0.0.1'\nport = " + strconv.Itoa(int(port)) + "\nlog_statement = 'none'\nlog_min_error_statement = 'panic'\nlog_error_verbosity = 'terse'\n"
+	// Use only loopback TCP. Packaged Unix servers otherwise create a socket in a system directory.
+	config := "\nlisten_addresses = '127.0.0.1'\nunix_socket_directories = ''\nport = " + strconv.Itoa(int(port)) + "\n"
+	// Keep statement text and parameters out of the log, including failed test statements.
+	config += "log_statement = 'none'\nlog_min_error_statement = 'panic'\nlog_error_verbosity = 'terse'\n"
 	var ca []byte
 	if enableTLS {
 		ca = postgresTestCertificate(t, data)
@@ -202,6 +203,10 @@ func TestPostgresNativeTransportIntegration(t *testing.T) {
 	defer admin.Close(context.Background())
 	if err := admin.Open(ctx, s, adminSecret, ChangePolicy{TransactionPooler: true}); err != nil {
 		t.Fatal(err)
+	}
+	listeners, err := admin.Query(ctx, "SELECT current_setting('listen_addresses'), current_setting('unix_socket_directories')", nil)
+	if err != nil || len(listeners) != 1 || len(listeners[0]) != 2 || string(listeners[0][0]) != "127.0.0.1" || len(listeners[0][1]) != 0 {
+		t.Fatal("test cluster must listen only on loopback TCP", err)
 	}
 	rows, err := admin.Query(ctx, "show server_version_num", nil)
 	if err != nil || len(rows) != 1 || len(rows[0]) != 1 {
