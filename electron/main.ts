@@ -7353,11 +7353,24 @@ class WebSurfaceManager {
       menu.popup({ window: record.owner });
     });
     if (record.target.ignoreCertErrors) {
-      contents.on('certificate-error', (event, _url, _error, _certificate, callback) => {
-        // The opt-in belongs to this isolated WebContents only. A regular tab cannot inherit this
-        // exception through Chromium's shared profile or certificate-decision cache.
+      const origin = new URL(record.navigation.navigateUrl).origin;
+      contents.on('certificate-error', (event, url, _error, _certificate, callback) => {
+        if (URL.parse(url)?.origin !== origin) return;
+        const epoch = authSession.authorizationEpoch;
+        const leaseId = record.tunnelLeaseId;
+        const canTrust = () =>
+          !authLockRequested &&
+          !isQuitting &&
+          isAuthorizationEpochCurrent(epoch) &&
+          !record.disposed &&
+          record.tabs.get(tabId) === view &&
+          !contents.isDestroyed() &&
+          (!record.vpn || (record.vpn.status === 'active' && record.tunnelLeaseId === leaseId));
+        if (!canTrust()) return;
         event.preventDefault();
-        callback(new URL(_url).origin === new URL(record.navigation.navigateUrl).origin);
+        // Electron emits the same event on app after this listener returns. Resolving it
+        // inline can release the native request while Electron still uses its URL.
+        setImmediate(() => callback(canTrust()));
       });
     }
     const update = (values: Partial<import('./web-browser-tabs.js').WebBrowserTabState> = {}) => {

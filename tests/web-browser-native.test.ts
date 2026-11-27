@@ -456,6 +456,7 @@ function browserHarness({ socks = '127.0.0.1:1080', active = true } = {}) {
     webMaxUrlLength: 4096,
     bitwardenExtensionHostMaxListeners: 100,
     isQuitting: false,
+    authLockRequested: false,
     ElectronChromeExtensions: class {
       options: any;
       constructor(options: any) {
@@ -2122,9 +2123,81 @@ test('production navigation errors retain diagnostic codes without copying sensi
   assert.equal(formatters.describeWebLoadFailure(-2, ''), 'Navigation failed.');
 });
 
-test('navigation restrictions, certificate scope, cancellations and tab limits fail closed', async () => {
-  const h = browserHarness({ socks: '' });
+test('browser certificate exceptions resolve after native dispatch and belong to the live tab and origin', async () => {
+  const h = browserHarness();
+  const url = 'https://router.internal/admin';
+  const verify = (contents: EventEmitter, requestUrl: string) => {
+    const { promise, resolve } = Promise.withResolvers<boolean>();
+    let prevented = false;
+    let dispatching = true;
+    contents.emit(
+      'certificate-error',
+      { preventDefault: () => (prevented = true) },
+      requestUrl,
+      'net::ERR_CERT_AUTHORITY_INVALID',
+      {},
+      (allowed: boolean) => {
+        assert.equal(dispatching, false, 'Electron still needs the request for the app event');
+        resolve(allowed);
+      },
+    );
+    dispatching = false;
+    if (!prevented) resolve(false); // Electron denies the request by default.
+    return promise;
+  };
+
+  await h.open('strict');
+  const strict = h.manager.surfaces.get('strict').view.webContents;
+  assert.equal(await verify(strict, url), false);
   await h.open('browser-1', 'vpn-1', { ignoreCertErrors: true });
+  const contents = h.manager.surfaces.get('browser-1').view.webContents;
+  assert.equal(await verify(contents, url), true);
+  assert.equal(await verify(contents, 'https://router.internal:8443/admin'), false);
+  assert.equal(await verify(contents, 'https://other.internal/'), false);
+  assert.equal(await verify(strict, url), false);
+
+  const duringLockRequest = verify(contents, url);
+  h.sandbox.authLockRequested = true;
+  assert.equal(await duringLockRequest, false);
+  h.sandbox.authLockRequested = false;
+  h.authSession.isAccessAllowed = false;
+  const whileLocked = verify(contents, url);
+  h.authSession.isAccessAllowed = true;
+  assert.equal(await whileLocked, false);
+  const beforeLock = verify(contents, url);
+  h.authSession.authorizationEpoch++;
+  assert.equal(await beforeLock, false);
+  const beforeRouteChange = verify(contents, url);
+  const { onExit } = h.acquisitions.at(-1) as { onExit(): void };
+  onExit();
+  const whileDisconnected = verify(contents, url);
+  assert.equal(await h.command('reconnect-vpn'), true);
+  assert.equal(await beforeRouteChange, false);
+  assert.equal(await whileDisconnected, false);
+  assert.equal(await verify(contents, url), true);
+  await h.command('new-tab');
+  const tabs = h.manager.surfaces.get('browser-1').tabs;
+  const closingTab = verify(tabs.get().webContents, url);
+  await h.command('close-tab', { tabId: tabs.activeId });
+  assert.equal(await closingTab, false);
+  assert.equal(await verify(contents, url), true);
+  const beforeClose = verify(contents, url);
+  h.manager.close('browser-1');
+  assert.equal(await beforeClose, false);
+
+  const forwarder = browserHarness({ socks: '' });
+  await forwarder.open('forwarded', 'vpn-1', { ignoreCertErrors: true });
+  const forwarded = forwarder.manager.surfaces.get('forwarded').view.webContents;
+  assert.equal(await verify(forwarded, forwarded.getURL()), true);
+  assert.equal(await verify(forwarded, url), false);
+  await h.open('direct', '', { ignoreCertErrors: true });
+  const direct = h.manager.surfaces.get('direct').view.webContents;
+  assert.equal(await verify(direct, url), true);
+});
+
+test('navigation restrictions, cancellations and tab limits fail closed', async () => {
+  const h = browserHarness({ socks: '' });
+  await h.open();
   const record = h.manager.surfaces.get('browser-1');
   const contents = record.view.webContents;
   const prevent = (url: string) => {
@@ -2147,16 +2220,6 @@ test('navigation restrictions, certificate scope, cancellations and tab limits f
   assert.equal(prevent('https://127.0.0.1:53001/'), false);
   contents.emit('page-title-updated');
   contents.emit('did-navigate-in-page');
-  for (const [url, allowed] of [
-    ['https://127.0.0.1:53001/', true],
-    ['https://other.internal/', false],
-  ] as const) {
-    let accepted;
-    contents.emit('certificate-error', { preventDefault() {} }, url, '', {}, (value: boolean) => {
-      accepted = value;
-    });
-    assert.equal(accepted, allowed);
-  }
   contents.loadURL = async () => {
     throw { code: 'ERR_ABORTED' };
   };
