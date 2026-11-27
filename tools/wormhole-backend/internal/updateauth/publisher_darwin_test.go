@@ -6,17 +6,20 @@ import (
 	"testing"
 )
 
-func TestNativeDarwinPublisher(t *testing.T) {
+func TestNativeDarwinPublisherRejectsUnsignedImage(t *testing.T) {
 	unsigned := openDarwinTestImage(t, filepath.Join(t.TempDir(), "unsigned.dmg"))
 	defer unsigned.Close()
 	if err := VerifyPublisher(unsigned, "AB7CDEFGH9"); err != ErrPublisherUntrusted {
 		t.Fatalf("unsigned disk image was accepted: %v", err)
 	}
+}
+
+func TestNativeDarwinPublisherVerifiesNotarizedImage(t *testing.T) {
 	path := os.Getenv("WORMHOLE_TEST_NOTARIZED_DMG")
-	if path == "" {
-		return
-	}
 	team := os.Getenv("WORMHOLE_TEST_NOTARIZED_TEAM_ID")
+	if path == "" && team == "" {
+		t.Skip("set WORMHOLE_TEST_NOTARIZED_DMG and its Apple Team ID to check a notarized image")
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		t.Fatal(err)
