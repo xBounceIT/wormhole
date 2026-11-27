@@ -90,7 +90,7 @@ test('real sandboxed preload forwards typed unlock bytes before erasing its IPC 
         });
         ipcMain.handle('vault:sftp-recovery-scopes',(_event,after)=>{assert.equal(after,'');return {nodeIds:['11111111-1111-4111-8111-111111111111'],after:''};});
         ipcMain.handle('vault:sftp-recovery-records',(_event,q)=>{assert.deepEqual(q,{nodeId:'11111111-1111-4111-8111-111111111111',operation:'discard',editId:'22222222-2222-4222-8222-222222222222',decision:'discard'});return {edits:[],after:'',busy:false};});
-        ipcMain.handle('vault:startup', (_event, ...args) => {
+        ipcMain.handle('startup:load', (_event, ...args) => {
           assert.equal(args.length, 0);
           startupCalls++;
           return { slots: null, cosmetics: { theme: 'system' }, newWorkspace: false };

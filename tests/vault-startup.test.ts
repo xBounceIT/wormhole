@@ -1279,36 +1279,48 @@ test('real renderer bootstrap probes public metadata first and cannot mount afte
   await verify();
 });
 
-test('main startup routes encrypted workspaces through the unlocked owner and preserves legacy startup', async (t) => {
+test('startup loads public hints and authorizes workspace reads', { timeout: 5000 }, async (t) => {
   const filename = 'wormhole-native-startup-main.js';
   const verify = await measure(t, filename);
   const code = stripTypeScriptTypes(`let confirmOnWindowClose;
     ${cut(main, 'function vaultAuthState()', 'function refreshAuthSession()')}
     ${cut(main, "  ipcMain.handle('startup:load'", "  ipcMain.handle('startup:unlock'")}
     ${cut(main, "  ipcMain.handle('workspace:load'", "  ipcMain.handle('workspace:node-notes'")}`);
+  const authQueue = stripTypeScriptTypes(`let authOperationQueue = Promise.resolve();
+    ${cut(main, 'function serializeAuthOperation<', 'function serializeAuthStateMutation<')}
+    ${cut(main, 'async function runAuthorizedOperation<', 'function isAuthorizationEpochCurrent(')}
+    ({ serializeAuthOperation, runAuthorizedOperation });`);
   for (const scenario of [
     'native',
     'locked',
     'untrusted',
+    'navigate-during-metadata',
     'navigate',
+    'lock-during-load',
     'metadata-error',
     'preferences-error',
     'workspace-error',
     'legacy',
     'legacy-locked-data',
+    'legacy-selection-changed',
+    'legacy-navigation',
     'legacy-migration-error',
     'legacy-migrated',
   ]) {
     const handlers = new Map<string, any>(),
       calls: string[] = [];
     let trusted = scenario !== 'untrusted';
+    const authSession = { authorizationEpoch: 0, isAccessAllowed: true };
     const isVaultWorkspace = !scenario.startsWith('legacy');
+    const hints = { slots: isVaultWorkspace ? descriptor : null, cosmetics: { theme: 'system' } };
     const api = {
       isVaultWorkspace,
       unlockedWorkspaceId: scenario === 'locked' ? undefined : descriptor.vaultId,
       startup: async () => {
         calls.push('metadata');
         if (scenario === 'metadata-error') throw Error('metadata');
+        if (scenario === 'navigate-during-metadata') trusted = false;
+        return hints;
       },
       preferences: async () => {
         calls.push('preferences');
@@ -1319,6 +1331,8 @@ test('main startup routes encrypted workspaces through the unlocked owner and pr
         calls.push('workspace');
         if (scenario === 'workspace-error') throw Error('workspace');
         if (scenario === 'navigate') trusted = false;
+        if (scenario === 'lock-during-load' && !authSession.authorizationEpoch)
+          authSession.authorizationEpoch++;
         return workspace;
       },
     };
@@ -1328,13 +1342,14 @@ test('main startup routes encrypted workspaces through the unlocked owner and pr
         ipcMain: { handle: (channel: string, callback: any) => handlers.set(channel, callback) },
         vaultBackend: api,
         parseThemeStartupRequest: () => ({}),
-        serializeAuthOperation: (fn: any) => fn(),
-        runAuthorizedOperation: (fn: any) => fn(),
+        ...runInNewContext(authQueue, { authSession, requireWorkspaceAuth: async () => {} }),
         isTrustedVaultSender: () => trusted,
         runBackend: async (op: string) => {
           assert.equal(isVaultWorkspace, false, 'native startup invoked legacy SQL');
           calls.push(`legacy:${op}`);
           if (op === 'workspace') return workspace;
+          if (scenario === 'legacy-selection-changed') api.isVaultWorkspace = true;
+          if (scenario === 'legacy-navigation') trusted = false;
           return {
             ...native,
             auth: { configured: scenario === 'legacy-locked-data' },
@@ -1354,11 +1369,18 @@ test('main startup routes encrypted workspaces through the unlocked owner and pr
       },
       { filename },
     );
-    const pending = handlers.get('startup:load')({}, undefined);
-    if (
-      scenario === 'native' ||
-      (scenario.startsWith('legacy') && scenario !== 'legacy-locked-data')
-    ) {
+    const load = handlers.get('startup:load');
+    await assert.rejects(load({}, {}, {}), /Invalid startup request/);
+    if (['untrusted', 'metadata-error', 'navigate-during-metadata'].includes(scenario)) {
+      await assert.rejects(load({}));
+    } else {
+      assert.equal(await load({}), hints);
+    }
+    assert.deepEqual(calls, scenario === 'untrusted' ? [] : ['metadata']);
+    calls.length = 0;
+    trusted = scenario !== 'untrusted';
+    const pending = load({}, undefined);
+    if (['native', 'legacy', 'legacy-migration-error', 'legacy-migrated'].includes(scenario)) {
       const result = await pending;
       assert.equal(result.workspace, workspace);
       if (scenario === 'native') {

@@ -348,7 +348,7 @@ const wormholeBridge = {
     ipcRenderer.invoke('vault:move-nodes', request),
   deleteVaultNodes: (request: import('./vault-node-delete.js').VaultNodeDeleteRequest) =>
     ipcRenderer.invoke('vault:delete-nodes', request),
-  loadVaultStartup: () => ipcRenderer.invoke('vault:startup'),
+  loadVaultStartup: () => ipcRenderer.invoke('startup:load'),
   createVault: () => ipcRenderer.invoke('vault:create'),
   createSharedWorkspace: () => ipcRenderer.invoke('vault:create-shared-workspace'),
   recoverSharedWorkspace: () => ipcRenderer.invoke('vault:recover-shared-workspace', null),

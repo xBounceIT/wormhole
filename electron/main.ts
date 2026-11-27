@@ -11359,30 +11359,41 @@ function registerIpcHandlers(
     }).catch(() => reportWarning('Workspace failure cleanup did not finish cleanly.'));
   });
 
-  ipcMain.handle('startup:load', async (event, value: unknown) => {
-    const request = parseThemeStartupRequest(value);
+  ipcMain.handle('startup:load', async (event, ...args: unknown[]) => {
+    if (args.length > 1) throw new Error('Invalid startup request.');
+    const request = parseThemeStartupRequest(args[0]);
+    if (!isTrustedVaultSender(event)) throw new Error('Invalid startup request.');
+    const metadata = await vaultBackend.startup();
+    if (!isTrustedVaultSender(event)) throw new Error('Startup owner is no longer available.');
+    // The pre-unlock request has no arguments. Full workspace loads always
+    // carry the preload's settings request and use the owning authorization path.
+    if (args.length === 0) return metadata;
+    if (vaultBackend.isVaultWorkspace) {
+      const startup = await runAuthorizedOperation(async () => {
+        if (!vaultBackend.unlockedWorkspaceId) throw new Error('Vault is locked.');
+        const settings = await vaultBackend.preferences();
+        const workspace = await vaultBackend.workspace();
+        return {
+          auth: vaultAuthState(),
+          settings,
+          workspace,
+          themeMigration: { handled: false, migrated: false },
+          migration: { status: 'vault', migrated: 0, missing: 0 },
+          migrationFailed: false,
+        };
+      });
+      if (!isTrustedVaultSender(event)) throw new Error('Startup owner is no longer available.');
+      confirmOnWindowClose = startup.settings.confirmOnWindowClose;
+      return startup;
+    }
     return serializeAuthOperation(async () => {
-      if (!isTrustedVaultSender(event)) throw new Error('Invalid startup request.');
-      await vaultBackend.startup();
-      if (vaultBackend.isVaultWorkspace) {
-        return runAuthorizedOperation(async () => {
-          if (!vaultBackend.unlockedWorkspaceId) throw new Error('Vault is locked.');
-          const settings = await vaultBackend.preferences();
-          const workspace = await vaultBackend.workspace();
-          if (!isTrustedVaultSender(event))
-            throw new Error('Startup owner is no longer available.');
-          confirmOnWindowClose = settings.confirmOnWindowClose;
-          return {
-            auth: vaultAuthState(),
-            settings,
-            workspace,
-            themeMigration: { handled: false, migrated: false },
-            migration: { status: 'vault', migrated: 0, missing: 0 },
-            migrationFailed: false,
-          };
-        });
+      if (!isTrustedVaultSender(event) || vaultBackend.isVaultWorkspace) {
+        throw new Error('Startup owner is no longer available.');
       }
       const startup = await runBackend<StartupResponse>('startup', request);
+      if (!isTrustedVaultSender(event) || vaultBackend.isVaultWorkspace) {
+        throw new Error('Startup owner is no longer available.');
+      }
       if (startup.auth.configured && startup.workspace) {
         throw new Error('Wormhole could not load the locked workspace.');
       }

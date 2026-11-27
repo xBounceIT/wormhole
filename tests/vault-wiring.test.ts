@@ -63,7 +63,7 @@ test('vault bridge is restricted to the registered main document and shutdown li
   assert.match(preload, /getVaultDescriptor: \(\) => ipcRenderer.invoke\('vault:describe'\)/);
   assert.match(preload, /loadVaultCatalog: \(\) => ipcRenderer.invoke\('vault:catalog'\)/);
   assert.match(preload, /loadVaultWorkspace: \(\) => ipcRenderer.invoke\('vault:workspace'\)/);
-  assert.match(preload, /loadVaultStartup: \(\) => ipcRenderer.invoke\('vault:startup'\)/);
+  assert.match(preload, /loadVaultStartup: \(\) => ipcRenderer.invoke\('startup:load'\)/);
   assert.match(preload, /ipcRenderer.invoke\('vault:unlock', request\)/);
   assert.match(
     preload,

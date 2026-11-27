@@ -1400,13 +1400,14 @@ The following building blocks are implemented and tested:
   cross this boundary. Provider-synchronized virtual credentials and certificate
   detail metadata still need their native consumers. Startup and workspace refresh use this read path for native vaults. Other domain actions
   still require migration to native commands; unsupported legacy calls are rejected.
-- Native `startup` and typed `vault:startup` IPC return only public slot hints and
+- Native `startup` and the zero-argument `startup:load` IPC return public slot hints and
   the theme preference. They do not open SQLite, inspect the legacy auth store,
   migrate settings/data or return security policy. Missing or unusable cosmetic
   settings fall back to the system theme; corrupt slot files fail the request.
   A null slot descriptor grants no workspace access. File reads are bounded,
-  buffers cleared and settings links/non-regular files ignored. Bootstrap reads this metadata before invoking `startup:load`. For native vaults,
-  that handler requires the unlocked owner, reads allowlisted preferences through
+  buffers cleared and settings links/non-regular files ignored. After unlock, the
+  preload supplies a settings request to `startup:load`. For native vaults, the
+  handler authorizes the operation against the current lock epoch and reads allowlisted preferences through
   the authenticated `preferences` RPC, and loads the native workspace. Preferences
   never supply authentication or lock policy. Existing legacy workspaces retain
   their original startup behavior. Failed metadata reads never fall back to legacy.
