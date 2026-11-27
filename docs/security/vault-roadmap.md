@@ -1879,8 +1879,20 @@ machine administrator. Verification is offline and only the machine policy
 supplies trust anchors. The renderer receives slot identifiers and kind. Go
 records the attestation result and the public key fingerprint in the slot file.
 The Windows capability probe, certificate container decoding, and synthetic
-attestation and unlock tests pass on Windows x64. The physical Windows TPM and
-software-key matrix and hardware-required profiles remain pending.
+attestation and unlock tests pass on Windows x64. A console operator on Windows
+x64 build 26300 completed deterministic enrollment, reopened the temporary slot
+and confirmed credential removal. The device returned `evidence-present`.
+The TPM verification and software-key configurations, and the other OS and
+architecture combinations, still require physical runs.
+
+To run the physical check, build the backend test executable on the device with
+`go test -c -o hello-device.exe .` from `tools/wormhole-backend`. From the
+repository root, run
+`pwsh -NoProfile -STA -File scripts/test-windows-hello-device.ps1 -TestBinary tools/wormhole-backend/hello-device.exe`.
+Click **Start** at the console and respond to the Windows prompts. The test
+uses a new temporary credential and a random in-memory root. Record the Windows
+build, native OS and binary architectures, attestation disposition and test
+result. Only `tpm-verified` confirms the key under the configured trust anchors.
 
 Slot file version 6 adds an optional Touch ID slot. The Go backend derives a
 wrapping key from a device-only Keychain factor, bound to the vault, file, slot
