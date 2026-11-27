@@ -2071,8 +2071,10 @@ Standard shows release notifications on builds without a supported publisher
 configuration. Hardened uses public notifications or a machine-approved local
 source. Paranoid accepts only the managed source. Release key rotation still
 needs integration. Production signing keys must be provisioned before the
-corresponding release runs. The macOS checks require a native run against a
-Developer ID signed and notarized disk image.
+corresponding release runs. The macOS CI job verifies a digest-pinned notarized
+disk image with the expected Apple Team ID and checks rejection with a different
+Team ID. It also compiles the Touch ID helper's signing requirement with
+`csreq`.
 
 ### Local slot-file persistence
 
