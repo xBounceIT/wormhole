@@ -468,8 +468,10 @@ their existing secret stores and app lock until the user opts into
 application detects an existing
 native vault before legacy startup, mounts the password/recovery unlock screen and
 loads its authenticated workspace after unlock. First launch on an empty local
-workspace now offers protected creation in a dedicated recovery dialog. Password
-and recovery slots are published only after confirmation of two random groups.
+workspace offers protected creation in a dedicated recovery dialog. Password
+and recovery slots are published after confirmation of two random groups.
+At Default, **Skip for now (Unprotected)** creates an OS-protected slot. The
+workspace shows a warning and a **Protect now** action until the user upgrades it.
 
 Native tree deletion, movement, connection duplication and folder/connection creation and editing are connected to
 the app at Default and, with per-action authentication, Standard. Native credential
@@ -478,9 +480,9 @@ now use a dedicated protected document and revision-checked native mutations.
 SSH terminals, standalone SFTP connections, shared SFTP tabs, VNC connections and saved local/shared RDP connections use native credential handoffs
 directly or through supported native VPN routes. SSH/SFTP include native first-use
 and changed-host-key confirmation. Vendor authentication/cache adapters,
-other protocol flows, the remaining migration-domain/provider gaps, unprotected
-local enrollment and shared administration remain unfinished. Hardened/Paranoid
-remain unavailable. Existing-workspace conversion is opt-in, requires confirmed
+other protocol flows, remaining legacy stores and parts of shared administration
+remain unfinished. Full Hardened/Paranoid workspace admission is pending.
+Existing-workspace conversion is opt-in, requires confirmed
 recovery and a fresh password/recovery unlock after restart. The native staged
 copy, authenticated retirement and atomic publication are now connected to this
 flow; the vault is still not a complete replacement for every daily workflow.
@@ -499,8 +501,9 @@ The following building blocks are implemented and tested:
   before owner adoption. A separate isolated native enrollment now confirms new
   factors before a one-use scope can stage an OS source under a stronger policy;
   ordinary source opening remains denied and partial cleanup stays reachable.
-  Its application window/bridge and OS-only creation/unlock remain before
-  Unprotected activation and Protect now.
+  **Protect now** opens this workflow from startup or from an open workspace.
+  The desktop-client test reopens an OS-only vault in a new process, rotates its
+  root and uses the replacement recovery code after a second restart.
 
 - [Native VPN retirement](vault-tunnel-retirement.md) now keeps the original
   sidecar/controller ownership through OS-confirmed exit, including failed
