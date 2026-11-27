@@ -121,8 +121,7 @@ test('Touch ID uses a nested app and a release profile for its own application i
   const now = new Date('2026-01-02').getTime();
   const applicationID = `${team}.${touchIDBundleIdentifier}`;
   const requirement = touchIDVerificationRequirement(team);
-  if (process.platform === 'darwin')
-    execFileSync('/usr/bin/csreq', ['-r', requirement, '-t']);
+  if (process.platform === 'darwin') execFileSync('/usr/bin/csreq', ['-r', requirement, '-t']);
   assert.ok(requirement.startsWith('=anchor apple generic and certificate leaf['));
   assert.ok(
     requirement.endsWith(
