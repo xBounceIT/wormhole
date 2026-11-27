@@ -1908,6 +1908,10 @@ The Argon2id parameters are fixed preset IDs, not caller-supplied numeric costs:
 and `kdf-v3` = 1 GiB/t4/p4. Local password slots use random 32-byte salts.
 The policy owner must authorize the preset before calling a derivation; in
 particular, low memory is permitted only by an authenticated Default policy.
+The native Electron test measures the vault process before its first password
+attempt and again after a rejected and a successful `kdf-v1` unlock. Each
+measurement must be within 32 MiB of the initial working set on Windows or
+resident set on Linux and macOS.
 
 Shared salt is SHA-256 of `wormhole/v1/salt`, the 36-byte lower-case canonical
 workspace UUID and immutable NFC/lower-case LoginName, concatenated in that order.

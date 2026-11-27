@@ -27,6 +27,28 @@ import { VaultBackendClient } from '../electron/vault-client.ts';
 import { parseVaultCatalog, parseVaultResponse } from '../electron/vault-contract.ts';
 import { parseVaultWorkspace } from '../electron/vault-workspace.ts';
 
+async function residentBytes(pid: number | undefined): Promise<number> {
+  assert.ok(
+    typeof pid === 'number' && Number.isSafeInteger(pid) && pid > 0,
+    'expected a running native vault',
+  );
+  const windows = process.platform === 'win32';
+  const { stdout } = await promisify(execFile)(
+    windows ? 'powershell.exe' : 'ps',
+    windows
+      ? [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          `(Get-Process -Id ${pid} -ErrorAction Stop).WorkingSet64`,
+        ]
+      : ['-o', 'rss=', '-p', String(pid)],
+    { windowsHide: true, timeout: 10_000 },
+  );
+  assert.match(stdout.trim(), /^[1-9]\d*$/);
+  return Number(stdout.trim()) * (windows ? 1 : 1024);
+}
+
 // Small stored ZIP fixture: no external archiver or platform-specific shell.
 function nativeExtensionZip(entries: [string, Buffer][]): Buffer {
   const local: Buffer[] = [],
@@ -141,12 +163,22 @@ test(
       assert.doesNotMatch(workspaceFrame, /catalog-private-/);
       for (const kind of ['recovery', 'password', 'recovery-code'] as const) {
         phase = `native vault lifecycle (${kind})`;
+        let vaultPid: number | undefined;
         const createUnlocked = () => {
-          const client = new VaultBackendClient({
-            executable,
-            databasePath: nativeDatabase,
-            onUnavailable: (reason) => unavailable.push({ owner: kind, phase, reason }),
-          });
+          const client = new VaultBackendClient(
+            {
+              executable,
+              databasePath: nativeDatabase,
+              onUnavailable: (reason) => unavailable.push({ owner: kind, phase, reason }),
+            },
+            kind === 'password'
+              ? (binary, args) => {
+                  const child = spawn(binary, args, { stdio: 'pipe', windowsHide: true });
+                  vaultPid = child.pid;
+                  return child;
+                }
+              : undefined,
+          );
           clients.push(client);
           return client;
         };
@@ -164,11 +196,24 @@ test(
         const wrong = new Uint8Array(
           kind === 'recovery' ? 32 : kind === 'recovery-code' ? 76 : 8,
         ).fill(0x31);
+        const baseline = kind === 'password' ? await residentBytes(vaultPid) : undefined;
+        const checkKDFMemory = async (outcome: string) => {
+          if (baseline === undefined) return;
+          const after = await residentBytes(vaultPid);
+          t.diagnostic(
+            `Argon2id ${outcome}: vault resident bytes ${baseline} before, ${after} after`,
+          );
+          assert.ok(
+            after <= baseline + 32 * 1024 * 1024,
+            'password derivation retained more than 32 MiB above baseline',
+          );
+        };
         await assert.rejects(
           unlocked.unlock({ vaultId: descriptor.vaultId, slotId: slot.id, kind, factor: wrong }),
           { message: 'Vault operation failed.' },
         );
         assert.ok(wrong.every((byte) => byte === 0));
+        await checkKDFMemory('rejected password');
         assert.equal((await unlocked.status()).unlocked, false);
         await assert.rejects(unlocked.security(), { message: 'Vault operation failed.' });
         const factor =
@@ -184,6 +229,7 @@ test(
           { unlocked: true, lockedMemory: true },
         );
         assert.ok(factor.every((byte) => byte === 0));
+        await checkKDFMemory('accepted password');
         assert.equal((await unlocked.status()).unlocked, true);
         assert.deepEqual(await unlocked.security(), {
           sequence: '3',
