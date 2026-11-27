@@ -37,11 +37,16 @@ test('actual failed SSH/SFTP surfaces offer only protected temporary and passphr
   visitSyntax(mainSyntax(source, true), (node) => {
     if (
       node.type === 'FunctionDeclaration' &&
-      ['SessionSurface', 'SshXtermSurface', 'SshTerminalConnectionState'].includes(node.id?.name)
+      [
+        'SessionSurface',
+        'SessionSurfaceContent',
+        'SshXtermSurface',
+        'SshTerminalConnectionState',
+      ].includes(node.id?.name)
     )
       selected.push(source.slice(node.start, node.end));
   });
-  assert.equal(selected.length, 3);
+  assert.equal(selected.length, 4);
   const { code } = await transformWithOxc(
     selected.join('\n') + '\nSessionSurface;',
     'ssh-actions.tsx',
@@ -50,13 +55,16 @@ test('actual failed SSH/SFTP surfaces offer only protected temporary and passphr
   const component = runInNewContext(code, {
     React: {
       createElement: (type: any, props: any, ...children: any[]) =>
-        typeof type === 'function' ? type(props) : { type, props, children },
+        typeof type === 'function' ? type({ ...props, children }) : { type, props, children },
     },
     useRef: () => ({ current: null }),
     useState: () => [null, () => {}],
     useEffect() {},
+    useLayoutEffect() {},
+    ConnectionLoading: 'loading',
     useContext: () => undefined,
     SshCertificateEditorContext: {},
+    ConnectionTransition: ({ pending, children }: any) => pending ?? children[0],
     isFileBrowserProtocol,
     protocolLabel: (p: string) => p.toUpperCase(),
     requiresSshCertificateReplacement: () => false,

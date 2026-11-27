@@ -374,6 +374,8 @@ test('actual native shutdown waits for web cleanup and propagates an unconfirmed
         vncSessionAttempts: { cancelAll() {} },
         cancelPreparingRdpStarts() {},
         serialBackend: undefined,
+        browserRelayBackend: undefined,
+        reportWarning() {},
         sealedSerial: { closeAll: async () => {} },
         rdpClient: undefined,
         nativeBackend: undefined,

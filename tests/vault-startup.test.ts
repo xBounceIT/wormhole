@@ -1349,6 +1349,7 @@ test('main startup routes encrypted workspaces through the unlocked owner and pr
         rememberAuthState: () => calls.push('remember'),
         normalizeWindowCloseConfirmation: (value: boolean) => value,
         scheduleStartupUpdateCheck: () => calls.push('updates'),
+        recordDiagnostic() {},
         console: { info: () => {}, error: () => {} },
       },
       { filename },

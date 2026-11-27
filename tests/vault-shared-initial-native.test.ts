@@ -5,7 +5,7 @@ import { execFile } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { rootCertificates } from 'node:tls';
@@ -69,6 +69,7 @@ test(
       const moduleURL = (name: string) =>
         JSON.stringify(pathToFileURL(join(root, 'dist-electron', name + '.js')).href);
       const capture = join(root, 'artifacts', 'vault', 'initial-invitation-screen.png');
+      await mkdir(dirname(capture), { recursive: true });
       const harness = join(directory, 'main.cjs');
       await writeFile(
         harness,

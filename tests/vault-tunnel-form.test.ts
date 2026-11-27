@@ -26,6 +26,7 @@ function sample(kind: number, field: string): unknown {
   if (
     [
       'UseSingleSignOn',
+      'UseSamlCallback',
       'UseExternalBrowser',
       'TrustServerCertificate',
       'UseOtp',

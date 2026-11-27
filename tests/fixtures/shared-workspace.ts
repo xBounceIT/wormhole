@@ -262,7 +262,7 @@ export async function runSharedWorkspaceTests() {
             width: 1,
             height: 1,
             image:
-              'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l9sAAAAASUVORK5CYII=',
+              'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNgAAAAAgABSK+kcQAAAABJRU5ErkJggg==',
           });
         });
       if (command.action === 'vnc.disconnect')
@@ -758,6 +758,7 @@ export async function runSharedWorkspaceTests() {
   (card.querySelector('[aria-label="Connect · Design desktop"]') as HTMLButtonElement).click();
   await until(() => !!card.querySelector('.shared-vnc-surface img'), 'VNC frame not mounted');
   const vncSurface = card.querySelector('.shared-vnc-surface [role=application]') as HTMLElement;
+  await until(() => vncSurface.tabIndex === 0, 'VNC input did not become active');
   const firstVnc = calls.find((c) => c.name === 'vnc' && c.args[0].action === 'vnc.connect')!
     .args[0];
   check(

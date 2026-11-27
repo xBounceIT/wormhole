@@ -139,10 +139,20 @@ jobs:
         run: |
           npm run build:electron
           npm run build:renderer
+          suffix=
+          if [[ "$RUNNER_OS" == Windows ]]; then suffix=.exe; fi
+          go -C tools/wormhole-backend build -o "$GITHUB_WORKSPACE/dist-electron/wormhole-backend-$(node -p process.arch)$suffix" .
+          mkdir -p artifacts/vault
 
       - name: Install private Linux clipboard test display
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install --no-install-recommends --yes xvfb xauth
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes xvfb xauth
+          # Use the runner's installed Chromium sandbox for Electron's renderer processes.
+          sandbox=/opt/google/chrome/chrome-sandbox
+          test "$(stat -c '%u:%a' "$sandbox")" = 0:4755
+          ln -sf "$sandbox" node_modules/electron/dist/chrome-sandbox
 
       - name: Verify Linux managed package ownership
         if: runner.os == 'Linux'
@@ -186,7 +196,9 @@ jobs:
 
       - name: Test Electron vault client and native process interoperability
         run: |
-          node --input-type=module <<'JS'
+          runner=(node)
+          if [[ "$RUNNER_OS" == Linux ]]; then runner=(dbus-run-session -- xvfb-run -a node); fi
+          "${runner[@]}" --input-type=module <<'JS'
           import { readFileSync } from 'node:fs';
           import { spawnSync } from 'node:child_process';
           const script = JSON.parse(readFileSync('package.json', 'utf8')).scripts['test:vault-client'];
@@ -442,14 +454,14 @@ jobs:
           dotnet format tools/wormhole-rdp-host/Tests/Wormhole.RdpHost.Tests.csproj --verify-no-changes --severity warn
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Build application
+        run: npm run build
+
       - name: Test Electron, backend, and sidecars
         run: npm run test:electron
 
       - name: Report unit and backend coverage
         run: npm run test:coverage
-
-      - name: Build application
-        run: npm run build
 
       - name: Build Windows RDP helper (x64 and arm64)
         run: npm run build:rdp-host && npm run build:rdp-host:arm64

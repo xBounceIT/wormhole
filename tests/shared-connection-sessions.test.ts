@@ -1221,12 +1221,14 @@ test('RDP sessions wait for measured mounted surfaces and pass only node identit
     assert.equal(f.current().status, 'opening');
     f.rdpEvent({ type: 'frame', sessionId: id });
     assert.equal(f.current().status, 'opening');
-    f.rdpEvent({ type: 'connected', sessionId: id });
+    f.rdpEvent({ type: 'connected', sessionId: id, backend: 'freerdp', external: false });
     assert.equal(f.current().status, 'connected');
     f.rdpEvent({ type: 'autoReconnecting', sessionId: id });
     assert.equal(f.current().rdpStatus, 'starting');
     f.rdpEvent({ type: 'autoReconnected', sessionId: id });
     assert.equal(f.current().rdpStatus, 'connected');
+    assert.equal(f.current().rdpBackend, 'freerdp');
+    assert.equal(f.current().rdpExternal, false);
     f.rdpEvent({ type: 'fatalError', sessionId: id, message: 'private' });
     await tick();
     assert.equal(f.current().status, 'failed');

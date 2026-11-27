@@ -213,7 +213,7 @@
   display: none;
 }
 
-.shared-rdp-surface > [data-rdp-session-id] {
+.shared-vnc-surface > :only-child {
   flex: 1;
   width: 100%;
 }

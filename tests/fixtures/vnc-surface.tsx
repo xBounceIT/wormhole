@@ -57,6 +57,10 @@ export async function runVncSurfaceTests() {
     React.act(async () => {
       await new Promise((r) => setTimeout(r, 10));
     });
+  const waitForInput = async (surface: HTMLElement) => {
+    for (let i = 0; i < 200 && surface.tabIndex !== 0; i++) await tick();
+    assert.equal(surface.tabIndex, 0, 'VNC input stays disabled until the first frame is visible');
+  };
   const render = async (change: any = {}) => {
     props = { ...props, ...change };
     await React.act(async () => {
@@ -157,10 +161,11 @@ export async function runVncSurfaceTests() {
       width: 100,
       height: 100,
       image:
-        'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l9sAAAAASUVORK5CYII=',
+        'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNgAAAAAgABSK+kcQAAAABJRU5ErkJggg==',
     });
     const surface = document.querySelector('[role="application"]') as HTMLElement,
       image = document.querySelector('img')!;
+    await waitForInput(surface);
     image.getBoundingClientRect = () => ({
       left: 0,
       top: 0,
@@ -400,9 +405,10 @@ export async function runVncSurfaceTests() {
       width: 100,
       height: 100,
       image:
-        'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l9sAAAAASUVORK5CYII=',
+        'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNgAAAAAgABSK+kcQAAAABJRU5ErkJggg==',
     });
     const controlledSurface = document.querySelector('[role=application]') as HTMLElement;
+    await waitForInput(controlledSurface);
     const controlledImage = document.querySelector('img')!;
     controlledImage.getBoundingClientRect = image.getBoundingClientRect;
     await React.act(async () => {

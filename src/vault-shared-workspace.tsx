@@ -113,6 +113,8 @@ function SharedRdpSurface({
         isActive={active}
         isAuthorized={!session.closeBusy}
         status={session.rdpStatus ?? 'starting'}
+        backend={session.rdpBackend}
+        external={session.rdpExternal}
         error={session.error}
         onReady={ready}
         onConnect={reconnect}

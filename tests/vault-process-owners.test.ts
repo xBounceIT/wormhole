@@ -11,6 +11,7 @@ import { stripTypeScriptTypes } from 'node:module';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { RdpBackendClient } from '../electron/rdp.ts';
+import { observeBackendProcess } from '../electron/runtime-diagnostics.ts';
 const sourceText = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
 const source = parseSync('main.ts', sourceText).program;
 const builtinCoverage =
@@ -78,7 +79,15 @@ function loadOwner(
       .filter((m: any) => m.type === 'MethodDefinition' && measured.includes(m.key.name))
       .map((m: any) => ({ start: m.start, end: m.end })),
   );
-  const context = vm.createContext({ console, setTimeout, clearTimeout, ...globals });
+  const context = vm.createContext({
+    console,
+    setTimeout,
+    clearTimeout,
+    observeBackendProcess,
+    recordDiagnostic() {},
+    reportWarning() {},
+    ...globals,
+  });
   new vm.Script(js, { filename: url }).runInContext(context);
   return new context.Subject();
 }

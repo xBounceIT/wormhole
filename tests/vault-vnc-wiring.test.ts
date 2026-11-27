@@ -406,8 +406,11 @@ test('actual App Quick VNC submit and SessionSurface reach the public native sch
   visitSyntax(mainSyntax(app, true), (node) => {
     if (node.type === 'FunctionDeclaration' && node.id?.name === 'submitQuickConnect')
       submit = app.slice(node.start, node.end);
-    if (node.type === 'FunctionDeclaration' && node.id?.name === 'SessionSurface')
-      surface = app.slice(node.start, node.end);
+    if (
+      node.type === 'FunctionDeclaration' &&
+      ['SessionSurface', 'SessionSurfaceContent'].includes(node.id?.name)
+    )
+      surface += app.slice(node.start, node.end) + '\n';
   });
   assert.ok(submit && surface);
   const { code } = await transformWithOxc(
@@ -419,7 +422,8 @@ test('actual App Quick VNC submit and SessionSurface reach the public native sch
     code,
     {
       React: {
-        createElement: (type: any, props: any, ...children: any[]) => ({ type, props, children }),
+        createElement: (type: any, props: any, ...children: any[]) =>
+          typeof type === 'function' ? type(props) : { type, props, children },
       },
       isFileBrowserProtocol: () => false,
       Suspense: 'suspense',

@@ -472,6 +472,8 @@ export class SealedSshBackend {
           }
           fingerprint = value.fingerprint;
           bytes = Buffer.alloc(0);
+          // The probe watches stdin for cancellation and joins that reader before exiting.
+          child.stdin.end();
         } catch {
           fail();
         }

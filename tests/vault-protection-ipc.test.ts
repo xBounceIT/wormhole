@@ -407,6 +407,8 @@ test('main wires preflight, browser flush, teardown and strict native cleanup be
       vncSessionAttempts: { cancelAll() {} },
       cancelPreparingRdpStarts() {},
       serialBackend: undefined,
+      browserRelayBackend: undefined,
+      reportWarning() {},
       sealedSerial: { closeAll: fail('serial') },
       stopVaultVncSessions: fail('vnc'),
       stopVaultBitwardenCLIUnlock: fail('bitwarden-cli'),

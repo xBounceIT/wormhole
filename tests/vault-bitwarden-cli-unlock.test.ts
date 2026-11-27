@@ -348,7 +348,7 @@ async function browserEnvelope(
           combined.set(key, combined.get(key) || r.count > 0);
         }
         assert.ok(100 * [...combined.values()].filter(Boolean).length / combined.size >= ${coverageThreshold});
-        console.log(JSON.stringify(envelope));
+        console.log('WH_TEST_ENVELOPE ' + JSON.stringify(envelope));
       } finally {
         window.destroy();
       }
@@ -364,7 +364,10 @@ async function browserEnvelope(
     headless ? ['--auto-servernum', executable, '--no-sandbox', harness] : [harness],
     { env, timeout: 25_000, windowsHide: true },
   );
-  const result = parseVaultBitwardenCLIPassword(JSON.parse(stdout));
+  const prefix = 'WH_TEST_ENVELOPE ';
+  const replies = stdout.split(/\r?\n/).filter((line) => line.startsWith(prefix));
+  assert.equal(replies.length, 1);
+  const result = parseVaultBitwardenCLIPassword(JSON.parse(replies[0].slice(prefix.length)));
   assert.ok(result);
   return result;
 }

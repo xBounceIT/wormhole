@@ -185,6 +185,7 @@ func TestVaultTunnelPublicProjectionReaderCompatibility(t *testing.T) {
 		{0, "Mtu", "9007199254740991", true}, {0, "Mtu", "-9007199254740991", true},
 		{0, "Mtu", "9007199254740992", false}, {0, "Mtu", "-9007199254740992", false},
 		{0, "Mtu", "null", true}, {2, "UseSingleSignOn", "true", true}, {2, "UseSingleSignOn", "false", true},
+		{2, "UseSamlCallback", "true", true}, {2, "UseSamlCallback", `"yes"`, false},
 		{0, "Dns", `["one","two"]`, true}, {0, "Dns", `["one\u0000"]`, false},
 		{0, "Dns", `["\ud800"]`, false}, {0, "Dns", `["\ud800\udfff"]`, true},
 		{2, "Host", `"\ud800"`, false}, {2, "Host", `"\udfff"`, false}, {2, "Host", `"a\u0000b"`, false},

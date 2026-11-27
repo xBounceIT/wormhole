@@ -1,4 +1,4 @@
-import { applyRdpBackendEvent, type RdpUiStatus } from './rdp-state.ts';
+import { applyRdpBackendEvent, type RdpBackendKind, type RdpUiStatus } from './rdp-state.ts';
 import { isRdpSurfaceRectWithinNativeBounds } from '../electron/rdp-contract.ts';
 import type { SharedCatalogNode } from '../electron/vault-shared-catalog.ts';
 import type { TerminalActions, XtermSession } from './xterm-terminal.ts';
@@ -59,6 +59,8 @@ export type SharedSessionView = {
   vncMount?: boolean;
   rdpMount?: boolean;
   rdpStatus?: RdpUiStatus;
+  rdpBackend?: RdpBackendKind;
+  rdpExternal?: boolean;
   webTarget?: WormholeWebTarget;
   webEvent?: Pick<WormholeWebEvent, 'url' | 'browser' | 'canGoBack' | 'canGoForward' | 'isLoading'>;
   serialPort?: string;
@@ -159,6 +161,8 @@ export class SharedConnectionSessions {
           vncMount,
           rdpMount,
           rdpStatus,
+          rdpBackend,
+          rdpExternal,
           webTarget,
           webEvent,
           serialPort,
@@ -175,6 +179,8 @@ export class SharedConnectionSessions {
           vncMount,
           rdpMount,
           rdpStatus,
+          rdpBackend,
+          rdpExternal,
           webTarget,
           webEvent,
           serialPort,
@@ -748,10 +754,17 @@ export class SharedConnectionSessions {
     )
       return;
     const next = applyRdpBackendEvent(
-      { rdpStatus: member.rdpStatus, rdpError: member.error },
+      {
+        rdpStatus: member.rdpStatus,
+        rdpError: member.error,
+        rdpBackend: member.rdpBackend,
+        rdpExternal: member.rdpExternal,
+      },
       event,
     );
     member.rdpStatus = next.rdpStatus;
+    member.rdpBackend = next.rdpBackend;
+    member.rdpExternal = next.rdpExternal;
     member.error = next.rdpError;
     if (next.rdpStatus === 'failed' || next.rdpStatus === 'disconnected') {
       this.failSession(member, 'RDP connection closed. Check access and reconnect.');

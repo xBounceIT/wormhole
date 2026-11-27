@@ -1380,8 +1380,14 @@ test('SSH probes identity before releasing credentials and awaits explicit trust
     assert.deepEqual(Object.keys(request).sort(), ['endpoint', 'host', 'port', 'requestId']);
     assert.equal(request.endpoint, '');
     assert.equal(f.requests.length, 0);
+    probe.exitOnEnd = false;
     probe.line({ requestId: request.requestId, fingerprint: observed });
     await tick();
+    assert.equal(
+      probe.stdin.writableEnded,
+      true,
+      'acknowledge the response before waiting for exit',
+    );
     assert.equal(
       f.children.length,
       1,
