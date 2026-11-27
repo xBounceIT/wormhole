@@ -1,12 +1,11 @@
 # Provisional connection resolver v1
 
-This is the Go metadata contract for issue #495. It is implemented by
-`internal/resolver` and consumed by the local vault owner. It is not the completed
-F0 rollout: existing protocol walks remain active, the PostgreSQL implementation
-does not exist yet, and migration pinning/orchestration must precede the switch.
-Runtime observations, automatic live shadow comparison and coherent native
-baseline capture are implemented as described below. Version 1 remains provisional
-until all rollout gates pass.
+The local vault and the shared PostgreSQL workspace implement resolver v1 for
+issue #495. The local owner uses `internal/resolver`. PostgreSQL computes the
+shared release plan and the Go client verifies it against signed catalog
+records. Legacy connection paths record the effective credential and run the
+Go resolver in shadow mode. Migration pins a changed path to its previous
+choice until the user selects the new result.
 
 ## Inputs and trust
 
@@ -22,8 +21,9 @@ records, grant permission, read storage or decrypt anything. Its result is not a
 capability. The owner authenticates each node and selected credential/tunnel
 before allowing a native consumer to borrow plaintext. Shared mode must also
 verify membership, capabilities and effective Use/Reveal grants, including Use
-on the selected credential boundary for an override. Slot catalogs and user slot
-values are not connected yet; the local owner refuses a slot choice.
+on the selected credential boundary for an override. In a shared workspace the
+client verifies the signed slot, its per-user assignment when present and the
+selected credential. Credential slots require a shared workspace.
 
 ## Inheritance and identity
 
@@ -124,21 +124,19 @@ tunnel leases or the sealed protocol handoff.
 
 `internal/resolver/testdata/conformance-v1.json` is a language-independent fixture
 corpus of full metadata chains, optional credential metadata/overrides, complete
-expected plans and fixed rejection categories. Go executes it today. PostgreSQL
-must execute the same corpus when its resolver is implemented. Additional Go
+expected plans and fixed rejection categories. The Go and PostgreSQL integration
+tests compare both implementations with the same expected results. Additional Go
 tests pin maximum depth, input immutability and platform-specific RDP policy.
 
 Intentional differences from some legacy paths include explicit empty identity/
 host handling, the inline identity boundary, complete ancestor requirements,
 the shared port/credential context rule, zero web port defaulting, serial tunnel
-rejection and consistent override priority. These are candidate contract choices,
-not permission to switch existing workspaces silently. The legacy golden snapshots
-must measure SSH, SFTP, VNC, RDP, gateway and Reveal separately; shadow comparison
-must allow only enumerated differences and log IDs only. Every affected result
-must be pinned to its legacy choice before activation, with a user-visible choice
-to retain the pin or adopt the new resolution. The legacy Go adapter performs
-diagnostic live shadow execution and coherent baseline capture as described below.
-`ResolverMigration` and the application switch are not implemented yet.
+rejection and consistent override priority. The legacy adapter captures SSH,
+SFTP, VNC, RDP, RDP gateway and Reveal separately. Its live shadow comparison
+logs IDs for differences. Migration preserves the legacy result for each
+changed path and lets the user retain the pin or adopt the new resolution.
+The local owner persists each changed path in its encrypted resolver migration
+record. Shared import carries the retained choices into the destination.
 
 ### Legacy observations and comparison
 
