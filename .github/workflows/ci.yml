@@ -232,7 +232,7 @@ jobs:
         run: |
           go vet -unsafeptr=false ./internal/encvfs
           go test -timeout=3m -run '^TestManagedUpdate|^TestManagedLinuxPackage|^TestWindowsInstallerHandoff|^TestWindowsUpdateConfirmation' .
-          go test -timeout=10m -coverprofile=vault.coverage ./internal/vault ./internal/securemem ./internal/encvfs ./internal/vaultwire ./internal/vaultstore ./internal/localvault ./internal/resolver ./internal/ospolicy ./internal/secretclipboard ./internal/updateauth ./cmd/sign-update-manifest
+          go test -timeout=10m -coverprofile=vault.coverage ./internal/argon2mem ./internal/vault ./internal/securemem ./internal/encvfs ./internal/vaultwire ./internal/vaultstore ./internal/localvault ./internal/resolver ./internal/ospolicy ./internal/secretclipboard ./internal/updateauth ./cmd/sign-update-manifest
           go test -timeout=35m -coverprofile=vault-entry.coverage .
 
       - name: Test OpenVPN capability build variants
@@ -269,7 +269,7 @@ jobs:
           import { readFileSync } from 'node:fs';
           import { parseGoCoverage, meetsCoverageThreshold } from './scripts/test-coverage.ts';
           const profile = readFileSync('tools/wormhole-backend/vault.coverage', 'utf8').split(/\r?\n/);
-          for (const name of ['vault', 'securemem', 'encvfs', 'vaultwire', 'vaultstore', 'localvault', 'resolver', 'ospolicy', 'secretclipboard']) {
+          for (const name of ['argon2mem', 'vault', 'securemem', 'encvfs', 'vaultwire', 'vaultstore', 'localvault', 'resolver', 'ospolicy', 'secretclipboard']) {
             const selected = [profile[0], ...profile.slice(1).filter(line => line.includes('/internal/' + name + '/'))];
             const coverage = parseGoCoverage(selected.join('\n'));
             console.log(name, coverage);

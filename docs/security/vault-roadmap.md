@@ -1914,7 +1914,10 @@ particular, low memory is permitted only by an authenticated Default policy.
 The native Electron test measures the vault process before its first password
 attempt and again after a rejected and a successful `kdf-v1` unlock. Each
 measurement must be within 32 MiB of the initial working set on Windows or
-resident set on Linux and macOS.
+resident set on Linux and macOS. On macOS the vault uses a private anonymous
+mapping for the Argon2id working blocks. It erases and unmaps the allocation
+before replying, including after a rejected password. The same serialized
+derivation gate and `debug.FreeOSMemory()` run on all three systems.
 
 Shared salt is SHA-256 of `wormhole/v1/salt`, the 36-byte lower-case canonical
 workspace UUID and immutable NFC/lower-case LoginName, concatenated in that order.

@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
-	"golang.org/x/crypto/argon2"
 	"golang.org/x/text/unicode/norm"
 )
 
@@ -62,7 +61,10 @@ func DerivePassword(ctx context.Context, password, salt []byte, preset KDFPreset
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	key := argon2.IDKey(password, salt, params.Iterations, params.MemoryKiB, params.Parallelism, 32)
+	key, err := passwordKey(password, salt, params)
+	if err != nil {
+		return nil, err
+	}
 	if err := ctx.Err(); err != nil {
 		Wipe(key)
 		return nil, err
