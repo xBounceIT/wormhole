@@ -549,6 +549,7 @@ app.whenReady().then(async()=>{
          await waitForAdmin('[...document.querySelectorAll("fieldset button")].some(b=>b.textContent==="Shared grant folder")');
          await fieldsetButton('Shared grant folder');
          await waitForAdmin('document.querySelector("fieldset h2")?.textContent==="Shared grant folder"');
+         await waitForAdmin('document.querySelector("fieldset")?.textContent.includes("requires Reveal on that credential.")');
          await fieldsetButton('Group grants');
          await waitForAdmin('[...document.querySelectorAll("select[aria-label] option")].some(option=>option.textContent==="Incident response")');
          await adminWindow.webContents.executeJavaScript('(()=>{const group=document.querySelector("fieldset select");group.selectedIndex=1;group.parentElement.querySelector("input[type=checkbox]").checked=true;})()');

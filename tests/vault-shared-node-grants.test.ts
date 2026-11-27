@@ -56,9 +56,12 @@ test('node grant pages cannot change snapshot or return another action’s recei
   }));
   const good = { status: 'ready', page: { ...snapshot, grants, after: id(26) } };
   assert.deepEqual(parseNodeGrantReply(good, target), good);
+  const protectedEdits = { ...good, page: { ...good.page, redirectRequiresReveal: true } };
+  assert.deepEqual(parseNodeGrantReply(protectedEdits, target), protectedEdits);
   assert.deepEqual(parseNodeGrantReply(good, { ...target, ...snapshot, after: id(1) }), good);
   for (const [value, request] of [
     [good, add],
+    [{ ...good, page: { ...good.page, redirectRequiresReveal: 'true' } }, target],
     [good, { ...target, ...snapshot, after: id(2) }],
     [good, { ...target, ...snapshot, changeSeq: '8', after: id(1) }],
     [{ ...good, page: { ...good.page, grants: [...grants, grants[0]] } }, target],

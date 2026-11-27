@@ -53,7 +53,7 @@ func checkPostgresNodeGrantAdministration(t *testing.T, ctx context.Context, dba
 	listPersonal.NodeID = personal
 	use(listPersonal, "unavailable")
 	preview := use(list, "ready").Page
-	if len(preview.Grants) != 0 {
+	if !preview.RedirectRequiresReveal || len(preview.Grants) != 0 {
 		t.Fatal("group got an implicit grant", preview)
 	}
 	mask := permissions.Use
@@ -127,7 +127,27 @@ func TestNodeGrantProjectionRejectsUnexpectedCursorAndMasks(t *testing.T) {
 	if _, err := parseAdminNodeGrantPage([][]byte{[]byte("1"), []byte("3"), []byte(`[]`)}, request); !errors.Is(err, ErrAdmissionResponse) {
 		t.Fatal("a second page reset the permission snapshot", err)
 	}
-	if _, err := parseAdminNodeGrantReply([][]byte{[]byte("changed"), nil, nil, nil}, request); !errors.Is(err, ErrAdmissionResponse) {
+	if _, err := parseAdminNodeGrantReply([][]byte{[]byte("changed"), nil, nil, nil, nil}, request); !errors.Is(err, ErrAdmissionResponse) {
 		t.Fatal("read reported a mutation", err)
+	}
+	for _, mode := range []string{"true", "false", "invalid"} {
+		row := [][]byte{[]byte("ready"), []byte("1"), []byte("2"), []byte("[]"), []byte(mode)}
+		reply, err := parseAdminNodeGrantReply(row, request)
+		if mode == "invalid" {
+			if err == nil || reply.Page != nil {
+				t.Fatal("invalid redirect policy accepted")
+			}
+		} else if err != nil || reply.Page == nil || reply.Page.RedirectRequiresReveal != (mode == "true") {
+			t.Fatal("credential redirect rule differs from installed schema", mode, err)
+		}
+	}
+	for _, row := range [][][]byte{
+		{[]byte("ready"), []byte("1"), []byte("2"), []byte("[]")},
+		{[]byte("unavailable"), nil, nil, nil, []byte("true")},
+		{[]byte("ready"), []byte("1"), []byte("2"), []byte("null"), []byte("true")},
+	} {
+		if reply, err := parseAdminNodeGrantReply(row, request); !errors.Is(err, ErrAdmissionResponse) || reply.Page != nil {
+			t.Fatal("invalid grant response exposed a permission rule", err)
+		}
 	}
 }

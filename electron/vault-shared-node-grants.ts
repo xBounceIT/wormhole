@@ -11,7 +11,11 @@ type GrantChange = Target &
   Snapshot & { grantRevision: string; mask: number } & ({ subjectId: string } | { login: string });
 export type NodeGrantRequest = GrantList | GrantChange;
 export type DirectNodeGrant = { subjectId: string; revision: string; label: string; mask: number };
-export type NodeGrantPage = Snapshot & { grants: DirectNodeGrant[]; after?: string };
+export type NodeGrantPage = Snapshot & {
+  grants: DirectNodeGrant[];
+  after?: string;
+  redirectRequiresReveal?: true;
+};
 export type NodeGrantStatus =
   | 'unavailable'
   | 'unsupported'
@@ -115,6 +119,7 @@ export function parseNodeGrantReply(
       'epoch',
       'changeSeq',
       'grants',
+      ...(page.redirectRequiresReveal === true ? ['redirectRequiresReveal'] : []),
       ...(Object.hasOwn(page, 'after') ? ['after'] : []),
     ]) ||
     !vaultRevision(page.epoch) ||
@@ -152,6 +157,7 @@ export function parseNodeGrantReply(
       epoch: page.epoch,
       changeSeq: page.changeSeq,
       grants,
+      ...(page.redirectRequiresReveal === true ? { redirectRequiresReveal: true } : {}),
       ...(page.after === last ? { after: last } : {}),
     },
   };

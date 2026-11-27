@@ -11,7 +11,7 @@ import (
 
 const nodeGrantsSupportedSQL = `SELECT (pg_catalog.to_regprocedure(
  'wormhole_api_v1.manage_node_grants(bytea,uuid,bigint,text,uuid,bigint,bigint,uuid,text,bigint,integer,bytea,bytea)') IS NOT NULL)::text`
-const adminNodeGrantsSQL = `SELECT status,epoch::text,change_seq::text,payload::text
+const adminNodeGrantsSQL = `SELECT status,epoch::text,change_seq::text,payload::text, CASE WHEN status='ready' THEN ` + nodeEditingAPI + `::text END
  FROM wormhole_api_v1.manage_node_grants(pg_catalog.decode($1,'hex'),$2::uuid,$3::bigint,$4,$5::uuid,$6::bigint,
  $7::bigint,$8::uuid,$9,$10::bigint,$11::integer,pg_catalog.decode($12,'hex'),pg_catalog.decode($13,'hex'))`
 
@@ -36,10 +36,11 @@ type AdminNodeGrant struct {
 }
 
 type AdminNodeGrantPage struct {
-	Epoch     string           `json:"epoch"`
-	ChangeSeq string           `json:"changeSeq"`
-	Grants    []AdminNodeGrant `json:"grants"`
-	After     string           `json:"after,omitempty"`
+	Epoch                  string           `json:"epoch"`
+	ChangeSeq              string           `json:"changeSeq"`
+	Grants                 []AdminNodeGrant `json:"grants"`
+	After                  string           `json:"after,omitempty"`
+	RedirectRequiresReveal bool             `json:"redirectRequiresReveal,omitempty"`
 }
 
 type AdminNodeGrantReply struct {
@@ -93,20 +94,33 @@ func (s *Session) AdminNodeGrants(ctx context.Context, trust TrustState, request
 		mask = strconv.AppendUint(nil, uint64(*request.Mask), 10)
 	}
 	args = append(args, mask)
-	err = s.queryAdministration(ctx, trust, adminNodeGrantsSQL, args, adminGroupPageBytes, 4, func(row [][]byte) error {
+	err = s.queryAdministration(ctx, trust, adminNodeGrantsSQL, args, adminGroupPageBytes, 5, func(row [][]byte) error {
 		result, err = parseAdminNodeGrantReply(row, request)
 		return err
 	})
-	return result, err
+	if err != nil {
+		return AdminNodeGrantReply{}, err
+	}
+	return result, nil
 }
 
 func parseAdminNodeGrantReply(row [][]byte, request AdminNodeGrantRequest) (AdminNodeGrantReply, error) {
+	if len(row) != 5 {
+		return AdminNodeGrantReply{}, ErrAdmissionResponse
+	}
 	status := string(row[0])
 	if status == "ready" && request.Mask == nil {
-		page, err := parseAdminNodeGrantPage(row[1:], request)
-		return AdminNodeGrantReply{Status: status, Page: page}, err
+		if string(row[4]) != "true" && string(row[4]) != "false" {
+			return AdminNodeGrantReply{}, ErrAdmissionResponse
+		}
+		page, err := parseAdminNodeGrantPage(row[1:4], request)
+		if err != nil {
+			return AdminNodeGrantReply{}, err
+		}
+		page.RedirectRequiresReveal = string(row[4]) == "true"
+		return AdminNodeGrantReply{Status: status, Page: page}, nil
 	}
-	if row[1] != nil || row[2] != nil || row[3] != nil {
+	if row[1] != nil || row[2] != nil || row[3] != nil || row[4] != nil {
 		return AdminNodeGrantReply{}, ErrAdmissionResponse
 	}
 	switch status {

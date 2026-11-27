@@ -1128,7 +1128,7 @@ let finishAdminPage;
     grant:async request=>{
       if(pending)await new Promise(resolve=>pending=resolve);
       check(request.nodeId==='folder'&&request.nodeRevision==='2','grant request lost the selected node');
-      if(!Object.hasOwn(request,'mask'))return {status:'ready',page:{epoch:'1',changeSeq:'4',grants:request.after?[]:listed,...(!request.after&&listed.length?{after:'more'}:{})}};
+      if(!Object.hasOwn(request,'mask'))return {status:'ready',page:{epoch:'1',changeSeq:'4',grants:request.after?[]:listed,...(request.kind==='group'?{redirectRequiresReveal:true}:{}),...(!request.after&&listed.length?{after:'more'}:{})}};
       change=request;
       check(request.epoch==='1'&&request.changeSeq==='4','grant request lost the reviewed snapshot');
       if(status==='changed') listed=request.mask?[{subjectId:request.subjectId??'alice',label:request.login??'Operators',mask:request.mask,revision:'2'}]:[];
@@ -1165,6 +1165,7 @@ let finishAdminPage;
   await press('More direct grants');
   check(!root.textContent.includes('alice'),'older grant page retained');
   await press('Group grants');await press('More groups');
+  check(root.textContent.includes('requires Reveal on that credential.')&&!root.textContent.includes('Write implies Reveal.'),'protected edits showed the legacy grant policy');
   const picker=root.querySelector('select');picker.value='operators';
   const editor=picker.parentElement;
   editor.querySelector('input[type=checkbox]').checked=true;

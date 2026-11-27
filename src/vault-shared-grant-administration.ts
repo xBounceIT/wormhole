@@ -252,8 +252,9 @@ export function mountSharedGrantAdministration(
     const title = document.createElement('h2');
     title.textContent = node.name;
     const explanation = document.createElement('p');
-    explanation.textContent =
-      'Direct grants are listed here. Folder grants apply to descendants. Write implies Reveal.';
+    explanation.textContent = result.page.redirectRequiresReveal
+      ? 'Folder grants apply to descendants. Changing where a credential is used requires Reveal on that credential.'
+      : 'Direct grants are listed here. Folder grants apply to descendants. Write implies Reveal.';
     const tabs = document.createElement('div');
     tabs.className = 'shared-setup-actions';
     const accounts = button('Account grants', () => open(node, 'account'));

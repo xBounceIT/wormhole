@@ -33,9 +33,11 @@ type NodeEdit struct {
 	epoch, sequence uint64
 }
 
+const nodeEditingAPI = `(pg_catalog.to_regprocedure('wormhole_api_v1.read_node_edit(bytea,uuid,bigint,bytea,bytea)') IS NOT NULL
+		AND pg_catalog.to_regprocedure('wormhole_api_v1.update_node(bytea,uuid,bigint,bigint,bigint,jsonb,uuid,integer,bytea,bytea,bytea,bytea)') IS NOT NULL)`
+
 func (s *Session) NodeEditingSupported(ctx context.Context) (bool, error) {
-	return s.serverCapability(ctx, `SELECT (pg_catalog.to_regprocedure('wormhole_api_v1.read_node_edit(bytea,uuid,bigint,bytea,bytea)') IS NOT NULL
-		AND pg_catalog.to_regprocedure('wormhole_api_v1.update_node(bytea,uuid,bigint,bigint,bigint,jsonb,uuid,integer,bytea,bytea,bytea,bytea)') IS NOT NULL)::text`)
+	return s.serverCapability(ctx, "SELECT "+nodeEditingAPI+"::text")
 }
 
 func (s *Session) ReadNodeEdit(ctx context.Context, trust TrustState, id uuid.UUID, revision uint64) (TrustState, *NodeEdit, error) {

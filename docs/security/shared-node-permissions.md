@@ -46,6 +46,8 @@ folders in the shared catalog. A rename needs those two permissions. When an
 edit changes where a credential would be used, the service checks Reveal on
 the resulting credential, including credentials selected by another member.
 The same checks apply to connections that inherit changed folder settings.
+The grant editor displays this rule when the workspace provides the protected
+node-editing API. Earlier workspaces retain the “Write implies Reveal” notice.
 
 Schema 89 adds **Move to folder…** to the editor. The user selects a writable
 folder or the workspace root. The backend checks the source and chosen folder
