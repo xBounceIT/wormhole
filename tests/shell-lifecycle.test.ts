@@ -8,6 +8,7 @@ import { PassThrough } from 'node:stream';
 import test from 'node:test';
 
 import { selectDialogVisuals } from '../src/dialog-lifecycle.ts';
+import { backendErrorText, observeBackendProcess } from '../electron/runtime-diagnostics.ts';
 import {
   readDarwinHardwareModel,
   shouldDisableHardwareAcceleration,
@@ -1630,9 +1631,10 @@ test('update IPC keeps the manifest in main and requires a completed download of
     }
   }
   const downloads: DownloadProcess[] = [];
+  const diagnostics: string[] = [];
   const harness = new Function(
     stripTypeScriptTypes(`function createUpdateHarness(d) {
-    const { path, createInterface } = d;
+    const { path, createInterface, backendErrorText, observeBackendProcess, recordDiagnostic } = d;
     const app = { getVersion: () => '2.0.0' };
     const runBackend = async (operation, request, _timeout, signal) => {
       d.fetches.push(operation);
@@ -1686,6 +1688,9 @@ test('update IPC keeps the manifest in main and requires a completed download of
   )()({
     path,
     createInterface,
+    backendErrorText,
+    observeBackendProcess,
+    recordDiagnostic: (_level: string, event: string) => diagnostics.push(event),
     fetches,
     checkRequests,
     signals,
@@ -1752,6 +1757,7 @@ test('update IPC keeps the manifest in main and requires a completed download of
     child.finish(0);
     await assert.rejects(pending, message);
   }
+  assert.ok(diagnostics.includes('Update download ended before reporting completion'));
 
   const pending = download(trusted, {
     ...publicRelease,

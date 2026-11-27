@@ -129,6 +129,7 @@ static CFMutableDictionaryRef wh_migration_query(CFTypeRef item) {
     CFMutableDictionaryRef query = CFDictionaryCreateMutable(kCFAllocatorDefault, 0,
         &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
     if (query != NULL) {
+        CFDictionarySetValue(query, kSecClass, kSecClassGenericPassword);
         CFDictionarySetValue(query, kSecMatchItemList, items);
         CFDictionarySetValue(query, kSecUseAuthenticationUI, kSecUseAuthenticationUIFail);
     }

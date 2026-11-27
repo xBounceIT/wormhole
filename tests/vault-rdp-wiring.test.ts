@@ -967,12 +967,16 @@ test('actual local edit and deletion retain canonical RDP tab ownership and canc
 
 test('actual local SessionSurface offers temporary entry for saved and quick protected RDP connections', async (t) => {
   const app = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
-  let source = '';
+  const components: string[] = [];
   visitSyntax(mainSyntax(app, true), (node) => {
-    if (node.type === 'FunctionDeclaration' && node.id?.name === 'SessionSurface')
-      source = app.slice(node.start, node.end);
+    if (
+      node.type === 'FunctionDeclaration' &&
+      ['SessionSurface', 'SessionSurfaceContent'].includes(node.id?.name)
+    )
+      components.push(app.slice(node.start, node.end));
   });
-  assert.ok(source);
+  assert.equal(components.length, 2);
+  const source = components.join('\n');
   const { code } = await transformWithOxc(source + '\nSessionSurface;', 'session-rdp.tsx', {
     jsx: { runtime: 'classic' },
   });
@@ -985,7 +989,10 @@ test('actual local SessionSurface offers temporary entry for saved and quick pro
   const component = runInNewContext(
     code,
     {
-      React: { createElement: (type: unknown, props: unknown) => ({ type, props }) },
+      React: {
+        createElement: (type: unknown, props: unknown) =>
+          typeof type === 'function' ? type(props) : { type, props },
+      },
       isFileBrowserProtocol: () => false,
       canOpenRdpSystemClient: () => false,
       RdpSurface: 'rdp-surface',

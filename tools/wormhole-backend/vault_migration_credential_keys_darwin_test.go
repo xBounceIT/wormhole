@@ -14,6 +14,13 @@ import (
 // The native CI runner must provide an unlocked test keychain; no silent skip.
 func TestVaultMigrationCredentialKeysNativeDarwin(t *testing.T) {
 	ctx := context.Background()
+	const otherValue = "larger than the migration limit"
+	id := uuid.NewString()
+	reference, encoding, err := storeCredentialSecret(id, "", otherValue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer deleteStoredCredentialSecret(id, reference, encoding)
 	for _, value := range []string{"", " \x00native secret\n "} {
 		id := uuid.NewString()
 		reference, encoding, err := prepareCredentialSecretStorage(id)
@@ -72,12 +79,11 @@ func TestVaultMigrationCredentialKeysNativeDarwin(t *testing.T) {
 			t.Fatal("deleted closed store")
 		}
 	}
-	id := uuid.NewString()
-	reference, encoding, err := storeCredentialSecret(id, "", "larger than the migration limit")
-	if err != nil {
-		t.Fatal(err)
+	other, err := unprotectPlatformCredentialSecret(id, reference, encoding)
+	if err != nil || !bytes.Equal(other, []byte(otherValue)) {
+		t.Fatal("migration touched another credential in the same service", err)
 	}
-	defer deleteStoredCredentialSecret(id, reference, encoding)
+	clearBytes(other)
 	row := legacyInventoryRow{ID: id, Reference: reference, Encoding: encoding}
 	store, err := openMigrationCredentialStore(ctx, row, 1)
 	if err != nil {
