@@ -267,7 +267,7 @@ func runBackendCLI(args []string, input io.Reader, output io.Writer, errorOutput
 func runBackendCLIWithOwnership(args []string, input io.Reader, output io.Writer, errorOutput io.Writer, releaseWorkspace *func()) int {
 	flags := flag.NewFlagSet("wormhole-backend", flag.ContinueOnError)
 	flags.SetOutput(errorOutput)
-	operation := flags.String("operation", "workspace", "backend operation: startup, startup-unlock, workspace, workspace-duplicate-node, workspace-delete-node, workspace-delete-nodes, workspace-show-credentials, backup-*, credential-*, tunnel-*, workspace-node-*, workspace-update-node-*, web-target, migrate, mcp-status, ssh, serial, ssh-trust-host-key, logs-info, settings-set-log-retention, settings-set-log-level, open-log-file, open-logs-folder, serve, rdp, extension-*, bitwarden-*, or auth-*")
+	operation := flags.String("operation", "workspace", "backend operation: export-shared-schema-upgrade, startup, startup-unlock, workspace, workspace-duplicate-node, workspace-delete-node, workspace-delete-nodes, workspace-show-credentials, backup-*, credential-*, tunnel-*, workspace-node-*, workspace-update-node-*, web-target, migrate, mcp-status, ssh, serial, ssh-trust-host-key, logs-info, settings-set-log-retention, settings-set-log-level, open-log-file, open-logs-folder, serve, rdp, extension-*, bitwarden-*, or auth-*")
 	databasePath := flags.String("database", "", "path to the Wormhole SQLite database")
 	electronUserDataPath := flags.String("electron-user-data", "", "path to the Electron user-data directory")
 	migrationSessionData := flags.String("migration-session-data", "", "isolated native Chromium session-data directory for migration")
@@ -288,6 +288,9 @@ func runBackendCLIWithOwnership(args []string, input io.Reader, output io.Writer
 	}
 	if *operation == "process-exit-proof" {
 		return runProcessExitProof(*processID, output, errorOutput)
+	}
+	if *operation == "export-shared-schema-upgrade" {
+		return exportSharedSchemaUpgrade(input, output, errorOutput)
 	}
 	decodeInput := func(target any) error {
 		return decodeInputReader(input, target)

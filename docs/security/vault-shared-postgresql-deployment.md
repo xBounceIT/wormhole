@@ -26,6 +26,33 @@ migration changes the expected catalog, maintainers verify the fingerprints
 against clean installations by both a superuser and a delegated DBA in
 `TestPostgresAtomicSchemaDeployment` and `TestPostgresSchemaDeploymentWithDelegatedDBA`.
 
+### Upgrade an existing workspace
+
+Use the backend bundled with the target Wormhole version to export the next
+versioned SQL transaction. Read the current values on a DBA connection to the
+workspace database.
+
+```sql
+SELECT role_tag, workspace_id, schema_version FROM wormhole_data.workspace_meta WHERE singleton;
+```
+
+For example, this PowerShell 7 command exports the 91→92 migration. Use your
+workspace's values and the backend executable for your architecture.
+
+```powershell
+'{"roleTag":"acmeprod","workspaceId":"5581ede5-b096-44ea-869b-c165e4ca114f","installedVersion":91}' |
+  .\wormhole-backend-x64.exe --operation export-shared-schema-upgrade > upgrade-92.sql
+```
+
+The offline exporter reads its request from stdin and writes SQL to stdout.
+Check the exit code before using the file. Review the script and apply it on
+a dedicated DBA connection during a maintenance window, for example with
+`psql -v ON_ERROR_STOP=1 -f upgrade-92.sql` on the intended database. Each
+transaction checks the workspace identity and installed version and takes the
+schema migration lock. For older workspaces, repeat for the next version after
+each commit. Run **Check deployment** once the workspace reaches the app's
+schema version.
+
 ### Client access rules
 
 For self-hosted PostgreSQL, open **PostgreSQL client access rules** in the
@@ -576,9 +603,8 @@ device count plus 20. For example, 300 devices require a budget of at least
 620 connections. The first-administrator form calculates this value as you type.
 
 Schema 92 gives each enrolled device role a connection limit of three. Temporary
-invitation and reset roles have a limit of two. To upgrade schema 91, apply
-`deploy.DeviceConnectionLimitMigration(roleTag, workspaceID)` during a maintenance
-window. The migration updates active confirmed roles with the original limit of
+invitation and reset roles have a limit of two. Follow [the upgrade procedure](#upgrade-an-existing-workspace)
+with installed version 91. The migration updates active confirmed roles with the original limit of
 two after matching their PostgreSQL OID and role name. An older pending device
 receives its new limit when it confirms enrollment.
 

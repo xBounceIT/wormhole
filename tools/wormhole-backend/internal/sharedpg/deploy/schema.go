@@ -40,6 +40,16 @@ const SchemaVersion = len(schemaMigrations)
 
 var errMigrationBoundary = errors.New("invalid shared workspace migration transaction boundary")
 
+// NextMigrationScript renders the same standalone transaction used for this
+// version in a fresh installation. Its SQL guard verifies the live identity and
+// installed version when the DBA applies it.
+func NextMigrationScript(roleTag, workspaceID string, installedVersion int) (string, error) {
+	if installedVersion < 1 || installedVersion >= SchemaVersion {
+		return "", errors.New("no workspace migration from this version")
+	}
+	return renderMigration(schemaMigrations[installedVersion], roleTag, workspaceID)
+}
+
 // SchemaScript builds a secret-free script for a fresh, dedicated database.
 // Run it on a fresh DBA connection. The schema stays in provisioning until
 // authenticated organisation data and the first account have been installed.

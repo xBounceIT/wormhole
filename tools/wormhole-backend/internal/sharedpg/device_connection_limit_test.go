@@ -54,7 +54,7 @@ func TestPostgresDeviceConnectionLimitUpgrade(t *testing.T) {
 			END LOOP;
 		END $fixture$;
 		RESET ROLE;`)
-	migration, err := deploy.DeviceConnectionLimitMigration("testscope", testHintID)
+	migration, err := deploy.NextMigrationScript("testscope", testHintID, 91)
 	if err != nil {
 		t.Fatal(err)
 	}
