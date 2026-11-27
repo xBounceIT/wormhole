@@ -1,3 +1,4 @@
+#define __STDC_WANT_LIB_EXT1__ 1
 #import <Foundation/Foundation.h>
 #import <LocalAuthentication/LocalAuthentication.h>
 #include <Security/SecTask.h>
@@ -144,7 +145,7 @@ static int RunOperation(uint8_t operation, NSString *group, NSString *account, u
         item[(__bridge id)kSecValueData] = [NSData dataWithBytesNoCopy:random length:sizeof(random) freeWhenDone:NO];
         status = SecItemAdd((__bridge CFDictionaryRef)item, NULL);
     }
-    explicit_bzero(random, sizeof(random));
+    memset_s(random, sizeof(random), 0, sizeof(random));
     CFRelease(control);
     if (status == errSecSuccess) {
         status = CopyFactor(identity, context, out);
@@ -190,7 +191,7 @@ int main(int argc, char **argv) {
             // The pipe may close after creation but before the parent can commit.
             RunOperation(removeFactor, group, account, response + headerSize);
         }
-        explicit_bzero(response, sizeof(response));
+        memset_s(response, sizeof(response), 0, sizeof(response));
         return sent ? 0 : 1;
     }
 }

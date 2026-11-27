@@ -16,7 +16,10 @@ import (
 
 // Bind destructive operations to one native directory handle, not a pathname
 // which another process could redirect after validation.
-type legacyPublicationFS struct{ root *os.Root }
+type legacyPublicationFS struct {
+	root      *os.Root
+	canonical string
+}
 
 func legacyPublicationFilename(name string) bool {
 	return name != "" && name != "." && name != ".." && len(name) <= 4096 && utf8.ValidString(name) && !strings.ContainsAny(name, "/\\:") && strings.IndexFunc(name, unicode.IsControl) < 0 && !strings.HasSuffix(name, ".") && !strings.HasSuffix(name, " ")
@@ -27,7 +30,17 @@ func openLegacyPublicationFS(directory string) (*legacyPublicationFS, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &legacyPublicationFS{root: root}, nil
+	canonical, err := filepath.EvalSymlinks(directory)
+	if err != nil {
+		root.Close()
+		return nil, err
+	}
+	f := &legacyPublicationFS{root: root, canonical: canonical}
+	if err := f.verify(); err != nil {
+		root.Close()
+		return nil, err
+	}
+	return f, nil
 }
 
 func (f *legacyPublicationFS) verify() error {
@@ -44,11 +57,18 @@ func (f *legacyPublicationFS) verify() error {
 	if err != nil || pathErr != nil || !current.IsDir() || current.Mode()&os.ModeSymlink != 0 || !os.SameFile(bound, current) {
 		return vault.ErrAuthentication
 	}
+	if f.canonical != f.root.Name() {
+		resolved, err := os.Lstat(f.canonical)
+		if err != nil || !resolved.IsDir() || !os.SameFile(bound, resolved) {
+			return vault.ErrAuthentication
+		}
+	}
 	return nil
 }
 
 func (f *legacyPublicationFS) relative(path string) (string, error) {
-	if f == nil || f.root == nil || filepath.Dir(path) != f.root.Name() || !legacyPublicationFilename(filepath.Base(path)) || filepath.Clean(path) != path {
+	parent := filepath.Dir(path)
+	if f == nil || f.root == nil || (parent != f.root.Name() && parent != f.canonical) || !legacyPublicationFilename(filepath.Base(path)) || filepath.Clean(path) != path {
 		return "", vault.ErrPolicy
 	}
 	return filepath.Base(path), nil
@@ -208,7 +228,7 @@ func (f *legacyPublicationFS) canonicalSource(logical string) (string, error) {
 	if selected == "" {
 		selected = filepath.Base(logical)
 	}
-	canonical := filepath.Join(f.root.Name(), selected)
+	canonical := filepath.Join(f.canonical, selected)
 	if _, err := f.relative(canonical); err != nil {
 		return "", err
 	}

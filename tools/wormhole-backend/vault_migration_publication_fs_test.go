@@ -96,6 +96,49 @@ func TestVaultMigrationPublicationRootRejectsUnsafeNamesAndSlots(t *testing.T) {
 	}
 }
 
+func TestVaultPublicationRetainsCanonicalDirectoryAcrossCutover(t *testing.T) {
+	base := t.TempDir()
+	physical := filepath.Join(base, "Parent", "workspace")
+	if err := os.MkdirAll(physical, 0700); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(base, "parent")
+	if runtime.GOOS != "windows" {
+		alias = filepath.Join(base, "alias")
+		if err := os.Symlink(filepath.Dir(physical), alias); err != nil {
+			t.Fatal(err)
+		}
+	}
+	logical := filepath.Join(alias, "workspace", "workspace.db")
+	f, err := openLegacyPublicationFS(filepath.Dir(logical))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.root.Close()
+	actual, err := filepath.EvalSymlinks(physical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(actual, "workspace.db")
+	if err := os.WriteFile(logical, []byte("fixture"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	check := func() {
+		t.Helper()
+		if got, err := f.canonicalSource(logical); err != nil || got != want {
+			t.Fatalf("canonical source = %q, want %q: %v", got, want, err)
+		}
+	}
+	check()
+	if err := os.WriteFile(vaultSlotPath(logical), []byte("fixture"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(logical); err != nil {
+		t.Fatal(err)
+	}
+	check()
+}
+
 func TestVaultMigrationPublicationRootWritesLongNamesAndRejectsOverwrite(t *testing.T) {
 	root := t.TempDir()
 	f, err := openLegacyPublicationFS(root)

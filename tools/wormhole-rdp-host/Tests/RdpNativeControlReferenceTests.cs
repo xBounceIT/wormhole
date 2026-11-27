@@ -1,5 +1,5 @@
-using System.Runtime.InteropServices;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using Wormhole.Interop.Rdp;
 
 namespace Wormhole.RdpHost.Tests;
@@ -52,8 +52,10 @@ public sealed class RdpNativeControlReferenceTests
         {
             StartInfo = new ProcessStartInfo(probe!)
             {
-                UseShellExecute = false, CreateNoWindow = true,
-                RedirectStandardOutput = true, RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
                 ArgumentList = { "-test.run=^TestNativeRdpCOM", "-test.v", "-test.timeout=60s" },
             },
         };

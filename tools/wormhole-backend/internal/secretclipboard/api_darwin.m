@@ -1,5 +1,6 @@
 //go:build darwin && cgo
 
+#define __STDC_WANT_LIB_EXT1__ 1
 #import <AppKit/AppKit.h>
 #include <stdlib.h>
 #include <string.h>
@@ -55,7 +56,7 @@ int wh_clipboard_write(void *opaque, const unsigned char *value, size_t length, 
             // so the Go owner retries cleanup. Never expose native diagnostics.
             return 1;
         } @finally {
-            if (text.length) explicit_bzero(text.mutableBytes, text.length);
+            if (text.length) memset_s(text.mutableBytes, text.length, 0, text.length);
         }
     }
 }

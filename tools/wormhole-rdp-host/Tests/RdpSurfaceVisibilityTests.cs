@@ -124,7 +124,8 @@ public sealed class RdpSurfaceVisibilityTests
             }
             catch (Exception error) { failure = error; }
             finally { _ = SetErrorMode(originalErrorMode); }
-        }) { IsBackground = true };
+        })
+        { IsBackground = true };
         thread.SetApartmentState(ApartmentState.STA);
         thread.Start();
         Assert.True(thread.Join(TimeSpan.FromSeconds(15)), "Native visibility test did not terminate");

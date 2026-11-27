@@ -18,17 +18,17 @@ import (
 )
 
 type fakeWindows struct {
-	sequenceValue       Ticket
-	owner, opened       bool
-	failInit, failEmpty bool
-	failFormat          uint32
-	busy                int
-	events              []uint32
-	published           []byte
-	borrowed            []byte
-	pumps, destroys     int
-	written             chan struct{}
-	resume              chan struct{}
+	sequenceValue          Ticket
+	owner, opened, changed bool
+	failInit, failEmpty    bool
+	failFormat             uint32
+	busy                   int
+	events                 []uint32
+	published              []byte
+	borrowed               []byte
+	pumps, destroys        int
+	written                chan struct{}
+	resume                 chan struct{}
 }
 
 func (a *fakeWindows) initialize() error {
@@ -47,7 +47,13 @@ func (a *fakeWindows) open() bool {
 	a.opened = true
 	return true
 }
-func (a *fakeWindows) close() { a.opened = false }
+func (a *fakeWindows) close() {
+	if a.changed {
+		a.sequenceValue++
+		a.changed = false
+	}
+	a.opened = false
+}
 func (a *fakeWindows) empty() bool {
 	if !a.opened {
 		panic("unlocked empty")
@@ -56,14 +62,12 @@ func (a *fakeWindows) empty() bool {
 		return false
 	}
 	a.sequenceValue++
+	a.changed = true
 	a.owner = true
 	a.published = nil
 	return true
 }
 func (a *fakeWindows) sequence() Ticket {
-	if !a.opened {
-		panic("unlocked sequence")
-	}
 	return a.sequenceValue
 }
 func (a *fakeWindows) owned() bool       { return a.owner }

@@ -3,10 +3,12 @@ package localvault
 import (
 	"bytes"
 	"context"
+	"runtime"
+	"testing"
+
 	"github.com/google/uuid"
 	"github.com/xBounceIT/wormhole/tools/wormhole-backend/internal/vault"
 	"github.com/xBounceIT/wormhole/tools/wormhole-backend/internal/vaultstore"
-	"testing"
 )
 
 type manualRDPSelectedStore struct {
@@ -176,13 +178,16 @@ func TestManualRDPRoutesAndInvalidAuthority(t *testing.T) {
 		t.Fatal(err)
 	}
 	endpoint := "127.0.0.1:19050"
-	// The saved AzureAD identity cannot veto a separately owned VPN lease,
-	// but it still cannot start a saved native RDP session on that lease.
+	// Only Windows delegates this saved AzureAD identity to its system client.
 	if _, err := o.SealConnectionTunnel(ctx, q); err != nil {
 		t.Fatal("route rejected by unselected identity", err)
 	}
-	if _, err := o.SealRoutedRDPConnection(ctx, q, *route, endpoint); err == nil {
-		t.Fatal("saved external identity admitted")
+	var wantSaved error
+	if runtime.GOOS == "windows" {
+		wantSaved = vault.ErrPolicy
+	}
+	if _, err := o.SealRoutedRDPConnection(ctx, q, *route, endpoint); err != wantSaved {
+		t.Fatalf("saved routed AzureAD identity: got %v, want %v", err, wantSaved)
 	}
 
 	inner, _ = vault.SealManualRDPCredentials(q.PublicKey, route.BundleBinding, route, endpoint, vault.RDPManualCredentials{Username: "routed", Password: []byte("temporary")})

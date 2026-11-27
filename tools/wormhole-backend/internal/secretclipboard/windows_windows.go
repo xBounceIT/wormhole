@@ -150,20 +150,29 @@ func windowsWrite(ctx context.Context, api windowsClipboard, value []byte) (Tick
 	if err := windowsOpen(ctx, api); err != nil {
 		return 0, err
 	}
+	if err := windowsPublishText(api, text); err != nil {
+		return 0, err
+	}
+	// CloseClipboard may increment the sequence when it publishes formats.
+	// A different writer in this interval loses our private-window ownership.
+	return windowsTicket(api), nil
+}
+
+func windowsPublishText(api windowsClipboard, text []byte) error {
 	defer api.close()
 	if !api.empty() {
-		return 0, ErrUnavailable
+		return ErrUnavailable
 	}
 	// Exclusion markers precede text while OpenClipboard excludes other writers.
 	for _, format := range api.formats() {
 		if !api.set(format, []byte{0, 0, 0, 0}) {
-			return 0, ErrUnavailable
+			return ErrUnavailable
 		}
 	}
 	if !api.set(13, text) {
-		return 0, ErrUnavailable
+		return ErrUnavailable
 	} // CF_UNICODETEXT
-	return windowsTicket(api), nil
+	return nil
 }
 func windowsClear(ctx context.Context, api windowsClipboard, ticket Ticket) error {
 	if ticket == 0 {

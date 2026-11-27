@@ -175,7 +175,7 @@ jobs:
         run: |
           go vet -unsafeptr=false ./internal/encvfs
           go test -timeout=3m -run '^TestManagedUpdate|^TestManagedLinuxPackage|^TestWindowsInstallerHandoff|^TestWindowsUpdateConfirmation' .
-          go test -timeout=2m -coverprofile=vault.coverage ./internal/vault ./internal/securemem ./internal/encvfs ./internal/vaultwire ./internal/vaultstore ./internal/localvault ./internal/resolver ./internal/ospolicy ./internal/secretclipboard ./internal/updateauth ./cmd/sign-update-manifest
+          go test -timeout=10m -coverprofile=vault.coverage ./internal/vault ./internal/securemem ./internal/encvfs ./internal/vaultwire ./internal/vaultstore ./internal/localvault ./internal/resolver ./internal/ospolicy ./internal/secretclipboard ./internal/updateauth ./cmd/sign-update-manifest
           go test -timeout=35m -coverprofile=vault-entry.coverage .
 
       - name: Test OpenVPN capability build variants

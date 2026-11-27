@@ -24,7 +24,7 @@ func readLegacyPublicationCheckpoint(ctx context.Context, path, logicalSource, u
 	defer func() { resultErr = errors.Join(resultErr, f.verify()) }()
 	verifyLogicalParent := func() error {
 		actual, err := filepath.EvalSymlinks(filepath.Dir(logicalSource))
-		if err != nil || actual != f.root.Name() {
+		if err != nil || actual != f.canonical {
 			return vault.ErrAuthentication
 		}
 		return nil
