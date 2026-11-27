@@ -68,6 +68,10 @@ func TestLocalPolicyRejectsAmbiguousFormatsAndInvalidFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	sharedOnly := bytes.Replace(raw, []byte(`"maxApi":1`), []byte(`"maxApi":1,"directConnectionDevices":50`), 1)
+	if _, err := DecodeLocalPolicy(sharedOnly); err != ErrFormat {
+		t.Fatal("shared deployment metadata accepted in local policy", err)
+	}
 	for _, bad := range [][]byte{nil, []byte(`null`), []byte(`{`), bytes.Repeat([]byte{'a'}, MaxLocalPolicyBytes+1), append(bytes.Clone(raw), ' '), bytes.Replace(raw, []byte(`"userProfile":"default"`), []byte(`"userProfile":"default","userProfile":"default"`), 1), bytes.Replace(raw, []byte(`"userProfile"`), []byte(`"UserProfile"`), 1), bytes.Replace(raw, []byte(`"userProfile":"default",`), nil, 1), bytes.Replace(raw, []byte(`"fileId"`), []byte(`"unknown"`), 1)} {
 		if _, err := DecodeLocalPolicy(bad); err == nil {
 			t.Fatal("ambiguous format accepted")

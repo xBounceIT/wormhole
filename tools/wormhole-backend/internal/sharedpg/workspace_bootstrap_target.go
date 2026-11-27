@@ -64,5 +64,6 @@ func prepareWorkspaceBootstrapFromDeployment(ctx context.Context, settings Setti
 	if !deployment.Provisioning || !deployment.RequiresTLS {
 		return nil, nil, ErrDeploymentMismatch
 	}
-	return prepareWorkspaceBootstrap(workspace, roleTag, settings.Database, settings.Endpoints[0], roots, login, profile, requireASK, time.Now(), org)
+	settings.Profile = profile
+	return prepareWorkspaceBootstrap(workspace, roleTag, settings, roots, login, requireASK, time.Now(), org)
 }

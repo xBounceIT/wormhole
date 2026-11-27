@@ -52,16 +52,17 @@ func (s *workspaceBootstrapSecrets) wipe() {
 // calling setup flow from its approved trust data. They are DER certificates.
 // The caller must durably protect the setup checkpoint and arrange offline
 // recovery custody before publishing these records to the server.
-func prepareWorkspaceBootstrap(workspace uuid.UUID, roleTag, database string, endpoint Endpoint, caRoots [][]byte, login string, profile vault.Profile, requireASK bool, now time.Time, org *bootstrapOrganisation) (*workspaceBootstrap, *workspaceBootstrapSecrets, error) {
-	if deploy.ValidateIdentity(roleTag, workspace.String()) != nil || !identifier(database) || endpoint.Port == 0 || now.IsZero() || now.Year() >= 9999 || len(caRoots) > 8 {
+func prepareWorkspaceBootstrap(workspace uuid.UUID, roleTag string, settings Settings, caRoots [][]byte, login string, requireASK bool, now time.Time, org *bootstrapOrganisation) (*workspaceBootstrap, *workspaceBootstrapSecrets, error) {
+	if deploy.ValidateIdentity(roleTag, workspace.String()) != nil || !identifier(settings.Database) || len(settings.Endpoints) != 1 || settings.Endpoints[0].Port == 0 || now.IsZero() || now.Year() >= 9999 || len(caRoots) > 8 {
 		return nil, nil, ErrConfiguration
 	}
 	if _, err := vault.SharedSalt(workspace.String(), login); err != nil {
 		return nil, nil, ErrConfiguration
 	}
-	if profile != vault.Default && profile != vault.Standard {
+	if settings.Profile != vault.Default && settings.Profile != vault.Standard {
 		return nil, nil, vault.ErrPolicy
 	}
+	endpoint := settings.Endpoints[0]
 	dns, ips, err := serverCertificateNames([]string{endpoint.Host})
 	if err != nil {
 		return nil, nil, err
@@ -114,7 +115,7 @@ func prepareWorkspaceBootstrap(workspace uuid.UUID, roleTag, database string, en
 	}
 	invite := vault.InviteContext{WorkspaceID: workspace, UserID: uuid.New(), InviteID: uuid.New(), KeyID: uuid.New(), KeyVersion: 1, LoginName: login}
 	fingerprint := sha256.Sum256(result.organisation.Signing)
-	result.invitation = Invitation{FormatVersion: 3, WorkspaceID: workspace, LoginName: login, Endpoints: []Endpoint{endpoint}, Database: database,
+	result.invitation = Invitation{FormatVersion: 3, WorkspaceID: workspace, LoginName: login, Endpoints: []Endpoint{endpoint}, Database: settings.Database,
 		TLS: TLSVerified, OrganisationFingerprint: fingerprint[:], ExpiresAt: now.Add(72 * time.Hour).Unix(),
 		Enrollment: &InvitationEnrollment{RoleTag: roleTag, Context: invite}, TLSIdentity: &InvitationTLSIdentity{Organisation: result.organisation.Signing, Bundle: tls}}
 	if err := result.invitation.Validate(now); err != nil {
@@ -129,7 +130,7 @@ func prepareWorkspaceBootstrap(workspace uuid.UUID, roleTag, database string, en
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := result.certify(public, profile, requireASK, signer); err != nil {
+	if err := result.certify(public, settings, requireASK, signer); err != nil {
 		return nil, nil, err
 	}
 	if err := result.prepareBoundary(keys, public.Encryption, signer); err != nil {
@@ -145,15 +146,20 @@ func prepareWorkspaceBootstrap(workspace uuid.UUID, roleTag, database string, en
 	return result, &secrets, nil
 }
 
-func (p *workspaceBootstrap) certify(public vault.UserPublicKeys, profile vault.Profile, requireASK bool, signer ed25519.PrivateKey) error {
+func (p *workspaceBootstrap) certify(public vault.UserPublicKeys, settings Settings, requireASK bool, signer ed25519.PrivateKey) error {
 	i := p.invitation.Enrollment.Context
 	org := p.recovery.Signing
 	certification, err := certifyInvitationBootstrap(i, org, public, signer)
 	if err != nil {
 		return err
 	}
-	policy := vault.Policy{FormatVersion: 1, WorkspaceID: i.WorkspaceID.String(), Sequence: 1, Profile: profile, KDF: vault.KDFV1,
+	policy := vault.Policy{FormatVersion: 1, WorkspaceID: i.WorkspaceID.String(), Sequence: 1, Profile: settings.Profile, KDF: vault.KDFV1,
 		ASKRequired: requireASK, OrgEscrow: true, MinAPI: 1, MaxAPI: 1}
+	devices := settings.Changes.ConcurrentDevices
+	if settings.Changes.TransactionPooler {
+		devices = 0
+	}
+	policy.DirectConnectionDevices = &devices
 	signed, err := vault.SignPolicy(policy, org.ID.String(), org.Version, signer)
 	if err != nil {
 		return err

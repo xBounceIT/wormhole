@@ -61,6 +61,9 @@ type Policy struct {
 	OrgEscrow      bool      `json:"orgEscrow"`
 	MinAPI         uint32    `json:"minApi"`
 	MaxAPI         uint32    `json:"maxApi"`
+	// A positive count describes a direct PostgreSQL deployment. Zero selects
+	// polling for poolers or unknown topology. Older policies omit the field.
+	DirectConnectionDevices *uint32 `json:"directConnectionDevices,omitempty"`
 }
 
 type SignedPolicy struct {

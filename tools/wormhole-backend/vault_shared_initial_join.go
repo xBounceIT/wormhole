@@ -302,8 +302,8 @@ func (h *vaultFoundationHandler) joinSharedInitialInput(ctx context.Context, inp
 		return controller
 	})
 	p.invitation = nil // the coordinator now owns the temporary connection
-	// No authenticated deployment policy is available yet. Polling works with
-	// transaction poolers and avoids opening an unsolicited LISTEN connection.
+	// Invitations without signed topology use a single polling connection.
+	// Device admission applies the organisation's policy after verification.
 	o := sharedAdmissionOptions{TrustPath: sharedWorkspaceTrustPath(h.databasePath), OSFloor: floor, UserFloor: vault.Default, MinimumRevision: 1, Request: sharedpg.AdmissionRequest{API: 1, AppVersion: input.appVersion, Source: "ui"}, Settings: sharedpg.Settings{Endpoints: append([]sharedpg.Endpoint(nil), i.Endpoints...), Database: i.Database, TLS: i.TLS, CAPEM: bytes.Clone(i.CAPEM), Profile: floor, Changes: sharedpg.ChangePolicy{TransactionPooler: true}}}
 	err = p.prepared.Borrow(func(_ *sharedpg.AccountMaster, root *sharedpg.DeviceTrustRoot, commit *sharedpg.PreparedInvitationCommit) error {
 		o.Binding = root.Binding()

@@ -564,6 +564,13 @@ the local package.
 
 ## First administrator
 
+During first administrator setup, enter the expected number of concurrent devices
+if clients connect directly to PostgreSQL. Leave the field blank for a transaction
+pooler or an unknown topology. The organisation signs this choice in the workspace
+profile. A certified device uses a second connection for `LISTEN wormhole_changes`
+when the estimate is 1–300. Larger deployments and poolers use one query connection.
+Every device fetches authenticated changes after unlock and polls every 30 seconds.
+
 The native bootstrap prepares an organisation signer, an organisation encryption
 key, the workspace boundary's view and secret keys, and a certificate chain for a
 single-use administrator invitation. The first admin receives custodian and

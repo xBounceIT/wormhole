@@ -99,6 +99,7 @@ async function exerciseWizard(
     | 'local-create',
   target: {
     schemaVersion: number;
+    directConnectionDevices?: number;
     importLocal?: boolean;
     checkStandardPin?: boolean;
     chooseStandard?: boolean;
@@ -123,6 +124,7 @@ async function exerciseWizard(
   },
   withASK = true,
   existingLocal = false,
+  inspectConnections?: () => Promise<void>,
 ) {
   const signingGroupSuspension =
     mode === 'admin-group-suspension' &&
@@ -155,8 +157,8 @@ app.whenReady().then(async()=>{
  const {VaultBackendHost}=await import(${fromDist('vault-host.js')});
  const {VaultBackendClient}=await import(${fromDist('vault-client.js')});
  const {VaultSharedSetupDialog}=await import(${fromDist('vault-shared-setup-dialog.js')});
- let native,onAdmissionLost;
- const makeHost=()=>new VaultBackendHost(()=>native=new VaultBackendClient({executable:${JSON.stringify(resolve(wizardBackend))},databasePath:${JSON.stringify(join(appData, 'workspace.db'))},userDataPath:${JSON.stringify(appData)},onUnavailable:reason=>onAdmissionLost?.(reason)}),()=>true);
+ let native,onAdmissionLost,onCatalogChanged;
+ const makeHost=()=>new VaultBackendHost(()=>native=new VaultBackendClient({executable:${JSON.stringify(resolve(wizardBackend))},databasePath:${JSON.stringify(join(appData, 'workspace.db'))},userDataPath:${JSON.stringify(appData)},onUnavailable:reason=>onAdmissionLost?.(reason),onSharedCatalogChanged:()=>onCatalogChanged?.()}),()=>true);
  let host=makeHost();
  const target=${JSON.stringify(target)},mode=${JSON.stringify(mode)},existingLocal=${existingLocal};
  const accountPassword='synthetic-administrator-password';
@@ -180,6 +182,22 @@ app.whenReady().then(async()=>{
      const admission=await admit();
      assert.ok(admission.admitted);
      assert.equal(admission.tls,'verified');
+     if(process.env.WORMHOLE_TEST_INSPECT_PORT){
+       const before=await host.sharedChanges({epoch:'0',changeSeq:'0'},()=>true);
+       const notified=new Promise(resolve=>{onCatalogChanged=resolve});
+       const result=await fetch('http://127.0.0.1:'+process.env.WORMHOLE_TEST_INSPECT_PORT);
+       assert.equal(result.status,204,'device connection inspection failed');
+       if(target.directConnectionDevices>0 && target.directConnectionDevices<=300){
+         const stop=new AbortController();
+         try {
+           await Promise.race([notified,require('node:timers/promises').setTimeout(12_000,undefined,{signal:stop.signal}).then(()=>{throw Error('PostgreSQL change hint did not reach Electron')})]);
+         } finally { stop.abort(); }
+         const after=await host.sharedChanges({epoch:before.epoch,changeSeq:before.changeSeq},()=>true);
+         assert.equal(after.epoch,before.epoch);
+         assert.equal(after.changeSeq,before.changeSeq);
+       }
+       onCatalogChanged=undefined;
+     }
      if(mode==='admin-reopen'){
        const profile=await host.security();
        assert.equal(profile.effective,ask?'standard':'default');
@@ -1071,6 +1089,7 @@ app.whenReady().then(async()=>{
    if(mode==='admin-prepare') {
      await waitButton('Create first administrator');
      await click('Create first administrator');
+     if(target.directConnectionDevices) await fill({directConnectionDevices:String(target.directConnectionDevices)});
      if(target.csr){
        await fill({role:target.role,password:'synthetic-wizard-password',loginName:'first-admin',profile:ask?'standard':'default',accountPassword:'wrong-setup-factor',confirm:'wrong-setup-factor',ask});
        await click('Prepare administrator');
@@ -1212,6 +1231,27 @@ app.whenReady().then(async()=>{
     env.WORMHOLE_TEST_SETUP_KEY_PASSPHRASE = syntheticServerFactor;
   }
   const headless = process.platform === 'linux' && !env.DISPLAY;
+  let inspected = false;
+  let inspectionFailure: unknown;
+  const inspector =
+    inspectConnections &&
+    createServer(async (_request, response) => {
+      try {
+        await inspectConnections();
+        inspected = true;
+        response.writeHead(204).end();
+      } catch (error) {
+        inspectionFailure = error;
+        response.writeHead(500).end();
+      }
+    });
+  if (inspector) {
+    inspector.listen(0, '127.0.0.1');
+    await once(inspector, 'listening');
+    const address = inspector.address();
+    assert.ok(address && typeof address !== 'string');
+    env.WORMHOLE_TEST_INSPECT_PORT = String(address.port);
+  }
   const result = await run(
     headless ? 'xvfb-run' : electron,
     headless ? ['--auto-servernum', electron, '--no-sandbox', harness] : [harness],
@@ -1221,7 +1261,11 @@ app.whenReady().then(async()=>{
       timeout: 90_000,
       maxBuffer: 16 * 1024,
     },
-  );
+  ).finally(() => {
+    inspector?.close();
+    if (inspectionFailure) throw inspectionFailure;
+  });
+  if (inspector) assert.ok(inspected, 'admitted Electron device was not inspected');
   assert.doesNotMatch(
     result.stdout + result.stderr,
     /synthetic-(wizard|administrator|local-vault|local-connection)-password|synthetic-standalone-server-key-factor|WHREC1-/,
@@ -1315,6 +1359,8 @@ for (const mode of [
           generated,
         );
         const target = await database.read();
+        if (mode === 'export') target.directConnectionDevices = 300;
+        if (mode === 'run') target.directConnectionDevices = 301;
         if (mode === 'local-web') {
           webServer = createServer((request, response) => {
             receivedCookies.set(request.url ?? '', request.headers.cookie ?? '');
@@ -1568,6 +1614,17 @@ for (const mode of [
             'admin-reopen',
             { ...target, chooseStandard: mode === 'export' },
             withASK,
+            false,
+            ['export', 'run', 'local'].includes(mode)
+              ? async () => {
+                  database!.send({ ...command, action: 'inspectDeviceConnections' });
+                  const listen = mode === 'export';
+                  assert.deepEqual(await database!.read(), {
+                    connections: listen ? '2' : '1',
+                    listeners: listen ? '1' : '0',
+                  });
+                }
+              : undefined,
           ),
           admitted,
         );

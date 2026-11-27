@@ -75,6 +75,25 @@ func TestPostgresSetupApplicationFixture(t *testing.T) {
 		if json.Unmarshal(scanner.Bytes(), &command) != nil || deploy.ValidateIdentity(command.RoleTag, command.WorkspaceID) != nil {
 			t.Fatal("invalid fixture command")
 		}
+		if command.Action == "inspectDeviceConnections" {
+			inspect, err := Connect(ctx, settings, secret)
+			if err != nil {
+				t.Fatal(err)
+			}
+			row, err := readDeploymentRow(ctx, inspect, `SELECT count(*)::text,
+				(count(*) FILTER (WHERE query='listen wormhole_changes'))::text,
+				pg_catalog.pg_notify('wormhole_changes',$3)
+				FROM pg_catalog.pg_stat_activity
+				WHERE datname=$1 AND starts_with(usename::text, $2)`, 3, []byte(database), []byte("wh_"+command.RoleTag+"_d_"), []byte(command.WorkspaceID))
+			closeDeploymentConnection(inspect)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := json.NewEncoder(os.Stdout).Encode(map[string]string{"connections": string(row[0]), "listeners": string(row[1])}); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
 		if command.Action == "releaseRotationLock" {
 			if rotationLock == nil {
 				t.Fatal("rotation lock was not held")

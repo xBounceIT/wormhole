@@ -23,6 +23,9 @@ type LocalPolicy struct {
 }
 
 func (p LocalPolicy) validate() error {
+	if p.Policy.DirectConnectionDevices != nil {
+		return ErrFormat
+	}
 	if err := p.Policy.Validate(); err != nil {
 		return err
 	}

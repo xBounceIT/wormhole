@@ -31,6 +31,7 @@ type sharedAdminSetupInput struct {
 	appVersion                            string
 	importConfirmation                    string
 	profile                               vault.Profile
+	directConnectionDevices               uint32
 }
 
 func (i *sharedAdminSetupInput) wipe() {
@@ -91,6 +92,7 @@ func decodeSharedAdminSetup(op string, payload []byte, workspace string) (input 
 	case "shared-setup-admin-prepare":
 		add("loginName", &input.login)
 		add("profile", &input.profile)
+		fields["directConnectionDevices"] = &input.directConnectionDevices
 		fallthrough
 	case "shared-setup-admin-publish":
 		add("role", &input.role)
@@ -241,6 +243,7 @@ func prepareSharedSetupAdministrator(ctx context.Context, path string, plan shar
 	}
 	s := &plan.Summary
 	settings := sharedpg.Settings{Endpoints: []sharedpg.Endpoint{{Host: s.Host, Port: s.Port}}, Database: s.Database, DeviceRole: input.role, TLS: sharedpg.TLSVerified, CAPEM: plan.CAPEM, Profile: profile}
+	settings.Changes = sharedpg.ChangePolicy{ConcurrentDevices: input.directConnectionDevices, TransactionPooler: input.directConnectionDevices == 0}
 	var tls *sharedpg.WorkspaceTLSInstallation
 	if plan.TLS != nil {
 		tlsScope, err := sharedSetupTLSScope(plan)

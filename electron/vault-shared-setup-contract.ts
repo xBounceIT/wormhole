@@ -46,6 +46,7 @@ export type SharedAdminSetupRequest = SharedAdminSetupFactors &
         action: 'admin-prepare';
         loginName: string;
         profile: 'default' | 'standard';
+        directConnectionDevices?: number;
         role: string;
         password: Uint8Array;
       }
@@ -290,9 +291,22 @@ function consumeSharedAdministrator(
   const credentials = ['role', 'password'];
   if (action === 'admin-publish' && exact(raw, [...keys, ...credentials]))
     return { action, ...own(), role: raw.role, password: Uint8Array.from(raw.password) };
+  const hasDevices = Object.hasOwn(raw, 'directConnectionDevices');
+  const devices = hasDevices ? raw.directConnectionDevices : undefined;
   if (
     action === 'admin-prepare' &&
-    exact(raw, [...keys, ...credentials, 'loginName', 'profile']) &&
+    exact(raw, [
+      ...keys,
+      ...credentials,
+      'loginName',
+      'profile',
+      ...(hasDevices ? ['directConnectionDevices'] : []),
+    ]) &&
+    (!hasDevices ||
+      (typeof devices === 'number' &&
+        Number.isInteger(devices) &&
+        devices >= 0 &&
+        devices <= 0xffffffff)) &&
     checkedText(raw.loginName, 256) &&
     (raw.profile === 'default' || raw.profile === 'standard')
   )
@@ -303,6 +317,7 @@ function consumeSharedAdministrator(
       password: Uint8Array.from(raw.password),
       loginName: raw.loginName,
       profile: raw.profile,
+      ...(typeof devices === 'number' ? { directConnectionDevices: devices } : {}),
     };
   return undefined;
 }

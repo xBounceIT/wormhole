@@ -39,8 +39,10 @@ shape and never grants authority from the token alone.
 Default TLS Off additionally requires the explicit acknowledgement; it never
 disables validation of signed policy or organisation identity. Preparation then
 authenticates the bootstrap and signed policy before deriving account material.
-Until deployment metadata is independently authenticated, initial change
-tracking conservatively polls so transaction poolers do not lose LISTEN events.
+Initial enrollment uses a single connection. After certification, device admission
+verifies the organisation's signed connection estimate. Direct deployments with
+1–300 concurrent devices can subscribe to changes. An invitation to a legacy
+workspace without a signed estimate starts with polling.
 
 One native workspace owner keeps preparation, temporary connection, join
 coordinator, device account, admission controller and cleanup obligations under

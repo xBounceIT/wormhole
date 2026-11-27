@@ -20,7 +20,7 @@ func TestWorkspaceBootstrapCheckpointPreservesIssuanceAndOfflineCustody(t *testi
 	ctx := context.Background()
 	scope := WorkspaceBootstrapScope{WorkspaceID: uuid.New(), RoleTag: "testscope", PlanDigest: sha256.Sum256([]byte("canonical deployment plan"))}
 	ca, _ := pem.Decode(testCA(t))
-	draft, factors, err := prepareWorkspaceBootstrap(scope.WorkspaceID, scope.RoleTag, "vault", Endpoint{Host: "db.example.org", Port: 5432}, [][]byte{ca.Bytes}, "first-admin", vault.Standard, true, time.Now(), nil)
+	draft, factors, err := prepareWorkspaceBootstrap(scope.WorkspaceID, scope.RoleTag, Settings{Database: "vault", Endpoints: []Endpoint{{Host: "db.example.org", Port: 5432}}, Profile: vault.Standard}, [][]byte{ca.Bytes}, "first-admin", true, time.Now(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

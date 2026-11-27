@@ -583,6 +583,33 @@ test('administrator setup consumes every factor and reserves native credentials 
   }
 });
 
+test('administrator setup accepts only unsigned integer deployment estimates', () => {
+  const prepare = (directConnectionDevices: unknown) => ({
+    action: 'admin-prepare',
+    role: 'dba',
+    loginName: 'admin',
+    profile: 'standard',
+    workspaceId,
+    accountPassword: Uint8Array.of(1),
+    password: Uint8Array.of(2),
+    directConnectionDevices,
+  });
+  for (const devices of [0, 1, 300, 301, 0xffffffff]) {
+    const request = prepare(devices);
+    const expected = structuredClone(request);
+    assert.deepEqual(consumeSharedSetupRequest(request), expected);
+  }
+  for (const devices of [null, undefined, true, -1, 1.5, '300', 0x100000000]) {
+    const request = prepare(devices);
+    assert.equal(consumeSharedSetupRequest(request), undefined);
+    assert.equal(request.password[0] | request.accountPassword[0], 0);
+  }
+  const { directConnectionDevices: _devices, ...legacy } = prepare(0);
+  const inherited = Object.assign(Object.create({ directConnectionDevices: 300 }), legacy);
+  const expected = structuredClone(legacy);
+  assert.deepEqual(consumeSharedSetupRequest(inherited), expected);
+});
+
 test('administrator reply correlates the recovery recipient and only accepts the expected stage', () => {
   const submitted = { ...plan, state: 'submitted' };
   const initial = { plan: submitted, adminPending: true };

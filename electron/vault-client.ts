@@ -2434,6 +2434,8 @@ export class VaultBackendClient {
     switch (input.action) {
       case 'admin-prepare':
         Object.assign(metadata, { loginName: input.loginName, profile: input.profile });
+        if (input.directConnectionDevices !== undefined)
+          metadata.directConnectionDevices = input.directConnectionDevices;
       // fall through
       case 'admin-publish':
         metadata.role = input.role;

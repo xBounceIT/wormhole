@@ -223,14 +223,25 @@ func (c *sharedAdmissionController) openWithDerivationSource(ctx context.Context
 	if err = sharedAdmissionRuntimeProfile(prepared.Profile); err != nil {
 		return err
 	}
-	if facts != nil {
-		policy, e := current.Policy()
-		if e != nil {
-			return e
+	deviceChanges := func(trust sharedpg.TrustState, profile vault.Profile) (sharedpg.ChangePolicy, error) {
+		policy, err := trust.Policy()
+		if err != nil {
+			return sharedpg.ChangePolicy{}, err
 		}
-		if e := validateSharedAccountDerivation(policy, prepared.Profile, facts.preset, facts.askUsed); e != nil {
-			return e
+		if facts != nil {
+			if err := validateSharedAccountDerivation(policy, profile, facts.preset, facts.askUsed); err != nil {
+				return sharedpg.ChangePolicy{}, err
+			}
 		}
+		if devices := policy.DirectConnectionDevices; devices != nil {
+			return sharedpg.ChangePolicy{ConcurrentDevices: *devices, TransactionPooler: *devices == 0}, nil
+		}
+		// Legacy profiles retain the transport metadata enrolled on this device.
+		return o.Settings.Changes, nil
+	}
+	prepared.Changes, err = deviceChanges(current, prepared.Profile)
+	if err != nil {
+		return err
 	}
 	if err = opCtx.Err(); err != nil {
 		return err
@@ -240,7 +251,7 @@ func (c *sharedAdmissionController) openWithDerivationSource(ctx context.Context
 		return err
 	}
 	defer vault.Wipe(login)
-	if err = c.session.Open(opCtx, prepared, login, o.Settings.Changes); err != nil {
+	if err = c.session.Open(opCtx, prepared, login, prepared.Changes); err != nil {
 		return err
 	}
 	response, err := c.session.AuthenticateSession(opCtx, o.Request, loginMaterial)
@@ -280,23 +291,20 @@ func (c *sharedAdmissionController) openWithDerivationSource(ctx context.Context
 		return err
 	}
 	if updated.Profile != prepared.Profile {
-		// The signed policy advanced during login. Reconnect under the saved
-		// floor so every PostgreSQL socket checks the stronger role settings.
+		// Reopen with the verified role settings and connection budget.
 		return sharedpg.ErrProfileChanged
 	}
-	if facts != nil {
-		policy, e := next.Policy()
-		if e != nil {
-			return e
-		}
-		if e := validateSharedAccountDerivation(policy, updated.Profile, facts.preset, facts.askUsed); e != nil {
-			return e
-		}
+	updated.Changes, err = deviceChanges(next, updated.Profile)
+	if err != nil {
+		return err
+	}
+	if updated.Changes.UseNotifications() != prepared.Changes.UseNotifications() {
+		return sharedpg.ErrProfileChanged
 	}
 	if err = opCtx.Err(); err != nil {
 		return err
 	}
-	if o.Settings.Changes.UseNotifications() {
+	if updated.Changes.UseNotifications() {
 		if err = c.session.SubscribeChanges(opCtx); err != nil {
 			return err
 		}
@@ -325,7 +333,7 @@ func (c *sharedAdmissionController) openWithDerivationSource(ctx context.Context
 		c.rotationEpoch = response.Epoch
 	}
 	c.rotationPending.Store(len(next.SuspensionRotations) != 0)
-	go c.monitorWorkspaceAuthority(o.Settings.Changes.UseNotifications())
+	go c.monitorWorkspaceAuthority(updated.Changes.UseNotifications())
 	return nil
 }
 

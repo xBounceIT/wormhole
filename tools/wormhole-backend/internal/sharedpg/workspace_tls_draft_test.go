@@ -93,10 +93,10 @@ func TestWorkspaceTLSAuthorityCarriesIntoOfflineRecovery(t *testing.T) {
 	}
 	endpoint := Endpoint{Host: hosts[0], Port: 5432}
 	unrelated, _ := pem.Decode(testCA(t))
-	if _, _, err := prepareWorkspaceBootstrap(scope.WorkspaceID, scope.RoleTag, "vault", endpoint, [][]byte{unrelated.Bytes}, "alice", vault.Standard, true, now, org); !errors.Is(err, ErrServerCertificate) {
+	if _, _, err := prepareWorkspaceBootstrap(scope.WorkspaceID, scope.RoleTag, Settings{Database: "vault", Endpoints: []Endpoint{endpoint}, Profile: vault.Standard}, [][]byte{unrelated.Bytes}, "alice", true, now, org); !errors.Is(err, ErrServerCertificate) {
 		t.Fatal("bootstrap accepted an unrelated verified root", err)
 	}
-	bootstrap, factors, err := prepareWorkspaceBootstrap(scope.WorkspaceID, scope.RoleTag, "vault", endpoint, [][]byte{issuer.Raw}, "alice", vault.Standard, true, now, org)
+	bootstrap, factors, err := prepareWorkspaceBootstrap(scope.WorkspaceID, scope.RoleTag, Settings{Database: "vault", Endpoints: []Endpoint{endpoint}, Profile: vault.Standard}, [][]byte{issuer.Raw}, "alice", true, now, org)
 	if err != nil {
 		t.Fatal(err)
 	}

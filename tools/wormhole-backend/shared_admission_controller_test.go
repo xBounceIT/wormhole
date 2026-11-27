@@ -281,6 +281,80 @@ func TestSharedAdmissionReconnectsWhenLoginRaisesTransportPolicy(t *testing.T) {
 	}
 }
 
+func TestSharedAdmissionUsesSignedConnectionBudget(t *testing.T) {
+	for _, tc := range []struct {
+		name                  string
+		initial, next         *uint32
+		wantListen, reconnect bool
+	}{
+		{"legacy enrollment polls", nil, nil, false, false},
+		{"direct at threshold", new(uint32(300)), new(uint32(1)), true, false},
+		{"direct over threshold", new(uint32(301)), new(uint32(600)), false, false},
+		{"transaction pooler", new(uint32(0)), new(uint32(0)), false, false},
+		{"direct to pooler", new(uint32(30)), new(uint32(0)), true, true},
+		{"back to unknown topology", new(uint32(50)), nil, true, true},
+		{"new direct deployment", nil, new(uint32(300)), false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, probe, options, root, current, _ := sharedControllerFixture(t, vault.Standard)
+			options.Settings.Changes = sharedpg.ChangePolicy{TransactionPooler: true}
+			options.TrustPath = filepath.Join(t.TempDir(), "device.trust")
+			pub, private, err := ed25519.GenerateKey(rand.Reader)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pin := current.PolicyTrust()
+			pin.PublicKey = pub
+			policy, err := current.Policy()
+			if err != nil {
+				t.Fatal(err)
+			}
+			sign := func(devices *uint32) {
+				t.Helper()
+				policy.DirectConnectionDevices = devices
+				doc, err := vault.SignPolicy(policy, pin.SignerKeyID, pin.SignerKeyVersion, private)
+				if err != nil {
+					t.Fatal(err)
+				}
+				probe.response.SignedProfile, err = vault.EncodeSignedPolicy(doc)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			sign(tc.initial)
+			enrolled, err := sharedpg.NewTrustState(probe.response, options.Request, pin)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := writeSharedTrustFile(options.TrustPath, root, options.Binding, enrolled, 0); err != nil {
+				t.Fatal(err)
+			}
+			policy.Sequence++
+			sign(tc.next)
+			probe.open = func(_ context.Context, settings sharedpg.Settings) error {
+				if settings.Changes.UseNotifications() != tc.wantListen {
+					t.Fatal("incorrect connection count before authentication")
+				}
+				return nil
+			}
+			subscribed := false
+			probe.subscribe = func(context.Context) error { subscribed = true; return nil }
+			err = c.Open(t.Context(), options, root, bytes.Repeat([]byte{7}, 32))
+			if tc.reconnect {
+				if err != sharedpg.ErrProfileChanged || c.Admitted() || subscribed {
+					t.Fatal("published a session under stale topology", err)
+				}
+				saved, err := readSharedTrustFile(options.TrustPath, root, options.Binding, 2)
+				if err != nil || !bytes.Equal(saved.SignedProfile, probe.response.SignedProfile) {
+					t.Fatal("new topology was not persisted", err)
+				}
+			} else if err != nil || !c.Admitted() || subscribed != tc.wantListen {
+				t.Fatal("incorrect notification subscription", err)
+			}
+		})
+	}
+}
+
 func TestSharedAdmissionPreservesUnsupportedNewFloor(t *testing.T) {
 	for _, profile := range []vault.Profile{vault.Hardened, vault.Paranoid} {
 		t.Run(string(profile), func(t *testing.T) {

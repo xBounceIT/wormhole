@@ -814,6 +814,25 @@ export function mountSharedSetup(card: HTMLElement, api: SharedSetupApi): void {
       label.append('Security profile', profile);
       fields.append(label);
     }
+    const directDevices = prepare
+      ? input(
+          'directConnectionDevices',
+          'Expected concurrent devices on a direct connection',
+          'number',
+          fields,
+        )
+      : undefined;
+    if (directDevices) {
+      directDevices.required = false;
+      directDevices.min = '1';
+      directDevices.max = '4294967295';
+      const hint = document.createElement('p');
+      hint.id = 'shared-connection-devices-hint';
+      hint.textContent =
+        'Leave blank for a transaction pooler or if unsure. Direct deployments with up to 300 concurrent devices receive change notifications. Other deployments poll every 30 seconds.';
+      directDevices.setAttribute('aria-describedby', hint.id);
+      fields.append(hint);
+    }
     const password = input(
       'accountPassword',
       prepare && certificates ? 'Administrator password from TLS setup' : 'Administrator password',
@@ -885,6 +904,7 @@ export function mountSharedSetup(card: HTMLElement, api: SharedSetupApi): void {
               password: new TextEncoder().encode(dba.value),
               loginName: login.value.trim().toLowerCase().normalize('NFC'),
               profile: profile.value === 'standard' ? 'standard' : 'default',
+              directConnectionDevices: directDevices?.value ? directDevices.valueAsNumber : 0,
             };
             break;
           case 'admin-open':

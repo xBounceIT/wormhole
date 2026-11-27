@@ -93,12 +93,12 @@ sequence floor in both TLS and plaintext transport fixtures. The plaintext case
 tests cryptographic verification only; it does not authorize Standard-profile use
 over plaintext.
 
-`Session.Open` now takes authenticated deployment metadata in `ChangePolicy`.
-Above 300 concurrent devices or with a transaction-mode pooler it opens only the
-query connection, selecting a 30-second polling interval. Other deployments open
-the second notification connection. This implements selection and connection count,
-not the polling loop. All clients still need an authoritative
-`get_changes_since` call after unlock/reconnect, regardless of notification hints.
+The first administrator records the deployment estimate in setup. Device admission
+verifies the signed workspace profile and passes the resulting `ChangePolicy` to
+`Session.Open`. Direct deployments with 1–300 concurrent devices open a second
+connection for notifications. Larger deployments and transaction poolers use one
+query connection. The client fetches authenticated changes after unlocking or
+reconnecting and every 30 seconds, including when a notification was lost.
 
 `SubscribeChanges` idempotently issues `LISTEN wormhole_changes` only on the
 dedicated connection, with a 30-second bound and a validated empty LISTEN result.
@@ -113,9 +113,8 @@ returned. A hint never authorizes access or updates local records by itself.
 Notification waits honor caller cancellation and workspace lifetime cancellation.
 An ordinary wait timeout leaves the connection usable; it does not idle-close or
 reconnect the session. Explicit owner Close cancels an active wait and then confirms
-the teardown of both connections. Scheduling refreshes, handling noise with bounded
-backoff, and integrating the stream with authenticated change retrieval remain work
-for the workspace controller.
+the teardown of both connections. The native controller coalesces matching hints
+at one-second intervals before requesting an authenticated catalog refresh.
 
 `Session.Query` is a native-only, parameterized transport primitive for the future
 typed business API. Arbitrary SQL must never be exposed through IPC. It leases the

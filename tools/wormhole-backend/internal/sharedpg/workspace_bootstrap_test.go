@@ -232,7 +232,7 @@ func TestWorkspaceBootstrapPreparesCertifiedFirstJoinAndRecovery(t *testing.T) {
 	ca, _ := pem.Decode(testCA(t))
 	endpoint := Endpoint{Host: "DB.EXAMPLE.ORG", Port: 5432}
 	id := uuid.New()
-	p, secrets, err := prepareWorkspaceBootstrap(id, "testscope", "work", endpoint, [][]byte{ca.Bytes, ca.Bytes}, "first-admin", vault.Standard, true, now, nil)
+	p, secrets, err := prepareWorkspaceBootstrap(id, "testscope", Settings{Database: "work", Endpoints: []Endpoint{endpoint}, Profile: vault.Standard, Changes: ChangePolicy{ConcurrentDevices: 300}}, [][]byte{ca.Bytes, ca.Bytes}, "first-admin", true, now, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -260,6 +260,9 @@ func TestWorkspaceBootstrapPreparesCertifiedFirstJoinAndRecovery(t *testing.T) {
 	policy, _, err := p.certification.Verify(i, opened.OrganisationPublic, public.Manifest, 1, 1, 1, now)
 	if err != nil || !policy.ASKRequired || policy.Profile != vault.Standard || policy.KDF != vault.KDFV1 {
 		t.Fatal("the ordinary invitation verifier rejected initial certification", err)
+	}
+	if policy.DirectConnectionDevices == nil || *policy.DirectConnectionDevices != 300 {
+		t.Fatal("certified profile lost the deployment's direct connection budget")
 	}
 	org, err := vault.OpenOrganisationRecovery(secrets.recoveryKey[:], p.recovery, p.recoveryKeys, p.organisation)
 	if err != nil {
@@ -322,13 +325,13 @@ func TestWorkspaceBootstrapRejectsInvalidPreparation(t *testing.T) {
 		{"invalid CA", "::1", "alice", vault.Default, [][]byte{[]byte("bad certificate")}, vault.ErrFormat},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			p, s, err := prepareWorkspaceBootstrap(id, "testscope", "work", Endpoint{Host: tc.host, Port: 5432}, tc.ca, tc.login, tc.profile, false, now, nil)
+			p, s, err := prepareWorkspaceBootstrap(id, "testscope", Settings{Database: "work", Endpoints: []Endpoint{{Host: tc.host, Port: 5432}}, Profile: tc.profile}, tc.ca, tc.login, false, now, nil)
 			if p != nil || s != nil || !errors.Is(err, tc.want) {
 				t.Fatal("invalid setup was accepted", err)
 			}
 		})
 	}
-	p, s, err := prepareWorkspaceBootstrap(id, "testscope", "work", Endpoint{Host: "0:0:0:0:0:0:0:1", Port: 5432}, [][]byte{ca.Bytes}, "alice", vault.Default, false, now, nil)
+	p, s, err := prepareWorkspaceBootstrap(id, "testscope", Settings{Database: "work", Endpoints: []Endpoint{{Host: "0:0:0:0:0:0:0:1", Port: 5432}}, Profile: vault.Default}, [][]byte{ca.Bytes}, "alice", false, now, nil)
 	if err != nil || p.invitation.Endpoints[0].Host != "::1" {
 		t.Fatal("valid IPv6 deployment target was refused", err)
 	}

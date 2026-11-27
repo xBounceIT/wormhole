@@ -27,6 +27,14 @@ func TestSignedPolicyCanonicalEncoding(t *testing.T) {
 	if err := VerifyPolicy(decoded, "workspace", "org", 1, pub, 1); err != nil {
 		t.Fatal(err)
 	}
+	if strings.Contains(string(raw), "directConnectionDevices") {
+		t.Fatal("legacy policy encoding changed")
+	}
+	changed := decoded
+	changed.Policy.DirectConnectionDevices = new(uint32(300))
+	if err := VerifyPolicy(changed, "workspace", "org", 1, pub, 1); err != ErrAuthentication {
+		t.Fatal("unsigned change to the connection budget accepted", err)
+	}
 	for _, bad := range []string{
 		"", strings.Repeat(" ", MaxSignedPolicyBytes+1), "{", "null", string(raw) + "\n", string(raw) + "{}",
 		strings.Replace(string(raw), `"sequence":1`, `"sequence":1,"sequence":1`, 1),
