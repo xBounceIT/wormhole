@@ -61,7 +61,20 @@ func checkCatalogDrift(t *testing.T, ctx context.Context, settings Settings, pas
 	}
 	check(t, nil)
 	const alter = "ALTER FUNCTION " + routine
+	names, err := readDeploymentRow(ctx, db, "SELECT quote_ident(current_database())", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	database := string(names[0])
 	for _, tc := range []struct{ name, change, restore string }{
+		{"public database connect", "GRANT CONNECT ON DATABASE " + database + " TO PUBLIC", "REVOKE CONNECT ON DATABASE " + database + " FROM PUBLIC"},
+		{"public database temp", "GRANT TEMP ON DATABASE " + database + " TO PUBLIC", "REVOKE TEMP ON DATABASE " + database + " FROM PUBLIC"},
+		{"public schema create", "GRANT CREATE ON SCHEMA public TO PUBLIC", "REVOKE CREATE ON SCHEMA public FROM PUBLIC"},
+		{"future public functions", "ALTER DEFAULT PRIVILEGES FOR ROLE wh_testscope_owner GRANT EXECUTE ON FUNCTIONS TO PUBLIC", "ALTER DEFAULT PRIVILEGES FOR ROLE wh_testscope_owner REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC"},
+		{"future public API", "ALTER DEFAULT PRIVILEGES FOR ROLE wh_testscope_owner IN SCHEMA wormhole_api_v1 GRANT EXECUTE ON FUNCTIONS TO PUBLIC", "ALTER DEFAULT PRIVILEGES FOR ROLE wh_testscope_owner IN SCHEMA wormhole_api_v1 REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC"},
+		{"future public data", "ALTER DEFAULT PRIVILEGES FOR ROLE wh_testscope_owner IN SCHEMA wormhole_data GRANT SELECT ON TABLES TO PUBLIC", "ALTER DEFAULT PRIVILEGES FOR ROLE wh_testscope_owner IN SCHEMA wormhole_data REVOKE SELECT ON TABLES FROM PUBLIC"},
+		{"future public sequences", "ALTER DEFAULT PRIVILEGES FOR ROLE wh_testscope_owner IN SCHEMA wormhole_data GRANT USAGE ON SEQUENCES TO PUBLIC", "ALTER DEFAULT PRIVILEGES FOR ROLE wh_testscope_owner IN SCHEMA wormhole_data REVOKE USAGE ON SEQUENCES FROM PUBLIC"},
+		{"device database access", "REVOKE CONNECT ON DATABASE " + database + " FROM wh_testscope_user", "GRANT CONNECT ON DATABASE " + database + " TO wh_testscope_user"},
 		{"source", string(source.Rows[0][1]), string(source.Rows[0][0])},
 		{"parsed SQL source", "CREATE OR REPLACE FUNCTION " + sqlRoutine + ` RETURNS text LANGUAGE sql SECURITY DEFINER
 		    SET search_path=pg_catalog,pg_temp SET lock_timeout='2s' SET statement_timeout='15s' RETURN NULL::text`, string(sqlBody.Rows[0][0])},
@@ -79,6 +92,12 @@ func checkCatalogDrift(t *testing.T, ctx context.Context, settings Settings, pas
 			check(t, ErrDeploymentMismatch)
 		})
 	}
+	t.Run("unrelated schema defaults", func(t *testing.T) {
+		exec(t, "CREATE SCHEMA catalog_unrelated AUTHORIZATION wh_testscope_owner")
+		t.Cleanup(func() { exec(t, "DROP SCHEMA catalog_unrelated CASCADE") })
+		exec(t, "ALTER DEFAULT PRIVILEGES FOR ROLE wh_testscope_owner IN SCHEMA catalog_unrelated GRANT SELECT ON TABLES TO PUBLIC")
+		check(t, nil)
+	})
 	t.Run("workspace metadata", func(t *testing.T) {
 		exec(t, "UPDATE wormhole_data.workspace_meta SET schema_version=schema_version-1 WHERE singleton")
 		t.Cleanup(func() {

@@ -77,6 +77,33 @@ WITH namespaces AS (
     GROUP BY kind,id,column_name,issuer.name,recipient.name,privilege_type,is_grantable HAVING sum(delta)<>0
 ), permissions AS (
     SELECT kind,id,jsonb_agg(entry ORDER BY entry COLLATE "C") AS entries FROM changes GROUP BY kind,id
+), database_acl AS (
+    SELECT a.grantee,a.privilege_type FROM pg_database d
+    CROSS JOIN LATERAL aclexplode(coalesce(d.datacl,acldefault('d',d.datdba))) a
+    WHERE d.datname=current_database()
+), owner_defaults AS (
+    -- A missing global pg_default_acl entry means the built-in ACL. In
+    -- particular, newly created functions would grant EXECUTE to PUBLIC.
+    SELECT a.grantee FROM workspace_roles w
+    CROSS JOIN (VALUES ('f'::"char",'f'::"char"),('r','r'),('S','s')) kind(stored_type,builtin_type)
+    LEFT JOIN pg_default_acl d ON d.defaclrole=w.oid AND d.defaclnamespace=0 AND d.defaclobjtype=kind.stored_type
+    CROSS JOIN LATERAL aclexplode(coalesce(d.defaclacl,acldefault(kind.builtin_type,w.oid))) a
+    WHERE w.name='workspace:owner'
+    UNION ALL
+    -- Per-schema defaults add privileges to the owner's global defaults.
+    SELECT a.grantee FROM workspace_roles w JOIN pg_default_acl d ON d.defaclrole=w.oid
+    JOIN namespaces n ON n.oid=d.defaclnamespace CROSS JOIN LATERAL aclexplode(d.defaclacl) a
+    WHERE w.name='workspace:owner' AND d.defaclobjtype IN ('f','r','S')
+), access_violations AS (
+    SELECT 1 FROM database_acl WHERE grantee=0
+    UNION ALL
+    SELECT 1 FROM workspace_roles w WHERE w.name IN ('workspace:user','workspace:deployer','workspace:enroll')
+        AND NOT EXISTS(SELECT FROM database_acl a WHERE a.grantee=w.oid AND a.privilege_type='CONNECT')
+    UNION ALL
+    SELECT 1 FROM pg_namespace n CROSS JOIN LATERAL aclexplode(coalesce(n.nspacl,acldefault('n',n.nspowner))) a
+        WHERE n.nspname='public' AND a.grantee=0 AND a.privilege_type='CREATE'
+    UNION ALL
+    SELECT 1 FROM owner_defaults WHERE grantee=0
 ), records AS (
     SELECT DISTINCT jsonb_build_array(o.kind,o.description,owner_role.name,p.entries)::text COLLATE "C" AS row_data
     FROM objects o JOIN roles owner_role ON owner_role.oid=o.owner LEFT JOIN permissions p USING(kind,id)
@@ -86,4 +113,4 @@ WITH namespaces AS (
     WHERE NOT t.tgisinternal AND t.tgparentid=0
 )
 SELECT encode(sha256(convert_to(string_agg(row_data,E'\n' ORDER BY row_data),'UTF8')),'base64'),
-    (SELECT count(*) FROM routines WHERE body IS NULL)::text FROM records
+    ((SELECT count(*) FROM routines WHERE body IS NULL)+(SELECT count(*) FROM access_violations))::text FROM records

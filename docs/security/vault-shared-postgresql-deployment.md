@@ -18,7 +18,11 @@ schema shipped by Wormhole. The check covers function bodies, signatures,
 execution settings, owners, table and column grants, and the definitions and
 enabled state of application triggers. Monthly audit
 partitions may come and go under the same permission policy. A changed grant
-on a single partition fails verification.
+on a single partition fails verification. The check also verifies that the
+workspace user, enrollment and deployer roles retain database access. It
+rejects database privileges granted to PUBLIC, PUBLIC creation rights on the
+`public` schema, and owner defaults that would give PUBLIC access to new
+functions, tables or sequences in the workspace schemas.
 
 If verification fails, confirm the database and workspace identity, then ask
 the DBA to compare the installed routines and grants with the exported SQL.
