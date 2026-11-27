@@ -46,6 +46,9 @@ func (h *vaultFoundationHandler) sharedAdminInventory(ctx context.Context, raw [
 	if err != nil {
 		return nil, err
 	}
+	if request.Kind == "slots" {
+		return h.sharedCredentialSlotInventory(ctx, request)
+	}
 	reply := sharedAdminInventoryReply{Status: "unavailable"}
 	err = h.withVerifiedSharedRuntime(ctx, func(ctx context.Context, native sharedAdmissionSession, _ sharedpg.TrustState, runtime sharedRuntimeSnapshot) error {
 		if request.Kind != "my-devices" && !runtime.Administrator {
@@ -71,6 +74,57 @@ func (h *vaultFoundationHandler) sharedAdminInventory(ctx context.Context, raw [
 	})
 	if err != nil {
 		return nil, err
+	}
+	return json.Marshal(reply)
+}
+
+type sharedCredentialSlotInventorySession interface {
+	sharedRuntimeStateSession
+	AdminInventorySupported(context.Context, string) (bool, error)
+	AdminCredentialSlots(context.Context, sharedpg.TrustState, uuid.UUID) (sharedpg.TrustState, *sharedpg.AdminSlotPage, error)
+}
+
+func (h *vaultFoundationHandler) sharedCredentialSlotInventory(ctx context.Context, request sharedpg.AdminInventoryRequest) (json.RawMessage, error) {
+	controller, err := h.sharedOwner(ctx)
+	if err != nil {
+		return nil, err
+	}
+	session, ok := controller.session.(sharedCredentialSlotInventorySession)
+	if !ok {
+		return nil, h.retire(sharedpg.ErrConfiguration)
+	}
+	reply := struct {
+		Status string                  `json:"status"`
+		Page   *sharedpg.AdminSlotPage `json:"page,omitempty"`
+	}{Status: "unavailable"}
+	err = controller.withCatalogOperation(ctx, func(ctx context.Context, current sharedpg.TrustState, pending *sharedpg.TrustState) error {
+		runtime, err := controller.observeRuntime(ctx, session, current, pending)
+		if err != nil || !runtime.Administrator {
+			return err
+		}
+		supported, err := session.AdminInventorySupported(ctx, "slots")
+		if err != nil {
+			return err
+		}
+		if !supported {
+			reply.Status = "unsupported"
+			return nil
+		}
+		var after uuid.UUID
+		if request.Next != nil {
+			after = request.Next.ID
+		}
+		next, page, err := session.AdminCredentialSlots(ctx, *pending, after)
+		if next.Revision != 0 {
+			*pending = next
+		}
+		if err == nil && page != nil {
+			reply.Status, reply.Page = "ready", page
+		}
+		return err
+	}, nil, false)
+	if err != nil {
+		return nil, h.retire(err)
 	}
 	return json.Marshal(reply)
 }

@@ -6,13 +6,16 @@ export type AdminInventoryKind =
   | 'my-devices'
   | 'unencrypted-clients'
   | 'sessions'
+  | 'slots'
   | 'audit';
 type Cursor = { id: string; at?: string };
 export type AdminInventoryRequest = { kind: AdminInventoryKind; next?: Cursor };
 
 type Entry = {
   id: string;
-  login: string;
+  login?: string;
+  protocol?: 'ssh' | 'rdp' | 'vnc';
+  allowSelfService?: boolean;
   name?: string;
   role?: string;
   status?: string;
@@ -50,7 +53,8 @@ export function parseAdminInventoryRequest(value: unknown): AdminInventoryReques
     kind !== 'my-devices' &&
     kind !== 'unencrypted-clients' &&
     kind !== 'sessions' &&
-    kind !== 'audit'
+    kind !== 'audit' &&
+    kind !== 'slots'
   )
     return;
   if (!Object.hasOwn(value, 'next')) return vaultFields(value, ['kind']) ? { kind } : undefined;
@@ -66,13 +70,20 @@ export function parseAdminInventoryRequest(value: unknown): AdminInventoryReques
 }
 
 function validEntry(value: unknown, kind: AdminInventoryKind): value is Entry {
-  if (
-    !vaultRecord(value) ||
-    !vaultID(value.id) ||
-    !text(value.login, 256) ||
-    (!value.login && kind !== 'audit')
-  )
-    return false;
+  if (!vaultRecord(value) || !vaultID(value.id)) return false;
+  if (kind === 'slots') {
+    return (
+      vaultFields(value, ['id', 'name', 'protocol', 'allowSelfService']) &&
+      typeof value.name === 'string' &&
+      value.name.trim().length > 0 &&
+      value.name.length <= 1024 &&
+      new TextEncoder().encode(value.name).byteLength <= 1024 &&
+      !value.name.includes('\0') &&
+      (value.protocol === 'ssh' || value.protocol === 'rdp' || value.protocol === 'vnc') &&
+      typeof value.allowSelfService === 'boolean'
+    );
+  }
+  if (!text(value.login, 256) || (!value.login && kind !== 'audit')) return false;
   const names = ['id', 'login', ...(Object.hasOwn(value, 'name') ? ['name'] : [])];
   switch (kind) {
     case 'accounts':
@@ -161,7 +172,7 @@ export function parseAdminInventoryReply(
     next = parseAdminInventoryRequest({ kind, next: page.next })?.next;
     if (
       !next ||
-      entries.length !== 25 ||
+      (kind === 'slots' ? entries.length === 0 : entries.length !== 25) ||
       next.id !== before?.id ||
       (byTime && next.at !== before.at)
     )

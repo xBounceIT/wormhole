@@ -54,6 +54,7 @@ func TestPostgresAdminInventoryAuthorizesEveryPage(t *testing.T) {
 			}
 			checkPostgresAdminGroups(t, ctx, dba, session, trust)
 			checkPostgresNodeGrantAdministration(t, ctx, dba, session, trust)
+			slotCursor := checkPostgresAdminCredentialSlots(t, ctx, dba, session, trust, keys)
 			if _, err := session.AdminInventory(ctx, AdminInventoryRequest{Kind: "passwords"}); !errors.Is(err, ErrConfiguration) {
 				t.Fatal("invalid inventory kind accepted", err)
 			}
@@ -101,6 +102,9 @@ func TestPostgresAdminInventoryAuthorizesEveryPage(t *testing.T) {
 				t.Fatal("database login opened audit without a capability", bareErr)
 			}
 			sql("UPDATE wormhole_data.users SET is_admin=false WHERE id='" + trust.UserID.String() + "'")
+			if _, page, err := session.AdminCredentialSlots(ctx, trust, slotCursor); err != nil || page != nil {
+				t.Fatal("demoted administrator could still page through slots", err)
+			}
 			page, err := session.AdminInventory(ctx, AdminInventoryRequest{Kind: "audit", Next: audit.Next})
 			if err != nil || page != nil {
 				t.Fatal("retired authority remained valid for a previously admitted device", err)

@@ -32,6 +32,7 @@ test('administration requests scope cursors to their section and preserve audit 
 test('administration replies are bounded to one ordered page with exact fields', () => {
   const account = { id: id(1), login: 'admin', role: 'administrator', status: 'enabled' };
   const device = { id: id(1), login: 'admin', name: 'Desk', status: 'pending', at };
+  const slot = { id: id(1), name: 'Primary login', protocol: 'ssh', allowSelfService: false };
   const session = {
     id: id(1),
     login: 'admin',
@@ -53,6 +54,11 @@ test('administration replies are bounded to one ordered page with exact fields',
   for (const [kind, record, invalid] of [
     ['accounts', account, { ...account, status: 'deleted' }],
     ['devices', device, { ...device, name: '\rsecret' }],
+    ['slots', slot, { ...slot, defaultCredentialId: id(2) }],
+    ['slots', slot, { ...slot, allowSelfService: 'false' }],
+    ['slots', slot, { ...slot, protocol: 'https' }],
+    ['slots', slot, { ...slot, name: ' ' }],
+    ['slots', slot, { ...slot, name: 'è'.repeat(513) }],
     ['unencrypted-clients', device, { ...device, clientAddr: '192.0.2.1' }],
     ['sessions', session, { ...session, clientAddr: '192.0.2.1' }],
     ['audit', event, { ...event, sessionRole: 'private-role' }],
@@ -69,6 +75,16 @@ test('administration replies are bounded to one ordered page with exact fields',
     );
   }
   const kind = 'audit';
+  const shortSlotPage = { kind: 'slots', entries: [slot], next: { id: slot.id } };
+  const shortReply = { status: 'ready', page: shortSlotPage };
+  assert.deepEqual(parseAdminInventoryReply(shortReply, { kind: 'slots' }), shortReply);
+  assert.equal(
+    parseAdminInventoryReply(
+      { ...shortReply, page: { ...shortSlotPage, entries: [] } },
+      { kind: 'slots' },
+    ),
+    undefined,
+  );
   const entries = Array.from({ length: 25 }, (_, index) => ({ ...event, id: id(30 - index) }));
   const next = { id: id(6), at };
   const reply = { status: 'ready', page: { kind, entries, next } };

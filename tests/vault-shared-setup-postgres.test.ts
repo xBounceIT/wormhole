@@ -506,6 +506,8 @@ app.whenReady().then(async()=>{
        const groupForm=(label, value)=>adminWindow.webContents.executeJavaScript('(()=>{const field=document.querySelector("input[aria-label="+JSON.stringify('+JSON.stringify(label)+')+"]");field.value='+JSON.stringify(value)+';field.form.requestSubmit();})()');
        try{
          await waitForRecord('administrator');
+         await section('slots');
+         await waitForAdmin('[...document.querySelectorAll("[role=status]")].some(s=>s.textContent==="No records on this page.")');
          await section('unencrypted-clients');
          await waitForAdmin('document.body.textContent.includes("No unencrypted clients connected.")');
          await section('accounts');

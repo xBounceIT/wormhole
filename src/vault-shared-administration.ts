@@ -47,6 +47,7 @@ export type SharedAdministrationApi = {
 
 const sections: Record<AdminInventoryKind, string> = {
   accounts: 'Accounts',
+  slots: 'Credential slots',
   devices: 'Devices',
   'my-devices': 'My devices',
   sessions: 'Recorded sessions',
@@ -236,8 +237,16 @@ export function mountSharedAdministration(
         const label = document.createElement('strong');
         const detail = document.createElement('p');
         const localTime = record.at ? new Date(record.at).toLocaleString() : '';
-        if (request.kind === 'accounts') {
-          label.textContent = record.name || record.login;
+        if (request.kind === 'slots') {
+          label.textContent = record.name ?? record.id;
+          detail.textContent = [
+            record.protocol?.toUpperCase(),
+            record.allowSelfService
+              ? 'Users can choose a credential'
+              : 'Assigned by an administrator',
+          ].join(' · ');
+        } else if (request.kind === 'accounts') {
+          label.textContent = record.name || record.login || record.id;
           detail.textContent = [record.name ? record.login : '', record.role, record.status]
             .filter(Boolean)
             .join(' · ');
@@ -256,7 +265,7 @@ export function mountSharedAdministration(
             .filter(Boolean)
             .join(' · ');
         } else if (request.kind === 'sessions') {
-          label.textContent = record.login;
+          label.textContent = record.login ?? record.id;
           detail.textContent = [
             localTime,
             record.appVersion,
@@ -321,7 +330,7 @@ export function mountSharedAdministration(
                 adminPanel,
                 suspension,
                 record.id,
-                label.textContent ?? record.login,
+                label.textContent ?? record.login ?? record.id,
                 closeReview,
                 api.accountBoundaryRotation,
                 {
@@ -365,7 +374,7 @@ export function mountSharedAdministration(
                           },
                         },
                         {
-                          targetLogin: record.login,
+                          targetLogin: record.login ?? '',
                           targetUserId: record.id,
                           suspension: suspensionRevision,
                           signal: lifetime.signal,

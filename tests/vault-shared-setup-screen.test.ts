@@ -418,6 +418,7 @@ let finishAdminPage;
       devices:{id:'device',login:'alice',status:'revoked',at:'2026-11-23T12:00:00.000000Z'},
       'unencrypted-clients':{id:'client',name:'Lab desktop',login:'alice',status:'active',at:'2026-11-23T12:00:00.000000Z'},
       sessions:{id:'session',login:'alice',appVersion:'2.4.3',transport:'tls',deviceId:'device',at:'2026-11-23T12:00:00.000000Z'},
+      slots:{id:'slot',name:'Production shell',protocol:'ssh',allowSelfService:true},
       audit:{id:'event',login:'',actorId:'deleted-account',sessionId:'session',action:'login',status:'success',source:'ui',at:'2026-11-23T12:00:00.000000Z'},
     };
     mountSharedAdministration(adminCard,{
@@ -450,12 +451,16 @@ let finishAdminPage;
     menu.dispatchEvent(new Event('change'));
     await tick();
     check(adminCard.textContent.includes('No manageable items')&&!list(),'grants section retained the previous section');
-    for(const [value,expected] of [['devices','revoked'],['sessions','2.4.3'],['audit','deleted-account']]){
+    for(const [value,expected] of [['devices','revoked'],['sessions','2.4.3'],['audit','deleted-account'],['slots','Production shell']]){
       menu.value=value;
       menu.dispatchEvent(new Event('change'));
       await tick();
       check(list().includes(expected),'section did not display its expected record');
     }
+    check(list().includes('SSH · Users can choose a credential')&&!adminCard.querySelector('li button'),'slot metadata or permissions changed in the view');
+    bySection.slots.allowSelfService=false;
+    await press('Refresh');
+    check(list().includes('SSH · Assigned by an administrator'),'assignment policy remained stale');
     menu.value='unencrypted-clients';
     menu.dispatchEvent(new Event('change'));
     await tick();

@@ -67,4 +67,20 @@ func TestPostgresDeviceConnectionLimitUpgrade(t *testing.T) {
 	if _, err := db.Exec(ctx, migration).ReadAll(); !hasSQLState(err, "55000", 0) {
 		t.Fatal("repeated upgrade", err)
 	}
+	run("ROLLBACK")
+	const available = "SELECT (to_regprocedure('wormhole_api_v1.admin_credential_slots(bytea,uuid,bytea,bytea)') IS NOT NULL)::text"
+	if row, err := readDeploymentRow(ctx, db, available, 1); err != nil || string(row[0]) != "false" {
+		t.Fatal("unexpected slot API on schema 92", err)
+	}
+	slots, err := deploy.NextMigrationScript("testscope", testHintID, 92)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run(slots)
+	if row, err := readDeploymentRow(ctx, db, available, 1); err != nil || string(row[0]) != "true" {
+		t.Fatal("slot API missing after schema 93 upgrade", err)
+	}
+	if _, err := db.Exec(ctx, slots).ReadAll(); !hasSQLState(err, "55000", 0) {
+		t.Fatal("repeated slot upgrade", err)
+	}
 }

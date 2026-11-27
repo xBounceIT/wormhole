@@ -357,6 +357,14 @@ recorded sessions and audit. The server checks current administrator authority
 and device admission for every page. The audit view shows the recorded action,
 outcome, time, actor and session. The session view represents sign-in records.
 
+Schema 93 adds **Credential slots** to this window. An administrator can review
+the name, protocol and assignment policy of each slot on a boundary where they
+have View permission. Each page shows up to 25 slots. Large author certificates
+can shorten a page. Use **Next page** to continue. The Go backend verifies
+the signed slot and its author and saves the verified revisions before it
+sends the page to the window. A workspace on schema 92 can use the offline
+upgrade command described above.
+
 Schema 60 adds the **Groups** section. Apply
 `deploy.AdminGroupsMigration(roleTag, workspaceID)` after schema 59.
 Administrators can create or rename groups, add an enabled account by its

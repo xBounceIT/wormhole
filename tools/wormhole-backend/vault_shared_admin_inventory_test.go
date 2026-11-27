@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -12,6 +13,10 @@ import (
 )
 
 type adminInventoryMemberProbe struct{ *credentialReleaseProbe }
+
+func (p *adminInventoryMemberProbe) AdminCredentialSlots(context.Context, sharedpg.TrustState, uuid.UUID) (sharedpg.TrustState, *sharedpg.AdminSlotPage, error) {
+	panic("member reached the credential slots query")
+}
 
 func (p *adminInventoryMemberProbe) AdminInventorySupported(context.Context, string) (bool, error) {
 	panic("member reached the administration capability probe")
@@ -25,6 +30,7 @@ func TestSharedAdminInventoryRequestAndMemberGate(t *testing.T) {
 	id := uuid.NewString()
 	for _, raw := range []string{
 		`{"kind":"accounts"}`,
+		`{"kind":"slots","next":{"id":"` + id + `"}}`,
 		`{"kind":"devices","next":{"id":"` + id + `"}}`,
 		`{"kind":"unencrypted-clients","next":{"id":"` + id + `"}}`,
 		`{"kind":"audit","next":{"id":"` + id + `","at":"2026-11-23T10:05:00.444555Z"}}`,
@@ -48,18 +54,24 @@ func TestSharedAdminInventoryRequestAndMemberGate(t *testing.T) {
 		}
 	}
 	raw := []byte(`{"kind":"audit"}`)
-	if _, err := h.sharedAdminInventory(context.Background(), raw); err != vaultwire.ErrProtocol {
-		t.Fatal("an unavailable owner accepted administration", err)
+	for _, request := range [][]byte{raw, []byte(`{"kind":"slots"}`)} {
+		if _, err := h.sharedAdminInventory(context.Background(), request); err != vaultwire.ErrProtocol {
+			t.Fatal("an unavailable owner accepted administration", err)
+		}
 	}
 	c, probe, _, _, _, _, _, _ := credentialControllerFixture(t)
 	c.session = &adminInventoryMemberProbe{probe}
 	c.runtimeTLS = sharedpg.TLSVerified
 	h.shared = &vaultSharedSession{controller: c, vaultID: uuid.NewString(), fileID: uuid.NewString()}
-	for _, request := range [][]byte{raw, []byte(`{"kind":"unencrypted-clients"}`)} {
+	for _, request := range [][]byte{raw, []byte(`{"kind":"unencrypted-clients"}`), []byte(`{"kind":"slots"}`)} {
 		result, err := h.Handle(context.Background(), "shared-admin-inventory", request)
 		var reply sharedAdminInventoryReply
 		if err != nil || json.Unmarshal(result, &reply) != nil || reply.Status != "unavailable" || reply.Page != nil || !c.Unlocked() {
 			t.Fatal("member denial leaked records or retired the workspace", err)
 		}
+	}
+	probe.runtime = func(context.Context) (*sharedpg.UnverifiedRuntimeState, error) { return nil, sharedpg.ErrSessionClosed }
+	if result, err := h.Handle(context.Background(), "shared-admin-inventory", []byte(`{"kind":"slots"}`)); !errors.Is(err, vaultwire.ErrRetired) || len(result) != 0 || c.Unlocked() {
+		t.Fatal("slot inventory exposed a page after losing the session", err)
 	}
 }
