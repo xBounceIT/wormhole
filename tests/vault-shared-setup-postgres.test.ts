@@ -1429,6 +1429,8 @@ for (const mode of [
           requiresTls: true,
         });
         if (mode === 'export') {
+          database.send({ ...command, action: 'enableRowSecurity' });
+          assert.deepEqual(await database.read(), { confirmed: true });
           database.send({ ...command, action: 'changeRoutineConfiguration' });
           assert.deepEqual(await database.read(), { confirmed: true });
           assert.deepEqual(

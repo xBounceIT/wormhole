@@ -92,6 +92,13 @@ func TestPostgresAuditPartitionMaintenance(t *testing.T) {
 	run(receiptMigration)
 	rejected(receiptMigration, "55000")
 	run("ROLLBACK")
+	rlsMigration, err := deploy.RowSecurityMigration("testscope", testHintID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run(rlsMigration)
+	rejected(rlsMigration, "55000")
+	run("ROLLBACK")
 	run("RESET SESSION AUTHORIZATION")
 	t.Run("edit-seal-verification", func(t *testing.T) { checkPostgresEditSignatures(t, ctx, db) })
 	const maintain = "SELECT * FROM wormhole_data.maintain_audit_partitions('" + testHintID + "'"

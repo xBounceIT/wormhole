@@ -695,6 +695,38 @@ replacement administrator. The earlier single-boundary recovery checkpoint
 keeps its original scope. Personal roots and the pending rotation remain
 protected by the existing rotation checks.
 
+### Optional row-level security
+
+Schema 91 adds a second check on direct reads and writes to workspace tables.
+It is off by default. To upgrade a schema-90 database, apply
+`deploy.RowSecurityMigration(roleTag, workspaceID)`. On a dedicated DBA
+connection, supply the workspace UUID and the tagged owner role as psql
+variables and run this transaction during a maintenance window.
+
+```sql
+BEGIN;
+SET LOCAL ROLE :"owner_role";
+SELECT wormhole_data.set_row_security(:'workspace_id'::uuid, true);
+COMMIT;
+```
+
+PostgreSQL enables and forces row-level security on every workspace table and
+audit partition. The application's owner-executed API functions can still
+access rows. The observer can read its existing device identification columns,
+and the original delegated installer can read its existing workspace inspection
+columns. A device with an accidental table grant sees no rows directly.
+Scheduled audit maintenance applies the same protection to each new partition.
+
+The change takes exclusive table locks and commits atomically. Retry a busy
+workspace after its active transactions finish. An unexpected policy stops
+the operation for DBA review. **Check deployment** verifies the policies and
+their roles across the entire workspace. To disable the option, use the same
+transaction with `false`. Configure the option again on the destination after
+restoring a workspace to a fresh database. Keep the table ACLs in place.
+PostgreSQL governs `TRUNCATE` and `REFERENCES` through those grants. Superusers
+and roles with `BYPASSRLS` retain their platform privileges.
+See [PostgreSQL row security policies](https://www.postgresql.org/docs/16/ddl-rowsecurity.html).
+
 ### Unencrypted clients
 
 Schema 86 adds **Unencrypted clients** to the administration window. Fresh

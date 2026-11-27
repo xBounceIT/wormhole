@@ -59,7 +59,7 @@ func TestSchemaDeploymentRejectsInvalidInputsBeforeConnecting(t *testing.T) {
 
 func TestPostgresAtomicSchemaDeployment(t *testing.T) {
 	s, secret := postgresTestClusterTLS(t, true)
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	admin, err := Connect(ctx, s, secret)
 	if err != nil {
@@ -109,6 +109,7 @@ AND (SELECT count(*) FROM pg_catalog.pg_roles WHERE rolname LIKE 'wh_testscope%'
 		t.Fatal("failed redeployment changed existing workspace", got, err)
 	}
 	checkCatalogDrift(t, ctx, s, secret, admin)
+	checkWorkspaceRowSecurity(t, ctx, s, secret, "testscope", standardRLSCatalog)
 	t.Run("DBA logging diagnostics", func(t *testing.T) {
 		dba := s
 		dba.Profile = vault.Standard
@@ -142,11 +143,17 @@ AND (SELECT count(*) FROM pg_catalog.pg_roles WHERE rolname LIKE 'wh_testscope%'
 	if got, err := CheckSchemaDeployment(ctx, exported, secret, "password", exportID); err != nil || got.SchemaDeployment != want {
 		t.Fatal("exported installation could not be reconciled", got, err)
 	}
+	if _, err := conn.Exec(ctx, "SET ROLE wh_password_owner; SELECT wormhole_data.set_row_security('"+exportID+"',true)").ReadAll(); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := CheckSchemaDeployment(ctx, exported, secret, "password", exportID); err != nil || got.SchemaDeployment != want {
+		t.Fatal("protected exported installation could not be reconciled", got, err)
+	}
 }
 
 func TestPostgresSchemaDeploymentWithDelegatedDBA(t *testing.T) {
 	s, secret := postgresTestClusterTLS(t, true)
-	ctx, cancel := context.WithTimeout(context.Background(), 75*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	admin, err := Connect(ctx, s, secret)
 	if err != nil {
@@ -154,15 +161,15 @@ func TestPostgresSchemaDeploymentWithDelegatedDBA(t *testing.T) {
 	}
 	defer closeDeploymentConnection(admin)
 	for _, sql := range []string{
-		"CREATE ROLE wh_setup_dba LOGIN CREATEROLE PASSWORD '" + postgresTestVerifier(secret) + "'",
-		"GRANT pg_read_all_stats TO wh_setup_dba WITH ADMIN TRUE, INHERIT FALSE, SET FALSE",
-		"CREATE DATABASE wormhole_delegated_test OWNER wh_setup_dba",
+		`CREATE ROLE "Setup-DBA" LOGIN CREATEROLE PASSWORD '` + postgresTestVerifier(secret) + "'",
+		`GRANT pg_read_all_stats TO "Setup-DBA" WITH ADMIN TRUE, INHERIT FALSE, SET FALSE`,
+		`CREATE DATABASE wormhole_delegated_test OWNER "Setup-DBA"`,
 	} {
 		if _, err := admin.Exec(ctx, sql).ReadAll(); err != nil {
 			t.Fatal(err)
 		}
 	}
-	s.Database, s.DeviceRole = "wormhole_delegated_test", "wh_setup_dba"
+	s.Database, s.DeviceRole = "wormhole_delegated_test", "Setup-DBA"
 	p, err := CheckDeploymentPrerequisites(ctx, s, secret)
 	if err != nil || !p.ReadyToDeploy() {
 		t.Fatal("delegated DBA did not pass preflight", p, err)
@@ -173,7 +180,7 @@ func TestPostgresSchemaDeploymentWithDelegatedDBA(t *testing.T) {
 		t.Fatal("delegated deployment", state, err)
 	}
 	grants := admin.ExecParams(ctx, `SELECT count(*)::text FROM pg_catalog.pg_auth_members m JOIN pg_catalog.pg_roles r ON r.oid=m.roleid
-WHERE m.member='wh_setup_dba'::regrole AND pg_catalog.starts_with(r.rolname,'wh_delegated_') AND (m.inherit_option OR m.set_option)`, nil, nil, nil, nil).Read()
+WHERE m.member='"Setup-DBA"'::regrole AND pg_catalog.starts_with(r.rolname,'wh_delegated_') AND (m.inherit_option OR m.set_option)`, nil, nil, nil, nil).Read()
 	if grants.Err != nil || len(grants.Rows) != 1 || string(grants.Rows[0][0]) != "0" {
 		t.Fatal("temporary delegated privileges survived deployment", grants.Err)
 	}
@@ -194,7 +201,8 @@ WHERE m.member='wh_setup_dba'::regrole AND pg_catalog.starts_with(r.rolname,'wh_
 	if got, err := CheckSchemaDeployment(ctx, s, secret, "delegated", testHintID); err != nil || got.Version != deploy.SchemaVersion || !got.Provisioning {
 		t.Fatal("independent DBA could not reconcile delegated installation", got, err)
 	}
-	s.DeviceRole = "wh_setup_dba"
+	s.DeviceRole = "Setup-DBA"
+	checkWorkspaceRowSecurity(t, ctx, s, secret, "delegated", delegatedRLSCatalog)
 	checkWorkspaceBootstrap(t, ctx, s, secret)
 }
 

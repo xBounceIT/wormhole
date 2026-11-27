@@ -45,9 +45,11 @@ var deploymentCatalogSQL string
 // Pinned from the fresh superuser and delegated installations in the real
 // schema deployment tests. These fingerprints contain no workspace identities.
 const (
-	catalogSchemaVersion       = 90
-	standardDeploymentCatalog  = "t0TDRbG7xd5BgbKdJ5nZ29ikDuxpnp6C1EY+7uLpmg8="
-	delegatedDeploymentCatalog = "VPjYFUc+LsDlfk60mfUETOqlnNoj4hXl1+sxjhR4lz0="
+	catalogSchemaVersion       = 91
+	standardDeploymentCatalog  = "ok1i/McvnMHRekeL01m0mMB9cE4Yl1A1NzWVIMAS5hQ="
+	delegatedDeploymentCatalog = "7uRATP+kA2QtiCXzDM/OP96Wbocl65TKwCQpmTsvA3Y="
+	standardRLSCatalog         = "tjlOQ6jF1U4FGhuB7TzdNU77wK2C9rdhjH5NIBG3KNE="
+	delegatedRLSCatalog        = "BxYL4J8WAQYDwE8znCMN+mqb5AM2RqMH7cl0Z2QMTH0="
 )
 
 // SchemaDeployment is a DBA observation for Check deployment, not proof of
@@ -174,7 +176,12 @@ func checkSchemaDeployment(ctx context.Context, conn *pgconn.PgConn, roleTag, wo
 	if err != nil {
 		return SchemaDeployment{}, err
 	}
-	if deploy.SchemaVersion != catalogSchemaVersion || digest != standardDeploymentCatalog && digest != delegatedDeploymentCatalog {
+	if deploy.SchemaVersion != catalogSchemaVersion {
+		return SchemaDeployment{}, ErrDeploymentMismatch
+	}
+	switch digest {
+	case standardDeploymentCatalog, delegatedDeploymentCatalog, standardRLSCatalog, delegatedRLSCatalog:
+	default:
 		return SchemaDeployment{}, ErrDeploymentMismatch
 	}
 	row, err := readDeploymentRow(ctx, conn, `SELECT workspace_id::text, role_tag, schema_version::text, state, require_tls::text

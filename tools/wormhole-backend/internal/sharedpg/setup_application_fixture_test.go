@@ -476,6 +476,19 @@ WHERE kind='org-enc' AND status='active' AND cert_signature IS NOT NULL`, nil, n
 			}
 			continue
 		}
+		if command.Action == "enableRowSecurity" {
+			conn, err := Connect(ctx, settings, secret)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Role tag and workspace UUID are validated before dispatch.
+			_, err = conn.Exec(ctx, "BEGIN; SET LOCAL ROLE wh_"+command.RoleTag+"_owner; SELECT wormhole_data.set_row_security('"+command.WorkspaceID+"',true); COMMIT").ReadAll()
+			closeDeploymentConnection(conn)
+			if err != nil || json.NewEncoder(os.Stdout).Encode(map[string]bool{"confirmed": true}) != nil {
+				t.Fatal("could not enable workspace row security", err)
+			}
+			continue
+		}
 		if command.Action == "changeRoutineConfiguration" || command.Action == "restoreRoutineConfiguration" {
 			conn, err := Connect(ctx, settings, secret)
 			if err != nil {

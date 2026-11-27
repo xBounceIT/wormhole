@@ -31,7 +31,7 @@ func checkCatalogDrift(t *testing.T, ctx context.Context, settings Settings, pas
 	}
 	exec(t, `CREATE ROLE catalog_reader NOLOGIN;
 	    SET ROLE wh_testscope_owner;
-	    CREATE TABLE wormhole_data.audit_log_208001 PARTITION OF wormhole_data.audit_log FOR VALUES FROM ('2080-01-01') TO ('2080-02-01');
+	    CREATE TABLE wormhole_data.audit_log_208001 PARTITION OF wormhole_data.audit_log FOR VALUES FROM ('2080-01-01 00:00:00+00') TO ('2080-02-01 00:00:00+00');
 	    RESET ROLE`)
 	check := func(t *testing.T, want error) {
 		t.Helper()

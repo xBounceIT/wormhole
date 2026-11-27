@@ -31,13 +31,22 @@ WITH namespaces AS (
             ELSE 'sql:'||encode(sha256(convert_to(pg_get_functiondef(p.oid),'UTF8')),'hex') END AS body
     FROM pg_proc p JOIN namespaces n ON n.oid=p.pronamespace JOIN pg_language l ON l.oid=p.prolang
 ), relations AS (
-    SELECT c.oid,c.relowner,c.relacl,c.relkind,n.nspname,c.relname,
+    SELECT c.oid,c.relowner,c.relacl,c.relkind,c.relrowsecurity,c.relforcerowsecurity,n.nspname,c.relname,
         c.relispartition AND c.relname ~ '^audit_log_[0-9]{4}(0[1-9]|1[0-2])$' AND EXISTS(
             SELECT FROM pg_inherits i JOIN pg_class parent ON parent.oid=i.inhparent
             WHERE i.inhrelid=c.oid AND parent.relnamespace=c.relnamespace AND parent.relname='audit_log'
         ) AS monthly_audit
     FROM pg_class c JOIN namespaces n ON n.oid=c.relnamespace
     WHERE c.relkind IN ('r','p','v','m','f','S')
+), policies AS (
+    SELECT p.polrelid,jsonb_agg(jsonb_build_array(p.polname,p.polcmd,p.polpermissive,role.name,
+        CASE WHEN pg_get_expr(p.polqual,p.polrelid)=format('(CURRENT_USER = %L::name)',r.rolname)
+            THEN 'current-role' ELSE pg_get_expr(p.polqual,p.polrelid) END,pg_get_expr(p.polwithcheck,p.polrelid))
+        ORDER BY p.polname COLLATE "C",role.name COLLATE "C") AS entries
+    FROM pg_policy p JOIN relations rel ON rel.oid=p.polrelid
+    CROSS JOIN LATERAL unnest(p.polroles) recipient
+    JOIN roles role ON role.oid=recipient LEFT JOIN pg_roles r ON r.oid=recipient
+    GROUP BY p.polrelid
 ), objects(kind,id,owner,acltype,acl,description) AS (
     SELECT 'schema',oid,nspowner,'n'::"char",nspacl,jsonb_build_array(nspname) FROM namespaces
     UNION ALL
@@ -47,8 +56,9 @@ WITH namespaces AS (
     FROM routines
     UNION ALL
     SELECT 'relation',oid,relowner,CASE WHEN relkind='S' THEN 's' ELSE 'r' END::"char",relacl,
-        jsonb_build_array(nspname,monthly_audit,CASE WHEN monthly_audit THEN '' ELSE relname END,relkind)
-    FROM relations
+        jsonb_build_array(nspname,monthly_audit,CASE WHEN monthly_audit THEN '' ELSE relname END,relkind,
+            relrowsecurity,relforcerowsecurity,policies.entries)
+    FROM relations LEFT JOIN policies ON polrelid=oid
 ), grants AS (
     -- Store the difference from PostgreSQL's defaults. This preserves owner
     -- revocations while accommodating privileges introduced by a server version.
