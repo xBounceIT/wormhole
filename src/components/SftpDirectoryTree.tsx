@@ -20,21 +20,7 @@ import {
 const minTreeHeight = 80;
 const maxTreeHeight = 400;
 
-export function SftpDirectoryTree({
-  sessionId,
-  pane,
-  path,
-  revision,
-  height,
-  onHeightChange,
-  search,
-  onSearchChange,
-  sortColumn,
-  ascending,
-  onSort,
-  onNavigate,
-  onDrop,
-}: {
+type SftpDirectoryTreeProps = {
   sessionId: string;
   pane: 'local' | 'remote';
   path: string;
@@ -48,16 +34,40 @@ export function SftpDirectoryTree({
   onSort: (column: SftpSortColumn) => void;
   onNavigate: (path: string) => void;
   onDrop: (event: React.DragEvent<HTMLElement>, path: string) => void;
-}) {
-  const [tree, setTree] = useState(() => createSftpTree(pane));
+};
+
+export function SftpDirectoryTree(props: SftpDirectoryTreeProps) {
+  return <DirectoryTreeContent key={props.pane + ':' + props.sessionId} {...props} />;
+}
+
+function DirectoryTreeContent({
+  sessionId,
+  pane,
+  path,
+  revision,
+  height,
+  onHeightChange,
+  search,
+  onSearchChange,
+  sortColumn,
+  ascending,
+  onSort,
+  onNavigate,
+  onDrop,
+}: SftpDirectoryTreeProps) {
+  const [tree, setTree] = useState(() => revealSftpTreePath(createSftpTree(pane), path));
+  const [lastRevision, setLastRevision] = useState(revision);
+  if (tree.path !== path || lastRevision !== revision) {
+    const next = tree.path === path ? tree : revealSftpTreePath(tree, path);
+    setTree(lastRevision === revision ? next : invalidateSftpTree(next));
+    if (lastRevision !== revision) setLastRevision(revision);
+  }
   const viewport = useRef<HTMLDivElement>(null);
-  const revealPending = useRef(true);
   const pending = useRef(new Map<string, string>());
   const resize = useRef<{ y: number; height: number } | undefined>(undefined);
   useEffect(() => {
     const move = (event: PointerEvent) => {
       if (resize.current) {
-        revealPending.current = true;
         onHeightChange(
           Math.max(
             minTreeHeight,
@@ -76,25 +86,9 @@ export function SftpDirectoryTree({
       window.removeEventListener('pointerup', stop);
     };
   }, [onHeightChange]);
-  useEffect(() => {
-    revealPending.current = true;
-    setTree((current) => revealSftpTreePath(current, path));
-  }, [path]);
-  useEffect(() => {
-    revealPending.current = true;
-    setTree((current) => invalidateSftpTree(current));
-  }, [revision]);
   useLayoutEffect(() => {
     if (viewport.current) viewport.current.scrollTop = 0;
-    revealPending.current = true;
-  }, [search, sortColumn, ascending]);
-  useLayoutEffect(() => {
-    if (!revealPending.current || tree.path !== path) return;
-    const container = viewport.current;
-    if (!container) return;
-    container.scrollTop = 0;
-    revealPending.current = false;
-  }, [tree, path, height, search, sortColumn, ascending]);
+  }, [path, revision, height, search, sortColumn, ascending]);
   useEffect(
     () =>
       window.wormhole?.onSshEvent((event) => {
@@ -269,7 +263,6 @@ export function SftpDirectoryTree({
           if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
             event.preventDefault();
             event.stopPropagation();
-            revealPending.current = true;
             onHeightChange((current) =>
               Math.max(
                 minTreeHeight,

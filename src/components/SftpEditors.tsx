@@ -222,41 +222,44 @@ function ConfirmSftpEdit({
   );
 }
 
-export function SftpEditedFiles({
-  allowConfirmation = true,
-  sessionId,
-  recovery = false,
-}: {
+type SftpEditedFilesProps = {
   allowConfirmation?: boolean;
   sessionId: string;
   recovery?: boolean;
-}) {
+};
+
+export function SftpEditedFiles(props: SftpEditedFilesProps) {
+  const key = (props.recovery ? 'recovery:' : 'session:') + props.sessionId;
+  return <EditedFileList key={key} {...props} />;
+}
+
+function EditedFileList({
+  allowConfirmation = true,
+  sessionId,
+  recovery = false,
+}: SftpEditedFilesProps) {
   const [files, setFiles] = useState<WormholeSftpEditView[]>([]);
   const [error, setError] = useState('');
   const [saveAs, setSaveAs] = useState<{ id: string; path: string }>();
-  const requests = useRef({
+  const requestsRef = useRef({
     version: 0,
     action: 0,
     pending: new Set<symbol>(),
     completed: new Set<string>(),
-  }).current;
-  const remember = useCallback(
-    (requestId: string | undefined) => {
-      if (!requestId) return;
-      requests.completed.add(requestId);
-      if (requests.completed.size > 256)
-        requests.completed.delete(requests.completed.values().next().value!);
-    },
-    [requests],
-  );
+  });
+  const remember = useCallback((requestId: string | undefined) => {
+    if (!requestId) return;
+    const requests = requestsRef.current;
+    requests.completed.add(requestId);
+    if (requests.completed.size > 256)
+      requests.completed.delete(requests.completed.values().next().value!);
+  }, []);
   useEffect(() => {
+    const requests = requestsRef.current;
     let active = true;
     const listToken = Symbol();
     requests.pending.add(listToken);
     const initialVersion = ++requests.version;
-    setFiles([]);
-    setError('');
-    setSaveAs(undefined);
     void window.wormhole
       ?.sftpEdit?.(sessionId, { operation: 'list' })
       .then((event) => {
@@ -305,8 +308,9 @@ export function SftpEditedFiles({
       requests.completed.clear();
       unsubscribe?.();
     };
-  }, [sessionId, recovery, requests, remember]);
+  }, [sessionId, recovery, remember]);
   const run = (request: WormholeSftpEditRequest) => {
+    const requests = requestsRef.current;
     const requestVersion = ++requests.version;
     requests.action = requestVersion;
     const token = Symbol();

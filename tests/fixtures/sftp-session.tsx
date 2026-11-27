@@ -46,7 +46,7 @@ async function runSftpTreeRequestTests(root: ReturnType<typeof createRoot>) {
         active.set(requestId, request);
       }),
   } as NonNullable<Window['wormhole']>;
-  const render = async (revision: string) => {
+  const render = async (revision: string, sessionId = 'tree-session') => {
     await React.act(async () =>
       root.render(
         <React.StrictMode>
@@ -55,7 +55,7 @@ async function runSftpTreeRequestTests(root: ReturnType<typeof createRoot>) {
               {(['local', 'remote'] as const).map((pane) => (
                 <SftpDirectoryTree
                   key={pane}
-                  sessionId="tree-session"
+                  sessionId={sessionId}
                   pane={pane}
                   path={`/${pane}/home`}
                   revision={revision}
@@ -160,6 +160,19 @@ async function runSftpTreeRequestTests(root: ReturnType<typeof createRoot>) {
       document.querySelector('button[aria-label$=": Permission denied"]'),
       'Real directory errors must remain visible',
     );
+    await render('pending-before-reconnect');
+    const retired = [...active.values()];
+    assert.equal(retired.length, 2);
+    const beforeReconnect = requests.length;
+    await render('pending-before-reconnect', 'replacement');
+    assert.equal(
+      requests.length,
+      beforeReconnect + 2,
+      'the replacement must start both reads immediately',
+    );
+    await React.act(async () => retired.forEach((request) => settle(request, 'Obsolete tree')));
+    assert.equal(document.querySelector('button[aria-label$=": Obsolete tree"]'), null);
+    assert.equal(document.querySelector('button[aria-label$=": Permission denied"]'), null);
   } finally {
     await React.act(async () => root.render(null));
     window.wormhole = original;
@@ -1437,7 +1450,7 @@ export async function runSftpSessionTests() {
   window.wormhole!.sftpEdit = async () => {
     throw new Error('Editor inventory unavailable');
   };
-  await React.act(async () => root.render(<SftpEditedFiles key="failed" sessionId="newer" />));
+  await React.act(async () => root.render(<SftpEditedFiles sessionId="previous" />));
   await tick();
   assert.ok(
     document.querySelector('[role="alert"]')?.textContent?.includes('inventory unavailable'),
@@ -1448,7 +1461,12 @@ export async function runSftpSessionTests() {
     resolveList = resolve;
   });
   window.wormhole!.sftpEdit = async () => delayedList;
-  await React.act(async () => root.render(<SftpEditedFiles key="delayed" sessionId="newer" />));
+  await React.act(async () => root.render(<SftpEditedFiles sessionId="newer" />));
+  assert.equal(
+    document.querySelector('[role="alert"]'),
+    null,
+    'the new session clears the previous inventory error',
+  );
   await tick();
   const latest: WormholeSftpEditView = {
     id: 'async',

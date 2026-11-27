@@ -393,6 +393,29 @@ async function runAuthPromptTests() {
     }
   }
 
+  // Reusing the same label after a different challenge must start a fresh lifetime.
+  for (const mode of ['pin', 'windowsHello']) {
+    const prior = deferred();
+    const current = deferred();
+    check = async () => ({ available: true, message: '' });
+    verifySecret = verifyHello = () => prior.promise;
+    await mount({ mode }, { reason: 'Repeated challenge' });
+    if (mode === 'pin') {
+      await enterSecret();
+      assert.equal(document.querySelector<HTMLInputElement>('#auth-secret')!.value, '');
+    }
+    await mount({ mode: 'pin' }, { reason: 'Interim challenge' }, false);
+    verifySecret = verifyHello = () => current.promise;
+    await mount({ mode }, { reason: 'Repeated challenge' }, false);
+    if (mode === 'pin') await enterSecret();
+    const before = results.length;
+    await React.act(async () => prior.resolve({ succeeded: false, message: 'Obsolete result' }));
+    assert.doesNotMatch(text(), /Obsolete result/);
+    assert.match(text(), mode === 'pin' ? /Checking/ : /Waiting for Windows Hello/);
+    await React.act(async () => current.resolve({ succeeded: true, message: '' }));
+    assert.equal(results.length, before + 1);
+  }
+
   for (const mode of ['pin', 'windowsHello']) {
     const pendingResult = deferred();
     verifySecret = () => pendingResult.promise;

@@ -46,8 +46,12 @@ export function VirtualCardGrid<T>({
   resetKey,
 }: VirtualCardGridProps<T>) {
   const viewportRef = useRef<HTMLDivElement>(null);
-  const viewportStateRef = useRef<VirtualGridViewport>({ width: 0, height: 0, scrollTop: 0 });
-  const [viewportState, setViewportState] = useState(viewportStateRef.current);
+  const [viewportState, setViewportState] = useState<VirtualGridViewport>({
+    width: 0,
+    height: 0,
+    scrollTop: 0,
+  });
+  const viewportStateRef = useRef(viewportState);
 
   const syncViewport = useCallback(
     (viewport: HTMLDivElement) => {

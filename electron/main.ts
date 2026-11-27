@@ -9143,7 +9143,10 @@ function registerIpcHandlers(
   );
 
   ipcMain.handle('backup:select-import', async (event) => {
-    await serializeAuthOperation(requireWorkspaceAuth);
+    const pickerEpoch = await serializeAuthOperation(async () => {
+      await requireWorkspaceAuth();
+      return authSession.authorizationEpoch;
+    });
     backupImportSelections.delete(event.sender);
     const owner = BrowserWindow.fromWebContents(event.sender);
     const options: Electron.OpenDialogOptions = {
@@ -9158,12 +9161,13 @@ function registerIpcHandlers(
     if (selection.canceled || selection.filePaths.length !== 1) return null;
     const selectedPath = selection.filePaths[0];
     return serializeAuthOperation(async () => {
-      await requireWorkspaceAuth();
+      if (!isAuthorizationEpochCurrent(pickerEpoch)) return null;
       const inspected = parseBackupInspectResponse(
         await runBackend<BackupInspectBackendResponse>('backup-inspect', {
           path: selectedPath,
         }),
       );
+      if (!isAuthorizationEpochCurrent(pickerEpoch)) return null;
       backupImportSelections.set(event.sender, selectedPath);
       const response: BackupImportSelection = {
         ...inspected,

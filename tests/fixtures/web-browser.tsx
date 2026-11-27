@@ -14,6 +14,7 @@ async function runWebBrowserTests() {
   const listeners = new Set<(event: any) => void>();
   let rejectCommand = false;
   let reconnectCommand = async () => {};
+  let navigationCommand = async () => {};
   const previewImage =
     'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
   let capturePreview = async (): Promise<string | undefined> => previewImage;
@@ -27,6 +28,7 @@ async function runWebBrowserTests() {
       commands.push(request);
       if (rejectCommand) throw new Error('This address cannot use the VPN route.');
       if (request.operation === 'reconnect-vpn') await reconnectCommand();
+      if (request.operation === 'reload') await navigationCommand();
     },
     setWebSessionBounds: async (request: any) => {
       bounds.push(request);
@@ -172,6 +174,28 @@ async function runWebBrowserTests() {
   await render({ webBrowser: { ...session.webBrowser, vpnStatus: 'active' } });
   assert.ok(document.body.textContent?.includes("Office's OpenVPN ACTIVE"));
   assert.equal(document.querySelectorAll('[role="tab"]').length, 3);
+
+  for (const interruption of ['tab', 'newer-command', 'lock']) {
+    let rejectReload!: (error: Error) => void;
+    navigationCommand = () =>
+      new Promise<void>((_, reject) => {
+        rejectReload = reject;
+      });
+    await click('Reload');
+    if (interruption === 'tab') {
+      await render({ webBrowser: { ...session.webBrowser, activeTabId: 'two' } });
+      await render({ webBrowser: { ...session.webBrowser, activeTabId: 'one' } });
+    } else if (interruption === 'lock') {
+      await render({}, { isAuthorized: false });
+      await render({}, { isAuthorized: true });
+    } else {
+      navigationCommand = async () => {};
+      await click('Reload');
+    }
+    await React.act(async () => rejectReload(new Error('Obsolete reload')));
+    assert.equal(document.querySelector('[role="alert"]'), null);
+  }
+  navigationCommand = async () => {};
 
   for (const interruption of ['lock', 'retry']) {
     await render({ webBrowser: { ...session.webBrowser, vpnStatus: 'disconnected' } });

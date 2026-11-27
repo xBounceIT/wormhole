@@ -1,3 +1,4 @@
+import { clearSecretInput, takeOneShotSecret } from './secret-input';
 import { fileSessionMode, isFileBrowserProtocol } from './file-protocol';
 import { SftpEditorSettings, SftpRecoveryNotice } from './components/SftpEditors';
 import { SftpConnectionIcon } from './components/SftpConnectionIcon';
@@ -976,17 +977,6 @@ function credentialDraftFor(credential: CredentialRecord): CredentialDraft {
 
 const SshCertificateEditorContext = createContext<((credentialId: string) => void) | null>(null);
 
-function clearSecretInput(input: HTMLInputElement | null): void {
-  if (input) input.value = '';
-}
-
-function takeOneShotSecret(input: HTMLInputElement | null): string {
-  if (!input) return '';
-  const secret = input.value;
-  clearSecretInput(input);
-  return secret;
-}
-
 function credentialSelectionFor(node: Pick<TreeNode, 'credentialMode' | 'credentialId'>) {
   if (node.credentialMode === 1) return 'none';
   if ((node.credentialMode === 2 || node.credentialMode == null) && node.credentialId) {
@@ -1314,6 +1304,7 @@ function SessionTabContextMenu({
   session,
   children,
   restoringFocus,
+  onRestoreMenuFocus,
   onReconnect,
   onRestoreFullView,
   onDisconnect,
@@ -1326,6 +1317,7 @@ function SessionTabContextMenu({
   session: Session;
   children: ReactNode;
   restoringFocus: RefObject<boolean>;
+  onRestoreMenuFocus: () => void;
   onReconnect: () => void;
   onRestoreFullView?: () => void;
   onDisconnect: () => void;
@@ -1340,16 +1332,7 @@ function SessionTabContextMenu({
       <TooltipFocusSuppressionContext.Provider value={restoringFocus}>
         <ContextMenuTrigger asChild>{children}</ContextMenuTrigger>
       </TooltipFocusSuppressionContext.Provider>
-      <ContextMenuContent
-        className="w-64"
-        onCloseAutoFocus={() => {
-          // Radix restores focus synchronously after this callback returns.
-          restoringFocus.current = true;
-          queueMicrotask(() => {
-            restoringFocus.current = false;
-          });
-        }}
-      >
+      <ContextMenuContent className="w-64" onCloseAutoFocus={onRestoreMenuFocus}>
         <ContextMenuItem onSelect={onDuplicate}>
           <Copy />
           Duplicate
@@ -1514,16 +1497,20 @@ function AuthPrompt({
   onResult: (succeeded: boolean) => void;
   onDialogElementChange?: (dialog: HTMLDialogElement | null) => void;
 }) {
-  const [secret, setSecret] = useState('');
+  const [hasSecret, setHasSecret] = useState(false);
   const [status, setStatus] = useState('');
   const [busy, setBusy] = useState(false);
-  const [helloBusy, setHelloBusy] = useState(false);
+  const [helloBusy, setHelloBusy] = useState(
+    state.mode === 'windowsHello' && Boolean(window.wormhole),
+  );
   const [helloAvailable, setHelloAvailable] = useState(false);
   const [helloStatus, setHelloStatus] = useState<string | null>(null);
-  const activeAuthRequest = useRef<string | null>(null);
-  const helloInFlight = useRef<string | null>(null);
   const dialogRef = useRef<HTMLDialogElement>(null);
   const secretInputRef = useRef<HTMLInputElement>(null);
+  const bindSecretInput = useCallback((input: HTMLInputElement | null) => {
+    clearSecretInput(secretInputRef.current);
+    secretInputRef.current = input;
+  }, []);
   const helloButtonRef = useRef<HTMLButtonElement>(null);
   const onResultRef = useRef(onResult);
   const method: WormholeAuthFallback =
@@ -1536,27 +1523,38 @@ function AuthPrompt({
     helloStatus ?? (state.windowsHello.available ? '' : state.windowsHello.message);
   const authRequestKey = `${request.kind}\0${request.reason}\0${request.autoWindowsHello}\0${isHelloMode}\0${method}`;
 
+  const [challenge, setChallenge] = useState({ key: authRequestKey });
+  if (challenge.key !== authRequestKey) {
+    setChallenge({ key: authRequestKey });
+    setHasSecret(false);
+    setStatus('');
+    setBusy(false);
+    setHelloAvailable(false);
+    setHelloBusy(isHelloMode && Boolean(window.wormhole));
+    setHelloStatus(null);
+  }
+  const activeAuthRequest = useRef<typeof challenge | null>(null);
+  const helloInFlight = useRef<typeof challenge | null>(null);
+
   useLayoutEffect(() => {
     // Invalidate the old request before a settled promise can reach the new callback.
-    activeAuthRequest.current = authRequestKey;
+    activeAuthRequest.current = challenge;
     return () => {
-      if (activeAuthRequest.current === authRequestKey) activeAuthRequest.current = null;
+      if (activeAuthRequest.current === challenge) activeAuthRequest.current = null;
     };
-  }, [authRequestKey]);
+  }, [challenge]);
 
   useLayoutEffect(() => {
     onResultRef.current = onResult;
   }, [onResult]);
 
   const tryWindowsHello = useCallback(
-    (requestKey = authRequestKey, verify = true) => {
-      if (helloInFlight.current === requestKey || !window.wormhole) return;
+    (verify = true) => {
+      if (helloInFlight.current === challenge || !window.wormhole) return;
 
       const api = window.wormhole;
-      const isCurrent = () => activeAuthRequest.current === requestKey;
-      helloInFlight.current = requestKey;
-      setHelloBusy(true);
-      setHelloStatus('');
+      const isCurrent = () => activeAuthRequest.current === challenge;
+      helloInFlight.current = challenge;
       const checkAvailability = async () => {
         const availability = await api.checkWindowsHello();
         if (!isCurrent()) return false;
@@ -1592,23 +1590,18 @@ function AuthPrompt({
           }
         })
         .finally(() => {
-          if (helloInFlight.current === requestKey) helloInFlight.current = null;
+          if (helloInFlight.current === challenge) helloInFlight.current = null;
           if (isCurrent()) setHelloBusy(false);
         });
     },
-    [fallbackName, authRequestKey],
+    [fallbackName, challenge],
   );
 
   useEffect(() => {
-    setSecret('');
-    setStatus('');
-    setBusy(false);
-    setHelloAvailable(false);
-    setHelloStatus(null);
     if (isHelloMode) {
-      void tryWindowsHello(authRequestKey, request.autoWindowsHello);
+      void tryWindowsHello(request.autoWindowsHello);
     }
-  }, [authRequestKey, request.autoWindowsHello, isHelloMode, tryWindowsHello]);
+  }, [request.autoWindowsHello, isHelloMode, tryWindowsHello]);
 
   useLayoutEffect(() => {
     const dialog = dialogRef.current;
@@ -1658,9 +1651,12 @@ function AuthPrompt({
 
   async function submitSecret(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (busy || !secret || !window.wormhole) return;
+    if (busy || !window.wormhole) return;
+    const secret = takeOneShotSecret(secretInputRef.current);
+    if (!secret) return;
+    setHasSecret(false);
 
-    const isCurrent = () => activeAuthRequest.current === authRequestKey;
+    const isCurrent = () => activeAuthRequest.current === challenge;
     setBusy(true);
     setStatus('Checking…');
     try {
@@ -1670,7 +1666,6 @@ function AuthPrompt({
         onResultRef.current(true);
         return;
       }
-      setSecret('');
       setStatus(result.message || (method === 'pin' ? 'Invalid PIN.' : 'Invalid password.'));
     } catch {
       if (!isCurrent()) return;
@@ -1729,7 +1724,12 @@ function AuthPrompt({
                   ref={helloButtonRef}
                   className="w-full"
                   disabled={helloBusy}
-                  onClick={() => void tryWindowsHello()}
+                  onClick={() => {
+                    if (!window.wormhole || helloInFlight.current === challenge) return;
+                    setHelloBusy(true);
+                    setHelloStatus('');
+                    void tryWindowsHello();
+                  }}
                   size="sm"
                   type="button"
                   variant="outline"
@@ -1760,7 +1760,7 @@ function AuthPrompt({
               ) : null}
               <TooltipProvider portalled={false}>
                 <PasswordInput
-                  ref={secretInputRef}
+                  ref={bindSecretInput}
                   autoFocus={
                     !isHelloMode || !request.autoWindowsHello || !state.windowsHello.available
                   }
@@ -1768,9 +1768,8 @@ function AuthPrompt({
                   id="auth-secret"
                   inputMode={method === 'pin' ? 'numeric' : undefined}
                   key={authRequestKey}
-                  onChange={(event) => setSecret(event.target.value)}
+                  onChange={(event) => setHasSecret(Boolean(event.currentTarget.value))}
                   placeholder={`Enter your ${method === 'pin' ? 'Wormhole PIN' : 'password'}`}
-                  value={secret}
                 />
               </TooltipProvider>
             </div>
@@ -1788,7 +1787,7 @@ function AuthPrompt({
                   Cancel
                 </Button>
               ) : null}
-              <Button disabled={busy || !secret} size="sm" type="submit">
+              <Button disabled={busy || !hasSecret} size="sm" type="submit">
                 {request.kind === 'confirmation' ? 'Confirm' : 'Unlock'}
               </Button>
             </div>
@@ -9796,10 +9795,17 @@ function SshXtermSurface({
 }) {
   const surfaceRef = useRef<HTMLDivElement>(null);
   const backendId = session.backendSessionId;
-  const [terminalLink, setTerminalLink] = useState<string | null>(null);
-  useEffect(() => {
-    setTerminalLink(null);
-  }, [backendId, session.status, isActive, isAuthorized]);
+  const [linkPrompt, setLinkPrompt] = useState<{ backendId: string; url: string } | null>(null);
+  if (
+    linkPrompt &&
+    (linkPrompt.backendId !== backendId ||
+      session.status !== 'connected' ||
+      !isActive ||
+      !isAuthorized)
+  ) {
+    setLinkPrompt(null);
+  }
+  const terminalLink = linkPrompt?.url;
   useLayoutEffect(() => {
     const surface = surfaceRef.current;
     if (!surface || !backendId || session.status !== 'connected') return;
@@ -9838,7 +9844,7 @@ function SshXtermSurface({
         void copyTextToClipboard(text).catch(() => undefined);
       },
       paste: async () => (await window.wormhole?.pasteClipboardToSsh(backendId))?.pasted ?? false,
-      openLink: (url) => setTerminalLink((current) => current ?? url),
+      openLink: (url) => setLinkPrompt((current) => current ?? { backendId, url }),
     });
     runtime.fit();
   }, [backendId, session.id, session.status, isActive, isAuthorized, autoCopyOnSelect, onInput]);
@@ -9871,7 +9877,7 @@ function SshXtermSurface({
         <TerminalLinkDialog
           key={terminalLink}
           url={terminalLink}
-          onClose={() => setTerminalLink(null)}
+          onClose={() => setLinkPrompt(null)}
           onRestoreFocus={() => {
             if (surfaceRef.current) sshTerminal(backendId).focus();
           }}
@@ -10246,6 +10252,13 @@ function SessionsPage({
 }) {
   const workspace = useRef<HTMLElement>(null);
   const restoringTabMenuFocus = useRef(false);
+  function restoreMenuFocus() {
+    // Radix restores focus synchronously after onCloseAutoFocus returns.
+    restoringTabMenuFocus.current = true;
+    queueMicrotask(() => {
+      restoringTabMenuFocus.current = false;
+    });
+  }
   const [bitwardenOpenSessionId, setBitwardenOpenSessionId] = useState('');
   useEffect(() => {
     return window.wormhole?.onBitwardenPopupState((state) => {
@@ -10272,20 +10285,12 @@ function SessionsPage({
     [layout, selectedSession?.id, sessionIds],
   );
 
-  // The session catalog is owned by App and may change after native lifecycle events. Persist the
-  // reconciled tree so removed tab identities and drag state cannot revive if an ID is reopened.
-  // react-doctor-disable-next-line react-hooks-js/set-state-in-effect
-  useEffect(() => {
-    setLayout((current) => reconcileSessionLayout(current, sessionIds, selectedSession?.id)); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
-    if (draggedSessionId && !sessionIds.includes(draggedSessionId)) {
-      setDraggedSessionId(''); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
-      setDropPreview(null); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
-    }
-  }, [draggedSessionId, selectedSession?.id, sessionIds]);
-
-  const dragIsValid = !draggedSessionId || sessionIds.includes(draggedSessionId);
-  const activeDraggedSessionId = dragIsValid ? draggedSessionId : '';
-  const activeDropPreview = dragIsValid ? dropPreview : null;
+  // Forget removed identities even if a later session reuses the same ID.
+  if (layout !== currentLayout) setLayout(currentLayout);
+  if (draggedSessionId && !sessionIds.includes(draggedSessionId)) {
+    setDraggedSessionId('');
+    setDropPreview(null);
+  }
 
   function updateLayout(updater: (current: SessionLayoutState) => SessionLayoutState) {
     setLayout((current) =>
@@ -10342,15 +10347,15 @@ function SessionsPage({
   }
 
   function finishDrop(sessionId: string) {
-    if (!sessionIds.includes(sessionId) || !activeDropPreview) {
+    if (!sessionIds.includes(sessionId) || !dropPreview) {
       setDraggedSessionId('');
       setDropPreview(null);
       return;
     }
     updateLayout((current) =>
-      activeDropPreview.edge
-        ? splitSession(current, activeDropPreview.paneId, activeDropPreview.edge, sessionId)
-        : moveSession(current, activeDropPreview.paneId, sessionId, activeDropPreview.tabIndex),
+      dropPreview.edge
+        ? splitSession(current, dropPreview.paneId, dropPreview.edge, sessionId)
+        : moveSession(current, dropPreview.paneId, sessionId, dropPreview.tabIndex),
     );
     onSelectSession(sessionId);
     setDraggedSessionId('');
@@ -10363,7 +10368,7 @@ function SessionsPage({
   }
 
   function updateDropPreview(event: DragEvent<HTMLElement>) {
-    const sessionId = activeDraggedSessionId || event.dataTransfer.getData('text/wormhole-session');
+    const sessionId = draggedSessionId || event.dataTransfer.getData('text/wormhole-session');
     if (!sessionId) return;
     const bounds = event.currentTarget.getBoundingClientRect();
     const x = ((event.clientX - bounds.left) / bounds.width) * 100;
@@ -10439,7 +10444,7 @@ function SessionsPage({
       onDragOver={updateDropPreview}
       onDrop={(event) => {
         event.preventDefault();
-        finishDrop(activeDraggedSessionId || event.dataTransfer.getData('text/wormhole-session'));
+        finishDrop(draggedSessionId || event.dataTransfer.getData('text/wormhole-session'));
       }}
       ref={workspace}
     >
@@ -10475,8 +10480,8 @@ function SessionsPage({
         const rect = rectByPane.get(pane.id)!;
         return (
           <SessionPaneChrome
-            dropEdge={activeDropPreview?.paneId === pane.id ? activeDropPreview.edge : undefined}
-            dropTarget={activeDropPreview?.paneId === pane.id && !activeDropPreview.edge}
+            dropEdge={dropPreview?.paneId === pane.id ? dropPreview.edge : undefined}
+            dropTarget={dropPreview?.paneId === pane.id && !dropPreview.edge}
             key={pane.id}
             onActivate={() => updateLayout((current) => focusSessionPane(current, pane.id))}
             rect={rect}
@@ -10501,6 +10506,7 @@ function SessionsPage({
                     panes.length > 1 ? () => restoreFullView(session.id) : undefined
                   }
                   restoringFocus={restoringTabMenuFocus}
+                  onRestoreMenuFocus={restoreMenuFocus}
                   session={session}
                 >
                   <div
@@ -10615,7 +10621,7 @@ function SessionsPage({
               isActive={active}
               isAuthorized={isAuthorized}
               nativeSurfaceActive={
-                active && isWebSurfaceVisible && !activeDraggedSessionId && !resizingSplitId
+                active && isWebSurfaceVisible && !draggedSessionId && !resizingSplitId
               }
               onBitwardenUnlockRequired={onBitwardenUnlockRequired}
               onCloseSftpBrowser={onCloseSftpBrowser}
@@ -10655,9 +10661,9 @@ function SessionsPage({
       ))}
 
       <p aria-live="polite" className="sr-only">
-        {activeDropPreview?.edge
-          ? `Drop to split ${activeDropPreview.edge}`
-          : activeDropPreview
+        {dropPreview?.edge
+          ? `Drop to split ${dropPreview.edge}`
+          : dropPreview
             ? 'Drop to move this tab into the pane'
             : ''}
       </p>
@@ -11205,6 +11211,10 @@ export function CredentialsPage({
   const [privateKeySelectionRetryRequired, setPrivateKeySelectionRetryRequired] = useState(false);
   const [privateKeyPassphraseRetryRequired, setPrivateKeyPassphraseRetryRequired] = useState(false);
   const credentialKeyPassphraseInput = useRef<HTMLInputElement>(null);
+  const bindCredentialKeyPassphrase = useCallback((input: HTMLInputElement | null) => {
+    clearSecretInput(credentialKeyPassphraseInput.current);
+    credentialKeyPassphraseInput.current = input;
+  }, []);
   const credentialEditorGeneration = useRef(0);
   const bitwardenSearchAttempts = useLazyRef(() => new WebSessionAttemptTracker());
 
@@ -11215,26 +11225,30 @@ export function CredentialsPage({
     [],
   );
 
-  // App lock is an external security boundary. Scrub every renderer-held secret without
-  // remounting this page, because a remount would orphan credential mutations already in flight.
-  // react-doctor-disable-next-line react-hooks-js/set-state-in-effect, react-doctor/no-adjust-state-on-prop-change
-  useEffect(() => {
+  // Keep in-flight mutations mounted across a lock, but discard the editor draft.
+  const [wasAuthorized, setWasAuthorized] = useState(true);
+  if (wasAuthorized !== isAuthorized) {
+    setWasAuthorized(isAuthorized);
+    if (!isAuthorized) {
+      setEditorOpen(false);
+      setEditingCredential(null);
+      setCredentialForm(emptyCredentialDraft());
+      setPendingDeletion([]);
+      setOperationError('');
+      setBitwardenQuery('');
+      setBitwardenItems([]);
+      setBitwardenAccessRequested(false);
+      setBitwardenSearchStatus('');
+      setBitwardenSearching(false);
+      setPrivateKeySelecting(false);
+      setPrivateKeySelectionRetryRequired(false);
+      setPrivateKeyPassphraseRetryRequired(false);
+    }
+  }
+  useLayoutEffect(() => {
     if (isAuthorized) return;
     credentialEditorGeneration.current++;
     clearSecretInput(credentialKeyPassphraseInput.current);
-    setEditorOpen(false); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
-    setEditingCredential(null); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
-    setCredentialForm(emptyCredentialDraft()); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
-    setPendingDeletion([]); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
-    setOperationError(''); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
-    setBitwardenQuery(''); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
-    setBitwardenItems([]); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
-    setBitwardenAccessRequested(false); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
-    setBitwardenSearchStatus(''); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
-    setBitwardenSearching(false); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
-    setPrivateKeySelecting(false); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
-    setPrivateKeySelectionRetryRequired(false); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
-    setPrivateKeyPassphraseRetryRequired(false); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
     bitwardenSearchAttempts.current.cancel('credential-search');
   }, [bitwardenSearchAttempts, isAuthorized]);
 
@@ -12106,7 +12120,7 @@ export function CredentialsPage({
                     id="credential-key-passphrase"
                     maxLength={8192}
                     name="credential-key-passphrase"
-                    ref={credentialKeyPassphraseInput}
+                    ref={bindCredentialKeyPassphrase}
                   />
                   {editingCredential && !credentialForm.privateKeySelectionId ? (
                     <label className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -13788,7 +13802,9 @@ export function TunnelsPage({
   const [providerFilter, setProviderFilter] = useState<string | null>(null);
   const [editorOpen, setEditorOpen] = useState(false);
   const [editorValue, setEditorValue] = useState<TunnelEditorValue>(blankTunnelEditor);
-  const [actionError, setActionError] = useState('');
+  const [actionError, setActionError] = useState(
+    window.wormhole ? '' : 'The VPN service is unavailable.',
+  );
   const [testState, setTestState] = useState<{
     tunnel: WormholeWorkspaceTunnel;
     status: 'idle' | 'connecting' | 'cancelling' | 'connected' | 'notice' | 'cancelled' | 'failed';
@@ -13841,12 +13857,7 @@ export function TunnelsPage({
     let active = true;
     const attempt = ++summaryLoadAttemptRef.current;
     const api = window.wormhole;
-    if (!api) {
-      setActionError('The VPN service is unavailable.');
-      return () => {
-        active = false;
-      };
-    }
+    if (!api) return;
     api
       .listTunnels()
       .then((loaded) => {
@@ -14509,47 +14520,37 @@ function LogLevelSetting({
   loaded: boolean;
   onSaved: (level: LogLevel) => void;
 }) {
-  const [logLevel, setLogLevel] = useState<LogLevel>(initialValue);
+  const [pendingLevel, setPendingLevel] = useState<LogLevel | null>(null);
   const [error, setError] = useState('');
-  const [busy, setBusy] = useState(false);
-  const busyRef = useRef(false);
-  const saveState = useLazyRef(() => createLogLevelSaveState(initialValue));
+  const saveState = useRef<ReturnType<typeof createLogLevelSaveState> | null>(null);
+  const busy = pendingLevel !== null;
+  const logLevel = pendingLevel ?? initialValue;
 
-  useEffect(() => {
-    if (!loaded || busyRef.current) return;
-    saveState.current.desired = initialValue;
-    saveState.current.persisted = initialValue;
-    setLogLevel(initialValue);
-  }, [initialValue, loaded, saveState]);
-
-  async function persistDesiredLogLevel() {
+  async function commitLogLevel(next: string) {
     const api = window.wormhole;
-    if (busyRef.current || !api) return;
-    busyRef.current = true;
-    setBusy(true);
+    if (!api || !loaded || !isLogLevel(next)) return;
+    const pending = saveState.current;
+    if (next === (pending?.desired ?? initialValue)) return;
+    setError('');
+    setPendingLevel(next);
+    if (pending) {
+      pending.desired = next;
+      return;
+    }
+    saveState.current = createLogLevelSaveState(initialValue);
+    saveState.current.desired = next;
     try {
       await drainLogLevelChanges(
         saveState.current,
         async (target) => (await api.setLogLevel(target)).logLevel,
         onSaved,
       );
-      setLogLevel(saveState.current.persisted);
     } catch (error) {
-      saveState.current.desired = saveState.current.persisted;
-      setLogLevel(saveState.current.persisted);
       setError(logsErrorMessage(error));
     } finally {
-      busyRef.current = false;
-      setBusy(false);
+      saveState.current = null;
+      setPendingLevel(null);
     }
-  }
-
-  function commitLogLevel(next: string) {
-    if (!loaded || !isLogLevel(next) || next === saveState.current.desired) return;
-    saveState.current.desired = next;
-    setLogLevel(next);
-    if (error) setError('');
-    void persistDesiredLogLevel();
   }
 
   return (
@@ -14606,11 +14607,12 @@ function RuntimeBitwardenUnlockDialog({
     passwordInput.current = input;
   }, []);
 
-  useLayoutEffect(() => {
-    if (open) return;
-    clearSecretInput(passwordInput.current);
+  if (!open && (hasPassword || passwordVisible)) {
     setHasPassword(false);
     setPasswordVisible(false);
+  }
+  useLayoutEffect(() => {
+    if (!open) clearSecretInput(passwordInput.current);
   }, [open]);
 
   function close() {
@@ -15604,7 +15606,7 @@ function SettingsPage({
   const [logsInfo, setLogsInfo] = useState<WormholeLogsInfo | null>(null);
   const [logsOpenBusy, setLogsOpenBusy] = useState(false);
   const [retentionBusy, setRetentionBusy] = useState(false);
-  const savedLogLevel = useRef<LogLevel>('info');
+  const [savedLogLevel, setSavedLogLevel] = useState<LogLevel>('info');
   const [logsActionError, setLogsActionError] = useState('');
   const [retentionError, setRetentionError] = useState('');
   const [backupExportOpen, setBackupExportOpen] = useState(false);
@@ -15632,11 +15634,20 @@ function SettingsPage({
     null,
   );
   const [backupSectionError, setBackupSectionError] = useState('');
-  const authGateRef = useRef(authGate);
+  const [authorization, setAuthorization] = useState({ gate: authGate });
+  const activeAuthorization = useRef<typeof authorization | null>(null);
   const { confirm, confirmationDialog } = useConfirmationDialog(authGate === 'unlocked');
   useLayoutEffect(() => {
-    authGateRef.current = authGate;
-  }, [authGate]);
+    activeAuthorization.current = authorization;
+    return () => {
+      activeAuthorization.current = null;
+    };
+  }, [authorization]);
+
+  const isCurrentUnlock = useCallback(
+    () => authorization.gate === 'unlocked' && activeAuthorization.current === authorization,
+    [authorization],
+  );
 
   useEffect(() => {
     return window.wormhole?.onOperationProgress((event) => {
@@ -15661,28 +15672,33 @@ function SettingsPage({
     [],
   );
 
-  // App lock is an external security boundary. Scrub renderer-held secrets while retaining the
-  // Settings instance so native backup and Bitwarden operations keep their progress/cancel state.
-  // react-doctor-disable-next-line react-hooks-js/set-state-in-effect, react-doctor/no-adjust-state-on-prop-change
-  useEffect(() => {
-    if (authGate === 'unlocked') return;
-    setSecretDialog(null); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
-    setBitwardenCliDialog(null); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
-    setBitwardenSyncDialog(null); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
-    setBitwardenCliUpdateDialog(null); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
-    setBitwardenExtensionUpdateDialog(null); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
-    pendingSecretAction.current = null;
-    setBackupExportOpen(false); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
-    setBackupExportPassword(''); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
-    setBackupExportConfirmation(''); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
-    setBackupImportOpen(false); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
-    setBackupImportPassword(''); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
-    setBackupImportSelection(null); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
-    setBackupSectionError(''); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
-    setMcpState(null); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
-    setMcpToken(''); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
-    setMcpTokenRevealed(false); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
-    window.wormhole?.clearBackupImportSelection();
+  // Retain native backup operations and discard the unlocked view's secrets before commit.
+  if (authorization.gate !== authGate) {
+    setAuthorization({ gate: authGate });
+    if (authGate !== 'unlocked') {
+      setSecretDialog(null);
+      setBitwardenCliDialog(null);
+      setBitwardenSyncDialog(null);
+      setBitwardenCliUpdateDialog(null);
+      setBitwardenExtensionUpdateDialog(null);
+      setBackupExportOpen(false);
+      setBackupExportPassword('');
+      setBackupExportConfirmation('');
+      setBackupImportOpen(false);
+      setBackupImportPassword('');
+      setBackupImportSelection(null);
+      setBackupSectionError('');
+      setMcpState(null);
+      setMcpToken('');
+      setMcpTokenRevealed(false);
+      setLogsInfo(null);
+    }
+  }
+  useLayoutEffect(() => {
+    if (authGate !== 'unlocked') {
+      pendingSecretAction.current = null;
+      window.wormhole?.clearBackupImportSelection();
+    }
   }, [authGate]);
 
   useEffect(() => {
@@ -15691,19 +15707,19 @@ function SettingsPage({
     void window.wormhole
       .mcpStatus()
       .then((status) => {
-        if (!active) return;
+        if (!active || !isCurrentUnlock()) return;
         setMcpState(status);
         setMcpPort(String(status.port));
         setMcpError('');
       })
       .catch((error) => {
-        if (!active) return;
+        if (!active || !isCurrentUnlock()) return;
         setMcpError(authSettingsErrorMessage(error));
       });
     return () => {
       active = false;
     };
-  }, [authGate]);
+  }, [authGate, isCurrentUnlock]);
 
   useEffect(() => {
     if (authGate !== 'unlocked' || !window.wormhole) return;
@@ -15714,7 +15730,7 @@ function SettingsPage({
         window.wormhole!.readBitwardenExtension(),
         window.wormhole!.readBitwardenCli(),
       ]);
-      if (!active) return;
+      if (!active || !isCurrentUnlock()) return;
 
       if (settingsResult.status === 'fulfilled') {
         setPromptBeforeTunnelConnect(settingsResult.value.promptBeforeTunnelConnect);
@@ -15739,27 +15755,24 @@ function SettingsPage({
       }
       try {
         const cliStatus = await window.wormhole!.refreshBitwardenCliStatus();
-        if (active) setBitwardenCliStatus(cliStatus);
+        if (active && isCurrentUnlock()) setBitwardenCliStatus(cliStatus);
       } catch (error: unknown) {
-        if (active) setBitwardenError(backendErrorMessage(error));
+        if (active && isCurrentUnlock()) setBitwardenError(backendErrorMessage(error));
       }
     })();
     return () => {
       active = false;
     };
-  }, [authGate]);
+  }, [authGate, isCurrentUnlock]);
 
   useEffect(() => {
-    if (authGate !== 'unlocked' || !window.wormhole) {
-      setLogsInfo(null);
-      return;
-    }
+    if (authGate !== 'unlocked' || !window.wormhole) return;
     let active = true;
     void window.wormhole
       .readLogsInfo()
       .then((info) => {
-        if (!active) return;
-        if (isLogLevel(info.logLevel)) savedLogLevel.current = info.logLevel;
+        if (!active || !isCurrentUnlock()) return;
+        if (isLogLevel(info.logLevel)) setSavedLogLevel(info.logLevel);
         setLogsInfo(info);
         setRetentionDays(String(info.logRetentionDays));
         setLogsActionError('');
@@ -15770,7 +15783,7 @@ function SettingsPage({
     return () => {
       active = false;
     };
-  }, [authGate]);
+  }, [authGate, isCurrentUnlock]);
 
   function applyBitwardenExtensionState(state: WormholeBitwardenExtensionState) {
     setBrowserExtensionEnabled(state.enabled);
@@ -16440,7 +16453,7 @@ function SettingsPage({
     setMcpError('');
     try {
       const token = await window.wormhole.getMcpToken();
-      if (authGateRef.current !== 'unlocked') return;
+      if (!isCurrentUnlock()) return;
       setMcpToken(token);
       setMcpTokenRevealed(true);
     } catch (error) {
@@ -16456,7 +16469,7 @@ function SettingsPage({
     setMcpError('');
     try {
       const token = mcpToken || (await window.wormhole.getMcpToken());
-      if (authGateRef.current !== 'unlocked') return;
+      if (!isCurrentUnlock()) return;
       await copyTextToClipboard(token);
       setMcpMessage('Bearer token copied.');
     } catch (error) {
@@ -16478,12 +16491,13 @@ function SettingsPage({
     ) {
       return;
     }
+    if (!isCurrentUnlock()) return;
     setMcpBusy(true);
     setMcpError('');
     setMcpMessage('');
     try {
       const token = await api.regenerateMcpToken();
-      if (authGateRef.current !== 'unlocked') {
+      if (!isCurrentUnlock()) {
         setMcpMessage('MCP token regenerated. Reveal it again after unlocking.');
         return;
       }
@@ -16514,7 +16528,7 @@ function SettingsPage({
     setMcpError('');
     try {
       const token = await window.wormhole.getMcpToken();
-      if (authGateRef.current !== 'unlocked') return;
+      if (!isCurrentUnlock()) return;
       await copyTextToClipboard(
         buildMcpConfig(mcpClient, mcpEndpoint, token, window.wormhole.platform),
       );
@@ -16649,14 +16663,14 @@ function SettingsPage({
     setBackupSectionError('');
     try {
       const selection = await window.wormhole.selectBackupForImport();
-      if (!selection) return;
+      if (!selection || !isCurrentUnlock()) return;
       setBackupImportSelection(selection);
       setBackupImportPassword('');
       setBackupImportError('');
       setBackupImportResult(null);
       setBackupImportOpen(true);
     } catch (error) {
-      if (authGateRef.current === 'unlocked') {
+      if (isCurrentUnlock()) {
         setBackupSectionError(backupOperationErrorMessage(error));
       }
     } finally {
@@ -17429,11 +17443,9 @@ function SettingsPage({
             </SettingsSection>
 
             <LogLevelSetting
-              initialValue={savedLogLevel.current}
+              initialValue={savedLogLevel}
               loaded={logsInfo !== null}
-              onSaved={(level) => {
-                savedLogLevel.current = level;
-              }}
+              onSaved={setSavedLogLevel}
             />
 
             <SettingsSection title="Rotation">
