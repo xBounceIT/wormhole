@@ -1302,6 +1302,9 @@ test('startup loads public hints and authorizes workspace reads', { timeout: 500
     'workspace-error',
     'legacy',
     'legacy-locked-data',
+    'legacy-migration-required',
+    'legacy-empty',
+    'legacy-join-pending',
     'legacy-selection-changed',
     'legacy-navigation',
     'legacy-migration-error',
@@ -1312,9 +1315,15 @@ test('startup loads public hints and authorizes workspace reads', { timeout: 500
     let trusted = scenario !== 'untrusted';
     const authSession = { authorizationEpoch: 0, isAccessAllowed: true };
     const isVaultWorkspace = !scenario.startsWith('legacy');
-    const hints = { slots: isVaultWorkspace ? descriptor : null, cosmetics: { theme: 'system' } };
+    const hints = {
+      slots: isVaultWorkspace ? descriptor : null,
+      cosmetics: { theme: 'system' },
+      newWorkspace: scenario === 'legacy-empty',
+      ...(scenario === 'legacy-join-pending' ? { sharedJoin: { lastLoginName: 'member' } } : {}),
+    };
     const api = {
       isVaultWorkspace,
+      requiresLegacyMigration: scenario === 'legacy-migration-required',
       unlockedWorkspaceId: scenario === 'locked' ? undefined : descriptor.vaultId,
       startup: async () => {
         calls.push('metadata');
@@ -1389,7 +1398,11 @@ test('startup loads public hints and authorizes workspace reads', { timeout: 500
         assert.equal(result.migration.status, 'vault');
         assert.deepEqual(calls, ['metadata', 'preferences', 'workspace']);
       }
-    } else await assert.rejects(pending);
+    } else {
+      await assert.rejects(pending);
+      if (['legacy-empty', 'legacy-join-pending', 'legacy-migration-required'].includes(scenario))
+        assert.deepEqual(calls, ['metadata']);
+    }
     trusted = scenario !== 'untrusted';
     const refresh = handlers.get('workspace:load')({});
     if (['untrusted', 'navigate', 'workspace-error'].includes(scenario))

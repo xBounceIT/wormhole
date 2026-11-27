@@ -11386,12 +11386,22 @@ function registerIpcHandlers(
       confirmOnWindowClose = startup.settings.confirmOnWindowClose;
       return startup;
     }
+    if (metadata.newWorkspace || metadata.sharedJoin)
+      throw new Error('Workspace setup is incomplete.');
     return serializeAuthOperation(async () => {
-      if (!isTrustedVaultSender(event) || vaultBackend.isVaultWorkspace) {
+      if (
+        !isTrustedVaultSender(event) ||
+        vaultBackend.isVaultWorkspace ||
+        vaultBackend.requiresLegacyMigration
+      ) {
         throw new Error('Startup owner is no longer available.');
       }
       const startup = await runBackend<StartupResponse>('startup', request);
-      if (!isTrustedVaultSender(event) || vaultBackend.isVaultWorkspace) {
+      if (
+        !isTrustedVaultSender(event) ||
+        vaultBackend.isVaultWorkspace ||
+        vaultBackend.requiresLegacyMigration
+      ) {
         throw new Error('Startup owner is no longer available.');
       }
       if (startup.auth.configured && startup.workspace) {
