@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { Session } from 'node:inspector/promises';
 import { execFile } from 'node:child_process';
-import { mkdtemp, mkdir, readFile, realpath, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readdir, readFile, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -16,6 +16,7 @@ import { VaultBackendHost } from '../electron/vault-host.ts';
 import { registerVaultUnprotectedIpc } from '../electron/vault-unprotected-ipc.ts';
 import { parseVaultProtection, parseVaultStartup } from '../electron/vault-contract.ts';
 import { mountUnprotectedStartup } from '../src/vault-unprotected-startup.ts';
+import { createRecoveryRecipient } from '../src/vault-recovery-recipient.ts';
 import { prepareVaultMigrationBoot } from '../electron/vault-migration-boot.ts';
 import { coverageThreshold } from '../scripts/test-coverage.ts';
 const profiler = new Session();
@@ -403,7 +404,7 @@ test('OS startup keeps open retries bound to admitted owner and ignores disposed
 });
 
 test(
-  'typed client creates and reopens an actual OS-owned Go vault and projects isolated setup only in maintenance',
+  'typed client reopens an OS-owned vault and upgrades it to password and recovery protection',
   {
     timeout: 120_000,
     skip: process.platform !== 'win32' && !process.env.WORMHOLE_TEST_NATIVE_DEFAULT_BACKEND,
@@ -416,7 +417,8 @@ test(
       database = join(data, 'workspace.db'),
       prebuilt = process.env.WORMHOLE_TEST_NATIVE_DEFAULT_BACKEND,
       executable = prebuilt || join(directory, 'backend.exe');
-    let host: VaultBackendHost | undefined, client: VaultBackendClient | undefined;
+    let host: VaultBackendHost | undefined;
+    let recoveryCode: Uint8Array | undefined;
     try {
       await mkdir(data);
       if (!prebuilt) {
@@ -426,9 +428,16 @@ test(
           timeout: 120_000,
         });
       }
-      const make = () =>
+      const makeClient = (migrationSessionData?: string) =>
+        new VaultBackendClient({
+          executable,
+          databasePath: database,
+          userDataPath: data,
+          migrationSessionData,
+        });
+      const make = (migrationSessionData?: string) =>
         new VaultBackendHost(
-          () => new VaultBackendClient({ executable, databasePath: database, userDataPath: data }),
+          () => makeClient(migrationSessionData),
           () => true,
         );
       host = make();
@@ -441,23 +450,79 @@ test(
       const doc = JSON.parse(await readFile(database + '.slots', 'utf8'));
       assert.equal(doc.slots[0].kind, 'unprotected');
       assert.equal(doc.initializing, false);
+      const factorFiles = async () =>
+        (await readdir(data)).filter((name) => name.startsWith('.wormhole-unprotected-'));
+      assert.equal((await factorFiles()).length, 1);
       host = make();
       assert.equal((await host.startup()).unprotected?.vaultId, id);
       await host.openUnprotected(false);
       assert.equal(host.unlockedWorkspaceId, id);
       await host.stop();
       const maintenance = await mkdtemp(join(directory, '.wormhole-vault-migration-'));
-      client = new VaultBackendClient({
-        executable,
-        databasePath: database,
-        userDataPath: data,
-        migrationSessionData: maintenance,
+      const isolated = makeClient(maintenance);
+      try {
+        assert.equal((await isolated.startup()).upgrade?.vaultId, id);
+        await assert.rejects(isolated.openUnprotected(false));
+      } finally {
+        await isolated.lock();
+      }
+      host = make(maintenance);
+      assert.equal((await host.startup()).upgrade?.vaultId, id);
+      assert.equal((await host.upgradeSetupContext()).vaultId, id);
+      const recipient = await createRecoveryRecipient();
+      const password = () => new TextEncoder().encode('native OS upgrade fixture');
+      try {
+        const enrollment = await host.beginUpgradeSetup({
+          password: password(),
+          publicKey: recipient.publicKey.slice(),
+        });
+        recoveryCode = await recipient.open(enrollment);
+        const groups = new Uint8Array(10);
+        for (const [index, group] of enrollment.groups.entries()) {
+          const start = 7 + 6 * (group - 1);
+          groups.set(recoveryCode.subarray(start, start + 5), index * 5);
+        }
+        assert.equal(
+          (await host.confirmUpgradeSetup({ enrollmentId: enrollment.enrollmentId, groups }))
+            .restartRequired,
+          true,
+        );
+      } finally {
+        recipient.dispose();
+      }
+      assert.equal(host.unlockedWorkspaceId, undefined);
+      await host.stop();
+      host = make(maintenance);
+      const pending = await host.startup();
+      assert.ok(pending.rotation?.pending);
+      const passwordSlot = pending.slots?.slots.find((slot) => slot.kind === 'password');
+      assert.ok(passwordSlot);
+      await host.resumeRootRotation({
+        vaultId: id,
+        slotId: passwordSlot.id,
+        kind: 'password',
+        factor: password(),
       });
-      assert.equal((await client.startup()).upgrade?.vaultId, id);
-      await assert.rejects(client.openUnprotected(false));
+      assert.deepEqual(await host.protection(), { protected: true });
+      assert.deepEqual(await factorFiles(), []);
+      await host.stop();
+      host = make();
+      const startup = await host.startup();
+      assert.equal(startup.unprotected, undefined);
+      assert.equal(startup.rotation, undefined);
+      const recoverySlot = startup.slots?.slots.find((slot) => slot.kind === 'recovery');
+      assert.ok(recoverySlot);
+      await host.unlock({
+        vaultId: id,
+        slotId: recoverySlot.id,
+        kind: 'recovery-code',
+        factor: recoveryCode,
+      });
+      assert.equal(host.unlockedWorkspaceId, id);
+      await host.workspace();
     } finally {
+      recoveryCode?.fill(0);
       await host?.stop();
-      await client?.lock();
       assert.ok(directory.startsWith(prefix));
       await rm(directory, { recursive: true, force: true });
     }

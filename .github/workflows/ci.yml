@@ -158,7 +158,7 @@ jobs:
           }
           EOF
 
-      - name: Create and reopen a Default vault using native OS custody
+      - name: Reopen a Default vault and rotate its OS factor to password and recovery
         shell: bash
         run: |
           set -euo pipefail

@@ -4,9 +4,9 @@ The native engine prepares a separately rotated vault, and a native controller
 can publish it through an encrypted recovery journal. Interrupted transitions now
 resume from application startup through a protected new-factor prompt. Existing
 local vaults can initiate the transition from Settings > Security > Change vault
-password and recovery key. Native forward-only source admission is implemented;
-its application window, OS-only creation/unlock and Protect now remain before
-enabling Unprotected startup.
+password and recovery key. For an OS-only local vault, **Protect now** starts
+the isolated upgrade from the startup screen or the open workspace.
+See [Local OS-only custody](vault-unprotected.md).
 
 ## Existing-owner enrollment
 
@@ -174,9 +174,9 @@ Existing-owner tests create a native vault in its real protected window, then
 enroll replacement factors through the compiled root setup preload and renderer.
 They verify confirmation, cancellation, parent navigation and adoption after
 restart with the replacement password. Transport tests also pin stale replies,
-concurrent operations, buffer ownership and uncertain cleanup. Cross builds verify
-compilation. These tests do not establish creation of an OS-only vault, OS-store
-runtime behavior on macOS/Linux or starting Protect now from the application.
+concurrent operations, buffer ownership and uncertain cleanup. With Windows DPAPI,
+the Electron test also opens an OS-only workspace, requests **Protect now**,
+confirms the recovery groups and verifies retirement after restart.
 The new isolated enrollment and forward-admission tests use real crypto/SQLite,
 prove ordinary source opening stays denied and preserve the stored Standard floor.
 Additional native tests interrupt every OS

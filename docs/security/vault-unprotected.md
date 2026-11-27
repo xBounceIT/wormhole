@@ -1,12 +1,11 @@
 # Local OS-only custody
 
-The Unprotected application flow is not enabled yet. The v3 native slot reader
-can authenticate an exact single OS-only source for forward root rotation;
-older containers, mixed sets, ASK and encrypted OS-only containers are refused.
-The ordinary factor-unlock API still rejects this slot, and no OS-only
-create/unlock/startup operation invokes the native custody primitives. Existing
-password/recovery vaults keep their flow; an interrupted root transition resumes
-through a protected startup prompt.
+Under the Default machine policy, a user creating a local workspace can choose
+**Skip for now (Unprotected)**. On the next launch, **Open workspace** asks the
+Go backend to reopen the existing vault with its OS-protected factor. The native
+owner authenticates the v3 slot document and the stored policy before the app
+opens the workspace. This flow requires exactly one OS-only slot and excludes
+ASK, whole-file encryption and shared workspaces.
 
 The native cryptographic primitive wraps the root under a random 32-byte platform
 factor. It uses the existing unlock derivation and authenticated envelope; the
@@ -26,17 +25,16 @@ File access uses a native directory root, regular-file checks, a 4096-byte bound
 and original-file identity checks across OS operations. Failed creation removes
 only its own reservation. Cancellation suppresses returned material. Native
 plaintext/ciphertext buffers are wiped, and errors contain no platform diagnostics
-or key material. Sensitive Keychain writes use stdin rather than process arguments.
+or key material. The macOS backend accesses the Keychain through Security.framework.
 
 The machine policy must remain Default throughout the operation. Local policy
 also rejects OS-only slots when Standard or higher applies, when an ASK is
 required, or when a protected slot coexists with OS-only custody. A mixed set must
 never be presented as protected merely because it contains a password slot.
 
-OS-only custody is **Unprotected**. It offers no Wormhole password or user-presence
-boundary against someone using the OS account. It must eventually display the
-persistent warning and Protect now action specified in issue #495. It is not a
-Windows Hello or Touch ID slot and cannot satisfy their requirements.
+Anyone using the unlocked OS account can open an **Unprotected** workspace.
+The app displays a persistent warning with a **Protect now** action. Users can
+also start protection from the startup screen before opening the workspace.
 
 The [native root-rotation engine](vault-root-rotation.md) now prepares and audits
 a separately reencrypted vault, including deleted records and retained SSO. It
@@ -55,19 +53,20 @@ against the protected target and returns only a rotation stage, never an ordinar
 source owner. Ordinary Open retains its original source-policy checks. Partial
 allocations remain attached to the scope until cleanup is acknowledged.
 
-Remaining activation work includes the typed application bridge/window for that
-upgrade, OS-only native creation/startup/unlock, authenticated state for the
-persistent indicator, and Protect now. Protected
-existing vaults can already enroll replacement factors through
-Settings > Security; that path still refuses OS-only source slots.
-Protect now must generate a new root, re-encrypt every secret, reseal metadata,
-confirm a new recovery key and retire the old OS slot through a resumable journal.
-It must finish secure deletion/compaction before claiming the transition complete.
-The current primitives and staging engine do not complete or bypass that transition.
+**Protect now** quiesces active sessions and restarts Wormhole in isolated
+maintenance mode. A protected window asks for a new password and confirmation
+of two groups from the generated recovery code. Go prepares the rotated
+database, re-encrypts secrets, reseals metadata and compacts the target. On
+restart, the new factor authorizes publication and retirement of the old OS
+slot. If publication is interrupted, the next launch resumes from the journal.
+Users of an already password-protected vault can rotate their factors from
+**Settings > Security**.
 
 Tests cover independent slot/context substitutions, reserved shapes, bounds,
 missing/corrupt files, borrowed-buffer wiping, cancellation, file replacements,
-exclusive concurrent creation, mixed-slot/policy refusal and real Windows DPAPI.
-Portable provider fixtures exercise file custody with AES-GCM, and cross builds
-check compilation. They do not establish macOS/Linux runtime key-store behavior
-or a complete application workflow.
+exclusive concurrent creation and mixed-slot/policy refusal. The desktop-client
+test creates a vault, stops its backend and reopens the same workspace in a new
+process, upgrades it with a password and reopens it with its recovery code.
+CI runs it against Windows DPAPI, a private Linux Secret Service collection
+and a temporary macOS Keychain. The Windows Electron rotation test
+also exercises **Protect now** through confirmation, restart and retirement.
