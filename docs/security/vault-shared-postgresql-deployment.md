@@ -570,6 +570,10 @@ pooler or an unknown topology. The organisation signs this choice in the workspa
 profile. A certified device uses a second connection for `LISTEN wormhole_changes`
 when the estimate is 1–300. Larger deployments and poolers use one query connection.
 Every device fetches authenticated changes after unlock and polls every 30 seconds.
+**Test connection** and **Check deployment** both report the server’s configured
+`max_connections`. For direct connections, allow twice the expected concurrent
+device count plus 20. For example, 300 devices require a budget of at least
+620 connections. The first-administrator form calculates this value as you type.
 
 The native bootstrap prepares an organisation signer, an organisation encryption
 key, the workspace boundary's view and secret keys, and a certificate chain for a

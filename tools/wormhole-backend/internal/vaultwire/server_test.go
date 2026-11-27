@@ -146,6 +146,25 @@ func (h *harness) finished(t *testing.T, want error) {
 	}
 }
 
+func TestWorkspaceConnectionLimitRedactsDiagnosticsAndYieldsToCancellation(t *testing.T) {
+	failure := errors.Join(errors.New("private database diagnostics"), ErrWorkspaceConnectionLimit)
+	for _, tc := range []struct {
+		err       error
+		cancelled bool
+		want      string
+	}{
+		{failure, false, "vault_workspace_connection_limit"},
+		{failure, true, "vault_cancelled"},
+		{errors.Join(failure, context.Canceled), false, "vault_cancelled"},
+		{errors.New("vault_workspace_connection_limit"), false, "vault_operation_failed"},
+	} {
+		reply := (completed{err: tc.err, result: json.RawMessage(`{"private":true}`)}).response(tc.cancelled)
+		if reply.Error != tc.want || len(reply.Result) != 0 {
+			t.Fatalf("unexpected error response: %v", reply)
+		}
+	}
+}
+
 func TestSerializedRequestsCancellationAndRedactedErrors(t *testing.T) {
 	started := make(chan struct{}, 1)
 	h := startServer(t, &testHandler{handle: func(ctx context.Context, op string, _ json.RawMessage) (json.RawMessage, error) {

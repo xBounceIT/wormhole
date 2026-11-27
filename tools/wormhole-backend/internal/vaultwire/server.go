@@ -23,12 +23,13 @@ const (
 )
 
 var (
-	ErrProtocol  = errors.New("vault_invalid_request")
-	ErrHeartbeat = errors.New("vault_heartbeat_expired")
-	ErrOutput    = errors.New("vault_output_closed")
-	ErrShutdown  = errors.New("vault_shutdown_timeout")
-	ErrCleanup   = errors.New("vault_cleanup_failed")
-	ErrRetired   = errors.New("vault_session_retired")
+	ErrProtocol                 = errors.New("vault_invalid_request")
+	ErrHeartbeat                = errors.New("vault_heartbeat_expired")
+	ErrOutput                   = errors.New("vault_output_closed")
+	ErrShutdown                 = errors.New("vault_shutdown_timeout")
+	ErrCleanup                  = errors.New("vault_cleanup_failed")
+	ErrRetired                  = errors.New("vault_session_retired")
+	ErrWorkspaceConnectionLimit = errors.New("vault_workspace_connection_limit")
 )
 
 type Request struct {
@@ -184,6 +185,8 @@ func (result completed) response(cancelled bool) Response {
 	switch {
 	case cancelled || errors.Is(result.err, context.Canceled):
 		response.Error = "vault_cancelled"
+	case errors.Is(result.err, ErrWorkspaceConnectionLimit):
+		response.Error = ErrWorkspaceConnectionLimit.Error()
 	case result.err != nil:
 		response.Error = "vault_operation_failed"
 	case len(result.result) > MaxFrameBytes-1024 || !json.Valid(result.result):

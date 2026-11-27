@@ -22,6 +22,7 @@ import { Session } from 'node:inspector/promises';
 import { coverageThreshold } from '../scripts/test-coverage.ts';
 import { sshRequest, sshBundle } from './fixtures/vault-ssh.ts';
 import { VaultBackendHost } from '../electron/vault-host.ts';
+import { SharedConnectionLimit } from '../electron/vault-shared-unlock.ts';
 import { launchVaultTouchIDBroker } from '../electron/vault-touchid-broker.ts';
 import {
   maxBitwardenFrame,
@@ -1781,9 +1782,19 @@ test('operation failures are redacted but do not corrupt the request sequence', 
   const { child, client } = fixture();
   child.automatic = false;
   try {
-    for (const error of ['vault_operation_failed', 'vault_cancelled', 'vault_busy']) {
+    for (const error of [
+      'vault_operation_failed',
+      'vault_cancelled',
+      'vault_busy',
+      'vault_workspace_connection_limit',
+    ]) {
       const pending = client.describe();
-      const rejection = assert.rejects(pending, /Vault (operation failed|request cancelled)/);
+      const rejection = assert.rejects(
+        pending,
+        error === 'vault_workspace_connection_limit'
+          ? SharedConnectionLimit
+          : /Vault (operation failed|request cancelled)/,
+      );
       await tick();
       const request = child.requests.at(-1)!;
       child.stdout.write(JSON.stringify({ version: 1, id: request.id, error }) + '\n');

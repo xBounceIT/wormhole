@@ -17,6 +17,7 @@ export type SharedVaultAdmission = {
 };
 export type SharedVaultRecovery = { recovered: true };
 export class SharedReenrollmentPending extends Error {}
+export class SharedConnectionLimit extends Error {}
 // Main adds controls only after validating the native runtime and current owner.
 // This public renderer projection is distinct from the native three-flag receipt.
 export type SharedVaultSessionAdmission = SharedVaultAdmission & {

@@ -46,6 +46,8 @@ const failureMessage: Record<NonNullable<SharedSetupReply['failure']>, string> =
     'The server did not offer SCRAM-SHA-256-PLUS. Check channel binding on the PostgreSQL endpoint or proxy.',
   database: 'The database is missing or the DBA login cannot access it.',
   'read-write': 'Connect to a writable PostgreSQL server.',
+  'connection-limit':
+    'The workspace server is at its connection limit. Try again after a connection closes.',
   rejected:
     'PostgreSQL rejected the deployment. Run the connection test again or export the script for the DBA.',
   mismatch:
@@ -80,14 +82,19 @@ function preflightMessages(report: SharedSetupPreflight): string[] {
   if (!report.canGrantStatistics)
     results.push('Ask the DBA for permission to grant pg_read_all_stats.');
   if (!report.emptyDatabase) results.push('Choose an empty database.');
-  results.push(...loggingMessages(report));
+  results.push(...serverSettingMessages(report));
   return results;
 }
 
-function loggingMessages(
-  report: Pick<SharedSetupPreflight, 'logsStatements' | 'logsParameters' | 'statementTracking'>,
+function serverSettingMessages(
+  report: Pick<
+    SharedSetupPreflight,
+    'maxConnections' | 'logsStatements' | 'logsParameters' | 'statementTracking'
+  >,
 ): string[] {
-  const results: string[] = [];
+  const results = [
+    `PostgreSQL max_connections is ${report.maxConnections}. Allow two connections per concurrent device plus 20 for administration and other clients.`,
+  ];
   if (report.logsStatements)
     results.push(
       'PostgreSQL logs statement text for this login. Ask the DBA to check log_statement.',
@@ -313,7 +320,7 @@ export function mountSharedSetup(card: HTMLElement, api: SharedSetupApi): void {
             plan?.hosting === 'managed'
               ? 'Ask the DBA to verify the provider’s TLS enforcement and allowed client networks.'
               : 'Ask the DBA to verify pg_hba.conf rule order for all workspace logins and allowed client networks.',
-            ...loggingMessages(result.checks),
+            ...serverSettingMessages(result.checks),
           );
         }
         showResults(messages);
@@ -830,8 +837,16 @@ export function mountSharedSetup(card: HTMLElement, api: SharedSetupApi): void {
       hint.id = 'shared-connection-devices-hint';
       hint.textContent =
         'Leave blank for a transaction pooler or if unsure. Direct deployments with up to 300 concurrent devices receive change notifications. Other deployments poll every 30 seconds.';
-      directDevices.setAttribute('aria-describedby', hint.id);
-      fields.append(hint);
+      const budget = document.createElement('output');
+      budget.id = 'shared-connection-budget';
+      directDevices.oninput = () => {
+        budget.textContent =
+          directDevices.value && directDevices.validity.valid
+            ? `Plan for max_connections of at least ${2 * directDevices.valueAsNumber + 20}.`
+            : '';
+      };
+      directDevices.setAttribute('aria-describedby', `${hint.id} ${budget.id}`);
+      fields.append(hint, budget);
     }
     const password = input(
       'accountPassword',

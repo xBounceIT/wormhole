@@ -449,6 +449,7 @@ import {
   consumeSharedVaultUnlockInput,
   consumeSharedVaultContinuationInput,
   hasSharedVaultContinuation,
+  SharedConnectionLimit,
   encodeSharedVaultUnlockFrame,
   parseSharedVaultAdmission,
   parseSharedEnrollmentResult,
@@ -3381,11 +3382,13 @@ export class VaultBackendClient {
           clearTimeout(pending.timer);
           this.pending.delete(response.id);
           pending.reject(
-            new Error(
-              response.error === 'vault_cancelled'
-                ? 'Vault request cancelled.'
-                : 'Vault operation failed.',
-            ),
+            response.error === 'vault_workspace_connection_limit'
+              ? new SharedConnectionLimit()
+              : new Error(
+                  response.error === 'vault_cancelled'
+                    ? 'Vault request cancelled.'
+                    : 'Vault operation failed.',
+                ),
           );
         } else {
           const value = pending.parse(response.result);

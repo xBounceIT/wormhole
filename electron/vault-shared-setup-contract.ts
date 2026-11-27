@@ -87,6 +87,7 @@ export type SharedSetupNativeRequest =
 
 export type SharedSetupPreflight = {
   serverVersion: number;
+  maxConnections: number;
   tls: 'verified';
   canCreateRoles: boolean;
   ownsDatabase: boolean;
@@ -105,7 +106,7 @@ export type SharedSetupDeployment = {
 };
 export type SharedSetupChecks = Pick<
   SharedSetupPreflight,
-  'logsStatements' | 'logsParameters' | 'statementTracking'
+  'maxConnections' | 'logsStatements' | 'logsParameters' | 'statementTracking'
 > & {
   plainStartup: 'offered' | 'refused' | 'unconfirmed';
 };
@@ -118,6 +119,7 @@ const failureCodes = [
   'channel-binding',
   'database',
   'read-write',
+  'connection-limit',
   'rejected',
   'mismatch',
   'configuration',
@@ -578,11 +580,22 @@ function validTracking(value: unknown): boolean {
   return value === 'none' || value === 'top' || value === 'all' || value === 'unavailable';
 }
 
+function validConnectionLimit(value: unknown): boolean {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 1 && value <= 0x7fff_ffff;
+}
+
 function parsePreflight(value: unknown): SharedSetupPreflight | undefined {
   const raw = object(value);
   if (
     !raw ||
-    !exact(raw, ['serverVersion', 'tls', 'statementTracking', ...preflightFlags]) ||
+    !exact(raw, [
+      'serverVersion',
+      'maxConnections',
+      'tls',
+      'statementTracking',
+      ...preflightFlags,
+    ]) ||
+    !validConnectionLimit(raw.maxConnections) ||
     typeof raw.serverVersion !== 'number' ||
     !Number.isSafeInteger(raw.serverVersion) ||
     raw.serverVersion <= 0 ||
@@ -598,7 +611,14 @@ function parseDeploymentChecks(value: unknown): SharedSetupChecks | undefined {
   const raw = object(value);
   if (
     !raw ||
-    !exact(raw, ['plainStartup', 'logsStatements', 'logsParameters', 'statementTracking']) ||
+    !exact(raw, [
+      'plainStartup',
+      'maxConnections',
+      'logsStatements',
+      'logsParameters',
+      'statementTracking',
+    ]) ||
+    !validConnectionLimit(raw.maxConnections) ||
     !validTracking(raw.statementTracking) ||
     typeof raw.logsStatements !== 'boolean' ||
     typeof raw.logsParameters !== 'boolean' ||

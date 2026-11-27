@@ -142,11 +142,11 @@ func CheckSchemaDeployment(ctx context.Context, settings Settings, password []by
 	if err != nil {
 		return DeploymentInspection{}, err
 	}
-	row, err := readDeploymentRow(ctx, conn, "SELECT "+deploymentLoggingColumns, 3)
+	row, err := readDeploymentRow(ctx, conn, "SELECT "+deploymentSettingsColumns, 4)
 	if err != nil {
 		return DeploymentInspection{}, err
 	}
-	logging, err := parseDeploymentLogging(row)
+	serverSettings, err := parseDeploymentServerSettings(row)
 	if err != nil {
 		return DeploymentInspection{}, err
 	}
@@ -154,7 +154,7 @@ func CheckSchemaDeployment(ctx context.Context, settings Settings, password []by
 	if err := ctx.Err(); err != nil {
 		return DeploymentInspection{}, err
 	}
-	return DeploymentInspection{schema, DeploymentChecks{logging, plain}}, nil
+	return DeploymentInspection{schema, DeploymentChecks{serverSettings, plain}}, nil
 }
 
 func closeDeploymentConnection(conn *pgconn.PgConn) {

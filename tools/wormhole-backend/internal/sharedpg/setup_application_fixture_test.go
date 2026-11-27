@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/xBounceIT/wormhole/tools/wormhole-backend/internal/sharedpg/deploy"
 )
@@ -59,6 +60,7 @@ func TestPostgresSetupApplicationFixture(t *testing.T) {
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 16*1024), 256*1024)
 	var rotationLock *pgconn.PgConn
+	var deviceConnectionLimit string
 	defer func() {
 		if rotationLock != nil {
 			closeDeploymentConnection(rotationLock)
@@ -74,6 +76,32 @@ func TestPostgresSetupApplicationFixture(t *testing.T) {
 		}
 		if json.Unmarshal(scanner.Bytes(), &command) != nil || deploy.ValidateIdentity(command.RoleTag, command.WorkspaceID) != nil {
 			t.Fatal("invalid fixture command")
+		}
+		if command.Action == "limitDeviceConnections" || command.Action == "restoreDeviceConnections" {
+			row, err := readDeploymentRow(ctx, admin, `SELECT rolname::text, rolconnlimit::text FROM pg_catalog.pg_roles
+				WHERE starts_with(rolname::text, $1)`, 2, []byte("wh_"+command.RoleTag+"_d_"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			limited := command.Action == "limitDeviceConnections"
+			from, to := "0", deviceConnectionLimit
+			if limited {
+				if deviceConnectionLimit != "" || (string(row[1]) != "2" && string(row[1]) != "3") {
+					t.Fatal("unexpected enrolled device connection limit")
+				}
+				deviceConnectionLimit = string(row[1])
+				from, to = deviceConnectionLimit, "0"
+			}
+			if to == "" || string(row[1]) != from {
+				t.Fatal("unexpected device connection limit")
+			}
+			if _, err := admin.Exec(ctx, "ALTER ROLE "+pgx.Identifier{string(row[0])}.Sanitize()+" CONNECTION LIMIT "+to).ReadAll(); err != nil {
+				t.Fatal(err)
+			}
+			if err := json.NewEncoder(os.Stdout).Encode(map[string]bool{"limited": limited}); err != nil {
+				t.Fatal(err)
+			}
+			continue
 		}
 		if command.Action == "inspectDeviceConnections" {
 			inspect, err := Connect(ctx, settings, secret)

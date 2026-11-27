@@ -379,6 +379,14 @@ test('shared input and startup screens consume factors and keep admission separa
       for(const [pw,ask] of [['',''],['x'.repeat(1025),''],['ok','bad']]){send(v,pw,ask);check(v.card.textContent.includes('valid password'),'bad input accepted');}
       send(v);await tick();check(v.copy.ask===undefined,'optional ASK became required');
       const method=v.card.querySelector('select');v.card.querySelector('input').value='secret';method.dispatchEvent(new Event('change'));check(v.card.querySelector('input').value==='','slot change retains factor');method.value='missing';send(v);v.remove();
+      for(const form of ['initial','admit']){
+        const limited={submit:async()=>'connection-limit'};
+        const view=form==='initial'?joinForm(limited):setup(limited);
+        if(form==='initial'){await checkInvite(view);sendJoin(view)}else{await tick();send(view)}
+        await tick();
+        check(view.card.querySelector('.startup-status').textContent.includes('The workspace server is at its connection limit.')&&!view.card.querySelector('[type=submit]').disabled,'capacity diagnosis or retry unavailable');
+        view.remove();
+      }
       for(const outcome of [true,false,'invalid']){v=setup({submit:async()=>outcome});await tick();send(v);await tick();check(outcome===true?v.card.querySelector('[type=submit]').disabled:v.card.textContent.includes('Could not'),'bad completion');v.remove();}
       for(const submit of [()=>{throw Error('private')},async()=>{throw Error('private')}]){v=setup({submit,cancel:async()=>{throw Error('private')}});await tick();send(v);await tick();check(v.card.textContent.includes('unavailable')&&!v.card.textContent.includes('private'),'raw error');v.card.querySelector('[type=button]').click();await tick();v.remove();}
       for(const context of [null,[],{}, {startup:metadata(),mode:'bad'}, {startup:{...metadata(),shared:undefined},mode:'admit'}, {startup:{...metadata(),slots:{...metadata().slots,slots:[{id:slotId,kind:'recovery'}]}},mode:'admit'}]){v=setup({context:async()=>context});await tick();check(v.card.querySelector('[type=submit]').disabled,'bad context');v.remove();}

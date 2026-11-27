@@ -275,7 +275,10 @@ export function mountSharedInitialJoinScreen(card: HTMLElement, api: SharedIniti
     pending = [];
     void request
       .then((result) => {
-        if (!disposed && reset && result === 'awaiting-activation') {
+        if (!disposed && result === 'connection-limit') {
+          status.textContent =
+            'The workspace server is at its connection limit. Try again after a connection closes.';
+        } else if (!disposed && reset && result === 'awaiting-activation') {
           awaitingActivation = true;
           status.textContent =
             'This device is registered. Close this window and continue after your administrator restores your personal keys and re-enables the account.';

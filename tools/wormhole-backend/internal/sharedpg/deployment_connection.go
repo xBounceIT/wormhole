@@ -39,13 +39,14 @@ func readDeploymentResponse(ctx context.Context, conn *pgconn.PgConn, statement 
 type DeploymentConnectionStage string
 
 const (
-	DeploymentDNS            DeploymentConnectionStage = "dns"
-	DeploymentTCP            DeploymentConnectionStage = "tcp"
-	DeploymentTLS            DeploymentConnectionStage = "tls"
-	DeploymentSCRAM          DeploymentConnectionStage = "scram"
-	DeploymentChannelBinding DeploymentConnectionStage = "channel-binding"
-	DeploymentDatabase       DeploymentConnectionStage = "database"
-	DeploymentReadWrite      DeploymentConnectionStage = "read-write"
+	DeploymentDNS             DeploymentConnectionStage = "dns"
+	DeploymentTCP             DeploymentConnectionStage = "tcp"
+	DeploymentTLS             DeploymentConnectionStage = "tls"
+	DeploymentSCRAM           DeploymentConnectionStage = "scram"
+	DeploymentChannelBinding  DeploymentConnectionStage = "channel-binding"
+	DeploymentDatabase        DeploymentConnectionStage = "database"
+	DeploymentReadWrite       DeploymentConnectionStage = "read-write"
+	DeploymentConnectionLimit DeploymentConnectionStage = "connection-limit"
 )
 
 // DeploymentConnectionError exposes a fixed stage and a sanitized cause. It
@@ -115,6 +116,9 @@ func connectForDeploymentCheck(ctx context.Context, settings Settings, password 
 		return conn, err
 	})
 	if err != nil && !errors.Is(err, ErrConfiguration) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		if errors.Is(err, ErrConnectionLimit) {
+			stage = DeploymentConnectionLimit
+		}
 		return nil, &DeploymentConnectionError{Stage: stage, cause: err}
 	}
 	return conn, err

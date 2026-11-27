@@ -6,6 +6,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"net"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -42,9 +43,9 @@ func TestValidateDeploymentTargetAcceptsOnlyPublicCertificates(t *testing.T) {
 }
 
 func TestDeploymentPreflightDiagnosticShape(t *testing.T) {
-	row := [][]byte{[]byte("160015"), []byte("true"), []byte("true"), []byte("true"), []byte("true"), []byte("true"), []byte("false"), []byte("false"), []byte("all")}
+	row := [][]byte{[]byte("160015"), []byte("true"), []byte("true"), []byte("true"), []byte("true"), []byte("true"), []byte("false"), []byte("false"), []byte("all"), []byte("120")}
 	p, err := parseDeploymentPreflight(row, TLSVerified)
-	if err != nil || !p.ReadyToDeploy() || p.StatementTracking != "all" || p.TLS != TLSVerified {
+	if err != nil || !p.ReadyToDeploy() || p.MaxConnections != 120 || p.StatementTracking != "all" || p.TLS != TLSVerified {
 		t.Fatal(p, err)
 	}
 	for _, column := range []int{0, 1, 3, 8} {
@@ -56,6 +57,13 @@ func TestDeploymentPreflightDiagnosticShape(t *testing.T) {
 	}
 	if _, err := parseDeploymentPreflight(row[:7], TLSOff); !errors.Is(err, ErrDeploymentMismatch) {
 		t.Fatal("accepted partial preflight", err)
+	}
+	for _, limit := range []string{"", "0", "-1", "1.5", "020", "2147483648"} {
+		bad := append([][]byte(nil), row...)
+		bad[9] = []byte(limit)
+		if _, err := parseDeploymentPreflight(bad, TLSVerified); !errors.Is(err, ErrDeploymentMismatch) {
+			t.Fatalf("accepted invalid max_connections %q", limit)
+		}
 	}
 	row[0] = []byte("150002")
 	if p, err := parseDeploymentPreflight(row, TLSOff); err != nil || p.ReadyToDeploy() {
@@ -105,6 +113,10 @@ func TestPostgresDeploymentPreflight(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer closeDeploymentConnection(admin)
+	capacity, err := readDeploymentRow(ctx, admin, "SHOW max_connections", 1)
+	if err != nil || string(capacity[0]) != strconv.Itoa(p.MaxConnections) {
+		t.Fatal("preflight did not report the live server connection limit", err)
+	}
 	exec := func(sql string) {
 		t.Helper()
 		if _, err := admin.Exec(ctx, sql).ReadAll(); err != nil {
@@ -118,6 +130,8 @@ func TestPostgresDeploymentPreflight(t *testing.T) {
 	if err != nil || p.ReadyToDeploy() || p.CanCreateRoles || p.OwnsDatabase || p.OwnsPublicSchema || p.CanGrantStatistics {
 		t.Fatal("limited role prerequisite check", p, err)
 	}
+	exec("ALTER ROLE wh_probe_readonly CONNECTION LIMIT 0")
+	checkStage(limited, password, DeploymentConnectionLimit)
 	exec("ALTER ROLE wormhole_test_admin SET log_statement='ddl'; ALTER ROLE wormhole_test_admin SET log_parameter_max_length=0; ALTER ROLE wormhole_test_admin SET log_parameter_max_length_on_error=0")
 	p, err = CheckDeploymentPrerequisites(ctx, s, password)
 	if err != nil || !p.LogsStatements || p.LogsParameters {

@@ -3,7 +3,10 @@ import test from 'node:test';
 import { EventEmitter } from 'node:events';
 import { resolve } from 'node:path';
 import { VaultSharedAuthenticationDialog } from '../electron/vault-shared-dialog.ts';
-import { SharedReenrollmentPending } from '../electron/vault-shared-unlock.ts';
+import {
+  SharedConnectionLimit,
+  SharedReenrollmentPending,
+} from '../electron/vault-shared-unlock.ts';
 const target = 'file:///app/dist/vault-shared.html';
 const tick = () => new Promise(setImmediate);
 const vaultId = '11111111-1111-4111-8111-111111111111',
@@ -98,6 +101,7 @@ function fixture(
     assert.ok(value.ask.every((n) => n === 5));
     assert.deepEqual(Object.keys(value).sort(), ['ask', 'password', 'slotId', 'vaultId']);
     if (mode === 'wrong' && calls === 1) throw Error('private error');
+    if (mode === 'connection-limit' && calls === 1) throw new SharedConnectionLimit();
     if (mode === 'completed') throw Error('lost admission response');
     if (mode === 'stale') accepted = false;
     if (['pending', 'stop-error'].includes(mode))
@@ -581,6 +585,17 @@ test('completed enrollment after a lost reply closes the stale fixed-mode dialog
   assert.equal(f.child.destroyed, true);
   assert.equal(f.stops, 1);
   assert.ok(f.borrowed!.password.every((b) => b === 0) && f.borrowed!.ask.every((b) => b === 0));
+});
+
+test('shared sign-in shows capacity to the current dialog and permits a fresh attempt', async () => {
+  const f = fixture('connection-limit');
+  const result = f.open();
+  await tick();
+  const value = factors();
+  assert.equal(await f.call('submit', value), 'connection-limit');
+  assert.ok([value.password, value.ask].every((bytes) => bytes.every((byte) => byte === 0)));
+  assert.equal(await f.call('submit', factors()), true);
+  assert.ok((await result)?.admitted);
 });
 
 test('shared dialog confines factors and fixed operation to its isolated document', async () => {

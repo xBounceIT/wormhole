@@ -9,7 +9,7 @@ import (
 )
 
 type DeploymentChecks struct {
-	DeploymentLogging
+	DeploymentServerSettings
 	PlainStartup string `json:"plainStartup"`
 }
 

@@ -641,9 +641,13 @@ export function parseVaultResponse(text: string): VaultResponse | undefined {
   if (
     fields(value, ['version', 'id', 'error']) &&
     typeof value.error === 'string' &&
-    ['vault_busy', 'vault_cancelled', 'vault_operation_failed', 'vault_invalid_response'].includes(
-      value.error,
-    )
+    [
+      'vault_busy',
+      'vault_cancelled',
+      'vault_operation_failed',
+      'vault_invalid_response',
+      'vault_workspace_connection_limit',
+    ].includes(value.error)
   )
     return { id: value.id, error: value.error };
   return undefined;

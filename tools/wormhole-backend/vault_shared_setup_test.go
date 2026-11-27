@@ -184,6 +184,17 @@ func TestSharedSetupWriteRefusalKeepsThePreparedReceipt(t *testing.T) {
 	}
 }
 
+func TestSharedSetupConnectionLimitDiagnostic(t *testing.T) {
+	for _, err := range []error{sharedpg.ErrConnectionLimit, &sharedpg.DeploymentConnectionError{Stage: sharedpg.DeploymentConnectionLimit}} {
+		if got := setupFailure(err); got != "connection-limit" {
+			t.Fatalf("connection exhaustion was reported as %q", got)
+		}
+	}
+	if got := setupFailure(errors.New(sharedpg.ErrConnectionLimit.Error())); got != "unavailable" {
+		t.Fatalf("untrusted diagnostic text selected %q", got)
+	}
+}
+
 func TestSharedSetupRejectsInvalidOrReplacedInput(t *testing.T) {
 	h, request := sharedSetupTestHandler(t)
 	for _, payload := range []string{`{}`, `{"hosting":"managed","hosting":"self-hosted"}`, `{"hosting":"managed","host":"localhost","port":5432,"database":"test","caPem":""}`} {

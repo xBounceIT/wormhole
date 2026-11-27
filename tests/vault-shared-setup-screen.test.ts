@@ -480,11 +480,11 @@ let finishAdminPage;
       check(!list(),'a late reply rendered after pagehide');
     };
   }
-  const prerequisites={serverVersion:150000,tls:'verified',canCreateRoles:false,ownsDatabase:false,ownsPublicSchema:false,canGrantStatistics:false,emptyDatabase:false,logsStatements:true,logsParameters:true,statementTracking:'all'};
+  const prerequisites={serverVersion:150000,maxConnections:100,tls:'verified',canCreateRoles:false,ownsDatabase:false,ownsPublicSchema:false,canGrantStatistics:false,emptyDatabase:false,logsStatements:true,logsParameters:true,statementTracking:'all'};
   const s={hosting:'managed',host:'host.example',port:5432,database:'vault',workspaceId:'workspace',roleTag:'role',state:'prepared'};
   let plan=null, administrator, serverKit, preflight=0, exports=0, publications=0, csrAttempts=0, last, closes=0;
   let catalogMatches=true;
-  let missingPlus=false;
+  let preflightFailure;
   const actions=[];
   const response=()=>({plan,adminPending:true,administrator});
   const setStage=stage=>{administrator={enrollmentId:'admin-id',loginName:'first-admin',stage};return response()};
@@ -507,9 +507,9 @@ let finishAdminPage;
         return {plan,serverKit};
       case 'discard': plan=null; serverKit=undefined; return {plan};
       case 'export-hba': return {plan,failure:'export-failed'};
-      case 'preflight': return missingPlus ? {plan,failure:'channel-binding'} : {plan,preflight:++preflight===1?prerequisites:{...prerequisites,serverVersion:160000,canCreateRoles:true,ownsDatabase:true,ownsPublicSchema:true,canGrantStatistics:true,emptyDatabase:true}};
+      case 'preflight': return preflightFailure ? {plan,failure:preflightFailure} : {plan,preflight:++preflight===1?prerequisites:{...prerequisites,serverVersion:160000,canCreateRoles:true,ownsDatabase:true,ownsPublicSchema:true,canGrantStatistics:true,emptyDatabase:true}};
       case 'run': plan={...s,state:'submitted'};throw Error('lost commit reply');
-      case 'check': return catalogMatches ? {plan,deployment,checks:{plainStartup:'unconfirmed',logsStatements:true,logsParameters:true,statementTracking:'all'}} : {plan,failure:'mismatch'};
+      case 'check': return catalogMatches ? {plan,deployment,checks:{plainStartup:'unconfirmed',maxConnections:120,logsStatements:true,logsParameters:true,statementTracking:'all'}} : {plan,failure:'mismatch'};
       case 'admin-prepare': return setStage('prepared');
       case 'admin-open': return response();
       case 'admin-recovery': return ++exports===1?null:{...setStage('recovery-exported'),recovery:{groups:[1,11]}};
@@ -577,18 +577,21 @@ let finishAdminPage;
   check(find('Deploy schema').disabled,'enabled before preflight');
   dba(); await enter();
   check(find('Deploy schema').disabled && card.querySelectorAll('li').length>=6,'invalid preflight allowed deploy');
+  check(card.textContent.includes('max_connections is 100'),'preflight omitted the server capacity');
   dba(); await click('Test connection');
   check(!find('Deploy schema').disabled && last.password.every(value=>value===0),'preflight retained credentials');
   field('role').dispatchEvent(new Event('input'));
   check(find('Deploy schema').disabled,'changed DBA role retained prior preflight');
-  missingPlus=true; dba(); await click('Test connection');
+  preflightFailure='channel-binding'; dba(); await click('Test connection');
   check(find('Deploy schema').disabled && status().includes('did not offer SCRAM-SHA-256-PLUS'),'missing channel binding enabled deployment');
-  missingPlus=false;
+  preflightFailure='connection-limit'; dba(); await click('Test connection');
+  check(find('Deploy schema').disabled && status().includes('server is at its connection limit'),'connection exhaustion lost its diagnostic');
+  preflightFailure=undefined;
   dba(); await click('Test connection'); dba(); await click('Deploy schema');
   check(status().includes('interrupted'),'lost dispatch could be replayed');
   await click('Reload deployment plan'); dba(); await enter();
   check(find('Create first administrator'),'verified deployment did not allow administrator setup');
-  for(const message of ['plaintext startup check was inconclusive','provider’s TLS enforcement','log_statement','log_parameter_max_length','pg_stat_statements.track']){
+  for(const message of ['plaintext startup check was inconclusive','provider’s TLS enforcement','max_connections is 120','log_statement','log_parameter_max_length','pg_stat_statements.track']){
     check(card.textContent.includes(message),'deployment check omitted '+message);
   }
   catalogMatches=false; dba(); await click('Check deployment');
@@ -602,7 +605,13 @@ let finishAdminPage;
   prepare('synthetic-account');
   field('ask').value='invalid'; await click('Prepare administrator');
   check(!actions.includes('admin-prepare'),'invalid ASK crossed the bridge');
-  prepare('synthetic-account'); fill({directConnectionDevices:'300'}); await enter();
+  prepare('synthetic-account');
+  for(const [devices,budget] of [['300','620'],['301','622'],['1','22'],['1.5',''],['','']]){
+    fill({directConnectionDevices:devices}); field('directConnectionDevices').dispatchEvent(new Event('input'));
+    const value=card.querySelector('#shared-connection-budget').textContent;
+    check(budget?value.includes('at least '+budget+'.'):value==='','incorrect connection budget for '+devices);
+  }
+  fill({directConnectionDevices:'300'}); await enter();
   check(last.directConnectionDevices===300,'direct deployment size was not sent for signature');
   check(last.loginName==='first-admin' && last.ask.every(value=>value===0),'admin profile fields were not consumed');
   failKeyGeneration=true; account(); await click('Save recovery kit and show key');

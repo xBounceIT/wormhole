@@ -100,6 +100,7 @@ async function exerciseWizard(
   target: {
     schemaVersion: number;
     directConnectionDevices?: number;
+    expectConnectionLimit?: boolean;
     importLocal?: boolean;
     checkStandardPin?: boolean;
     chooseStandard?: boolean;
@@ -173,6 +174,14 @@ app.whenReady().then(async()=>{
      if(mode==='custodian-resume-suspension')assert.equal(startup.shared.lastLoginName,'recovered-admin');
      const slot=startup.slots.slots.find(slot=>slot.kind==='password');
      const admit=()=>host.sharedUnlock({vaultId:startup.slots.vaultId,slotId:slot.id,password:new TextEncoder().encode(accountPassword),...(ask?{ask:Buffer.from(ask,'hex')}:{})},'2.4.3',()=>true);
+     if(target.expectConnectionLimit){
+       const {SharedConnectionLimit}=await import(${fromDist('vault-shared-unlock.js')});
+       await assert.rejects(admit(),SharedConnectionLimit);
+       assert.equal(host.unlockedWorkspaceId,undefined);
+       writeFileSync(${JSON.stringify(resultPath)},JSON.stringify({limited:true}),{mode:0o600});
+       app.quit();
+       return;
+     }
      if(mode==='admin-offline-no-bundle'){
        await assert.rejects(admit());
        writeFileSync(${JSON.stringify(resultPath)},JSON.stringify({rejected:true}),{mode:0o600});
@@ -1335,6 +1344,7 @@ for (const mode of [
       let database: ReturnType<typeof startDatabase> | undefined;
       let restoreTarget: ReturnType<typeof startDatabase> | undefined;
       let webServer: Server | undefined;
+      let scenarioFailed = false;
       const receivedCookies = new Map<string, string>();
       try {
         const fixture = join(directory, 'postgres.test' + nativeSuffix);
@@ -1610,6 +1620,21 @@ for (const mode of [
           );
           database.send({ ...command, action: 'seedSuspensionAccount' });
           assert.deepEqual(await database.read(), { confirmed: true });
+        }
+        if (mode === 'run') {
+          database.send({ ...command, action: 'limitDeviceConnections' });
+          assert.deepEqual(await database.read(), { limited: true });
+          assert.deepEqual(
+            await exerciseWizard(
+              directory,
+              'admin-reopen',
+              { ...target, expectConnectionLimit: true },
+              withASK,
+            ),
+            { limited: true },
+          );
+          database.send({ ...command, action: 'restoreDeviceConnections' });
+          assert.deepEqual(await database.read(), { limited: false });
         }
         assert.deepEqual(
           await exerciseWizard(
@@ -1974,6 +1999,9 @@ for (const mode of [
           provisioning: false,
           requiresTls: true,
         });
+      } catch (error) {
+        scenarioFailed = true;
+        throw error;
       } finally {
         try {
           const closed = await Promise.allSettled([
@@ -1984,7 +2012,7 @@ for (const mode of [
               : undefined,
           ]);
           const failed = closed.find((cleanup) => cleanup.status === 'rejected');
-          if (failed) await Promise.reject(failed.reason);
+          if (!scenarioFailed && failed) await Promise.reject(failed.reason);
         } finally {
           assert.equal(resolve(directory, '..'), resolve(tmpdir()));
           await rm(directory, { recursive: true, force: true, maxRetries: 8, retryDelay: 250 });

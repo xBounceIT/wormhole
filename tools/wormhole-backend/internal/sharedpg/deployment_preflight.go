@@ -62,10 +62,11 @@ type DeploymentPreflight struct {
 	OwnsPublicSchema   bool    `json:"ownsPublicSchema"`
 	CanGrantStatistics bool    `json:"canGrantStatistics"`
 	EmptyDatabase      bool    `json:"emptyDatabase"`
-	DeploymentLogging
+	DeploymentServerSettings
 }
 
-type DeploymentLogging struct {
+type DeploymentServerSettings struct {
+	MaxConnections    int    `json:"maxConnections"`
 	LogsStatements    bool   `json:"logsStatements"`
 	LogsParameters    bool   `json:"logsParameters"`
 	StatementTracking string `json:"statementTracking"`
@@ -94,16 +95,17 @@ SELECT
  (NOT EXISTS (SELECT FROM custom_namespace WHERE nspname <> 'public')
   AND NOT EXISTS (SELECT FROM pg_catalog.pg_class c JOIN custom_namespace n ON n.oid=c.relnamespace)
   AND NOT EXISTS (SELECT FROM pg_catalog.pg_proc p JOIN custom_namespace n ON n.oid=p.pronamespace)
-  AND NOT EXISTS (SELECT FROM pg_catalog.pg_type t JOIN custom_namespace n ON n.oid=t.typnamespace))::text,` + deploymentLoggingColumns + `
+  AND NOT EXISTS (SELECT FROM pg_catalog.pg_type t JOIN custom_namespace n ON n.oid=t.typnamespace))::text,` + deploymentSettingsColumns + `
 FROM pg_catalog.pg_roles AS r, pg_catalog.pg_database AS d
 LEFT JOIN pg_catalog.pg_namespace AS n ON n.nspname='public'
 WHERE r.rolname=current_user AND d.datname=pg_catalog.current_database()`
 
-const deploymentLoggingColumns = `
+const deploymentSettingsColumns = `
  (pg_catalog.current_setting('log_statement') <> 'none')::text,
  (pg_catalog.current_setting('log_parameter_max_length') <> '0'
   OR pg_catalog.current_setting('log_parameter_max_length_on_error') <> '0')::text,
- coalesce(pg_catalog.current_setting('pg_stat_statements.track', true), 'unavailable')`
+ coalesce(pg_catalog.current_setting('pg_stat_statements.track', true), 'unavailable'),
+ pg_catalog.current_setting('max_connections')`
 
 func CheckDeploymentPrerequisites(ctx context.Context, settings Settings, password []byte) (DeploymentPreflight, error) {
 	conn, err := connectForDeploymentCheck(ctx, settings, password)
@@ -111,7 +113,7 @@ func CheckDeploymentPrerequisites(ctx context.Context, settings Settings, passwo
 		return DeploymentPreflight{}, err
 	}
 	defer closeDeploymentConnection(conn)
-	row, err := readDeploymentRow(ctx, conn, deploymentPreflightSQL, 9)
+	row, err := readDeploymentRow(ctx, conn, deploymentPreflightSQL, 10)
 	if err != nil {
 		return DeploymentPreflight{}, err
 	}
@@ -119,18 +121,18 @@ func CheckDeploymentPrerequisites(ctx context.Context, settings Settings, passwo
 }
 
 func parseDeploymentPreflight(row [][]byte, tls TLSMode) (DeploymentPreflight, error) {
-	if len(row) != 9 {
+	if len(row) != 10 {
 		return DeploymentPreflight{}, ErrDeploymentMismatch
 	}
 	version, err := strconv.Atoi(string(row[0]))
 	if err != nil || version <= 0 || strconv.Itoa(version) != string(row[0]) {
 		return DeploymentPreflight{}, ErrDeploymentMismatch
 	}
-	logging, err := parseDeploymentLogging(row[6:])
+	settings, err := parseDeploymentServerSettings(row[6:])
 	if err != nil {
 		return DeploymentPreflight{}, err
 	}
-	p := DeploymentPreflight{ServerVersion: version, TLS: tls, DeploymentLogging: logging}
+	p := DeploymentPreflight{ServerVersion: version, TLS: tls, DeploymentServerSettings: settings}
 	for i, dst := range []*bool{&p.CanCreateRoles, &p.OwnsDatabase, &p.OwnsPublicSchema, &p.CanGrantStatistics, &p.EmptyDatabase} {
 		switch string(row[i+1]) {
 		case "true":
@@ -143,15 +145,19 @@ func parseDeploymentPreflight(row [][]byte, tls TLSMode) (DeploymentPreflight, e
 	return p, nil
 }
 
-func parseDeploymentLogging(row [][]byte) (DeploymentLogging, error) {
-	if len(row) != 3 || (string(row[0]) != "true" && string(row[0]) != "false") || (string(row[1]) != "true" && string(row[1]) != "false") {
-		return DeploymentLogging{}, ErrDeploymentMismatch
+func parseDeploymentServerSettings(row [][]byte) (DeploymentServerSettings, error) {
+	if len(row) != 4 || (string(row[0]) != "true" && string(row[0]) != "false") || (string(row[1]) != "true" && string(row[1]) != "false") {
+		return DeploymentServerSettings{}, ErrDeploymentMismatch
 	}
-	p := DeploymentLogging{LogsStatements: string(row[0]) == "true", LogsParameters: string(row[1]) == "true", StatementTracking: string(row[2])}
+	maxConnections, err := strconv.ParseInt(string(row[3]), 10, 32)
+	if err != nil || maxConnections < 1 || strconv.FormatInt(maxConnections, 10) != string(row[3]) {
+		return DeploymentServerSettings{}, ErrDeploymentMismatch
+	}
+	p := DeploymentServerSettings{MaxConnections: int(maxConnections), LogsStatements: string(row[0]) == "true", LogsParameters: string(row[1]) == "true", StatementTracking: string(row[2])}
 	switch p.StatementTracking {
 	case "none", "top", "all", "unavailable":
 		return p, nil
 	default:
-		return DeploymentLogging{}, ErrDeploymentMismatch
+		return DeploymentServerSettings{}, ErrDeploymentMismatch
 	}
 }

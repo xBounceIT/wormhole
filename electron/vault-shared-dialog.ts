@@ -14,6 +14,7 @@ import {
   validSharedArtifactPath,
   validSharedTLSBundlePath,
   SharedReenrollmentPending,
+  SharedConnectionLimit,
   type SharedVaultUnlockInput,
   type SharedVaultSessionAdmission,
   type SharedVaultRecovery,
@@ -180,7 +181,9 @@ export class VaultSharedAuthenticationDialog {
                 if (dialog.mode === 'join-initial') await dialog.finish();
               }
             }
-            return false;
+            return error instanceof SharedConnectionLimit && this.trusted(event) === dialog
+              ? 'connection-limit'
+              : false;
           } finally {
             dialog.busy = false;
             dialog.factors = undefined;

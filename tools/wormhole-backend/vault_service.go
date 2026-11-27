@@ -12,6 +12,7 @@ import (
 	"github.com/xBounceIT/wormhole/tools/wormhole-backend/internal/localvault"
 	"github.com/xBounceIT/wormhole/tools/wormhole-backend/internal/secretclipboard"
 	"github.com/xBounceIT/wormhole/tools/wormhole-backend/internal/securemem"
+	"github.com/xBounceIT/wormhole/tools/wormhole-backend/internal/sharedpg"
 	"github.com/xBounceIT/wormhole/tools/wormhole-backend/internal/vault"
 	"github.com/xBounceIT/wormhole/tools/wormhole-backend/internal/vaultwire"
 )
@@ -57,7 +58,12 @@ func (h *vaultFoundationHandler) notifySharedCatalog() {
 }
 
 func (h *vaultFoundationHandler) Handle(ctx context.Context, operation string, payload json.RawMessage) (json.RawMessage, error) {
-	return h.handle(ctx, operation, payload, false)
+	result, err := h.handle(ctx, operation, payload, false)
+	if errors.Is(err, sharedpg.ErrConnectionLimit) {
+		// Preserve cancellation and native retirement if cleanup also failed.
+		err = errors.Join(err, vaultwire.ErrWorkspaceConnectionLimit)
+	}
+	return result, err
 }
 
 func (h *vaultFoundationHandler) handle(ctx context.Context, operation string, payload json.RawMessage, fresh bool) (json.RawMessage, error) {

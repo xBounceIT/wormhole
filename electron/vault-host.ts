@@ -200,6 +200,7 @@ import {
   consumeSharedVaultContinuationInput,
   hasSharedVaultContinuation,
   SharedReenrollmentPending,
+  SharedConnectionLimit,
   validSharedTLSBundlePath,
   validSharedRecoveryKitPath,
   validSharedRecoveryBackupPath,
@@ -2787,17 +2788,13 @@ export class VaultBackendHost {
         ...(runtime.administrator ? { administrator: true } : {}),
       };
     } catch (error) {
-      if (
-        error instanceof SharedReenrollmentPending &&
-        client &&
-        this.client === client &&
-        !this.stopping &&
-        this.canStart() &&
-        accepted()
-      )
-        throw error;
-      if (client && this.client === client) await this.stop();
-      throw Error('Shared workspace invitation unavailable.');
+      return await this.failSharedAuthentication(
+        error,
+        client,
+        accepted,
+        true,
+        'Shared workspace invitation unavailable.',
+      );
     } finally {
       if (reserved) this.sharedAuthenticating = false;
     }
@@ -3352,24 +3349,37 @@ export class VaultBackendHost {
       this.sharedAdmitted = false;
       return result;
     } catch (error) {
-      if (
-        joining &&
-        error instanceof SharedReenrollmentPending &&
-        client &&
-        this.client === client &&
-        !this.stopping &&
-        this.canStart() &&
-        accepted()
-      )
-        throw error;
-      if (client && this.client === client) await this.stop();
-      throw Error('Shared vault authentication unavailable.');
+      return await this.failSharedAuthentication(
+        error,
+        client,
+        accepted,
+        joining,
+        'Shared vault authentication unavailable.',
+      );
     } finally {
       if (reserved) this.sharedAuthenticating = false;
       input.password.fill(0);
       input.ask?.fill(0);
       if (hasSharedVaultContinuation(input)) input.code.fill(0);
     }
+  }
+
+  private async failSharedAuthentication(
+    error: unknown,
+    client: Client | undefined,
+    accepted: () => boolean,
+    joining: boolean,
+    message: string,
+  ): Promise<never> {
+    if (client && this.client === client) {
+      const pending = joining && error instanceof SharedReenrollmentPending;
+      const capacity = error instanceof SharedConnectionLimit;
+      const current = (pending || capacity) && !this.stopping && this.canStart() && accepted();
+      if (current && pending) throw error;
+      await this.stop();
+      if (current && capacity && accepted()) throw error;
+    }
+    throw Error(message);
   }
 
   // Only the main-owned recovery dialog can call these methods. No generic

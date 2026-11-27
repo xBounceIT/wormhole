@@ -16,6 +16,7 @@ const plan = { ...target, workspaceId, roleTag: 'abcd2345abcd2345', state: 'prep
 const deployment = { version: 44, provisioning: true, requiresTls: true };
 const checks = {
   plainStartup: 'refused',
+  maxConnections: 80,
   logsStatements: false,
   logsParameters: false,
   statementTracking: 'top',
@@ -470,6 +471,7 @@ test('ties receipts to the saved plan, action and deployment stage', () => {
   for (const invalid of [
     undefined,
     { ...checks, plainStartup: 'safe' },
+    { ...checks, maxConnections: '80' },
     { ...checks, statementTracking: 'unknown' },
     { ...checks, logsParameters: 1 },
     { ...checks, password: 'unexpected' },
@@ -490,6 +492,7 @@ test('ties receipts to the saved plan, action and deployment stage', () => {
 test('checks preflight diagnostics and refuses extra receipt fields', () => {
   const preflight = {
     serverVersion: 160015,
+    maxConnections: 100,
     tls: 'verified',
     canCreateRoles: true,
     ownsDatabase: true,
@@ -509,6 +512,10 @@ test('checks preflight diagnostics and refuses extra receipt fields', () => {
     { serverVersion: '160015' },
     { serverVersion: 0 },
     { serverVersion: 1.5 },
+    { maxConnections: 0 },
+    { maxConnections: 1.5 },
+    { maxConnections: 2 ** 31 },
+    { maxConnections: '100' },
     { tls: 'off' },
     { logsParameters: 'false' },
     { statementTracking: 'unexpected' },
@@ -528,6 +535,8 @@ test('checks preflight diagnostics and refuses extra receipt fields', () => {
     failure: 'check-required',
   });
   assert.equal(parseSharedSetupReply({ plan, failure: 'secret-server-text' }, 'run'), undefined);
+  const full = { plan, failure: 'connection-limit' };
+  assert.deepEqual(parseSharedSetupReply(full, 'preflight'), full);
 });
 
 test('administrator setup consumes every factor and reserves native credentials and file selection', () => {

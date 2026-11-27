@@ -216,7 +216,10 @@ export function mountSharedAuthenticationScreen(card: HTMLElement, api: SharedAu
     void request
       .then((result) => {
         if (!disposed && result !== true) {
-          if (resetting && result === 'awaiting-activation') {
+          if (result === 'connection-limit') {
+            status.textContent =
+              'The workspace server is at its connection limit. Try again after a connection closes.';
+          } else if (resetting && result === 'awaiting-activation') {
             status.textContent =
               'This device is registered. Try again after your administrator restores your personal keys and re-enables the account.';
           } else {

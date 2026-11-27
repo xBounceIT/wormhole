@@ -316,6 +316,8 @@ func setupFailure(err error) string {
 	switch {
 	case errors.As(err, &probe):
 		return string(probe.Stage)
+	case errors.Is(err, sharedpg.ErrConnectionLimit):
+		return string(sharedpg.DeploymentConnectionLimit)
 	case errors.Is(err, sharedpg.ErrAuthentication):
 		return "scram"
 	case errors.Is(err, sharedpg.ErrDeploymentRejected):

@@ -11,7 +11,10 @@ import { prepareVaultMigrationBoot } from '../electron/vault-migration-boot.ts';
 import { coverageThreshold } from '../scripts/test-coverage.ts';
 import { consumeSharedInitialJoinInput } from '../electron/vault-shared-initial-join.ts';
 import { consumeSharedAccountResetInput } from '../electron/vault-shared-account-reset.ts';
-import { SharedReenrollmentPending } from '../electron/vault-shared-unlock.ts';
+import {
+  SharedConnectionLimit,
+  SharedReenrollmentPending,
+} from '../electron/vault-shared-unlock.ts';
 import {
   isSharedInitialStartup,
   maxSharedInvitationBytes,
@@ -324,6 +327,9 @@ test('enrollment resume host binds the pending device, reserves authentication a
     'continuation',
     'awaiting-activation',
     'awaiting-after-navigation',
+    'capacity',
+    'capacity-after-navigation',
+    'capacity-during-stop',
     'ordinary',
     'slot',
     'native-error',
@@ -349,6 +355,8 @@ test('enrollment resume host binds the pending device, reserves authentication a
         return { admitted: true, lockedMemory: true, orgEscrow: true };
       },
       sharedRecoverEnrollment: async () => {
+        if (mode === 'capacity-after-navigation') allowed = false;
+        if (mode.startsWith('capacity')) throw new SharedConnectionLimit();
         if (mode === 'awaiting-after-navigation') allowed = false;
         if (mode.startsWith('awaiting-')) throw new SharedReenrollmentPending();
         if (mode === 'native-error') throw Error('private');
@@ -362,6 +370,7 @@ test('enrollment resume host binds the pending device, reserves authentication a
         mode === 'runtime-id' ? { ...runtime(), vaultId: slotId } : runtime(),
       lock: async () => {
         stops++;
+        if (mode === 'capacity-during-stop') allowed = false;
       },
     };
     const host = new VaultBackendHost(
@@ -407,7 +416,9 @@ test('enrollment resume host binds the pending device, reserves authentication a
     } else {
       await assert.rejects(
         pending,
-        (error) => error instanceof SharedReenrollmentPending === (mode === 'awaiting-activation'),
+        (error) =>
+          error instanceof SharedReenrollmentPending === (mode === 'awaiting-activation') &&
+          error instanceof SharedConnectionLimit === (mode === 'capacity'),
       );
       assert.equal(host.unlockedWorkspaceId, undefined);
       assert.equal(stops, mode === 'awaiting-activation' ? 0 : 1);
@@ -479,6 +490,7 @@ test('initial invitation host reserves a fresh workspace and activates only comp
     'success',
     'reset-success',
     'reset-awaiting',
+    'capacity',
     'existing',
     'native-error',
     'incomplete',
@@ -517,6 +529,7 @@ test('initial invitation host reserves a fresh workspace and activates only comp
         starts++;
         assert.equal(version, '1.0.0');
         assert.equal(value.code[0], 7);
+        if (mode === 'capacity') throw new SharedConnectionLimit();
         if (mode === 'native-error') throw Error('private');
         if (['late', 'duplicate', 'replaced'].includes(mode))
           await new Promise<void>((yes) => {
@@ -586,7 +599,9 @@ test('initial invitation host reserves a fresh workspace and activates only comp
     } else {
       await assert.rejects(
         pending,
-        (error) => error instanceof SharedReenrollmentPending === (mode === 'reset-awaiting'),
+        (error) =>
+          error instanceof SharedReenrollmentPending === (mode === 'reset-awaiting') &&
+          error instanceof SharedConnectionLimit === (mode === 'capacity'),
       );
       assert.equal(host.unlockedWorkspaceId, undefined);
       assert.equal(stops, ['denied', 'reset-awaiting'].includes(mode) ? 0 : 1);
