@@ -393,8 +393,16 @@ func TestVaultMigrationBrowserNativeProfileFixture(t *testing.T) {
 		t.Skip("run by the isolated Electron migration integration fixture")
 	}
 	id, err := uuid.Parse(token)
-	if err != nil || id == uuid.Nil || id.String() != token || !filepath.IsAbs(root) || filepath.Clean(filepath.Dir(root)) != filepath.Clean(os.TempDir()) || !strings.HasPrefix(filepath.Base(root), "wormhole-browser-migration-") {
+	if err != nil || id == uuid.Nil || id.String() != token || !filepath.IsAbs(root) || filepath.Clean(root) != root || !strings.HasPrefix(filepath.Base(root), "wormhole-browser-migration-") {
 		t.Fatal("invalid native fixture authority")
+	}
+	// Chromium expands Windows short names and macOS temporary-directory aliases.
+	// Verify the physical parent before permitting fixture retirement.
+	parent, parentErr := os.Stat(filepath.Dir(root))
+	temp, tempErr := os.Stat(os.TempDir())
+	fixture, fixtureErr := os.Lstat(root)
+	if parentErr != nil || tempErr != nil || !os.SameFile(parent, temp) || fixtureErr != nil || !fixture.IsDir() {
+		t.Fatal("native fixture must be a directory directly inside the system temporary directory")
 	}
 	marker, err := os.ReadFile(filepath.Join(root, "wormhole-browser-migration-fixture"))
 	if err != nil || string(marker) != token {
@@ -440,8 +448,14 @@ func TestVaultMigrationBrowserNativeProfileFixture(t *testing.T) {
 	// Electron has exited and flushed these test-only profiles before this Go
 	// process starts. Retirement never runs while a native Chromium context lives.
 	db.Close()
-	if path, err := continueLegacyVaultMigration(context.Background(), source, root, document, key, plan); err != nil || path != stage {
+	path, err := continueLegacyVaultMigration(context.Background(), source, root, document, key, plan)
+	if err != nil {
 		t.Fatal("native migration could not advance", err)
+	}
+	got, gotErr := os.Stat(path)
+	want, wantErr := os.Stat(stage)
+	if gotErr != nil || wantErr != nil || filepath.Base(path) != filepath.Base(stage) || !os.SameFile(got, want) {
+		t.Fatal("native migration returned a different staging database")
 	}
 	check := openNativeMigrationStage(t, stage, key)
 	defer check.Close()

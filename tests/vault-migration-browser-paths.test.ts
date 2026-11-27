@@ -84,7 +84,6 @@ app.whenReady().then(async()=>{
           '^TestVaultMigrationBrowserNativeProfileFixture$',
           '-count=1',
           '-json',
-          '-count=1',
           '-timeout',
           '60s',
         ],
