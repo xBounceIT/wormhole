@@ -259,8 +259,16 @@ test('real Chromium sibling tabs retain their proxy and never fall back to a dir
             const tlsBrowser = manager.surfaces.get(sessionId);
             const contents = tlsBrowser.view.webContents;
             if (ignoreCertErrors) {
-              await waitFor(() => contents.getTitle() === 'HTTPS appliance', 'Opted-in TLS navigation');
-              await assert.rejects(contents.loadURL('https://appliance.test/'), { code: /^ERR_CERT_/ });
+              // The title arrives before did-finish-load. Let the first navigation finish
+              // before observing the native failure for the other origin.
+              await waitFor(() => contents.getTitle() === 'HTTPS appliance' && !contents.isLoading(), 'Opted-in TLS navigation');
+              const otherOrigin = 'https://appliance.test/';
+              let rejectedOrigin = false;
+              contents.on('did-fail-load', (_event, _code, description, url, mainFrame) => {
+                if (mainFrame && url === otherOrigin && description.startsWith('ERR_CERT_')) rejectedOrigin = true;
+              });
+              await assert.rejects(contents.loadURL(otherOrigin), { code: /^ERR_CERT_/ });
+              await waitFor(() => rejectedOrigin, 'Other TLS origin rejected');
             } else {
               await waitFor(() => tlsBrowser.tabs.snapshot('vpn').tabs[0].error, 'Strict TLS rejection');
             }

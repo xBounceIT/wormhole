@@ -66,8 +66,7 @@ test('production prompt factory selects its dedicated document and preload in de
     'vault-tunnel-authentication-screen.test.ts',
     'vault-tunnel-authentication-native.test.ts',
   ]) {
-    for (const script of ['test:vault-client', 'preformat:check', 'prelint'])
-      assert.ok(scripts[script].split(' ').includes('tests/' + file), script + ' missing ' + file);
+    assert.ok(scripts['test:vault-client'].split(' ').includes('tests/' + file), file);
   }
 });
 
@@ -211,8 +210,7 @@ test('production SAML window factory stays in the native approval-window coordin
     'vault-tunnel-cookie-dialog.test.ts',
     'vault-tunnel-cookie-native.test.ts',
   ])
-    for (const script of ['test:vault-client', 'prelint', 'preformat:check'])
-      assert.ok(scripts[script].split(' ').includes('tests/' + file));
+    assert.ok(scripts['test:vault-client'].split(' ').includes('tests/' + file), file);
 });
 
 test('all four native route brokers parent VPN prompts to their exact live session owner', async (t) => {

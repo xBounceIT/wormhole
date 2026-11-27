@@ -11,6 +11,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { transformWithOxc } from 'vite';
 import { coverageThreshold } from '../scripts/test-coverage.ts';
+import { mainSyntax, visitSyntax } from './fixtures/main-source.ts';
 
 test('native Bitwarden settings show verified metadata, handle cancellation and ignore retired UI lifetimes', async (t) => {
   const require = createRequire(import.meta.url);
@@ -122,13 +123,14 @@ test('native Bitwarden settings show verified metadata, handle cancellation and 
 
 test('actual settings loading uses native preferences without invoking legacy Bitwarden backends', async (t) => {
   const source = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
-  const target = source.indexOf('      const [settingsResult, extensionResult, cliResult]');
-  const begin = source.lastIndexOf('  useEffect(() => {', target);
-  const finish =
-    source.indexOf('  }, [authGate, authState?.mode]);', target) +
-    '  }, [authGate, authState?.mode]);'.length;
-  assert.ok(begin > 0 && finish > target);
-  const code = stripTypeScriptTypes(source.slice(begin, finish));
+  const settingsEffects: string[] = [];
+  visitSyntax(mainSyntax(source, true), (node) => {
+    if (node.type !== 'CallExpression' || node.callee.name !== 'useEffect') return;
+    const effect = source.slice(node.start, node.end);
+    if (effect.includes('.readAppSettings(')) settingsEffects.push(effect);
+  });
+  assert.equal(settingsEffects.length, 1);
+  const code = stripTypeScriptTypes(settingsEffects[0]);
   const inspector = new Session();
   inspector.connect();
   t.after(() => inspector.disconnect());
@@ -137,6 +139,7 @@ test('actual settings loading uses native preferences without invoking legacy Bi
   const filename = 'vault-bitwarden-native-settings-load.js';
   let effects: any,
     values: boolean[] = [];
+  let current = true;
   const execute = (api: unknown, gate = 'unlocked') => {
     runInNewContext(
       code,
@@ -146,6 +149,7 @@ test('actual settings loading uses native preferences without invoking legacy Bi
           effects = effect;
         },
         authGate: gate,
+        isCurrentUnlock: () => current,
         authState: { mode: 'vault' },
         window: { wormhole: api },
         setPromptBeforeTunnelConnect: (value: boolean) => values.push(value),
@@ -167,6 +171,11 @@ test('actual settings loading uses native preferences without invoking legacy Bi
   execute(api);
   await tick();
   assert.deepEqual(values, [true]);
+  execute({ ...api, readAppSettings: async () => ({ promptBeforeTunnelConnect: false }) });
+  current = false;
+  await tick();
+  assert.deepEqual(values, [true], 'an earlier unlock must not publish its settings');
+  current = true;
   execute({
     ...api,
     readAppSettings: async () => {

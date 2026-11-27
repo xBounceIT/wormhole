@@ -15445,7 +15445,8 @@ function SettingsPage({
       if (authState?.mode === 'vault') {
         try {
           const settings = await window.wormhole!.readAppSettings();
-          if (active) setPromptBeforeTunnelConnect(settings.promptBeforeTunnelConnect);
+          if (active && isCurrentUnlock())
+            setPromptBeforeTunnelConnect(settings.promptBeforeTunnelConnect);
         } catch {
           /* Settings retain their current value until the next refresh. */
         }
