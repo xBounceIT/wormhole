@@ -42,7 +42,11 @@ import {
   type SharedConnectionContext,
 } from './vault-shared-connection.ts';
 import { parseSharedVaultRuntime, type SharedVaultRuntime } from './vault-shared-runtime.ts';
-import type { AdminInventoryReply, AdminInventoryRequest } from './vault-shared-admin-inventory.ts';
+import type {
+  AdminInventoryReply,
+  AdminInventoryRequest,
+  CreateSlotPort,
+} from './vault-shared-admin-inventory.ts';
 import type { WorkspaceAccessPort } from './vault-shared-access.ts';
 import type {
   AccountBoundaryRotationPort,
@@ -306,6 +310,7 @@ export type VaultPresenceAuthentication = (
 
 export type SharedAdministrationPorts = {
   read(request: AdminInventoryRequest): Promise<AdminInventoryReply>;
+  createSlot?: CreateSlotPort;
   groups?: (request: GroupRequest) => Promise<GroupReply>;
   nodeGrants?: NodeGrantAdministration;
   groupKey?: GroupKeyPort;
@@ -325,6 +330,7 @@ export type SharedAdministrationPorts = {
 type Client = BrowserTransferClient &
   VPNSSOClient & {
     sharedAdminInventory(request: AdminInventoryRequest): Promise<AdminInventoryReply>;
+    sharedCreateCredentialSlot: CreateSlotPort;
     sharedWorkspaceAccess: WorkspaceAccessPort;
     sharedAccountSuspension: AccountSuspensionPort;
     sharedAccountBoundaryRotation: AccountBoundaryRotationPort;
@@ -3087,6 +3093,9 @@ export class VaultBackendHost {
         administrator || request.kind === 'my-devices'
           ? read((client) => client.sharedAdminInventory(request))
           : Promise.resolve({ status: 'unavailable' }),
+      createSlot: administrator
+        ? (request) => read((client) => client.sharedCreateCredentialSlot(request))
+        : undefined,
       groups: administrator
         ? (request) => read((client) => client.sharedAdminGroups(request))
         : undefined,

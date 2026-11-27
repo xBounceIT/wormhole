@@ -2,7 +2,9 @@ import type {
   AdminInventoryKind,
   AdminInventoryReply,
   AdminInventoryRequest,
+  CreateSlotPort,
 } from '../electron/vault-shared-admin-inventory.ts';
+import { mountCreateSlot } from './vault-shared-create-slot.ts';
 import {
   mountSharedGroupAdministration,
   type GroupAdminPort,
@@ -28,6 +30,7 @@ import type {
 
 export type SharedAdministrationApi = {
   adminInventory(request: AdminInventoryRequest): Promise<AdminInventoryReply>;
+  createSlot?: CreateSlotPort;
   adminGroups?: GroupAdminPort;
   grantTargets?: NodeGrantAdministration['catalog'];
   nodeGrant?: NodeGrantAdministration['grant'];
@@ -211,6 +214,10 @@ export function mountSharedAdministration(
     }
   };
   const load = async (request: AdminInventoryRequest, history: AdminInventoryRequest[]) => {
+    disposePanel?.();
+    disposePanel = undefined;
+    adminPanel.replaceChildren();
+    adminPanel.hidden = true;
     nextRequest = undefined;
     previous.disabled = next.disabled = refresh.disabled = section.disabled = true;
     status.textContent = 'Loading…';
@@ -230,6 +237,22 @@ export function mountSharedAdministration(
       const { entries, next: cursor } = result.page;
       nextRequest = cursor ? { kind: request.kind, next: cursor } : undefined;
       status.textContent = entries.length ? `Page ${requests.length}` : 'No records on this page.';
+      if (request.kind === 'slots' && !ownDevicesOnly && api.createSlot) {
+        adminPanel.hidden = false;
+        disposePanel = mountCreateSlot(
+          adminPanel,
+          api.createSlot,
+          (busy) => {
+            section.disabled = refresh.disabled = busy;
+            previous.disabled = busy || requests.length < 2;
+            next.disabled = busy || !nextRequest;
+          },
+          (name) => {
+            accessNotice.textContent = `Created credential slot “${name}”.`;
+            void load({ kind: 'slots' }, []);
+          },
+        );
+      }
       if (!entries.length && !request.next && request.kind === 'unencrypted-clients')
         status.textContent = 'No unencrypted clients connected.';
       for (const record of entries) {

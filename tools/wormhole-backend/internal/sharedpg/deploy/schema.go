@@ -17,6 +17,11 @@ var accountGroupRolesTemplate string
 
 var accountGroupRolesMigration = strings.Replace(accountGroupRolesTemplate, "{{WEB_SUSPENSION_RESTORE_DEFINITION}}", renderWebSuspensionRestore("94"), 1)
 
+//go:embed migrations/0095_create_credential_slot.sql
+var createCredentialSlotTemplate string
+
+var createCredentialSlotMigration = strings.Replace(createCredentialSlotTemplate, "{{WEB_SUSPENSION_RESTORE_DEFINITION}}", renderWebSuspensionRestore("95"), 1)
+
 // This order matches the individual DBA upgrade scripts. A fresh deployment
 // uses the same migrations in a single transaction.
 var schemaMigrations = [...]string{
@@ -44,7 +49,7 @@ var schemaMigrations = [...]string{
 	scopedGroupRemovalMigration, enrollmentHistoryMigration, suspensionEnrollmentMigration, personalRootRecoveryMigration, accountReenrollmentMigration,
 	accountReenrollmentRedemptionMigration, webSessionViewsMigration, webConnectionPlanMigration, webTunnelReleaseMigration, webSuspensionInventoryMigration,
 	auditMaintenanceMigration, unencryptedClientsMigration, sshHostPinMigration, updateNodeMigration, moveNodeMigration, suspensionRotationReceiptsMigration,
-	rowSecurityMigration, deviceConnectionLimitMigration, adminCredentialSlotsMigration, accountGroupRolesMigration,
+	rowSecurityMigration, deviceConnectionLimitMigration, adminCredentialSlotsMigration, accountGroupRolesMigration, createCredentialSlotMigration,
 }
 
 const SchemaVersion = len(schemaMigrations)

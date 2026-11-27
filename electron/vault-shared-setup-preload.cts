@@ -5,6 +5,8 @@ contextBridge.exposeInMainWorld('vaultSharedSetup', {
   mode: () => ipcRenderer.invoke('vault-shared-setup:mode'),
   adminInventory: (value: import('./vault-shared-admin-inventory.js').AdminInventoryRequest) =>
     ipcRenderer.invoke('vault-shared-setup:admin-inventory', value),
+  createSlot: (value: import('./vault-shared-admin-inventory.js').CredentialSlot) =>
+    ipcRenderer.invoke('vault-shared-setup:create-slot', value),
   workspaceAccess: (value: import('./vault-shared-access.js').WorkspaceAccessRequest) =>
     ipcRenderer.invoke('vault-shared-setup:workspace-access', value),
   accountSuspension: (value: import('./vault-account-suspension.js').AccountSuspensionRequest) =>

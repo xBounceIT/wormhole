@@ -3,10 +3,33 @@ import test from 'node:test';
 import {
   parseAdminInventoryReply,
   parseAdminInventoryRequest,
+  parseCreateSlot,
+  parseCreateSlotReply,
 } from '../electron/vault-shared-admin-inventory.ts';
 
 const id = (n: number) => `00000000-0000-0000-0000-${String(n).padStart(12, '0')}`;
 const at = '2026-11-23T12:00:00.123456Z';
+
+test('slot creation accepts only unassigned metadata and a bounded outcome', () => {
+  const slot = { id: id(1), name: 'Créneau <&>', protocol: 'ssh', allowSelfService: true };
+  assert.deepEqual(parseCreateSlot(slot), slot);
+  for (const bad of [
+    null,
+    { ...slot, defaultCredentialId: id(2) },
+    { ...slot, allowSelfService: 1 },
+    { ...slot, id: id(0) },
+    { ...slot, protocol: 'http' },
+    { ...slot, name: '   ' },
+    { ...slot, name: '\u0001test' },
+    { ...slot, name: '\udaaa' },
+    { ...slot, name: 'è'.repeat(513) },
+  ])
+    assert.equal(parseCreateSlot(bad), undefined);
+  for (const status of ['saved', 'unavailable', 'unsupported', 'busy', 'stale'])
+    assert.deepEqual(parseCreateSlotReply({ status }), { status });
+  for (const invalid of [null, { status: 'ready' }, { status: 'saved', credentialId: id(1) }])
+    assert.equal(parseCreateSlotReply(invalid), undefined);
+});
 
 test('administration requests scope cursors to their section and preserve audit microseconds', () => {
   assert.deepEqual(parseAdminInventoryRequest({ kind: 'accounts' }), { kind: 'accounts' });

@@ -8,6 +8,7 @@ import test from 'node:test';
 import { promisify } from 'node:util';
 import { coverageThreshold } from '../scripts/test-coverage.ts';
 import { validSharedHBANetworks } from '../electron/vault-shared-setup-contract.ts';
+import { vaultFields, vaultID, vaultRecord } from '../electron/vault-contract.ts';
 
 test('protected setup screen clears credentials and separates recovery display from confirmation', async (t) => {
   const source = stripTypeScriptTypes(
@@ -45,6 +46,14 @@ test('protected setup screen clears credentials and separates recovery display f
   )
     .replace(/^import .*?;\s*/gms, '')
     .replace(/^export /gm, '');
+  const slotSources = await Promise.all(
+    ['../electron/vault-shared-admin-inventory.ts', '../src/vault-shared-create-slot.ts'].map(
+      async (path) =>
+        stripTypeScriptTypes(await readFile(new URL(path, import.meta.url), 'utf8'))
+          .replace(/^import .*?;\s*/gms, '')
+          .replace(/^export /gm, ''),
+    ),
+  );
   const suspensionInventorySource = stripTypeScriptTypes(
     await readFile(new URL('../src/vault-account-suspension.ts', import.meta.url), 'utf8'),
   )
@@ -99,6 +108,11 @@ if(!crypto.randomUUID)Object.defineProperty(crypto,'randomUUID',{value:()=>reset
 ${resetQueueSource}
 ${resetIssueSource}
 ${administrationSource}
+const mountCreateSlot=(()=>{
+  const vaultID=${vaultID.toString()}, vaultRecord=${vaultRecord.toString()}, vaultFields=${vaultFields.toString()};
+  ${slotSources.join('\n')}
+  return mountCreateSlot;
+})();
 ${suspensionInventorySource}
 ${groupSource}
 const workspacePermissionLabels=['View','Use','Write','Reveal','Manage'];
@@ -412,7 +426,7 @@ let finishAdminPage;
   {
     const adminCard = document.createElement('section');
     document.body.append(adminCard);
-    let state = 'ready', release, closed = 0;
+    let state = 'ready', release, closed = 0, createStatus='busy', submitted=[];
     const bySection = {
       accounts:{id:'account',name:'Workspace Administrator',login:'alice',role:'administrator',status:'enabled'},
       devices:{id:'device',login:'alice',status:'revoked',at:'2026-11-23T12:00:00.000000Z'},
@@ -423,6 +437,12 @@ let finishAdminPage;
     };
     mountSharedAdministration(adminCard,{
       adminGroups: async ()=>({status:'unsupported'}),
+      createSlot: async request=>{
+        submitted.push(request);
+        if(createStatus==='failure')throw Error('private diagnostic');
+        if(createStatus==='delayed')return new Promise(resolve=>{release=()=>resolve({status:'saved'})});
+        return {status:createStatus};
+      },
       grantTargets: async ()=>({nodes:[],next:null}),
       nodeGrant: async ()=>({status:'unsupported'}),
       adminInventory: async ({kind,next})=>{
@@ -458,6 +478,32 @@ let finishAdminPage;
       check(list().includes(expected),'section did not display its expected record');
     }
     check(list().includes('SSH · Users can choose a credential')&&!adminCard.querySelector('li button'),'slot metadata or permissions changed in the view');
+    const fillSlot=()=>{
+      const details=adminCard.querySelector('details');
+      details.open=true;
+      const form=details.querySelector('form');
+      form.querySelector('input').value='  ';
+      form.requestSubmit();
+      check(form.textContent.includes('Enter a slot name')&&!submitted.length,'blank name reached the native port');
+      form.querySelector('input').value='My RDP';
+      form.querySelector('select').value='rdp';
+      form.querySelector('[type=checkbox]').checked=true;
+      return form;
+    };
+    const slotForm=fillSlot();
+    for(const [result,message] of [['busy','busy'],['failure','Retry to check'],['unavailable','permission'],['unsupported','Update'],['stale','workspace changed']]){
+      createStatus=result;
+      slotForm.requestSubmit();
+      await tick();
+      check(slotForm.textContent.includes(message)&&submitted.at(-1).id===submitted[0].id,'creation retry lost identity or feedback');
+    }
+    createStatus='delayed';
+    slotForm.requestSubmit();
+    slotForm.requestSubmit();
+    check(menu.disabled&&submitted.length===6,'concurrent slot submission reached the port');
+    release();
+    await tick();
+    check(!menu.disabled&&adminCard.textContent.includes('Created credential slot')&&submitted.at(-1).protocol==='rdp'&&submitted.at(-1).allowSelfService,'saved slot was not confirmed');
     bySection.slots.allowSelfService=false;
     await press('Refresh');
     check(list().includes('SSH · Assigned by an administrator'),'assignment policy remained stale');
@@ -1227,7 +1273,7 @@ app.whenReady().then(async()=>{
     const report=await debug.sendCommand('Profiler.takePreciseCoverage');
     const script=report.result.find(entry=>entry.url==='wormhole-vault-shared-setup-screen.js');
     assert.ok(script);
-    for(const name of ['mountSharedSetup','mountAdminRecovery','mountSharedBackup','mountSharedRestore','mountSharedAccountResetIssue','createAccountResetQueue','mountSharedAdministration','mountSharedGroupAdministration','mountSharedGrantAdministration','mountAccountSuspension']){
+    for(const name of ['mountSharedSetup','mountAdminRecovery','mountSharedBackup','mountSharedRestore','mountSharedAccountResetIssue','createAccountResetQueue','mountSharedAdministration','mountCreateSlot','mountSharedGroupAdministration','mountSharedGrantAdministration','mountAccountSuspension']){
     const mount=script.functions.find(entry=>entry.functionName===name);
     assert.ok(mount);
     const extent=mount.ranges[0];

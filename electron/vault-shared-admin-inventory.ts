@@ -10,6 +10,16 @@ export type AdminInventoryKind =
   | 'audit';
 type Cursor = { id: string; at?: string };
 export type AdminInventoryRequest = { kind: AdminInventoryKind; next?: Cursor };
+export type CredentialSlot = {
+  id: string;
+  name: string;
+  protocol: 'ssh' | 'rdp' | 'vnc';
+  allowSelfService: boolean;
+};
+export type CreateSlotReply = {
+  status: 'saved' | 'busy' | 'stale' | 'unsupported' | 'unavailable';
+};
+export type CreateSlotPort = (request: CredentialSlot) => Promise<CreateSlotReply>;
 
 type Entry = {
   id: string;
@@ -69,20 +79,41 @@ export function parseAdminInventoryRequest(value: unknown): AdminInventoryReques
   return { kind, next: { id: next.id, ...(typeof next.at === 'string' ? { at: next.at } : {}) } };
 }
 
+function isSlot(value: unknown): value is CredentialSlot {
+  return (
+    vaultRecord(value) &&
+    vaultID(value.id) &&
+    vaultFields(value, ['id', 'name', 'protocol', 'allowSelfService']) &&
+    typeof value.name === 'string' &&
+    value.name.trim().length > 0 &&
+    value.name.length <= 1024 &&
+    new TextEncoder().encode(value.name).byteLength <= 1024 &&
+    !value.name.includes('\0') &&
+    (value.protocol === 'ssh' || value.protocol === 'rdp' || value.protocol === 'vnc') &&
+    typeof value.allowSelfService === 'boolean'
+  );
+}
+
+export function parseCreateSlot(value: unknown): CredentialSlot | undefined {
+  if (isSlot(value) && !/\p{Cc}|\p{Cs}/u.test(value.name)) return value;
+}
+
+export function parseCreateSlotReply(value: unknown): CreateSlotReply | undefined {
+  if (!vaultRecord(value) || !vaultFields(value, ['status'])) return;
+  const { status } = value;
+  if (
+    status === 'saved' ||
+    status === 'busy' ||
+    status === 'stale' ||
+    status === 'unsupported' ||
+    status === 'unavailable'
+  )
+    return { status };
+}
+
 function validEntry(value: unknown, kind: AdminInventoryKind): value is Entry {
+  if (kind === 'slots') return isSlot(value);
   if (!vaultRecord(value) || !vaultID(value.id)) return false;
-  if (kind === 'slots') {
-    return (
-      vaultFields(value, ['id', 'name', 'protocol', 'allowSelfService']) &&
-      typeof value.name === 'string' &&
-      value.name.trim().length > 0 &&
-      value.name.length <= 1024 &&
-      new TextEncoder().encode(value.name).byteLength <= 1024 &&
-      !value.name.includes('\0') &&
-      (value.protocol === 'ssh' || value.protocol === 'rdp' || value.protocol === 'vnc') &&
-      typeof value.allowSelfService === 'boolean'
-    );
-  }
   if (!text(value.login, 256) || (!value.login && kind !== 'audit')) return false;
   const names = ['id', 'login', ...(Object.hasOwn(value, 'name') ? ['name'] : [])];
   switch (kind) {

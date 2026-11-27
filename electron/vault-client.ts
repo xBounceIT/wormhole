@@ -124,6 +124,8 @@ import {
 } from './vault-shared-group-boundary-grant.ts';
 import {
   parseAdminInventoryReply,
+  parseCreateSlotReply,
+  type CredentialSlot,
   type AdminInventoryRequest,
 } from './vault-shared-admin-inventory.ts';
 import { parseWorkspaceAccessReply, type WorkspaceAccessRequest } from './vault-shared-access.ts';
@@ -536,6 +538,7 @@ type PublicPayload =
   | SharedConnectionContextRequest
   | SharedChangesRequest
   | AdminInventoryRequest
+  | CredentialSlot
   | WorkspaceAccessRequest
   | AccountSuspensionRequest
   | AccountBoundaryRotationRequest
@@ -2108,6 +2111,10 @@ export class VaultBackendClient {
     );
   }
 
+  sharedCreateCredentialSlot(request: CredentialSlot) {
+    return this.metadata('shared-create-credential-slot', parseCreateSlotReply, undefined, request);
+  }
+
   sharedAdminInventory(request: AdminInventoryRequest) {
     return this.metadata(
       'shared-admin-inventory',
@@ -2906,6 +2913,7 @@ export class VaultBackendClient {
       | 'shared-changes'
       | 'shared-runtime'
       | 'shared-admin-inventory'
+      | 'shared-create-credential-slot'
       | 'shared-workspace-access'
       | 'shared-account-suspension'
       | 'shared-account-boundary-rotation'
@@ -3214,6 +3222,7 @@ export class VaultBackendClient {
                     operation === 'shared-account-reset-issue' ||
                     operation === 'shared-account-reset-targets' ||
                     operation === 'shared-admin-inventory' ||
+                    operation === 'shared-create-credential-slot' ||
                     operation === 'shared-workspace-access' ||
                     operation === 'shared-account-suspension' ||
                     operation === 'shared-account-boundary-rotation' ||

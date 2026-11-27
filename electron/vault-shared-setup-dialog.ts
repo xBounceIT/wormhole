@@ -45,7 +45,7 @@ import {
 } from './vault-shared-account-reset-issue.ts';
 import { enrollmentID } from './vault-enrollment-contract.ts';
 import { parseAccountResetMark } from './vault-shared-account-reset-queue.ts';
-import { parseAdminInventoryRequest } from './vault-shared-admin-inventory.ts';
+import { parseAdminInventoryRequest, parseCreateSlot } from './vault-shared-admin-inventory.ts';
 import { parseGroupRequest } from './vault-shared-admin-groups.ts';
 import { parseSharedCatalogRequest } from './vault-shared-catalog.ts';
 import { parseNodeGrantRequest } from './vault-shared-node-grants.ts';
@@ -288,6 +288,13 @@ export class VaultSharedSetupDialog {
           wipePersonalRootRecoveryFactors(factors);
         }
       },
+    );
+    options.ipc.handle('vault-shared-setup:create-slot', (event, ...args: unknown[]) =>
+      this.runAdministration(event, async ({ createSlot }) => {
+        const request = args.length === 1 ? parseCreateSlot(args[0]) : undefined;
+        if (!request || !createSlot) throw Error('Invalid credential slot request.');
+        return createSlot(request);
+      }),
     );
     options.ipc.handle('vault-shared-setup:admin-groups', (event, ...args: unknown[]) =>
       this.runAdministration(event, async ({ groups }) => {

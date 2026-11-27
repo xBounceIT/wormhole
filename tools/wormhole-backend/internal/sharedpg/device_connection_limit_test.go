@@ -146,4 +146,22 @@ func TestPostgresDeviceConnectionLimitUpgrade(t *testing.T) {
 	if _, err := db.Exec(ctx, groups).ReadAll(); !hasSQLState(err, "55000", 0) {
 		t.Fatal("repeated group migration", err)
 	}
+	run("ROLLBACK")
+	if r, err := readDeploymentRow(ctx, db, createSlotAvailableSQL, 1); err != nil || string(r[0]) != "false" {
+		t.Fatal("older deployment offered slot creation", err)
+	}
+	createSlot, err := deploy.NextMigrationScript("testscope", testHintID, 94)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run(createSlot)
+	if r, err := readDeploymentRow(ctx, db, createSlotAvailableSQL, 1); err != nil || string(r[0]) != "true" {
+		t.Fatal("upgraded deployment could not create slots", err)
+	}
+	assert(`(SELECT prosecdef AND has_function_privilege('wh_testscope_user',p.oid,'EXECUTE')
+		AND NOT has_function_privilege('wh_testscope_enroll',p.oid,'EXECUTE') FROM pg_proc p
+		WHERE p.pronamespace='wormhole_api_v1'::regnamespace AND p.proname='create_credential_slot')`)
+	if _, err := db.Exec(ctx, createSlot).ReadAll(); !hasSQLState(err, "55000", 0) {
+		t.Fatal("repeated creation API upgrade", err)
+	}
 }

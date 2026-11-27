@@ -508,6 +508,9 @@ app.whenReady().then(async()=>{
          await waitForRecord('administrator');
          await section('slots');
          await waitForAdmin('[...document.querySelectorAll("[role=status]")].some(s=>s.textContent==="No records on this page.")');
+         await adminWindow.webContents.executeJavaScript('(()=>{const details=document.querySelector("details");details.open=true;const form=details.querySelector("form");form.querySelector("input").value="Operations remote desktop";form.querySelector("select").value="rdp";form.querySelector("input[type=checkbox]").checked=true;form.requestSubmit()})()');
+         await waitForRecord('Operations remote desktop');
+         await waitForRecord('RDP · Users can choose a credential');
          await section('unencrypted-clients');
          await waitForAdmin('document.body.textContent.includes("No unencrypted clients connected.")');
          await section('accounts');

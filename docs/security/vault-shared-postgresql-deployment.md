@@ -366,6 +366,14 @@ the signed slot and its author and saves the verified revisions before it
 sends the page to the window. A workspace on schema 92 can use the offline
 upgrade command described above.
 
+On schema 95, open **Workspace administration → Credential slots → Create
+credential slot**. Enter a name, select SSH, RDP or VNC, and choose whether
+users may supply their own credential. The slot starts unassigned. Creation
+requires verified TLS and an administrator with View, Write and Manage on the
+shared boundary. Go verifies the signed creation receipt before confirming
+the change. Retrying in the same form after a lost reply reuses the slot ID
+and records a single creation event.
+
 Schema 60 adds the **Groups** section. Apply
 `deploy.AdminGroupsMigration(roleTag, workspaceID)` after schema 59.
 Administrators can create or rename groups, add an enabled account by its

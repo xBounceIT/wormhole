@@ -224,7 +224,7 @@ export function parseSharedRecoveryInspection(
     typeof summary.sourceSchemaVersion !== 'number' ||
     !Number.isInteger(summary.sourceSchemaVersion) ||
     summary.sourceSchemaVersion < 49 ||
-    summary.sourceSchemaVersion > 94 ||
+    summary.sourceSchemaVersion > 95 ||
     (summary.profile !== 'default' && summary.profile !== 'standard') ||
     !recordCount(summary.accounts, 1) ||
     !recordCount(summary.nodes, 0)

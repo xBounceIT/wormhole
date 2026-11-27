@@ -118,6 +118,25 @@ func TestAdminSlotPageRequiresVerifiedRows(t *testing.T) {
 		}
 	}
 	wire, _ := json.Marshal([][]*string{cells})
+	receiptRow, _ := json.Marshal(cells)
+	receipt := [][][]byte{{[]byte("saved"), []byte("1"), []byte("7"), receiptRow}}
+	// Even another certified record with the same metadata is not a receipt
+	// for the slot signed by this device.
+	foreign := seal
+	foreign.Signature = make([]byte, ed25519.SignatureSize)
+	if observed, status, err := verifyCreatedSlot(receipt, trust, id, c.Boundary, record, foreign); err != vault.ErrAuthentication || status != "" || observed.Catalog["slot/"+id.String()].Revision != 1 {
+		t.Fatal("foreign receipt accepted or lost an authenticated observation", err)
+	}
+	for _, bad := range [][][][]byte{
+		nil, {{[]byte("changed"), nil, nil, nil}}, {{[]byte("busy"), nil, nil, []byte("0")}},
+		{{[]byte("saved"), []byte("0"), []byte("7"), receiptRow}},
+		{{[]byte("saved"), []byte("1"), []byte("7"), []byte("[]")}},
+		{{[]byte("saved"), []byte("1"), []byte("7"), []byte("null")}},
+	} {
+		if _, status, err := verifyCreatedSlot(bad, trust, id, c.Boundary, record, seal); err == nil || status != "" {
+			t.Fatal("invalid slot receipt accepted")
+		}
+	}
 	if _, page, err := verifyAdminSlotPage([][]byte{[]byte("more"), []byte("1"), []byte("7"), wire}, trust, uuid.Nil); err != nil || page == nil || len(page.Entries) != 1 || page.Next == nil || page.Next.ID != id {
 		t.Fatal("short verified page lost its continuation", err)
 	}
@@ -132,6 +151,10 @@ func TestAdminSlotPageRequiresVerifiedRows(t *testing.T) {
 	altered, _ := json.Marshal(record)
 	label := string(altered)
 	cells[4] = &label
+	receipt[0][3], _ = json.Marshal(cells)
+	if _, status, err := verifyCreatedSlot(receipt, trust, id, c.Boundary, record, seal); err == nil || status != "" {
+		t.Fatal("altered stored metadata accepted as a creation receipt")
+	}
 	wire, _ = json.Marshal([][]*string{cells})
 	if _, page, err := verifyAdminSlotPage([][]byte{[]byte("ready"), []byte("1"), []byte("7"), wire}, trust, uuid.Nil); err == nil || page != nil {
 		t.Fatal("uncertified slot name reached the page")

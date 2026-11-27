@@ -55,6 +55,7 @@ func TestPostgresAdminInventoryAuthorizesEveryPage(t *testing.T) {
 			checkPostgresAdminGroups(t, ctx, dba, session, trust)
 			checkPostgresNodeGrantAdministration(t, ctx, dba, session, trust)
 			slotCursor := checkPostgresAdminCredentialSlots(t, ctx, dba, session, trust, keys)
+			checkPostgresCreateCredentialSlot(t, ctx, dba, session, trust, tls, keys)
 			if _, err := session.AdminInventory(ctx, AdminInventoryRequest{Kind: "passwords"}); !errors.Is(err, ErrConfiguration) {
 				t.Fatal("invalid inventory kind accepted", err)
 			}

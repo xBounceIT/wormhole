@@ -144,7 +144,8 @@ func (s *Session) queryServerCA(ctx context.Context, trust TrustState, statement
 		return err
 	}
 	defer give(s.control)
-	if s.capability == nil || s.authEpoch == 0 || s.admission.WorkspaceID != trust.WorkspaceID || s.admission.UserID != trust.UserID {
+	if s.capability == nil || s.authEpoch == 0 || s.admission.WorkspaceID != trust.WorkspaceID ||
+		s.admission.UserID != trust.UserID || s.admission.DeviceID != trust.DeviceID {
 		return ErrAuthentication
 	}
 	owned, opCtx, release, err := s.lease(ctx, 0)
