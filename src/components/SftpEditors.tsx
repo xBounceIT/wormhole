@@ -222,112 +222,133 @@ function ConfirmSftpEdit({
   );
 }
 
-export function SftpEditedFiles({
-  allowConfirmation = true,
-  sessionId,
-  recovery = false,
-}: {
+type SftpEditedFilesProps = {
   allowConfirmation?: boolean;
   sessionId: string;
   recovery?: boolean;
-}) {
+};
+
+export function SftpEditedFiles(props: SftpEditedFilesProps) {
+  return (
+    <SessionEditedFiles
+      key={`${props.recovery ? 'recovery' : 'session'}:${props.sessionId}`}
+      {...props}
+    />
+  );
+}
+
+function rememberRequest(completed: Set<string>, requestId?: string) {
+  if (!requestId) return;
+  completed.add(requestId);
+  if (completed.size > 256) completed.delete(completed.values().next().value!);
+}
+
+type EditInventoryRequest = {
+  refreshedSessions: Set<string>;
+  watchedFiles: Set<string>;
+};
+
+function mergeEditedFiles(base: WormholeSftpEditView[], updates: WormholeSftpEditView[]) {
+  const files = new Map(base.map((file) => [file.id, file]));
+  for (const file of updates) files.set(file.id, file);
+  return [...files.values()];
+}
+
+function SessionEditedFiles({
+  allowConfirmation = true,
+  sessionId,
+  recovery = false,
+}: SftpEditedFilesProps) {
   const [files, setFiles] = useState<WormholeSftpEditView[]>([]);
   const [error, setError] = useState('');
   const [saveAs, setSaveAs] = useState<{ id: string; path: string }>();
-  const requests = useRef({
-    version: 0,
-    action: 0,
-    pending: new Set<symbol>(),
+  const requestState = useRef({
+    latest: undefined as EditInventoryRequest | undefined,
+    pending: new Set<EditInventoryRequest>(),
     completed: new Set<string>(),
-  }).current;
-  const remember = useCallback(
-    (requestId: string | undefined) => {
-      if (!requestId) return;
-      requests.completed.add(requestId);
-      if (requests.completed.size > 256)
-        requests.completed.delete(requests.completed.values().next().value!);
+  });
+  const send = useCallback(
+    (request: WormholeSftpEditRequest) => {
+      const api = window.wormhole;
+      if (!api?.sftpEdit) return;
+      const requests = requestState.current;
+      const pending: EditInventoryRequest = {
+        refreshedSessions: new Set(),
+        watchedFiles: new Set(),
+      };
+      requests.latest = pending;
+      requests.pending.add(pending);
+      void api
+        .sftpEdit(sessionId, request)
+        .then((event) => {
+          rememberRequest(requests.completed, event.requestId);
+          if (requests.latest !== pending) return;
+          requests.latest = undefined;
+          if (!event.error || event.edits.length) {
+            // A session snapshot covers that session and all recovered files. An
+            // action's result also settles its own file, including its removal.
+            const keepNewer = (file: WormholeSftpEditView) =>
+              file.id !== request.editId &&
+              (pending.watchedFiles.has(file.id) ||
+                pending.refreshedSessions.has('sftp-recovery') ||
+                pending.refreshedSessions.has(file.sessionId) ||
+                (file.recovered && pending.refreshedSessions.size > 0));
+            const baseline = event.edits.filter((file) => !keepNewer(file));
+            setFiles((current) => mergeEditedFiles(baseline, current.filter(keepNewer)));
+          }
+          setError(event.error ?? '');
+        })
+        .catch((failure: unknown) => {
+          if (requests.latest === pending)
+            setError(failure instanceof Error ? failure.message : String(failure));
+        })
+        .finally(() => {
+          requests.pending.delete(pending);
+          if (requests.latest === pending) requests.latest = undefined;
+        });
     },
-    [requests],
+    [sessionId],
   );
   useEffect(() => {
-    let active = true;
-    const listToken = Symbol();
-    requests.pending.add(listToken);
-    const initialVersion = ++requests.version;
-    setFiles([]);
-    setError('');
-    setSaveAs(undefined);
-    void window.wormhole
-      ?.sftpEdit?.(sessionId, { operation: 'list' })
-      .then((event) => {
-        remember(event.requestId);
-        if (active && requests.version === initialVersion) {
-          setFiles(event.edits);
-          setError(event.error ?? '');
-        }
-      })
-      .catch((failure: unknown) => {
-        if (active && requests.version === initialVersion)
-          setError(failure instanceof Error ? failure.message : String(failure));
-      })
-      .finally(() => requests.pending.delete(listToken));
+    const requests = requestState.current;
     const unsubscribe = window.wormhole?.onSshEvent((event) => {
       if (event.type !== 'sftp.edit') return;
       if (event.requestId) {
-        if (requests.completed.has(event.requestId)) return;
-        if (event.sessionId === sessionId && !recovery) {
-          if (requests.pending.size || (event.error && !event.edits.length)) return;
-          requests.version++;
+        if (requests.completed.has(event.requestId) || (event.error && !event.edits.length)) return;
+        if (event.sessionId === sessionId) {
+          if (requests.pending.size) return;
           setFiles(event.edits);
           setError(event.error ?? '');
-        } else if (recovery || event.sessionId !== sessionId) {
-          if (event.error && !event.edits.length) return;
-          requests.version++;
-          setFiles((current) => [
-            ...current.filter((file) => !file.recovered && file.sessionId === sessionId),
-            ...event.edits.filter((file) => file.recovered),
-          ]);
+        } else {
+          requests.latest?.refreshedSessions.add(event.sessionId);
+          const snapshot = event.edits.filter(
+            (file) => recovery || file.sessionId === sessionId || file.recovered,
+          );
+          setFiles((current) =>
+            mergeEditedFiles(
+              event.sessionId === 'sftp-recovery'
+                ? []
+                : current.filter((file) => !file.recovered && file.sessionId !== event.sessionId),
+              snapshot,
+            ),
+          );
         }
       } else if (event.sessionId === sessionId || recovery) {
-        requests.version++;
-        setFiles((current) => {
-          const next = new Map(current.map((file) => [file.id, file]));
-          for (const file of event.edits) next.set(file.id, file);
-          return [...next.values()];
-        });
+        for (const file of event.edits) requests.latest?.watchedFiles.add(file.id);
+        setFiles((current) => mergeEditedFiles(current, event.edits));
       }
     });
+    send({ operation: 'list' });
     return () => {
-      active = false;
-      requests.version++;
-      requests.action = 0;
+      requests.latest = undefined;
       requests.pending.clear();
       requests.completed.clear();
       unsubscribe?.();
     };
-  }, [sessionId, recovery, requests, remember]);
+  }, [sessionId, recovery, send]);
   const run = (request: WormholeSftpEditRequest) => {
-    const requestVersion = ++requests.version;
-    requests.action = requestVersion;
-    const token = Symbol();
-    requests.pending.add(token);
     setError('');
-    void window.wormhole
-      ?.sftpEdit?.(sessionId, request)
-      .then((event) => {
-        remember(event.requestId);
-        // Progress emitted by this command may advance the stream version. The
-        // command's final snapshot is still authoritative unless a newer action
-        // or a session change has superseded it.
-        if (requests.action !== requestVersion) return;
-        if (!event.error || event.edits.length) setFiles(event.edits);
-        setError(event.error ?? '');
-      })
-      .catch((failure: unknown) => {
-        if (requests.action === requestVersion)
-          setError(failure instanceof Error ? failure.message : String(failure));
-      })
-      .finally(() => requests.pending.delete(token));
+    send(request);
   };
   const visible = files.filter((file) =>
     recovery ? file.recovered || file.pending : file.sessionId === sessionId || file.recovered,

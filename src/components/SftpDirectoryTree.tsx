@@ -49,15 +49,19 @@ export function SftpDirectoryTree({
   onNavigate: (path: string) => void;
   onDrop: (event: React.DragEvent<HTMLElement>, path: string) => void;
 }) {
-  const [tree, setTree] = useState(() => createSftpTree(pane));
+  const [tree, setTree] = useState(() => revealSftpTreePath(createSftpTree(pane), path));
+  const [treeRevision, setTreeRevision] = useState(revision);
+  if (tree.path !== path) setTree((current) => revealSftpTreePath(current, path));
+  if (treeRevision !== revision) {
+    setTreeRevision(revision);
+    setTree(invalidateSftpTree);
+  }
   const viewport = useRef<HTMLDivElement>(null);
-  const revealPending = useRef(true);
   const pending = useRef(new Map<string, string>());
   const resize = useRef<{ y: number; height: number } | undefined>(undefined);
   useEffect(() => {
     const move = (event: PointerEvent) => {
       if (resize.current) {
-        revealPending.current = true;
         onHeightChange(
           Math.max(
             minTreeHeight,
@@ -76,25 +80,9 @@ export function SftpDirectoryTree({
       window.removeEventListener('pointerup', stop);
     };
   }, [onHeightChange]);
-  useEffect(() => {
-    revealPending.current = true;
-    setTree((current) => revealSftpTreePath(current, path));
-  }, [path]);
-  useEffect(() => {
-    revealPending.current = true;
-    setTree((current) => invalidateSftpTree(current));
-  }, [revision]);
   useLayoutEffect(() => {
     if (viewport.current) viewport.current.scrollTop = 0;
-    revealPending.current = true;
-  }, [search, sortColumn, ascending]);
-  useLayoutEffect(() => {
-    if (!revealPending.current || tree.path !== path) return;
-    const container = viewport.current;
-    if (!container) return;
-    container.scrollTop = 0;
-    revealPending.current = false;
-  }, [tree, path, height, search, sortColumn, ascending]);
+  }, [path, revision, height, search, sortColumn, ascending]);
   useEffect(
     () =>
       window.wormhole?.onSshEvent((event) => {
@@ -269,7 +257,6 @@ export function SftpDirectoryTree({
           if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
             event.preventDefault();
             event.stopPropagation();
-            revealPending.current = true;
             onHeightChange((current) =>
               Math.max(
                 minTreeHeight,

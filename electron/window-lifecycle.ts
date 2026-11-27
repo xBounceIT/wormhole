@@ -111,7 +111,11 @@ export class WindowCloseCoordinator {
       request.close();
       return true;
     }
-    if (this.state !== 'idle') return false;
+    if (
+      this.state === 'tearing-down' ||
+      (this.state === 'prompting' && request.reason !== 'renderer-failure')
+    )
+      return false;
 
     if (
       request.reason === 'window' &&
@@ -121,11 +125,18 @@ export class WindowCloseCoordinator {
       let confirmed = false;
       try {
         confirmed = (await request.prepare?.()) !== false;
-        if (confirmed && request.confirmationEnabled && this.activeCount > 0)
+        if (
+          confirmed &&
+          this.state === 'prompting' &&
+          request.confirmationEnabled &&
+          this.activeCount > 0
+        )
           confirmed = await request.confirm(this.activeCount);
       } catch {
         confirmed = false;
       }
+      // A renderer crash can take over while either prompt is pending.
+      if (this.state !== 'prompting') return false;
       if (!confirmed) {
         this.state = 'idle';
         return false;

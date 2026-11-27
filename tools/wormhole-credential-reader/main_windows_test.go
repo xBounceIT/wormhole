@@ -3,13 +3,50 @@
 package main
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
+	"os"
+	"os/exec"
+	"strings"
 	"syscall"
 	"testing"
+	"time"
 	"unicode/utf16"
 	"unsafe"
 )
+
+func TestReaderStartsOnlyAfterSupervisorSignal(t *testing.T) {
+	const fixture = "WORMHOLE_TEST_CREDENTIAL_READER"
+	if os.Getenv(fixture) == "1" {
+		credEnumerate = func(*uint16, *uint32, ***credential) (uintptr, error) { return 0, errorNotFound }
+		main()
+		os.Exit(0)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	for _, tc := range []struct {
+		supervised, input string
+		success           bool
+	}{
+		{"1", "", false}, {"1", "x", false}, {"1", "\n", true}, {"", "", true},
+	} {
+		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestReaderStartsOnlyAfterSupervisorSignal$")
+		cmd.Env = append(os.Environ(), fixture+"=1", "WORMHOLE_SUPERVISED_CREDENTIAL_READER="+tc.supervised)
+		cmd.Stdin = strings.NewReader(tc.input)
+		out, err := cmd.Output()
+		if tc.success {
+			if err != nil || strings.TrimSpace(string(out)) != "[]" {
+				t.Fatalf("supervised=%q input=%q: expected an empty inventory, err=%v", tc.supervised, tc.input, err)
+			}
+		} else {
+			var exited *exec.ExitError
+			if !errors.As(err, &exited) || exited.ExitCode() != 1 || len(out) != 0 {
+				t.Fatalf("input=%q: reader must stop before enumeration, err=%v", tc.input, err)
+			}
+		}
+	}
+}
 
 func utf16Buffer(value string, size int) []uint16 {
 	units := utf16.Encode([]rune(value))

@@ -1437,7 +1437,7 @@ export async function runSftpSessionTests() {
   window.wormhole!.sftpEdit = async () => {
     throw new Error('Editor inventory unavailable');
   };
-  await React.act(async () => root.render(<SftpEditedFiles key="failed" sessionId="newer" />));
+  await React.act(async () => root.render(<SftpEditedFiles sessionId="failed" />));
   await tick();
   assert.ok(
     document.querySelector('[role="alert"]')?.textContent?.includes('inventory unavailable'),
@@ -1448,8 +1448,13 @@ export async function runSftpSessionTests() {
     resolveList = resolve;
   });
   window.wormhole!.sftpEdit = async () => delayedList;
-  await React.act(async () => root.render(<SftpEditedFiles key="delayed" sessionId="newer" />));
+  await React.act(async () => root.render(<SftpEditedFiles sessionId="newer" />));
   await tick();
+  assert.equal(
+    document.querySelector('[role="alert"]'),
+    null,
+    'The previous session error must clear while the next list is pending',
+  );
   const latest: WormholeSftpEditView = {
     id: 'async',
     sessionId: 'newer',
@@ -1462,11 +1467,34 @@ export async function runSftpSessionTests() {
     recovered: false,
   };
   await React.act(async () => emit({ type: 'sftp.edit', sessionId: 'newer', edits: [latest] }));
-  await React.act(async () => resolveList({ type: 'sftp.edit', sessionId: 'newer', edits: [] }));
+  const sibling = { ...latest, id: 'sibling', name: 'sibling.conf', remotePath: '/sibling.conf' };
+  await React.act(async () =>
+    emit({ type: 'sftp.edit', sessionId: 'other-tab', requestId: 'other-list', edits: [] }),
+  );
+  await React.act(async () =>
+    resolveList({
+      type: 'sftp.edit',
+      sessionId: 'newer',
+      edits: [
+        sibling,
+        { ...latest, name: 'stale.conf' },
+        { ...latest, id: 'removed', recovered: true, name: 'removed.conf' },
+      ],
+    }),
+  );
   await tick();
   assert.ok(
     document.body.textContent?.includes('latest.conf'),
     'late initial snapshot replaced watcher state',
+  );
+  assert.ok(
+    document.body.textContent?.includes('sibling.conf'),
+    'Partial updates must preserve the rest of the initial inventory',
+  );
+  assert.ok(!document.body.textContent?.includes('stale.conf'));
+  assert.ok(!document.body.textContent?.includes('removed.conf'));
+  await React.act(async () =>
+    emit({ type: 'sftp.edit', sessionId: 'newer', requestId: 'current-list', edits: [latest] }),
   );
 
   // A previous command must not resurrect a working copy after Stop editing.
@@ -1478,6 +1506,17 @@ export async function runSftpSessionTests() {
   await click(button('Upload now'));
   await click(button('Stop editing'));
   assert.equal(pendingActions.length, 2);
+  await React.act(async () =>
+    emit({ type: 'sftp.edit', sessionId: 'newer', edits: [{ ...sibling, name: 'watched.conf' }] }),
+  );
+  await React.act(async () =>
+    emit({
+      type: 'sftp.edit',
+      sessionId: 'other-tab',
+      requestId: 'shared-during-stop',
+      edits: [{ ...sibling, id: 'shared', sessionId: 'other-tab', recovered: true }],
+    }),
+  );
   await React.act(async () =>
     pendingActions[1]({
       type: 'sftp.edit',
@@ -1503,12 +1542,23 @@ export async function runSftpSessionTests() {
     !document.body.textContent?.includes('latest.conf'),
     'late upload resurrected stopped copy',
   );
+  assert.ok(
+    document.body.textContent?.includes('sibling.conf'),
+    'A delayed stop cannot remove a shared recovery update',
+  );
+  assert.ok(
+    document.body.textContent?.includes('watched.conf'),
+    'Stop must preserve other watched files',
+  );
 
   // Recovery inventory and banner react to removal from another tab.
   window.wormhole!.sftpEdit = async (sessionId) => ({
     type: 'sftp.edit',
     sessionId,
-    edits: [{ ...latest, recovered: true }],
+    edits: [
+      { ...latest, recovered: true },
+      { ...sibling, sessionId: 'third-tab', pending: true },
+    ],
   });
   await React.act(async () =>
     root.render(
@@ -1528,6 +1578,10 @@ export async function runSftpSessionTests() {
   await tick();
   assert.ok(!document.body.textContent?.includes('latest.conf'));
   assert.ok(!document.body.textContent?.includes('can be recovered'));
+  assert.ok(
+    document.body.textContent?.includes('sibling.conf'),
+    'A different session cannot remove a pending working copy',
+  );
   await React.act(async () =>
     emit({
       type: 'sftp.edit',

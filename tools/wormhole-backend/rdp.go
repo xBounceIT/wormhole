@@ -589,7 +589,7 @@ func (c *rdpController) startNative(command rdpCommand) {
 		return
 	}
 	cmd.Stderr = io.Discard
-	if err := cmd.Start(); err != nil {
+	if err := startOwnedHelper(cmd); err != nil {
 		_ = process.Close()
 		_ = stdout.Close()
 		writeRdpEvent(rdpEvent{Type: "error", RequestID: command.RequestID, SessionID: command.SessionID, LifecycleID: command.LifecycleID, Backend: "activex", Message: "could not start the embedded Remote Desktop component"})

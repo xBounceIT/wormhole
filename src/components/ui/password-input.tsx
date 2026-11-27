@@ -27,9 +27,7 @@ function PasswordInput({
   const visible = open !== false && !disabled && (controlledVisible ?? uncontrolledVisible);
   const label = visible ? 'Hide password' : 'Show password';
 
-  React.useLayoutEffect(() => {
-    if (open === false || disabled) setVisible(false);
-  }, [open, disabled]);
+  if (uncontrolledVisible && (open === false || disabled)) setVisible(false);
 
   return (
     <div className="relative w-full min-w-0">

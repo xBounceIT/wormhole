@@ -75,7 +75,7 @@ function WebSurfaceContent({
   const bitwardenButtonRef = useRef<HTMLButtonElement>(null);
   const addressRef = useRef<HTMLInputElement>(null);
   const previewIdRef = useRef<string | undefined>(undefined);
-  const vpnReconnectRequest = useRef(0);
+  const latestCommand = useRef(0);
   const browser = session.webBrowser;
   const vpnLabel = `${browser?.tunnel?.name ? `${browser.tunnel.name}'s ` : ''}${browser?.tunnel?.kind || 'VPN tunnel'}${session.status === 'connected' ? ' ACTIVE' : ''}`;
   const vpnReconnecting = browser?.vpnStatus === 'reconnecting';
@@ -102,10 +102,21 @@ function WebSurfaceContent({
     tab?.url ||
     session.webUrl ||
     `${session.protocol}://${session.host}${session.port ? `:${session.port}` : ''}`;
-  const [address, setAddress] = useState(blank ? '' : currentAddress);
-  const [commandError, setCommandError] = useState('');
   const pageKey = `${session.id}:${tab?.id ?? ''}`;
+  const location = {
+    pageKey,
+    url: currentAddress,
+    text: currentAddress === 'about:blank' ? '' : currentAddress,
+  };
+  const [address, setAddress] = useState(location);
+  const [commandError, setCommandError] = useState('');
+  if (address.pageKey !== pageKey || address.url !== currentAddress) {
+    setAddress(location);
+    setCommandError('');
+  }
   const [preview, setPreview] = useState<{ id: string; image: string; pageKey: string }>();
+  if (preview && (!available || !captureWhenOccluded || preview.pageKey !== pageKey))
+    setPreview(undefined);
 
   useLayoutEffect(() => {
     const list = tabListRef.current;
@@ -113,11 +124,6 @@ function WebSurfaceContent({
     if (!ready || !list || !selected) return;
     return keepHorizontalItemVisible(list, selected);
   }, [ready, tab?.id]);
-
-  useEffect(() => {
-    setAddress(currentAddress === 'about:blank' ? '' : currentAddress);
-    setCommandError('');
-  }, [currentAddress, tab?.id]);
 
   useEffect(() => {
     if (ready && blank) addressRef.current?.focus();
@@ -173,7 +179,6 @@ function WebSurfaceContent({
     let previousHasBounds: boolean | undefined;
     const previewId = showPreview ? crypto.randomUUID() : undefined;
     previewIdRef.current = previewId;
-    if (!available || !captureWhenOccluded) setPreview(undefined);
     const sendBounds = () => {
       frame = 0;
       const bounds = surface.getBoundingClientRect();
@@ -285,21 +290,21 @@ function WebSurfaceContent({
 
   useLayoutEffect(
     () => () => {
-      vpnReconnectRequest.current++;
+      latestCommand.current++;
     },
-    [session.id, isAuthorized],
+    [pageKey, currentAddress, isAuthorized],
   );
 
   const command = (
     operation: Parameters<NonNullable<Window['wormhole']>['commandWebSession']>[0]['operation'],
     details: { tabId?: string; url?: string } = {},
   ) => {
-    const reconnectRequest = operation === 'reconnect-vpn' ? ++vpnReconnectRequest.current : 0;
+    const request = ++latestCommand.current;
     setCommandError('');
     void window.wormhole
       ?.commandWebSession({ sessionId: session.id, operation, ...details })
       .catch((error: unknown) => {
-        if (reconnectRequest && reconnectRequest !== vpnReconnectRequest.current) return;
+        if (request !== latestCommand.current) return;
         setCommandError(
           error instanceof Error ? error.message : 'The browser could not complete this action.',
         );
@@ -459,7 +464,7 @@ function WebSurfaceContent({
           className="flex h-[34px] min-w-0 flex-1 items-center gap-2 rounded-full border border-transparent bg-[var(--browser-address)] px-3 focus-within:border-ring focus-within:ring-1 focus-within:ring-ring @max-[340px]:order-last @max-[340px]:basis-full"
           onSubmit={(event) => {
             event.preventDefault();
-            command('navigate', { url: address });
+            command('navigate', { url: address.text });
           }}
         >
           {currentAddress.startsWith('https:') ? (
@@ -474,13 +479,13 @@ function WebSurfaceContent({
             className="h-full w-full min-w-0 bg-transparent text-[13px] outline-none placeholder:text-muted-foreground"
             disabled={!ready}
             maxLength={8192}
-            onChange={(event) => setAddress(event.target.value)}
+            onChange={(event) => setAddress({ ...location, text: event.target.value })}
             onFocus={(event) => event.target.select()}
             placeholder="Enter a website address"
             ref={addressRef}
             spellCheck={false}
             type="text"
-            value={address}
+            value={address.text}
           />
         </form>
         {session.protocol === 'https' ? (

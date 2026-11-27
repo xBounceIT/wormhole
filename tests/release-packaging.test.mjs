@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { once } from 'node:events';
 import { closeSync, existsSync } from 'node:fs';
-import { glob, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { copyFile, glob, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
-import { join, relative, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
@@ -48,6 +49,127 @@ function readPngDimensions(data) {
   assert.equal(data.subarray(12, 16).toString('ascii'), 'IHDR');
   return { width: data.readUInt32BE(16), height: data.readUInt32BE(20) };
 }
+
+test(
+  'Windows setup replaces a running helper only in the selected installation',
+  {
+    skip: process.platform !== 'win32',
+  },
+  async (context) => {
+    const compiler = join(process.env['ProgramFiles(x86)'], 'Inno Setup 6', 'ISCC.exe');
+    if (!existsSync(compiler)) return context.skip('Inno Setup 6 is required');
+    const directory = await mkdtemp(join(tmpdir(), 'wormhole-setup-lock-'));
+    const relativeHelper = join('resources', 'app', 'dist-electron', 'wormhole-wgproxy.exe');
+    const target = join(directory, 'installed');
+    const children = [];
+    const waitForExit = async (child) => {
+      if (child.exitCode === null && child.signalCode === null) {
+        await once(child, 'exit', { signal: AbortSignal.timeout(10_000) });
+      }
+    };
+    const startFixture = async (image, code, args = []) => {
+      await mkdir(dirname(image), { recursive: true });
+      await copyFile(process.execPath, image);
+      const child = spawn(image, ['-e', code, ...args], {
+        windowsHide: true,
+        stdio: 'ignore',
+      });
+      children.push(child);
+      await once(child, 'spawn');
+      return child;
+    };
+    try {
+      // Use the shipping Setup, Files and Code sections. Isolate the identity and
+      // omit shortcuts, uninstall registration, WER registry writes and app launches.
+      const policy = await readFile(join(projectDir, 'installer', 'Wormhole.Electron.iss'), 'utf8');
+      const script = policy
+        .replace(/^AppId=.*$/m, 'AppId=WormholeIsolatedSetupTest')
+        .replace(
+          /^SetupIconFile=.*$/m,
+          'PrivilegesRequired=lowest\nUninstallable=no\nUsePreviousAppDir=no',
+        )
+        .replace(/^\[Icons\][\s\S]*?(?=^\[Code\])/m, '');
+      const payload = join(directory, 'payload');
+      await mkdir(join(payload, 'resources', 'app', 'dist-electron'), { recursive: true });
+      await writeFile(join(payload, relativeHelper), 'new version');
+      await writeFile(join(payload, 'Wormhole.exe'), 'new app');
+      const fixture = join(directory, 'setup.iss');
+      await writeFile(fixture, script);
+      const arch = process.arch === 'arm64' ? 'arm64' : 'x64';
+      execFileSync(
+        compiler,
+        [
+          '/Q',
+          '/DMyAppVersion=1.0.0',
+          '/DAppArchitecture=' + arch,
+          '/DPublishDir=' + payload,
+          '/O' + directory,
+          '/Fupgrade',
+          fixture,
+        ],
+        { windowsHide: true },
+      );
+      const log = join(directory, 'install.log');
+      const runUpgrade = async (extraArgs = []) => {
+        const install = spawn(
+          join(directory, 'upgrade.exe'),
+          [
+            '/VERYSILENT',
+            '/SUPPRESSMSGBOXES',
+            '/NORESTART',
+            '/DIR=' + target,
+            '/LOG=' + log,
+            ...extraArgs,
+          ],
+          { windowsHide: true, stdio: 'ignore', timeout: 120_000 },
+        );
+        const [code] = await once(install, 'exit');
+        if (code !== 0) assert.fail(await readFile(log, 'utf8'));
+      };
+      const worker = 'setTimeout(() => {}, 180000)';
+      const orphan = await startFixture(join(target, relativeHelper), worker);
+      const other = await startFixture(join(directory, 'other', relativeHelper), worker);
+      const flushed = join(directory, 'session-saved');
+      await startFixture(
+        join(target, 'Wormhole.exe'),
+        `
+          const fs = require('node:fs');
+          const timer = setInterval(() => {
+            if (!fs.existsSync(process.argv[1])) return;
+            clearInterval(timer);
+            setTimeout(() => fs.writeFileSync(process.argv[2], 'saved'), 1500);
+          }, 50);
+        `,
+        [log, flushed],
+      );
+      await runUpgrade(['/RESTARTAPP']);
+      assert.equal(await readFile(flushed, 'utf8'), 'saved');
+      await waitForExit(orphan);
+      assert.equal((await stat(join(target, relativeHelper))).size, 'new version'.length);
+      assert.equal(await readFile(join(target, relativeHelper), 'utf8'), 'new version');
+
+      // A standalone setup must also replace an abandoned Electron process.
+      const abandonedApp = await startFixture(join(target, 'Wormhole.exe'), worker);
+      await runUpgrade();
+      await waitForExit(abandonedApp);
+      assert.equal((await stat(join(target, 'Wormhole.exe'))).size, 'new app'.length);
+      assert.equal(
+        other.exitCode ?? other.signalCode,
+        null,
+        'The other installation must keep running',
+      );
+    } finally {
+      await Promise.all(
+        children.map(async (child) => {
+          if (!child.pid || child.exitCode !== null || child.signalCode !== null) return;
+          child.kill();
+          await waitForExit(child);
+        }),
+      );
+      await rm(directory, { recursive: true, force: true, maxRetries: 5 });
+    }
+  },
+);
 
 function readIcnsChunks(icon) {
   assert.equal(icon.subarray(0, 4).toString('ascii'), 'icns');
