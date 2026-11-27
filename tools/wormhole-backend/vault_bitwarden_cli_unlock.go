@@ -199,7 +199,7 @@ func unlockVaultBitwardenCLI(parent context.Context, settings bitwardenCliSettin
 	})
 	stdout := &bitwardenCliOutputBuffer{maxBytes: vault.MaxBitwardenSession}
 	cmd.Stdout = stdout
-	if err := cmd.Start(); err != nil {
+	if err := startOwnedHelper(cmd); err != nil {
 		return "", err
 	}
 	if pipe.deliver == nil {

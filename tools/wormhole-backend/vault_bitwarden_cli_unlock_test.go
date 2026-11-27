@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -84,6 +85,10 @@ func TestVaultBitwardenCLIUnlockExternalPasswordPipe(t *testing.T) {
 	}
 	if _, err := unlockVaultBitwardenCLI(ctx, settings, []byte("wrong password")); err == nil {
 		t.Fatal("failed CLI was accepted")
+	}
+	cancel()
+	if session, err := unlockVaultBitwardenCLI(ctx, settings, []byte("unused")); session != "" || !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled unlock started a worker: %v", err)
 	}
 }
 

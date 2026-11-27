@@ -346,7 +346,7 @@ func launchSealedTunnel(ctx context.Context, command *exec.Cmd, config []byte) (
 		return nil, err
 	}
 	command.Stderr = io.Discard
-	if err = command.Start(); err != nil {
+	if err = startOwnedHelper(command); err != nil {
 		return nil, err
 	}
 	process := &tunnelProcess{stdin: stdin, command: command, exited: make(chan struct{})}
