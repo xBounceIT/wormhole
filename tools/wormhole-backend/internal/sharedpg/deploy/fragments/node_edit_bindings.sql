@@ -1,4 +1,4 @@
-CREATE FUNCTION wormhole_data.node_edit_bindings(p_actor uuid,p_root uuid,p_epoch bigint,p_sequence bigint{{MASK_ARG}})
+CREATE {{REPLACE_BINDINGS}}FUNCTION wormhole_data.node_edit_bindings(p_actor uuid,p_root uuid,p_epoch bigint,p_sequence bigint{{MASK_ARG}})
 RETURNS TABLE(binding text,digest bytea,can_reveal boolean)
 LANGUAGE plpgsql SET search_path=pg_catalog,pg_temp AS $bindings$
 DECLARE leaf record; member record; path text; paths text[]; chain jsonb; base jsonb; plan jsonb;
@@ -46,7 +46,7 @@ BEGIN
         END IF;
         binding:=leaf.id::text||'/default';
         digest:=sha256(convert_to(jsonb_build_array(base,plan,gateway_settings)::text,'UTF8'));
-        can_reveal:=wormhole_data.node_edit_can_reveal(p_actor,node_mask,leaf.boundary_id,plan,(base->>'protocol')::int IN (3,4));
+        can_reveal:=wormhole_data.node_edit_can_reveal(p_actor,node_mask,leaf.boundary_id,plan,(base->>'protocol')::int IN (3,4)){{UNASSIGNED_SLOT_CHECK}};
         RETURN NEXT;
         FOR member IN SELECT u.id FROM wormhole_data.users u WHERE {{BINDING_USERS}}
         LOOP

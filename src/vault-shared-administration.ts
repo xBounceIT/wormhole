@@ -306,6 +306,11 @@ export function mountSharedAdministration(
           ].join(' · ');
         }
         row.append(label, detail);
+        if (request.kind === 'slots') {
+          const identifier = document.createElement('code');
+          identifier.textContent = record.id;
+          row.append('Slot ID ', identifier);
+        }
         const accessAction =
           request.kind === 'accounts'
             ? record.status === 'enabled'

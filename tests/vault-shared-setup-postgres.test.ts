@@ -162,6 +162,8 @@ app.whenReady().then(async()=>{
  const makeHost=()=>new VaultBackendHost(()=>native=new VaultBackendClient({executable:${JSON.stringify(resolve(wizardBackend))},databasePath:${JSON.stringify(join(appData, 'workspace.db'))},userDataPath:${JSON.stringify(appData)},onUnavailable:reason=>onAdmissionLost?.(reason),onSharedCatalogChanged:()=>onCatalogChanged?.()}),()=>true);
  let host=makeHost();
  const target=${JSON.stringify(target)},mode=${JSON.stringify(mode)},existingLocal=${existingLocal};
+ const exerciseSlotBinding=target.importLocal&&!target.checkStandardPin&&!target.webFixturePort;
+ const slotConnectionName='Slot binding test connection';
  const accountPassword='synthetic-administrator-password';
  const localPassword='synthetic-local-vault-password';
  const ask=${withASK ? "'4b'.repeat(32)" : "''"};
@@ -348,8 +350,8 @@ app.whenReady().then(async()=>{
      } else if(mode==='admin-reopen'&&target.importLocal){
        const page=()=>host.sharedCatalog({after:'',epoch:'0',changeSeq:'0',limit:32},()=>true);
        const catalog=await page();
-       assert.equal(catalog.nodes.length,2);
-       const imported=catalog.nodes.find(node=>node.notesRevision);
+       assert.equal(catalog.nodes.length,exerciseSlotBinding?3:2);
+       const imported=catalog.nodes.find(node=>node.name==='Preserved local connection');
        assert.ok(imported && !imported.grantRevision);
        const ssh={workspaceId:host.unlockedWorkspaceId,nodeId:imported.id,credentialOverride:'',route:null,epoch:1,
          sessionId:require('node:crypto').randomUUID(),requestId:require('node:crypto').randomUUID()};
@@ -445,9 +447,9 @@ app.whenReady().then(async()=>{
        assert.equal((await host.sharedNodeEdit(restore,()=>true,confirm)).status,'saved');
        assert.equal((await page()).nodes.find(node=>node.id===imported.id).parentId,null);
      }
-     if(mode==='admin-reopen' && target.importLocal && !target.webFixturePort && !target.checkStandardPin){
+     if(mode==='admin-reopen' && exerciseSlotBinding){
        const catalog=await host.sharedCatalog({after:'',epoch:'0',changeSeq:'0',limit:32},()=>true);
-       const imported=catalog.nodes.find(node=>node.notesRevision);
+       const imported=catalog.nodes.find(node=>node.name==='Preserved local connection');
        const {VaultNotesDialog}=await import(${fromDist('vault-notes-dialog.js')});
        assert.ok(catalog.nodes.find(node=>node.name==='Shared grant folder')?.grantRevision);
        window=new BrowserWindow({show:false,webPreferences:{sandbox:true,preload:${JSON.stringify(join(root, 'dist-electron', 'preload.cjs'))}}});
@@ -511,6 +513,29 @@ app.whenReady().then(async()=>{
          await adminWindow.webContents.executeJavaScript('(()=>{const details=document.querySelector("details");details.open=true;const form=details.querySelector("form");form.querySelector("input").value="Operations remote desktop";form.querySelector("select").value="rdp";form.querySelector("input[type=checkbox]").checked=true;form.requestSubmit()})()');
          await waitForRecord('Operations remote desktop');
          await waitForRecord('RDP · Users can choose a credential');
+         const publicId=await adminWindow.webContents.executeJavaScript('[...document.querySelectorAll(".shared-administration-list li")].find(row=>row.querySelector("strong")?.textContent==="Operations remote desktop")?.querySelector("code")?.textContent');
+         assert.match(publicId,/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/);
+         const selected=catalog.nodes.find(node=>node.name===slotConnectionName);
+         const noFactors=()=>{throw Error('Unexpected authentication for Default slot selection')};
+         const readSelection=revision=>host.sharedNodeEdit({nodeId:selected.id,revision},()=>true,noFactors);
+         const inlineEditor=await host.sharedNodeEdit({nodeId:imported.id,revision:imported.editRevision},()=>true,noFactors);
+         assert.equal(inlineEditor.status,'ready');
+         assert.equal(inlineEditor.usesInlinePassword,true);
+         assert.equal((await host.sharedNodeEdit({nodeId:imported.id,revision:inlineEditor.revision,workspaceId:inlineEditor.workspaceId,
+           epoch:inlineEditor.epoch,changeSeq:inlineEditor.changeSeq,changes:{credentialMode:3,credentialSlotId:publicId}},()=>true,noFactors)).status,
+           'unavailable','an inline password would still take precedence over the saved slot');
+         const editor=await readSelection(selected.editRevision);
+         assert.equal(editor.status,'ready');
+         assert.equal(editor.usesInlinePassword,undefined);
+         const choose=changes=>host.sharedNodeEdit({workspaceId:editor.workspaceId,nodeId:editor.nodeId,revision:editor.revision,
+           epoch:editor.epoch,changeSeq:editor.changeSeq,changes:{credentialMode:3,credentialSlotId:publicId,...changes}},()=>true,noFactors);
+         assert.equal((await choose({})).status,'unavailable','an SSH connection accepted an RDP slot');
+         const saved=await choose({protocol:1,port:3389});
+         assert.equal(saved.status,'saved');
+         const bound=await readSelection(saved.revision);
+         assert.equal(bound.status,'ready');
+         assert.equal(bound.fields.credentialSlotId,publicId);
+         assert.equal(bound.fields.protocol,1);
          await section('unencrypted-clients');
          await waitForAdmin('document.body.textContent.includes("No unencrypted clients connected.")');
          await section('accounts');
@@ -924,7 +949,7 @@ app.whenReady().then(async()=>{
  const checkLocal=async()=>{
    assert.ok(host.unlockedWorkspaceId && !host.isSharedWorkspace);
    const workspace=await host.workspace();
-   assert.equal(workspace.tree.length,(target.importLocal?2:1)+(target.webFixturePort?1:0));
+   assert.equal(workspace.tree.length,(target.importLocal?2:1)+(target.webFixturePort?1:0)+(exerciseSlotBinding?1:0));
    assert.ok(workspace.tree.some(node=>node.name===localName));
  };
  if(mode==='admin-offline-signin'){
@@ -971,6 +996,10 @@ app.whenReady().then(async()=>{
      input.password=new TextEncoder().encode('synthetic-local-connection-password');
      input.notes=new TextEncoder().encode('Synthetic local notes');
      await host.saveConnection(input);
+     if(exerciseSlotBinding){
+       const metadata={...input.metadata,id:'',name:slotConnectionName,inlinePasswordAction:'clear'};
+       await host.saveConnection({rowVersion:'0',notesAction:'clear',metadata,password:new Uint8Array(),notes:new Uint8Array()});
+     }
      if(target.webFixturePort){
        const metadata={...input.metadata,id:'',name:'Shared web fixture',protocol:'http',host:'127.0.0.1/login',
          port:target.webFixturePort,username:'',inlinePasswordAction:'clear'};

@@ -378,6 +378,17 @@ shared boundary. Go verifies the signed creation receipt before confirming
 the change. Retrying in the same form after a lost reply reuses the slot ID
 and records a single creation event.
 
+To bind a connection to a slot, copy its **Slot ID** from the list. In the
+connection editor choose **Credential slot** as the credential mode, clear
+**Inherit** beside **Credential slot ID**, paste the ID and save. SSH and SFTP
+share the SSH slot type. On schema 97 the
+server checks the protocol even when the slot is empty and requires View on
+the selected slot's boundary. An incompatible binding from an earlier schema
+can be corrected in the editor. Connections using an empty slot require an
+assignment before they can use a credential. For a connection with its own
+stored password, the editor identifies that credential source and hides the
+saved-credential and slot controls.
+
 Schema 60 adds the **Groups** section. Apply
 `deploy.AdminGroupsMigration(roleTag, workspaceID)` after schema 59.
 Administrators can create or rename groups, add an enabled account by its

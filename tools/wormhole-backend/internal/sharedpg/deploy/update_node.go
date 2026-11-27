@@ -17,6 +17,9 @@ var nodeEditMessageDefinition string
 //go:embed fragments/node_edit_bindings.sql
 var nodeEditBindingsTemplate string
 
+//go:embed fragments/node_edit_slot_authority.sql
+var nodeEditSlotAuthority string
+
 //go:embed fragments/node_edit_verify_seals.sql
 var nodeEditVerifySeals string
 
@@ -41,10 +44,10 @@ func readNodeEdit(includeFolderFields bool) string {
 	return strings.NewReplacer("{{REPLACE_READ}}", replace, "{{READ_FIELD_ROW}}", fields).Replace(strings.TrimSpace(readNodeEditTemplate))
 }
 
-func nodeEditBindings(move bool) string {
-	var arg, typ, mask string
+func nodeEditBindings(version int) string {
+	var arg, typ, mask, replace, slotCheck string
 	users := "NOT u.disabled AND\n            (u.id=p_actor OR (wormhole_data.effective_permissions(u.id,leaf.id)&2)=2)"
-	if move {
+	if version >= 89 {
 		arg, typ = ",p_previous_masks jsonb", ",jsonb"
 		mask = " & CASE WHEN p_previous_masks IS NULL THEN 31 ELSE COALESCE((p_previous_masks->>leaf.id::text)::integer,0) END"
 		// Stored selections still bind the destination if Use is restored later.
@@ -53,14 +56,22 @@ func nodeEditBindings(move bool) string {
             OR (base#>>'{credential,kind}'='slot' AND EXISTS(SELECT FROM wormhole_data.credential_slot_values v
                 WHERE v.user_id=u.id AND v.slot_id=NULLIF(base#>>'{credential,id}','')::uuid AND NOT v.deleted))`
 	}
-	return strings.NewReplacer("{{MASK_ARG}}", arg, "{{MASK_TYPE}}", typ, "{{PRIOR_MASK}}", mask, "{{BINDING_USERS}}", users).Replace(strings.TrimSpace(nodeEditBindingsTemplate))
+	if version >= 97 {
+		replace = "OR REPLACE "
+		// The first resolution path is the protocol family (including SSH for
+		// SFTP). Returning false lets an edit repair an incompatible old slot
+		// while rejecting an incompatible resulting binding.
+		slotCheck = "\n" + strings.TrimRight(nodeEditSlotAuthority, "\r\n")
+	}
+	return strings.NewReplacer("{{REPLACE_BINDINGS}}", replace, "{{MASK_ARG}}", arg, "{{MASK_TYPE}}", typ,
+		"{{PRIOR_MASK}}", mask, "{{BINDING_USERS}}", users, "{{UNASSIGNED_SLOT_CHECK}}", slotCheck).Replace(strings.TrimSpace(nodeEditBindingsTemplate))
 }
 
 var updateNodeMigration = strings.NewReplacer(
 	"{{READ_NODE_EDIT}}", readNodeEdit(false),
 	"{{ED25519_VERIFY}}", ed25519VerifyDefinition,
 	"{{NODE_EDIT_MESSAGE}}", nodeEditMessageDefinition,
-	"{{NODE_EDIT_BINDINGS}}", nodeEditBindings(false),
+	"{{NODE_EDIT_BINDINGS}}", nodeEditBindings(88),
 	"{{NODE_EDIT_VERIFY_SEALS}}", strings.TrimRight(nodeEditVerifySeals, "\r\n"),
 	"{{WEB_SUSPENSION_RESTORE_DEFINITION}}", renderWebSuspensionRestore("88"),
 ).Replace(updateNodeTemplate)
@@ -74,7 +85,7 @@ var moveNodeTemplate string
 
 var moveNodeMigration = strings.NewReplacer(
 	"{{READ_NODE_EDIT}}", readNodeEdit(true),
-	"{{NODE_MOVE_BINDINGS}}", nodeEditBindings(true),
+	"{{NODE_MOVE_BINDINGS}}", nodeEditBindings(89),
 	"{{NODE_EDIT_VERIFY_SEALS}}", strings.TrimRight(nodeEditVerifySeals, "\r\n"),
 	"{{WEB_SUSPENSION_RESTORE_DEFINITION}}", renderWebSuspensionRestore("89"),
 ).Replace(moveNodeTemplate)

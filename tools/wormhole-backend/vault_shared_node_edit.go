@@ -68,14 +68,15 @@ func sharedNodeEditFields(n *vaultstore.NodeMetadata) map[string]any {
 }
 
 type sharedNodeEditReply struct {
-	Status    string         `json:"status"`
-	NodeID    string         `json:"nodeId,omitempty"`
-	Revision  string         `json:"revision,omitempty"`
-	Workspace string         `json:"workspaceId,omitempty"`
-	Epoch     string         `json:"epoch,omitempty"`
-	Sequence  string         `json:"changeSeq,omitempty"`
-	Fields    map[string]any `json:"fields,omitempty"`
-	CanMove   bool           `json:"canMove,omitempty"`
+	Status             string         `json:"status"`
+	NodeID             string         `json:"nodeId,omitempty"`
+	Revision           string         `json:"revision,omitempty"`
+	Workspace          string         `json:"workspaceId,omitempty"`
+	Epoch              string         `json:"epoch,omitempty"`
+	Sequence           string         `json:"changeSeq,omitempty"`
+	Fields             map[string]any `json:"fields,omitempty"`
+	CanMove            bool           `json:"canMove,omitempty"`
+	UsesInlinePassword bool           `json:"usesInlinePassword,omitempty"`
 }
 
 func (h *vaultFoundationHandler) sharedNodeEdit(ctx context.Context, raw []byte) (json.RawMessage, error) {
@@ -163,10 +164,11 @@ func (h *vaultFoundationHandler) sharedNodeEdit(ctx context.Context, raw []byte)
 			return err
 		}
 		fields := sharedNodeEditFields(&desired)
+		inline := desired.Kind == 1 && desired.UseInlinePassword != nil && *desired.UseInlinePassword
 		readEpoch, readSequence := item.Snapshot()
 		currentEpoch, currentSequence := strconv.FormatUint(readEpoch, 10), strconv.FormatUint(readSequence, 10)
 		if patch == nil {
-			reply = sharedNodeEditReply{Status: "ready", NodeID: id, Revision: version, Workspace: pending.WorkspaceID.String(), Epoch: currentEpoch, Sequence: currentSequence, Fields: fields}
+			reply = sharedNodeEditReply{Status: "ready", NodeID: id, Revision: version, Workspace: pending.WorkspaceID.String(), Epoch: currentEpoch, Sequence: currentSequence, Fields: fields, UsesInlinePassword: inline}
 			if mover != nil {
 				reply.CanMove, err = mover.NodeMovingSupported(ctx)
 			}
@@ -219,6 +221,10 @@ func (h *vaultFoundationHandler) sharedNodeEdit(ctx context.Context, raw []byte)
 				return nil
 			}
 			if desired.Validate() != nil || reflect.DeepEqual(desired, before) {
+				return nil
+			}
+			if inline && (!reflect.DeepEqual(desired.CredentialMode, before.CredentialMode) ||
+				!reflect.DeepEqual(desired.CredentialID, before.CredentialID) || !reflect.DeepEqual(desired.CredentialSlotID, before.CredentialSlotID)) {
 				return nil
 			}
 			before.Name = desired.Name

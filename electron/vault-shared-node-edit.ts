@@ -68,6 +68,7 @@ export type SharedNodeEditReply =
       changeSeq: string;
       fields: SharedEditValues;
       canMove?: true;
+      usesInlinePassword?: true;
     }
   | { status: 'saved'; nodeId: string; revision: string };
 
@@ -167,8 +168,10 @@ export function parseSharedNodeEditReply(
       'changeSeq',
       'fields',
       ...('canMove' in v ? ['canMove'] : []),
+      ...('usesInlinePassword' in v ? ['usesInlinePassword'] : []),
     ]) &&
     (!('canMove' in v) || v.canMove === true) &&
+    (!('usesInlinePassword' in v) || v.usesInlinePassword === true) &&
     vaultID(v.workspaceId) &&
     vaultRevision(v.epoch) &&
     vaultRevision(v.changeSeq, true) &&
@@ -184,5 +187,6 @@ export function parseSharedNodeEditReply(
       changeSeq: v.changeSeq,
       fields: { ...v.fields },
       ...(v.canMove === true ? { canMove: true } : {}),
+      ...(v.usesInlinePassword === true ? { usesInlinePassword: true } : {}),
     };
 }

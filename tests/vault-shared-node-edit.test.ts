@@ -78,6 +78,8 @@ test('catalog edit replies bind the node, revision and response fields to the re
   assert.deepEqual(parseSharedNodeEditReply(ready, read), ready);
   const canMove = { ...ready, canMove: true };
   assert.deepEqual(parseSharedNodeEditReply(canMove, read), canMove);
+  const inline = { ...ready, usesInlinePassword: true };
+  assert.deepEqual(parseSharedNodeEditReply(inline, read), inline);
   const saved = { ...read, status: 'saved', revision: '9' };
   assert.deepEqual(parseSharedNodeEditReply(saved, write), saved);
   const auth = { status: 'authentication-required' };
@@ -92,6 +94,8 @@ test('catalog edit replies bind the node, revision and response fields to the re
     { ...ready, nodeId: workspaceId },
     { ...ready, epoch: '0' },
     { ...ready, canMove: false },
+    { ...ready, usesInlinePassword: false },
+    { ...ready, usesInlinePassword: 'true' },
     { ...ready, changeSeq: '-2' },
     { ...ready, revision: '7' },
     { ...ready, fields: { name: 'partial' } },

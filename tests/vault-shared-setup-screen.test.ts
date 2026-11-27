@@ -478,6 +478,7 @@ let finishAdminPage;
       check(list().includes(expected),'section did not display its expected record');
     }
     check(list().includes('SSH · Users can choose a credential')&&!adminCard.querySelector('li button'),'slot metadata or permissions changed in the view');
+    check(adminCard.querySelector('li code')?.textContent===bySection.slots.id,'slot ID needed by the connection editor is missing');
     const fillSlot=()=>{
       const details=adminCard.querySelector('details');
       details.open=true;

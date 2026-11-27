@@ -191,8 +191,8 @@ func checkInheritedFolderEdit(t *testing.T, ctx context.Context, db *pgconn.PgCo
 		if err != nil {
 			t.Fatal(err)
 		}
-		query(`INSERT INTO wormhole_data.nodes(id,parent_id,kind,name,protocol,host,credential_mode,credential_id,boundary_id,seal_suite,seal_signer_key_id,seal_signer_key_version,seal)
-            SELECT n.id,n.parent_id,n.kind,n.name,n.protocol,n.host,n.credential_mode,n.credential_id,$2::uuid,2,$3::uuid,$4::int,decode($5,'hex')
+		query(`INSERT INTO wormhole_data.nodes(id,parent_id,kind,name,protocol,host,credential_mode,credential_id,credential_slot_id,boundary_id,seal_suite,seal_signer_key_id,seal_signer_key_version,seal)
+            SELECT n.id,n.parent_id,n.kind,n.name,n.protocol,n.host,n.credential_mode,n.credential_id,n.credential_slot_id,$2::uuid,2,$3::uuid,$4::int,decode($5,'hex')
             FROM jsonb_populate_record(NULL::wormhole_data.nodes,wormhole_data.import_columns($1::jsonb)) n`,
 			string(raw), boundary.String(), signer.ID.String(), strconv.FormatUint(uint64(signer.Version), 10), hex.EncodeToString(seal.Signature))
 		t.Cleanup(func() { query(`DELETE FROM wormhole_data.nodes WHERE id=$1::uuid`, n.ID) })
@@ -255,6 +255,57 @@ func checkInheritedFolderEdit(t *testing.T, ctx context.Context, db *pgconn.PgCo
 		commit(t, n.ID, 1, "host", secondHost, 0)
 		query(`UPDATE wormhole_data.grants SET permissions=15 WHERE node_id=$1::uuid`, n.ID)
 		commit(t, n.ID, 1, "host", secondHost, 2)
+	})
+	t.Run("unassigned-slot-protocol", func(t *testing.T) {
+		slot := sharedcatalog.SlotRecord{ID: uuid.NewString(), Name: "Shared shell", Protocol: "ssh"}
+		seal, err := sharedcatalog.SignSelection(trust.WorkspaceID, boundary, slot, 1, signer, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		query(`INSERT INTO wormhole_data.credential_slots(id,name,protocol,boundary_id,seal_suite,seal_signer_key_id,seal_signer_key_version,seal)
+			VALUES($1::uuid,$2,$3,$4::uuid,2,$5::uuid,$6::int,decode($7,'hex'))`,
+			slot.ID, slot.Name, slot.Protocol, boundary.String(), signer.ID.String(), strconv.FormatUint(uint64(signer.Version), 10), hex.EncodeToString(seal.Signature))
+		t.Cleanup(func() { query(`DELETE FROM wormhole_data.credential_slots WHERE id=$1::uuid`, slot.ID) })
+		query(`UPDATE wormhole_data.grants SET permissions=15 WHERE node_id=$1::uuid`, folder)
+		t.Cleanup(func() { query(`UPDATE wormhole_data.grants SET permissions=5 WHERE node_id=$1::uuid`, folder) })
+		slotMode := 3
+		selectSlot := func(n vaultstore.NodeMetadata, revision uint64, protocol int, want uint64) {
+			t.Helper()
+			next, edit, err := session.ReadNodeEdit(ctx, trust, uuid.MustParse(n.ID), revision)
+			if err != nil || edit == nil {
+				t.Fatal("read slot selection", err)
+			}
+			trust = next
+			n.CredentialMode, n.CredentialSlotID, n.CredentialID, n.Protocol = &slotMode, &slot.ID, nil, &protocol
+			got, err := session.CommitNodeEdit(ctx, trust, edit, n, actor)
+			if err != nil || got != want {
+				t.Fatalf("protocol %d: got revision %d, want %d (%v)", protocol, got, want, err)
+			}
+			if want == 0 {
+				row := query(`SELECT row_version,change_seq FROM wormhole_data.nodes,wormhole_data.workspace_meta WHERE id=$1::uuid AND singleton`, n.ID)
+				if string(row.Rows[0][0]) != strconv.FormatUint(revision, 10) || string(row.Rows[0][1]) != strconv.FormatUint(edit.sequence, 10) {
+					t.Fatal("incompatible selection changed the catalog")
+				}
+			}
+		}
+		n := leaf
+		n.ID = uuid.NewString()
+		insertNode(t, n)
+		selectSlot(n, 1, 1, 0) // RDP cannot use an SSH slot.
+		query(`UPDATE wormhole_data.boundary_grants SET permissions=2 WHERE boundary_id=$1::uuid AND user_id=$2::uuid`, boundary.String(), trust.UserID.String())
+		t.Cleanup(func() {
+			query(`UPDATE wormhole_data.boundary_grants SET permissions=31 WHERE boundary_id=$1::uuid AND user_id=$2::uuid`, boundary.String(), trust.UserID.String())
+		})
+		selectSlot(n, 1, 0, 0)
+		query(`UPDATE wormhole_data.boundary_grants SET permissions=31 WHERE boundary_id=$1::uuid AND user_id=$2::uuid`, boundary.String(), trust.UserID.String())
+		selectSlot(n, 1, 0, 2)
+		selectSlot(n, 2, 6, 0)
+		selectSlot(n, 2, 7, 3) // SFTP shares the SSH credential family.
+		// A pre-upgrade incompatible selection can still be repaired.
+		vnc := 6
+		n.ID, n.Protocol, n.CredentialMode, n.CredentialID, n.CredentialSlotID = uuid.NewString(), &vnc, &slotMode, nil, &slot.ID
+		insertNode(t, n)
+		selectSlot(n, 1, 0, 2)
 	})
 	t.Run("signed-move", func(t *testing.T) {
 		supported, err := session.NodeMovingSupported(ctx)

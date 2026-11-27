@@ -460,7 +460,7 @@ test('shared input and startup screens consume factors and keep admission separa
         dispose();card.remove();
       }
 
-      for(const mode of ['saved','unavailable','canceled','load-failed','read-denied','write-failed','disposed','late-save']) {
+      for(const mode of ['saved','unavailable','canceled','load-failed','read-denied','write-failed','disposed','late-save','inline']) {
         const card=document.createElement('section');document.body.append(card);
         const row={id:vaultId,name:'Office',kind:1,editRevision:'4'};
         const values=Object.fromEntries(Object.keys(sharedEditFields).map(key=>[key,null]));
@@ -477,7 +477,7 @@ test('shared input and startup screens consume factors and keep admission separa
           if(mode==='load-failed')throw Error('unavailable');
           if(mode==='read-denied')return {status:'unavailable'};
           if(mode==='disposed')await new Promise(resolve=>{finishRead=resolve});
-          return {status:'ready',...request,workspaceId:slotId,epoch:'2',changeSeq:'5',fields:values};
+          return {status:'ready',...request,workspaceId:slotId,epoch:'2',changeSeq:'5',fields:values,...(mode==='inline'?{usesInlinePassword:true}:{})};
         };
         const remove=mountSharedCatalogScreen(card,{
           editSharedNode:edit,loadSharedCatalogPage:async()=>({epoch:'2',changeSeq:'5',nodes:[row],next:null}),
@@ -489,6 +489,11 @@ test('shared input and startup screens consume factors and keep admission separa
         if(mode==='disposed'){remove();finishRead();await tick();check(!card.childElementCount,'late dialog reopened');}
         else if(mode==='load-failed'||mode==='read-denied'){check(dialog.textContent.includes('unavailable'),'missing read failure');dialog.querySelector('[type=button]').click();}
         else if(mode==='canceled'){dialog.dispatchEvent(new Event('cancel',{cancelable:true}));check(!saved&&!dialog.isConnected,'cancel saved an edit');}
+        else if(mode==='inline'){
+          check(dialog.textContent.includes('own stored password')&&dialog.textContent.includes('Username'),'inline identity or editable fields missing');
+          for(const field of ['Credential mode','Saved credential ID','Credential slot ID'])check(!dialog.textContent.includes(field),'inactive credential selection offered');
+          dialog.querySelector('[type=button]').click();check(!saved,'dismissing inline settings changed the connection');
+        }
         else {
           const form=dialog.querySelector('form'),save=dialog.querySelector('[type=submit]');
           check(save.disabled,'unchanged edit enabled');

@@ -197,7 +197,16 @@ export function openSharedNodeEditor(
     const ready = await edit(request);
     if (!active) return;
     if (ready.status !== 'ready') throw Error('unavailable');
-    const controls = (Object.keys(sharedEditFields) as SharedEditKey[]).map((key) => {
+    let keys = Object.keys(sharedEditFields) as SharedEditKey[];
+    if (ready.usesInlinePassword) {
+      const explanation = document.createElement('p');
+      explanation.textContent = 'This connection uses its own stored password.';
+      fields.append(explanation);
+      keys = keys.filter(
+        (key) => !['credentialMode', 'credentialId', 'credentialSlotId'].includes(key),
+      );
+    }
+    const controls = keys.map((key) => {
       const { row, read } = editControl(key, ready.fields[key]);
       fields.append(row);
       // HTML controls normalize some stored strings when displaying them.

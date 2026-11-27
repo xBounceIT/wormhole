@@ -27,6 +27,14 @@ var publicAPILimitsTemplate string
 
 var publicAPILimitsMigration = strings.Replace(publicAPILimitsTemplate, "{{WEB_SUSPENSION_RESTORE_DEFINITION}}", renderWebSuspensionRestore("96"), 1)
 
+//go:embed migrations/0097_slot_binding_protocol.sql
+var slotBindingTemplate string
+
+var slotBindingMigration = strings.NewReplacer(
+	"{{NODE_EDIT_BINDINGS}}", nodeEditBindings(97),
+	"{{WEB_SUSPENSION_RESTORE_DEFINITION}}", renderWebSuspensionRestore("97"),
+).Replace(slotBindingTemplate)
+
 // This order matches the individual DBA upgrade scripts. A fresh deployment
 // uses the same migrations in a single transaction.
 var schemaMigrations = [...]string{
@@ -55,6 +63,7 @@ var schemaMigrations = [...]string{
 	accountReenrollmentRedemptionMigration, webSessionViewsMigration, webConnectionPlanMigration, webTunnelReleaseMigration, webSuspensionInventoryMigration,
 	auditMaintenanceMigration, unencryptedClientsMigration, sshHostPinMigration, updateNodeMigration, moveNodeMigration, suspensionRotationReceiptsMigration,
 	rowSecurityMigration, deviceConnectionLimitMigration, adminCredentialSlotsMigration, accountGroupRolesMigration, createCredentialSlotMigration, publicAPILimitsMigration,
+	slotBindingMigration,
 }
 
 const SchemaVersion = len(schemaMigrations)
