@@ -109,6 +109,7 @@ AND (SELECT count(*) FROM pg_catalog.pg_roles WHERE rolname LIKE 'wh_testscope%'
 		t.Fatal("failed redeployment changed existing workspace", got, err)
 	}
 	checkCatalogDrift(t, ctx, s, secret, admin)
+	checkDeploymentAPIPermissions(t, ctx, admin)
 	checkWorkspaceRowSecurity(t, ctx, s, secret, "testscope", standardRLSCatalog)
 	t.Run("DBA logging diagnostics", func(t *testing.T) {
 		dba := s

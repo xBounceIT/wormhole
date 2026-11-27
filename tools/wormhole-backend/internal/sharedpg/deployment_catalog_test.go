@@ -8,6 +8,25 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
+// Verify the policy independently of the catalog digest. Regenerating the
+// fingerprint for a new migration must not bless a weaker public API.
+func checkDeploymentAPIPermissions(t *testing.T, ctx context.Context, db *pgconn.PgConn) {
+	t.Helper()
+	rows := db.ExecParams(ctx, `SELECT p.proname FROM pg_proc p WHERE p.pronamespace='wormhole_api_v1'::regnamespace AND (
+		NOT p.prosecdef OR NOT coalesce('search_path=pg_catalog, pg_temp'=ANY(p.proconfig),false)
+		OR NOT EXISTS(SELECT FROM unnest(p.proconfig) s WHERE s ~ '^lock_timeout=[1-9][0-9]*(ms|s|min)?$')
+		OR NOT EXISTS(SELECT FROM unnest(p.proconfig) s WHERE s ~ '^statement_timeout=[1-9][0-9]*(ms|s|min)?$')
+		OR EXISTS(SELECT FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a
+			WHERE a.grantee=0 AND a.privilege_type='EXECUTE'))
+		ORDER BY p.proname`, nil, nil, nil, nil).Read()
+	if rows.Err != nil {
+		t.Fatal(rows.Err)
+	}
+	for _, row := range rows.Rows {
+		t.Errorf("public API has unsafe privileges, search path or timeouts: %s", row[0])
+	}
+}
+
 func checkCatalogDrift(t *testing.T, ctx context.Context, settings Settings, password []byte, db *pgconn.PgConn) {
 	t.Helper()
 	exec := func(t *testing.T, sql string) {

@@ -164,4 +164,46 @@ func TestPostgresDeviceConnectionLimitUpgrade(t *testing.T) {
 	if _, err := db.Exec(ctx, createSlot).ReadAll(); !hasSQLState(err, "55000", 0) {
 		t.Fatal("repeated creation API upgrade", err)
 	}
+	run("ROLLBACK")
+	retirement, err := deploy.NextMigrationScript("testscope", testHintID, 95)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run(retirement)
+	checkDeploymentAPIPermissions(t, ctx, db)
+	// These are synthetic accounts in this temporary cluster. Use one fixed
+	// login to cover deletion, rollback and a new identity at that login.
+	name := roleName(login)
+	row, err := readDeploymentRow(ctx, db, "SELECT oid::text FROM pg_roles WHERE rolname='"+name+"'", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := string(row[0])
+	remove := "DELETE FROM wormhole_data.users WHERE login_name='" + login + "'"
+	run("BEGIN")
+	run(remove)
+	assert("NOT EXISTS(SELECT FROM pg_roles WHERE rolname='" + name + "')")
+	run("ROLLBACK")
+	assert("EXISTS(SELECT FROM pg_roles WHERE oid=" + original + "::oid AND rolname='" + name + "')")
+	run("GRANT " + name + " TO wh_testscope_observer")
+	if _, err := db.Exec(ctx, remove).ReadAll(); !hasSQLState(err, "WH009", 0) {
+		t.Fatal("deleted a group with external membership", err)
+	}
+	assert("pg_has_role('wh_testscope_observer','" + name + "','MEMBER')")
+	run("REVOKE " + name + " FROM wh_testscope_observer")
+	run("ALTER ROLE " + name + " RENAME TO preserved_account_role")
+	run("CREATE ROLE " + name + " NOLOGIN NOINHERIT")
+	if _, err := db.Exec(ctx, remove).ReadAll(); !hasSQLState(err, "WH009", 0) {
+		t.Fatal("deleted a replacement cluster role", err)
+	}
+	assert("EXISTS(SELECT FROM pg_roles WHERE rolname='" + name + "' AND oid<>" + original + "::oid)")
+	run("DROP ROLE " + name)
+	run("ALTER ROLE preserved_account_role RENAME TO " + name)
+	run(remove)
+	assert("NOT EXISTS(SELECT FROM pg_roles WHERE oid=" + original + "::oid OR rolname='" + name + "')")
+	run("INSERT INTO wormhole_data.users(id,login_name) VALUES(gen_random_uuid(),'" + login + "')")
+	assert("EXISTS(SELECT FROM wormhole_data.account_group_roles g JOIN pg_roles r ON r.oid=g.role_oid AND r.rolname=g.role_name WHERE r.rolname='" + name + "' AND r.oid<>" + original + "::oid)")
+	if _, err := db.Exec(ctx, retirement).ReadAll(); !hasSQLState(err, "55000", 0) {
+		t.Fatal("repeated role retirement migration", err)
+	}
 }

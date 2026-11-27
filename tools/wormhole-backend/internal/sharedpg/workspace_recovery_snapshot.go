@@ -17,7 +17,7 @@ const maxRecoverySnapshotRecords = 100000
 const maxRecoverySnapshotBytes = 42 * 1024 * 1024
 
 const firstRecoveryArchiveSchema = 49
-const lastRecoveryArchiveSchema = 95
+const lastRecoveryArchiveSchema = 96
 
 func supportsRecoveryArchiveSchema(version int) bool {
 	return version >= firstRecoveryArchiveSchema && version <= lastRecoveryArchiveSchema

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -58,5 +59,9 @@ func TestSharedCreateSlotInputAndAuthority(t *testing.T) {
 	result, err := h.Handle(ctx, "shared-create-credential-slot", raw)
 	if err != nil || string(result) != `{"status":"unavailable"}` || !c.Unlocked() {
 		t.Fatal("member slot request affected the session", err)
+	}
+	c.session = probe
+	if result, err := h.Handle(ctx, "shared-create-credential-slot", raw); !errors.Is(err, vaultwire.ErrRetired) || len(result) != 0 {
+		t.Fatal("owner without the slot protocol kept accepting requests", err)
 	}
 }

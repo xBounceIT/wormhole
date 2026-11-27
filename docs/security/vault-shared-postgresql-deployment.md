@@ -635,6 +635,13 @@ The database records the cluster OIDs of the group and device. Recovery creates
 fresh groups on the target cluster. A collision with an existing role aborts the
 transaction, including any groups it has already created.
 
+From schema 96, deleting an account also retires its recorded group in the same
+transaction. PostgreSQL checks the role name, OID, attributes and memberships.
+A conflicting role or an external dependency stops the deletion. A later account
+can then reuse the login after a successful deletion and receives a new group
+OID. If an account was already deleted on schema 94 or 95, a DBA must review
+any remaining untracked role before reusing that login.
+
 The native bootstrap prepares an organisation signer, an organisation encryption
 key, the workspace boundary's view and secret keys, and a certificate chain for a
 single-use administrator invitation. The first admin receives custodian and
