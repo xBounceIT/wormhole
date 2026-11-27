@@ -222,6 +222,7 @@ export class VaultWebCookieCheckpoint {
   private dirty = false;
   private timer?: NodeJS.Timeout;
   private pending?: Promise<void>;
+  private closing?: Promise<void>;
   private readonly options: Options;
   private readonly target: URL;
 
@@ -317,9 +318,21 @@ export class VaultWebCookieCheckpoint {
     }
   }
 
-  async flush(): Promise<void> {
-    this.unobserve();
-    await this.checkpointNow();
+  flush(): Promise<void> {
+    return (this.closing ??= this.flushAndStop());
+  }
+
+  private async flushAndStop(): Promise<void> {
+    try {
+      if (!this.observing) return;
+      await this.checkpointNow();
+      // A change observed during capture invalidates that snapshot. Make one
+      // more attempt while the view still belongs to this checkpoint.
+      await this.run(true);
+    } finally {
+      this.stop();
+      await this.pending;
+    }
   }
 
   async checkpointNow(): Promise<void> {
@@ -328,6 +341,9 @@ export class VaultWebCookieCheckpoint {
     await this.pending;
     // A cookie change during the previous save may have queued its erasure.
     if (this.pending) await this.pending;
+    // Chromium can commit Set-Cookie before delivering its change event.
+    // Explicit checkpoints read the current jar even if no event has arrived.
+    if (this.observing) this.dirty = true;
     await this.run(true);
   }
 

@@ -7,7 +7,6 @@ import { writeSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
-import { setImmediate } from 'node:timers/promises';
 import { promisify } from 'node:util';
 import { VaultBackendClient } from '../../electron/vault-client.ts';
 import { VaultBackendHost } from '../../electron/vault-host.ts';
@@ -103,7 +102,6 @@ async function run() {
     try {
       await checkpoint.restore(contents);
       await action(new URL(plan.target.url).origin, contents);
-      await setImmediate();
       await checkpoint.flush();
     } finally {
       checkpoint.stop();

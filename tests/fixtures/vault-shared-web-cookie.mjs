@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import { BaseWindow, WebContentsView } from 'electron';
 import { randomUUID } from 'node:crypto';
-import { setImmediate } from 'node:timers/promises';
 import { VaultWebConnections } from '../../electron/vault-web-connections.ts';
 import { VaultWebCookieCheckpoint } from '../../electron/vault-web-cookies.ts';
 
@@ -62,7 +61,6 @@ export async function exerciseSharedWebCookies(host, admit, port) {
     try {
       await checkpoint.restore(contents);
       await contents.loadURL(new URL(path, prepared.target.url).href);
-      await setImmediate();
       await checkpoint.flush();
     } finally {
       checkpoint.stop();

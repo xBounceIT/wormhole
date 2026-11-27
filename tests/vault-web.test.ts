@@ -242,16 +242,69 @@ test('vault web cookies preserve first-party source and partition attributes dur
   ]);
   assert.deepEqual(
     f.writes.map(({ revision, contents }) => ({ revision, contents })),
-    [
-      {
-        revision: '2',
-        contents: { version: 1, cookies: [portalCookie({ partitionKey: archiveKey })] },
-      },
-    ],
+    ['2', '4'].map((revision) => ({
+      revision,
+      contents: { version: 1, cookies: [portalCookie({ partitionKey: archiveKey })] },
+    })),
   );
   assert.ok(f.writes[0].bytes.every((value) => value === 0));
   assert.equal(f.jar.listenerCount('changed'), 0);
-  assert.equal(f.detachCount(), 2);
+  assert.equal(f.detachCount(), 3);
+});
+
+test('final cookie checkpoint reads a committed login and logout before change delivery', async () => {
+  const f = cookieCheckpointFixture();
+  await f.checkpoint.restore(f.view);
+  await f.checkpoint.checkpointNow();
+  assert.equal(f.writes.length, 1);
+  f.paths([]);
+  await f.checkpoint.flush();
+  assert.deepEqual(f.erases, ['1']);
+  assert.equal(f.writes.length, 1);
+  assert.equal(f.jar.listenerCount('changed'), 0);
+  await f.checkpoint.flush();
+  assert.deepEqual(f.erases, ['1']);
+});
+
+test('logout during the final cookie write retires its saved revision before close', async () => {
+  const f = cookieCheckpointFixture();
+  await f.checkpoint.restore(f.view);
+  const saving = Promise.withResolvers<void>();
+  f.holdSave(saving.promise);
+  const closing = f.checkpoint.flush();
+  assert.equal(f.checkpoint.flush(), closing);
+  await tick();
+  assert.equal(f.writes.length, 1);
+  f.paths([]);
+  f.change();
+  saving.resolve();
+  await closing;
+  assert.deepEqual(f.erases, ['1']);
+  assert.equal(f.writes.length, 1);
+  assert.equal(f.jar.listenerCount('changed'), 0);
+});
+
+test('closing during the initial archive read prevents late cookie restoration', async () => {
+  const seed = cookieBytes([portalCookie()]);
+  const f = cookieCheckpointFixture(seed);
+  const restoring = f.checkpoint.restore(f.view);
+  await Promise.all([f.checkpoint.flush(), assert.rejects(restoring, /superseded/)]);
+  assert.equal(f.jar.listenerCount('changed'), 0);
+  assert.deepEqual(f.calls, []);
+  assert.deepEqual(f.erases, []);
+  assert.ok(seed.every((byte) => byte === 0));
+});
+
+test('closing off origin retires the last checkpoint without reading the other site', async () => {
+  const f = cookieCheckpointFixture();
+  await f.checkpoint.restore(f.view);
+  await f.checkpoint.checkpointNow();
+  assert.equal(f.calls.length, 1);
+  f.navigate('https://other.example/');
+  await f.checkpoint.flush();
+  assert.deepEqual(f.erases, ['1']);
+  assert.equal(f.writes.length, 1);
+  assert.equal(f.calls.length, 1);
 });
 
 test(

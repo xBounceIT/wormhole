@@ -349,8 +349,10 @@ Local saved targets restore first-party cookies into a fresh in-memory
 Chromium profile before navigation. Electron preserves their source port,
 path, expiry and first-party partition key. A cookie change invalidates the
 prior saved revision and a new snapshot records the current jar. A normal
-close settles pending changes while the original browser owner is still
-authorized. Restoring a snapshot consumes it before inserting cookies, so an
+close reads the jar while the original browser owner still has authorization,
+including when Chromium has yet to deliver its change notification. If all
+tabs have left the target origin, closing retires the previous snapshot.
+Restoring a snapshot consumes it before inserting cookies, so an
 interrupted restore can require signing in again. Only one live browser per
 node holds the archive lease. Other Chromium storage remains pending.
 
