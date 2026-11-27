@@ -144,15 +144,19 @@ jobs:
           go -C tools/wormhole-backend build -o "$GITHUB_WORKSPACE/dist-electron/wormhole-backend-$(node -p process.arch)$suffix" .
           mkdir -p artifacts/vault
 
-      - name: Install private Linux clipboard test display
+      - name: Prepare the Linux sandbox and private test display
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends --yes xvfb xauth
-          # Use the runner's installed Chromium sandbox for Electron's renderer processes.
-          sandbox=/opt/google/chrome/chrome-sandbox
-          test "$(stat -c '%u:%a' "$sandbox")" = 0:4755
-          ln -sf "$sandbox" node_modules/electron/dist/chrome-sandbox
+          # Ubuntu 24.04 requires a per-executable profile for Chromium's user namespace sandbox.
+          sudo apparmor_parser -r <<EOF
+          abi <abi/4.0>,
+          include <tunables/global>
+          profile wormhole-ci-electron "$GITHUB_WORKSPACE/node_modules/electron/dist/electron" flags=(unconfined) {
+            userns,
+          }
+          EOF
 
       - name: Verify Linux managed package ownership
         if: runner.os == 'Linux'
