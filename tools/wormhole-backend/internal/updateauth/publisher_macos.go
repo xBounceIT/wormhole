@@ -43,7 +43,7 @@ func verifyDarwinPublisher(file *os.File, team string, run darwinPublisherTool) 
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	requirement := `anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "` + team + `"`
+	requirement := `=anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "` + team + `"`
 	if _, err := run(ctx, "/usr/bin/codesign", "--verify", "--strict", "-R", requirement, path); err != nil {
 		return ErrPublisherUntrusted
 	}

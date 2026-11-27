@@ -94,7 +94,7 @@ func TestDarwinPublisherPinsTeamAndVerifiesDiskImage(t *testing.T) {
 				case 1:
 					if executable != "/usr/bin/codesign" || len(args) != 5 ||
 						!reflect.DeepEqual(args[:3], []string{"--verify", "--strict", "-R"}) || !strings.Contains(args[3], `certificate leaf[subject.OU] = "`+team+`"`) ||
-						!strings.Contains(args[3], "anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists") ||
+						!strings.HasPrefix(args[3], "=anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists") ||
 						args[4] != path {
 						t.Fatalf("unexpected signature verification: %q %q", executable, args)
 					}

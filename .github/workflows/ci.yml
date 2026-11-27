@@ -186,7 +186,6 @@ jobs:
 
       - name: Verify a notarized disk image against its pinned Apple Team ID
         if: runner.os == 'macOS'
-        working-directory: tools/wormhole-backend
         run: |
           fixture="$RUNNER_TEMP/macfuse-5.5.0.dmg"
           curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
@@ -194,8 +193,9 @@ jobs:
             https://github.com/macfuse/macfuse/releases/download/macfuse-5.5.0/macfuse-5.5.0.dmg
           # Digest published at https://macfuse.github.io/2026/10/17/macfuse-5.5.0.html
           echo "92c21ef2db4199bcf5bddc8e6efb57b23ecb9715f74ab38cba2c77ab226d3830  $fixture" | shasum -a 256 --check
+          node --test --test-name-pattern 'Touch ID uses a nested app' tests/release-packaging.test.mjs
           WORMHOLE_TEST_NOTARIZED_DMG="$fixture" WORMHOLE_TEST_NOTARIZED_TEAM_ID=3T5GSNBU6W \
-            go test -v -count=1 -run '^TestNativeDarwinPublisher' ./internal/updateauth
+            go -C tools/wormhole-backend test -v -count=1 -run '^TestNativeDarwinPublisher' ./internal/updateauth
 
       - name: Test vault primitives and lifecycle
         working-directory: tools/wormhole-backend

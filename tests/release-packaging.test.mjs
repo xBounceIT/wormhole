@@ -25,6 +25,7 @@ import { backendGoToolchain } from '../scripts/backend-go-toolchain.mjs';
 import {
   touchIDBundleIdentifier,
   touchIDEntitlements,
+  touchIDVerificationRequirement,
 } from '../scripts/sign-macos-with-touch-id.mjs';
 
 const require = createRequire(import.meta.url);
@@ -119,6 +120,15 @@ test('Touch ID uses a nested app and a release profile for its own application i
   const team = 'ABCDEFG123';
   const now = new Date('2026-01-02').getTime();
   const applicationID = `${team}.${touchIDBundleIdentifier}`;
+  const requirement = touchIDVerificationRequirement(team);
+  if (process.platform === 'darwin')
+    execFileSync('/usr/bin/csreq', ['-r', requirement, '-t']);
+  assert.ok(requirement.startsWith('=anchor apple generic and certificate leaf['));
+  assert.ok(
+    requirement.endsWith(
+      `certificate leaf[subject.OU] = "${team}" and identifier "${touchIDBundleIdentifier}"`,
+    ),
+  );
   const profile = {
     TeamIdentifier: [team],
     ExpirationDate: new Date('2026-06-01'),

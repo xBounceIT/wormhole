@@ -7,6 +7,10 @@ import plist from 'plist';
 
 export const touchIDBundleIdentifier = 'com.xbounceit.wormhole.vault-touch-id';
 
+export function touchIDVerificationRequirement(team) {
+  return `=anchor apple generic and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "${team}" and identifier "${touchIDBundleIdentifier}"`;
+}
+
 export function touchIDEntitlements(profile, team, now = Date.now()) {
   const applicationID = `${team}.${touchIDBundleIdentifier}`;
   if (
@@ -66,13 +70,7 @@ export default async function signMacWithTouchID(options) {
     });
     execFileSync(
       '/usr/bin/codesign',
-      [
-        '--verify',
-        '--strict',
-        '-R',
-        `anchor apple generic and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "${team}" and identifier "${touchIDBundleIdentifier}"`,
-        helper,
-      ],
+      ['--verify', '--strict', '-R', touchIDVerificationRequirement(team), helper],
       { stdio: ['ignore', 'ignore', 'ignore'] },
     );
   } finally {
