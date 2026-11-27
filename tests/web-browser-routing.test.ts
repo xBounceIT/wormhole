@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { createRequire, stripTypeScriptTypes } from 'node:module';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { createInterface } from 'node:readline';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { Script } from 'node:vm';
 
@@ -38,7 +41,23 @@ test('real Chromium sibling tabs retain their proxy and never fall back to a dir
     mode: 'transform',
   });
   const directory = mkdtempSync(join(tmpdir(), 'wormhole-web-browser-routing-'));
+  const fixture = fileURLToPath(new URL('./fixtures/browser-https.go', import.meta.url));
+  const httpsServer = spawn('go', ['run', fixture], {
+    stdio: ['pipe', 'pipe', 'inherit'],
+    timeout: 180_000,
+    windowsHide: true,
+  });
+  const exited = once(httpsServer, 'close');
   try {
+    const lines = createInterface({ input: httpsServer.stdout });
+    const [address] = await Promise.race([
+      once(lines, 'line'),
+      exited.then(() => {
+        throw new Error('HTTPS fixture exited before listening');
+      }),
+    ]);
+    const tlsPort = Number(new URL(address).port);
+    assert.ok(tlsPort > 0 && tlsPort <= 65535);
     const harnessPath = join(directory, 'routing.cjs');
     writeFileSync(
       harnessPath,
@@ -57,9 +76,10 @@ test('real Chromium sibling tabs retain their proxy and never fall back to a dir
       app.setPath('userData', ${JSON.stringify(directory)});
       app.setPath('sessionData', ${JSON.stringify(directory)});
       const authSession = { authorizationEpoch: 1, isAccessAllowed: true };
-      const isAuthorizationEpochCurrent = epoch => epoch === authSession.authorizationEpoch;
+      const isAuthorizationEpochCurrent = epoch => authSession.isAccessAllowed && epoch === authSession.authorizationEpoch;
       const webMaxUrlLength = 4096;
       const isQuitting = false;
+      const authLockRequested = false;
       const validateWebTarget = value => value;
       const describeWebNavigationError = () => 'Navigation failed';
       const describeWebLoadFailure = () => 'Page unavailable';
@@ -134,6 +154,7 @@ test('real Chromium sibling tabs retain their proxy and never fall back to a dir
         });
         await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
         const targetPort = server.address().port;
+        const tlsPort = ${tlsPort};
         const createSocksProxy = () => net.createServer(client => {
           sockets.add(client);
           client.on('error', () => {});
@@ -156,11 +177,14 @@ test('real Chromium sibling tabs retain their proxy and never fall back to a dir
             if (buffer.length < packetLength) return;
             const host = type === 3 ? buffer.subarray(hostStart, hostStart + hostLength).toString() : [...buffer.subarray(hostStart, hostStart + hostLength)].join('.');
             proxied.push(host);
-            assert.equal(buffer.readUInt16BE(packetLength - 2), targetPort);
+            const port = buffer.readUInt16BE(packetLength - 2);
+            // Serve the same certificate on a second port of the test appliance.
+            const otherTlsOrigin = host === 'appliance.test' && port === 443;
+            assert.ok(port === targetPort || port === tlsPort || otherTlsOrigin);
             const leftover = buffer.subarray(packetLength);
             client.pause();
             client.off('data', receive);
-            const upstream = net.connect(targetPort, '127.0.0.1', () => {
+            const upstream = net.connect(otherTlsOrigin ? tlsPort : port, '127.0.0.1', () => {
               client.write(Buffer.from([5, 0, 0, 1, 127, 0, 0, 1, 0, 0]));
               if (leftover.length) upstream.write(leftover);
               client.pipe(upstream); upstream.pipe(client); client.resume();
@@ -179,11 +203,35 @@ test('real Chromium sibling tabs retain their proxy and never fall back to a dir
             return { active: true, socksEndpoint: '127.0.0.1:' + proxy.address().port, configuredTunnelId: tunnelConfigId };
           },
         });
-        globalThis.runBackend = async (_action, request) => ({ url: request.address, host: new URL(request.address).hostname, protocol: 'http', port: targetPort, ignoreCertErrors: false, tunnelConfigId: request.tunnelConfigId });
+        globalThis.runBackend = async (action, request) => {
+          if (action === 'extension-read') return { enabled: false };
+          const url = new URL(request.address);
+          return { url: url.href, host: url.hostname, protocol: request.protocol, port: Number(url.port), ignoreCertErrors: request.ignoreCertErrors === true, tunnelConfigId: request.tunnelConfigId };
+        };
         const owner = new BrowserWindow({ show: false, width: 900, height: 700 });
         const manager = new WebSurfaceManager();
         try {
           await owner.loadURL('data:text/html,<title>Browser owner</title>');
+          const tlsAddress = 'https://appliance.test:' + tlsPort + '/';
+          const certificateErrors = new Set();
+          app.on('certificate-error', (_event, contents, url, error) => {
+            if (url === tlsAddress && error.includes('ERR_CERT_')) certificateErrors.add(contents.id);
+          });
+          for (const [sessionId, ignoreCertErrors] of [['tls-opt-in', true], ['tls-strict', false]]) {
+            await manager.open(owner, { sessionId, attempt: 1, address: tlsAddress, protocol: 'https', tunnelConfigId: 'vpn-route', ignoreCertErrors });
+            const tlsBrowser = manager.surfaces.get(sessionId);
+            const contents = tlsBrowser.view.webContents;
+            if (ignoreCertErrors) {
+              await waitFor(() => contents.getTitle() === 'HTTPS appliance', 'Opted-in TLS navigation');
+              await assert.rejects(contents.loadURL('https://appliance.test/'), { code: /^ERR_CERT_/ });
+            } else {
+              await waitFor(() => tlsBrowser.tabs.snapshot('vpn').tabs[0].error, 'Strict TLS rejection');
+            }
+            assert.ok(certificateErrors.has(contents.id), 'The certificate error must reach the native app event');
+            assert.equal(tlsBrowser.vpn.status, 'active');
+            manager.close(sessionId);
+          }
+          assert.ok(proxied.includes('appliance.test'));
           await manager.open(owner, { sessionId: 'routed', attempt: 1, address: 'http://gateway.internal:' + targetPort + '/', protocol: 'http', tunnelConfigId: 'vpn-route' });
           const record = manager.surfaces.get('routed');
           manager.setBounds(owner, { sessionId: 'routed', x: 0, y: 0, width: 900, height: 650, visible: true });
@@ -425,7 +473,9 @@ test('real Chromium sibling tabs retain their proxy and never fall back to a dir
       { env: { ...environment, NODE_ENV: 'test' }, timeout: 60_000, windowsHide: true },
     );
   } finally {
+    httpsServer.stdin.end();
     assert.equal(resolve(directory, '..'), resolve(tmpdir()));
     rmSync(directory, { force: true, recursive: true });
+    await exited;
   }
 });
