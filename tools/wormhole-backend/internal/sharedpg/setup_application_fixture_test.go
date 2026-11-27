@@ -60,7 +60,6 @@ func TestPostgresSetupApplicationFixture(t *testing.T) {
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 16*1024), 256*1024)
 	var rotationLock *pgconn.PgConn
-	var deviceConnectionLimit string
 	defer func() {
 		if rotationLock != nil {
 			closeDeploymentConnection(rotationLock)
@@ -84,15 +83,11 @@ func TestPostgresSetupApplicationFixture(t *testing.T) {
 				t.Fatal(err)
 			}
 			limited := command.Action == "limitDeviceConnections"
-			from, to := "0", deviceConnectionLimit
+			from, to := "0", "3"
 			if limited {
-				if deviceConnectionLimit != "" || (string(row[1]) != "2" && string(row[1]) != "3") {
-					t.Fatal("unexpected enrolled device connection limit")
-				}
-				deviceConnectionLimit = string(row[1])
-				from, to = deviceConnectionLimit, "0"
+				from, to = to, from
 			}
-			if to == "" || string(row[1]) != from {
+			if string(row[1]) != from {
 				t.Fatal("unexpected device connection limit")
 			}
 			if _, err := admin.Exec(ctx, "ALTER ROLE "+pgx.Identifier{string(row[0])}.Sanitize()+" CONNECTION LIMIT "+to).ReadAll(); err != nil {
@@ -592,6 +587,7 @@ WHERE kind='org-enc' AND status='active' AND cert_signature IS NOT NULL`, nil, n
  AND (SELECT count(*) FROM wormhole_data.workspace_bootstrap WHERE singleton)=1
  AND (SELECT count(*) FROM wormhole_data.invites WHERE used_at IS NOT NULL AND bootstrap_envelope IS NULL)=1
  AND (SELECT count(*) FROM wormhole_data.device_confirmations)=1
+ AND EXISTS(SELECT FROM wormhole_data.device_confirmations c JOIN pg_catalog.pg_roles r ON r.oid=c.role_oid WHERE r.rolconnlimit=3)
  AND (SELECT count(*) FROM wormhole_data.audit_log WHERE action='bootstrap_workspace')=1
  AND (SELECT count(*) FROM wormhole_data.audit_log WHERE action='join_workspace')=1
  AND NOT EXISTS(SELECT FROM wormhole_data.invitation_logins WHERE NOT revoked)

@@ -575,6 +575,13 @@ Every device fetches authenticated changes after unlock and polls every 30 secon
 device count plus 20. For example, 300 devices require a budget of at least
 620 connections. The first-administrator form calculates this value as you type.
 
+Schema 92 gives each enrolled device role a connection limit of three. Temporary
+invitation and reset roles have a limit of two. To upgrade schema 91, apply
+`deploy.DeviceConnectionLimitMigration(roleTag, workspaceID)` during a maintenance
+window. The migration updates active confirmed roles with the original limit of
+two after matching their PostgreSQL OID and role name. An older pending device
+receives its new limit when it confirms enrollment.
+
 The native bootstrap prepares an organisation signer, an organisation encryption
 key, the workspace boundary's view and secret keys, and a certificate chain for a
 single-use administrator invitation. The first admin receives custodian and

@@ -1164,20 +1164,22 @@ func AccountReenrollmentMigration(roleTag, workspaceID string) (string, error) {
 //go:embed migrations/0080_account_reenrollment_redemption.sql
 var accountReenrollmentRedemptionTemplate string
 
-var accountReenrollmentRedemptionMigration = strings.NewReplacer(
-	"{{REDEEM_ACCOUNT_REENROLLMENT}}", strings.NewReplacer(
-		"wormhole_api_v1.redeem_account_reset(", "wormhole_api_v1.redeem_account_reenrollment(",
-		"p_verifier text,p_kdf text,p_nonce bytea,p_ciphertext bytea)", "p_verifier text,p_kdf text,p_nonce bytea,p_ciphertext bytea,p_certificate bytea)",
-		"DECLARE request wormhole_data.account_reset_offers;", "DECLARE enrollment record; request wormhole_data.account_reset_offers;",
-		"wormhole_data.require_account_reset(", "wormhole_data.require_account_reenrollment(",
-		"    UPDATE wormhole_data.user_key_wraps w SET wrap_revision", `    SELECT * INTO STRICT enrollment FROM wormhole_data.install_replacement_enrollment(request,p_certificate);
+var redeemAccountReenrollment = strings.NewReplacer(
+	"wormhole_api_v1.redeem_account_reset(", "wormhole_api_v1.redeem_account_reenrollment(",
+	"p_verifier text,p_kdf text,p_nonce bytea,p_ciphertext bytea)", "p_verifier text,p_kdf text,p_nonce bytea,p_ciphertext bytea,p_certificate bytea)",
+	"DECLARE request wormhole_data.account_reset_offers;", "DECLARE enrollment record; request wormhole_data.account_reset_offers;",
+	"wormhole_data.require_account_reset(", "wormhole_data.require_account_reenrollment(",
+	"    UPDATE wormhole_data.user_key_wraps w SET wrap_revision", `    SELECT * INTO STRICT enrollment FROM wormhole_data.install_replacement_enrollment(request,p_certificate);
     INSERT INTO wormhole_data.device_confirmations(device_id,role_oid,certificate_digest)
         SELECT p_device,r.oid,pg_catalog.sha256(p_certificate) FROM pg_catalog.pg_roles r WHERE r.rolname=target;
     UPDATE wormhole_data.user_key_wraps w SET encryption_key_id=enrollment.encryption_id,encryption_key_version=1,
         signing_key_id=enrollment.signing_id,signing_key_version=1,wrap_revision`,
-		"target,p_verifier,pg_catalog.clock_timestamp()+interval '1 hour'", "target,p_verifier,'infinity'",
-		"'reset-v1','redeem_account_reset'", "'reset-v2','redeem_account_reenrollment'",
-	).Replace(replaceMigrationFunction(accountResetRedemptionTemplate, "wormhole_api_v1.redeem_account_reset(", "CREATE FUNCTION wormhole_api_v1.account_reset_receipt(")),
+	"target,p_verifier,pg_catalog.clock_timestamp()+interval '1 hour'", "target,p_verifier,'infinity'",
+	"'reset-v1','redeem_account_reset'", "'reset-v2','redeem_account_reenrollment'",
+).Replace(replaceMigrationFunction(accountResetRedemptionTemplate, "wormhole_api_v1.redeem_account_reset(", "CREATE FUNCTION wormhole_api_v1.account_reset_receipt("))
+
+var accountReenrollmentRedemptionMigration = strings.NewReplacer(
+	"{{REDEEM_ACCOUNT_REENROLLMENT}}", redeemAccountReenrollment,
 	"{{SUSPENSION_ENROLLMENT_RESTORE_DEFINITION}}", renderSuspensionEnrollmentRestore("80"),
 ).Replace(accountReenrollmentRedemptionTemplate)
 

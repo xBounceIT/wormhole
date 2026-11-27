@@ -33,7 +33,7 @@ var schemaMigrations = [...]string{
 	scopedGroupRemovalMigration, enrollmentHistoryMigration, suspensionEnrollmentMigration, personalRootRecoveryMigration, accountReenrollmentMigration,
 	accountReenrollmentRedemptionMigration, webSessionViewsMigration, webConnectionPlanMigration, webTunnelReleaseMigration, webSuspensionInventoryMigration,
 	auditMaintenanceMigration, unencryptedClientsMigration, sshHostPinMigration, updateNodeMigration, moveNodeMigration, suspensionRotationReceiptsMigration,
-	rowSecurityMigration,
+	rowSecurityMigration, deviceConnectionLimitMigration,
 }
 
 const SchemaVersion = len(schemaMigrations)
