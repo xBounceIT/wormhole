@@ -43,7 +43,7 @@ execFileSync(
   ],
   { stdio: 'inherit' },
 );
-execFileSync('/usr/bin/xcrun', ['lipo', '-verify_arch', 'arm64', 'x86_64', binary], {
+execFileSync('/usr/bin/xcrun', ['lipo', binary, '-verify_arch', 'arm64', 'x86_64'], {
   stdio: 'inherit',
 });
 copyFileSync(path.join(source, 'Info.plist'), path.join(contents, 'Info.plist'));

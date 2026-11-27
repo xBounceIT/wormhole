@@ -56,8 +56,18 @@ func openNativeMigrationStage(t *testing.T, path string, key []byte) *localvault
 	return owner
 }
 
+func physicalMigrationPath(t *testing.T, path string) string {
+	t.Helper()
+	physical, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return physical
+}
+
 func TestVaultMigrationStageDomainsPinsAndRestart(t *testing.T) {
 	db, source, doc, key, plan, ids := migrationStageFixture(t)
+	wantStage := physicalMigrationPath(t, source) + ".migrating-" + doc.FileID
 	ctx := context.Background()
 	for attempt := 0; attempt < 3; attempt++ {
 		wantNote := "private stage note"
@@ -78,7 +88,7 @@ func TestVaultMigrationStageDomainsPinsAndRestart(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if result.Credentials != 1 || result.Tunnels != 0 || result.Nodes != 3 || result.Pins != 2 || result.Path != source+".migrating-"+doc.FileID {
+		if result.Credentials != 1 || result.Tunnels != 0 || result.Nodes != 3 || result.Pins != 2 || result.Path != wantStage {
 			t.Fatal("incorrect import result", result)
 		}
 		marker, err := readVaultSlotFile(result.Path)

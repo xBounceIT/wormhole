@@ -49,9 +49,10 @@ func TestVaultMigrationCoordinatorResumesUnderContinuousOwnership(t *testing.T) 
 					t.Fatal(err)
 				}
 			}
+			wantStage := physicalMigrationPath(t, source) + ".migrating-" + document.FileID
 			for retry := 0; retry < 2; retry++ {
 				stage, err = continueLegacyVaultMigration(context.Background(), source, root, document, key, plan)
-				if err != nil || stage != source+".migrating-"+document.FileID {
+				if err != nil || stage != wantStage {
 					t.Fatal("resume failed", stage, err)
 				}
 			}

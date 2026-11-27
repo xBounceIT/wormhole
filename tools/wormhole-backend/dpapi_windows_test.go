@@ -12,6 +12,9 @@ import (
 	"testing"
 )
 
+// The parent and child already share the Windows user's DPAPI identity.
+func syncForcepointFixtureKey(*testing.T, *forcepointMutationFixture) {}
+
 func TestWindowsVncSavedCredentialIDCase(t *testing.T) {
 	testVncSavedCredentialIDCase(t)
 }

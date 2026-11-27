@@ -105,7 +105,7 @@ int main(void) {
                 board.throwClose = YES;
             }
             if (mode == 8) {
-                assert(ticket == 1 && board.count == 2);
+                assert(handle->owned == 1 && ticket == 2 && board.count == 2);
                 NSUInteger writes = board.writes;
                 assert(wh_clipboard_erase(handle,ticket) == 0 && board.writes == writes);
             }

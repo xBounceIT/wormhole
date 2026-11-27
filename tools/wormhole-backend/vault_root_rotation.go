@@ -173,6 +173,9 @@ func requireNoRootRotation(source string) error {
 		}
 		return nil
 	}
+	if err != nil {
+		return errVaultSlotStorage
+	}
 	return vault.ErrPolicy
 }
 

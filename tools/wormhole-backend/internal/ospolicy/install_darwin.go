@@ -42,7 +42,7 @@ func checkNativeInstallation(ctx context.Context) (string, error) {
 func darwinProcessImage(pid int) (string, error) {
 	// The operation behind libproc's proc_pidpath queries the text vnode,
 	// whereas kern.procargs2 exposes the process's writable argument area.
-	const procInfoCallPIDInfo, procPIDPathInfo = 1, 11
+	const procInfoCallPIDInfo, procPIDPathInfo = 2, 11
 	var path [4096]byte
 	_, _, errno := syscall.Syscall6(unix.SYS_PROC_INFO, procInfoCallPIDInfo, uintptr(pid), procPIDPathInfo, 0,
 		uintptr(unsafe.Pointer(&path[0])), uintptr(len(path)))

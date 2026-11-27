@@ -56,6 +56,13 @@ func TestVaultMigrationPublicationRootRejectsUnsafeNamesAndSlots(t *testing.T) {
 	if _, err := f.readSlots(path); !errors.Is(err, errVaultSlotMissing) {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(path, []byte("database fixture"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if invalid, err := openLegacyPublicationFS(path); err == nil {
+		invalid.root.Close()
+		t.Fatal("regular file admitted as a publication directory")
+	}
 	if err := f.writeSlots(path, nil); !errors.Is(err, vault.ErrFormat) {
 		t.Fatal("empty slot write accepted", err)
 	}
@@ -297,8 +304,8 @@ func TestVaultMigrationPublicationRejectsRedirectedLogicalParent(t *testing.T) {
 	if err != nil {
 		t.Fatal("original parent could not resume", err)
 	}
-	if publication.canonicalSource != source {
+	defer publication.close()
+	if publication.canonicalSource != physicalMigrationPath(t, source) {
 		t.Fatal("caller would retain the mutable logical alias")
 	}
-	publication.close()
 }

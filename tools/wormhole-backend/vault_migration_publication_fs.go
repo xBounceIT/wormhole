@@ -26,13 +26,12 @@ func legacyPublicationFilename(name string) bool {
 }
 
 func openLegacyPublicationFS(directory string) (*legacyPublicationFS, error) {
-	root, err := openLegacyBrowserRoot(directory)
+	canonical, err := filepath.EvalSymlinks(directory)
 	if err != nil {
 		return nil, err
 	}
-	canonical, err := filepath.EvalSymlinks(directory)
+	root, err := openLegacyBrowserRoot(directory)
 	if err != nil {
-		root.Close()
 		return nil, err
 	}
 	f := &legacyPublicationFS{root: root, canonical: canonical}

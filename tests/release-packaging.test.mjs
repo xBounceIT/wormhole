@@ -2,7 +2,17 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import { closeSync, existsSync } from 'node:fs';
-import { copyFile, glob, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import {
+  copyFile,
+  glob,
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  stat,
+  writeFile,
+} from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
@@ -1602,7 +1612,7 @@ test(
     skip: process.platform !== 'win32',
   },
   async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'wormhole authenticode-'));
+    const directory = await mkdtemp(join(await realpath(tmpdir()), 'wormhole authenticode-'));
     const steps = releaseJobs['windows-installers'].steps;
     const run = (name, overrides = {}, prefix = '') => {
       const body = steps.find((step) => step.name === name).run;
