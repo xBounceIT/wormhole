@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { execFile } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, realpath, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -17,7 +17,7 @@ test(
   'native Chromium SSO profile paths and complete persisted files enter the Go migration archive',
   { timeout: 120000 },
   async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'wormhole-browser-migration-'));
+    const directory = await mkdtemp(join(await realpath(tmpdir()), 'wormhole-browser-migration-'));
     try {
       const token = randomUUID();
       const partitions = [

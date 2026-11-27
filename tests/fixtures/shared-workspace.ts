@@ -882,7 +882,10 @@ export async function runSharedWorkspaceTests() {
   );
   const rdp = card.querySelector('.shared-rdp-surface')!;
   const rdpBounds = rdp.querySelector('[data-rdp-native-surface-region]')!.getBoundingClientRect();
-  check(rdpBounds.width > 500 && rdpBounds.height > 250, 'RDP surface geometry collapsed');
+  check(
+    rdpBounds.width > 500 && rdpBounds.height > 250,
+    `RDP surface measured ${rdpBounds.width}×${rdpBounds.height} in a ${innerWidth}×${innerHeight} viewport`,
+  );
   (
     Array.from(card.querySelectorAll('[role=tab]')).find((tab) =>
       tab.textContent?.includes('SSH'),

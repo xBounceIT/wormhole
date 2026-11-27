@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test, { before, after } from 'node:test';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtemp, rm, writeFile, readFile } from 'node:fs/promises';
+import { mkdtemp, realpath, rm, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -271,7 +271,7 @@ for (const mode of ['ssh', 'sftp', 'sftp-from-ssh'] as const)
       `Electron relays ${routed ? 'VPN-routed' : 'direct'} native credentials to a real ${mode.toUpperCase()} server while vault owns SQLite`,
       { timeout: 180000 },
       async (t) => {
-        const directory = await mkdtemp(join(tmpdir(), 'wormhole-ssh-relay-'));
+        const directory = await mkdtemp(join(await realpath(tmpdir()), 'wormhole-ssh-relay-'));
         const database = join(directory, 'vault.db');
         let server: ReturnType<typeof spawn> | undefined;
         const host = new VaultBackendHost(

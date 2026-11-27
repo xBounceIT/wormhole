@@ -61,14 +61,21 @@ test('shared catalog mounts real terminals and file tabs with owned reconnect an
  app.whenReady().then(async()=>{const window=new BrowserWindow({show:false,width:1360,height:850,webPreferences:{sandbox:true,contextIsolation:true,nodeIntegration:false,backgroundThrottling:false}});try{
  await window.loadURL(${JSON.stringify(pathToFileURL(join(directory, 'index.html')).href)});
  const debug=window.webContents.debugger;debug.attach('1.3');await debug.sendCommand('Emulation.setFocusEmulationEnabled',{enabled:true});await debug.sendCommand('Profiler.enable');await debug.sendCommand('Profiler.startPreciseCoverage',{callCount:true,detailed:true});
+ const viewport=async(width,height)=>{
+   window.setContentSize(width,height);
+   await debug.sendCommand('Emulation.setDeviceMetricsOverride',{width,height,mobile:false,deviceScaleFactor:1});
+   await window.webContents.executeJavaScript('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
+   assert.deepEqual(await window.webContents.executeJavaScript('[innerWidth,innerHeight]'),[width,height]);
+ };
+ await viewport(1360,850);
  await window.webContents.executeJavaScript(readFileSync(${JSON.stringify(join(directory, 'renderer.js'))},'utf8'));
  const result=await window.webContents.executeJavaScript('SharedWorkspaceTests.runSharedWorkspaceTests()');assert.equal(result.sessions,2);assert.equal(result.opens,4);
  await window.webContents.executeJavaScript('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
  writeFileSync(${JSON.stringify(screenshot)},(await window.webContents.capturePage()).toPNG());
- window.setSize(600,820);await window.webContents.executeJavaScript('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
+ await viewport(600,820);
  const narrow=await window.webContents.executeJavaScript('({width:innerWidth,scroll:document.documentElement.scrollWidth,top:document.querySelector(".startup-card").getBoundingClientRect().top,panel:document.querySelector(".shared-session-panel").getBoundingClientRect().height})');assert.ok(narrow.scroll<=narrow.width+1&&narrow.top>=0&&narrow.panel>=400,JSON.stringify(narrow));writeFileSync(${JSON.stringify(screenshot.replace('.png', '-narrow.png'))},(await window.webContents.capturePage()).toPNG());
  const scrolled=await window.webContents.executeJavaScript('(()=>{const shell=document.querySelector(".startup-shell");shell.scrollTop=shell.scrollHeight;const result={top:shell.scrollTop,bottom:document.querySelector(".shared-session-panel").getBoundingClientRect().bottom,height:innerHeight};shell.scrollTop=0;return result})()');assert.ok(scrolled.top>0&&scrolled.bottom<=scrolled.height,JSON.stringify(scrolled));
- window.setSize(1360,850);await window.webContents.executeJavaScript('document.documentElement.classList.remove("dark");new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');writeFileSync(${JSON.stringify(screenshot.replace('.png', '-light.png'))},(await window.webContents.capturePage()).toPNG());
+ await viewport(1360,850);await window.webContents.executeJavaScript('document.documentElement.classList.remove("dark");new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');writeFileSync(${JSON.stringify(screenshot.replace('.png', '-light.png'))},(await window.webContents.capturePage()).toPNG());
  await window.webContents.executeJavaScript('SharedWorkspaceTests.finishSharedWorkspaceTests()');
  await window.webContents.executeJavaScript('SharedWorkspaceTests.checkSharedWebSurface()');
  await window.webContents.executeJavaScript('SharedWorkspaceTests.checkSharedSerialSurface()');

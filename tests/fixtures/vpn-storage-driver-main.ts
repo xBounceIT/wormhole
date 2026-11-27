@@ -349,7 +349,12 @@ app
     for (const [initial, operation] of [
       ["caches.open('unsupported-cache')", 'cache'],
       [
-        "globalThis.worker=new Worker(URL.createObjectURL(new Blob(['setInterval(()=>{},1000)'],{type:'text/javascript'})));true",
+        `new Promise((resolve, reject) => {
+          const script = new Blob(["postMessage('ready')"], { type: 'text/javascript' });
+          const worker = globalThis.worker = new Worker(URL.createObjectURL(script));
+          worker.onmessage = ({ data }) => resolve(data);
+          worker.onerror = () => reject(new Error('Fixture worker failed to start'));
+        })`,
         'worker',
       ],
       [
