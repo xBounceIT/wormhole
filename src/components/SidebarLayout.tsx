@@ -139,9 +139,8 @@ export function SidebarLayout({
   const shouldKeepOpen = keepOpen || menuOpen;
 
   // A portaled menu may extend beyond the sidebar. Keep its owning surface mounted and visible.
-  useEffect(() => {
-    setRevealed((current) => hovered || focused || (shouldKeepOpen && current));
-  }, [hovered, focused, shouldKeepOpen]);
+  const shouldReveal = hovered || focused || (shouldKeepOpen && revealed);
+  if (revealed !== shouldReveal) setRevealed(shouldReveal);
   useEffect(() => () => window.clearTimeout(hoverExit.current), []);
   useEffect(() => {
     // Chromium matches :focus-visible on text inputs even when the pointer focuses them.

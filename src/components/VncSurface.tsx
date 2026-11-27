@@ -2,6 +2,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type FormEvent,
@@ -10,6 +11,7 @@ import {
 import { AlertCircle, KeyRound, Monitor, RefreshCcw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { PasswordInput } from '@/components/ui/password-input';
+import { clearSecretInput, takeOneShotSecret } from '@/secret-input';
 import { formatBitwardenAuthenticationError } from '@/bitwarden-cli-view';
 import { isBitwardenUnlockError } from '@/runtime-credential-errors';
 import {
@@ -106,19 +108,16 @@ function isFormInteraction(target: EventTarget | null): boolean {
   return target instanceof Element && target.closest('form, input, button') !== null;
 }
 
-// VNC input, frame, connection, tunnel, and credential flows share one native session lifetime;
-// independent state setters avoid coupling high-frequency frames to low-frequency auth transitions.
-// react-doctor-disable-next-line react-doctor/no-giant-component, react-doctor/prefer-useReducer
-export function VncSurface({
-  isAuthorized,
-  session,
-  connectionGeneration,
-  disconnected,
-  bitwardenUnlockPending,
-  onBitwardenUnlockRequired,
-  onReconnect,
-  onStatusChange,
-}: {
+async function sendCommand(command: WormholeVncCommand) {
+  try {
+    if (!window.wormhole) return { ok: false, error: 'The VNC service is unavailable.' };
+    return await window.wormhole.sendVncCommand(command);
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : 'The VNC service failed.' };
+  }
+}
+
+type VncSurfaceProps = {
   isAuthorized: boolean;
   session: VncSurfaceSession;
   connectionGeneration: number;
@@ -127,13 +126,35 @@ export function VncSurface({
   onBitwardenUnlockRequired?: (reason: string, retry: () => void) => void;
   onReconnect?: () => void;
   onStatusChange?: (status: VncStatus) => void;
-  // react-doctor-disable-next-line react-doctor/prefer-useReducer
-}) {
-  const [status, setStatus] = useState<VncStatus>(disconnected ? 'disconnected' : 'idle');
-  const [message, setMessage] = useState(disconnected ? 'The session was disconnected.' : '');
+};
+
+export function VncSurface({
+  connectionGeneration,
+  isAuthorized,
+  session,
+  disconnected,
+  bitwardenUnlockPending,
+  onBitwardenUnlockRequired,
+  onReconnect,
+  onStatusChange,
+}: VncSurfaceProps) {
+  const initialStatus = !window.wormhole ? 'failed' : disconnected ? 'disconnected' : 'connecting';
+  const initialMessage = !window.wormhole
+    ? 'The VNC service is unavailable.'
+    : disconnected
+      ? 'The session was disconnected.'
+      : '';
+  const [status, setStatus] = useState<VncStatus>(initialStatus);
+  const [message, setMessage] = useState(initialMessage);
   const [passwordRequired, setPasswordRequired] = useState(false);
   const [bitwardenUnlockRequired, setBitwardenUnlockRequired] = useState(false);
-  const [password, setPassword] = useState('');
+  const [hasPassword, setHasPassword] = useState(false);
+  const passwordInput = useRef<HTMLInputElement>(null);
+  const bindPasswordInput = useCallback((input: HTMLInputElement | null) => {
+    clearSecretInput(passwordInput.current);
+    passwordInput.current = input;
+    setHasPassword(false);
+  }, []);
   const [tunnelProgress, setTunnelProgress] = useState<TunnelProgress | null>(null);
   const [frame, setFrame] = useState<string>();
   const [hasLoadedFrame, setHasLoadedFrame] = useState(false);
@@ -144,45 +165,26 @@ export function VncSurface({
   const lastPointer = useRef<{ x: number; y: number } | null>(null);
   const pointerMoveGeneration = useRef(0);
   const connectAttempt = useRef(0);
+  const [authLifetime, setAuthLifetime] = useState({ isAuthorized });
   const pendingPointerMove = useRef<PendingPointerMove | null>(null);
   const pointerMoveSending = useRef<number | null>(null);
   const buttons = useRef(0);
   const connectRef = useRef<(providedPassword?: string) => Promise<void>>(() => Promise.resolve());
   const onStatusChangeRef = useRef(onStatusChange);
-  const bitwardenUnlockRequestRef = useRef({ isAuthorized, onBitwardenUnlockRequired });
+  const bitwardenUnlockRequestRef = useRef({ authLifetime, onBitwardenUnlockRequired });
 
   useLayoutEffect(() => {
     onStatusChangeRef.current = onStatusChange;
-    bitwardenUnlockRequestRef.current = { isAuthorized, onBitwardenUnlockRequired };
-  }, [isAuthorized, onBitwardenUnlockRequired, onStatusChange]);
+    bitwardenUnlockRequestRef.current = { authLifetime, onBitwardenUnlockRequired };
+  }, [authLifetime, onBitwardenUnlockRequired, onStatusChange]);
 
-  // Disconnection is an external native lifecycle transition, and authorization loss must scrub
-  // the renderer-held password immediately. Synchronizing those boundaries cannot be derived from
-  // the local VNC event stream alone.
-  // react-doctor-disable-next-line react-hooks-js/set-state-in-effect
-  useEffect(() => {
+  if (authLifetime.isAuthorized !== isAuthorized) {
+    setAuthLifetime({ isAuthorized });
     if (!isAuthorized) {
-      setPassword(''); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
-      setPasswordRequired(false); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
-      setBitwardenUnlockRequired(false); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
+      setPasswordRequired(false);
+      setBitwardenUnlockRequired(false);
     }
-    if (!disconnected) return;
-    connectAttempt.current += 1;
-    setStatus('disconnected'); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
-    setMessage('The session was disconnected.'); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
-    setPasswordRequired(false); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
-    setBitwardenUnlockRequired(false); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
-    setPassword(''); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
-    setTunnelProgress(null); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
-    setFrame(undefined); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
-    setHasLoadedFrame(false); // react-doctor-disable-line react-doctor/no-adjust-state-on-prop-change
-    frameSize.current = { width: 0, height: 0 };
-    lastPointer.current = null;
-    pointerMoveGeneration.current += 1;
-    pendingPointerMove.current = null;
-    pressedKeys.current.clear();
-    buttons.current = 0;
-  }, [disconnected, isAuthorized]);
+  }
 
   const updateStatus = useCallback((nextStatus: VncStatus) => {
     setStatus(nextStatus);
@@ -190,13 +192,22 @@ export function VncSurface({
   }, []);
   const notifyBitwardenUnlockRequired = useCallback((reason: string) => {
     const request = bitwardenUnlockRequestRef.current;
-    if (!request.isAuthorized) return;
-    request.onBitwardenUnlockRequired?.(reason, () => void connectRef.current());
+    if (!request.authLifetime.isAuthorized) return;
+    const attempt = connectAttempt.current;
+    request.onBitwardenUnlockRequired?.(reason, () => {
+      if (
+        attempt === connectAttempt.current &&
+        bitwardenUnlockRequestRef.current.authLifetime === request.authLifetime
+      ) {
+        void connectRef.current();
+      }
+    });
   }, []);
   const applyBitwardenUnlockRequirement = useCallback(
     (error: string | undefined, reason: string): boolean => {
       const unlockRequired = isBitwardenUnlockError(error);
-      const promptAllowed = unlockRequired && bitwardenUnlockRequestRef.current.isAuthorized;
+      const promptAllowed =
+        unlockRequired && bitwardenUnlockRequestRef.current.authLifetime.isAuthorized;
       setBitwardenUnlockRequired(promptAllowed);
       if (promptAllowed) notifyBitwardenUnlockRequired(reason);
       return unlockRequired;
@@ -204,95 +215,94 @@ export function VncSurface({
     [notifyBitwardenUnlockRequired],
   );
 
-  const sendCommand = useCallback(
-    async (
-      command: WormholeVncCommand,
-      showError = false,
-      expectedConnectAttempt?: number,
-    ): Promise<boolean> => {
-      const canShowError = () =>
-        showError &&
-        (expectedConnectAttempt === undefined || connectAttempt.current === expectedConnectAttempt);
-      const api = window.wormhole;
-      if (!api) {
-        if (canShowError()) {
-          updateStatus('failed');
-          setMessage('The VNC service is unavailable.');
-        }
-        return false;
-      }
-      try {
-        const response = await api.sendVncCommand(command);
-        if (!response.ok && canShowError()) {
-          const message = response.error ?? 'The VNC request could not be completed.';
-          updateStatus('failed');
-          setMessage(message);
-          const unlockRequired = applyBitwardenUnlockRequirement(response.error, message);
-          setPasswordRequired(!unlockRequired && isAuthenticationMessage(response.error));
-        }
-        return response.ok;
-      } catch (error) {
-        if (canShowError()) {
-          updateStatus('failed');
-          const message = error instanceof Error ? error.message : 'The VNC service failed.';
-          setMessage(message);
-          applyBitwardenUnlockRequirement(message, message);
-        }
-        return false;
-      }
-    },
-    [applyBitwardenUnlockRequirement, updateStatus],
-  );
-
-  const connect = useCallback(
-    async (providedPassword?: string) => {
-      const attempt = connectAttempt.current + 1;
-      connectAttempt.current = attempt;
-      updateStatus('connecting');
-      setMessage('');
-      setPasswordRequired(false);
-      setBitwardenUnlockRequired(false);
-      setFrame(undefined);
-      setHasLoadedFrame(false);
-      frameSize.current = { width: 0, height: 0 };
-      setTunnelProgress(null);
-      lastPointer.current = null;
-      pointerMoveGeneration.current += 1;
-      pendingPointerMove.current = null;
-      pressedKeys.current.clear();
-      buttons.current = 0;
-      await sendCommand(
-        {
-          action: 'vnc.connect',
-          sessionId: session.id,
-          nodeId: session.nodeId,
-          credentialId: session.credentialId,
-          tunnelConfigId: session.tunnelConfigId,
-          host: session.host,
-          port: session.port,
-          ...(providedPassword === undefined
-            ? {}
-            : { password: providedPassword, passwordProvided: true }),
-        },
-        true,
-        attempt,
-      );
-    },
+  const target = useMemo(
+    () => ({
+      sessionId: session.id,
+      nodeId: session.nodeId,
+      credentialId: session.credentialId,
+      tunnelConfigId: session.tunnelConfigId,
+      host: session.host,
+      port: session.port,
+    }),
     [
-      sendCommand,
       session.credentialId,
       session.host,
       session.id,
       session.nodeId,
       session.port,
       session.tunnelConfigId,
-      updateStatus,
     ],
+  );
+  const connect = useCallback(
+    (providedPassword?: string) => {
+      const attempt = connectAttempt.current + 1;
+      connectAttempt.current = attempt;
+      onStatusChangeRef.current?.('connecting');
+      frameSize.current = { width: 0, height: 0 };
+      lastPointer.current = null;
+      pointerMoveGeneration.current += 1;
+      pendingPointerMove.current = null;
+      pressedKeys.current.clear();
+      buttons.current = 0;
+      return sendCommand({
+        action: 'vnc.connect',
+        ...target,
+        ...(providedPassword === undefined
+          ? {}
+          : { password: providedPassword, passwordProvided: true }),
+      }).then((response) => {
+        if (connectAttempt.current !== attempt || response.ok) return;
+        const message = response.error ?? 'The VNC request could not be completed.';
+        updateStatus('failed');
+        setMessage(message);
+        const unlockRequired = applyBitwardenUnlockRequirement(response.error, message);
+        setPasswordRequired(!unlockRequired && isAuthenticationMessage(response.error));
+      });
+    },
+    [applyBitwardenUnlockRequirement, updateStatus, target],
+  );
+
+  const resetConnectionView = useCallback((nextStatus: VncStatus, nextMessage: string) => {
+    setStatus(nextStatus);
+    setMessage(nextMessage);
+    setPasswordRequired(false);
+    setBitwardenUnlockRequired(false);
+    setFrame(undefined);
+    setHasLoadedFrame(false);
+    setTunnelProgress(null);
+  }, []);
+
+  // Keep the desktop mounted while retiring the previous connection's frame and prompts.
+  const [connection, setConnection] = useState({ target, connectionGeneration, disconnected });
+  if (
+    connection.target !== target ||
+    connection.connectionGeneration !== connectionGeneration ||
+    connection.disconnected !== disconnected
+  ) {
+    setConnection({ target, connectionGeneration, disconnected });
+    resetConnectionView(initialStatus, initialMessage);
+  }
+
+  const retryConnection = useCallback(
+    (providedPassword?: string) => {
+      if (!window.wormhole) {
+        updateStatus('failed');
+        setMessage('The VNC service is unavailable.');
+        return Promise.resolve();
+      }
+      resetConnectionView('connecting', '');
+      return connect(providedPassword);
+    },
+    [connect, resetConnectionView, updateStatus],
   );
 
   useLayoutEffect(() => {
-    connectRef.current = connect;
-  }, [connect]);
+    connectRef.current = retryConnection;
+    return () => {
+      connectAttempt.current++;
+      connectRef.current = () => Promise.resolve();
+    };
+  }, [retryConnection, connectionGeneration, disconnected]);
 
   const queuePointerMove = useCallback(
     (command: PointerCommand) => {
@@ -321,20 +331,19 @@ export function VncSurface({
         }
       })();
     },
-    [sendCommand, session.id],
+    [session.id],
   );
 
   useEffect(() => {
     const api = window.wormhole;
     if (!api) {
-      updateStatus('failed');
-      setMessage('The VNC service is unavailable.');
+      onStatusChangeRef.current?.('failed');
       return;
     }
 
     let mounted = true;
     const unsubscribe = api.onBackendEvent((event) => {
-      if (!mounted || event.sessionId !== session.id) return;
+      if (!mounted || disconnected || event.sessionId !== session.id) return;
       if (event.type === 'tunnel.progress' && event.phase) {
         setTunnelProgress({ phase: event.phase, detail: event.detail });
         return;
@@ -359,7 +368,6 @@ export function VncSurface({
     return () => {
       mounted = false;
       unsubscribe();
-      setTunnelProgress(null);
       for (const keySym of pressedKeysForCleanup.values()) {
         void sendCommand({ action: 'vnc.key', sessionId: session.id, down: false, keysym: keySym });
       }
@@ -374,7 +382,6 @@ export function VncSurface({
     connectionGeneration,
     disconnected,
     applyBitwardenUnlockRequirement,
-    sendCommand,
     session.id,
     updateStatus,
   ]);
@@ -517,28 +524,36 @@ export function VncSurface({
 
   async function submitPassword(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const value = password;
-    setPassword('');
+    if (!isAuthorized || disconnected || !passwordInput.current) return;
+    const value = takeOneShotSecret(passwordInput.current);
+    setHasPassword(false);
     if (bitwardenUnlockRequired) {
+      if (!value) return;
+      const attempt = connectAttempt.current;
+      const isCurrent = () =>
+        attempt === connectAttempt.current &&
+        authLifetime === bitwardenUnlockRequestRef.current.authLifetime;
       try {
         await window.wormhole?.unlockBitwardenCli(value);
-        await connect();
+        if (!isCurrent()) return;
+        await connectRef.current();
       } catch (error: unknown) {
+        if (!isCurrent()) return;
         const message = formatBitwardenAuthenticationError(error, 'unlock');
         updateStatus('failed');
         setMessage(message);
-        const promptAllowed = bitwardenUnlockRequestRef.current.isAuthorized;
-        setBitwardenUnlockRequired(promptAllowed);
-        if (promptAllowed) notifyBitwardenUnlockRequired(message);
+        setBitwardenUnlockRequired(true);
+        notifyBitwardenUnlockRequired(message);
       }
       return;
     }
-    await connect(value);
+    await retryConnection(value);
   }
 
   const globalBitwardenUnlockPending =
     isAuthorized && bitwardenUnlockRequired && bitwardenUnlockPending;
   const showPasswordPrompt =
+    isAuthorized &&
     status === 'failed' &&
     (passwordRequired || (bitwardenUnlockRequired && !globalBitwardenUnlockPending));
   const displayHost = session.host || 'inherited target';
@@ -626,15 +641,15 @@ export function VncSurface({
                           autoFocus
                           key={bitwardenUnlockRequired ? 'bitwarden' : session.id}
                           id={`vnc-password-${session.id}`}
-                          onChange={(event) => setPassword(event.target.value)}
+                          onChange={(event) => setHasPassword(Boolean(event.currentTarget.value))}
                           placeholder={
                             bitwardenUnlockRequired
                               ? 'Unlock the Bitwarden vault'
                               : 'Enter password'
                           }
-                          value={password}
+                          ref={bindPasswordInput}
                         />
-                        <Button disabled={bitwardenUnlockRequired && !password} type="submit">
+                        <Button disabled={bitwardenUnlockRequired && !hasPassword} type="submit">
                           <KeyRound data-icon="inline-start" />
                           {bitwardenUnlockRequired ? 'Unlock and connect' : 'Connect'}
                         </Button>
@@ -642,7 +657,7 @@ export function VncSurface({
                     </form>
                   ) : (
                     <Button
-                      onClick={() => (disconnected ? onReconnect?.() : void connect())}
+                      onClick={() => (disconnected ? onReconnect?.() : void retryConnection())}
                       variant="outline"
                     >
                       <RefreshCcw data-icon="inline-start" />

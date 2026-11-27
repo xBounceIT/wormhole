@@ -352,7 +352,10 @@ test('authentication prompts and window-close controls work in Chromium', async 
       closeHarness +
       bitwardenHelpers +
       selectSource +
-      slice('function clearSecretInput(', 'function credentialSelectionFor(') +
+      readFileSync(new URL('../src/secret-input.ts', import.meta.url), 'utf8').replace(
+        /^export /gm,
+        '',
+      ) +
       bitwardenHarness +
       runtimeCredentialHarness +
       notesHarness +

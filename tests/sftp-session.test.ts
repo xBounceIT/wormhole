@@ -134,7 +134,7 @@ app.whenReady().then(async () => {
     await window.webContents.debugger.sendCommand('Profiler.stopPreciseCoverage');
     const script = coverage.result.find(item => item.url === 'wormhole-sftp-session.js');
     assert.ok(script);
-    for (const name of ['IconButton', 'SftpBrowserSurface', 'SftpDirectoryTree', 'SearchField', 'SftpColumnHeader', 'SftpSectionHeader', 'SftpEditorSettings', 'SftpEditedFiles', 'SftpRecoveryNotice']) {
+    for (const name of ['IconButton', 'SftpBrowserSurface', 'SftpDirectoryTree', 'DirectoryTreeContent', 'SearchField', 'SftpColumnHeader', 'SftpSectionHeader', 'SftpEditorSettings', 'SftpEditedFiles', 'EditedFileList', 'SftpRecoveryNotice']) {
       const fn = script.functions.find(item => item.functionName === name);
       assert.ok(fn, 'Missing ' + name);
       const ranges = script.functions.flatMap(item => item.ranges).filter(range => range.startOffset >= fn.ranges[0].startOffset && range.endOffset <= fn.ranges[0].endOffset);
