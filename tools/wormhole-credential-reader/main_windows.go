@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"syscall"
@@ -53,6 +54,13 @@ type credentialEntry struct {
 }
 
 func main() {
+	if os.Getenv("WORMHOLE_SUPERVISED_CREDENTIAL_READER") == "1" {
+		// EOF before the start signal means the supervisor died during launch.
+		var start [1]byte
+		if _, err := io.ReadFull(os.Stdin, start[:]); err != nil || start[0] != '\n' {
+			os.Exit(1)
+		}
+	}
 	entries, err := enumerateCredentials("Wormhole:*")
 	if err != nil {
 		// Never include credential values in errors. The parent records only this generic failure

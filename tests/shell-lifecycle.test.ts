@@ -1702,6 +1702,76 @@ test('window close cancellation is fail-closed and duplicate requests do not pro
   assert.deepEqual({ prompts, teardowns, closes }, { prompts: 1, teardowns: 0, closes: 0 });
 });
 
+test('renderer failure closes once even when edit preparation or close confirmation is pending', async () => {
+  for (const stage of ['prepare', 'confirm'] as const) {
+    const coordinator = new WindowCloseCoordinator();
+    coordinator.updateActiveCount(1);
+    const entered = Promise.withResolvers<void>();
+    const result = Promise.withResolvers<boolean>();
+    const calls: string[] = [];
+    const prompt = () => {
+      entered.resolve();
+      return result.promise;
+    };
+    const request = {
+      reason: 'window' as const,
+      confirmationEnabled: true,
+      prepare: stage === 'prepare' ? prompt : async () => true,
+      confirm:
+        stage === 'confirm'
+          ? prompt
+          : async () => {
+              calls.push('unexpected prompt');
+              return true;
+            },
+      teardown: async () => {
+        calls.push('teardown');
+      },
+      close: () => {
+        calls.push('closed');
+      },
+    };
+    const pending = coordinator.request(request);
+    await entered.promise;
+    assert.equal(await coordinator.request({ ...request, reason: 'renderer-failure' }), true);
+    result.resolve(stage === 'prepare');
+    assert.equal(await pending, false);
+    assert.equal(coordinator.isComplete, true);
+    assert.deepEqual(calls, ['teardown', 'closed']);
+  }
+});
+
+test('a crashed renderer releases its pending quit confirmation while the window still exists', async () => {
+  let crashed = false;
+  const webContents = Object.assign(new EventEmitter(), {
+    id: 1,
+    isDestroyed: () => false,
+    isCrashed: () => crashed,
+    send: () => {},
+  });
+  const window = { isDestroyed: () => false, webContents };
+  const waiters = new Map();
+  const main = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
+  const start = main.indexOf('function requestRendererCloseConfirmation(');
+  const source = main.slice(start, main.indexOf('type StartupResponse', start));
+  const confirm = new Function(
+    'closeConfirmationReadyWindows',
+    'closeConfirmationWaiters',
+    'randomUUID',
+    stripTypeScriptTypes(source) + '\nreturn requestRendererCloseConfirmation;',
+  )(new WeakSet([window]), waiters, () => 'request');
+  const pending = confirm(window, 1, 'quit');
+  assert.equal(waiters.size, 1);
+  crashed = true;
+  webContents.emit('render-process-gone');
+  assert.equal(waiters.size, 0);
+  assert.equal(await pending, false);
+  assert.equal(webContents.listenerCount('destroyed'), 0);
+  const retry = confirm(window, 1, 'quit');
+  assert.equal(waiters.size, 0);
+  assert.equal(await retry, false);
+});
+
 test('confirmed and non-interactive closes teardown once before closing', async () => {
   for (const reason of [
     'window',

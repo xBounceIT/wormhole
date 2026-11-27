@@ -22,6 +22,7 @@ import {
 import { Sidebar, SidebarProvider } from '../../src/components/ui/sidebar';
 import { TooltipProvider } from '../../src/components/ui/tooltip';
 import { applyTheme } from '../../src/theme';
+import { useIsMobile } from '../../src/hooks/use-mobile';
 import '../../src/index.css';
 
 declare global {
@@ -30,6 +31,7 @@ declare global {
     sidebarInput: (event: Record<string, unknown>) => Promise<void>;
     sidebarHover: (selector: string, enabled: boolean) => Promise<void>;
     sidebarReducedMotion: (reduce: boolean) => Promise<void>;
+    sidebarViewport: (width?: number) => Promise<void>;
     sidebarObserve: (stage: string) => Promise<void>;
     runSidebarTests: (handleOnly?: boolean) => Promise<void>;
   }
@@ -155,6 +157,27 @@ window.runSidebarTests = async (handleOnly = false) => {
   if (handleOnly) return runAppIntegrationTests(true);
   const assert = window.sidebarAssert;
   const root = createRoot(document.getElementById('root')!);
+  const mobileCommits: boolean[] = [];
+  function ViewportProbe() {
+    const mobile = useIsMobile();
+    React.useLayoutEffect(() => {
+      mobileCommits.push(mobile);
+    }, [mobile]);
+    return null;
+  }
+  try {
+    await window.sidebarViewport(767);
+    await React.act(async () => root.render(<ViewportProbe />));
+    assert.deepEqual(mobileCommits, [true], 'The first commit must use the current viewport');
+    await React.act(async () => window.sidebarViewport(768));
+    assert.deepEqual(
+      mobileCommits,
+      [true, false],
+      'Crossing the mobile breakpoint must update the sidebar',
+    );
+  } finally {
+    await React.act(async () => window.sidebarViewport());
+  }
   let key = 0;
   const mount = async (
     pinned = true,

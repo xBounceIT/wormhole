@@ -13,6 +13,7 @@ import {
 import { runSshThemeSettingsTests } from './ssh-theme-settings';
 import { WebglAddon } from '@xterm/addon-webgl';
 import * as React from 'react';
+import { flushSync } from 'react-dom';
 import { createRoot } from 'react-dom/client';
 import {
   ContextMenuOverlayProvider,
@@ -498,30 +499,28 @@ async function run(setZoomFactor: (zoom: number) => void) {
     onTrustSshHostKey: () => {},
   };
   let paneRect = { paneId: 'ssh', x: 0, y: 0, width: 100, height: 100 };
-  const render = async () => {
-    await React.act(async () => {
-      root.render(
+  const renderPane = () =>
+    root.render(
+      React.createElement(
+        ContextMenuOverlayProvider,
+        null,
+        React.createElement(OverlayProbe),
+        React.createElement(SessionPaneChrome, {
+          dropTarget: false,
+          onActivate: () => {},
+          rect: paneRect,
+        }),
         React.createElement(
-          ContextMenuOverlayProvider,
-          null,
-          React.createElement(OverlayProbe),
-          React.createElement(SessionPaneChrome, {
-            dropTarget: false,
-            onActivate: () => {},
-            rect: paneRect,
-          }),
-          React.createElement(
-            'div',
-            {
-              className: 'session-surface absolute overflow-hidden',
-              style: sessionSurfaceStyle(paneRect, true, 'ssh'),
-            },
-            React.createElement(SessionSurface, props),
-          ),
+          'div',
+          {
+            className: 'session-surface absolute overflow-hidden',
+            style: sessionSurfaceStyle(paneRect, true, 'ssh'),
+          },
+          React.createElement(SessionSurface, props),
         ),
-      );
-    });
-  };
+      ),
+    );
+  const render = () => React.act(renderPane);
   function OverlayProbe() {
     return React.createElement(
       'output',
@@ -552,19 +551,21 @@ async function run(setZoomFactor: (zoom: number) => void) {
   assert.ok(status.querySelector('.lucide-shield-check'));
   assert.equal(mounted.querySelector('.xterm'), null);
   props = { ...props, session: { ...props.session, tunnelProgress: null, status: 'connected' } };
-  await render();
-  const exiting = mounted.querySelector<HTMLElement>('[data-connection-transition="exit"]')!;
-  assert.equal(exiting, pending, 'the loading panel must survive the first terminal paint');
-  assert.ok(exiting.inert);
-  assert.equal(getComputedStyle(exiting).pointerEvents, 'none');
-  if (motionReduced) {
-    assert.equal(getComputedStyle(exiting).display, 'none');
-  } else {
-    assert.equal(getComputedStyle(exiting).animationName, 'connection-loading-exit');
-  }
-  assert.ok(mounted.querySelector('.xterm'));
+  await React.act(() => {
+    // Observe the connected commit before the exit animation or reduced-motion timer can finish.
+    flushSync(renderPane);
+    assert.equal(mounted.querySelector('[data-connection-transition="exit"]'), pending);
+    assert.ok(pending.inert);
+    assert.equal(getComputedStyle(pending).pointerEvents, 'none');
+    if (motionReduced) {
+      assert.equal(getComputedStyle(pending).display, 'none');
+    } else {
+      assert.equal(getComputedStyle(pending).animationName, 'connection-loading-exit');
+    }
+    assert.ok(mounted.querySelector('.xterm'));
+  });
   const revealDeadline = performance.now() + 1500;
-  while (exiting.isConnected && performance.now() < revealDeadline) {
+  while (pending.isConnected && performance.now() < revealDeadline) {
     await React.act(() => new Promise((resolve) => setTimeout(resolve, 30)));
   }
   assert.equal(mounted.querySelector('[data-connection-transition]'), null);

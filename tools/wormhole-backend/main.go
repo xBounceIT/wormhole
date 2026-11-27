@@ -1441,10 +1441,22 @@ func readWindowsCredentials(executablePath string) ([]credentialReaderEntry, err
 	ctx, cancel := context.WithTimeout(context.Background(), credentialReaderTimeout)
 	defer cancel()
 	command := exec.CommandContext(ctx, executablePath)
+	command.Env = append(command.Environ(), "WORMHOLE_SUPERVISED_CREDENTIAL_READER=1")
 	command.Stderr = io.Discard
 	output := &limitedOutput{limit: credentialReaderMaxOutput}
 	command.Stdout = output
-	err := command.Run()
+	start, err := command.StdinPipe()
+	if err != nil {
+		return nil, errors.New("Credential Manager reader failed")
+	}
+	err = startOwnedHelper(command)
+	if err == nil {
+		// Release the reader only after Windows owns it. Older readers ignore
+		// stdin and may have already exited successfully.
+		_, _ = start.Write([]byte{'\n'})
+		_ = start.Close()
+		err = command.Wait()
+	}
 	if output.exceeded {
 		return nil, errors.New("Credential Manager reader returned too much data")
 	}

@@ -744,6 +744,9 @@ func startSingleTunnelProcess(ctx context.Context, snapshot tunnelConfigSnapshot
 		return nil, err
 	}
 
+	if err := reportTunnelProgress(ctx, "starting", ""); err != nil {
+		return nil, err
+	}
 	command := exec.Command(path)
 	stdin, err := command.StdinPipe()
 	if err != nil {
@@ -760,10 +763,7 @@ func startSingleTunnelProcess(ctx context.Context, snapshot tunnelConfigSnapshot
 	// A descendant can inherit the pipe after the sidecar exits. Bound that
 	// final drain so process.exited still releases tunnel leases promptly.
 	command.WaitDelay = tunnelSidecarDrainTimeout
-	if err := reportTunnelProgress(ctx, "starting", ""); err != nil {
-		return nil, err
-	}
-	if err := command.Start(); err != nil {
+	if err := startOwnedHelper(command); err != nil {
 		return nil, errors.New("could not start VPN tunnel")
 	}
 	process := &tunnelProcess{stdin: stdin, command: command, exited: make(chan struct{}), identity: snapshot.identity}

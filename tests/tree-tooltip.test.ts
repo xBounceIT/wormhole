@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
 import { promisify } from 'node:util';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { runInNewContext } from 'node:vm';
 import type { BrowserWindow, BrowserWindowConstructorOptions } from 'electron';
 import { TreeTooltipManager, type TreeTooltipRequest } from '../electron/tree-tooltip.ts';
@@ -475,47 +475,46 @@ test('an old window load failure cannot tear down its replacement', async () => 
 
 test('real Electron tooltip stays owned, unfocused, and reusable over session views', async (context) => {
   const require = createRequire(import.meta.url);
+  const execFileAsync = promisify(execFile);
   const { transformWithOxc } = await import('vite');
   const source = readFileSync(new URL('../electron/tree-tooltip.ts', import.meta.url), 'utf8');
   const transformed = await transformWithOxc(source, 'tree-tooltip.ts');
   const directory = mkdtempSync(join(tmpdir(), 'wormhole-tree-tooltip-'));
   const modulePath = join(directory, 'tree-tooltip.mjs');
   const harnessPath = join(directory, 'tooltip.cjs');
-  const stackingPath = join(directory, 'stacking.ps1');
+  const stackingPath = join(directory, 'window-stacking.exe');
+  const completed = 'Native tooltip ownership, focus, bounds, reuse and teardown passed';
   const { ELECTRON_RUN_AS_NODE: _electronRunAsNode, ...environment } = process.env;
   try {
     writeFileSync(modulePath, transformed.code);
-    writeFileSync(
-      stackingPath,
-      `param([long]$Above, [long]$Below)
-Add-Type @'
-using System;
-using System.Runtime.InteropServices;
-public static class NativeStacking {
-  [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr hwnd, uint command);
-  public static bool IsAbove(long above, long below) {
-    var current = new IntPtr(below);
-    for (var index = 0; index < 10000; index++) {
-      current = GetWindow(current, 3);
-      if (current == IntPtr.Zero) return false;
-      if (current == new IntPtr(above)) return true;
+    if (process.platform === 'win32') {
+      const fixture = fileURLToPath(
+        new URL('./fixtures/window-stacking_windows.go', import.meta.url),
+      );
+      await execFileAsync('go', ['build', '-o', stackingPath, fixture], {
+        env: {
+          ...environment,
+          GOOS: 'windows',
+          GOARCH: process.arch === 'arm64' ? 'arm64' : 'amd64',
+        },
+        windowsHide: true,
+        timeout: 180_000,
+      });
+      await assert.rejects(
+        execFileAsync(stackingPath, ['0', '0'], { windowsHide: true, timeout: 10_000 }),
+        /expected a nonzero window handle/,
+      );
     }
-    throw new InvalidOperationException("Native window order did not terminate");
-  }
-}
-'@
-[NativeStacking]::IsAbove($Above, $Below)
-`,
-    );
     writeFileSync(
       harnessPath,
       `
       const assert = require('node:assert/strict');
       const { app, BrowserWindow, WebContentsView } = require('electron');
-      const { execFileSync } = require('node:child_process');
-      const isAbove = (above, below) => {
+      const execFile = require('node:util').promisify(require('node:child_process').execFile);
+      const isAbove = async (above, below) => {
         const handle = window => window.getNativeWindowHandle().readBigUInt64LE().toString();
-        return execFileSync('powershell.exe', ['-NoProfile', '-File', ${JSON.stringify(stackingPath)}, handle(above), handle(below)], { windowsHide: true, encoding: 'utf8', timeout: 10000 }).trim() === 'True';
+        const { stdout } = await execFile(${JSON.stringify(stackingPath)}, [handle(above), handle(below)], { windowsHide: true, timeout: 10000 });
+        return JSON.parse(stdout);
       };
       app.setPath('userData', ${JSON.stringify(directory)});
       app.setPath('sessionData', ${JSON.stringify(directory)});
@@ -569,9 +568,11 @@ public static class NativeStacking {
             await nativeRdp.loadURL('data:text/html,<body style="background:red">Native RDP sibling</body>');
             nativeRdp.showInactive();
             nativeRdp.moveTop();
-            assert.equal(isAbove(popup, nativeRdp), false, 'Reproduce native RDP reclaiming the z-order');
+            assert.equal(await isAbove(popup, nativeRdp), false, 'Reproduce native RDP reclaiming the z-order');
             manager.raiseForWindow(owner);
-            assert.equal(isAbove(popup, nativeRdp), true, 'An open tooltip must be raised above the native RDP sibling');
+            assert.equal(await isAbove(popup, nativeRdp), true, 'An open tooltip must be raised above the native RDP sibling');
+            assert.equal(popup.isVisible(), true, 'The raised tooltip must remain visible');
+            assert.equal(popup.isFocused(), false, 'The raised tooltip must remain unfocused');
           }
           manager.hide(owner);
           assert.equal(popup.isVisible(), false);
@@ -586,26 +587,30 @@ public static class NativeStacking {
           assert.equal(popup.isVisible(), false);
           owner.destroy();
           assert.equal(popup.isDestroyed(), true);
-          console.log('Native tooltip ownership, focus, bounds, reuse and teardown passed');
         } finally {
           manager.closeForWindow(owner);
           if (nativeRdp && !nativeRdp.isDestroyed()) nativeRdp.destroy();
           if (view && !view.webContents.isDestroyed()) view.webContents.close();
           if (!owner.isDestroyed()) owner.destroy();
         }
+        console.log(${JSON.stringify(completed)});
         app.quit();
       }).catch(error => { console.error(error); app.exit(1); });
     `,
     );
     const electron = require('electron') as string;
     const needsDisplay = process.platform === 'linux' && !environment.DISPLAY;
-    const { stdout, stderr } = await promisify(execFile)(
+    const { stdout, stderr } = await execFileAsync(
       needsDisplay ? 'xvfb-run' : electron,
       needsDisplay ? ['--auto-servernum', electron, '--no-sandbox', harnessPath] : [harnessPath],
       { env: { ...environment, NODE_ENV: 'test' }, timeout: 30_000, windowsHide: true },
     );
-    if (stdout.trim()) context.diagnostic(stdout.trim());
     if (stderr.trim()) process.stderr.write(stderr);
+    assert.ok(
+      stdout.includes(completed),
+      'Electron exited before completing the native tooltip checks',
+    );
+    context.diagnostic(stdout.trim());
   } finally {
     assert.equal(resolve(directory, '..'), resolve(tmpdir()));
     rmSync(directory, { force: true, recursive: true });

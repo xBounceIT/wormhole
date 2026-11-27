@@ -648,29 +648,28 @@ function requestRendererCloseConfirmation(
   activeSessionCount: number,
   action: 'window' | 'quit',
 ): Promise<boolean> {
-  if (
-    !window ||
-    window.isDestroyed() ||
-    window.webContents.isDestroyed() ||
-    !closeConfirmationReadyWindows.has(window)
-  ) {
+  if (!window || window.isDestroyed() || !closeConfirmationReadyWindows.has(window)) {
     return Promise.resolve(false);
   }
+  const contents = window.webContents;
+  if (contents.isDestroyed() || contents.isCrashed()) return Promise.resolve(false);
   const requestId = randomUUID();
   return new Promise((resolve) => {
     const finish = (confirmed: boolean) => {
       closeConfirmationWaiters.delete(requestId);
-      window.webContents.removeListener('destroyed', rendererDestroyed);
+      contents.removeListener('destroyed', rendererGone);
+      contents.removeListener('render-process-gone', rendererGone);
       resolve(confirmed);
     };
-    const rendererDestroyed = () => finish(false);
+    const rendererGone = () => finish(false);
     closeConfirmationWaiters.set(requestId, {
-      webContentsId: window.webContents.id,
+      webContentsId: contents.id,
       resolve: finish,
     });
-    window.webContents.once('destroyed', rendererDestroyed);
+    contents.once('destroyed', rendererGone);
+    contents.once('render-process-gone', rendererGone);
     try {
-      window.webContents.send('lifecycle:confirm-close', requestId, {
+      contents.send('lifecycle:confirm-close', requestId, {
         activeSessionCount,
         action,
       });

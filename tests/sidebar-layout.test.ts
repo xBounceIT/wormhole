@@ -92,6 +92,7 @@ test('pinned and auto-hide sidebars preserve layout, focus, menus and saved pref
     globalThis.IS_REACT_ACT_ENVIRONMENT = true;
     window.sidebarAssert = require('node:assert/strict');
     window.sidebarInput = event => require('electron').ipcRenderer.invoke('test:input', event);
+    window.sidebarViewport = width => require('electron').ipcRenderer.invoke('test:viewport', width);
     window.sidebarHover = (selector, enabled) => require('electron').ipcRenderer.invoke('test:hover', selector, enabled);
     window.sidebarReducedMotion = reduce => require('electron').ipcRenderer.invoke('test:reduced-motion', reduce);
     window.sidebarObserve = stage => require('electron').ipcRenderer.invoke('test:observe', stage);
@@ -120,6 +121,12 @@ test('pinned and auto-hide sidebars preserve layout, focus, menus and saved pref
           // Commit the hidden window's current hit-test regions before native hover input.
           if (input.type === 'mouseMove') await window.webContents.capturePage();
           window.webContents.sendInputEvent(input);
+        });
+        ipcMain.handle('test:viewport', async (_event, width) => {
+          const debuggerApi = window.webContents.debugger;
+          if (width === undefined) await debuggerApi.sendCommand('Emulation.clearDeviceMetricsOverride');
+          else await debuggerApi.sendCommand('Emulation.setDeviceMetricsOverride', { width, height: 800, mobile: false, deviceScaleFactor: 1 });
+          await window.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
         });
         let hoverNodeId;
         ipcMain.handle('test:hover', async (_event, selector, enabled) => {

@@ -82,14 +82,13 @@ function DialogContent({
   showCloseButton?: boolean;
 }) {
   const open = React.useContext(DialogOpenContext);
-  const [retainedVisuals, setRetainedVisuals] = React.useState({ children, showCloseButton });
+  const [retained, setRetained] = React.useState({ children, showCloseButton });
+  const visible = selectDialogVisuals(open, { children, showCloseButton }, retained);
   if (
-    open !== false &&
-    (children !== retainedVisuals.children || showCloseButton !== retainedVisuals.showCloseButton)
-  ) {
-    setRetainedVisuals({ children, showCloseButton });
-  }
-  const visible = selectDialogVisuals(open, { children, showCloseButton }, retainedVisuals);
+    !Object.is(visible.children, retained.children) ||
+    visible.showCloseButton !== retained.showCloseButton
+  )
+    setRetained(visible);
 
   return (
     <DialogPortal container={container}>

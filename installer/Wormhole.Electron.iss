@@ -37,6 +37,8 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 SetupIconFile=..\Assets\Wormhole.ico
 OutputBaseFilename=Wormhole-{#MyAppVersion}-win-{#AppArchitecture}-setup
 SolidCompression=yes
+CloseApplications=force
+RestartApplications=no
 WizardStyle=modern
 ArchitecturesAllowed={#AppArchitecture}
 ArchitecturesInstallIn64BitMode={#AppArchitecture}
@@ -80,4 +82,48 @@ end;
 function ShouldRestartApp: Boolean;
 begin
   Result := CmdLineParamExists('/RESTARTAPP');
+end;
+
+function CanReplaceAppImage(const AppPath: String): Boolean;
+var
+  Probe: TFileStream;
+begin
+  { Open the existing image without changing it. Windows denies write access
+    while it is mapped by any process in this installation. }
+  try
+    Probe := TFileStream.Create(AppPath, fmOpenWrite or fmShareDenyNone);
+    Probe.Free;
+    Result := True;
+  except
+    Result := False;
+  end;
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  AppPath: String;
+  Attempt: Integer;
+  Progress: TOutputMarqueeProgressWizardPage;
+begin
+  Result := '';
+  AppPath := ExpandConstant('{app}\{#MyAppExeName}');
+  if not ShouldRestartApp then Exit;
+  if not FileExists(AppPath) or CanReplaceAppImage(AppPath) then Exit;
+
+  { The in-app updater starts Setup before flushing browser storage and stopping
+    sessions. This also works for older versions that pass only /RESTARTAPP. }
+  Log('Waiting for the installed Wormhole executable to be released.');
+  Progress := CreateOutputMarqueeProgressPage('Preparing to install', 'Waiting for Wormhole to close...');
+  try
+    Progress.Show;
+    for Attempt := 1 to 240 do
+    begin
+      Progress.Animate;
+      Sleep(250);
+      if CanReplaceAppImage(AppPath) then Exit;
+    end;
+    Log('Shutdown grace period expired. Checking remaining locks with Restart Manager.');
+  finally
+    Progress.Hide;
+  end;
 end;

@@ -13,6 +13,7 @@ async function runWebBrowserTests() {
     reconnects: string[] = [];
   const listeners = new Set<(event: any) => void>();
   let rejectCommand = false;
+  let navigationResult: Promise<void> | undefined;
   let reconnectCommand = async () => {};
   let navigationCommand = async () => {};
   const previewImage =
@@ -27,6 +28,7 @@ async function runWebBrowserTests() {
     commandWebSession: async (request: any) => {
       commands.push(request);
       if (rejectCommand) throw new Error('This address cannot use the VPN route.');
+      if (request.operation === 'navigate') await navigationResult;
       if (request.operation === 'reconnect-vpn') await reconnectCommand();
       if (request.operation === 'reload') await navigationCommand();
     },
@@ -435,11 +437,42 @@ async function runWebBrowserTests() {
       .dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })),
   );
   assert.equal(commands.at(-1).url, 'router.internal:8443/settings');
+  await render({});
+  assert.equal(
+    input.value,
+    'router.internal:8443/settings',
+    'A browser refresh must preserve an unfinished address',
+  );
   rejectCommand = true;
   await click('New tab');
   assert.match(document.querySelector('[role="alert"]')!.textContent!, /VPN route/);
   rejectCommand = false;
-  await render({ webBrowser: { ...session.webBrowser, activeTabId: 'two' } });
+  const slowNavigation = Promise.withResolvers<void>();
+  navigationResult = slowNavigation.promise;
+  await React.act(async () =>
+    input.closest('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })),
+  );
+  await render({
+    webBrowser: {
+      ...session.webBrowser,
+      activeTabId: 'two',
+      tabs: [first, { ...second, url: first.url }, third],
+    },
+  });
+  assert.equal(
+    input.value,
+    first.url,
+    'Switching tabs must discard the draft even when both tabs show the same URL',
+  );
+  assert.equal(document.querySelector('[role="alert"]'), null);
+  await React.act(async () => slowNavigation.reject(new Error('Previous page failed')));
+  assert.equal(
+    document.querySelector('[role="alert"]')?.textContent,
+    undefined,
+    'A late failure belongs to the original tab',
+  );
+  navigationResult = undefined;
+  await render({ webBrowser: { ...session.webBrowser, tabs: [first, second, third] } });
   assert.equal(input.value, second.url);
   assert.equal(document.querySelector('[role="alert"]'), null);
   await render({
