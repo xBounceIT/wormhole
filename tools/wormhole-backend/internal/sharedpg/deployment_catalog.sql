@@ -80,6 +80,10 @@ WITH namespaces AS (
 ), records AS (
     SELECT DISTINCT jsonb_build_array(o.kind,o.description,owner_role.name,p.entries)::text COLLATE "C" AS row_data
     FROM objects o JOIN roles owner_role ON owner_role.oid=o.owner LEFT JOIN permissions p USING(kind,id)
+    UNION ALL
+    SELECT jsonb_build_array('trigger',pg_get_triggerdef(t.oid,false),t.tgenabled)::text COLLATE "C"
+    FROM pg_trigger t JOIN relations rel ON rel.oid=t.tgrelid
+    WHERE NOT t.tgisinternal AND t.tgparentid=0
 )
 SELECT encode(sha256(convert_to(string_agg(row_data,E'\n' ORDER BY row_data),'UTF8')),'base64'),
     (SELECT count(*) FROM routines WHERE body IS NULL)::text FROM records

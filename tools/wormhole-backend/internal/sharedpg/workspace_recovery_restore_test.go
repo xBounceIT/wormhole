@@ -250,6 +250,9 @@ func restoreWorkspaceRecoveryArchive(t *testing.T, ctx context.Context, source *
 	if row, err := readDeploymentRow(ctx, targetConn, `SELECT (
     (SELECT state='ready' AND epoch>1 AND change_seq=catalog_reset_seq FROM wormhole_data.workspace_meta WHERE singleton)
     AND EXISTS(SELECT FROM wormhole_data.workspace_bootstrap WHERE singleton AND invite_id IS NULL)
+    AND NOT EXISTS(SELECT FROM wormhole_data.users u WHERE NOT EXISTS(
+        SELECT FROM wormhole_data.account_group_roles g JOIN pg_roles r ON r.oid=g.role_oid AND r.rolname=g.role_name
+        WHERE g.user_id=u.id AND NOT r.rolcanlogin))
     AND NOT EXISTS(SELECT FROM wormhole_data.devices) AND NOT EXISTS(SELECT FROM wormhole_data.account_auth)
     AND NOT EXISTS(SELECT FROM wormhole_data.invites) AND NOT EXISTS(SELECT FROM wormhole_data.sessions)
     AND NOT EXISTS(SELECT FROM wormhole_data.invitation_logins)

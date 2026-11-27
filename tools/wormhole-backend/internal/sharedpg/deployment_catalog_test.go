@@ -51,6 +51,7 @@ func checkCatalogDrift(t *testing.T, ctx context.Context, settings Settings, pas
 		{"table grant", "GRANT SELECT ON wormhole_data.workspace_meta TO catalog_reader", "REVOKE SELECT ON wormhole_data.workspace_meta FROM catalog_reader"},
 		{"column grant", "REVOKE SELECT(id) ON wormhole_data.devices FROM wh_testscope_observer", "GRANT SELECT(id) ON wormhole_data.devices TO wh_testscope_observer"},
 		{"single audit partition", "GRANT SELECT(action) ON wormhole_data.audit_log_208001 TO catalog_reader", "REVOKE SELECT(action) ON wormhole_data.audit_log_208001 FROM catalog_reader"},
+		{"account group confirmation trigger", "ALTER TABLE wormhole_data.device_confirmations DISABLE TRIGGER confirm_account_group", "ALTER TABLE wormhole_data.device_confirmations ENABLE TRIGGER confirm_account_group"},
 		{"unexpected API", "CREATE FUNCTION wormhole_api_v1.local_fixture() RETURNS int LANGUAGE sql RETURN 1", "DROP FUNCTION wormhole_api_v1.local_fixture()"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

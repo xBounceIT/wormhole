@@ -277,6 +277,10 @@ func checkAccountResetIssuance(t *testing.T, ctx context.Context, dba *pgconn.Pg
     AND (SELECT count(*) FROM wormhole_data.account_reset_receipts r
       JOIN wormhole_data.device_confirmations c ON c.device_id=r.device_id)=2
     AND (SELECT count(*) FROM wormhole_data.account_reset_receipts q
+      JOIN wormhole_data.devices d ON d.id=q.device_id JOIN wormhole_data.device_confirmations c ON c.device_id=d.id
+      JOIN wormhole_data.account_group_roles g ON g.user_id=d.user_id JOIN pg_auth_members m ON m.roleid=g.role_oid AND m.member=c.role_oid
+      WHERE d.status='active' AND NOT (m.admin_option OR m.inherit_option OR m.set_option))=1
+    AND (SELECT count(*) FROM wormhole_data.account_reset_receipts q
       JOIN wormhole_data.devices d ON d.id=q.device_id JOIN pg_catalog.pg_roles r ON r.rolname=d.role_name
       WHERE d.status='revoked' AND NOT r.rolcanlogin AND q.auth_epoch=1)=1
     AND (SELECT count(*) FROM wormhole_data.account_reset_receipts q

@@ -587,7 +587,13 @@ WHERE kind='org-enc' AND status='active' AND cert_signature IS NOT NULL`, nil, n
  AND (SELECT count(*) FROM wormhole_data.workspace_bootstrap WHERE singleton)=1
  AND (SELECT count(*) FROM wormhole_data.invites WHERE used_at IS NOT NULL AND bootstrap_envelope IS NULL)=1
  AND (SELECT count(*) FROM wormhole_data.device_confirmations)=1
- AND EXISTS(SELECT FROM wormhole_data.device_confirmations c JOIN pg_catalog.pg_roles r ON r.oid=c.role_oid WHERE r.rolconnlimit=3)
+ AND EXISTS(SELECT FROM wormhole_data.device_confirmations c JOIN pg_catalog.pg_roles r ON r.oid=c.role_oid
+      JOIN wormhole_data.devices d ON d.id=c.device_id AND d.role_name=r.rolname JOIN wormhole_data.users u ON u.id=d.user_id
+      JOIN wormhole_data.account_group_roles g ON g.user_id=u.id WHERE r.rolconnlimit=3 AND
+      CASE WHEN d.status='active' AND NOT u.disabled THEN r.rolcanlogin AND EXISTS(
+          SELECT FROM pg_catalog.pg_auth_members m WHERE m.roleid=g.role_oid AND m.member=r.oid AND NOT (m.admin_option OR m.inherit_option OR m.set_option))
+      ELSE (d.status<>'revoked' OR NOT r.rolcanlogin) AND NOT EXISTS(
+          SELECT FROM pg_catalog.pg_auth_members m WHERE m.roleid=g.role_oid AND m.member=r.oid) END)
  AND (SELECT count(*) FROM wormhole_data.audit_log WHERE action='bootstrap_workspace')=1
  AND (SELECT count(*) FROM wormhole_data.audit_log WHERE action='join_workspace')=1
  AND NOT EXISTS(SELECT FROM wormhole_data.invitation_logins WHERE NOT revoked)

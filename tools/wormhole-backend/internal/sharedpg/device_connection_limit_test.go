@@ -2,6 +2,8 @@ package sharedpg
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base32"
 	"strings"
 	"testing"
 	"time"
@@ -82,5 +84,66 @@ func TestPostgresDeviceConnectionLimitUpgrade(t *testing.T) {
 	}
 	if _, err := db.Exec(ctx, slots).ReadAll(); !hasSQLState(err, "55000", 0) {
 		t.Fatal("repeated slot upgrade", err)
+	}
+	run("ROLLBACK")
+	groups, err := deploy.NextMigrationScript("testscope", testHintID, 93)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The database may already have FORCE RLS when the new private table is installed.
+	run("SET ROLE wh_testscope_owner; SELECT wormhole_data.set_row_security('" + testHintID + "',true); RESET ROLE")
+	roleName := func(login string) string {
+		digest := sha256.Sum256([]byte("testscope" + login))
+		return "wh_testscope_u_" + strings.ToLower(base32.StdEncoding.EncodeToString(digest[:])[:20])
+	}
+	collision := roleName("limit-user-2")
+	run("CREATE ROLE " + collision + " NOLOGIN")
+	if _, err := db.Exec(ctx, groups).ReadAll(); !hasSQLState(err, "42710", 0) {
+		t.Fatal("existing cluster role accepted", err)
+	}
+	run("ROLLBACK")
+	assert := func(query string) {
+		t.Helper()
+		row, err := readDeploymentRow(ctx, db, "SELECT ("+query+")::text", 1)
+		if err != nil || string(row[0]) != "true" {
+			t.Fatal(query, err)
+		}
+	}
+	assert("to_regclass('wormhole_data.account_group_roles') IS NULL AND to_regrole('" + roleName("limit-user-1") + "') IS NULL")
+	run("DROP ROLE " + collision)
+	run(groups)
+	assert("(SELECT relrowsecurity AND relforcerowsecurity FROM pg_class WHERE oid='wormhole_data.account_group_roles'::regclass)")
+	assert("(SELECT count(*)=4 FROM wormhole_data.account_group_roles)")
+	const affiliations = `SELECT string_agg(u.login_name,',' ORDER BY u.login_name)
+		FROM wormhole_data.users u JOIN wormhole_data.account_group_roles g ON g.user_id=u.id
+		JOIN pg_auth_members m ON m.roleid=g.role_oid JOIN pg_roles r ON r.oid=m.member
+		JOIN wormhole_data.devices d ON d.role_name=r.rolname AND d.user_id=u.id
+		WHERE NOT (m.admin_option OR m.set_option OR m.inherit_option) AND m.grantor='wh_testscope_owner'::regrole`
+	assert("(" + affiliations + ")='limit-user-1,limit-user-3'")
+	assert("NOT has_table_privilege('wh_testscope_user','wormhole_data.account_group_roles','SELECT') AND NOT has_function_privilege('wh_testscope_user','wormhole_data.sync_account_device_group(uuid)','EXECUTE')")
+	run("UPDATE wormhole_data.users SET disabled=true WHERE login_name='limit-user-3'")
+	assert("(" + affiliations + ")='limit-user-1'")
+	run("UPDATE wormhole_data.users SET disabled=false WHERE login_name='limit-user-3'")
+	assert("(" + affiliations + ")='limit-user-1,limit-user-3'")
+	run("UPDATE wormhole_data.devices SET status='revoked' WHERE id='00000000-0000-4000-8000-000000000001'")
+	assert("(" + affiliations + ")='limit-user-3'")
+	run(`INSERT INTO wormhole_data.device_confirmations(device_id,role_oid,certificate_digest)
+		SELECT d.id,r.oid,sha256('fixture'::bytea) FROM wormhole_data.devices d
+		JOIN pg_roles r ON r.rolname=d.role_name WHERE d.id='00000000-0000-4000-8000-000000000002'`)
+	assert("(" + affiliations + ")='limit-user-2,limit-user-3'")
+	run("UPDATE wormhole_data.users SET disabled=true WHERE login_name='limit-user-2'")
+	run("UPDATE wormhole_data.account_group_roles SET role_oid='wh_testscope_owner'::regrole WHERE role_name='" + collision + "'")
+	if _, err := db.Exec(ctx, "UPDATE wormhole_data.users SET disabled=false WHERE login_name='limit-user-2'").ReadAll(); !hasSQLState(err, "WH009", 0) {
+		t.Fatal("account with an unrecognized group was re-enabled", err)
+	}
+	assert("(SELECT disabled FROM wormhole_data.users WHERE login_name='limit-user-2')")
+	assert("(" + affiliations + ")='limit-user-3'")
+	const login = "Élise 東京"
+	run("INSERT INTO wormhole_data.users(id,login_name) VALUES(gen_random_uuid(),'" + login + "')")
+	assert(`EXISTS(SELECT FROM wormhole_data.account_group_roles g JOIN pg_roles r ON r.oid=g.role_oid AND r.rolname=g.role_name
+		JOIN wormhole_data.users u ON u.id=g.user_id WHERE u.login_name='` + login + `' AND r.rolname='` + roleName(login) + `'
+		AND NOT (r.rolcanlogin OR r.rolinherit OR r.rolcreaterole OR r.rolcreatedb OR r.rolsuper OR r.rolreplication OR r.rolbypassrls))`)
+	if _, err := db.Exec(ctx, groups).ReadAll(); !hasSQLState(err, "55000", 0) {
+		t.Fatal("repeated group migration", err)
 	}
 }

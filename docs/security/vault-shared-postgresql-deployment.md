@@ -15,7 +15,8 @@ performs the same read-only check after SQL export or reconnection. The app
 repeats it before preparing the first administrator. It compares a SHA-256
 fingerprint of the `wormhole_api_v1` and `wormhole_data` catalogs with the
 schema shipped by Wormhole. The check covers function bodies, signatures,
-execution settings, owners and grants, including column grants. Monthly audit
+execution settings, owners, table and column grants, and the definitions and
+enabled state of application triggers. Monthly audit
 partitions may come and go under the same permission policy. A changed grant
 on a single partition fails verification.
 
@@ -615,6 +616,16 @@ invitation and reset roles have a limit of two. Follow [the upgrade procedure](#
 with installed version 91. The migration updates active confirmed roles with the original limit of
 two after matching their PostgreSQL OID and role name. An older pending device
 receives its new limit when it confirms enrollment.
+
+Schema 94 creates one PostgreSQL group for each account. Its name contains the
+workspace tag and the first 20 lowercase base32 characters of the SHA-256 digest
+of the tag followed by the account's immutable UTF-8 login name. A confirmed
+device receives membership with the PostgreSQL `ADMIN`, `INHERIT` and `SET`
+options disabled. Disabling the account removes that membership. Enabling the
+account restores it for eligible devices. Revoking a device removes its membership.
+The database records the cluster OIDs of the group and device. Recovery creates
+fresh groups on the target cluster. A collision with an existing role aborts the
+transaction, including any groups it has already created.
 
 The native bootstrap prepares an organisation signer, an organisation encryption
 key, the workspace boundary's view and secret keys, and a certificate chain for a
