@@ -3,7 +3,7 @@ import { execFile, spawn } from 'node:child_process';
 import { createHash, X509Certificate } from 'node:crypto';
 import { once } from 'node:events';
 import { createServer, type Server } from 'node:http';
-import { cp, mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
@@ -1412,7 +1412,10 @@ for (const mode of [
           let keyPem: string | undefined;
           if (generated) {
             generatedFolder = serverKit.folder as string;
-            assert.equal(resolve(generatedFolder, '../..'), resolve(directory, 'server-export'));
+            assert.equal(
+              await realpath(resolve(generatedFolder, '../..')),
+              await realpath(join(directory, 'server-export')),
+            );
             keyPem = await readFile(join(generatedFolder, 'server.key'), 'utf8');
             assert.match(keyPem, /^-----BEGIN ENCRYPTED PRIVATE KEY-----/);
             assert.doesNotMatch(keyPem, new RegExp(syntheticServerFactor));
