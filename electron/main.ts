@@ -91,6 +91,7 @@ import { stricterVaultProfile, type VaultProfile } from './vault-security.js';
 import type { VaultUpdatePreferences } from './vault-preferences.js';
 import { bindNativeVaultSession } from './vault-session-monitor.js';
 import { VaultWindowPolicy } from './vault-window-policy.js';
+import { createVaultDialogWindow } from './vault-dialog-appearance.js';
 import { VaultCreateDialog } from './vault-create-dialog.js';
 import { VaultTunnelDialog } from './vault-tunnel-dialog.js';
 import { VaultCredentialsDialog } from './vault-credentials-dialog.js';
@@ -4518,6 +4519,15 @@ const vaultWindowPolicy = new VaultWindowPolicy({
 });
 const createApplicationWindow = (options: Electron.BrowserWindowConstructorOptions) =>
   vaultWindowPolicy.createWindow(options);
+const workspaceColorSchemes = new WeakMap<BrowserWindow, Exclude<AppTheme, 'system'>>();
+const createThemedVaultWindow = (options: Electron.BrowserWindowConstructorOptions) =>
+  createVaultDialogWindow(
+    options,
+    (options.parent instanceof BrowserWindow && workspaceColorSchemes.get(options.parent)) ||
+      'system',
+    path.join(__dirname, 'vault-dialog-appearance-preload.cjs'),
+    createApplicationWindow,
+  );
 
 const vaultLockMonitor = new VaultLockMonitor({
   profileChanged: () => broadcastVaultChange('vault:profile-changed'),
@@ -4632,7 +4642,7 @@ const vaultBackend = new VaultBackendHost(
 const vaultCreateDialog = new VaultCreateDialog({
   host: vaultBackend,
   ipc: ipcMain,
-  createWindow: createApplicationWindow,
+  createWindow: createThemedVaultWindow,
   url:
     rendererUrl && !app.isPackaged
       ? new URL('vault-create.html', rendererUrl.endsWith('/') ? rendererUrl : rendererUrl + '/')
@@ -4648,7 +4658,7 @@ const vaultCreateDialog = new VaultCreateDialog({
 const vaultMigrationSetupDialog = new VaultMigrationSetupDialog({
   host: vaultBackend,
   ipc: ipcMain,
-  createWindow: createApplicationWindow,
+  createWindow: createThemedVaultWindow,
   url:
     rendererUrl && !app.isPackaged
       ? new URL('vault-create.html', rendererUrl.endsWith('/') ? rendererUrl : rendererUrl + '/')
@@ -4661,7 +4671,7 @@ const vaultOSMigrationDialog = new VaultMigrationSetupDialog({
   host: vaultBackend,
   ipc: ipcMain,
   mode: 'os-migration',
-  createWindow: createApplicationWindow,
+  createWindow: createThemedVaultWindow,
   url:
     rendererUrl && !app.isPackaged
       ? new URL('vault-create.html', rendererUrl.endsWith('/') ? rendererUrl : rendererUrl + '/')
@@ -4674,7 +4684,7 @@ const vaultRootSetupDialog = new VaultMigrationSetupDialog({
   host: vaultBackend,
   ipc: ipcMain,
   mode: 'rotation',
-  createWindow: createApplicationWindow,
+  createWindow: createThemedVaultWindow,
   url:
     rendererUrl && !app.isPackaged
       ? new URL('vault-create.html', rendererUrl.endsWith('/') ? rendererUrl : rendererUrl + '/')
@@ -4687,7 +4697,7 @@ const vaultUpgradeSetupDialog = new VaultMigrationSetupDialog({
   host: vaultBackend,
   ipc: ipcMain,
   mode: 'upgrade',
-  createWindow: createApplicationWindow,
+  createWindow: createThemedVaultWindow,
   url:
     rendererUrl && !app.isPackaged
       ? new URL('vault-create.html', rendererUrl.endsWith('/') ? rendererUrl : rendererUrl + '/')
@@ -4732,7 +4742,7 @@ const vaultTunnelAuthenticationDialog = new VaultTunnelAuthenticationDialog({
 
 const vaultReauthenticationDialog = new VaultReauthenticationDialog({
   ipc: ipcMain,
-  createWindow: createApplicationWindow,
+  createWindow: createThemedVaultWindow,
   stop: () => vaultBackend.stop(),
   url:
     rendererUrl && !app.isPackaged
@@ -4782,7 +4792,6 @@ const vaultSharedDialog = new VaultSharedAuthenticationDialog({
   preload: path.join(__dirname, 'vault-shared-preload.cjs'),
 });
 
-const workspaceColorSchemes = new WeakMap<BrowserWindow, Exclude<AppTheme, 'system'>>();
 const vaultSharedSetupDialog = new VaultSharedSetupDialog({
   colorScheme: (parent) => workspaceColorSchemes.get(parent),
   host: vaultBackend,
@@ -4927,7 +4936,7 @@ const vaultSshCredentialsDialog = new VaultSshCredentialsDialog({
 
 const vaultVncPasswordDialog = new VaultVncPasswordDialog({
   ipc: ipcMain,
-  createWindow: createApplicationWindow,
+  createWindow: createThemedVaultWindow,
   url:
     rendererUrl && !app.isPackaged
       ? new URL(

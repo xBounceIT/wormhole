@@ -43,7 +43,10 @@ export function mountVaultVncPasswordScreen(card: HTMLElement, api: VaultVncPass
   const status = document.createElement('p');
   status.setAttribute('role', 'status');
   status.className = 'startup-status';
-  form.append(label, submit, cancel);
+  const actions = document.createElement('div');
+  actions.className = 'vault-dialog-actions';
+  actions.append(submit, cancel);
+  form.append(label, actions);
   card.replaceChildren(heading, target, explanation, form, status);
   if (!api.contentProtectionAvailable) {
     const limitation = document.createElement('p');

@@ -114,6 +114,22 @@
   flex-wrap: wrap;
   gap: 8px;
 }
+.vault-dialog .startup-form > .vault-dialog-actions:last-child,
+.vault-create .startup-card > .vault-dialog-actions {
+  justify-content: end;
+}
+.vault-create .startup-card > .vault-dialog-actions {
+  margin-top: 10px;
+}
+.vault-create .vault-recovery-code {
+  margin-block: 16px;
+  padding: 12px;
+  border-color: var(--border);
+  background: var(--sidebar);
+  font:
+    14px/1.65 ui-monospace,
+    monospace;
+}
 .shared-invitation-form .vault-dialog-actions:has([type='submit']) {
   justify-content: end;
 }

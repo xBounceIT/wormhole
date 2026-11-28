@@ -136,13 +136,16 @@ export function mountVaultCreateScreen(
   cancel.type = 'button';
   cancel.className = 'startup-button startup-button-secondary';
   cancel.textContent = 'Cancel';
-  form.append(status, submit);
   const captureNotice = document.createElement('p');
   captureNotice.className = 'startup-status';
   captureNotice.hidden = api.contentProtectionAvailable !== false;
   captureNotice.textContent =
     'Screen capture protection is unavailable on this system. Keep your recovery code private when sharing your screen.';
-  card.replaceChildren(heading, detail, captureNotice, form, recovery, saved, cancel);
+  const actions = document.createElement('div');
+  actions.className = 'vault-dialog-actions';
+  actions.append(submit, saved, cancel);
+  form.append(status, actions);
+  card.replaceChildren(heading, detail, captureNotice, form, recovery);
   let busy = false,
     disposed = false,
     step: 'password' | 'display' | 'confirm' | 'done' = 'password';
@@ -182,6 +185,8 @@ export function mountVaultCreateScreen(
     step = 'confirm';
     recovery.hidden = saved.hidden = true;
     form.hidden = false;
+    submit.hidden = false;
+    form.append(actions);
     heading.textContent = 'Confirm your recovery code';
     detail.textContent = 'Enter the two groups below from your saved code. Do not include hyphens.';
     for (const [index, control] of [first, second].entries()) {
@@ -266,7 +271,9 @@ export function mountVaultCreateScreen(
         legacyLabel.hidden = true;
         if (old) old.label.hidden = true;
         form.hidden = true;
+        submit.hidden = true;
         recovery.hidden = saved.hidden = false;
+        card.append(actions);
         heading.textContent = 'Save your recovery code';
         detail.textContent =
           'This code is shown only once. Write it down and store it safely. Anyone with it can open your workspace.';

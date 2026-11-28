@@ -71,7 +71,10 @@ export function mountVaultReauthenticationScreen(card: HTMLElement, api: VaultRe
   const status = document.createElement('p');
   status.setAttribute('role', 'status');
   status.className = 'startup-status';
-  form.append(method, label, submit, cancel);
+  const controls = document.createElement('div');
+  controls.className = 'vault-dialog-actions';
+  controls.append(submit, cancel);
+  form.append(method, label, controls);
   card.replaceChildren(heading, action, form, status);
   let descriptor: VaultDescriptor | undefined,
     restoringBackup = false,
@@ -180,6 +183,7 @@ export function mountVaultReauthenticationScreen(card: HTMLElement, api: VaultRe
         method.append(option);
       }
       if (!method.options.length) throw Error('No supported factor');
+      method.hidden = method.options.length === 1;
       submit.disabled = false;
       updateMethod();
     })
