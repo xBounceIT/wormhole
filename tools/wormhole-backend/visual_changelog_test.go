@@ -59,6 +59,24 @@ func TestVisualChangelogClaimThroughBackendCLI(t *testing.T) {
 	}
 }
 
+func TestVaultChangelogClaimLeavesWorkspaceUnopened(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "wormhole.db")
+	slot := vaultSlotPath(path)
+	if err := os.WriteFile(slot, []byte("vault marker"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var output, stderr bytes.Buffer
+	if code := runBackendCLI([]string{"-database", path, "-operation", "visual-changelog-claim"}, strings.NewReader(`{"appVersion":"2.5.0","hasChangelog":true}`), &output, &stderr); code != 0 || strings.TrimSpace(output.String()) != `{"claimed":true}` {
+		t.Fatalf("claim %d %q %q", code, &output, &stderr)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatal("claim attempted to open workspace", err)
+	}
+	if marker, err := os.ReadFile(slot); err != nil || string(marker) != "vault marker" {
+		t.Fatal("claim changed vault marker", err)
+	}
+}
+
 func TestVisualChangelogClaimIsAtomic(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
 	var claims atomic.Int32

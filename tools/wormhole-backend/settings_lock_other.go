@@ -18,11 +18,22 @@ func tryAcquireExclusiveFileLock(lockPath string) (func(), error) {
 }
 
 func lockExclusiveFile(lockPath string, nonblocking bool) (func(), error) {
+	return lockNativeFile(lockPath, nonblocking, true)
+}
+
+func tryAcquireSharedFileLock(lockPath string) (func(), error) {
+	return lockNativeFile(lockPath, true, false)
+}
+
+func lockNativeFile(lockPath string, nonblocking, exclusive bool) (func(), error) {
 	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("cannot open the Wormhole data lock: %w", err)
 	}
-	flags := syscall.LOCK_EX
+	flags := syscall.LOCK_SH
+	if exclusive {
+		flags = syscall.LOCK_EX
+	}
 	if nonblocking {
 		flags |= syscall.LOCK_NB
 	}

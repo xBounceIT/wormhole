@@ -528,7 +528,7 @@ func deleteWorkspaceNodes(
 	return workspaceDeleteNodeResponse{Deleted: true}, nil
 }
 
-func loadWorkspaceCredentialNodes(database *sql.DB) (map[string]*workspaceCredentialNode, error) {
+func loadWorkspaceCredentialNodes(database sqlMetadataReader) (map[string]*workspaceCredentialNode, error) {
 	exists, err := tableExists(database, "Nodes")
 	if err != nil {
 		return nil, err
@@ -589,7 +589,7 @@ func loadWorkspaceCredentialNodes(database *sql.DB) (map[string]*workspaceCreden
 	return nodes, nil
 }
 
-func loadWorkspaceCredentialProfile(database *sql.DB, credentialID string) (workspaceCredentialProfile, bool, error) {
+func loadWorkspaceCredentialProfile(database sqlMetadataReader, credentialID string) (workspaceCredentialProfile, bool, error) {
 	exists, err := tableExists(database, "CredentialProfiles")
 	if err != nil {
 		return workspaceCredentialProfile{}, false, err
@@ -679,101 +679,24 @@ func showWorkspaceNodeCredentials(
 	if err != nil {
 		return workspaceCredentialRevealResponse{}, err
 	}
-	root := nodes[nodeID]
-	if root == nil || !root.kind.Valid || root.kind.Int64 != 1 {
-		return workspaceCredentialRevealResponse{}, errors.New("workspace connection was not found")
-	}
-
-	response := workspaceCredentialRevealResponse{ConnectionName: root.name}
-	protocol := int64(0)
-	protocolSet := false
-	username := ""
-	credentialID := ""
-	credentialResolved := root.useInlinePassword.Valid && root.useInlinePassword.Int64 != 0
-	identityBoundary := false
-	seen := make(map[string]struct{})
-	current := root
-	for current != nil {
-		if _, duplicate := seen[current.id]; duplicate {
-			return workspaceCredentialRevealResponse{}, errors.New("workspace connection tree contains a cycle")
-		}
-		seen[current.id] = struct{}{}
-		if !protocolSet && current.protocol.Valid {
-			protocol = current.protocol.Int64
-			protocolSet = true
-		}
-		if !identityBoundary && username == "" && strings.TrimSpace(nullableString(current.username)) != "" {
-			username = strings.TrimSpace(nullableString(current.username))
-		}
-		if !credentialResolved {
-			if current.credentialMode.Valid {
-				switch current.credentialMode.Int64 {
-				case 1:
-					credentialResolved = true
-				case 2:
-					credentialResolved = true
-					credentialID = normalizeID(nullableString(current.credentialID))
-					if credentialID != "" {
-						identityBoundary = true
-					}
-				}
-			} else if strings.TrimSpace(nullableString(current.credentialID)) != "" {
-				credentialResolved = true
-				credentialID = normalizeID(nullableString(current.credentialID))
-				identityBoundary = true
-			}
-		}
-		if current.parentID == "" {
-			break
-		}
-		current = nodes[current.parentID]
-	}
-
-	if !workspaceProtocolCredentialValue(protocol) {
-		return response, nil
-	}
-	if username != "" {
-		response.Username = username
-	}
-	if credentialResolved && root.useInlinePassword.Valid && root.useInlinePassword.Int64 != 0 {
-		if protocol != 0 && protocol != 7 && protocol != 1 && protocol != smbProtocolValue {
-			return response, nil
-		}
-		secret, err := readOptionalCredentialSecret(database, root.id, electronUserDataPath)
-		if err != nil {
-			return workspaceCredentialRevealResponse{}, fmt.Errorf("could not read the connection password: %w", err)
-		}
-		return workspaceCredentialRevealFromSecret(response, response.Username, "Password", secret), nil
-	}
-	if credentialID == "" {
-		return response, nil
-	}
-	profile, found, err := loadWorkspaceCredentialProfile(database, credentialID)
+	selection, err := resolveLegacyRevealMetadata(nodes, nodeID, func(id string) (workspaceCredentialProfile, bool, error) {
+		return loadWorkspaceCredentialProfile(database, id)
+	})
 	if err != nil {
 		return workspaceCredentialRevealResponse{}, err
 	}
-	if !found || !profile.protocol.Valid || !workspaceCredentialProtocolMatches(protocol, profile.protocol.Int64) {
-		return response, nil
+	if selection.source == "none" {
+		return observeLegacyReveal(databasePath, nodeID, "", "none", selection.response), nil
 	}
-	if profile.secretProvider.Valid && profile.secretProvider.Int64 != 0 {
-		return response, nil
-	}
-	if response.Username == "" {
-		response.Username = strings.TrimSpace(nullableString(profile.username))
-	}
-	response.Domain = strings.TrimSpace(nullableString(profile.domain))
-	response.CredentialName = strings.TrimSpace(nullableString(profile.name))
-	secretLabel := "Password"
-	if (protocol == 0 || protocol == 7) && profile.kind.Valid && profile.kind.Int64 == 1 {
-		secretLabel = "Key passphrase"
-	} else if profile.kind.Valid && profile.kind.Int64 != 0 {
-		return response, nil
-	}
-	secret, err := readOptionalCredentialSecret(database, credentialID, electronUserDataPath)
+	secret, err := readOptionalCredentialSecret(database, selection.ownerID, electronUserDataPath)
 	if err != nil {
+		if selection.source == "inline" {
+			return workspaceCredentialRevealResponse{}, fmt.Errorf("could not read the connection password: %w", err)
+		}
 		return workspaceCredentialRevealResponse{}, fmt.Errorf("could not read the credential secret: %w", err)
 	}
-	return workspaceCredentialRevealFromSecret(response, response.Username, secretLabel, secret), nil
+	response := workspaceCredentialRevealFromSecret(selection.response, selection.response.Username, selection.label, secret)
+	return observeLegacyReveal(databasePath, nodeID, selection.ownerID, selection.source, response), nil
 }
 
 func workspaceCredentialRevealFromSecret(

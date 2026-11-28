@@ -134,6 +134,7 @@ type serialServer struct {
 	databasePath         string
 	electronUserDataPath string
 	output               *serialEventWriter
+	protected            bool
 
 	mu       sync.Mutex
 	sessions map[string]*serialNativeSession
@@ -210,7 +211,12 @@ func (server *serialServer) open(command serialWireCommand) {
 		server.writeError(command.SessionID, "serial line name is required")
 		return
 	}
+	server.openWithTarget(command, func(ctx context.Context) (serialTarget, error) {
+		return resolveSerialTargetForOpen(ctx, server.databasePath, server.electronUserDataPath, command)
+	})
+}
 
+func (server *serialServer) openWithTarget(command serialWireCommand, resolve func(context.Context) (serialTarget, error)) {
 	ctx, cancel := context.WithCancel(context.Background())
 	server.mu.Lock()
 	if _, exists := server.sessions[command.SessionID]; exists {
@@ -229,12 +235,8 @@ func (server *serialServer) open(command serialWireCommand) {
 	server.mu.Unlock()
 
 	go func() {
-		target, err := resolveSerialTargetForOpen(
-			ctx,
-			server.databasePath,
-			server.electronUserDataPath,
-			command,
-		)
+		defer cancel()
+		target, err := resolve(ctx)
 		if err == nil {
 			var native *serialNativeSession
 			native, err = openNativeSerialForOpen(ctx, target, command.Columns, command.Rows)
@@ -258,8 +260,9 @@ func (server *serialServer) open(command serialWireCommand) {
 					native.close(false)
 					return
 				}
-				logInfo("serial session connected (port=%q, baud=%d)", target.PortName, target.BaudRate)
-				native.publishTerminalFrame(native.terminal.initialFrame())
+				if !server.protected {
+					logInfo("serial session connected (port=%q, baud=%d)", target.PortName, target.BaudRate)
+				}
 				native.start()
 				return
 			}
@@ -332,7 +335,7 @@ func (server *serialServer) close(sessionID string) {
 		cancel()
 	}
 	if native != nil {
-		if native.portName != "" {
+		if !server.protected && native.portName != "" {
 			logInfo("serial session closed (port=%q)", native.portName)
 		}
 		native.close(true)
@@ -363,12 +366,20 @@ func (server *serialServer) publishConnected(
 	native *serialNativeSession,
 	event serialWireEvent,
 ) bool {
+	// The first acknowledgement allows the renderer to resize immediately.
+	// Keep the initial frame ahead of every resize or snapshot on this line.
+	native.terminalOutputMu.Lock()
+	defer native.terminalOutputMu.Unlock()
 	server.mu.Lock()
-	defer server.mu.Unlock()
 	if server.sessions[sessionID] != native {
+		server.mu.Unlock()
 		return false
 	}
 	server.output.write(event)
+	server.mu.Unlock()
+	if !native.isClosed() {
+		native.publishTerminalFrameLocked(native.terminal.initialFrame())
+	}
 	return true
 }
 
@@ -1026,15 +1037,6 @@ func (native *serialNativeSession) publishTerminalData(data []byte) {
 	if changed {
 		native.publishTerminalFrameLocked(frame)
 	}
-}
-
-func (native *serialNativeSession) publishTerminalFrame(frame *sshTerminalFrame) {
-	native.terminalOutputMu.Lock()
-	defer native.terminalOutputMu.Unlock()
-	if native.isClosed() {
-		return
-	}
-	native.publishTerminalFrameLocked(frame)
 }
 
 func (native *serialNativeSession) publishTerminalFrameLocked(frame *sshTerminalFrame) {

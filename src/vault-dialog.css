@@ -1,0 +1,192 @@
+@import '@fontsource-variable/geist';
+@import './workspace-palette.css';
+
+:root .vault-dialog .startup-shell {
+  min-height: 100%;
+  height: auto;
+  background: var(--sidebar);
+  color: var(--foreground);
+  font:
+    13px/1.45 'Geist Variable',
+    'Segoe UI',
+    sans-serif;
+}
+
+:root .vault-dialog .startup-card {
+  width: min(460px, 100%);
+  min-width: 0;
+  padding: 24px;
+  border-color: var(--border);
+  background: var(--card);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 9%);
+}
+
+.vault-dialog h1 {
+  margin: 0;
+  font-size: 18px;
+  line-height: 1.35;
+  font-weight: 600;
+  letter-spacing: -0.025em;
+}
+
+.vault-dialog h1 + p,
+.vault-dialog .startup-status,
+.vault-dialog .startup-subtitle {
+  margin: 6px 0 0;
+  color: color-mix(in srgb, var(--foreground) 68%, var(--card));
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.vault-dialog .startup-status {
+  font-size: 12px;
+}
+.vault-dialog :is(.startup-status, [role='status']):empty {
+  display: none;
+}
+.vault-dialog .startup-form {
+  gap: 12px;
+}
+.vault-dialog .startup-form label:not([hidden]) {
+  display: grid;
+  gap: 5px;
+}
+.vault-dialog .startup-form label:has(input[type='checkbox']):not([hidden]) {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+:root .vault-dialog .startup-card :is(input:not([type='checkbox']), select, textarea) {
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+  padding: 4px 10px;
+  border: 1px solid var(--input);
+  border-radius: 7px;
+  background: var(--background);
+  color: var(--foreground);
+  font: inherit;
+}
+
+:root .vault-dialog .startup-card textarea {
+  min-height: 72px;
+  padding-block: 7px;
+  resize: vertical;
+}
+
+:root .vault-dialog .startup-card input[type='checkbox']:not([role='switch']) {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  margin: 0;
+  accent-color: var(--primary);
+}
+
+:root .vault-dialog .startup-card :is(input, select, textarea, button):focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+  box-shadow: none;
+}
+
+.vault-dialog .startup-card .startup-button {
+  width: auto;
+  min-height: 30px;
+  margin: 0;
+  padding: 4px 11px;
+  border: 1px solid transparent;
+  background: var(--primary);
+  color: var(--primary-foreground);
+  font-size: 12px;
+  font-weight: 500;
+}
+.vault-dialog .startup-card .startup-button-secondary {
+  border-color: var(--border);
+  background: var(--card);
+  color: var(--foreground);
+}
+.vault-dialog .startup-button-secondary:hover:not(:disabled) {
+  background: var(--accent);
+}
+.vault-dialog-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.vault-dialog .startup-form > .vault-dialog-actions:last-child,
+.vault-create .startup-card > .vault-dialog-actions {
+  justify-content: end;
+}
+.vault-create .startup-card > .vault-dialog-actions {
+  margin-top: 10px;
+}
+.vault-create .vault-recovery-code {
+  margin-block: 16px;
+  padding: 12px;
+  border-color: var(--border);
+  background: var(--sidebar);
+  font:
+    14px/1.65 ui-monospace,
+    monospace;
+}
+.shared-invitation-form .vault-dialog-actions:has([type='submit']) {
+  justify-content: end;
+}
+.vault-dialog .startup-card .vault-dialog-link {
+  justify-self: start;
+  min-height: 24px;
+  padding-inline: 0;
+  border: 0;
+  background: transparent;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.shared-invitation-source.has-invitation {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--sidebar);
+  font-size: 12px;
+}
+.shared-invitation-account {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.shared-invitation-account summary {
+  width: fit-content;
+  cursor: pointer;
+  color: color-mix(in srgb, var(--foreground) 68%, var(--card));
+}
+.shared-invitation-account summary:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+.shared-invitation-account code {
+  user-select: text;
+}
+.shared-invitation-factors:not([hidden]) {
+  display: grid;
+  gap: 12px;
+}
+.shared-invitation-factors .shared-invitation-off {
+  padding: 10px 12px;
+  border-inline-start: 2px solid var(--ring);
+  background: var(--muted);
+}
+@media (min-width: 460px) {
+  .shared-invitation-factors:not([hidden]) {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .shared-invitation-factors > label {
+    grid-column: 1 / -1;
+  }
+  .shared-invitation-factors > label:has([autocomplete='new-password']) {
+    grid-column: auto;
+  }
+}

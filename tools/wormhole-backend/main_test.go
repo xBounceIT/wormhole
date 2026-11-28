@@ -210,7 +210,12 @@ func TestRunBackendCLIDispatchesSemanticallyInvalidRequests(t *testing.T) {
 		[]string{"-database", databasePath, "-operation", "migrate", "-credential-reader", missingPath},
 		strings.NewReader(""), &stdout, &stderr,
 	)
-	if code != 1 || strings.TrimSpace(stderr.String()) == "" {
+	if !isWindowsRuntime() {
+		var result migrationResult
+		if code != 0 || stderr.Len() != 0 || json.Unmarshal(stdout.Bytes(), &result) != nil || result.Status != "skipped-non-windows" {
+			t.Fatal("non-Windows migration did not acknowledge the unused credential reader")
+		}
+	} else if code != 1 || strings.TrimSpace(stderr.String()) == "" {
 		t.Fatalf("missing migration reader: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 }
@@ -489,7 +494,11 @@ func TestLoadStartupSnapshotReturnsUnlockedWorkspaceAndSettings(t *testing.T) {
 	if startup.Settings.Theme != applicationThemeSystem {
 		t.Fatalf("unexpected default startup theme: %q", startup.Settings.Theme)
 	}
-	if startup.Migration.Status != "already-completed" || startup.MigrationFailed {
+	wantMigration := "already-completed"
+	if !isWindowsRuntime() {
+		wantMigration = "skipped-non-windows"
+	}
+	if startup.Migration.Status != wantMigration || startup.MigrationFailed {
 		t.Fatalf("unexpected migration result: %#v, failed=%v", startup.Migration, startup.MigrationFailed)
 	}
 }

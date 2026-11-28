@@ -520,6 +520,8 @@ func TestUpdateCacheMaintenanceRemovesOnlyStaleAndSupersededFiles(t *testing.T) 
 		"Wormhole-1.0.0-x86_64.AppImage",
 		"Wormhole-1.0.0-arm64.AppImage",
 		"Wormhole-1.0.0-linux-arm64.AppImage",
+		"Wormhole-1.0.0-linux-amd64.deb",
+		"Wormhole-1.0.0-linux-aarch64.rpm",
 		"Wormhole-1.0.0-mac-universal-setup.dmg",
 	}
 	for _, name := range append([]string{keepName}, removeNames...) {

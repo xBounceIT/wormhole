@@ -6,6 +6,8 @@ import (
 	"errors"
 	"net/url"
 	"strings"
+
+	"github.com/xBounceIT/wormhole/tools/wormhole-backend/internal/vault"
 )
 
 // Browser credentials belong to a single connection attempt.
@@ -81,9 +83,7 @@ func prepareFortinetAuthentication(ctx context.Context, raw json.RawMessage) (js
 	delete(settings, "SamlRedirectPort")
 	clearFortinetSSLCredentials(settings)
 	if useCallback {
-		if len(value) == 0 || len(value) > 4096 || strings.IndexFunc(value, func(r rune) bool {
-			return r <= ' ' || r > '~'
-		}) >= 0 {
+		if !vault.ValidFortinetAuthID([]byte(value)) {
 			return nil, errors.New("Fortinet SAML returned an invalid authentication ID")
 		}
 		settings["SamlAuthId"], _ = json.Marshal(value)

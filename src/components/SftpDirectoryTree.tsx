@@ -189,7 +189,7 @@ function DirectoryTreeContent({
               aria-expanded={row.expanded}
               aria-selected={row.path === path}
               aria-level={row.depth + 1}
-              className={`grid h-7 grid-cols-[minmax(0,1fr)_5.25rem_7.75rem] items-center gap-x-2.5 px-[22px] text-xs ${row.path === path ? 'bg-accent text-accent-foreground' : ''}`}
+              className={`sftp-columns sftp-tree-columns h-7 items-center text-xs ${row.path === path ? 'bg-accent text-accent-foreground' : ''}`}
               onDragOver={(event) => {
                 if (hasSftpDragPayload(event.dataTransfer.types)) {
                   event.preventDefault();
@@ -202,7 +202,7 @@ function DirectoryTreeContent({
               <div
                 role="gridcell"
                 aria-colindex={1}
-                className="grid min-w-0 grid-cols-[1rem_minmax(0,1fr)] items-center gap-x-2.5 overflow-hidden"
+                className="sftp-tree-name-grid grid min-w-0 grid-cols-[1rem_minmax(0,1fr)] items-center overflow-hidden"
                 style={{ paddingLeft: row.depth * 14 }}
               >
                 <button
@@ -228,7 +228,7 @@ function DirectoryTreeContent({
                         setTree((current) => invalidateSftpTree(current));
                       onNavigate(row.path);
                     }}
-                    className="grid min-w-0 grid-cols-[1.5rem_minmax(0,1fr)] items-center gap-x-2.5 text-left"
+                    className="sftp-tree-name-grid grid min-w-0 grid-cols-[1.5rem_minmax(0,1fr)] items-center text-left"
                   >
                     <FolderOpen className="size-3.5 shrink-0 justify-self-center text-amber-400" />
                     <span className="flex min-w-0 items-center gap-1">

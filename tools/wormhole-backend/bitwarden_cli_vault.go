@@ -258,10 +258,14 @@ func bitwardenCliSearchItems(databasePath string, settings bitwardenCliSettings,
 }
 
 func bitwardenCliGetItem(databasePath string, settings bitwardenCliSettings, sessionKey, itemID string) (*bitwardenCliLoginItem, error) {
+	return bitwardenCliGetItemContext(context.Background(), databasePath, settings, sessionKey, itemID)
+}
+
+func bitwardenCliGetItemContext(ctx context.Context, databasePath string, settings bitwardenCliSettings, sessionKey, itemID string) (*bitwardenCliLoginItem, error) {
 	if strings.TrimSpace(itemID) == "" {
 		return nil, errors.New("Enter a Bitwarden item identifier.")
 	}
-	result, err := bitwardenCliTryRun(databasePath, settings, []string{"get", "item", itemID}, bitwardenCliSessionEnv(sessionKey))
+	result, err := bitwardenCliTryRunContext(ctx, databasePath, settings, []string{"get", "item", itemID}, bitwardenCliSessionEnv(sessionKey))
 	if err != nil {
 		return nil, err
 	}
@@ -286,7 +290,11 @@ func bitwardenCliGetItem(databasePath string, settings bitwardenCliSettings, ses
 }
 
 func bitwardenCliSync(databasePath string, settings bitwardenCliSettings, sessionKey string) error {
-	_, err := bitwardenCliRun(databasePath, settings, []string{"sync"}, bitwardenCliSessionEnv(sessionKey))
+	return bitwardenCliSyncContext(context.Background(), databasePath, settings, sessionKey)
+}
+
+func bitwardenCliSyncContext(ctx context.Context, databasePath string, settings bitwardenCliSettings, sessionKey string) error {
+	_, err := bitwardenCliRunContext(ctx, databasePath, settings, []string{"sync"}, bitwardenCliSessionEnv(sessionKey))
 	return err
 }
 
@@ -303,7 +311,11 @@ func bitwardenCliRun(
 	args []string,
 	environment map[string]string,
 ) (bitwardenCliProcessResult, error) {
-	result, err := bitwardenCliTryRun(databasePath, settings, args, environment)
+	return bitwardenCliRunContext(context.Background(), databasePath, settings, args, environment)
+}
+
+func bitwardenCliRunContext(ctx context.Context, databasePath string, settings bitwardenCliSettings, args []string, environment map[string]string) (bitwardenCliProcessResult, error) {
+	result, err := bitwardenCliTryRunContext(ctx, databasePath, settings, args, environment)
 	if err != nil {
 		return bitwardenCliProcessResult{}, err
 	}
@@ -322,6 +334,13 @@ func bitwardenCliTryRun(
 	args []string,
 	environment map[string]string,
 ) (bitwardenCliProcessResult, error) {
+	return bitwardenCliTryRunContext(context.Background(), databasePath, settings, args, environment)
+}
+
+func bitwardenCliTryRunContext(parent context.Context, databasePath string, settings bitwardenCliSettings, args []string, environment map[string]string) (bitwardenCliProcessResult, error) {
+	if err := parent.Err(); err != nil {
+		return bitwardenCliProcessResult{}, err
+	}
 	if err := requireBitwardenCliContentSession(args, environment); err != nil {
 		return bitwardenCliProcessResult{}, err
 	}
@@ -329,7 +348,7 @@ func bitwardenCliTryRun(
 	if executable == "" {
 		return bitwardenCliProcessResult{}, errors.New("The Bitwarden CLI is not installed. Install it first.")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), bitwardenCliProcessTimeout)
+	ctx, cancel := context.WithTimeout(parent, bitwardenCliProcessTimeout)
 	defer cancel()
 	command := exec.CommandContext(ctx, executable, args...)
 	command.Env = bitwardenCliMergeEnv(os.Environ(), environment)
@@ -341,6 +360,9 @@ func bitwardenCliTryRun(
 	err := command.Run()
 	exitCode := 0
 	if err != nil {
+		if err := parent.Err(); err != nil {
+			return bitwardenCliProcessResult{}, err
+		}
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return bitwardenCliProcessResult{}, errors.New("The Bitwarden CLI command timed out.")
 		}

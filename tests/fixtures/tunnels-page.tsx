@@ -59,6 +59,7 @@ export async function run(columns: number, paneWidth = window.innerWidth) {
   let pendingRead: Promise<ReturnType<typeof readDetails>> | undefined;
   Object.assign(window, {
     wormhole: {
+      getTunnelCapabilities: async () => ({ openVpn: true }),
       listTunnels: () => initialList.promise,
       importOvpnProfile: () => importedProfile.promise,
       updateTunnel: async (request: (typeof updated)[number]) => {

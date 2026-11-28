@@ -415,6 +415,7 @@ test('concurrent automatic opens reuse the new SSH tab before React has rendered
       ].join('\n'),
     ),
     {
+      authState: undefined,
       sessions: [],
       sessionsRef,
       webSessionOpenInFlight: { current: new Set() },

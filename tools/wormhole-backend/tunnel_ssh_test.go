@@ -80,11 +80,12 @@ func jumpFixture(t *testing.T, host string, port int) (string, tunnelDetails) {
 			t.Fatal(err)
 		}
 	}
-	secret, encoding, err := storeCredentialSecret(path, jumpCredentialID, "secret")
+	secret, encoding, err := storeCredentialSecret(jumpCredentialID, "", "secret")
 	if err != nil {
 		db.Close()
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = deleteStoredCredentialSecret(jumpCredentialID, secret, encoding) })
 	if _, err := db.Exec("INSERT INTO CredentialSecrets (Id,Secret,Encoding,UpdatedAt) VALUES (?,?,?,'now');", jumpCredentialID, secret, encoding); err != nil {
 		db.Close()
 		t.Fatal(err)

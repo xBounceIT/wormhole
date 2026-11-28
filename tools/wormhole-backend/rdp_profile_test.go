@@ -379,8 +379,12 @@ func TestWorkspaceInlineRdpSecretSetPreserveClearAndNoRendererLeak(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if external.Password != "" || !external.UseExternalClient {
-		t.Fatalf("external RDP profile unnecessarily exposed a password: %#v", external)
+	if runtime.GOOS == "windows" {
+		if external.Password != "" || !external.UseExternalClient {
+			t.Fatal("Windows external RDP must delegate password entry to the system client")
+		}
+	} else if external.Password != "inline-secret" || external.UseExternalClient {
+		t.Fatal("the bundled RDP client did not receive its inline credential")
 	}
 	settings = externalSettings
 	settings.UseExternalClient = false

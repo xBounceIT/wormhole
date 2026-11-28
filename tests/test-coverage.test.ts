@@ -8,9 +8,64 @@ import test from 'node:test';
 import {
   discoverGoModules,
   discoverTypeScriptTests,
+  meetsCoverageThreshold,
+  mergeGoCoverage,
+  mergeVaultCoverageMatrix,
   parseGoCoverage,
   runGoCoverage,
 } from '../scripts/test-coverage.ts';
+
+test('Go coverage across runners counts portable blocks once and retains native files', () => {
+  const windows = 'mode: atomic\r\nshared.go:1.1,2.2 3 0\r\nwindows.go:3.1,3.2 1 0\r\n';
+  const linux = 'mode: set\nshared.go:1.1,2.2 3 1\nlinux.go:4.1,4.2 2 1\n';
+  const merged = mergeGoCoverage([windows, linux]);
+  assert.deepEqual(parseGoCoverage(merged), { covered: 5, total: 6 });
+  assert.equal(merged, mergeGoCoverage([linux, windows, linux]));
+  assert.equal(merged, mergeGoCoverage([merged]));
+  assert.throws(() => mergeGoCoverage([]), /No Go coverage/);
+  assert.throws(() => mergeGoCoverage([windows, 'mode: set\n']), /no statements/);
+  assert.throws(() => mergeGoCoverage([windows, linux.replace('2.2 3', '2.2 4')]), /Inconsistent/);
+});
+
+test('the vault coverage gate uses the exact statement ratio', () => {
+  assert.equal(meetsCoverageThreshold({ covered: 4, total: 5 }, 80), true);
+  assert.equal(meetsCoverageThreshold({ covered: 7999, total: 10000 }, 80), false);
+  assert.throws(() => meetsCoverageThreshold({ covered: 0, total: 0 }, 80));
+});
+
+test('the vault matrix requires results from native PostgreSQL and the desktop wizard', () => {
+  const root = mkdtempSync(join(tmpdir(), 'vault-matrix-'));
+  const profile = 'mode: set\nportable.go:1.1,2.1 1 0\n';
+  try {
+    for (const os of ['Linux', 'Windows', 'macOS']) {
+      const runner = join(root, `vault-go-${os}-fixture`);
+      mkdirSync(runner);
+      for (const file of ['vault.coverage', 'vault-entry.coverage'])
+        writeFileSync(join(runner, file), profile);
+      if (os === 'Linux') {
+        for (const major of [16, 17, 18]) {
+          writeFileSync(
+            join(runner, `vault-postgres-${major}.coverage`),
+            profile.replace('portable.go', `pg${major}.go`),
+          );
+        }
+        assert.throws(() => mergeVaultCoverageMatrix(root), /Missing vault coverage from Windows/);
+      }
+      if (os === 'Windows') {
+        writeFileSync(join(runner, 'vault-postgres.coverage'), profile);
+        writeFileSync(join(runner, 'vault-desktop.coverage'), profile.replace('1 0', '1 1'));
+      }
+    }
+    assert.deepEqual(parseGoCoverage(mergeVaultCoverageMatrix(root)), { covered: 1, total: 4 });
+    rmSync(join(root, 'vault-go-Windows-fixture', 'vault-desktop.coverage'));
+    assert.throws(() => mergeVaultCoverageMatrix(root), /vault-desktop\.coverage/);
+    rmSync(join(root, 'vault-go-Linux-fixture', 'vault-postgres-17.coverage'));
+    assert.throws(() => mergeVaultCoverageMatrix(root), /vault-postgres-17\.coverage/);
+  } finally {
+    assert.equal(dirname(root), resolve(tmpdir()));
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test('Go coverage parsing is exact and fails closed', () => {
   const coverage = parseGoCoverage(
@@ -65,13 +120,18 @@ test('Go coverage reports low percentages and propagates test failures', (contex
   const output: string[] = [];
   context.mock.method(console, 'log', (line: string) => output.push(line));
   const root = mkdtempSync(join(tmpdir(), 'wormhole-coverage-runner-'));
-  const modules = ['backend', 'adapter'].map((name) => join(root, 'tools', name));
+  const modules = ['wormhole-backend', 'adapter'].map((name) => join(root, 'tools', name));
   const calls: string[] = [];
   const profiles: string[] = [];
   let failCommand = false;
   const runCommand = (command: string, args: string[], cwd: string) => {
     assert.equal(command, 'go');
-    assert.deepEqual(args.slice(0, 3), ['test', '-timeout=10m', './...']);
+    assert.deepEqual(
+      args.slice(0, -1),
+      cwd === modules[0]
+        ? ['test', '-count=1', '-timeout=35m', './...']
+        : ['test', '-timeout=10m', './...'],
+    );
     assert.ok(modules.includes(cwd));
     calls.push(cwd);
     const profile = args.find((arg) => arg.startsWith('-coverprofile='))!.slice(14);

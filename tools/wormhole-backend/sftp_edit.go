@@ -143,6 +143,11 @@ func (record *sftpEditRecord) save() error {
 }
 
 func (server *sshServer) ensureSftpEdits() error {
+	if server.sealedEdits != nil {
+		if err := server.sealedEdits.prepare(server); err != nil {
+			return err
+		}
+	}
 	server.editOnce.Do(func() {
 		server.edits = make(map[string]*sftpEditRecord)
 		server.editWorkers = make(chan struct{}, 16)
@@ -155,11 +160,11 @@ func (server *sshServer) ensureSftpEdits() error {
 			server.editError = err
 			return
 		}
-		if err := protectSftpEditDirectory(root); err != nil {
+		if err := protectPrivateDirectory(root); err != nil {
 			server.editError = err
 			return
 		}
-		settings, settingsErr := readSftpEditorSettings(server.databasePath)
+		settings, settingsErr := server.readEditSettings()
 		if settingsErr != nil {
 			server.editError = settingsErr
 			return
@@ -186,10 +191,10 @@ func (server *sshServer) ensureSftpEdits() error {
 				continue
 			}
 			record := &sftpEditRecord{}
-			if json.Unmarshal(contents, record) != nil || record.View.ID != entry.Name() || !validSftpEditManifest(record) {
+			if json.Unmarshal(contents, record) != nil || record.View.ID != entry.Name() || !validSftpEditManifest(record) || (server.sealedEdits != nil && record.View.NodeID != server.sealedEdits.nodeID) {
 				continue
 			}
-			if protectSftpEditDirectory(directory) != nil || protectSftpEditDirectory(filepath.Join(directory, "files")) != nil {
+			if protectPrivateDirectory(directory) != nil || protectPrivateDirectory(filepath.Join(directory, "files")) != nil {
 				continue
 			}
 			record.directory, record.maxSize = directory, settings.MaxFileSize
@@ -248,6 +253,17 @@ func (server *sshServer) sftpEditSnapshot(sessionID string) []sftpEditView {
 }
 
 func (server *sshServer) handleSftpEdit(command sshWireCommand) {
+	// Closing a tab with no working copies must not acquire another process's
+	// cache lease (or create a cache merely because the application is quitting).
+	if server.sealedEdits != nil && (command.Operation == "prepare-close" || command.Operation == "finish-close") {
+		server.editMu.Lock()
+		empty := len(server.edits) == 0
+		server.editMu.Unlock()
+		if empty {
+			server.output.write(sshWireEvent{Type: "sftp.edit", SessionID: command.SessionID, RequestID: command.RequestID})
+			return
+		}
+	}
 	if err := server.ensureSftpEdits(); err != nil {
 		server.output.write(sshWireEvent{Type: "sftp.edit", SessionID: command.SessionID, RequestID: command.RequestID, Error: safeSftpError(err)})
 		return
@@ -258,7 +274,7 @@ func (server *sshServer) handleSftpEdit(command sshWireCommand) {
 		server.output.write(sshWireEvent{Type: "sftp.edit", SessionID: command.SessionID, RequestID: command.RequestID, Error: "too many file edit operations; retry after the current operation"})
 		return
 	}
-	go func() {
+	if !server.startSftpWork(func() {
 		defer func() { <-server.editWorkers }()
 		err := server.runSftpEdit(command)
 		event := sshWireEvent{Type: "sftp.edit", SessionID: command.SessionID, RequestID: command.RequestID, Edits: server.sftpEditSnapshot(command.SessionID)}
@@ -276,7 +292,10 @@ func (server *sshServer) handleSftpEdit(command sshWireCommand) {
 			}
 		}
 		server.editMu.Unlock()
-	}()
+	}) {
+		<-server.editWorkers
+		server.output.write(sshWireEvent{Type: "sftp.edit", SessionID: command.SessionID, RequestID: command.RequestID, Error: "file editing is stopping or busy"})
+	}
 }
 
 func (server *sshServer) runSftpEdit(command sshWireCommand) error {
@@ -354,7 +373,7 @@ func (server *sshServer) runSftpEdit(command sshWireCommand) error {
 			return err
 		}
 		record.resetUploadRetry()
-		go server.watchSftpEdit(record)
+		server.startEditWatcher(record)
 		return nil
 	}
 	if record.View.Recovered || record.View.SessionID != command.SessionID || !record.matches(native) {
@@ -417,7 +436,7 @@ func (server *sshServer) startSftpEdit(native *sshNativeSession, command sshWire
 	if native == nil || native.isClosed() {
 		return errSSHSessionClosed
 	}
-	settings, err := readSftpEditorSettings(server.databasePath)
+	settings, err := server.readEditSettings()
 	if err != nil {
 		return err
 	}
@@ -471,7 +490,9 @@ func (server *sshServer) startSftpEdit(native *sshNativeSession, command sshWire
 		return err
 	}
 	record := &sftpEditRecord{View: sftpEditView{ID: id, SessionID: native.id, Name: name, RemotePath: remote, Editor: editor.Name, State: "Opening"}, Host: native.mcpSession.Host, Port: native.mcpSession.Port, Username: native.mcpSession.Username, Fingerprint: native.fingerprint, Route: native.editRoute(), maxSize: settings.MaxFileSize}
-	if state := server.reconnectState(native.id); state != nil {
+	if server.sealedEdits != nil {
+		record.View.NodeID = server.sealedEdits.nodeID
+	} else if state := server.reconnectState(native.id); state != nil {
 		record.View.NodeID = state.commandSnapshot().NodeID
 	}
 	record.directory = filepath.Join(server.electronUserDataPath, "sftp-edit", id)
@@ -485,7 +506,7 @@ func (server *sshServer) startSftpEdit(native *sshNativeSession, command sshWire
 		record.stopped = true
 		return err
 	}
-	if err := protectSftpEditDirectory(record.directory); err != nil {
+	if err := protectPrivateDirectory(record.directory); err != nil {
 		record.stopped = true
 		_ = os.Remove(record.directory)
 		return err
@@ -513,7 +534,7 @@ func (server *sshServer) startSftpEdit(native *sshNativeSession, command sshWire
 		return err
 	}
 	record.View.State = "Watching"
-	go server.watchSftpEdit(record)
+	server.startEditWatcher(record)
 	return nil
 }
 
@@ -761,7 +782,19 @@ func (server *sshServer) watchSftpEdit(record *sftpEditRecord) {
 
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
-	for range ticker.C {
+	var stop <-chan struct{}
+	if server.sealedEdits != nil {
+		stop = server.sealedEdits.stop
+	}
+	for {
+		select {
+		case <-stop:
+			record.mu.Lock()
+			record.watching = false
+			record.mu.Unlock()
+			return
+		case <-ticker.C:
+		}
 		record.mu.Lock()
 		if record.stopped || record.View.Recovered {
 			// Clear ownership before unlocking. A recover racing with this exit
@@ -770,7 +803,17 @@ func (server *sshServer) watchSftpEdit(record *sftpEditRecord) {
 			record.mu.Unlock()
 			return
 		}
-		changed := record.poll(server.session(record.View.SessionID), time.Now())
+		native := server.session(record.View.SessionID)
+		if server.sealedEdits != nil && (native == nil || native.isClosed()) {
+			record.View.Recovered, record.View.State = true, "Recovered"
+			_ = record.save()
+			record.watching = false
+			view := record.View
+			record.mu.Unlock()
+			server.notifySftpEdit(view)
+			return
+		}
+		changed := record.poll(native, time.Now())
 		view := record.View
 		record.mu.Unlock()
 		if changed {

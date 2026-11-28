@@ -19,12 +19,23 @@ func tryAcquireExclusiveFileLock(lockPath string) (func(), error) {
 }
 
 func lockExclusiveFile(lockPath string, nonblocking bool) (func(), error) {
+	return lockNativeFile(lockPath, nonblocking, true)
+}
+
+func tryAcquireSharedFileLock(lockPath string) (func(), error) {
+	return lockNativeFile(lockPath, true, false)
+}
+
+func lockNativeFile(lockPath string, nonblocking, exclusive bool) (func(), error) {
 	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("cannot open the Wormhole data lock: %w", err)
 	}
 	overlapped := new(windows.Overlapped)
-	flags := uint32(windows.LOCKFILE_EXCLUSIVE_LOCK)
+	var flags uint32
+	if exclusive {
+		flags = windows.LOCKFILE_EXCLUSIVE_LOCK
+	}
 	if nonblocking {
 		flags |= windows.LOCKFILE_FAIL_IMMEDIATELY
 	}

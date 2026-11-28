@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import test from 'node:test';
+import { backendGoToolchain } from '../scripts/backend-go-toolchain.mjs';
 import {
   createDevRuntimeBuildPlan,
   devRuntimeGoBuildEnvironment,
@@ -14,6 +15,19 @@ const planOptions = {
   nodeExecutable: 'node',
 };
 
+test('the backend compiler is pinned to an exact go.mod patch or explicit toolchain', () => {
+  assert.equal(backendGoToolchain('go 1.26.10 // desktop ABI\r\n'), 'go1.26.10');
+  assert.equal(backendGoToolchain('go 1.26\ntoolchain go1.26.11\n'), 'go1.26.11');
+  for (const manifest of [
+    '// go 1.26.10',
+    'go 1.26',
+    'go 1.26.10/path',
+    'go 1.26.10\ntoolchain default',
+  ]) {
+    assert.throws(() => backendGoToolchain(manifest), /exact Go toolchain/);
+  }
+});
+
 test('Go probes override inherited cross-compilation targets exactly as each native build', () => {
   const inherited = {
     GOOS: 'freebsd',
@@ -21,6 +35,7 @@ test('Go probes override inherited cross-compilation targets exactly as each nat
     CGO_ENABLED: '0',
     CC: 'custom-cc',
     GOFLAGS: '-trimpath',
+    GOTOOLCHAIN: 'local',
   };
   for (const platform of ['win32', 'darwin', 'linux'] as const) {
     for (const architecture of ['x64', 'arm64'] as const) {
@@ -52,20 +67,29 @@ test('Go probes override inherited cross-compilation targets exactly as each nat
           platform === 'darwin' && module === 'ovpnproxy' ? 'clang' : 'custom-cc',
         );
         assert.equal(environment.GOFLAGS, '-trimpath');
+        assert.equal(
+          environment.GOTOOLCHAIN,
+          module === 'backend' ? backendGoToolchain() : 'local',
+        );
       }
     }
   }
   assert.equal(inherited.GOOS, 'freebsd');
-  const probe = spawnSync('go', ['env', '-json', 'GOOS', 'GOARCH', 'CGO_ENABLED', 'CC'], {
-    encoding: 'utf8',
-    windowsHide: true,
-    env: devRuntimeGoBuildEnvironment('darwin', 'arm64', path.join('tools', 'wormhole-backend'), {
-      ...process.env,
-      ...inherited,
-    }),
-  });
+  const probe = spawnSync(
+    'go',
+    ['env', '-json', 'GOOS', 'GOARCH', 'CGO_ENABLED', 'CC', 'GOVERSION'],
+    {
+      encoding: 'utf8',
+      windowsHide: true,
+      env: devRuntimeGoBuildEnvironment('darwin', 'arm64', path.join('tools', 'wormhole-backend'), {
+        ...process.env,
+        ...inherited,
+      }),
+    },
+  );
   assert.equal(probe.status, 0, probe.stderr);
   assert.deepEqual(JSON.parse(probe.stdout), {
+    GOVERSION: backendGoToolchain(),
     GOOS: 'darwin',
     GOARCH: 'arm64',
     CGO_ENABLED: '1',

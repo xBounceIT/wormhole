@@ -1,0 +1,92 @@
+@import '@fontsource-variable/geist';
+@import './workspace-palette.css';
+
+:root .startup-shell:has(> .vault-unlock) {
+  background: var(--sidebar);
+  color: var(--foreground);
+  font:
+    14px/1.45 'Geist Variable',
+    'Segoe UI',
+    sans-serif;
+}
+
+:root .startup-card.vault-unlock {
+  padding: 0;
+  border-color: var(--border);
+  background: var(--card);
+  box-shadow: 0 12px 40px rgb(0 0 0 / 14%);
+}
+
+.vault-unlock .startup-heading {
+  padding: 20px;
+  align-items: flex-start;
+}
+
+.vault-unlock .startup-heading strong {
+  font-size: 16px;
+  line-height: 1.25;
+  letter-spacing: -0.025em;
+}
+
+.vault-unlock .startup-mark-box {
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--muted) 60%, var(--card));
+}
+
+.vault-unlock .startup-mark {
+  width: 16px;
+  height: 16px;
+}
+
+.vault-unlock :is(.startup-heading small, .startup-status) {
+  color: color-mix(in srgb, var(--foreground) 68%, var(--card));
+  font-size: 12px;
+}
+
+.vault-unlock .startup-form {
+  gap: 14px;
+  margin: 0;
+  padding: 16px 20px;
+  border-top: 1px solid var(--border);
+}
+
+.vault-unlock label:not([hidden]) {
+  display: grid;
+  gap: 6px;
+}
+
+:root .vault-unlock .startup-form :is(input, select) {
+  height: 32px;
+  border-color: var(--input);
+  border-radius: 8px;
+  background: var(--background);
+  color: var(--foreground);
+  font: inherit;
+}
+
+:root .vault-unlock .startup-form :is(input, select, button):focus-visible {
+  border-color: var(--ring);
+  outline: 3px solid color-mix(in srgb, var(--ring) 40%, transparent);
+  outline-offset: 0;
+  box-shadow: none;
+}
+
+.vault-unlock .startup-status:empty {
+  position: absolute;
+  min-height: 0;
+}
+
+.vault-unlock .startup-button {
+  min-height: 28px;
+  margin: 0;
+  padding-inline: 12px;
+  background: var(--primary);
+  color: var(--primary-foreground);
+  font-weight: 500;
+}
+
+.vault-unlock .startup-button-secondary {
+  border-color: var(--border);
+  background: var(--card);
+  color: var(--foreground);
+}

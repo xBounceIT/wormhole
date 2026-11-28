@@ -1,3 +1,6 @@
+import { tunnelClosedMessage } from '../electron/tunnel-failure.ts';
+import { coverageThreshold } from '../scripts/test-coverage.ts';
+import { parseVaultWebRequest } from '../electron/vault-web-open.ts';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { readFileSync } from 'node:fs';
@@ -59,6 +62,12 @@ after(async () => {
     const coverage = await profiler.post('Profiler.takePreciseCoverage');
     const methods = new Set([
       'open',
+      'watchVaultOwner',
+      'forgetVaultOwner',
+      'stopVaultSessions',
+      'releaseTunnel',
+      'closeForOwner',
+      'closeForWindow',
       'acquireTunnelRoute',
       'setBounds',
       'capturePreview',
@@ -67,6 +76,9 @@ after(async () => {
       'addBrowserTab',
       'showBrowserTab',
       'destroyBrowserTab',
+      'closeVaultContents',
+      'closeVaultView',
+      'closeForContents',
       'backendStopped',
       'configureWebContents',
       'failBrowserTab',
@@ -81,6 +93,7 @@ after(async () => {
     const blocks = new Map<string, number>();
     const previewBlocks = new Map<string, number>();
     const errorBlocks = new Map<string, number>();
+    const vaultBlocks = new Map<string, number>();
     for (const script of coverage.result.filter((item) =>
       ['wormhole-web-browser-native.js', 'wormhole-web-browser-errors.js'].includes(item.url),
     )) {
@@ -89,6 +102,19 @@ after(async () => {
         .map((fn) => fn.ranges[0]);
       const previewScopes = script.functions
         .filter((fn) => ['setBounds', 'capturePreview'].includes(fn.functionName))
+        .map((fn) => fn.ranges[0]);
+      const vaultScopes = script.functions
+        .filter((fn) =>
+          [
+            'open',
+            'stopVaultSessions',
+            'releaseTunnel',
+            'closeForOwner',
+            'closeForContents',
+            'closeVaultView',
+            'destroyBrowserTab',
+          ].includes(fn.functionName),
+        )
         .map((fn) => fn.ranges[0]);
       for (const fn of script.functions) {
         if (
@@ -102,6 +128,13 @@ after(async () => {
         for (const range of fn.ranges) {
           const key = `${script.url}:${range.startOffset}:${range.endOffset}`;
           blocks.set(key, (blocks.get(key) ?? 0) + range.count);
+          if (
+            vaultScopes.some(
+              (scope) =>
+                range.startOffset >= scope.startOffset && range.endOffset <= scope.endOffset,
+            )
+          )
+            vaultBlocks.set(key, (vaultBlocks.get(key) ?? 0) + range.count);
           if (script.url === 'wormhole-web-browser-errors.js')
             errorBlocks.set(key, (errorBlocks.get(key) ?? 0) + range.count);
           if (
@@ -116,6 +149,10 @@ after(async () => {
       }
     }
     assert.ok(blocks.size > 0);
+    const vaultPercent =
+      (100 * [...vaultBlocks.values()].filter((n) => n > 0).length) / vaultBlocks.size;
+    console.log(`Modified vault browser methods: V8 block coverage ${vaultPercent.toFixed(2)}%`);
+    assert.ok(vaultPercent >= coverageThreshold);
     const percent = (100 * [...blocks.values()].filter((value) => value > 0).length) / blocks.size;
     console.log(`Native browser handlers: V8 block coverage ${percent.toFixed(2)}%`);
     const previewPercent =
@@ -132,7 +169,11 @@ after(async () => {
 
 // Run the production native controller, replacing only Electron and the Go transport.
 // Real React/Chromium interaction is covered separately in web-browser.test.ts.
-function browserHarness({ socks = '127.0.0.1:1080', active = true } = {}) {
+function browserHarness({
+  socks = '127.0.0.1:1080',
+  active = true,
+  vault = undefined as any,
+} = {}) {
   const source = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
   const start = source.indexOf('class WebSurfaceManager');
   const end = source.indexOf('function clampWindowDimension', start);
@@ -154,7 +195,15 @@ function browserHarness({ socks = '127.0.0.1:1080', active = true } = {}) {
         setProxy: async (proxy: unknown) => {
           sessions.get(partition)!.proxy = proxy;
         },
-        closeAllConnections: async () => {},
+        closeAllConnections: async () => {
+          sessions.get(partition)!.connectionsClosed = true;
+        },
+        clearStorageData: async () => {
+          sessions.get(partition)!.storageCleared = true;
+        },
+        clearCache: async () => {
+          sessions.get(partition)!.cacheCleared = true;
+        },
         setPermissionRequestHandler() {},
         setPermissionCheckHandler() {},
         fetch: async () => new Response(null, { status: 404 }),
@@ -380,6 +429,7 @@ function browserHarness({ socks = '127.0.0.1:1080', active = true } = {}) {
     randomUUID,
     URL,
     console,
+    tunnelClosedMessage,
     recordDiagnostic: (...args: unknown[]) => diagnostics.push(args),
     reportWarning: (message: string) => diagnostics.push(['WRN', message]),
     setImmediate,
@@ -433,6 +483,8 @@ function browserHarness({ socks = '127.0.0.1:1080', active = true } = {}) {
         return request;
       },
     },
+    vaultID: (value: unknown) => typeof value === 'string' && /^[0-9a-f-]{36}$/.test(value),
+    parseVaultWebRequest,
     validateWebTarget: (value: unknown) => value,
     runBackend: async (action: string, request: any) =>
       action === 'extension-read'
@@ -471,7 +523,7 @@ function browserHarness({ socks = '127.0.0.1:1080', active = true } = {}) {
   };
   const context = vm.createContext(sandbox);
   vm.runInContext(code, context, { filename: 'wormhole-web-browser-native.js' });
-  const manager = new (context as any).Manager();
+  const manager = new (context as any).Manager(vault);
   const open = (
     sessionId = 'browser-1',
     tunnelConfigId: string | undefined = 'vpn-1',
@@ -2083,7 +2135,7 @@ test('production navigation errors retain diagnostic codes without copying sensi
   const source = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
   const code = source.slice(
     source.indexOf('function describeWebNavigationError('),
-    source.indexOf('const webSurfaces = new WebSurfaceManager();'),
+    source.indexOf('const vaultWebConnections = new VaultWebConnections('),
   );
   const formatters = vm.runInNewContext(
     stripTypeScriptTypes(`${code}; ({ describeWebNavigationError, describeWebLoadFailure });`),
@@ -2251,4 +2303,428 @@ test('navigation restrictions, cancellations and tab limits fail closed', async 
   h.manager.failBrowserTab('browser-1', record, record.tabs.activeId, 'Late failure');
   await h.command('reload');
   assert.equal(h.events.length, count);
+});
+
+function vaultBrowserHarness({ routed = true } = {}) {
+  const preparations: any[] = [],
+    closes: string[] = [],
+    retirements: string[] = [];
+  let closeFailure = false,
+    hold: Promise<void> | undefined;
+  const connections = {
+    async open(q: any, epoch: number, owner: () => boolean, onClosed: () => void) {
+      const entry = { q, epoch, owner, onClosed, active: true };
+      preparations.push(entry);
+      await hold;
+      return {
+        target: {
+          url: 'https://native.example:8443/path',
+          host: 'native.example',
+          port: 8443,
+          protocol: 'https',
+          ignoreCertErrors: false,
+          ...(routed
+            ? { tunnelConfigId: 'b'.repeat(36), proxyUrl: 'socks5://127.0.0.1:1081' }
+            : {}),
+        },
+        route: routed ? 'socks5' : 'direct',
+        active: () => entry.active && owner(),
+      };
+    },
+    async close(id: string) {
+      closes.push(id);
+      if (closeFailure) throw Error('private close diagnostic');
+    },
+    async retireRoute(id: string) {
+      retirements.push(id);
+      if (closeFailure) throw Error('private close diagnostic');
+    },
+    async retireAllRoutes() {
+      if (closeFailure) throw Error('private close diagnostic');
+    },
+    async closeAll() {
+      if (closeFailure) throw Error('private close diagnostic');
+    },
+  };
+  const h = browserHarness({ vault: { active: () => true, connections } });
+  h.sandbox.runBackend = async () => {
+    throw Error('legacy backend must not be called');
+  };
+  const id = '10000000-0000-4000-8000-000000000001';
+  const nodeId = '20000000-0000-4000-8000-000000000001';
+  const open = (owner = h.owner, sid = id, trusted = () => true) =>
+    h.manager.open(owner, { sessionId: sid, nodeId, attempt: 1 }, trusted);
+  return {
+    ...h,
+    id,
+    nodeId,
+    preparations,
+    closes,
+    retirements,
+    nativeOpen: open,
+    failClose: (value: boolean) => {
+      closeFailure = value;
+    },
+    hold: (value: Promise<void> | undefined) => {
+      hold = value;
+    },
+  };
+}
+
+test('Quick browser tabs share one target and profile failures retain authority until a confirmed retry', async () => {
+  const h = vaultBrowserHarness();
+  const quickTarget = {
+    protocol: 'https',
+    host: 'native.example',
+    port: 8443,
+    credentialId: '',
+    tunnelId: '',
+    sshAutoSudo: false,
+    httpPath: '/path',
+    ignoreCertificateErrors: false,
+    rdp: null,
+  };
+  await h.manager.open(h.owner, { sessionId: h.id, attempt: 1, quickTarget });
+  const record = h.manager.surfaces.get(h.id),
+    first = record.view.webContents;
+  assert.equal(h.preparations.length, 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(h.preparations[0].q)), {
+    sessionId: h.id,
+    quickTarget,
+  });
+  await h.manager.command(h.owner, { sessionId: h.id, operation: 'new-tab' });
+  const second = record.view.webContents;
+  await h.manager.command(h.owner, {
+    sessionId: h.id,
+    operation: 'close-tab',
+    tabId: record.tabs.activeId,
+  });
+  assert.equal(second.isDestroyed(), true);
+  assert.equal(first.isDestroyed(), false);
+  assert.equal(h.closes.length, 0);
+  const browserSession = h.sessions.get(record.partition)!;
+  const clear = browserSession.clearCache.bind(browserSession);
+  browserSession.clearCache = async () => {
+    throw Error('private profile diagnostic');
+  };
+  await assert.rejects(h.manager.closeForContents(h.owner.webContents, h.id), /Web shutdown/);
+  assert.equal(first.isDestroyed(), true);
+  assert.equal(h.closes.length, 0, 'failed profile cleanup cannot retire the native target');
+  assert.ok(h.retirements.length > 0, 'route shutdown does not wait for profile success');
+  assert.equal(h.manager.vaultSessionOwners.size, 1);
+  browserSession.clearCache = clear;
+  await h.manager.closeForContents(h.owner.webContents, h.id);
+  assert.equal(h.closes.length, 1);
+  assert.equal(h.manager.vaultSessionOwners.size, 0);
+  await h.manager.closeForContents(h.owner.webContents, h.id);
+  assert.equal(h.closes.length, 1);
+});
+
+test('failed forced view close is retryable after actual late destruction', async () => {
+  const h = vaultBrowserHarness();
+  await h.nativeOpen();
+  const record = h.manager.surfaces.get(h.id),
+    contents = record.view.webContents;
+  const close = contents.close.bind(contents);
+  contents.close = () => {
+    throw Error('private diagnostic');
+  };
+  await assert.rejects(h.manager.stopVaultSessions());
+  assert.equal(h.closes.length, 0);
+  close();
+  await h.manager.stopVaultSessions();
+  assert.equal(h.manager.vaultSessionOwners.size, 0);
+  assert.equal(h.closes.length, 1);
+});
+
+test('vault close uses the captured document when the BrowserWindow has already been destroyed', async () => {
+  const h = vaultBrowserHarness();
+  await h.nativeOpen();
+  const contents = h.owner.webContents;
+  h.owner.isDestroyed = () => true;
+  Object.defineProperty(h.owner, 'webContents', {
+    get() {
+      throw Error('Object has been destroyed');
+    },
+  });
+  await h.manager.closeForContents(contents, h.id);
+  assert.equal(h.manager.vaultSessionOwners.size, 0);
+  assert.equal(h.closes.length, 1);
+});
+
+test('vault browser applies its native proxy before navigation and keeps it out of app responses', async () => {
+  for (const routed of [false, true]) {
+    const h = vaultBrowserHarness({ routed });
+    const result = await h.nativeOpen();
+    assert.equal(result.proxyUrl, undefined);
+    assert.equal(result.url, 'https://native.example:8443/path');
+    assert.equal(result.browser.route, routed ? 'vpn' : 'direct');
+    const record = h.manager.surfaces.get(h.id);
+    assert.equal(h.preparations[0].epoch, h.authSession.authorizationEpoch + 1);
+    assert.equal(
+      h.preparations[0].owner(),
+      true,
+      'ownership survives pending-to-active transition',
+    );
+    assert.equal(h.sessions.get(record.partition)!.proxy.mode, routed ? 'fixed_servers' : 'direct');
+    assert.equal(h.acquisitions.length, 0);
+    await h.manager.command(h.owner, { sessionId: h.id, operation: 'new-tab' });
+    assert.equal(h.preparations.length, 1, 'tabs share one native preparation');
+    await h.manager.stopVaultSessions();
+    assert.equal(record.disposed, true);
+    assert.equal(h.sessions.get(record.partition)!.storageCleared, true);
+    assert.equal(h.sessions.get(record.partition)!.cacheCleared, true);
+    assert.equal(h.sessions.get(record.partition)!.connectionsClosed, true);
+    assert.equal(h.preparations[0].owner(), false);
+    assert.equal(h.manager.vaultSessionOwners.size, 0);
+    assert.equal(h.owner.listenerCount('closed'), 0);
+  }
+});
+
+test('vault browser rejects target overrides, foreign windows and stale trusted documents', async () => {
+  const h = vaultBrowserHarness();
+  for (const extra of [
+    { password: 'secret' },
+    { address: 'https://attacker' },
+    { credentialId: h.nodeId },
+    { sessionId: 'not-id' },
+  ]) {
+    await assert.rejects(
+      h.manager.open(h.owner, { sessionId: h.id, nodeId: h.nodeId, attempt: 1, ...extra }),
+    );
+  }
+  await assert.rejects(h.nativeOpen(h.owner, h.id, () => false));
+  await h.nativeOpen();
+  const record = h.manager.surfaces.get(h.id);
+  const foreign = Object.assign(new EventEmitter(), {
+    ...h.owner,
+    webContents: h.owner.webContents,
+  });
+  await assert.rejects(h.nativeOpen(foreign));
+  assert.equal(record.disposed, false);
+  h.manager.closeForOwner(foreign, h.id);
+  assert.equal(record.disposed, false);
+  h.manager.closeForOwner(h.owner, h.id);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(record.disposed, true);
+});
+
+test('vault root document lifecycle closes active views and retains one hook per owner', async () => {
+  for (const event of ['did-start-loading', 'render-process-gone', 'destroyed', 'closed']) {
+    const h = vaultBrowserHarness();
+    await h.nativeOpen();
+    await h.nativeOpen(h.owner, '10000000-0000-4000-8000-000000000002');
+    assert.equal(h.owner.webContents.listenerCount('did-start-loading'), 1);
+    const records = [...h.manager.surfaces.values()];
+    (event === 'closed' ? h.owner : h.owner.webContents).emit(event);
+    assert.ok(records.every((r: any) => r.disposed));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(h.manager.vaultSessionOwners.size, 0);
+    assert.equal(h.owner.webContents.listenerCount('did-start-loading'), 0);
+  }
+});
+
+test('vault pending preparation cannot create a view after reload, lock or lost route', async () => {
+  for (const loss of ['reload', 'epoch', 'trust', 'route']) {
+    const h = vaultBrowserHarness();
+    let resume!: () => void,
+      trusted = true;
+    h.hold(
+      new Promise<void>((resolve) => {
+        resume = resolve;
+      }),
+    );
+    const pending = h.nativeOpen(h.owner, h.id, () => trusted);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(h.preparations.length, 1);
+    if (loss === 'reload') h.owner.webContents.emit('did-start-loading');
+    if (loss === 'epoch') h.authSession.authorizationEpoch++;
+    if (loss === 'trust') trusted = false;
+    if (loss === 'route') h.preparations[0].active = false;
+    resume();
+    await assert.rejects(pending, /Vault web connection could not be opened/);
+    assert.equal(h.children.size, 0);
+    await h.manager.stopVaultSessions();
+    assert.equal(h.manager.vaultSessionOwners.size, 0);
+  }
+});
+
+test('vault old preparation and route callbacks cannot close a replacement browser', async () => {
+  const h = vaultBrowserHarness();
+  let resume!: () => void;
+  h.hold(
+    new Promise<void>((resolve) => {
+      resume = resolve;
+    }),
+  );
+  const old = h.nativeOpen();
+  await new Promise((resolve) => setImmediate(resolve));
+  h.hold(undefined);
+  await h.nativeOpen();
+  const replacement = h.manager.surfaces.get(h.id);
+  const closes = h.closes.length;
+  h.preparations[0].onClosed('route');
+  resume();
+  await assert.rejects(old);
+  assert.equal(replacement.disposed, false);
+  assert.equal(h.closes.length, closes);
+  h.preparations[1].onClosed('route');
+  assert.equal(replacement.disposed, true);
+  assert.ok(h.events.some((event) => event.type === 'failed'));
+  await h.manager.stopVaultSessions();
+});
+
+test('shared View revocation destroys and clears only the browser owned by the affected generation', async () => {
+  const h = vaultBrowserHarness();
+  const other = '66666666-6666-4666-8666-666666666666';
+  await h.nativeOpen();
+  await h.nativeOpen(h.owner, other);
+  const affected = h.manager.surfaces.get(h.id);
+  const independent = h.manager.surfaces.get(other);
+  h.preparations[0].onClosed('view-revoked');
+  await h.manager.releaseTunnel(h.id);
+  assert.equal(affected.disposed, true);
+  assert.equal(affected.view.webContents.isDestroyed(), true);
+  assert.equal(h.manager.vaultSessionOwners.has(h.id), false);
+  const profile = h.sessions.get(affected.partition)!;
+  assert.equal(profile.connectionsClosed, true);
+  assert.equal(profile.storageCleared, true);
+  assert.equal(profile.cacheCleared, true);
+  assert.equal(independent.disposed, false);
+  assert.equal(independent.view.webContents.isDestroyed(), false);
+  assert.equal(h.sessions.get(independent.partition)!.storageCleared, undefined);
+  assert.ok(
+    h.events.some(
+      (event) =>
+        event.type === 'failed' && event.error === 'Access to the shared browser was revoked.',
+    ),
+  );
+  await h.manager.stopVaultSessions();
+});
+
+test('vault unconfirmed close retains ownership and fails global/window cleanup', async () => {
+  const h = vaultBrowserHarness();
+  await h.nativeOpen();
+  const record = h.manager.surfaces.get(h.id);
+  h.failClose(true);
+  await assert.rejects(
+    h.manager.flushAndCloseForWindow(h.owner),
+    /Web shutdown could not be confirmed/,
+  );
+  assert.equal(record.disposed, true, 'views close before waiting for native exit');
+  assert.equal(h.manager.vaultSessionOwners.size, 1);
+  await assert.rejects(h.manager.stopVaultSessions());
+  assert.equal(h.manager.vaultSessionOwners.size, 1);
+  h.failClose(false);
+  await h.manager.flushAndCloseAll();
+  assert.equal(h.manager.vaultSessionOwners.size, 0);
+});
+
+test('vault lock never acknowledges a failed Chromium profile cleanup', async () => {
+  for (const method of ['clearStorageData', 'clearCache', 'closeAllConnections']) {
+    const h = vaultBrowserHarness();
+    await h.nativeOpen();
+    const record = h.manager.surfaces.get(h.id);
+    h.sessions.get(record.partition)![method] = async () => {
+      throw Error('private profile diagnostic');
+    };
+    await assert.rejects(h.manager.stopVaultSessions(), /Web shutdown could not be confirmed/);
+    assert.equal(record.disposed, true);
+    assert.equal(
+      h.manager.vaultSessionOwners.size,
+      1,
+      'unconfirmed cleanup reserves browser identity',
+    );
+    assert.equal(h.preparations[0].owner(), false);
+  }
+});
+
+test('vault cleanup waits for actual surface destruction and reports a failed forced close', async () => {
+  for (const fail of [false, true]) {
+    const h = vaultBrowserHarness();
+    await h.nativeOpen();
+    const record = h.manager.surfaces.get(h.id),
+      contents = record.view.webContents;
+    const close = contents.close.bind(contents);
+    contents.close = (options: any) => {
+      assert.equal(options.waitForBeforeUnload, false);
+      if (fail) throw Error('private close diagnostic');
+    };
+    let settled = false;
+    const pending = h.manager.stopVaultSessions();
+    const observed = pending.then(
+      () => {
+        settled = true;
+      },
+      (error: Error) => {
+        settled = true;
+        return error;
+      },
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    if (!fail) {
+      assert.equal(settled, false);
+      assert.equal(
+        h.sessions.get(record.partition)!.storageCleared,
+        undefined,
+        'No running document may write after cleanup',
+      );
+      close();
+    }
+    assert.equal(Boolean(await observed), fail);
+    assert.equal(h.owner.webContents.listenerCount('did-start-loading'), fail ? 1 : 0);
+  }
+});
+
+test('vault surface retirement rejects a timeout and accepts a late observed destruction', async () => {
+  for (const destroyed of [false, true]) {
+    const h = vaultBrowserHarness();
+    // Keep production retirement logic; shorten only the timer in the Electron fake.
+    h.sandbox.setTimeout = (fn: () => void) => setTimeout(fn, 1);
+    const contents = Object.assign(new EventEmitter(), {
+      isDestroyed: () => destroyed,
+      close() {},
+    });
+    if (destroyed) {
+      await h.manager.closeVaultContents(contents);
+    } else {
+      const live = setTimeout(() => {}, 1000);
+      try {
+        await assert.rejects(
+          h.manager.closeVaultContents(contents),
+          /Web surface shutdown could not be confirmed/,
+        );
+      } finally {
+        clearTimeout(live);
+      }
+      assert.equal(contents.listenerCount('destroyed'), 0);
+    }
+  }
+});
+
+test('vault browser admission bounds pending opens and unconfirmed profile reservations together', async () => {
+  const h = vaultBrowserHarness();
+  let warnings = 0;
+  h.sandbox.reportWarning = () => {
+    warnings++;
+  };
+  const ids = Array.from(
+    { length: 33 },
+    (_, i) => '10000000-0000-4000-8000-' + String(i).padStart(12, '0'),
+  );
+  const pending = ids.map((id) => h.nativeOpen(h.owner, id));
+  const results = await Promise.allSettled(pending);
+  assert.equal(results.filter((r) => r.status === 'fulfilled').length, 32);
+  assert.equal(h.preparations.length, 32);
+  for (const record of h.manager.surfaces.values()) {
+    h.sessions.get(record.partition)!.clearCache = async () => {
+      throw Error('private cleanup diagnostic');
+    };
+  }
+  await assert.rejects(h.manager.stopVaultSessions(), /Web shutdown could not be confirmed/);
+  assert.equal(h.manager.vaultSessionOwners.size, 32);
+  assert.equal(h.manager.pendingOpenOwners.size, 0);
+  assert.ok(warnings > 0, 'failed cleanup remains observable');
+  await assert.rejects(h.nativeOpen(h.owner, ids[32]));
+  assert.equal(h.preparations.length, 32, 'unconfirmed profiles still consume browser capacity');
 });

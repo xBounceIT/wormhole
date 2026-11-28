@@ -18,9 +18,12 @@ test('fatal input cleanup releases terminal ownership before forwarding the fina
     stripTypeScriptTypes(`class Harness {
       terminalDelivery = new SshTerminalDelivery();
       terminalOwners = new Map([['session-1', {}]]);
+      terminalAdmissions = new Map([['session-1', {}]]);
+      protectedMembers = new Map();
       activeSessions = new Set(['session-1']);
       retainedMismatchSessions = new Set();
       openWaiters = new Map();
+      editWaiters = new Map();
       events = []; releases = [];
       releaseTunnel(id) { this.releases.push(id); return Promise.resolve(); }
       broadcast(event) { this.events.push(event); }
@@ -28,6 +31,15 @@ test('fatal input cleanup releases terminal ownership before forwarding the fina
     }`) + '; return Harness;',
   )(SshTerminalDelivery, JSON.parse);
   const backend = new Harness();
+  let editError: Error | undefined;
+  const editTimeout = setTimeout(() => {}, 60_000).unref();
+  backend.editWaiters.set('edit-1', {
+    sessionId: 'session-1',
+    timeout: editTimeout,
+    reject: (error: Error) => {
+      editError = error;
+    },
+  });
   backend.terminalDelivery.receive(parseSshTerminalOutput(wire)!);
   backend.handleLine(JSON.stringify({ type: 'closed', sessionId: 'session-1' }));
   backend.handleLine(
@@ -35,6 +47,8 @@ test('fatal input cleanup releases terminal ownership before forwarding the fina
   );
   assert.equal(backend.activeSessions.has('session-1'), false);
   assert.equal(backend.terminalOwners.has('session-1'), false);
+  assert.equal(backend.editWaiters.size, 0);
+  assert.match(editError?.message ?? '', /working copies are retained/);
   assert.deepEqual(backend.terminalDelivery.pending(), []);
   assert.deepEqual(backend.releases, ['session-1', 'session-1']);
   assert.deepEqual(backend.events, [
@@ -209,7 +223,12 @@ test('a rejected duplicate SSH open cannot replace the terminal owner', async ()
   const handlers = new Map<string, (...args: unknown[]) => Promise<unknown>>();
   const ipcStart = source.indexOf("  ipcMain.handle('ssh:open',");
   const ipcEnd = source.indexOf("  ipcMain.handle('ssh:trust-host-key',", ipcStart);
+  const vault = { unlockedWorkspaceId: undefined as string | undefined };
   new Function(
+    'vaultBackend',
+    'vaultSshIpc',
+    'isRecord',
+    'isTrustedVaultSender',
     'ipcMain',
     'sshBackend',
     'requireNativeResourcesRunning',
@@ -217,6 +236,10 @@ test('a rejected duplicate SSH open cannot replace the terminal owner', async ()
     'runAuthorizedOperation',
     stripTypeScriptTypes(source.slice(ipcStart, ipcEnd)),
   )(
+    vault,
+    { handles: () => false },
+    (value: unknown) => value !== null && typeof value === 'object' && !Array.isArray(value),
+    () => false,
     {
       handle: (name: string, handler: (...args: unknown[]) => Promise<unknown>) =>
         handlers.set(name, handler),
@@ -241,4 +264,10 @@ test('a rejected duplicate SSH open cannot replace the terminal owner', async ()
     assert.equal(backend.terminalOwners.get('session-1'), owner);
     busy.delete('session-1');
   }
+  vault.unlockedWorkspaceId = 'native-vault';
+  await assert.rejects(
+    open({ sender: otherWindow }, { sessionId: 'session-1' }),
+    /Invalid vault SSH owner/,
+  );
+  assert.equal(backend.terminalOwners.get('session-1'), owner);
 });

@@ -20,7 +20,7 @@
     "dev:electron": "wait-on http://127.0.0.1:5173 && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron .",
     "build": "npm run build:renderer && npm run build:electron && npm run build:backend",
     "build:renderer": "vite build",
-    "build:electron": "tsc -p electron/tsconfig.electron.json",
+    "build:electron": "tsc -p electron/tsconfig.electron.json && node scripts/Build-VaultBitwardenBridge.mjs",
     "build:dev-backend": "node --experimental-strip-types scripts/build-dev-backend.ts",
     "build:backend": "node scripts/Build-ElectronBackend.mjs",
     "build:backend:arm64": "node scripts/Build-ElectronBackend.mjs --arch arm64",
@@ -37,7 +37,7 @@
     "package": "electron-builder --publish never",
     "build:windows": "npm run build && npm run build:vpn-sidecars && npm run build:credential-reader && npm run build:rdp-host",
     "build:windows:arm64": "npm run build:renderer && npm run build:electron && npm run build:backend:arm64 && npm run build:vpn-sidecars:arm64 && npm run build:credential-reader:arm64 && npm run build:rdp-host:arm64",
-    "test:backend": "powershell.exe -NoProfile -Command \"Push-Location tools/wormhole-backend; go test ./...; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; go test github.com/cloudsoda/go-smb2 -run TestWormhole; exit $LASTEXITCODE\"",
+    "test:backend": "go -C tools/wormhole-backend test -count=1 -timeout=35m ./... && go -C tools/wormhole-backend test github.com/cloudsoda/go-smb2 -run TestWormhole",
     "test:credential-reader": "powershell.exe -NoProfile -Command \"Push-Location tools/wormhole-credential-reader; go test ./...; exit $LASTEXITCODE\"",
     "test:rdp-host": "dotnet test tools/wormhole-rdp-host/Tests/Wormhole.RdpHost.Tests.csproj -c Release",
     "test:wgproxy": "powershell.exe -NoProfile -Command \"Push-Location tools/wormhole-wgproxy; go test ./...; exit $LASTEXITCODE\"",
@@ -53,7 +53,7 @@
     "test:crash-diagnostics": "node --experimental-strip-types --test tests/crash-diagnostics.test.ts tests/runtime-diagnostics.test.ts",
     "pretest:shell-lifecycle": "node -e \"require('electron')\"",
     "test:shell-lifecycle": "node --experimental-strip-types --test tests/shell-lifecycle.test.ts tests/mcp-approval.test.ts tests/mcp-approval-modes.test.ts tests/mcp-approval-ui.test.ts tests/sidebar-layout.test.ts tests/settings-navigation.test.ts tests/settings-dialog.test.ts",
-    "test:updates": "node --experimental-strip-types --test tests/update-state.test.ts tests/update-notification.test.ts",
+    "test:updates": "node --experimental-strip-types --test tests/update-state.test.ts tests/update-notification.test.ts tests/update-windows-handoff-native.test.ts",
     "test:theme-settings": "node --experimental-strip-types --test tests/theme-settings.test.ts tests/ssh-terminal-theme.test.ts",
     "test:tree-layout": "node --experimental-strip-types --test tests/connection-tree-state.test.ts tests/tree-layout.test.ts tests/tree-tooltip.test.ts tests/tree-parent.test.ts",
     "test:tree-shortcuts": "node --experimental-strip-types --test tests/tree-shortcuts.test.ts",
@@ -63,14 +63,14 @@
     "test:credential-state": "node --experimental-strip-types --test tests/credential-state.test.ts tests/ssh-certificate.test.ts tests/ssh-certificate-ui.test.ts",
     "test:backup-state": "node --experimental-strip-types --test tests/backup-state.test.ts",
     "test:mremote-import": "node --experimental-strip-types --test tests/mremote-import-contract.test.ts tests/mremote-import-state.test.ts tests/mremote-import-dialog.test.ts",
-    "test:tunnel-state": "node --experimental-strip-types --test tests/tunnel-state.test.ts tests/tunnel-test-contract.test.ts tests/fortinet-ipsec-state.test.ts tests/forcepoint-editor.test.ts tests/ssh-tunnel-state.test.ts tests/ssh-tunnel-editor.test.ts tests/tunnels-page.test.ts",
+    "test:tunnel-state": "node --experimental-strip-types --test tests/tunnel-state.test.ts tests/tunnel-test-contract.test.ts tests/fortinet-ipsec-state.test.ts tests/forcepoint-editor.test.ts tests/ssh-tunnel-state.test.ts tests/ssh-tunnel-editor.test.ts tests/tunnels-page.test.ts tests/tunnel-capabilities.test.ts",
     "test:smb": "node --experimental-strip-types --test tests/smb-protocol.test.ts",
     "test:quick-connect-state": "node --experimental-strip-types --test tests/quick-connect-state.test.ts",
     "test:workspace-notes": "node --experimental-strip-types --test tests/workspace-notes.test.ts",
     "test:tunnel-auth": "node --experimental-strip-types --test tests/tunnel-auth.test.ts tests/tunnel-route-order.test.ts tests/fortinet-ipsec-secret.test.ts",
     "test:sftp-state": "node --experimental-strip-types --test tests/sftp-state.test.ts tests/sftp-pane.test.ts tests/sftp-format.test.ts tests/sftp-contract.test.ts tests/sftp-tree-state.test.ts tests/ssh-shared-route.test.ts tests/sftp-session.test.ts",
     "test:rdp-state": "node --experimental-strip-types --test tests/rdp-state.test.ts",
-    "test:rdp-client": "node --experimental-strip-types --test tests/rdp-client.test.ts tests/rdp-tunnel-leases.test.ts",
+    "test:rdp-client": "node --experimental-strip-types --test-concurrency=1 --test tests/rdp-client.test.ts tests/rdp-tunnel-leases.test.ts tests/sealed-rdp.test.ts tests/sealed-rdp-contract.test.ts tests/vault-rdp.test.ts tests/vault-rdp-controller.test.ts tests/vault-rdp-ipc.test.ts tests/vault-rdp-wiring.test.ts tests/vault-rdp-credentials.test.ts tests/vault-rdp-credentials-dialog.test.ts tests/vault-rdp-manual.test.ts tests/vault-rdp-credentials-screen.test.ts tests/vault-rdp-credentials-native.test.ts",
     "test:rdp-contract": "node --experimental-strip-types --test tests/workspace-rdp-contract.test.ts",
     "test:serial-client": "node --experimental-strip-types --test tests/serial-client.test.ts",
     "pretest:terminal-clipboard": "node -e \"require('electron')\"",
@@ -78,7 +78,7 @@
     "test:web-session": "node --experimental-strip-types --test tests/web-session-attempt.test.ts tests/keyed-single-flight.test.ts tests/keyed-task-tracker.test.ts tests/keyed-retry-queue.test.ts tests/runtime-credential-errors.test.ts tests/runtime-bitwarden-unlock.test.ts tests/extension-reload-policy.test.ts tests/extension-mutation-guard.test.ts tests/bitwarden-active-tab-bridge.test.ts tests/bitwarden-browser-profile.test.ts tests/bitwarden-cookie-seed.test.ts tests/bitwarden-popup-layout.test.ts tests/bitwarden-operation-dialog.test.ts tests/bitwarden-popup-lifecycle.test.ts tests/bitwarden-storage.test.ts tests/bitwarden-storage-sync.test.ts tests/web-new-window-navigation.test.ts tests/web-zoom.test.ts tests/web-surface.test.ts tests/web-browser-tabs.test.ts tests/web-browser-native.test.ts tests/web-browser.test.ts tests/web-browser-routing.test.ts",
     "pretest:coverage": "node -e \"require('electron')\"",
     "test:coverage": "node --experimental-strip-types scripts/test-coverage.ts",
-    "test:electron": "npm run build:electron && npm run test:dependency-security && npm run test:codeql && npm run test:packaging && npm run test:dev-runtime && npm run test:auth-session && npm run test:crash-diagnostics && npm run test:startup-failure && npm run test:shell-lifecycle && npm run test:updates && npm run test:theme-settings && npm run test:tree-layout && npm run test:tree-shortcuts && npm run test:session-layout && npm run test:list-search && npm run test:virtual-grid && npm run test:credential-state && npm run test:backup-state && npm run test:mremote-import && npm run test:tunnel-state && npm run test:quick-connect-state && npm run test:smb && npm run test:workspace-notes && npm run test:tunnel-auth && npm run test:sftp-state && npm run test:rdp-state && npm run test:rdp-canvas && npm run test:rdp-client && npm run test:rdp-contract && npm run test:rdp-host && npm run test:serial-client && npm run test:terminal-clipboard && npm run test:web-session && npm run test:backend && npm run test:credential-reader && npm run test:sidecars",
+    "test:electron": "npm run build:electron && npm run test:dependency-security && npm run test:codeql && npm run test:packaging && npm run test:dev-runtime && npm run test:auth-session && npm run test:crash-diagnostics && npm run test:startup-failure && npm run test:shell-lifecycle && npm run test:updates && npm run test:theme-settings && npm run test:tree-layout && npm run test:tree-shortcuts && npm run test:session-layout && npm run test:list-search && npm run test:virtual-grid && npm run test:credential-state && npm run test:backup-state && npm run test:mremote-import && npm run test:tunnel-state && npm run test:quick-connect-state && npm run test:smb && npm run test:workspace-notes && npm run test:tunnel-auth && npm run test:sftp-state && npm run test:rdp-state && npm run test:rdp-canvas && npm run test:rdp-client && npm run test:rdp-contract && npm run test:rdp-host && npm run test:serial-client && npm run test:terminal-clipboard && npm run test:web-session && npm run test:backend && npm run test:credential-reader && npm run test:sidecars && npm run test:vault-client",
     "test:react-doctor": "react-doctor . --verbose --blocking warning",
     "start": "electron .",
     "typecheck": "tsc -p tsconfig.json && tsc -p electron/tsconfig.electron.json --noEmit",
@@ -91,11 +91,15 @@
     "build:rdp-canvas": "node scripts/build-rdp-canvas-host.mjs",
     "test:rdp-canvas": "node --experimental-strip-types --test tests/rdp-canvas.test.ts tests/rdp-canvas-surface.test.ts tests/rdp-canvas-build.test.mjs tests/rdp-native-wire.test.mjs tests/rdp-certificate.test.ts",
     "test:fortiipsecproxy": "powershell.exe -NoProfile -Command \"Push-Location tools/wormhole-fortiipsecproxy; go test ./...; exit $LASTEXITCODE\"",
-    "test:ipsec-engine": "powershell.exe -NoProfile -Command \"Push-Location tools/vendor/go-ipsec; go test ./...; exit $LASTEXITCODE\""
+    "test:ipsec-engine": "powershell.exe -NoProfile -Command \"Push-Location tools/vendor/go-ipsec; go test ./...; exit $LASTEXITCODE\"",
+    "build:touch-id:macos": "node scripts/build-macos-touch-id.mjs",
+    "pretest:vault-client": "node -e \"require('electron')\"",
+    "test:vault-client": "node --experimental-strip-types --test --test-concurrency=1 tests/vault-bitwarden-document.test.ts tests/vault-bitwarden-endpoint.test.ts tests/vault-bitwarden-endpoint-native.test.ts tests/vault-bitwarden-sync.test.ts tests/vault-bitwarden-extension-entry.test.ts tests/vault-bitwarden-extension-bridge.test.ts tests/vault-bitwarden-extension-storage.test.ts tests/vault-bitwarden-native.test.ts tests/vault-bitwarden-picker.test.ts tests/vault-bitwarden-settings.test.ts tests/vault-bitwarden-cli-unlock.test.ts tests/vault-bitwarden-transfer.test.ts tests/vault-bitwarden-transfer-native.test.ts tests/vault-web-app.test.ts tests/vault-web-ipc.test.ts tests/vault-web-wiring.test.ts tests/vault-web-connections.test.ts tests/vault-web.test.ts tests/vault-web-native.test.ts tests/vault-process-exit.test.ts tests/vault-process-exit-native.test.ts tests/vault-process-owners.test.ts tests/child-process-exit.test.ts tests/vault-vnc-password.test.ts tests/vault-vnc-password-native.test.ts tests/vault-vnc-password-dialog.test.ts tests/vault-vnc-password-screen.test.ts tests/vault-vnc-manual.test.ts tests/vault-vnc-controller.test.ts tests/vault-vnc-ipc.test.ts tests/vault-vnc-wiring.test.ts tests/vnc-surface.test.ts tests/sealed-vnc.test.ts tests/sealed-vnc-native.test.ts tests/vault-vnc.test.ts tests/sealed-route.test.ts tests/sealed-route-retirement-native.test.ts tests/vault-ssh-host.test.ts tests/vault-route.test.ts tests/vault-tunnel-authentication.test.ts tests/vault-tunnel-authentication-dialog.test.ts tests/vault-tunnel-authentication-wiring.test.ts tests/vault-tunnel-authentication-screen.test.ts tests/vault-tunnel-authentication-native.test.ts tests/vault-tunnel-browser.test.ts tests/vault-tunnel-browser-dialog.test.ts tests/vault-tunnel-browser-native.test.ts tests/vault-tunnel-browser-packaging.test.ts tests/vault-tunnel-cookie.test.ts tests/vault-tunnel-cookie-dialog.test.ts tests/vault-tunnel-cookie-native.test.ts tests/vault-vpn-browser.test.ts tests/vault-vpn-browser-native.test.ts tests/vault-vpn-storage-native.test.ts tests/vault-vpn-storage-driver-native.test.ts tests/vault-vpn-browser-session.test.ts tests/vault-vpn-browser-session-native.test.ts tests/vault-vpn-sso.test.ts tests/vault-vpn-sso-transfer-native.test.ts tests/vault-tunnel-import.test.ts tests/vault-tunnel-fields.test.ts tests/vault-tunnel-screen.test.ts tests/vault-tunnel-wiring.test.ts tests/vault-tunnel-form.test.ts tests/vault-tunnel-dialog.test.ts tests/vault-tunnel-preload.test.ts tests/vault-tunnel.test.ts tests/vault-credential.test.ts tests/vault-reauth.test.ts tests/vault-reauth-dialog.test.ts tests/vault-reauth-screen.test.ts tests/vault-migration.test.ts tests/vault-migration-panel.test.ts tests/vault-notes.test.ts tests/vault-credentials.test.ts tests/vault-clipboard.test.ts tests/vault-linux-clipboard-native.test.ts tests/vault-credentials-screen.test.ts tests/vault-notes-screen.test.ts tests/vault-connection-editor.test.ts tests/vault-connection.test.ts tests/vault-folder.test.ts tests/vault-node-delete.test.ts tests/vault-node-move.test.ts tests/vault-node-duplicate.test.ts tests/vault-enrollment.test.ts tests/vault-migration-setup.test.ts tests/vault-migration-setup-dialog.test.ts tests/vault-migration-setup-native.test.ts tests/vault-protection-ipc.test.ts tests/vault-native-paths.test.ts tests/vault-migration-boot.test.ts tests/vault-migration-boot-native.test.ts tests/vault-migration-ipc.test.ts tests/vault-migration-startup.test.ts tests/vault-create-dialog.test.ts tests/vault-create-native.test.ts tests/vault-create-screen.test.ts tests/vault-preferences.test.ts tests/vault-startup.test.ts tests/vault-ssh-credentials-dialog.test.ts tests/vault-ssh-credentials-screen.test.ts tests/vault-ssh-manual.test.ts tests/vault-ssh-manual-native.test.ts tests/ssh-connect.test.ts tests/vault-ssh-app.test.ts tests/vault-ssh-ipc.test.ts tests/vault-ssh-wiring.test.ts tests/vault-ssh-open.test.ts tests/vault-ssh.test.ts tests/vault-sftp-edit.test.ts tests/sealed-ssh.test.ts tests/sealed-ssh-wiring.test.ts tests/sealed-ssh-native.test.ts tests/vault-lock-monitor.test.ts tests/vault-window-policy.test.ts tests/vault-security.test.ts tests/vault-workspace.test.ts tests/vault-shared-dialog.test.ts tests/vault-shared-ipc.test.ts tests/vault-shared-screen.test.ts tests/vault-shared-admin-groups.test.ts tests/vault-shared-group-key.test.ts tests/vault-shared-node-grants.test.ts tests/vault-shared-admin-inventory.test.ts tests/vault-shared-setup-contract.test.ts tests/vault-shared-setup-screen.test.ts tests/vault-shared-setup-dialog.test.ts tests/vault-shared-setup-postgres.test.ts tests/vault-shared-unlock.test.ts tests/vault-shared-catalog.test.ts tests/shared-connection-sessions.test.ts tests/shared-sftp-session.test.ts tests/shared-workspace.test.ts tests/vault-shared-host.test.ts tests/vault-shared-join.test.ts tests/vault-shared-initial-native.test.ts tests/vault-shared-enrollment-postgres.test.ts tests/vault-unlock.test.ts tests/vault-client.test.ts tests/vault-contract.test.ts tests/vault-host.test.ts tests/vault-native.test.ts tests/vault-wiring.test.ts tests/vault-preload.test.ts tests/vault-unlock-screen.test.ts tests/vault-quick-target.test.ts tests/vault-quick-target-native.test.ts tests/vault-migration-browser-paths.test.ts tests/vault-tunnel-fallback.test.ts tests/vault-root-rotation-native.test.ts tests/vault-root-enrollment.test.ts tests/vault-root-enrollment-native.test.ts tests/vault-upgrade.test.ts tests/vault-os-migration.test.ts tests/vault-os-migration-native.test.ts tests/vault-legacy-startup.test.ts tests/vault-unprotected.test.ts tests/vault-protection-notice.test.ts"
   },
   "dependencies": {
     "@base-ui/react": "^1.9.0",
     "@fontsource-variable/geist": "^5.3.0",
+    "@hpke/core": "1.9.0",
     "@radix-ui/react-dialog": "^1.3.1",
     "@radix-ui/react-separator": "^1.2.0",
     "@radix-ui/react-slot": "^1.5.0",
@@ -119,6 +123,7 @@
     "tw-animate-css": "^1.4.0"
   },
   "devDependencies": {
+    "@babel/parser": "7.29.13",
     "@tailwindcss/vite": "^4.3.4",
     "@types/node": "^24.19.2",
     "@types/react": "^19.3.0",
@@ -156,6 +161,7 @@
       "dist/**/*",
       "dist-electron/**/*",
       "!dist-electron/wormhole-*",
+      "!dist-electron/wormhole-touch-id/**/*",
       "!dist-electron/rdp-host-*",
       "!dist-electron/freerdp/**/*",
       "Assets/**/*",
@@ -200,6 +206,13 @@
       "packageName": "wormhole"
     },
     "mac": {
+      "sign": "./scripts/sign-macos-with-touch-id.mjs",
+      "extraFiles": [
+        {
+          "from": "dist-electron/wormhole-touch-id/Wormhole Vault Touch ID.app",
+          "to": "Helpers/Wormhole Vault Touch ID.app"
+        }
+      ],
       "extraResources": [
         {
           "from": "dist-electron/freerdp",

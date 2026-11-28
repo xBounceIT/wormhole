@@ -2,9 +2,17 @@ import { isTunnelIdentifier } from '../electron/tunnel-test-contract.ts';
 import { hasValidCredentialSecretLength } from '../electron/credential-secret-length.ts';
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { stripTypeScriptTypes } from 'node:module';
-import { isFileBrowserProtocol } from '../src/file-protocol.ts';
+import { KeyedSingleFlight } from '../electron/keyed-single-flight.ts';
+import { fileSessionMode, isFileBrowserProtocol } from '../src/file-protocol.ts';
+import { sshConnectRequest } from '../src/ssh-connect.ts';
+import { Session as InspectorSession } from 'node:inspector/promises';
+import { runInNewContext } from 'node:vm';
 import { parseWorkspaceNotes } from '../electron/workspace-notes.ts';
 import { parseWorkspaceRdpSettings } from '../electron/workspace-rdp-contract.ts';
 
@@ -69,6 +77,81 @@ test('editor snapshots and watcher updates leave the owning session and file bro
   listener({ type: 'sftp.edit', sessionId: 'backend', requestId: 'empty-list', edits: [] });
   assert.equal(current, sessions, 'an empty edit inventory retired the file-transfer tab');
   assert.equal(sessionUpdates, 0, 'edit-only events must not enter the lifecycle mapper');
+});
+
+test('SFTP bridge declarations preserve the renderer Vite ambient type reference', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'wormhole-vite-types-'));
+  try {
+    const declaration = fileURLToPath(new URL('../src/vite-env.d.ts', import.meta.url)).replaceAll(
+      '\\',
+      '/',
+    );
+    const source = join(directory, 'ambient.mts');
+    writeFileSync(
+      source,
+      `/// <reference path="${declaration}" />\nconst development: boolean = import.meta.env.DEV;\n`,
+    );
+    execFileSync(
+      process.execPath,
+      [
+        fileURLToPath(new URL('../node_modules/typescript/bin/tsc', import.meta.url)),
+        '--noEmit',
+        '--skipLibCheck',
+        '--allowImportingTsExtensions',
+        '--target',
+        'es2022',
+        '--module',
+        'esnext',
+        '--moduleResolution',
+        'bundler',
+        source,
+      ],
+      { cwd: directory, windowsHide: true, timeout: 30000, stdio: 'pipe' },
+    );
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('failed edit finalization still disconnects SSH and releases its route', async () => {
+  const source = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
+  const start = source.indexOf(
+    '  async close(sessionId: string): Promise<void> {',
+    source.indexOf('class NativeSshBackend'),
+  );
+  const end = source.indexOf('\n  cancelPendingConnections()', start);
+  assert.ok(start > 0 && end > start);
+  const { close } = new Function(
+    'reportWarning',
+    stripTypeScriptTypes(`function makeClose() { return { ${source.slice(start, end)} }; }`) +
+      ';return makeClose();',
+  )(() => undefined);
+  const calls: string[] = [];
+  const originalWarn = console.warn;
+  console.warn = () => undefined;
+  try {
+    await close.call(
+      {
+        hasProtectedReservation: () => false,
+        finishEditClose: async () => {
+          throw new Error('journal write failed');
+        },
+        terminalDelivery: { remove: () => calls.push('delivery') },
+        terminalOwners: new Map(),
+        terminalAdmissions: new Map(),
+        connectionAttempts: { cancel: () => calls.push('cancel') },
+        closingConnections: new KeyedSingleFlight<string, void>(),
+        openWaiters: new Map(),
+        child: { killed: false },
+        write: (command: { type: string }) => calls.push(command.type),
+        releaseTunnel: async () => calls.push('release'),
+      },
+      'session',
+    );
+    assert.deepEqual(calls, ['cancel', 'delivery', 'close', 'release']);
+  } finally {
+    console.warn = originalWarn;
+  }
 });
 
 test('SFTP reconnect waits for edit confirmation and close, rejecting duplicates and stale tabs', async () => {
@@ -442,4 +525,123 @@ test('remote SFTP names allow colons without treating backslashes as separators'
     isSftpName(`${'é'.repeat(sshMaxSftpEntryNameLength / 2)}a`, 'remote', 'linux'),
     false,
   );
+});
+test('file reconnect preserves only an explicit credential override and records its selection', async (t) => {
+  const source = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  const extract = (name: string) => {
+    const start = source.indexOf('  function ' + name + '('),
+      end = source.indexOf('\n  function ', start + 20);
+    assert.ok(start > 0 && end > start);
+    return stripTypeScriptTypes(source.slice(start, end)) + ';' + name;
+  };
+  const inspector = new InspectorSession();
+  inspector.connect();
+  t.after(() => inspector.disconnect());
+  await inspector.post('Profiler.enable');
+  await inspector.post('Profiler.startPreciseCoverage', { callCount: true, detailed: true });
+  const restartScript = extract('restartSession'),
+    openScript = extract('startSshSession'),
+    duplicateScript = extract('duplicateSession');
+  for (const override of [undefined, 'selected-profile']) {
+    let sessions: any[] = [
+      {
+        id: 'tab',
+        backendSessionId: 'old',
+        nodeId: 'ssh-origin',
+        protocol: 'sftp',
+        credentialId: 'resolved-profile',
+        status: 'closed',
+      },
+      { id: 'other', backendSessionId: 'other', nodeId: 'other', protocol: 'ssh' },
+      { id: 'quick', backendSessionId: 'old', protocol: 'ssh' },
+    ];
+    const calls: any[] = [];
+    const context = {
+      authState: { mode: 'legacy' },
+      sshConnectRequest,
+      fileSessionMode,
+      isFileBrowserProtocol,
+      sessionsRef: { current: sessions },
+      sessions,
+      setSessions: (update: any) => {
+        sessions = update(sessions);
+      },
+      newSessionToken: () => 'fresh',
+      clearSftpCancelRequestsForBrowser: () => {},
+      sftpCancelRequests: { current: new Map() },
+      startSshSession: (q: any) => calls.push(q),
+      setSelectedSessionId: () => {},
+      setActivePage: () => {},
+      window: { wormhole: { openSshSession: async (q: any) => calls.push(q) } },
+    };
+    const open = runInNewContext(openScript, context, { filename: 'sftp-override-open.js' });
+    open({ sessionId: 'old', nodeId: 'ssh-origin', credentialId: override });
+    assert.equal(sessions[0].sshCredentialOverride, override);
+    assert.equal(sessions[1].sshCredentialOverride, undefined);
+    assert.equal(sessions[2].sshCredentialOverride, undefined);
+    assert.equal(calls[0].mode, 'sftp');
+    context.sessionsRef.current = sessions;
+    const restart = runInNewContext(restartScript, context, {
+      filename: 'sftp-override-restart.js',
+    });
+    restart('tab', true);
+    assert.deepEqual(JSON.parse(JSON.stringify(calls[1])), {
+      sessionId: 'fresh',
+      nodeId: 'ssh-origin',
+      ...(override ? { credentialId: override } : {}),
+      manualCredentials: false,
+      manualKeyPassphrase: false,
+      mode: 'sftp',
+      columns: 80,
+      rows: 24,
+    });
+    assert.equal(sessions[0].status, 'connecting');
+    assert.equal(sessions[0].backendSessionId, 'fresh');
+    context.sessions = sessions;
+    const duplicate = runInNewContext(duplicateScript, context, {
+      filename: 'sftp-override-duplicate.js',
+    });
+    duplicate('tab');
+    assert.equal(calls.length, 3, 'a saved node must not also open as a quick connection');
+    assert.deepEqual(JSON.parse(JSON.stringify(calls[2])), JSON.parse(JSON.stringify(calls[1])));
+    context.sessions = [
+      {
+        ...sessions[0],
+        nodeId: undefined,
+        credentialId: 'quick-profile',
+        status: 'closed',
+        host: 'files.example',
+        port: 22,
+      },
+    ];
+    duplicate('tab');
+    assert.equal(calls.length, 4);
+    assert.equal(calls[3].nodeId, undefined);
+    assert.equal(calls[3].credentialId, 'quick-profile');
+    assert.equal(calls[3].host, 'files.example');
+  }
+  const coverage = await inspector.post('Profiler.takePreciseCoverage');
+  await inspector.post('Profiler.stopPreciseCoverage');
+  for (const [file, script, needle] of [
+    ['sftp-override-open.js', openScript, 'sshCredentialOverride: request.credentialId'],
+    ['sftp-override-restart.js', restartScript, 'credentialId: source.sshCredentialOverride'],
+    [
+      'sftp-override-duplicate.js',
+      duplicateScript,
+      'credentialId: duplicate.sshCredentialOverride',
+    ],
+  ]) {
+    const offset = script.indexOf(needle);
+    assert.ok(offset > 0);
+    const entries = coverage.result.filter((e) => e.url === file);
+    assert.ok(entries.length > 0);
+    for (const entry of entries) {
+      const ranges = entry.functions
+        .flatMap((fn) => fn.ranges)
+        .filter((r) => r.startOffset <= offset && r.endOffset > offset)
+        .sort((a, b) => a.endOffset - a.startOffset - (b.endOffset - b.startOffset));
+      assert.ok(ranges[0]?.count > 0, 'changed override statement must execute');
+    }
+  }
+  t.diagnostic('SFTP override capture and replay: 100% changed statements executed (V8)');
 });

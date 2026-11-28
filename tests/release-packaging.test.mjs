@@ -2,7 +2,17 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import { closeSync, existsSync } from 'node:fs';
-import { copyFile, glob, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import {
+  copyFile,
+  glob,
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  stat,
+  writeFile,
+} from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
@@ -11,6 +21,12 @@ import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { coerce, prerelease, satisfies, valid } from 'semver';
 import { parse } from 'yaml';
+import { backendGoToolchain } from '../scripts/backend-go-toolchain.mjs';
+import {
+  touchIDBundleIdentifier,
+  touchIDEntitlements,
+  touchIDVerificationRequirement,
+} from '../scripts/sign-macos-with-touch-id.mjs';
 
 const require = createRequire(import.meta.url);
 const { convertIcon } = require('app-builder-lib/out/util/iconConverter.js');
@@ -42,6 +58,104 @@ const bash =
         '../../../bin/bash.exe',
       )
     : 'bash';
+
+test('Windows installer retires only the legacy Wormhole LocalDumps defaults', async () => {
+  const installer = await readFile(
+    new URL('../installer/Wormhole.Electron.iss', import.meta.url),
+    'utf8',
+  );
+  const registry = /^\[Registry\]\r?\n([^[]*)/m.exec(installer)?.[1] ?? '';
+  assert.doesNotMatch(registry, /LocalDumps/i);
+  assert.match(installer, /LocalDumps\\\{#MyAppExeName\}/);
+  const [, guards, removal] =
+    /procedure RemoveLegacyLocalDumps;([\s\S]*?)(RegDeleteValue[\s\S]*?)\r?\nend;/.exec(
+      installer,
+    ) ?? [];
+  assert.ok(guards && removal);
+  assert.match(guards, /GetArrayLength\(Names\) <> 3 then Exit/);
+  assert.match(guards, /GetArrayLength\(Subkeys\) <> 0 then Exit/);
+  assert.match(guards, /CompareText\(Folder, '%LOCALAPPDATA%\\Wormhole\\crashdumps'\) <> 0/);
+  assert.match(guards, /\(Count <> 10\) or \(DumpType <> 1\) then Exit/);
+  assert.deepEqual(
+    [...removal.matchAll(/RegDeleteValue\(HKLM, LegacyLocalDumps, '([^']+)'\)/g)].map(
+      ([, value]) => value,
+    ),
+    ['DumpFolder', 'DumpCount', 'DumpType'],
+  );
+  assert.match(removal, /RegDeleteKeyIfEmpty\(HKLM, LegacyLocalDumps\)/);
+  assert.doesNotMatch(removal, /RegDeleteKeyIncludingSubkeys/);
+  assert.match(installer, /if CurStep = ssPostInstall then\s+begin\s+RemoveLegacyLocalDumps;/);
+});
+
+test('Windows installer scopes WER exclusion to its own executable and preserves existing entries', async () => {
+  const installer = await readFile(
+    new URL('../installer/Wormhole.Electron.iss', import.meta.url),
+    'utf8',
+  );
+  assert.match(installer, /^#define MyAppExeName\s+"Wormhole\.exe"/m);
+  const provision = installer.slice(
+    installer.indexOf('procedure InstallWerExclusion;'),
+    installer.indexOf('procedure RemoveOwnedWerExclusion;'),
+  );
+  assert.match(provision, /RegValueExists\(HKLM64, WerExclusions, '\{#MyAppExeName\}'\) then Exit/);
+  assert.match(
+    provision,
+    /RegWriteDWordValue\(HKLM64, InstallerState, WerExclusionOwner, 1\)[\s\S]+RegWriteDWordValue\(HKLM64, WerExclusions, '\{#MyAppExeName\}', 1\)/,
+  );
+  const removal = installer.slice(
+    installer.indexOf('procedure RemoveOwnedWerExclusion;'),
+    installer.indexOf('procedure CurStepChanged'),
+  );
+  assert.match(removal, /if Owner <> 1 then Exit/);
+  assert.match(
+    removal,
+    /\(Value = 1\) then[\s\S]+RegDeleteValue\(HKLM64, WerExclusions, '\{#MyAppExeName\}'\)/,
+  );
+  assert.doesNotMatch(removal, /RegDeleteKey\w*\(HKLM64, WerExclusions\)/);
+  assert.match(installer, /RemoveLegacyLocalDumps;\s+InstallWerExclusion;/);
+  assert.match(installer, /if CurUninstallStep = usPostUninstall then RemoveOwnedWerExclusion/);
+});
+
+test('Touch ID uses a nested app and a release profile for its own application identity', () => {
+  const team = 'ABCDEFG123';
+  const now = new Date('2026-01-02').getTime();
+  const applicationID = `${team}.${touchIDBundleIdentifier}`;
+  const requirement = touchIDVerificationRequirement(team);
+  if (process.platform === 'darwin') execFileSync('/usr/bin/csreq', ['-r', requirement, '-t']);
+  assert.ok(requirement.startsWith('=anchor apple generic and certificate leaf['));
+  assert.ok(
+    requirement.endsWith(
+      `certificate leaf[subject.OU] = "${team}" and identifier "${touchIDBundleIdentifier}"`,
+    ),
+  );
+  const profile = {
+    TeamIdentifier: [team],
+    ExpirationDate: new Date('2026-06-01'),
+    Entitlements: { 'com.apple.application-identifier': applicationID },
+  };
+  assert.deepEqual(touchIDEntitlements(profile, team, now), {
+    'com.apple.application-identifier': applicationID,
+    'com.apple.developer.team-identifier': team,
+  });
+  for (const invalid of [
+    { ...profile, TeamIdentifier: 'xABCDEFG123x' },
+    { ...profile, TeamIdentifier: ['ZZZZZZZ000'] },
+    { ...profile, ExpirationDate: new Date('2026-01-01') },
+    { ...profile, Entitlements: { 'com.apple.application-identifier': `${team}.*` } },
+    {
+      ...profile,
+      Entitlements: { ...profile.Entitlements, 'com.apple.security.get-task-allow': true },
+    },
+  ])
+    assert.throws(() => touchIDEntitlements(invalid, team, now), /authorize/);
+  assert.throws(() => touchIDEntitlements(profile, 'bad-team', now), /authorize/);
+  assert.equal(packageJson.build.mac.sign, './scripts/sign-macos-with-touch-id.mjs');
+  assert.ok(
+    packageJson.build.mac.extraFiles.some(({ to }) => to === 'Helpers/Wormhole Vault Touch ID.app'),
+  );
+  assert.match(releaseWorkflow, /npm run build:touch-id:macos/);
+  assert.match(ciWorkflow, /Build the universal Touch ID helper and reject a direct caller/);
+});
 
 function readPngDimensions(data) {
   const pngSignature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
@@ -412,7 +526,10 @@ test('the desktop window uses an icon format supported by the current platform',
     electronMain,
     /const applicationIconPath = path\.join\([^;]*process\.platform === 'win32' \? 'Wormhole\.ico' : 'Wormhole\.png'/,
   );
-  assert.match(electronMain, /const window = new BrowserWindow\(\{[^;]*icon: applicationIconPath/);
+  assert.match(
+    electronMain,
+    /const window = createApplicationWindow\(\{[^;]*icon: applicationIconPath/,
+  );
 });
 
 test('native Go binaries are shipped outside the Electron asar archive', () => {
@@ -774,6 +891,15 @@ test('release verifies the Linux package outputs and their installed desktop ass
   assert.equal(tooling?.if, "matrix.builder_platform == 'linux'");
 });
 
+function releaseBash() {
+  return process.platform === 'win32'
+    ? resolve(
+        execFileSync('git', ['--exec-path'], { encoding: 'utf8' }).trim(),
+        '../../../bin/bash.exe',
+      )
+    : 'bash';
+}
+
 test('release AppImage validation accepts static PIE and rejects external dependencies and inspection errors', async () => {
   // Workflow Bash is outside the Node/Go coverage tooling. Execute its actual validation
   // with both architectures, covering static PIE, external dependencies and command failures.
@@ -799,6 +925,7 @@ readelf() {
   return "$MOCK_SECTION_STATUS"
 }
 ${source}`;
+  const bash = releaseBash();
   const directory = await mkdtemp(join(tmpdir(), 'wormhole-release-appimage-'));
   const content = Buffer.from('AppImage fixture');
   const sha1 = createHash('sha1').update(content).digest('hex');
@@ -864,6 +991,91 @@ ${source}`;
   }
 });
 
+test('macOS release prepares private notarization credentials and verifies only accepted disk images', async () => {
+  const steps = releaseJobs.packages.steps;
+  const prepare = steps
+    .find((step) => step.id === 'mac-notary')
+    .run.replace('/usr/bin/expect', 'mock_expect');
+  const notarize = steps
+    .find((step) => step.name === 'Notarize and verify the signed macOS disk image')
+    .run.replaceAll('/usr/bin/xcrun', 'mock_xcrun');
+  const mock = `
+    export GITHUB_WORKSPACE="$PWD"
+    mock_expect() { [[ "$#" -eq 0 ]] && cat >/dev/null; }
+    mock_xcrun() {
+      printf '%s %s\n' "$1" "$2" >> calls.txt
+      if [[ "$1" == notarytool ]]; then
+        [[ "$4" == --keychain-profile && "$5" == 'release profile' && "$6" == --keychain ]] || return 1
+        printf '{"status":"%s"}\n' "$MOCK_NOTARY_STATUS"
+      fi
+    }
+    go() { printf 'verify %s\n' "$*" >> calls.txt; }
+  `;
+  const directory = await mkdtemp(join(tmpdir(), 'wormhole-macos-notarization-'));
+  const bash = releaseBash();
+  const run = (script, env = {}) => {
+    const result = spawnSync(bash, ['-s'], {
+      cwd: directory,
+      encoding: 'utf8',
+      input: `${mock}\n${script}`,
+      env: {
+        ...process.env,
+        GITHUB_OUTPUT: 'outputs.txt',
+        GITHUB_RUN_ID: '10',
+        GITHUB_RUN_ATTEMPT: '4',
+        MACOS_PUBLISHER: 'AB7CDEFGH9',
+        NOTARY_PROFILE: '',
+        NOTARY_KEYCHAIN: './test.keychain-db',
+        APPLE_ID: '',
+        APPLE_APP_SPECIFIC_PASSWORD: '',
+        APPLE_KEYCHAIN_PROFILE: 'release profile',
+        APPLE_KEYCHAIN: './test.keychain-db',
+        MOCK_NOTARY_STATUS: 'Accepted',
+        ...env,
+      },
+    });
+    assert.ifError(result.error);
+    return result;
+  };
+  try {
+    await mkdir(join(directory, 'release'));
+    await writeFile(
+      join(directory, 'release', 'Wormhole-9.8.7-mac-universal-setup.dmg'),
+      'disk image fixture',
+    );
+    await writeFile(join(directory, 'test.keychain-db'), 'keychain fixture');
+    assert.equal(run(prepare, { NOTARY_PROFILE: 'existing profile' }).status, 0);
+    assert.match(
+      await readFile(join(directory, 'outputs.txt'), 'utf8'),
+      /^profile=existing profile$/m,
+    );
+    assert.equal(run(prepare, { NOTARY_PROFILE: 'profile\noutput=invalid' }).status, 1);
+    assert.equal(run(prepare).status, 1);
+    const credentials = run(prepare, {
+      APPLE_ID: 'fixture@example.invalid',
+      APPLE_APP_SPECIFIC_PASSWORD: 'mock-password',
+    });
+    assert.equal(credentials.status, 0, credentials.stderr);
+    assert.doesNotMatch(credentials.stdout + credentials.stderr, /mock-password/);
+    assert.match(
+      await readFile(join(directory, 'outputs.txt'), 'utf8'),
+      /^profile=wormhole-release-10-4$/m,
+    );
+    assert.equal(run(notarize, { MOCK_NOTARY_STATUS: 'Invalid' }).status, 1);
+    const calls = join(directory, 'calls.txt');
+    assert.equal((await readFile(calls, 'utf8')).trim(), 'notarytool submit');
+    await writeFile(calls, '');
+    const accepted = run(notarize);
+    assert.equal(accepted.status, 0, accepted.stderr);
+    assert.match(
+      await readFile(calls, 'utf8'),
+      /^notarytool submit\r?\nstapler staple\r?\nstapler validate\r?\nverify -C tools\/wormhole-backend run .\/cmd\/verify-update-publisher AB7CDEFGH9 /,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('release packages generate and upload the installer checksums required by the updater', () => {
   const checksum = releaseJobs.packages.steps.find((step) => step.run?.includes('Get-FileHash'));
   assert.ok(checksum, 'installer checksum generation is missing');
@@ -874,8 +1086,10 @@ test('release packages generate and upload the installer checksums required by t
     checksum.run,
     /"\$hash  \$\(\$_\.Name\)" \| Set-Content -LiteralPath "\$\(\$_\.FullName\)\.sha256" -Encoding ascii/,
   );
-  const uploadSteps = releaseJobs.packages.steps.filter((step) =>
-    step.uses?.startsWith('actions/upload-artifact@'),
+  const uploadSteps = releaseJobs.packages.steps.filter(
+    (step) =>
+      step.uses?.startsWith('actions/upload-artifact@') &&
+      step.with.name === 'wormhole-${{ matrix.platform }}',
   );
   assert.equal(uploadSteps.length, 1, 'expected one release package upload step');
   const paths = uploadSteps[0].with.path.split(/\r?\n/).map((line) => line.trim());
@@ -938,6 +1152,9 @@ test('all release builds use the tagged commit and embed the resolved version', 
   assert.deepEqual(checks.outputs, {
     tag: '${{ steps.release.outputs.tag }}',
     version: '${{ steps.release.outputs.version }}',
+    'update-manifest-public-key': '${{ steps.update-key.outputs.public-key }}',
+    'windows-publisher-spki': '${{ steps.update-key.outputs.windows-publisher-spki }}',
+    'macos-publisher-team': '${{ steps.update-key.outputs.macos-publisher-team }}',
   });
   const checkout = (job) => job.steps.find((step) => step.uses?.startsWith('actions/checkout@'));
   for (const job of [build, packages]) {
@@ -1000,13 +1217,241 @@ test('electron-builder writes the release version into the packaged app manifest
   assert.equal(JSON.parse(await readFile(manifestPath, 'utf8')).version, manifest.version);
 });
 
+test('backend builds pin the release key and reject malformed keys before replacing the binary', async () => {
+  const source = await readFile(
+    new URL('../scripts/Build-ElectronBackend.mjs', import.meta.url),
+    'utf8',
+  );
+  const start = source.indexOf('const cgoEnabled');
+  const end = source.indexOf('// The VPN implementations', start);
+  assert.ok(start >= 0 && end > start);
+  const build = new Function(
+    'backendGoToolchain',
+    'goos',
+    'process',
+    'stage',
+    'spawnSync',
+    `
+    const goarch = 'amd64', architecture = 'x64';
+    const stagingDir = 'dist-electron', binaryPath = 'backend.exe', sourceDir = 'source';
+    const mkdirSync = stage, rmSync = stage, console = { log() {} };
+    ${source.slice(start, end)}
+  `,
+  ).bind(null, backendGoToolchain);
+  const pin = 'f2'.repeat(32);
+  const publisher = '3d'.repeat(32);
+  for (const [key, spki, ldflags] of [
+    ['', '', '-s -w'],
+    [pin, '', `-s -w -X main.updateManifestPublicKeyHex=${pin}`],
+    [
+      pin,
+      publisher,
+      `-s -w -X main.updateManifestPublicKeyHex=${pin} -X main.updateWindowsPublisherSPKI=${publisher}`,
+    ],
+  ]) {
+    const mutations = [];
+    const spawns = [];
+    build(
+      'windows',
+      { env: { WORMHOLE_UPDATE_MANIFEST_PUBLIC_KEY: key, WORMHOLE_WINDOWS_PUBLISHER_SPKI: spki } },
+      (...args) => mutations.push(args),
+      (...args) => {
+        spawns.push(args);
+        return { status: 0 };
+      },
+    );
+    assert.equal(mutations.length, 2);
+    assert.equal(spawns.length, 1);
+    assert.equal(spawns[0][0], 'go');
+    assert.equal(spawns[0][2].env.GOTOOLCHAIN, backendGoToolchain());
+    assert.equal(spawns[0][1][spawns[0][1].indexOf('-ldflags') + 1], ldflags);
+  }
+  for (const key of [
+    pin.toUpperCase(),
+    '0'.repeat(64),
+    pin + '\n',
+    'x'.repeat(64),
+    pin.slice(0, -1),
+  ]) {
+    assert.throws(
+      () =>
+        build(
+          'windows',
+          { env: { WORMHOLE_UPDATE_MANIFEST_PUBLIC_KEY: key } },
+          assert.fail,
+          assert.fail,
+        ),
+      /Invalid WORMHOLE_UPDATE_MANIFEST_PUBLIC_KEY/,
+    );
+  }
+  for (const [key, spki] of [
+    ['', publisher],
+    [pin, publisher.toUpperCase()],
+    [pin, '0'.repeat(64)],
+    [pin, publisher + '\n'],
+    [pin, 'z'.repeat(64)],
+  ]) {
+    assert.throws(
+      () =>
+        build(
+          'windows',
+          {
+            env: {
+              WORMHOLE_UPDATE_MANIFEST_PUBLIC_KEY: key,
+              WORMHOLE_WINDOWS_PUBLISHER_SPKI: spki,
+            },
+          },
+          assert.fail,
+          assert.fail,
+        ),
+      /Invalid WORMHOLE_WINDOWS_PUBLISHER_SPKI/,
+    );
+  }
+  const team = 'AB7CDEFGH9';
+  build(
+    'darwin',
+    { env: { WORMHOLE_UPDATE_MANIFEST_PUBLIC_KEY: pin, WORMHOLE_MACOS_PUBLISHER_TEAM_ID: team } },
+    () => {},
+    (_command, args) => {
+      assert.equal(
+        args[args.indexOf('-ldflags') + 1],
+        `-s -w -X main.updateManifestPublicKeyHex=${pin} -X main.updateDarwinPublisherTeamID=${team}`,
+      );
+      return { status: 0 };
+    },
+  );
+  for (const [key, value] of [
+    ['', team],
+    [pin, team.toLowerCase()],
+    [pin, '0000000000'],
+    [pin, `${team}\n`],
+    [pin, `A" or true`],
+  ]) {
+    assert.throws(
+      () =>
+        build(
+          'darwin',
+          {
+            env: {
+              WORMHOLE_UPDATE_MANIFEST_PUBLIC_KEY: key,
+              WORMHOLE_MACOS_PUBLISHER_TEAM_ID: value,
+            },
+          },
+          assert.fail,
+          assert.fail,
+        ),
+      /Invalid WORMHOLE_MACOS_PUBLISHER_TEAM_ID/,
+    );
+  }
+});
+
 test('release publication waits for every build and publishes the downloaded assets', () => {
   assert.equal(releaseConfig.permissions.contents, 'read');
   assert.match(packageJson.scripts.package, /--publish never(?:\s|$)/);
   assert.equal(releaseConfig.concurrency.group, 'release-${{ github.ref_name }}');
   assert.equal(releaseConfig.concurrency['cancel-in-progress'], false);
+  assert.equal(releaseJobs.build.needs, 'checks');
+  assert.equal(releaseJobs.packages.needs, 'checks');
+  const pin = '${{ needs.checks.outputs.update-manifest-public-key }}';
+  assert.equal(
+    releaseJobs.checks.outputs['update-manifest-public-key'],
+    '${{ steps.update-key.outputs.public-key }}',
+  );
+  const pinCheck = releaseJobs.checks.steps.find((step) => step.id === 'update-key');
+  assert.equal(pinCheck.env.PUBLIC_KEY, '${{ vars.WORMHOLE_UPDATE_MANIFEST_PUBLIC_KEY }}');
+  assert.equal(pinCheck.env.WINDOWS_PUBLISHER, '${{ vars.WORMHOLE_WINDOWS_PUBLISHER_SPKI }}');
+  assert.equal(pinCheck.env.MACOS_PUBLISHER, '${{ vars.WORMHOLE_MACOS_PUBLISHER_TEAM_ID }}');
+  assert.match(pinCheck.run, /exit 1[\s\S]+GITHUB_OUTPUT/);
+  for (const [job, name] of [
+    [releaseJobs.build, 'Build Go backend for ${{ matrix.platform }}'],
+    [releaseJobs.packages, 'Build native Go components'],
+    [releaseJobs.packages, 'Build universal macOS Go components'],
+  ]) {
+    assert.equal(
+      job.steps.find((step) => step.name === name)?.env.WORMHOLE_UPDATE_MANIFEST_PUBLIC_KEY,
+      pin,
+    );
+  }
+  const windowsPublisher = '${{ needs.checks.outputs.windows-publisher-spki }}';
+  assert.equal(
+    releaseJobs.checks.outputs['windows-publisher-spki'],
+    '${{ steps.update-key.outputs.windows-publisher-spki }}',
+  );
+  const windowsBackend = releaseJobs.build.steps.find((step) =>
+    step.name?.startsWith('Build Go backend for'),
+  );
+  assert.equal(windowsBackend.env.WORMHOLE_WINDOWS_PUBLISHER_SPKI, windowsPublisher);
+  const finalize = releaseJobs['windows-installers'];
+  assert.deepEqual(finalize.needs, ['checks', 'build']);
+  assert.deepEqual(finalize.strategy.matrix.platform, releaseJobs.build.strategy.matrix.platform);
+  const steps = finalize.steps;
+  const verifyPublisher = steps.find((step) => step.name === 'Verify Windows installer publisher');
+  assert.equal(verifyPublisher?.env.WINDOWS_PUBLISHER, windowsPublisher);
+  assert.match(
+    verifyPublisher.run,
+    /go run \.\/cmd\/verify-update-publisher \$env:WINDOWS_PUBLISHER \$env:INSTALLER/,
+  );
+  assert.ok(
+    steps.indexOf(verifyPublisher) >
+      steps.findIndex((step) => step.name === 'Sign Windows installer'),
+  );
+  assert.ok(
+    steps.indexOf(verifyPublisher) <
+      steps.findIndex((step) => step.name === 'Generate SHA-256 sidecar'),
+  );
+  const macPublisher = '${{ needs.checks.outputs.macos-publisher-team }}';
+  assert.equal(
+    releaseJobs.checks.outputs['macos-publisher-team'],
+    '${{ steps.update-key.outputs.macos-publisher-team }}',
+  );
+  const macSteps = releaseJobs.packages.steps;
+  const macBackend = macSteps.find((step) => step.name === 'Build universal macOS Go components');
+  const macPackaging = macSteps.find((step) => step.name === 'Build macOS packages');
+  const macCredentials = macSteps.find((step) => step.id === 'mac-notary');
+  const macNotary = macSteps.find(
+    (step) => step.name === 'Notarize and verify the signed macOS disk image',
+  );
+  assert.equal(macBackend.env.WORMHOLE_MACOS_PUBLISHER_TEAM_ID, macPublisher);
+  assert.equal(macPackaging.env.MACOS_PUBLISHER, macPublisher);
+  assert.equal(macNotary.env.MACOS_PUBLISHER, macPublisher);
+  assert.equal(macCredentials?.env.NOTARY_PROFILE, '${{ vars.WORMHOLE_MACOS_NOTARY_PROFILE }}');
+  assert.equal(macPackaging.env.APPLE_KEYCHAIN_PROFILE, '${{ steps.mac-notary.outputs.profile }}');
+  assert.equal(macNotary.env.APPLE_KEYCHAIN_PROFILE, '${{ steps.mac-notary.outputs.profile }}');
+  assert.equal(macNotary.env.APPLE_KEYCHAIN, '${{ steps.mac-notary.outputs.keychain }}');
+  assert.match(
+    macCredentials.run,
+    /log_user 0[\s\S]+unset env\(APPLE_APP_SPECIFIC_PASSWORD\)[\s\S]+spawn -noecho[^\n]+notarytool store-credentials[\s\S]+send -- "\$password\\r"/,
+  );
+  assert.doesNotMatch(macCredentials.run, /notarytool store-credentials[^\n]+--password/);
+  assert.match(
+    macPackaging.run,
+    /unset APPLE_ID APPLE_APP_SPECIFIC_PASSWORD[\s\S]*--config\.dmg\.sign=true/,
+  );
+  assert.match(
+    macNotary.run,
+    /credentials=\(--keychain-profile[^\n]+[\s\S]+notarytool submit[^\n]+--wait[\s\S]+status !== "Accepted"[\s\S]+stapler staple[\s\S]+stapler validate[\s\S]+go -C tools\/wormhole-backend run .\/cmd\/verify-update-publisher/,
+  );
+  assert.ok(macSteps.indexOf(macNotary) > macSteps.indexOf(macPackaging));
+  assert.ok(
+    macSteps.indexOf(macNotary) <
+      macSteps.findIndex((step) => step.name === 'Generate installer SHA-256 sidecar'),
+  );
+  const sign = releaseJobs.sign;
+  assert.deepEqual([...sign.needs].sort(), ['checks', 'packages', 'windows-installers']);
+  assert.equal(sign.permissions, undefined);
+  const signStep = sign.steps.find((step) => step.env?.WORMHOLE_UPDATE_MANIFEST_SEED);
+  assert.equal(signStep.env.PUBLIC_KEY, pin);
+  assert.match(
+    signStep.run,
+    /printf[^\n]+WORMHOLE_UPDATE_MANIFEST_SEED[^\n]+\|\n\s+env -u WORMHOLE_UPDATE_MANIFEST_SEED/,
+  );
+  assert.deepEqual(sign.steps.at(-1).with.path.trim().split(/\r?\n/), [
+    'dist/Wormhole-UpdateManifest-v1.json',
+    'dist/Wormhole-UpdateManifest-v2.json',
+  ]);
+
   const release = releaseJobs.release;
-  assert.deepEqual([...release.needs].sort(), ['build', 'checks', 'packages']);
+  assert.deepEqual(release.needs, ['checks', 'sign']);
   assert.equal(release.permissions.contents, 'write');
   const download = release.steps.find((step) =>
     step.uses?.startsWith('actions/download-artifact@'),
@@ -1018,8 +1463,14 @@ test('release publication waits for every build and publishes the downloaded ass
   assert.equal(publish.env.RELEASE_TAG, '${{ needs.checks.outputs.tag }}');
   assert.equal(publish.env.RELEASE_COMMIT, '${{ github.sha }}');
   assert.match(publish.run, /gh release create[\s\S]*?dist\/\*/);
+  assert.match(publish.run, /test -s dist\/Wormhole-UpdateManifest-v1\.json/);
+  assert.match(publish.run, /test -s dist\/Wormhole-UpdateManifest-v2\.json/);
+  assert.match(publish.run, /gh release create[\s\S]*?--draft[\s\S]*?dist\/\*/);
   assert.match(publish.run, /for asset in dist\/\*/);
-  assert.match(publish.run, /gh release upload "\$RELEASE_TAG" "\$asset" --repo "\$REPOSITORY"/);
+  assert.match(
+    publish.run,
+    /\[\[ "\$is_draft" == "true" \]\]\n\s+gh release upload "\$RELEASE_TAG" dist\/\*/,
+  );
   assert.match(publish.run, /gh release edit[\s\S]*?--draft=false/);
 });
 
@@ -1028,7 +1479,16 @@ test('publication keeps packages in a draft until the tag still resolves to the 
   const workDir = await mkdtemp(join(tmpdir(), 'wormhole-release-publish-'));
   t.after(() => rm(workDir, { recursive: true, force: true }));
   await mkdir(join(workDir, 'dist'));
-  await writeFile(join(workDir, 'dist', 'Wormhole-8.12.34.AppImage'), 'package');
+  const assets = [
+    'Wormhole-8.12.34.AppImage',
+    ...['darwin-universal', 'linux-arm64', 'linux-x64', 'windows-arm64', 'windows-x64'].map(
+      (target) => 'Wormhole-InstallationProof-v1-' + target + '.json',
+    ),
+    'Wormhole-UpdateManifest-v1.json',
+    'Wormhole-UpdateManifest-v2.json',
+  ];
+  await Promise.all(assets.map((asset) => writeFile(join(workDir, 'dist', asset), 'fixture')));
+  const uploadFiles = assets.map((asset) => 'dist/' + asset).join(' ');
 
   const commit = 'a'.repeat(40);
   const movedCommit = 'b'.repeat(40);
@@ -1036,9 +1496,9 @@ test('publication keeps packages in a draft until the tag still resolves to the 
     'api repos/example/wormhole/commits/refs/tags/v8.12.34 --header Accept: application/vnd.github.sha';
   const view = 'release view v8.12.34 --repo example/wormhole --json isDraft,assets';
   const create =
-    'release create v8.12.34 --repo example/wormhole --verify-tag --draft --generate-notes dist/Wormhole-8.12.34.AppImage';
-  const upload =
-    'release upload v8.12.34 dist/Wormhole-8.12.34.AppImage --repo example/wormhole --clobber';
+    'release create v8.12.34 --repo example/wormhole --verify-tag --draft --generate-notes ' +
+    uploadFiles;
+  const upload = 'release upload v8.12.34 ' + uploadFiles + ' --repo example/wormhole --clobber';
   const edit = 'release edit v8.12.34 --repo example/wormhole --verify-tag --draft=false';
 
   const fakeCli = `
@@ -1116,8 +1576,247 @@ jq() {
   }
 });
 
+test('only finalized Windows installers reach release signing and publication', () => {
+  const build = releaseJobs.build.steps;
+  const steps = releaseJobs['windows-installers'].steps;
+  const input = build.find((step) => step.name === 'Upload installer for finalization');
+  const download = steps.find((step) => step.name === 'Download Windows installer');
+  const output = steps.at(-1);
+  assert.equal(download.with.name, input.with.name);
+  assert.doesNotMatch(input.with.name, /^wormhole-/);
+  for (const step of build.filter((s) => s.with?.name?.startsWith('wormhole-'))) {
+    assert.doesNotMatch(step.with.path, /setup\.exe|sha256|\n/);
+    assert.match(step.with.path, /\.zip$/);
+  }
+  assert.match(output.with.name, /^wormhole-/);
+  assert.deepEqual(output.with.path.trim().split(/\r?\n/), [
+    '${{ steps.installer.outputs.path }}',
+    '${{ steps.installer.outputs.path }}.sha256',
+  ]);
+  const installTool = steps.find((step) => step.name === 'Download pinned Authenticode tool');
+  const sign = steps.find((step) => step.name === 'Sign Windows installer');
+  const verify = steps.find((step) => step.name === 'Verify Windows installer publisher');
+  assert.ok(steps.indexOf(installTool) < steps.indexOf(sign));
+  for (const step of [installTool, sign, verify]) {
+    assert.equal(step.if, "needs.checks.outputs.windows-publisher-spki != ''");
+  }
+  assert.match(installTool.run, /releases\/download\/v7\.0\.1\/AzureSignTool-x64\.exe/);
+  assert.match(installTool.run, /DC85A3F24BCD5978C63FCFD167A9B41313AF9116722B99B831400F05F387FCBA/);
+  assert.deepEqual(
+    Object.values(releaseJobs).flatMap((job) =>
+      job.steps.filter((step) => step.env?.AZURE_CLIENT_SECRET),
+    ),
+    [sign],
+  );
+  assert.equal(
+    sign.env.AZURE_CLIENT_SECRET,
+    '${{ secrets.WORMHOLE_WINDOWS_SIGNING_CLIENT_SECRET }}',
+  );
+  assert.equal(verify.env.INSTALLER, sign.env.INSTALLER);
+});
+
+test(
+  'Windows publisher workflow signs the selected installer and hashes the final bytes',
+  {
+    skip: process.platform !== 'win32',
+  },
+  async () => {
+    const directory = await mkdtemp(join(await realpath(tmpdir()), 'wormhole authenticode-'));
+    const steps = releaseJobs['windows-installers'].steps;
+    const run = (name, overrides = {}, prefix = '') => {
+      const body = steps.find((step) => step.name === name).run;
+      const result = spawnSync('pwsh', ['-NoProfile', '-Command', prefix + body], {
+        encoding: 'utf8',
+        windowsHide: true,
+        env: { ...process.env, RUNNER_TEMP: directory, ...overrides },
+      });
+      assert.ifError(result.error);
+      return result;
+    };
+    try {
+      const name = 'Wormhole-2.4.3-win-arm64-setup.exe';
+      const staging = join(directory, 'windows-installer');
+      const installer = join(staging, name);
+      const output = join(directory, 'github-output');
+      const selection = { RELEASE_TAG: 'v2.4.3', PLATFORM: 'arm64', GITHUB_OUTPUT: output };
+      await mkdir(staging);
+      assert.notEqual(run('Select installer', selection).status, 0);
+      await writeFile(installer, 'unsigned');
+      assert.equal(run('Select installer', selection).status, 0);
+      assert.equal((await readFile(output, 'utf8')).trim(), 'path=' + installer);
+
+      const mismatch = run(
+        'Download pinned Authenticode tool',
+        {},
+        'function Invoke-WebRequest($Uri, $OutFile) { [IO.File]::WriteAllText($OutFile, "unexpected") }\n',
+      );
+      assert.notEqual(mismatch.status, 0);
+      assert.match(mismatch.stderr, /Unexpected Authenticode tool digest/);
+
+      // A native child records the actual arguments and supplies a deterministic signed-file fixture.
+      await copyFile(process.execPath, join(directory, 'AzureSignTool-x64.exe'));
+      const hook = join(directory, 'signer.cjs');
+      await writeFile(
+        hook,
+        [
+          "const fs = require('node:fs');",
+          'fs.writeFileSync(process.env.TRACE, JSON.stringify(process.argv.slice(1)));',
+          "if (process.env.FAKE_SIGN_ERROR === '1') process.exit(7);",
+          "fs.appendFileSync(process.env.INSTALLER, '-signed');",
+          'process.exit(0);',
+        ].join('\n'),
+      );
+      const trace = join(directory, 'trace.json');
+      const env = {
+        VAULT_NAME: 'wormhole-signing',
+        CERTIFICATE: 'release',
+        AZURE_TENANT_ID: 'test-tenant',
+        AZURE_CLIENT_ID: 'test-client',
+        AZURE_CLIENT_SECRET: 'fixture-only',
+        INSTALLER: installer,
+        TRACE: trace,
+        NODE_OPTIONS: '--require "' + hook.replaceAll('\\', '/') + '"',
+      };
+      for (const override of [{ AZURE_CLIENT_SECRET: '' }, { VAULT_NAME: 'other.invalid/path' }]) {
+        assert.notEqual(run('Sign Windows installer', { ...env, ...override }).status, 0);
+        assert.equal(existsSync(trace), false);
+      }
+      const failure = run('Sign Windows installer', { ...env, FAKE_SIGN_ERROR: '1' });
+      assert.notEqual(failure.status, 0);
+      assert.match(failure.stderr, /Windows installer signing failed/);
+      assert.equal(await readFile(installer, 'utf8'), 'unsigned');
+      const signed = run('Sign Windows installer', env);
+      assert.equal(signed.status, 0, signed.stderr);
+      const args = JSON.parse(await readFile(trace, 'utf8'));
+      // Node expands argv[1] to an absolute path; the remaining arguments are untouched.
+      assert.equal(args[0].split(/[\\/]/).at(-1), 'sign');
+      assert.deepEqual(args.slice(1), [
+        '-q',
+        '-kvm',
+        '-kvu',
+        'https://wormhole-signing.vault.azure.net',
+        '-kvc',
+        'release',
+        '-fd',
+        'sha256',
+        '-tr',
+        'http://timestamp.digicert.com',
+        '-td',
+        'sha256',
+        installer,
+      ]);
+      assert.equal(run('Generate SHA-256 sidecar', { INSTALLER: installer }).status, 0);
+      const digest = createHash('sha256').update('unsigned-signed').digest('hex');
+      assert.equal((await readFile(installer + '.sha256', 'utf8')).trim(), digest + '  ' + name);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
+
+test('release jobs sign installation proofs from the packaged payloads for every target', async () => {
+  const findStep = (job, name) => job.steps.find((step) => step.name === name);
+  const win = findStep(releaseJobs.build, 'Measure installed Windows payload');
+  const linux = findStep(releaseJobs.packages, 'Measure installed Linux payload');
+  const mac = findStep(releaseJobs.packages, 'Measure installed macOS payload');
+  for (const measure of [win, linux, mac]) {
+    assert.match(measure.run, /inventory-installation/);
+    assert.doesNotMatch(JSON.stringify(measure), /WORMHOLE_UPDATE_MANIFEST_SEED/);
+  }
+  assert.match(win.run, /artifacts\/electron-app\/\$env:PLATFORM\/Wormhole/);
+  assert.match(
+    linux.run,
+    /dpkg-deb --extract[\s\S]*rpm2cpio[\s\S]*cmp "\$scratch\/deb.json" "\$scratch\/rpm.json"/,
+  );
+  assert.match(
+    mac.run,
+    /hdiutil attach -readonly[\s\S]*inventory-installation[^\n]+darwin\/universal[\s\S]*\$scratch\/mount\/Wormhole\.app/,
+  );
+  assert.equal(
+    findStep(releaseJobs.sign, 'Download installation inventories').with.pattern,
+    'installation-inventory-*',
+  );
+  assert.equal(
+    findStep(releaseJobs.release, 'Download release packages').with.pattern,
+    'wormhole-*',
+  );
+  const publish = findStep(releaseJobs.release, 'Publish release with generated notes');
+  const targets = ['darwin-universal', 'linux-arm64', 'linux-x64', 'windows-arm64', 'windows-x64'];
+  assert.ok(targets.every((target) => publish.run.includes(target)));
+  assert.match(publish.run, /test -s "dist\/Wormhole-InstallationProof-v1-\$name.json"/);
+
+  const signer = `#!/usr/bin/env bash
+set -euo pipefail
+[[ -z "\${WORMHOLE_UPDATE_MANIFEST_SEED+x}" ]]
+[[ "$(cat)" == 'test seed' ]]
+if [[ "$1" == sign-system-manifest ]]; then
+  [[ "$2" == v2.4.3 && "$4" == 'test pin' ]]
+  printf signed-system-release > "$3/Wormhole-UpdateManifest-v2.json"
+  exit 0
+elif [[ "$1" != sign-installation ]]; then
+  [[ "$1" == v2.4.3 && "$3" == 'test pin' ]]
+  printf signed-release > "$2/Wormhole-UpdateManifest-v1.json"
+  exit 0
+fi
+[[ "$2" == v2.4.3 && "$5" == 'test pin' && "$(cat "$4")" == "$3" ]]
+printf 'signed %s' "$3"
+`;
+  const directory = await mkdtemp(join(tmpdir(), 'wormhole-installation-release-'));
+  try {
+    await mkdir(join(directory, 'dist'));
+    await mkdir(join(directory, 'inventory'));
+    await writeFile(join(directory, 'wormhole-sign-update-manifest'), signer, { mode: 0o755 });
+    const step = findStep(releaseJobs.sign, 'Sign installer sizes and hashes');
+    const execute = () =>
+      spawnSync(releaseBash(), ['-s'], {
+        cwd: directory,
+        encoding: 'utf8',
+        input: `export RUNNER_TEMP="$PWD" GITHUB_WORKSPACE="$PWD"\nchmod +x wormhole-sign-update-manifest\n${step.run}`,
+        env: {
+          ...process.env,
+          RELEASE_TAG: 'v2.4.3',
+          PUBLIC_KEY: 'test pin',
+          WORMHOLE_UPDATE_MANIFEST_SEED: 'test seed',
+        },
+      });
+    for (const target of targets) {
+      await writeFile(
+        join(directory, 'inventory', `installation-${target}.json`),
+        target.replace('-', '/'),
+      );
+    }
+    const valid = execute();
+    assert.equal(valid.status, 0, valid.stderr || valid.error?.message);
+    assert.equal(
+      await readFile(join(directory, 'dist', 'Wormhole-UpdateManifest-v2.json'), 'utf8'),
+      'signed-system-release',
+    );
+    for (const target of targets) {
+      assert.equal(
+        await readFile(
+          join(directory, 'dist', `Wormhole-InstallationProof-v1-${target}.json`),
+          'utf8',
+        ),
+        `signed ${target.replace('-', '/')}`,
+      );
+    }
+    await rm(join(directory, 'inventory', 'installation-linux-x64.json'));
+    const missing = execute();
+    assert.notEqual(missing.status, 0, 'a missing target inventory must fail the signing job');
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('workflows pin runner images and third-party action revisions', () => {
-  const pinnedRunners = new Set(['ubuntu-24.04', 'windows-2025', 'macos-26']);
+  const pinnedRunners = new Set([
+    'ubuntu-24.04',
+    'ubuntu-24.04-arm',
+    'windows-2025',
+    'windows-11-arm',
+    'macos-26',
+    'macos-26-intel',
+  ]);
   const workflows = [
     { source: ciWorkflow, config: parse(ciWorkflow) },
     { source: releaseWorkflow, config: releaseConfig },

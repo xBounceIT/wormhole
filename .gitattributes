@@ -14,6 +14,9 @@
 *.mod    text eol=lf
 *.sum    text eol=lf
 
+# Go embeds the vault SQL migrations and function bodies in native binaries.
+tools/wormhole-backend/internal/**/*.sql text eol=lf
+
 # OpenVPN3/mbedTLS submodule patches are applied by Fetch-OvpnProxy.ps1 via a strict
 # `git apply` against the (LF) submodule sources. They MUST stay LF — under the default
 # `* eol=crlf` rule above they'd check out as CRLF, the apply --check would fail on the
@@ -25,3 +28,4 @@ tools/wormhole-ovpnproxy/patches/*.patch text eol=lf
 *.ico binary
 *.dll binary
 *.exe binary
+tools/wormhole-backend/internal/encvfs/testdata/*.bin binary

@@ -615,7 +615,7 @@ func TestSerialNativeSessionLifecyclePublishesFrames(t *testing.T) {
 	native.server = server
 	server.sessions[native.id] = native
 	native.publishTerminalData([]byte("hello\r\n"))
-	native.publishTerminalFrame(native.terminal.snapshot())
+	native.snapshot()
 	native.start()
 	deadline := time.Now().Add(time.Second)
 	for !native.isClosed() && time.Now().Before(deadline) {

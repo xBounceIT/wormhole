@@ -291,16 +291,12 @@ function browserAuthHarness(
           return browserSession;
         },
       },
-      BrowserWindow: class extends AuthWindow {
-        static getAllWindows() {
-          return [renderer];
-        }
-        constructor(options: { webPreferences: { partition: string } }) {
-          super();
-          windowPartitions.push(options.webPreferences.partition);
-          window = this;
-          windows.push(this);
-        }
+      BrowserWindow: Object.assign(AuthWindow, { getAllWindows: () => [renderer] }),
+      createApplicationWindow: (options: { webPreferences: { partition: string } }) => {
+        window = new AuthWindow();
+        windowPartitions.push(options.webPreferences.partition);
+        windows.push(window);
+        return window;
       },
       applicationIconPath: 'app.ico',
       nativeConnectionTimeoutMs: 315_000,
@@ -1452,13 +1448,9 @@ test('browser load failures classify Chromium certificate errors and ignore ERR_
 // loaded-module coverage excludes. Protect this declarative native UI setting
 // with the same scoped source contract used for the authentication lifecycle.
 test('VPN authentication popup uses the Wormhole application icon', () => {
-  const options = mainSource.slice(
-    mainSource.indexOf('const authWindow = new BrowserWindow({'),
-    mainSource.indexOf(
-      'let candidate = 0;',
-      mainSource.indexOf('const authWindow = new BrowserWindow({'),
-    ),
-  );
+  const start = mainSource.indexOf('const authWindow = createApplicationWindow({');
+  assert.ok(start >= 0);
+  const options = mainSource.slice(start, mainSource.indexOf('let candidate = 0;', start));
   assert.match(options, /\bicon:\s*applicationIconPath\s*,/);
 });
 

@@ -1,5 +1,22 @@
 import { clearSecretInput, takeOneShotSecret } from './secret-input';
+import { sshConnectRequest, vaultSshQuickTarget, type SshStartRequest } from './ssh-connect';
+import { vaultWebQuickTarget, webConnectRequest } from './web-connect';
+import { vaultVncQuickTarget } from './vnc-connect';
+import { vaultRdpConnectRequest, vaultRdpQuickTarget } from './rdp-connect';
 import { fileSessionMode, isFileBrowserProtocol } from './file-protocol';
+import { VaultBitwardenInstallation } from './components/VaultBitwardenInstallation';
+import {
+  tunnelKinds,
+  tunnelKindLabel,
+  tunnelEditorFields,
+  tunnelDefaultSettings,
+  type TunnelField,
+} from './tunnel-editor-schema';
+import type { VaultCredentialRequest } from '../electron/vault-credential';
+import { VaultMigrationChoices } from './components/VaultMigrationChoices';
+import { VaultProtectionNotice } from './components/VaultProtectionNotice';
+import { useTunnelCapabilities } from './tunnel-capabilities';
+import { vaultDeleteSelection } from './vault-delete-selection';
 import { SftpEditorSettings, SftpRecoveryNotice } from './components/SftpEditors';
 import { SftpConnectionIcon } from './components/SftpConnectionIcon';
 import {
@@ -14,7 +31,6 @@ import {
   lazy,
   createContext,
   useContext,
-  memo,
   startTransition,
   Suspense,
   useCallback,
@@ -37,6 +53,8 @@ import {
 import { Tabs as TabsPrimitive } from 'radix-ui';
 import './index.css';
 import { authenticationIdleSeconds } from './auth-idle';
+import { VaultPresenceSettings } from './VaultPresenceSettings';
+import { VaultSecurityProfile } from './VaultSecurityProfile';
 import { McpApprovalDialog } from './components/McpApprovalDialog';
 import { TerminalLinkDialog } from './components/TerminalLinkDialog';
 import { TunnelProviderIcon } from './components/TunnelProviderIcon';
@@ -94,35 +112,22 @@ import {
   formatBitwardenSyncResult,
   formatBitwardenVaultStatus,
 } from './bitwarden-cli-view';
-import { writeClipboardText } from './clipboard';
+import { copyTextToClipboard } from './clipboard';
 import { isWormholeShortcutSuppressed, markWormholeShortcutSuppressed } from './app-shortcuts';
 import { buildMcpConfig, type McpClient } from './mcp-config';
 import {
+  installCheckedUpdate,
   isUpdateInstallable,
   shouldShowReleaseNotes,
   shouldOfferUpdate,
   updateStatusMessage,
 } from './update-state';
+import { NativeTerminalSurface } from './components/NativeTerminalSurface';
 import {
-  copyTerminalSelection,
-  normalizeTerminalPasteText,
-  shouldAutoCopyTerminalSelection,
-  shouldUseTerminalClipboardShortcut,
-  terminalCopyChordAfterKeyDown,
-  terminalCopyChordAfterKeyUp,
-} from './terminal-clipboard';
-import { terminalControlKeyData } from './terminal-keyboard';
-import { selectTerminalDoubleClick } from './terminal-selection';
-import {
-  mergeTerminalScrollback,
-  sameTerminalScrollbackChunk,
-  sameTerminalViewport,
-  terminalScrollbackChunks,
-  nextTerminalViewportResetSequence,
-  scrollTerminalToBottom,
-  terminalScrollEventKeepsBottomPin,
-  terminalVisibleScrollback,
-} from './terminal-frame';
+  applySshTerminalFrame,
+  encodeTerminalData,
+  type RenderedTerminalFrame,
+} from './native-terminal-frame';
 import {
   failedSshReconnectState,
   reconnectingSshState,
@@ -373,6 +378,7 @@ import {
   isTunnelTestNotice,
   missingTunnelFields,
   normalizeTunnelEditorSettings,
+  tunnelKindAvailable,
   parseTunnelProbeTarget,
   tunnelTestPhaseLabel,
   tunnelModeFor,
@@ -384,12 +390,7 @@ import {
   type TunnelMode,
 } from './tunnel-state';
 import { SshTunnelFields } from './components/SshTunnelFields';
-import {
-  fortinetIPsecDefaults,
-  fortinetIPsecFields,
-  fortinetIPsecEditorSettings,
-  fortinetIPsecFieldVisible,
-} from './fortinet-ipsec-state';
+import { fortinetIPsecEditorSettings, fortinetIPsecFieldVisible } from './fortinet-ipsec-state';
 import {
   filterSettingsCategories,
   isSettingsTabId,
@@ -527,6 +528,7 @@ type AuthPromptRequest = {
 
 type TreeNode = {
   id: string;
+  rowVersion?: string;
   name: string;
   notes?: string;
   kind: 'folder' | 'connection';
@@ -713,11 +715,6 @@ function parseDraggedNodeIds(value: string): string[] {
   return [value];
 }
 
-type RenderedTerminalFrame = WormholeSshTerminalFrame & {
-  viewportResetSequence?: number;
-  scrollbackStart?: number;
-};
-
 type Session = {
   id: string;
   title: string;
@@ -735,6 +732,9 @@ type Session = {
   tunnelConfigId?: string;
   credentialId?: string;
   sshAutoSudo?: boolean;
+  sshCredentialOverride?: string;
+  sshManualCredentials?: boolean;
+  sshManualKeyPassphrase?: boolean;
   serialSettings?: SerialSettings;
   sftp?: SftpBrowserState;
   error?: string;
@@ -744,12 +744,15 @@ type Session = {
     received: string;
   };
   rdpStatus?: RdpUiStatus;
+  rdpManualCredentials?: boolean;
+  quickTarget?: import('../electron/vault-quick-target').VaultQuickTarget;
   rdpBackend?: 'activex' | 'freerdp';
   rdpError?: string;
   rdpExternal?: boolean;
   rdpProfile?: WormholeRdpProfile;
   rdpSystemClientSupported?: boolean;
   vncConnectionGeneration?: number;
+  vncManualPassword?: boolean;
   webTargetNodeId?: string;
   webIgnoreCertErrors?: boolean;
   webUrl?: string;
@@ -771,24 +774,8 @@ type SshCredentials = {
   password: string;
 };
 
-type SshStartRequest = {
-  mode?: 'terminal' | 'sftp' | 'smb';
-  sessionId: string;
-  nodeId?: string;
-  host?: string;
-  port?: number;
-  username?: string;
-  password?: string;
-  credentialId?: string;
-  autoSudo?: boolean;
-  tunnelConfigId?: string;
-  manualCredentials?: boolean;
-  keyPassphrase?: string;
-  manualKeyPassphrase?: boolean;
-  frontendSessionId?: string;
-};
-
 type CredentialRecord = {
+  rowVersion?: string;
   id: string;
   name: string;
   protocol: Protocol;
@@ -1043,64 +1030,6 @@ async function waitForRdpSurfaceBounds(
   if (measured) return measured;
   await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
   return measuredRdpSurfaceBounds(sessionId);
-}
-
-function encodeTerminalData(value: string): string {
-  const bytes = new TextEncoder().encode(value);
-  let binary = '';
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary);
-}
-
-function createBlankTerminalCells(columns: number, rows: number): WormholeSshTerminalCell[] {
-  return Array.from({ length: columns * rows }, () => ({
-    character: ' ',
-    foreground: 0xff80,
-    background: 0xff81,
-  }));
-}
-
-function applySshTerminalFrame(
-  previous: RenderedTerminalFrame | undefined,
-  incoming: WormholeSshTerminalFrame,
-): RenderedTerminalFrame {
-  const cellCount = incoming.columns * incoming.rows;
-  const hasMatchingPrevious =
-    previous &&
-    previous.columns === incoming.columns &&
-    previous.rows === incoming.rows &&
-    previous.cells?.length === cellCount;
-  const cells =
-    incoming.full && incoming.cells?.length === cellCount
-      ? incoming.cells.slice()
-      : hasMatchingPrevious
-        ? incoming.changes.length > 0
-          ? previous.cells!.slice()
-          : previous.cells!
-        : createBlankTerminalCells(incoming.columns, incoming.rows);
-
-  for (const change of incoming.changes) {
-    if (change.index < 0 || change.index >= cells.length) continue;
-    // Frames with cell changes always get a fresh buffer above, so this never mutates
-    // the previous frame. React Doctor mistakes that local buffer for React state.
-    // react-doctor-disable-next-line react-doctor/no-side-effect-in-state-updater-function
-    cells[change.index] = {
-      character: change.character,
-      foreground: change.foreground,
-      background: change.background,
-    };
-  }
-
-  return {
-    ...incoming,
-    full: true,
-    cells,
-    ...mergeTerminalScrollback(previous, incoming, terminalMaxScrollbackLines),
-    viewportResetSequence: nextTerminalViewportResetSequence(
-      previous?.viewportResetSequence,
-      incoming,
-    ),
-  };
 }
 
 const navItems = sidebarNavigationItems;
@@ -2026,8 +1955,19 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   const [connectionEditorMode, setConnectionEditorMode] = useState<'saved' | 'quick'>('saved');
   const [editingConnectionId, setEditingConnectionId] = useState<string | null>(null);
   const [connectionNotesReady, setConnectionNotesReady] = useState(true);
+  const nativeConnectionPassword = useRef<HTMLInputElement>(null);
+  const nativeConnectionNotes = useRef<HTMLTextAreaElement>(null);
+  const editingConnectionVersion = useRef<string | undefined>(undefined);
+  const connectionSavePending = useRef(false);
+  const connectionEditorGeneration = useRef(0);
+  const [removeNativeNotes, setRemoveNativeNotes] = useState(false);
+  const [nativeConnectionTab, setNativeConnectionTab] = useState('general');
+  const nativeSavedConnection = authState?.mode === 'vault' && connectionEditorMode === 'saved';
+  const migrationEditorGeneration = connectionEditorGeneration.current;
   const [folderDetailsOpen, setFolderDetailsOpen] = useState(false);
   const editingFolderId = useRef<string | null>(null);
+  const editingFolderVersion = useRef<string | undefined>(undefined);
+  const folderSavePending = useRef(false);
   const editingFolderGeneration = useRef(0);
   const [folderDetailsForm, setFolderDetailsForm] = useState<FolderForm>(blankFolderForm);
   const [editorError, setEditorError] = useState('');
@@ -2065,6 +2005,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     serial: { ...defaultSerialSettings },
     rdp: { ...defaultRdpSettings },
   });
+  const nativeQuickCredentialConnection =
+    authState?.mode === 'vault' &&
+    connectionEditorMode === 'quick' &&
+    ['rdp', 'ssh', 'sftp'].includes(newConnectionForm.protocol);
   const [connectionAuthenticationOverride, setConnectionAuthenticationOverride] =
     useState<SshAuthenticationType | null>(null);
   const [rdpExternalClientRequired, setRdpExternalClientRequired] = useState(false);
@@ -2181,12 +2125,19 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   useEffect(() => {
     if (authGate === 'unlocked') void connectionTreeExpansionWriter.flush().catch(() => undefined);
   }, [authGate, connectionTreeExpansionWriter]);
+  useEffect(() => {
+    setNativeConnectionTab('general');
+  }, [newConnectionForm.protocol, newConnectionOpen]);
   const editingConnectionNotesId =
     editingConnectionId && findTreeNode(tree, editingConnectionId)?.persisted !== false
       ? editingConnectionId
       : null;
   useEffect(() => {
     const api = window.wormhole;
+    if (authState?.mode === 'vault') {
+      setConnectionNotesReady(true);
+      return;
+    }
     if (!newConnectionOpen || !editingConnectionNotesId || !api) return;
     let canceled = false;
     setConnectionNotesReady(false);
@@ -2204,11 +2155,16 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     return () => {
       canceled = true;
     };
-  }, [newConnectionOpen, editingConnectionNotesId]);
+  }, [newConnectionOpen, editingConnectionNotesId, authState?.mode]);
 
   useEffect(() => {
     const requestId = ++rdpExternalClientRequirementRequest.current;
-    if (!newConnectionOpen || newConnectionForm.protocol !== 'rdp' || !window.wormhole) {
+    if (
+      authState?.mode === 'vault' ||
+      !newConnectionOpen ||
+      newConnectionForm.protocol !== 'rdp' ||
+      !window.wormhole
+    ) {
       setRdpExternalClientRequired(false);
       return;
     }
@@ -2252,6 +2208,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     newConnectionForm.useSavedCredentials,
     newConnectionForm.username,
     newConnectionOpen,
+    authState?.mode,
   ]);
   const activeSessionCount = useMemo(() => sessions.filter(isSessionActive).length, [sessions]);
   useEffect(() => {
@@ -2401,7 +2358,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     let receivedResult = false;
     const unsubscribeResult = window.wormhole.onUpdateResult((result) => {
       receivedResult = true;
+      setUpdateStatus('');
       setUpdateResult(result);
+      if (result.lastUpdateCheck) setLastUpdateCheck(result.lastUpdateCheck);
     });
 
     void window.wormhole
@@ -2409,7 +2368,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       .then(({ currentVersion, result }) => {
         if (!active) return;
         setUpdateCurrentVersion(currentVersion);
-        if (!receivedResult) setUpdateResult(result);
+        if (!receivedResult) {
+          setUpdateResult(result);
+          if (result?.lastUpdateCheck) setLastUpdateCheck(result.lastUpdateCheck);
+        }
       })
       .catch(() => {
         // The settings page still exposes "Check now" when status cannot be read.
@@ -2438,8 +2400,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       const result = await window.wormhole.checkForUpdates();
       setUpdateResult(result);
       setUpdateStatus('');
-      const settings = await window.wormhole.readAppSettings();
-      setLastUpdateCheck(settings.lastUpdateCheck);
+      if (result.lastUpdateCheck) setLastUpdateCheck(result.lastUpdateCheck);
     } catch {
       setUpdateStatus("Couldn't reach the update server. Try again later.");
     } finally {
@@ -2488,19 +2449,14 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     setUpdateDownloadProgress(0);
     setUpdateStatus('Downloading…');
     try {
-      const installerPath = await window.wormhole.downloadUpdate({
-        installerUrl: latest.installerUrl,
-        installerFileName: latest.installerFileName,
-        ...(latest.installerSha256 ? { installerSha256: latest.installerSha256 } : {}),
-        ...(latest.installerSize != null ? { installerSize: latest.installerSize } : {}),
-      });
       const platform = window.wormhole.platform;
-      setUpdateStatus(platform === 'linux' ? 'Opening download location…' : 'Launching installer…');
-      const installation = await window.wormhole.installUpdate(installerPath);
+      const installation = await installCheckedUpdate(window.wormhole, latest, () => {
+        setUpdateStatus(
+          platform === 'linux' ? 'Opening download location…' : 'Launching installer…',
+        );
+      });
       if (installation.appWillQuit) return;
-      setUpdateStatus(
-        'AppImage downloaded. Replace your current AppImage with the verified download.',
-      );
+      setUpdateStatus(installation.status);
       setUpdateBusy(false);
       setUpdateDownloadProgress(null);
     } catch (error) {
@@ -2519,7 +2475,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
 
   const requestAuthentication = useCallback(
     (reason: string) => {
-      if (authGate !== 'unlocked') return Promise.resolve(false);
+      if (authGate !== 'unlocked' || authState?.mode === 'vault') return Promise.resolve(false);
       if (authPromptResolver.current) return Promise.resolve(false);
       if (!authState?.configured || authState.mode === 'disabled') return Promise.resolve(true);
 
@@ -3204,6 +3160,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       inlinePassword: '',
       removeInlinePassword: false,
     }));
+    connectionEditorGeneration.current += 1;
+    clearSecretInput(nativeConnectionPassword.current);
+    if (nativeConnectionNotes.current) nativeConnectionNotes.current.value = '';
+    setRemoveNativeNotes(false);
     setNewConnectionOpen(false);
     setFolderDetailsOpen(false);
     setNewFolderOpen(false);
@@ -3493,11 +3453,21 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         ) {
           throw new Error('The workspace service cannot save this move.');
         }
-        const result = await window.wormhole.moveWorkspaceNodes({
-          nodeIds: sourceIds,
-          targetId: node.id,
-          placement,
-        });
+        const selection =
+          authState?.mode === 'vault'
+            ? vaultDeleteSelection(currentTree, [...sourceIds, node.id]).nodes
+            : undefined;
+        const result = selection
+          ? await window.wormhole.moveVaultNodes({
+              nodes: selection.slice(0, -1),
+              target: selection.at(-1)!,
+              placement,
+            })
+          : await window.wormhole.moveWorkspaceNodes({
+              nodeIds: sourceIds,
+              targetId: node.id,
+              placement,
+            });
         if (!result.moved) throw new Error('The workspace did not save the move.');
         try {
           await refreshWorkspace();
@@ -3558,66 +3528,92 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         candidate.backendSessionId === request.sessionId ||
         candidate.id === request.frontendSessionId,
     );
-    const { frontendSessionId, ...nativeRequest } = request;
-    nativeRequest.mode ??= fileSessionMode(target?.protocol);
-    void api
-      .openSshSession({
-        ...nativeRequest,
-        columns: 80,
-        rows: 24,
-      })
-      .catch((error: unknown) => {
-        const message = error instanceof Error ? error.message : String(error);
-        // The structured backend event owns host-key mismatch state. Ignoring the parallel IPC
-        // rejection prevents an older open promise from overwriting a trust retry using this ID.
-        if (isSshHostKeyMismatchError(message)) return;
-        if (requiresSshKeyPassphrasePrompt(message) && !request.manualKeyPassphrase) {
-          clearSecretInput(sshKeyPassphraseInput.current);
-          setSshKeyPassphrasePrompt(request);
-        } else if (isBitwardenUnlockError(message)) {
-          requestRuntimeBitwardenUnlock(`ssh:${request.sessionId}`, message, () =>
-            startSshSession(request),
-          );
-        } else {
-          const promptTarget = sshCredentialPromptTarget(request, message);
-          if (promptTarget === 'saved' && request.nodeId) {
-            setSshCredentialForm({
-              username: findTreeNode(treeRef.current, request.nodeId)?.username ?? '',
-              password: '',
-            });
+    const { frontendSessionId } = request;
+    setSessions((current) =>
+      current.map((session) =>
+        session.backendSessionId === request.sessionId
+          ? {
+              ...session,
+              sshManualCredentials:
+                authState?.mode === 'vault' && Boolean(request.manualCredentials),
+              sshManualKeyPassphrase:
+                authState?.mode === 'vault' && Boolean(request.manualKeyPassphrase),
+              ...(session.nodeId ? { sshCredentialOverride: request.credentialId } : {}),
+              ...(session.quickTarget && (request.credentialId || request.manualCredentials)
+                ? {
+                    credentialId: request.manualCredentials ? undefined : request.credentialId,
+                    quickTarget: {
+                      ...session.quickTarget,
+                      credentialId: request.manualCredentials ? '' : request.credentialId!,
+                    },
+                  }
+                : {}),
+            }
+          : session,
+      ),
+    );
+    let opening: Promise<WormholeSshConnected>;
+    try {
+      opening = api.openSshSession(sshConnectRequest(request, target, authState?.mode === 'vault'));
+    } catch (error: unknown) {
+      opening = Promise.reject(error);
+    }
+    void opening.catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      // The structured backend event owns host-key mismatch state. Ignoring the parallel IPC
+      // rejection prevents an older open promise from overwriting a trust retry using this ID.
+      if (isSshHostKeyMismatchError(message)) return;
+      if (
+        authState?.mode !== 'vault' &&
+        requiresSshKeyPassphrasePrompt(message) &&
+        !request.manualKeyPassphrase
+      ) {
+        clearSecretInput(sshKeyPassphraseInput.current);
+        setSshKeyPassphrasePrompt(request);
+      } else if (isBitwardenUnlockError(message)) {
+        requestRuntimeBitwardenUnlock(`ssh:${request.sessionId}`, message, () =>
+          startSshSession(request),
+        );
+      } else if (authState?.mode !== 'vault') {
+        const promptTarget = sshCredentialPromptTarget(request, message);
+        if (promptTarget === 'saved' && request.nodeId) {
+          setSshCredentialForm({
+            username: findTreeNode(treeRef.current, request.nodeId)?.username ?? '',
+            password: '',
+          });
+          setSshCredentialSelection(manualCredentialSelectionValue);
+          setSshCredentialSave(false);
+          setSshCredentialPrompt({
+            kind: 'saved',
+            backendSessionId: request.sessionId,
+            nodeId: request.nodeId,
+          });
+        } else if (promptTarget === 'quick') {
+          const sessionId =
+            frontendSessionId ??
+            sessionsRef.current.find(
+              (candidate) => candidate.backendSessionId === request.sessionId,
+            )?.id;
+          if (sessionId) {
+            setSshCredentialForm({ username: '', password: '' });
             setSshCredentialSelection(manualCredentialSelectionValue);
             setSshCredentialSave(false);
-            setSshCredentialPrompt({
-              kind: 'saved',
-              backendSessionId: request.sessionId,
-              nodeId: request.nodeId,
-            });
-          } else if (promptTarget === 'quick') {
-            const sessionId =
-              frontendSessionId ??
-              sessionsRef.current.find(
-                (candidate) => candidate.backendSessionId === request.sessionId,
-              )?.id;
-            if (sessionId) {
-              setSshCredentialForm({ username: '', password: '' });
-              setSshCredentialSelection(manualCredentialSelectionValue);
-              setSshCredentialSave(false);
-              setSshCredentialPrompt({ kind: 'quick', sessionId });
-            }
+            setSshCredentialPrompt({ kind: 'quick', sessionId });
           }
         }
-        setSessions((current) =>
-          current.map((session) =>
-            session.backendSessionId === request.sessionId
-              ? {
-                  ...session,
-                  status: 'failed',
-                  error: message,
-                }
-              : session,
-          ),
-        );
-      });
+      }
+      setSessions((current) =>
+        current.map((session) =>
+          session.backendSessionId === request.sessionId
+            ? {
+                ...session,
+                status: 'failed',
+                error: message,
+              }
+            : session,
+        ),
+      );
+    });
   }
 
   function submitSshKeyPassphrase(event: FormEvent<HTMLFormElement>) {
@@ -3783,24 +3779,15 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       return;
     }
 
-    const request = session.webTargetNodeId
-      ? {
-          sessionId: session.id,
-          attempt: generation,
-          nodeId: session.webTargetNodeId,
-        }
-      : {
-          sessionId: session.id,
-          attempt: generation,
-          address: session.host,
-          port: session.port,
-          protocol: session.protocol as 'http' | 'https',
-          ignoreCertErrors: session.webIgnoreCertErrors === true,
-          tunnelConfigId: session.tunnelConfigId,
-        };
-
-    void api
-      .openWebSession(request)
+    let opening: Promise<WormholeWebTarget>;
+    try {
+      opening = api.openWebSession(
+        webConnectRequest(session, generation, authState?.mode === 'vault'),
+      );
+    } catch (error) {
+      opening = Promise.reject(error);
+    }
+    void opening
       .then(
         (target) => {
           setSessions((current) =>
@@ -3854,8 +3841,16 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     if (!session || session.protocol !== 'rdp') return;
     setSelectedSessionId(sessionId);
     setActivePage('sessions');
-    if (session.nodeId || session.credentialId) {
-      startRdpSession(sessionId, { username: '', domain: '', password: '' }, false);
+    if (authState?.mode === 'vault' || session.nodeId || session.credentialId) {
+      startRdpSession(
+        sessionId,
+        { username: '', domain: '', password: '' },
+        Boolean(
+          authState?.mode === 'vault' &&
+          (session.rdpManualCredentials ||
+            (session.quickTarget && !session.quickTarget.credentialId)),
+        ),
+      );
       return;
     }
     setRdpCredentialForm({ username: '', domain: '', password: '' });
@@ -3880,7 +3875,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       domain: credentials.domain.trim(),
       password: credentials.password,
     };
-    if (manualCredentials) {
+    if (manualCredentials || authState?.mode === 'vault') {
       rdpSavedCredentialAttempts.current.delete(sessionId);
     } else {
       rdpSavedCredentialAttempts.current.add(sessionId);
@@ -3891,6 +3886,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           ? {
               ...candidate,
               rdpStatus: 'starting',
+              rdpManualCredentials: authState?.mode === 'vault' && manualCredentials,
               rdpError: undefined,
               tunnelProgress: null,
               rdpProfile: defaultRdpProfile(candidate),
@@ -3931,6 +3927,24 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           return;
         }
         sessionResourceReleaseGate.current.reset(sessionId);
+        if (authState?.mode === 'vault')
+          return wormhole.openVaultRdpSession(
+            vaultRdpConnectRequest(
+              {
+                sessionId,
+                nodeId: session.nodeId,
+                quickTarget: session.quickTarget
+                  ? {
+                      ...session.quickTarget,
+                      credentialId: manualCredentials ? '' : session.quickTarget.credentialId,
+                    }
+                  : undefined,
+                credentialId: credentialIdOverride,
+                bounds,
+              },
+              manualCredentials,
+            ),
+          );
         return wormhole.startRdpSession({
           sessionId,
           profile: {
@@ -3957,7 +3971,11 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
               ? requestRdpCredentials(sessionId)
               : startRdpSession(sessionId, normalizedCredentials, false, credentialIdOverride),
           );
-        } else if (!manualCredentials && requiresRdpCredentialPrompt(message)) {
+        } else if (
+          authState?.mode !== 'vault' &&
+          !manualCredentials &&
+          requiresRdpCredentialPrompt(message)
+        ) {
           rdpSavedCredentialAttempts.current.delete(sessionId);
           setRdpCredentialForm({ username: '', domain: '', password: '' });
           setRdpCredentialSelection(manualCredentialSelectionValue);
@@ -3974,14 +3992,17 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       });
   }
 
-  function retryRdpSession(sessionId: string) {
+  function retryRdpSession(sessionId: string, manualCredentials?: boolean) {
     void (async () => {
       const source = sessionsRef.current.find((session) => session.id === sessionId);
       if (!source || source.protocol !== 'rdp') return;
-      if (canDisconnectRemoteDesktopSession(source)) {
+      const manual =
+        authState?.mode === 'vault' && (manualCredentials ?? source.rdpManualCredentials ?? false);
+      if (canDisconnectRemoteDesktopSession(source) || manual) {
         if (!(await disconnectRemoteDesktopSession(sessionId))) return;
       }
-      await requestRdpCredentials(sessionId);
+      if (manual) startRdpSession(sessionId, { username: '', domain: '', password: '' }, true);
+      else await requestRdpCredentials(sessionId);
     })();
   }
 
@@ -4212,6 +4233,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       session.nodeId
     )
       return;
+    if (authState?.mode === 'vault') {
+      startQuickSshSession(sessionId, { username: '', password: '' });
+      return;
+    }
     sshCredentialSubmitInFlight.current = false;
     setSshCredentialForm({ username: '', password: '' });
     setSshCredentialSelection(manualCredentialSelectionValue);
@@ -4235,7 +4260,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       return;
 
     const backendSessionId = newSessionToken();
-    const username = credentials.username.trim();
+    const username = authState?.mode === 'vault' ? '' : credentials.username.trim();
     setSessions((current) =>
       current.map((candidate) =>
         candidate.id === sessionId
@@ -4255,12 +4280,18 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     );
     startSshSession({
       sessionId: backendSessionId,
+      frontendSessionId: sessionId,
+      quickTarget: session.quickTarget,
       host: session.host,
       port: session.port,
       mode: fileSessionMode(session.protocol),
       credentialId,
-      username: credentialId ? undefined : username,
-      password: credentialId ? undefined : credentials.password,
+      ...(authState?.mode === 'vault'
+        ? { manualCredentials: !credentialId }
+        : {
+            username: credentialId ? undefined : username,
+            password: credentialId ? undefined : credentials.password,
+          }),
       tunnelConfigId: session.tunnelConfigId,
     });
   }
@@ -4268,7 +4299,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   function openConnection(node: TreeNode) {
     if (node.kind !== 'connection' || !node.protocol) return;
 
-    const sessionId = `session-${node.id}`;
+    // A saved connection can change protocol while keeping its tab. Reserve a
+    // canonical ID for every vault tab so a later web/desktop edit remains valid.
+    const sessionId = authState?.mode === 'vault' ? node.id : `session-${node.id}`;
     // Saved connections reuse their tab/native surface ID. Queue a reopen until
     // the old resources are released so a late disconnect cannot close the new one.
     if (
@@ -4290,7 +4323,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       setSelectedSessionId(existing.id);
       setActivePage('sessions');
       if (existing.protocol === 'rdp' && existing.rdpStatus !== 'connected') {
-        requestRdpCredentials(existing.id);
+        retryRdpSession(existing.id);
       }
       return;
     }
@@ -4496,7 +4529,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   }
 
   async function closeSessionsForNodeIds(nodeIds: ReadonlySet<string>) {
-    sessionCloseGate.current.cancelReopens(new Set([...nodeIds].map((id) => `session-${id}`)));
+    sessionCloseGate.current.cancelReopens(
+      new Set([...nodeIds].flatMap((id) => [`session-${id}`, id])),
+    );
     const closing = sessionsRef.current.filter(
       (session) => session.nodeId && nodeIds.has(session.nodeId),
     );
@@ -4589,10 +4624,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   }
 
   const sftpReconnectPending = useRef(new Set<string>());
-  async function reconnectSession(id: string) {
+  async function reconnectSession(id: string, manualMode?: 'account' | 'passphrase') {
     const source = sessionsRef.current.find((session) => session.id === id);
     if (!source || !isFileBrowserProtocol(source.protocol) || !source.backendSessionId) {
-      restartSession(id);
+      restartSession(id, false, manualMode);
       return;
     }
     if (sftpReconnectPending.current.has(id)) return;
@@ -4609,7 +4644,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         sessionsRef.current.find((session) => session.id === id)?.backendSessionId ===
         source.backendSessionId
       )
-        restartSession(id, true);
+        restartSession(id, true, manualMode);
     } catch (error) {
       setSessions((current) =>
         current.map((session) =>
@@ -4623,9 +4658,15 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     }
   }
 
-  function restartSession(id: string, released = false) {
+  function restartSession(id: string, released = false, manualMode?: 'account' | 'passphrase') {
     const source = sessionsRef.current.find((session) => session.id === id);
     if (!source) return;
+    const manualCredentials =
+      authState?.mode === 'vault' &&
+      (manualMode ? manualMode === 'account' : source.sshManualCredentials);
+    const manualKeyPassphrase =
+      authState?.mode === 'vault' &&
+      (manualMode ? manualMode === 'passphrase' : source.sshManualKeyPassphrase);
 
     if (source.backendSessionId && !released) {
       if (source.protocol === 'serial') {
@@ -4694,11 +4735,14 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       startSshSession({
         sessionId: backendSessionId,
         nodeId: source.nodeId,
+        credentialId: source.sshCredentialOverride,
+        manualCredentials,
+        manualKeyPassphrase,
         mode: fileSessionMode(source.protocol),
       });
     } else if (
       (source.protocol === 'ssh' || isFileBrowserProtocol(source.protocol)) &&
-      source.credentialId
+      (source.credentialId || (authState?.mode === 'vault' && source.quickTarget))
     ) {
       const backendSessionId = newSessionToken();
       setSessions((current) =>
@@ -4720,9 +4764,12 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       );
       startSshSession({
         sessionId: backendSessionId,
+        quickTarget: source.quickTarget,
         host: source.host,
         port: source.port,
         credentialId: source.credentialId,
+        manualCredentials,
+        manualKeyPassphrase,
         autoSudo: source.sshAutoSudo,
         tunnelConfigId: source.tunnelConfigId,
         frontendSessionId: source.id,
@@ -4788,19 +4835,23 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
 
     const duplicate: Session = {
       ...source,
-      id: `session-duplicate-${newSessionToken()}`,
+      id:
+        authState?.mode === 'vault' ? newSessionToken() : `session-duplicate-${newSessionToken()}`,
       title: `${source.title} (copy)`,
       mcpAccessible: false,
       backendSessionId:
         ((source.protocol === 'ssh' || isFileBrowserProtocol(source.protocol)) &&
-          (source.nodeId || source.credentialId)) ||
+          (source.nodeId ||
+            source.credentialId ||
+            (authState?.mode === 'vault' && source.quickTarget))) ||
         source.protocol === 'serial'
           ? newSessionToken()
           : undefined,
       status:
         (source.protocol === 'ssh' || isFileBrowserProtocol(source.protocol)) &&
         !source.nodeId &&
-        !source.credentialId
+        !source.credentialId &&
+        !(authState?.mode === 'vault' && source.quickTarget)
           ? 'placeholder'
           : source.protocol === 'ssh' ||
               isFileBrowserProtocol(source.protocol) ||
@@ -4841,19 +4892,26 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       startSshSession({
         sessionId: duplicate.backendSessionId,
         nodeId: duplicate.nodeId,
+        credentialId: duplicate.sshCredentialOverride,
+        manualCredentials: duplicate.sshManualCredentials,
+        manualKeyPassphrase: duplicate.sshManualKeyPassphrase,
         mode: fileSessionMode(duplicate.protocol),
       });
     }
     if (
       duplicate.backendSessionId &&
-      duplicate.credentialId &&
+      !duplicate.nodeId &&
+      (duplicate.credentialId || (authState?.mode === 'vault' && duplicate.quickTarget)) &&
       (duplicate.protocol === 'ssh' || isFileBrowserProtocol(duplicate.protocol))
     ) {
       startSshSession({
         sessionId: duplicate.backendSessionId,
+        quickTarget: duplicate.quickTarget,
         host: duplicate.host,
         port: duplicate.port,
         credentialId: duplicate.credentialId,
+        manualCredentials: duplicate.sshManualCredentials,
+        manualKeyPassphrase: duplicate.sshManualKeyPassphrase,
         autoSudo: duplicate.sshAutoSudo,
         tunnelConfigId: duplicate.tunnelConfigId,
         frontendSessionId: duplicate.id,
@@ -4863,7 +4921,8 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     if (
       (duplicate.protocol === 'ssh' || isFileBrowserProtocol(duplicate.protocol)) &&
       !duplicate.nodeId &&
-      !duplicate.credentialId
+      !duplicate.credentialId &&
+      !(authState?.mode === 'vault' && duplicate.quickTarget)
     ) {
       sshCredentialSubmitInFlight.current = false;
       setSshCredentialForm({ username: '', password: '' });
@@ -4878,8 +4937,12 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       );
     }
     if (duplicate.protocol === 'rdp') {
-      setRdpCredentialForm({ username: '', domain: '', password: '' });
-      setRdpCredentialPrompt(duplicate.id);
+      if (authState?.mode === 'vault') {
+        window.setTimeout(() => retryRdpSession(duplicate.id, duplicate.rdpManualCredentials), 0);
+      } else {
+        setRdpCredentialForm({ username: '', domain: '', password: '' });
+        setRdpCredentialPrompt(duplicate.id);
+      }
     }
     if (duplicate.protocol === 'http' || duplicate.protocol === 'https') {
       startWebSession(duplicate);
@@ -5785,7 +5848,11 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
 
   function openQuickConnect() {
     setConnectionAuthenticationOverride(null);
+    connectionEditorGeneration.current += 1;
     setConnectionNotesReady(true);
+    setRemoveNativeNotes(false);
+    if (nativeConnectionNotes.current) nativeConnectionNotes.current.value = '';
+    clearSecretInput(nativeConnectionPassword.current);
     quickConnectSubmitInFlight.current = false;
     setEditingConnectionId(null);
     setConnectionEditorMode('quick');
@@ -5852,7 +5919,11 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
 
   function openNewConnection(folderId?: string | null) {
     setConnectionAuthenticationOverride(null);
+    connectionEditorGeneration.current += 1;
     setConnectionNotesReady(true);
+    setRemoveNativeNotes(false);
+    if (nativeConnectionNotes.current) nativeConnectionNotes.current.value = '';
+    clearSecretInput(nativeConnectionPassword.current);
     setEditingConnectionId(null);
     setConnectionEditorMode('saved');
     setEditorError('');
@@ -5884,6 +5955,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     const requestId = ++credentialRevealRequest.current;
     credentialRevealBusy.current = true;
     try {
+      if (authState?.mode === 'vault') {
+        await api.showVaultCredentials({ nodeId: node.id, rowVersion: node.rowVersion ?? '' });
+        return;
+      }
       const result = await api.showWorkspaceCredentials({ nodeId: node.id });
       if (credentialRevealRequest.current !== requestId) return;
       setCopiedCredentialField(null);
@@ -5990,9 +6065,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       if (persistedNodeIds.length > 0) {
         const api = window.wormhole;
         if (!api) throw new Error('The workspace service is unavailable.');
-        const result = await api.deleteWorkspaceNodes({
-          nodeIds: persistedNodeIds,
-        });
+        const result =
+          authState?.mode === 'vault'
+            ? await api.deleteVaultNodes(vaultDeleteSelection(nodes, persistedNodeIds))
+            : await api.deleteWorkspaceNodes({ nodeIds: persistedNodeIds });
         if (!result.deleted) throw new Error('The workspace nodes were not deleted.');
         workspaceRefresh.invalidate();
         await reconcileDeletedNodes();
@@ -6022,9 +6098,15 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         setEditorError('The workspace service is unavailable.');
         return;
       }
-      void api
-        .duplicateWorkspaceNode({ nodeId: node.id })
-        .then(async ({ nodeId, name }) => {
+      const vault = authState?.mode === 'vault';
+      const currentTree = treeRef.current;
+      const parentId = vault ? findParentFolderId(currentTree, node.id) : undefined;
+      const duplication = vault
+        ? api.duplicateVaultConnection({ id: node.id, rowVersion: node.rowVersion ?? '' })
+        : api.duplicateWorkspaceNode({ nodeId: node.id });
+      void duplication
+        .then(async (result) => {
+          const { nodeId, name } = result;
           try {
             await refreshWorkspace();
           } catch (error: unknown) {
@@ -6032,14 +6114,18 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
               ...node,
               id: nodeId,
               name,
+              rowVersion: 'rowVersion' in result && result.rowVersion === '1' ? '1' : undefined,
               persisted: true,
               children: undefined,
             };
-            setTree((current) =>
-              findTreeNode(current, nodeId)
-                ? current
-                : insertRelativeToTreeNode(current, node.id, [duplicate], 'after'),
-            );
+            setTree((current) => {
+              if (findTreeNode(current, nodeId)) return current;
+              if (!vault) return insertRelativeToTreeNode(current, node.id, [duplicate], 'after');
+              if (current !== currentTree || !findTreeNode(current, node.id)) return current;
+              return parentId
+                ? insertIntoTreeFolder(current, parentId, [duplicate])
+                : [...current, duplicate];
+            });
             setEditorError(
               `Connection duplicated, but the workspace could not be refreshed: ${
                 error instanceof Error ? error.message : 'unknown error'
@@ -6073,7 +6159,14 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     if (node.kind !== 'connection' || !node.protocol) return;
     setConnectionAuthenticationOverride(null);
 
-    setConnectionNotesReady(!window.wormhole || node.persisted === false);
+    setConnectionNotesReady(
+      authState?.mode === 'vault' || !window.wormhole || node.persisted === false,
+    );
+    connectionEditorGeneration.current += 1;
+    editingConnectionVersion.current = node.rowVersion;
+    setRemoveNativeNotes(false);
+    if (nativeConnectionNotes.current) nativeConnectionNotes.current.value = '';
+    clearSecretInput(nativeConnectionPassword.current);
     setConnectionEditorMode('saved');
     setSelectedNodeId(node.id);
     setEditingConnectionId(node.id);
@@ -6110,6 +6203,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     setSelectedNodeId(node.id);
     editingFolderGeneration.current += 1;
     editingFolderId.current = node.id;
+    editingFolderVersion.current = node.rowVersion;
     setEditorError('');
     setFolderDetailsForm({
       name: node.name,
@@ -6220,13 +6314,69 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       (newConnectionForm.protocol === 'ssh' || isFileBrowserProtocol(newConnectionForm.protocol)) &&
       !credentialId &&
       !newConnectionForm.useSavedCredentials &&
+      authState?.mode !== 'vault' &&
       !newConnectionForm.username.trim()
     ) {
       setEditorError('Enter a username for this SSH connection.');
       quickConnectSubmitInFlight.current = false;
       return;
     }
-    const id = `session-quick-${newSessionToken()}`;
+    const protectedRdp = authState?.mode === 'vault' && newConnectionForm.protocol === 'rdp';
+    const protectedVnc = authState?.mode === 'vault' && newConnectionForm.protocol === 'vnc';
+    const protectedWeb =
+      authState?.mode === 'vault' && ['http', 'https'].includes(newConnectionForm.protocol);
+    const protectedSsh =
+      authState?.mode === 'vault' && ['ssh', 'sftp'].includes(newConnectionForm.protocol);
+    let quickTarget: Session['quickTarget'];
+    if (protectedRdp || protectedVnc || protectedWeb || protectedSsh) {
+      try {
+        if (!protectedWeb && newConnectionForm.useSavedCredentials && !credentialId)
+          throw Error('Select saved credentials or enter temporary credentials.');
+        quickTarget = protectedWeb
+          ? vaultWebQuickTarget({
+              protocol: newConnectionForm.protocol,
+              host,
+              port,
+              tunnelId: quickConnectTunnelId(newConnectionForm.protocol, newConnectionForm.tunnel),
+              ignoreCertificateErrors:
+                newConnectionForm.protocol === 'https' && newConnectionForm.httpIgnoreCertErrors,
+            })
+          : protectedSsh
+            ? vaultSshQuickTarget({
+                protocol: newConnectionForm.protocol,
+                host,
+                port,
+                credentialId,
+                tunnelId: quickConnectTunnelId(
+                  newConnectionForm.protocol,
+                  newConnectionForm.tunnel,
+                ),
+                sshAutoSudo: quickAutoSudo,
+              })
+            : protectedVnc
+              ? vaultVncQuickTarget({
+                  host,
+                  port,
+                  credentialId,
+                  tunnelId: quickConnectTunnelId('vnc', newConnectionForm.tunnel),
+                })
+              : vaultRdpQuickTarget({
+                  host,
+                  port,
+                  credentialId,
+                  tunnelId: quickConnectTunnelId('rdp', newConnectionForm.tunnel),
+                  rdp: newConnectionForm.rdp,
+                });
+      } catch (error) {
+        setEditorError(error instanceof Error ? error.message : 'Invalid remote desktop target.');
+        quickConnectSubmitInFlight.current = false;
+        return;
+      }
+    }
+    const id =
+      protectedRdp || protectedVnc || protectedWeb || protectedSsh
+        ? newSessionToken()
+        : `session-quick-${newSessionToken()}`;
     const startsImmediately = quickConnectStartsImmediately(
       newConnectionForm.protocol,
       newConnectionForm.useSavedCredentials,
@@ -6246,6 +6396,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     const session: Session = {
       id,
       title: name,
+      quickTarget,
       protocol: newConnectionForm.protocol,
       host,
       port,
@@ -6258,12 +6409,14 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       serialSettings:
         newConnectionForm.protocol === 'serial' ? { ...newConnectionForm.serial } : undefined,
       rdpStatus: newConnectionForm.protocol === 'rdp' ? 'idle' : undefined,
+      rdpManualCredentials: protectedRdp && !newConnectionForm.useSavedCredentials,
+      vncManualPassword: newConnectionForm.protocol === 'vnc' ? false : undefined,
       rdpSystemClientSupported: newConnectionForm.protocol === 'rdp' ? false : undefined,
       vncConnectionGeneration: newConnectionForm.protocol === 'vnc' ? 0 : undefined,
       rdpProfile:
         newConnectionForm.protocol === 'rdp'
           ? {
-              ...newConnectionForm.rdp,
+              ...(quickTarget?.rdp ?? newConnectionForm.rdp),
               credentialId,
               gatewayCredentialId: newConnectionForm.rdp.gatewayCredentialId || undefined,
               name,
@@ -6285,6 +6438,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       if (backendSessionId && credentialId) {
         startSshSession({
           sessionId: backendSessionId,
+          quickTarget,
           host,
           port,
           credentialId,
@@ -6292,6 +6446,14 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           tunnelConfigId,
           frontendSessionId: id,
           mode: fileSessionMode(newConnectionForm.protocol),
+        });
+      } else if (backendSessionId && protectedSsh) {
+        startSshSession({
+          sessionId: backendSessionId,
+          quickTarget,
+          manualCredentials: true,
+          mode: fileSessionMode(newConnectionForm.protocol),
+          frontendSessionId: id,
         });
       } else if (backendSessionId && !newConnectionForm.useSavedCredentials) {
         startSshSession({
@@ -6316,11 +6478,13 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     }
     if (newConnectionForm.protocol === 'rdp') {
       const manual = !newConnectionForm.useSavedCredentials;
-      const credentials = {
-        username: newConnectionForm.username,
-        domain: newConnectionForm.rdp.domain,
-        password: newConnectionForm.inlinePassword,
-      };
+      const credentials = protectedRdp
+        ? { username: '', domain: '', password: '' }
+        : {
+            username: newConnectionForm.username,
+            domain: newConnectionForm.rdp.domain,
+            password: newConnectionForm.inlinePassword,
+          };
       window.setTimeout(() => startRdpSession(id, credentials, manual), 0);
     }
     if (newConnectionForm.protocol === 'http' || newConnectionForm.protocol === 'https') {
@@ -6329,7 +6493,11 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   }
   async function submitNewConnection(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (editorBusy || !connectionNotesReady) return;
+    if (editorBusy || connectionSavePending.current || !connectionNotesReady) return;
+    if (nativeSavedConnection && newConnectionForm.protocol === 'smb') {
+      setEditorError('SMB connections are unavailable in this vault.');
+      return;
+    }
     if (!connectionEditorCredentialSelectionComplete) {
       setEditorError(connectionAuthenticationSelectionError);
       return;
@@ -6339,6 +6507,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     const portText = newConnectionForm.port.trim();
     const port = portText === '' ? 0 : Number(portText);
     const editingId = editingConnectionId;
+    const dialogGeneration = connectionEditorGeneration.current;
     if (
       newConnectionForm.protocol !== 'serial' &&
       portText !== '' &&
@@ -6347,6 +6516,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       setEditorError('Port must be a whole number between 1 and 65535.');
       return;
     }
+    connectionSavePending.current = true;
     setEditorBusy(true);
     setEditorError('');
 
@@ -6374,7 +6544,11 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       const inlinePasswordAction = connectionInlinePasswordAction(
         newConnectionForm.useSavedCredentials,
         newConnectionForm.protocol,
-        newConnectionForm.inlinePassword,
+        nativeSavedConnection
+          ? nativeConnectionPassword.current?.value
+            ? 'present'
+            : ''
+          : newConnectionForm.inlinePassword,
         editingNode?.hasInlineCredential,
         newConnectionForm.removeInlinePassword,
       );
@@ -6409,10 +6583,68 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         serialFlowControl: newConnectionForm.serial.flowControl,
         rdp: newConnectionForm.protocol === 'rdp' ? newConnectionForm.rdp : undefined,
       };
+      const saveNativeConnection = async () => {
+        if (nodeWrite.protocol === 'smb')
+          throw new Error('SMB connections are unavailable in this vault.');
+        const passwordInput = nativeConnectionPassword.current,
+          notesInput = nativeConnectionNotes.current;
+        const password = new TextEncoder().encode(
+          inlinePasswordAction === 'set' ? (passwordInput?.value ?? '') : '',
+        );
+        const notes = new TextEncoder().encode(removeNativeNotes ? '' : (notesInput?.value ?? ''));
+        clearSecretInput(passwordInput);
+        if (notesInput) notesInput.value = '';
+        try {
+          return await window.wormhole!.saveVaultConnection({
+            metadata: {
+              id: editingId ?? '',
+              parentId: nodeWrite.parentId,
+              name: nodeWrite.name,
+              protocol: nodeWrite.protocol,
+              host: nodeWrite.host,
+              port: nodeWrite.port,
+              username: nodeWrite.username,
+              inlinePasswordAction: nodeWrite.inlinePasswordAction,
+              sshAutoSudo: nodeWrite.sshAutoSudo,
+              httpIgnoreCertErrors: nodeWrite.httpIgnoreCertErrors,
+              tunnelEnabled: nodeWrite.tunnelEnabled,
+              tunnelConfigId: nodeWrite.tunnelConfigId,
+              credentialMode: nodeWrite.credentialMode as 0 | 1 | 2,
+              credentialId: nodeWrite.credentialId,
+              serialBaudRate: nodeWrite.serialBaudRate,
+              serialDataBits: nodeWrite.serialDataBits,
+              serialStopBits: nodeWrite.serialStopBits,
+              serialParity: nodeWrite.serialParity,
+              serialFlowControl: nodeWrite.serialFlowControl,
+              rdp: nodeWrite.rdp ?? null,
+            },
+            rowVersion: editingId ? (editingConnectionVersion.current ?? '') : '0',
+            notesAction: removeNativeNotes ? 'clear' : notes.length ? 'set' : 'preserve',
+            password,
+            notes,
+          });
+        } finally {
+          password.fill(0);
+          notes.fill(0);
+        }
+      };
+      const refreshSavedConnection = async () => {
+        try {
+          await refreshWorkspace();
+        } catch (error: unknown) {
+          if (!nativeSavedConnection) throw error;
+          setTreeMoveError(
+            `Connection saved, but the workspace could not be refreshed: ${error instanceof Error ? error.message : 'unknown error'}`,
+          );
+        }
+      };
       const reconnectEditedSession =
         editingId &&
         connectionEditRequiresReconnect(initialConnectionEditForm.current, newConnectionForm);
-      const editedSessionId = editingId ? `session-${editingId}` : '';
+      const editedSessionId = editingId
+        ? (sessionsRef.current.find((session) => session.nodeId === editingId)?.id ??
+          `session-${editingId}`)
+        : '';
       const editSourceSession = sessionsRef.current.find(
         (session) => session.id === editedSessionId,
       );
@@ -6430,10 +6662,12 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
             !sessionCloseGate.current.activeSessionIds().has(editedSessionId) &&
             sessionsRef.current.some((session) => session.id === editedSessionId)));
       if (editingId) {
-        const result = await window.wormhole.updateWorkspaceNode({
-          id: editingId,
-          ...nodeWrite,
-        });
+        const result = nativeSavedConnection
+          ? await saveNativeConnection()
+          : await window.wormhole.updateWorkspaceNode({
+              id: editingId,
+              ...nodeWrite,
+            });
         if (!result.updated) throw new Error('The workspace did not save the connection.');
       }
       if (editingId && !reconnectEditedSession) {
@@ -6442,7 +6676,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
             session.nodeId === editingId ? { ...session, title: name } : session,
           ),
         );
-        await refreshWorkspace();
+        await refreshSavedConnection();
       } else if (editingId) {
         const editedSession = isEditedSessionCurrent()
           ? sessionsRef.current.find((session) => session.id === editedSessionId)
@@ -6593,34 +6827,57 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                 : undefined,
           });
         }
-        await refreshWorkspace();
+        await refreshSavedConnection();
       } else {
-        const result = await window.wormhole.createWorkspaceNode(nodeWrite);
-        await refreshWorkspace();
-        setSelectedNodeId(result.nodeId);
+        const result = nativeSavedConnection
+          ? await saveNativeConnection()
+          : await window.wormhole.createWorkspaceNode(nodeWrite);
+        await refreshSavedConnection();
+        if (connectionEditorGeneration.current === dialogGeneration)
+          setSelectedNodeId(result.nodeId);
       }
 
       if (newConnectionForm.folder) {
         setExpanded((current) => new Set(current).add(newConnectionForm.folder));
       }
-      setEditingConnectionId(null);
-      setNewConnectionForm((form) => ({ ...form, inlinePassword: '' }));
-      setNewConnectionOpen(false);
+      if (connectionEditorGeneration.current === dialogGeneration) {
+        setEditingConnectionId(null);
+        setNewConnectionForm((form) => ({ ...form, inlinePassword: '' }));
+        setNewConnectionOpen(false);
+      }
     } catch (error: unknown) {
-      setEditorError(error instanceof Error ? error.message : 'Could not save the connection.');
+      if (connectionEditorGeneration.current === dialogGeneration)
+        setEditorError(error instanceof Error ? error.message : 'Could not save the connection.');
     } finally {
+      connectionSavePending.current = false;
       setEditorBusy(false);
+    }
+  }
+
+  async function refreshSavedFolder() {
+    try {
+      await refreshWorkspace();
+    } catch (error: unknown) {
+      if (authState?.mode !== 'vault') throw error;
+      // Persistence already succeeded. Close the editor and surface the refresh
+      // error in the tree so retrying a creation cannot duplicate the folder.
+      setTreeMoveError(
+        `Folder saved, but the workspace could not be refreshed: ${
+          error instanceof Error ? error.message : 'unknown error'
+        }`,
+      );
     }
   }
 
   async function submitFolderDetails(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const folderId = editingFolderId.current;
-    if (editorBusy || !folderId) return;
+    if (editorBusy || folderSavePending.current || !folderId) return;
     const dialogGeneration = editingFolderGeneration.current;
     const name = folderDetailsForm.name.trim();
     if (!name) return;
 
+    folderSavePending.current = true;
     setEditorBusy(true);
     setEditorError('');
     try {
@@ -6629,7 +6886,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       if (!window.wormhole) throw new Error('The workspace service is unavailable.');
       const tunnel = tunnelValueFor(folderDetailsForm.tunnel);
       const credential = credentialSettingsFor(folderDetailsForm.credential);
-      const result = await window.wormhole.updateWorkspaceNode({
+      const nodeWrite = {
         id: folderId,
         parentId: findParentFolderId(tree, folderId) ?? '',
         name,
@@ -6651,9 +6908,23 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         serialStopBits: 0,
         serialParity: 0,
         serialFlowControl: 0,
-      });
+      } as const;
+      const result =
+        authState?.mode === 'vault'
+          ? await window.wormhole.saveVaultFolder({
+              id: folderId,
+              rowVersion: editingFolderVersion.current ?? '',
+              parentId: nodeWrite.parentId,
+              name: nodeWrite.name,
+              sshAutoSudo: nodeWrite.sshAutoSudo,
+              tunnelEnabled: nodeWrite.tunnelEnabled,
+              tunnelConfigId: nodeWrite.tunnelConfigId,
+              credentialMode: nodeWrite.credentialMode,
+              credentialId: nodeWrite.credentialId,
+            })
+          : await window.wormhole.updateWorkspaceNode(nodeWrite);
       if (!result.updated) throw new Error('The workspace did not save the folder.');
-      await refreshWorkspace();
+      await refreshSavedFolder();
       if (editingFolderGeneration.current === dialogGeneration) {
         setFolderDetailsOpen(false);
         editingFolderId.current = null;
@@ -6663,24 +6934,26 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         setEditorError(error instanceof Error ? error.message : 'Could not save the folder.');
       }
     } finally {
+      folderSavePending.current = false;
       setEditorBusy(false);
     }
   }
 
   async function submitNewFolder(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (editorBusy) return;
+    if (editorBusy || folderSavePending.current) return;
     const parentFolderId = newFolderParentId.current;
     const dialogGeneration = newFolderGeneration.current;
     const name = newFolderForm.name.trim();
     if (!name) return;
+    folderSavePending.current = true;
     setEditorBusy(true);
     setEditorError('');
     try {
       if (!window.wormhole) throw new Error('The workspace service is unavailable.');
       const tunnel = tunnelValueFor(newFolderForm.tunnel);
       const credential = credentialSettingsFor(newFolderForm.credential);
-      const result = await window.wormhole.createWorkspaceNode({
+      const nodeWrite = {
         parentId: parentFolderId ?? '',
         name,
         kind: 'folder',
@@ -6701,8 +6974,22 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         serialStopBits: 0,
         serialParity: 0,
         serialFlowControl: 0,
-      });
-      await refreshWorkspace();
+      } as const;
+      const result =
+        authState?.mode === 'vault'
+          ? await window.wormhole.saveVaultFolder({
+              id: '',
+              rowVersion: '0',
+              parentId: nodeWrite.parentId,
+              name: nodeWrite.name,
+              sshAutoSudo: nodeWrite.sshAutoSudo,
+              tunnelEnabled: nodeWrite.tunnelEnabled,
+              tunnelConfigId: nodeWrite.tunnelConfigId,
+              credentialMode: nodeWrite.credentialMode,
+              credentialId: nodeWrite.credentialId,
+            })
+          : await window.wormhole.createWorkspaceNode(nodeWrite);
+      await refreshSavedFolder();
       setExpanded(
         (current) =>
           new Set([...current, result.nodeId, ...(parentFolderId ? [parentFolderId] : [])]),
@@ -6717,6 +7004,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         setEditorError(error instanceof Error ? error.message : 'Could not create the folder.');
       }
     } finally {
+      folderSavePending.current = false;
       setEditorBusy(false);
     }
   }
@@ -6926,6 +7214,33 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     });
   }
 
+  async function saveVaultCredential(request: VaultCredentialRequest): Promise<boolean> {
+    if (!window.wormhole || authState?.mode !== 'vault') throw Error('The vault is unavailable.');
+    const originatingEditor = sshKeyEditor;
+    const saved = await window.wormhole.editVaultCredential(request);
+    try {
+      await refreshWorkspace();
+    } catch {
+      setTreeMoveError(
+        'The credential was saved. Refresh the workspace to load its current revision.',
+      );
+      return false;
+    }
+    if (originatingEditor?.fromConnection && sshKeyEditorRef.current === originatingEditor) {
+      setNewConnectionForm((current) =>
+        sshKeyEditorRef.current === originatingEditor
+          ? {
+              ...current,
+              useSavedCredentials: true,
+              credential: saved.id,
+              inlinePassword: '',
+              removeInlinePassword: false,
+            }
+          : current,
+      );
+    }
+    return true;
+  }
   async function createCredential(draft: CredentialWriteRequest): Promise<void> {
     if (!window.wormhole) throw new Error('The credential service is unavailable.');
     if (draft.provider !== 'Local') {
@@ -6979,10 +7294,14 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     });
   }
 
-  async function deleteSavedCredential(id: string): Promise<void> {
+  async function deleteSavedCredential(id: string, rowVersion?: string): Promise<void> {
     if (!window.wormhole) throw new Error('The credential service is unavailable.');
-    const result = await window.wormhole.deleteCredential({ id });
-    if (!result.deleted) throw new Error(result.error ?? 'The credential was not deleted.');
+    const result =
+      authState?.mode === 'vault'
+        ? await window.wormhole.deleteVaultCredential({ id, rowVersion: rowVersion ?? '' })
+        : await window.wormhole.deleteCredential({ id });
+    if (!result.deleted)
+      throw new Error(('error' in result && result.error) || 'The credential was not deleted.');
     setCredentials((current) => current.filter((credential) => credential.id !== id));
     setCredentialOptions((current) => ({
       ssh: current.ssh.filter((credential) => credential.id !== id),
@@ -7026,6 +7345,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       />
       {sshKeyEditor && authGate === 'unlocked' ? (
         <CredentialsPage
+          onVaultSave={authState?.mode === 'vault' ? saveVaultCredential : undefined}
           editorOnly
           initialEditor={sshKeyEditor}
           initialCredentials={credentials}
@@ -7290,6 +7610,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         className="flex h-full min-w-0 flex-col bg-background font-sans text-foreground"
         inert={authGate !== 'unlocked'}
       >
+        {authState?.mode === 'vault' && authGate === 'unlocked' && <VaultProtectionNotice />}
         <SidebarLayout
           header={
             <>
@@ -7299,8 +7620,12 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                   busy={updateBusy}
                   downloadProgress={updateDownloadProgress}
                   onDismiss={handleDismissUpdate}
-                  onUpdate={() => void handleInstallUpdate()}
-                  onViewChanges={handleViewUpdateChanges}
+                  onUpdate={
+                    updateResult.isUpdateAvailable ? () => void handleInstallUpdate() : undefined
+                  }
+                  onViewChanges={
+                    updateResult.updatePolicy === 'managed' ? undefined : handleViewUpdateChanges
+                  }
                   status={updateStatus}
                   version={updateResult.latestVersion}
                 />
@@ -7459,7 +7784,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         >
           <SidebarInset className="h-full min-h-0 min-w-0 bg-transparent pr-2 pb-2 in-[[data-sidebar-layout][data-revealed=false]]:pl-2">
             <div className="order-last shrink-0" data-sftp-recovery-notice="">
-              <SftpRecoveryNotice />
+              <SftpRecoveryNotice vault={authState?.mode === 'vault'} />
             </div>
             {activePage === 'sessions' ? (
               <SshCertificateEditorContext
@@ -7469,6 +7794,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                 }}
               >
                 <SessionsPage
+                  vault={authState?.mode === 'vault'}
                   autoCopyOnSelect={autoCopyOnSelect}
                   bitwardenUnlockPending={bitwardenUnlockPrompt !== null}
                   captureWebPreview={pendingSessionClose === null}
@@ -7476,7 +7802,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                     requestRuntimeBitwardenUnlock(`vnc:${sessionId}`, reason, retry)
                   }
                   onCloseSession={closeSession}
-                  onConnectRdp={requestRdpCredentials}
+                  onConnectRdp={retryRdpSession}
                   onDisconnectSession={disconnectRemoteDesktopSession}
                   onDisconnectAiAgent={disconnectSessionAiAgent}
                   onDuplicateSession={duplicateSession}
@@ -7499,10 +7825,16 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                   onSftpRefresh={refreshSftpBrowser}
                   onSshInput={sendSshInput}
                   onTrustSshHostKey={trustSshHostKey}
-                  onVncStatusChange={(sessionId, status) =>
+                  onVncStatusChange={(sessionId, status, manualPassword) =>
                     setSessions((current) =>
                       current.map((session) =>
-                        session.id === sessionId ? { ...session, status } : session,
+                        session.id === sessionId
+                          ? {
+                              ...session,
+                              status,
+                              vncManualPassword: manualPassword ?? session.vncManualPassword,
+                            }
+                          : session,
                       ),
                     )
                   }
@@ -7531,6 +7863,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
               <div className="workspace-page-canvas min-h-0 flex-1 overflow-hidden">
                 {activePage === 'credentials' ? (
                   <CredentialsPage
+                    onVaultSave={authState?.mode === 'vault' ? saveVaultCredential : undefined}
                     initialCredentials={credentials}
                     isAuthorized={authGate === 'unlocked'}
                     onCreate={createCredential}
@@ -7539,6 +7872,38 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                   />
                 ) : activePage === 'tunnels' ? (
                   <TunnelsPage
+                    onVaultEdit={
+                      authState?.mode === 'vault'
+                        ? async (selection) => {
+                            if (!window.wormhole) throw Error('The vault is unavailable.');
+                            const saved = await window.wormhole.editVaultTunnel(selection);
+                            if (saved) {
+                              try {
+                                await refreshWorkspace();
+                              } catch {
+                                throw Error(
+                                  'The tunnel was saved. Refresh the workspace to load its current revision.',
+                                );
+                              }
+                            }
+                          }
+                        : undefined
+                    }
+                    onVaultDelete={
+                      authState?.mode === 'vault'
+                        ? async (selection) => {
+                            if (!window.wormhole) throw Error('The vault is unavailable.');
+                            await window.wormhole.deleteVaultTunnel(selection);
+                            try {
+                              await refreshWorkspace();
+                            } catch {
+                              throw Error(
+                                'The tunnel was deleted. Refresh the workspace to load its current revision.',
+                              );
+                            }
+                          }
+                        : undefined
+                    }
                     tree={tree}
                     isAuthorized={authGate === 'unlocked'}
                     credentials={credentialOptions.ssh.filter(
@@ -7832,6 +8197,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           onOpenChange={(open) => {
             setNewConnectionOpen(open);
             if (!open) {
+              connectionEditorGeneration.current += 1;
+              clearSecretInput(nativeConnectionPassword.current);
+              if (nativeConnectionNotes.current) nativeConnectionNotes.current.value = '';
+              setRemoveNativeNotes(false);
               setNewConnectionForm((form) => ({ ...form, inlinePassword: '' }));
               setEditingConnectionId(null);
               setConnectionEditorMode('saved');
@@ -7867,7 +8236,13 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
               <Tabs
                 className="flex min-h-0 flex-1 flex-col gap-0 overflow-hidden"
                 defaultValue="general"
-                key={connectionTypeForProtocol(newConnectionForm.protocol)}
+                key={
+                  nativeSavedConnection
+                    ? 'native'
+                    : connectionTypeForProtocol(newConnectionForm.protocol)
+                }
+                value={nativeSavedConnection ? nativeConnectionTab : undefined}
+                onValueChange={nativeSavedConnection ? setNativeConnectionTab : undefined}
               >
                 <TabsList className="w-full shrink-0 justify-start gap-1 overflow-x-auto overflow-y-hidden rounded-none border-b border-border bg-transparent px-px py-0.5 group-data-horizontal/tabs:h-9">
                   <TabsTrigger className="flex-none px-3 text-xs" value="general">
@@ -7896,8 +8271,45 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                   ) : null}
                 </TabsList>
 
-                <TabsContent className="min-h-0 flex-1 overflow-y-auto px-1 py-4" value="general">
+                <TabsContent
+                  className="min-h-0 flex-1 overflow-y-auto px-1 py-4 data-[state=inactive]:hidden"
+                  forceMount={nativeSavedConnection ? true : undefined}
+                  value="general"
+                >
                   <div className="grid gap-4">
+                    {nativeSavedConnection && editingConnectionId ? (
+                      <VaultMigrationChoices
+                        key={`${editingConnectionId}:${migrationEditorGeneration}`}
+                        nodeId={editingConnectionId}
+                        rowVersion={editingConnectionVersion.current ?? ''}
+                        disabled={editorBusy}
+                        beginChange={() => {
+                          if (connectionSavePending.current || editorBusy) return false;
+                          connectionSavePending.current = true;
+                          setEditorBusy(true);
+                          return true;
+                        }}
+                        endChange={() => {
+                          connectionSavePending.current = false;
+                          setEditorBusy(false);
+                        }}
+                        refreshAfterFailure={async () => {
+                          if (connectionEditorGeneration.current !== migrationEditorGeneration)
+                            return;
+                          await refreshWorkspace();
+                        }}
+                        onCommitted={(rowVersion) => {
+                          if (connectionEditorGeneration.current !== migrationEditorGeneration)
+                            return;
+                          editingConnectionVersion.current = rowVersion;
+                          void refreshWorkspace().catch(() =>
+                            setTreeMoveError(
+                              'Credential choices saved, but the workspace could not be refreshed.',
+                            ),
+                          );
+                        }}
+                      />
+                    ) : null}
                     <div className="grid gap-2">
                       <Label htmlFor="connection-name">
                         {connectionEditorMode === 'quick'
@@ -7926,20 +8338,78 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                     {connectionEditorMode === 'saved' ? (
                       <div className="grid gap-2">
                         <Label htmlFor="connection-notes">Notes (optional)</Label>
-                        <Textarea
-                          disabled={!connectionNotesReady}
-                          id="connection-notes"
-                          maxLength={16_384}
-                          onChange={(event) =>
-                            setNewConnectionForm((form) => ({
-                              ...form,
-                              notes: event.target.value,
-                            }))
-                          }
-                          placeholder="Additional information about this connection"
-                          rows={3}
-                          value={newConnectionForm.notes}
-                        />
+                        {nativeSavedConnection ? (
+                          <>
+                            <Textarea
+                              key={`native-notes-${editingConnectionId ?? 'new'}`}
+                              ref={nativeConnectionNotes}
+                              id="connection-notes"
+                              maxLength={16_384}
+                              defaultValue=""
+                              disabled={removeNativeNotes}
+                              rows={3}
+                              placeholder={
+                                editingConnectionId
+                                  ? 'Leave blank to keep stored notes, or enter replacement notes'
+                                  : 'Notes are encrypted in the vault'
+                              }
+                            />
+                            {editingConnectionId ? (
+                              <Button
+                                type="button"
+                                size="xs"
+                                variant="outline"
+                                disabled={editorBusy}
+                                onClick={() => {
+                                  const generation = connectionEditorGeneration.current;
+                                  void window.wormhole
+                                    ?.showVaultNotes({
+                                      nodeId: editingConnectionId,
+                                      rowVersion: editingConnectionVersion.current ?? '',
+                                    })
+                                    .catch(() => {
+                                      if (connectionEditorGeneration.current === generation)
+                                        setEditorError(
+                                          'Stored notes are unavailable. Refresh the connection and try again.',
+                                        );
+                                    });
+                                }}
+                              >
+                                View stored notes
+                              </Button>
+                            ) : null}
+                            {editingConnectionId ? (
+                              <Button
+                                type="button"
+                                size="xs"
+                                variant="destructive"
+                                aria-pressed={removeNativeNotes}
+                                onClick={() => {
+                                  if (nativeConnectionNotes.current)
+                                    nativeConnectionNotes.current.value = '';
+                                  setRemoveNativeNotes((value) => !value);
+                                }}
+                              >
+                                Clear stored notes
+                              </Button>
+                            ) : null}
+                          </>
+                        ) : (
+                          <Textarea
+                            disabled={!connectionNotesReady}
+                            id="connection-notes"
+                            maxLength={16_384}
+                            onChange={(event) =>
+                              setNewConnectionForm((form) => ({
+                                ...form,
+                                notes: event.target.value,
+                              }))
+                            }
+                            placeholder="Additional information about this connection"
+                            rows={3}
+                            value={newConnectionForm.notes}
+                          />
+                        )}
                       </div>
                     ) : null}
 
@@ -8169,7 +8639,13 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                       </div>
                     ) : null}
 
-                    {!newConnectionForm.useSavedCredentials &&
+                    {nativeQuickCredentialConnection && !newConnectionForm.useSavedCredentials ? (
+                      <p className="text-xs text-muted-foreground">
+                        Enter the temporary account in the protected window after connecting.
+                      </p>
+                    ) : null}
+                    {!nativeQuickCredentialConnection &&
+                    !newConnectionForm.useSavedCredentials &&
                     (newConnectionForm.protocol === 'ssh' ||
                       isFileBrowserProtocol(newConnectionForm.protocol) ||
                       newConnectionForm.protocol === 'rdp') ? (
@@ -8196,13 +8672,14 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                             {editingConnectionHasInlineCredential ? (
                               <Button
                                 aria-pressed={newConnectionForm.removeInlinePassword}
-                                onClick={() =>
+                                onClick={() => {
+                                  clearSecretInput(nativeConnectionPassword.current);
                                   setNewConnectionForm((form) => ({
                                     ...form,
                                     inlinePassword: '',
                                     removeInlinePassword: !form.removeInlinePassword,
-                                  }))
-                                }
+                                  }));
+                                }}
                                 size="xs"
                                 type="button"
                                 variant="destructive"
@@ -8211,25 +8688,44 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                               </Button>
                             ) : null}
                           </div>
-                          <PasswordInput
-                            autoComplete="new-password"
-                            disabled={newConnectionForm.removeInlinePassword}
-                            id="connection-inline-password"
-                            onChange={(event) =>
-                              setNewConnectionForm((form) => ({
-                                ...form,
-                                inlinePassword: event.target.value,
-                              }))
-                            }
-                            placeholder={
-                              newConnectionForm.removeInlinePassword
-                                ? 'Stored password will be removed'
-                                : connectionInlinePasswordPlaceholder(
-                                    editingConnectionHasInlineCredential,
-                                  )
-                            }
-                            value={newConnectionForm.inlinePassword}
-                          />
+                          {nativeSavedConnection ? (
+                            <PasswordInput
+                              key={`native-password-${editingConnectionId ?? 'new'}`}
+                              ref={nativeConnectionPassword}
+                              autoComplete="new-password"
+                              id="connection-inline-password"
+                              maxLength={4096}
+                              defaultValue=""
+                              disabled={newConnectionForm.removeInlinePassword}
+                              placeholder={
+                                newConnectionForm.removeInlinePassword
+                                  ? 'Stored password will be removed'
+                                  : connectionInlinePasswordPlaceholder(
+                                      editingConnectionHasInlineCredential,
+                                    )
+                              }
+                            />
+                          ) : (
+                            <PasswordInput
+                              autoComplete="new-password"
+                              disabled={newConnectionForm.removeInlinePassword}
+                              id="connection-inline-password"
+                              onChange={(event) =>
+                                setNewConnectionForm((form) => ({
+                                  ...form,
+                                  inlinePassword: event.target.value,
+                                }))
+                              }
+                              placeholder={
+                                newConnectionForm.removeInlinePassword
+                                  ? 'Stored password will be removed'
+                                  : connectionInlinePasswordPlaceholder(
+                                      editingConnectionHasInlineCredential,
+                                    )
+                              }
+                              value={newConnectionForm.inlinePassword}
+                            />
+                          )}
                         </div>
                       </div>
                     ) : null}
@@ -8516,22 +9012,24 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                           />
                           <span>Use all my monitors</span>
                         </label>
-                        <div className="grid gap-2 sm:col-span-2 sm:max-w-[320px]">
-                          <Label htmlFor="rdp-domain">Domain override</Label>
-                          <Input
-                            id="rdp-domain"
-                            onChange={(event) =>
-                              setNewConnectionForm((form) => ({
-                                ...form,
-                                rdp: {
-                                  ...form.rdp,
-                                  domain: event.target.value,
-                                },
-                              }))
-                            }
-                            value={newConnectionForm.rdp.domain}
-                          />
-                        </div>
+                        {!nativeQuickCredentialConnection ? (
+                          <div className="grid gap-2 sm:col-span-2 sm:max-w-[320px]">
+                            <Label htmlFor="rdp-domain">Domain override</Label>
+                            <Input
+                              id="rdp-domain"
+                              onChange={(event) =>
+                                setNewConnectionForm((form) => ({
+                                  ...form,
+                                  rdp: {
+                                    ...form.rdp,
+                                    domain: event.target.value,
+                                  },
+                                }))
+                              }
+                              value={newConnectionForm.rdp.domain}
+                            />
+                          </div>
+                        ) : null}
                       </div>
                     </TabsContent>
                     <TabsContent
@@ -9362,312 +9860,18 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   );
 }
 
-const terminalFontSize = 13;
-const terminalFontFamily = '"Cascadia Mono", "Consolas", monospace';
-const terminalFallbackCellWidth = 8;
-const terminalLineHeight = 18;
-const terminalMaxScrollbackLines = 5000;
-const terminalScrollbackChunkSize = 128;
-const terminalDefaultForeground = 0xff80;
-const terminalDefaultBackground = 0xff81;
-const terminalAnsiPalette = [
-  '#1d2021',
-  '#cc241d',
-  '#98971a',
-  '#d79921',
-  '#458588',
-  '#b16286',
-  '#689d6a',
-  '#a89984',
-  '#928374',
-  '#fb4934',
-  '#b8bb26',
-  '#fabd2f',
-  '#83a598',
-  '#d3869b',
-  '#8ec07c',
-  '#ebdbb2',
-];
-
-function terminalColor(value: number, fallback: string): string {
-  if (value === terminalDefaultForeground || value === terminalDefaultBackground) return fallback;
-  if (value < 16) return terminalAnsiPalette[value] ?? fallback;
-  if (value < 232) {
-    const color = value - 16;
-    const red = Math.floor(color / 36);
-    const green = Math.floor((color % 36) / 6);
-    const blue = color % 6;
-    const channel = (component: number) => (component === 0 ? 0 : 55 + component * 40);
-    return `rgb(${channel(red)} ${channel(green)} ${channel(blue)})`;
-  }
-  if (value < 256) {
-    const gray = 8 + (value - 232) * 10;
-    return `rgb(${gray} ${gray} ${gray})`;
-  }
-  return fallback;
-}
-
-function measureTerminalCellWidth(): number {
-  if (typeof document === 'undefined') return terminalFallbackCellWidth;
-  const canvas = document.createElement('canvas');
-  const context = canvas.getContext('2d');
-  if (!context) return terminalFallbackCellWidth;
-  context.font = `${terminalFontSize}px ${terminalFontFamily}`;
-  const width = context.measureText('0').width;
-  return Number.isFinite(width) && width > 0 ? width : terminalFallbackCellWidth;
-}
-
-function terminalWheelDelta(
-  surface: HTMLElement,
-  value: number,
-  deltaMode: number,
-  axis: 'x' | 'y',
-): number {
-  if (deltaMode === 1)
-    return value * (axis === 'y' ? terminalLineHeight : terminalFallbackCellWidth);
-  if (deltaMode === 2) return value * (axis === 'y' ? surface.clientHeight : surface.clientWidth);
-  return value;
-}
-
-function terminalIsAtBottom(surface: HTMLElement): boolean {
-  return surface.scrollHeight - surface.scrollTop - surface.clientHeight <= terminalLineHeight;
-}
-
-type TerminalTextRun = {
-  text: string;
-  foreground: string;
-  background: string;
-  cursor: boolean;
-  cellCount: number;
-};
-
-function terminalTextRuns(frame: WormholeSshTerminalFrame, row: number): TerminalTextRun[] {
-  const runs: TerminalTextRun[] = [];
-  const offset = row * frame.columns;
-  for (let column = 0; column < frame.columns; column++) {
-    const cell = frame.cells?.[offset + column];
-    if (!cell) continue;
-    const cursor = frame.cursorVisible && frame.cursorX === column && frame.cursorY === row;
-    const foreground = cursor
-      ? terminalColor(cell.background, '#090909')
-      : terminalColor(cell.foreground, '#e5e7eb');
-    const background = cursor ? '#e5e7eb' : terminalColor(cell.background, '#090909');
-    const previous = runs[runs.length - 1];
-    if (
-      previous &&
-      previous.foreground === foreground &&
-      previous.background === background &&
-      previous.cursor === cursor
-    ) {
-      previous.text += cell.character || ' ';
-      previous.cellCount += 1;
-    } else {
-      runs.push({
-        text: cell.character || ' ',
-        foreground,
-        background,
-        cursor,
-        cellCount: 1,
-      });
-    }
-  }
-  return runs;
-}
-
-const TerminalScrollbackChunk = memo(function TerminalScrollbackChunk({
-  lines,
-  start,
-}: {
-  lines: WormholeSshTerminalScrollbackLine[];
-  start: number;
-}) {
-  return (
-    <div
-      className="terminal-scrollback-chunk"
-      style={{ height: `${lines.length * terminalLineHeight}px` }}
-    >
-      {lines.map((line, index) => {
-        const runs = line.runs.length
-          ? line.runs
-          : [
-              {
-                text: ' ',
-                cells: 1,
-                foreground: terminalDefaultForeground,
-                background: terminalDefaultBackground,
-              },
-            ];
-        return (
-          <div data-terminal-row className="h-[18px] min-w-max whitespace-pre" key={start + index}>
-            {runs.map((run, runIndex) => (
-              <span
-                className="inline-block overflow-hidden align-top"
-                key={`${start + index}-${runIndex}`}
-                style={{
-                  backgroundColor: terminalColor(run.background, '#090909'),
-                  color: terminalColor(run.foreground, '#e5e7eb'),
-                  height: `${terminalLineHeight}px`,
-                  width: `${run.cells}ch`,
-                }}
-              >
-                {run.text}
-              </span>
-            ))}
-          </div>
-        );
-      })}
-    </div>
-  );
-}, sameTerminalScrollbackChunk);
-
-const TerminalScrollback = memo(function TerminalScrollback({
-  lines,
-  start = 0,
-}: {
-  lines?: WormholeSshTerminalScrollbackLine[];
-  start?: number;
-}) {
-  if (!lines?.length) return null;
-
-  return (
-    <div aria-label="SSH terminal scrollback" className="terminal-scrollback">
-      {terminalScrollbackChunks(lines, start, terminalScrollbackChunkSize).map((chunk) => (
-        <TerminalScrollbackChunk
-          key={Math.floor(chunk.start / terminalScrollbackChunkSize)}
-          start={chunk.start}
-          lines={chunk.lines}
-        />
-      ))}
-    </div>
-  );
-});
-
-const TerminalTextGrid = memo(function TerminalTextGrid({
-  frame,
-}: {
-  frame?: RenderedTerminalFrame;
-}) {
-  if (!frame?.cells) return null;
-  return (
-    <div
-      className="min-h-full min-w-max select-text"
-      style={{
-        fontFamily: terminalFontFamily,
-        fontSize: `${terminalFontSize}px`,
-        fontSynthesis: 'none',
-        lineHeight: `${terminalLineHeight}px`,
-        textRendering: 'geometricPrecision',
-        fontVariantLigatures: 'none',
-      }}
-    >
-      <TerminalScrollback lines={terminalVisibleScrollback(frame)} start={frame.scrollbackStart} />
-      <TerminalViewport frame={frame} />
-    </div>
-  );
-});
-
-const TerminalViewport = memo(
-  function TerminalViewport({ frame }: { frame: WormholeSshTerminalFrame }) {
-    return (
-      <>
-        {Array.from({ length: frame.rows }, (_, row) => (
-          <div data-terminal-row className="h-[18px] min-w-max whitespace-pre" key={row}>
-            {terminalTextRuns(frame, row).map((run, index) => (
-              <span
-                className={`inline-block overflow-hidden align-top ${run.cursor ? 'terminal-cursor' : ''}`}
-                key={`${row}-${index}`}
-                style={{
-                  backgroundColor: run.background,
-                  color: run.foreground,
-                  height: `${terminalLineHeight}px`,
-                  width: `${run.cellCount}ch`,
-                }}
-              >
-                {run.text}
-              </span>
-            ))}
-          </div>
-        ))}
-      </>
-    );
-  },
-  (previous, incoming) => sameTerminalViewport(previous.frame, incoming.frame),
-);
-
-function terminalCsiWithModifier(final: string, event: React.KeyboardEvent, appCursor: boolean) {
-  const modifier = 1 + (event.shiftKey ? 1 : 0) + (event.altKey ? 2 : 0) + (event.ctrlKey ? 4 : 0);
-  if (modifier === 1 && appCursor) return `\u001bO${final}`;
-  if (modifier === 1) return `\u001b[${final}`;
-  return `\u001b[1;${modifier}${final}`;
-}
-
-function terminalKeyData(event: React.KeyboardEvent, appCursor: boolean): string | undefined {
-  if (event.nativeEvent.isComposing || event.metaKey) return undefined;
-  const key = event.key;
-  if (event.ctrlKey && !event.altKey) {
-    const controlData = terminalControlKeyData(key);
-    if (controlData !== undefined) return controlData;
-  }
-
-  if (key === 'Enter') return '\r';
-  if (key === 'Backspace') return '\u007f';
-  if (key === 'Tab') return event.shiftKey ? '\u001b[Z' : '\t';
-  if (key === 'Escape') return '\u001b';
-  if (key === 'ArrowUp') return terminalCsiWithModifier('A', event, appCursor);
-  if (key === 'ArrowDown') return terminalCsiWithModifier('B', event, appCursor);
-  if (key === 'ArrowRight') return terminalCsiWithModifier('C', event, appCursor);
-  if (key === 'ArrowLeft') return terminalCsiWithModifier('D', event, appCursor);
-  if (key === 'Home') return terminalCsiWithModifier('H', event, appCursor);
-  if (key === 'End') return terminalCsiWithModifier('F', event, appCursor);
-  if (key === 'Insert') return '\u001b[2~';
-  if (key === 'Delete') return '\u001b[3~';
-  if (key === 'PageUp') return '\u001b[5~';
-  if (key === 'PageDown') return '\u001b[6~';
-  if (key === 'F1') return '\u001bOP';
-  if (key === 'F2') return '\u001bOQ';
-  if (key === 'F3') return '\u001bOR';
-  if (key === 'F4') return '\u001bOS';
-  if (key === 'F5') return '\u001b[15~';
-  if (key === 'F6') return '\u001b[17~';
-  if (key === 'F7') return '\u001b[18~';
-  if (key === 'F8') return '\u001b[19~';
-  if (key === 'F9') return '\u001b[20~';
-  if (key === 'F10') return '\u001b[21~';
-  if (key === 'F11') return '\u001b[23~';
-  if (key === 'F12') return '\u001b[24~';
-  if (key.length === 1) return event.altKey ? `\u001b${key}` : key;
-  return undefined;
-}
-
-function terminalSelection(surface: HTMLElement): Selection | undefined {
-  const selection = window.getSelection();
-  if (
-    !selection ||
-    selection.isCollapsed ||
-    !selection.anchorNode ||
-    !selection.focusNode ||
-    !surface.contains(selection.anchorNode) ||
-    !surface.contains(selection.focusNode)
-  ) {
-    return undefined;
-  }
-  return selection;
-}
-
-function terminalSelectionText(surface: HTMLElement): string {
-  return terminalSelection(surface)?.toString() ?? '';
-}
-
 function SshTerminalConnectionState({
   session,
   isSerial,
   onReconnect,
   onTrustHostKey,
+  onEnterCredentials,
 }: {
   session: Session;
   isSerial: boolean;
   onReconnect: (sessionId: string) => void;
   onTrustHostKey?: (sessionId: string, mismatch: NonNullable<Session['hostKeyMismatch']>) => void;
+  onEnterCredentials?: (mode: 'account' | 'passphrase') => void;
 }) {
   const replaceCertificate = useContext(SshCertificateEditorContext);
   const isConnecting = session.status === 'connecting';
@@ -9719,6 +9923,16 @@ function SshTerminalConnectionState({
       </p>
       <h3 className="mt-2 text-sm font-semibold text-zinc-100">{title}</h3>
       <p className="mt-2 max-w-xl break-words text-sm leading-relaxed text-zinc-400">{message}</p>
+      {!isConnecting && !isSerial && onEnterCredentials ? (
+        <div className="mt-4 flex flex-wrap justify-center gap-2">
+          <Button onClick={() => onEnterCredentials('account')} size="sm" variant="secondary">
+            Temporary credentials…
+          </Button>
+          <Button onClick={() => onEnterCredentials('passphrase')} size="sm" variant="secondary">
+            Key passphrase…
+          </Button>
+        </div>
+      ) : null}
       {!isSerial &&
       isFailed &&
       session.credentialId &&
@@ -9787,6 +10001,7 @@ function SshXtermSurface({
   onInput,
   onReconnect,
   onTrustHostKey,
+  onEnterCredentials,
 }: {
   session: Session;
   isActive: boolean;
@@ -9795,6 +10010,7 @@ function SshXtermSurface({
   onInput: (sessionId: string, value: string, paste?: boolean) => void;
   onReconnect: (sessionId: string) => void;
   onTrustHostKey: (sessionId: string, mismatch: NonNullable<Session['hostKeyMismatch']>) => void;
+  onEnterCredentials?: (mode: 'account' | 'passphrase') => void;
 }) {
   const surfaceRef = useRef<HTMLDivElement>(null);
   const backendId = session.backendSessionId;
@@ -9866,6 +10082,7 @@ function SshXtermSurface({
           isSerial={false}
           onReconnect={onReconnect}
           onTrustHostKey={onTrustHostKey}
+          onEnterCredentials={onEnterCredentials}
         />
       </div>
     );
@@ -9903,247 +10120,15 @@ function SerialTerminalSurface({
   onInput: (sessionId: string, value: string) => void;
   onReconnect: (sessionId: string) => void;
 }) {
-  const surfaceRef = useRef<HTMLDivElement>(null);
-  const stickToBottomRef = useRef(true);
-  const automaticScrollTopRef = useRef<number | undefined>(undefined);
-  const handledViewportResetSequenceRef = useRef<number | undefined>(undefined);
-  const terminalCopyChordActiveRef = useRef(false);
-
-  useEffect(() => {
-    const surface = surfaceRef.current;
-    const backendSessionId = session.backendSessionId;
-    if (
-      !isActive ||
-      !surface ||
-      !backendSessionId ||
-      session.status !== 'connected' ||
-      typeof ResizeObserver === 'undefined'
-    )
-      return;
-
-    let lastSize = '';
-    const resize = () => {
-      if (surface.clientHeight < terminalLineHeight) return;
-      const cellWidth = measureTerminalCellWidth();
-      if (surface.clientWidth < cellWidth) return;
-      if (stickToBottomRef.current) {
-        automaticScrollTopRef.current = scrollTerminalToBottom(surface);
-      }
-      const columns = Math.min(500, Math.floor(surface.clientWidth / cellWidth));
-      const rows = Math.min(500, Math.floor(surface.clientHeight / terminalLineHeight));
-      const signature = `${columns}x${rows}`;
-      if (signature === lastSize) return;
-      lastSize = signature;
-      void window.wormhole?.resizeSerialSession(backendSessionId, columns, rows).catch(() => {
-        // A resize can race with a close; the closed event owns the visible session state.
-      });
-    };
-    const observer = new ResizeObserver(resize);
-    observer.observe(surface);
-    resize();
-    return () => observer.disconnect();
-  }, [isActive, session.backendSessionId, session.status]);
-
-  useLayoutEffect(() => {
-    stickToBottomRef.current = true;
-    automaticScrollTopRef.current = undefined;
-    handledViewportResetSequenceRef.current = undefined;
-    terminalCopyChordActiveRef.current = false;
-  }, [session.backendSessionId, session.status]);
-
-  useLayoutEffect(() => {
-    if (!isActive || session.status !== 'connected') return;
-    const surface = surfaceRef.current;
-    if (!surface) return;
-    const viewportResetSequence = session.terminalFrame?.viewportResetSequence;
-    if (
-      viewportResetSequence !== undefined &&
-      viewportResetSequence !== handledViewportResetSequenceRef.current
-    ) {
-      stickToBottomRef.current = true;
-      handledViewportResetSequenceRef.current = viewportResetSequence;
-    }
-    if (!stickToBottomRef.current) return;
-    automaticScrollTopRef.current = scrollTerminalToBottom(surface);
-  }, [
-    isActive,
-    session.backendSessionId,
-    session.status,
-    session.terminalFrame?.viewportResetSequence,
-    session.terminalFrame?.sequence,
-  ]);
-
-  useEffect(() => {
-    if (!isActive || session.status !== 'connected') return;
-    const surface = surfaceRef.current;
-    if (!surface) return;
-
-    const handleWheel = (event: WheelEvent) => {
-      const maxScrollTop = Math.max(0, surface.scrollHeight - surface.clientHeight);
-      const maxScrollLeft = Math.max(0, surface.scrollWidth - surface.clientWidth);
-      const rawDeltaX = terminalWheelDelta(surface, event.deltaX, event.deltaMode, 'x');
-      const rawDeltaY = terminalWheelDelta(surface, event.deltaY, event.deltaMode, 'y');
-      const deltaX = Number.isFinite(rawDeltaX) ? rawDeltaX : 0;
-      const deltaY = Number.isFinite(rawDeltaY) ? rawDeltaY : 0;
-      if ((maxScrollTop <= 0 && maxScrollLeft <= 0) || (deltaX === 0 && deltaY === 0)) return;
-
-      const nextScrollLeft = Math.min(maxScrollLeft, Math.max(0, surface.scrollLeft + deltaX));
-      const nextScrollTop = Math.min(maxScrollTop, Math.max(0, surface.scrollTop + deltaY));
-
-      // Keep the terminal as the scroll owner. This is deliberately a native,
-      // non-passive listener because Chromium can make delegated React wheel
-      // listeners passive, which lets the surrounding layout consume the wheel.
-      event.preventDefault();
-      event.stopPropagation();
-
-      surface.scrollLeft = nextScrollLeft;
-      if (deltaY !== 0) {
-        automaticScrollTopRef.current = undefined;
-        surface.scrollTop = nextScrollTop;
-        stickToBottomRef.current = terminalIsAtBottom(surface);
-      }
-    };
-
-    surface.addEventListener('wheel', handleWheel, { passive: false });
-    return () => surface.removeEventListener('wheel', handleWheel);
-  }, [isActive, session.status]);
-
-  useEffect(() => {
-    if (!isActive || session.status !== 'connected') return;
-    const surface = surfaceRef.current;
-    if (!surface) return;
-    const focus = () => surface.focus({ preventScroll: true });
-    const frame = requestAnimationFrame(focus);
-    return () => cancelAnimationFrame(frame);
-  }, [isActive, session.backendSessionId, session.status]);
-
-  useEffect(() => {
-    if (!isActive || session.status !== 'connected') {
-      terminalCopyChordActiveRef.current = false;
-      return;
-    }
-
-    const resetCopyChord = () => {
-      terminalCopyChordActiveRef.current = false;
-    };
-    const resetCopyChordWhenHidden = () => {
-      if (document.visibilityState !== 'visible') resetCopyChord();
-    };
-    window.addEventListener('blur', resetCopyChord);
-    document.addEventListener('visibilitychange', resetCopyChordWhenHidden);
-    return () => {
-      window.removeEventListener('blur', resetCopyChord);
-      document.removeEventListener('visibilitychange', resetCopyChordWhenHidden);
-      resetCopyChord();
-    };
-  }, [isActive, session.status]);
-
-  useEffect(() => {
-    const surface = surfaceRef.current;
-    if (!isActive || session.status !== 'connected' || !surface) return;
-    const clearOnOutsidePointer = (event: PointerEvent) => {
-      if (event.target instanceof Node && !surface.contains(event.target)) {
-        terminalSelection(surface)?.removeAllRanges();
-      }
-    };
-    document.addEventListener('pointerdown', clearOnOutsidePointer, true);
-    return () => document.removeEventListener('pointerdown', clearOnOutsidePointer, true);
-  }, [isActive, session.status]);
-
-  if (session.status !== 'connected') {
-    return (
-      <div
-        aria-label="Serial connection state"
-        className="flex h-full min-h-0 min-w-0 flex-1 items-center justify-center overflow-auto bg-[#090909] px-6 py-10 text-zinc-100"
-        ref={surfaceRef}
-      >
-        <SshTerminalConnectionState isSerial onReconnect={onReconnect} session={session} />
-      </div>
-    );
-  }
-
   return (
-    <div
-      aria-label="Live serial terminal"
-      className="terminal-scrollbar h-full min-h-0 min-w-0 flex-1 cursor-text overflow-x-auto overflow-y-auto overscroll-contain bg-[#090909] text-[#e5e7eb] outline-none"
-      onClick={(event) => event.currentTarget.focus({ preventScroll: true })}
-      onMouseDown={selectTerminalDoubleClick}
-      onKeyDown={(event) => {
-        const hasSelection = Boolean(terminalSelectionText(event.currentTarget));
-        const useClipboard = shouldUseTerminalClipboardShortcut(
-          event,
-          hasSelection,
-          terminalCopyChordActiveRef.current,
-        );
-        terminalCopyChordActiveRef.current = terminalCopyChordAfterKeyDown(
-          event,
-          hasSelection,
-          terminalCopyChordActiveRef.current,
-        );
-        if (useClipboard) return;
-        const data = terminalKeyData(event, session.terminalFrame?.applicationCursor ?? false);
-        if (data === undefined) return;
-        event.preventDefault();
-        terminalSelection(event.currentTarget)?.removeAllRanges();
-        onInput(session.id, data);
-      }}
-      onKeyUp={(event) => {
-        terminalCopyChordActiveRef.current = terminalCopyChordAfterKeyUp(
-          event,
-          terminalCopyChordActiveRef.current,
-        );
-      }}
-      onBlur={() => {
-        terminalCopyChordActiveRef.current = false;
-      }}
-      onCopy={(event) => {
-        const copied = copyTerminalSelection(
-          terminalSelectionText(event.currentTarget),
-          event.clipboardData,
-        );
-        if (copied) event.preventDefault();
-      }}
-      onPaste={(event) => {
-        const text = event.clipboardData.getData('text');
-        if (!text) return;
-        event.preventDefault();
-        terminalSelection(event.currentTarget)?.removeAllRanges();
-        onInput(session.id, normalizeTerminalPasteText(text));
-      }}
-      onMouseUp={(event) => {
-        if (!shouldAutoCopyTerminalSelection(autoCopyOnSelect, event.button)) return;
-        const surface = event.currentTarget;
-        const selection = terminalSelection(surface);
-        const text = selection?.toString() ?? '';
-        if (!selection || !text) return;
-        void copyTextToClipboard(text).catch(() => undefined);
-      }}
-      onCompositionEnd={(event) => {
-        if (!event.data) return;
-        terminalSelection(event.currentTarget)?.removeAllRanges();
-        onInput(session.id, event.data);
-      }}
-      onScroll={(event) => {
-        const surface = event.currentTarget;
-        const isAutomaticScroll = terminalScrollEventKeepsBottomPin(
-          surface.scrollTop,
-          false,
-          automaticScrollTopRef.current,
-        );
-        stickToBottomRef.current = isAutomaticScroll || terminalIsAtBottom(surface);
-        // Output may have grown since Chromium queued this event. Catch up now,
-        // including the final frame, and retain the marker for subsequent events.
-        automaticScrollTopRef.current = isAutomaticScroll
-          ? scrollTerminalToBottom(surface)
-          : undefined;
-      }}
-      ref={surfaceRef}
-      role="application"
-      style={{ overflowAnchor: 'none', scrollbarGutter: 'stable' }}
-      tabIndex={0}
-    >
-      <TerminalTextGrid frame={session.terminalFrame} />
-    </div>
+    <NativeTerminalSurface
+      session={session}
+      isActive={isActive}
+      autoCopyOnSelect={autoCopyOnSelect}
+      onInput={onInput}
+      isSerial
+      fallback={<SshTerminalConnectionState isSerial onReconnect={onReconnect} session={session} />}
+    />
   );
 }
 
@@ -10172,6 +10157,7 @@ function SessionsPage({
   bitwardenUnlockPending,
   captureWebPreview,
   isAuthorized,
+  vault,
   isWebSurfaceVisible,
   sessions,
   selectedSession,
@@ -10206,6 +10192,7 @@ function SessionsPage({
   bitwardenUnlockPending: boolean;
   captureWebPreview: boolean;
   isAuthorized: boolean;
+  vault?: boolean;
   isWebSurfaceVisible: boolean;
   sessions: Session[];
   selectedSession?: Session;
@@ -10220,7 +10207,7 @@ function SessionsPage({
   onOpenFileTransfer: (id: string) => void;
   onSelectSession: (id: string) => void;
   onOpenQuickConnect: () => void;
-  onReconnectSession: (id: string) => void;
+  onReconnectSession: (id: string, manualMode?: 'account' | 'passphrase') => void;
   onSftpLocalNavigate: (sessionId: string, path: string) => void;
   onSftpOperation: (
     sessionId: string,
@@ -10250,8 +10237,12 @@ function SessionsPage({
   onSshInput: (sessionId: string, value: string, paste?: boolean) => void;
   onSerialInput: (sessionId: string, value: string) => void;
   onTrustSshHostKey: (sessionId: string, mismatch: NonNullable<Session['hostKeyMismatch']>) => void;
-  onRetryRdp: (id: string) => void;
-  onVncStatusChange: (sessionId: string, status: Session['status']) => void;
+  onRetryRdp: (id: string, manualCredentials?: boolean) => void;
+  onVncStatusChange: (
+    sessionId: string,
+    status: Session['status'],
+    manualPassword?: boolean,
+  ) => void;
 }) {
   const workspace = useRef<HTMLElement>(null);
   const restoringTabMenuFocus = useRef(false);
@@ -10617,6 +10608,7 @@ function SessionsPage({
               </p>
             ) : null}
             <SessionSurface
+              vault={vault}
               autoCopyOnSelect={autoCopyOnSelect}
               bitwardenOpen={bitwardenOpenSessionId === session.id}
               bitwardenUnlockPending={bitwardenUnlockPending}
@@ -10933,6 +10925,7 @@ function SessionSurfaceContent({
   captureWebPreview,
   isActive,
   isAuthorized,
+  vault,
   nativeSurfaceActive,
   onBitwardenUnlockRequired,
   onCloseSftpBrowser,
@@ -10961,14 +10954,15 @@ function SessionSurfaceContent({
   captureWebPreview: boolean;
   isActive: boolean;
   isAuthorized: boolean;
+  vault?: boolean;
   nativeSurfaceActive: boolean;
   session: Session;
   onBitwardenUnlockRequired: (sessionId: string, reason: string, retry: () => void) => void;
   onCloseSftpBrowser: (id: string) => void;
   onConnectRdp: (id: string) => void;
   onOpenSystemRdp: (id: string) => void;
-  onReconnectSession: (id: string) => void;
-  onRetryRdp: (id: string) => void;
+  onReconnectSession: (id: string, manualMode?: 'account' | 'passphrase') => void;
+  onRetryRdp: (id: string, manualCredentials?: boolean) => void;
   onSerialInput: (sessionId: string, value: string) => void;
   onSftpConflict: (
     sessionId: string,
@@ -10998,7 +10992,11 @@ function SessionSurfaceContent({
   onSftpTransferRemove: (sessionId: string, transferId: string, itemId: string) => void;
   onSshInput: (sessionId: string, value: string, paste?: boolean) => void;
   onTrustSshHostKey: (sessionId: string, mismatch: NonNullable<Session['hostKeyMismatch']>) => void;
-  onVncStatusChange: (sessionId: string, status: Session['status']) => void;
+  onVncStatusChange: (
+    sessionId: string,
+    status: Session['status'],
+    manualPassword?: boolean,
+  ) => void;
 }) {
   if (isFileBrowserProtocol(session.protocol)) {
     if (!session.sftp)
@@ -11011,6 +11009,11 @@ function SessionSurfaceContent({
             isSerial={false}
             onReconnect={onReconnectSession}
             onTrustHostKey={onTrustSshHostKey}
+            onEnterCredentials={
+              vault && session.protocol === 'sftp'
+                ? (mode) => onReconnectSession(session.id, mode)
+                : undefined
+            }
             session={session}
           />
         </div>
@@ -11055,6 +11058,7 @@ function SessionSurfaceContent({
         onInput={onSshInput}
         onReconnect={onReconnectSession}
         onTrustHostKey={onTrustSshHostKey}
+        onEnterCredentials={vault ? (mode) => onReconnectSession(session.id, mode) : undefined}
         session={session}
       />
     );
@@ -11086,6 +11090,11 @@ function SessionSurfaceContent({
         onRetry={() => onRetryRdp(session.id)}
         name={session.title}
         port={session.port}
+        onEnterCredentials={
+          vault && (session.nodeId || session.quickTarget)
+            ? () => onRetryRdp(session.id, true)
+            : undefined
+        }
         sessionId={session.id}
         status={session.rdpStatus ?? 'idle'}
         tunnelProgress={session.tunnelProgress}
@@ -11096,6 +11105,7 @@ function SessionSurfaceContent({
     return (
       <Suspense fallback={<SessionSurfaceFallback session={session} />}>
         <VncSurface
+          vault={vault}
           bitwardenUnlockPending={bitwardenUnlockPending}
           connectionGeneration={session.vncConnectionGeneration ?? 0}
           disconnected={session.status === 'closed'}
@@ -11104,14 +11114,20 @@ function SessionSurfaceContent({
             onBitwardenUnlockRequired(session.id, reason, retry)
           }
           onReconnect={() => onReconnectSession(session.id)}
-          onStatusChange={(status) =>
+          onStatusChange={(status, manualPassword) =>
             status === 'idle'
               ? undefined
-              : onVncStatusChange(session.id, status === 'disconnected' ? 'closed' : status)
+              : onVncStatusChange(
+                  session.id,
+                  status === 'disconnected' ? 'closed' : status,
+                  manualPassword,
+                )
           }
           session={{
             id: session.id,
             nodeId: session.nodeId,
+            quickTarget: session.quickTarget,
+            manualPassword: session.vncManualPassword,
             credentialId: session.credentialId,
             host: session.host,
             port: session.port,
@@ -11167,6 +11183,7 @@ export function CredentialsPage({
   initialCredentials,
   isAuthorized,
   onCreate,
+  onVaultSave,
   onUpdate,
   onDelete,
   initialEditor,
@@ -11175,9 +11192,10 @@ export function CredentialsPage({
 }: {
   initialCredentials: CredentialRecord[];
   isAuthorized: boolean;
+  onVaultSave?: (request: VaultCredentialRequest) => Promise<boolean>;
   onCreate: (draft: CredentialWriteRequest) => Promise<void>;
   onUpdate: (id: string, draft: CredentialWriteRequest) => Promise<void>;
-  onDelete: (id: string) => Promise<void>;
+  onDelete: (id: string, rowVersion?: string) => Promise<void>;
   initialEditor?: SshKeyEditorRequest;
   editorOnly?: boolean;
   onEditorClose?: () => void;
@@ -11218,6 +11236,9 @@ export function CredentialsPage({
     clearSecretInput(credentialPasswordInput.current);
     credentialPasswordInput.current = input;
   }, []);
+  const nativeCredentialSavePending = useRef(false);
+  const nativeCredentialRetry = useRef({ password: false, certificate: false });
+  const deletionVersions = useRef(new Map<string, string | undefined>());
   const credentialKeyPassphraseInput = useRef<HTMLInputElement>(null);
   const bindCredentialKeyPassphrase = useCallback((input: HTMLInputElement | null) => {
     clearSecretInput(credentialKeyPassphraseInput.current);
@@ -11229,6 +11250,8 @@ export function CredentialsPage({
   useEffect(
     () => () => {
       credentialEditorGeneration.current++;
+      clearSecretInput(credentialPasswordInput.current);
+      clearSecretInput(credentialKeyPassphraseInput.current);
     },
     [],
   );
@@ -11258,6 +11281,7 @@ export function CredentialsPage({
     credentialEditorGeneration.current++;
     clearSecretInput(credentialPasswordInput.current);
     clearSecretInput(credentialKeyPassphraseInput.current);
+    nativeCredentialRetry.current = { password: false, certificate: false };
     bitwardenSearchAttempts.current.cancel('credential-search');
   }, [bitwardenSearchAttempts, isAuthorized]);
 
@@ -11310,11 +11334,13 @@ export function CredentialsPage({
   }
 
   function openNewCredential() {
-    clearSecretInput(credentialPasswordInput.current);
+    credentialEditorGeneration.current++;
     clearSecretInput(credentialKeyPassphraseInput.current);
+    clearSecretInput(credentialPasswordInput.current);
     setEditingCredential(null);
     setCredentialForm(emptyCredentialDraft());
     setPrivateKeySelectionRetryRequired(false);
+    nativeCredentialRetry.current = { password: false, certificate: false };
     setPrivateKeyPassphraseRetryRequired(false);
     setOperationError('');
     resetBitwardenSearch();
@@ -11323,12 +11349,14 @@ export function CredentialsPage({
 
   function openEditCredential(credential: CredentialRecord) {
     if (!credential.canEdit) return;
-    clearSecretInput(credentialPasswordInput.current);
+    credentialEditorGeneration.current++;
     clearSecretInput(credentialKeyPassphraseInput.current);
+    clearSecretInput(credentialPasswordInput.current);
     const protocol = credential.protocol as CredentialDraft['protocol'];
     setEditingCredential(credential);
     setCredentialForm({ ...credentialDraftFor(credential), protocol });
     setPrivateKeySelectionRetryRequired(false);
+    nativeCredentialRetry.current = { password: false, certificate: false };
     setPrivateKeyPassphraseRetryRequired(false);
     setOperationError('');
     resetBitwardenSearch();
@@ -11346,6 +11374,7 @@ export function CredentialsPage({
     setEditingCredential(null);
     setCredentialForm(emptyCredentialDraft());
     setPrivateKeySelectionRetryRequired(false);
+    nativeCredentialRetry.current = { password: false, certificate: false };
     setPrivateKeyPassphraseRetryRequired(false);
     setOperationError('');
     resetBitwardenSearch();
@@ -11367,6 +11396,7 @@ export function CredentialsPage({
         return;
       }
       clearSecretInput(credentialKeyPassphraseInput.current);
+      clearSecretInput(credentialPasswordInput.current);
       discardPrivateKeySelection(credentialForm.privateKeySelectionId);
       if (selected.suggestedCertificate)
         discardCertificateSelection(credentialForm.certificateSelectionId);
@@ -11472,9 +11502,126 @@ export function CredentialsPage({
     }));
   }
 
+  async function submitVaultCredential() {
+    if (!onVaultSave || nativeCredentialSavePending.current) return;
+    const form = credentialForm;
+    if (form.protocol === 'smb') {
+      setOperationError('SMB credentials are unavailable in this vault.');
+      return;
+    }
+    if (
+      nativeCredentialRetry.current.password &&
+      credentialForm.kind === 'password' &&
+      credentialForm.provider === 'Local' &&
+      !credentialPasswordInput.current?.value
+    ) {
+      setOperationError('Enter the replacement password again before retrying.');
+      return;
+    }
+    if (
+      nativeCredentialRetry.current.certificate &&
+      credentialForm.kind === 'sshKey' &&
+      !credentialForm.clearCertificate &&
+      !credentialForm.certificateSelectionId
+    ) {
+      setOperationError('Select the SSH certificate again before retrying.');
+      return;
+    }
+    if (credentialForm.kind === 'sshKey') {
+      if (
+        (!editingCredential || privateKeySelectionRetryRequired) &&
+        !credentialForm.privateKeySelectionId
+      ) {
+        setOperationError('Select the SSH private key again before retrying.');
+        return;
+      }
+      if (
+        privateKeyPassphraseRetryRequired &&
+        !credentialForm.clearPassphrase &&
+        !credentialKeyPassphraseInput.current?.value
+      ) {
+        setOperationError('Enter the SSH key passphrase again before retrying.');
+        return;
+      }
+    }
+    const password = new TextEncoder().encode(credentialPasswordInput.current?.value ?? '');
+    const passphrase = new TextEncoder().encode(credentialKeyPassphraseInput.current?.value ?? '');
+    clearSecretInput(credentialPasswordInput.current);
+    clearSecretInput(credentialKeyPassphraseInput.current);
+    const generation = credentialEditorGeneration.current;
+    const key = form.kind === 'sshKey';
+    const request: VaultCredentialRequest = {
+      rowVersion: editingCredential?.rowVersion ?? (editingCredential ? '' : '0'),
+      password,
+      passphrase,
+      metadata: {
+        id: editingCredential?.id ?? '',
+        name: form.name,
+        protocol: key ? 'ssh' : form.protocol,
+        kind: form.kind,
+        username: form.protocol === 'vnc' ? '' : form.username,
+        domain: form.protocol === 'rdp' ? form.domain : '',
+        provider: key ? 'Local' : form.provider,
+        bitwardenItemId: form.provider === 'Bitwarden' && !key ? form.bitwardenItemId : '',
+        bitwardenItemName: form.provider === 'Bitwarden' && !key ? form.bitwardenItemName : '',
+        privateKeySelectionId: key ? form.privateKeySelectionId : '',
+        certificateSelectionId: key ? form.certificateSelectionId : '',
+        clearPassphrase: key && form.clearPassphrase,
+        clearCertificate: key && form.clearCertificate,
+      },
+    };
+    nativeCredentialSavePending.current = true;
+    setBusy(true);
+    setOperationError('');
+    try {
+      const pending = onVaultSave(request);
+      password.fill(0);
+      passphrase.fill(0);
+      const refreshed = await pending;
+      if (generation !== credentialEditorGeneration.current) return;
+      closeCredentialEditor();
+      if (!refreshed)
+        setOperationError(
+          'The credential was saved. Refresh the workspace before editing it again.',
+        );
+    } catch {
+      if (generation !== credentialEditorGeneration.current) return;
+      discardPrivateKeySelection(request.metadata.privateKeySelectionId);
+      discardCertificateSelection(request.metadata.certificateSelectionId);
+      setCredentialForm((current) => ({
+        ...current,
+        privateKeySelectionId: '',
+        certificateSelectionId: '',
+        privateKeyFileName: editingCredential?.privateKeyFileName ?? '',
+        certificateFileName: editingCredential?.certificateFileName ?? '',
+      }));
+      setPrivateKeySelectionRetryRequired(Boolean(request.metadata.privateKeySelectionId));
+      setPrivateKeyPassphraseRetryRequired(key && passphrase.length > 0);
+      nativeCredentialRetry.current = {
+        password: password.length > 0,
+        certificate: Boolean(request.metadata.certificateSelectionId),
+      };
+      setOperationError(
+        'Could not save the credential. Refresh stale items, reselect any SSH files and enter replacement secrets again.',
+      );
+    } finally {
+      password.fill(0);
+      passphrase.fill(0);
+      nativeCredentialSavePending.current = false;
+      setBusy(false);
+    }
+  }
+  function requestCredentialDeletion(ids: string[]) {
+    deletionVersions.current = new Map(ids.map((id) => [id, credentialById.get(id)?.rowVersion]));
+    setPendingDeletion(ids);
+  }
   async function submitCredential(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (busy) return;
+    if (busy || nativeCredentialSavePending.current) return;
+    if (onVaultSave) {
+      await submitVaultCredential();
+      return;
+    }
     if (!editingCredential && credentialForm.provider !== 'Local') {
       setOperationError(bitwardenCredentialCreationError);
       return;
@@ -11622,7 +11769,7 @@ export function CredentialsPage({
       for (const id of ids) {
         try {
           // react-doctor-disable-next-line react-doctor/async-await-in-loop
-          await onDelete(id);
+          await onDelete(id, deletionVersions.current.get(id));
         } catch (error) {
           const name = credentialById.get(id)?.name ?? 'Credential';
           const message =
@@ -11729,7 +11876,7 @@ export function CredentialsPage({
                 <Button
                   className="!text-xs"
                   disabled={deletableSelectedCredentials.length === 0}
-                  onClick={() => setPendingDeletion(deletableSelectedCredentials)}
+                  onClick={() => requestCredentialDeletion(deletableSelectedCredentials)}
                   size="default"
                   variant="destructive"
                 >
@@ -11827,7 +11974,7 @@ export function CredentialsPage({
                         <IconButton
                           disabled={!credential.canDelete}
                           label={`Delete ${credential.name}`}
-                          onClick={() => setPendingDeletion([credential.id])}
+                          onClick={() => requestCredentialDeletion([credential.id])}
                         >
                           <Trash2 />
                         </IconButton>
@@ -11894,6 +12041,7 @@ export function CredentialsPage({
                 onValueChange={(value) => {
                   if (value !== 'ssh') {
                     clearSecretInput(credentialKeyPassphraseInput.current);
+                    clearSecretInput(credentialPasswordInput.current);
                     discardPrivateKeySelection(credentialForm.privateKeySelectionId);
                     discardCertificateSelection(credentialForm.certificateSelectionId);
                   }
@@ -11928,6 +12076,7 @@ export function CredentialsPage({
                 <Select
                   disabled={Boolean(editingCredential) || Boolean(initialEditor?.authentication)}
                   onValueChange={(value) => {
+                    clearSecretInput(credentialPasswordInput.current);
                     const kind = value as CredentialDraft['kind'];
                     if (kind === 'password') {
                       clearSecretInput(credentialKeyPassphraseInput.current);
@@ -11967,12 +12116,13 @@ export function CredentialsPage({
                 <div className="grid gap-2">
                   <Label htmlFor="credential-provider">Credential vault</Label>
                   <Select
-                    onValueChange={(value) =>
+                    onValueChange={(value) => {
+                      clearSecretInput(credentialPasswordInput.current);
                       setCredentialForm((form) => ({
                         ...form,
                         provider: value as CredentialDraft['provider'],
-                      }))
-                    }
+                      }));
+                    }}
                     value={credentialForm.provider}
                   >
                     <SelectTrigger id="credential-provider">
@@ -12150,6 +12300,7 @@ export function CredentialsPage({
                         onCheckedChange={(checked) => {
                           if (checked === true) {
                             clearSecretInput(credentialKeyPassphraseInput.current);
+                            clearSecretInput(credentialPasswordInput.current);
                             setPrivateKeyPassphraseRetryRequired(false);
                           }
                           setCredentialForm((form) => ({
@@ -12182,6 +12333,7 @@ export function CredentialsPage({
                 <PasswordInput
                   autoComplete="new-password"
                   id="credential-password"
+                  key={onVaultSave ? 'vault-password' : 'legacy-password'}
                   maxLength={4096}
                   ref={bindCredentialPassword}
                   required={!editingCredential || editingCredential.provider !== 'Local'}
@@ -12326,19 +12478,6 @@ export function CredentialsPage({
   );
 }
 
-const tunnelKinds = [
-  { value: 0, label: 'WireGuard' },
-  { value: 1, label: 'OpenVPN' },
-  { value: 2, label: 'Fortinet' },
-  { value: 9, label: 'Fortinet IPsec' },
-  { value: 3, label: 'WatchGuard' },
-  { value: 4, label: 'Stormshield' },
-  { value: 5, label: 'Azure VPN' },
-  { value: 6, label: 'Cisco Secure Client' },
-  { value: 7, label: 'Forcepoint' },
-  { value: 8, label: 'SSH tunnel (jump host)' },
-] as const;
-
 type TunnelEditorValue = {
   jumpHostKeySha256?: string;
   forgetJumpHostKeySha256?: string;
@@ -12347,21 +12486,6 @@ type TunnelEditorValue = {
   kind: number;
   settings: Record<string, unknown>;
 };
-
-type TunnelField = {
-  key: string;
-  label: string;
-  section?: string;
-  type?: 'password' | 'textarea' | 'number' | 'checkbox' | 'switch' | 'select';
-  options?: { value: number; label: string }[];
-  placeholder?: string;
-  hint?: string;
-  fullWidth?: boolean;
-};
-
-function tunnelKindLabel(kind: number) {
-  return tunnelKinds.find((item) => item.value === kind)?.label ?? 'Unknown';
-}
 
 function TunnelRouteField({
   id,
@@ -12421,469 +12545,6 @@ function TunnelRouteField({
       <p className="text-[11px] leading-relaxed text-muted-foreground">{description}</p>
     </div>
   );
-}
-
-function tunnelEditorFields(kind: number): TunnelField[] {
-  if (kind === 9) return fortinetIPsecFields;
-  switch (kind) {
-    case 0:
-      return [
-        {
-          key: 'InterfacePrivateKey',
-          label: 'Private key (base64)',
-          section: 'Interface',
-          type: 'password',
-        },
-        {
-          key: 'InterfaceAddress',
-          label: 'Address (e.g. 10.0.0.2/32)',
-          section: 'Interface',
-          placeholder: '10.0.0.2/32',
-        },
-        {
-          key: 'Mtu',
-          label: 'MTU (optional)',
-          section: 'Interface',
-          type: 'number',
-        },
-        {
-          key: 'Dns',
-          label: 'DNS (comma-separated, optional)',
-          section: 'Interface',
-          placeholder: '1.1.1.1, 2606:4700:4700::1111',
-        },
-        { key: 'PeerPublicKey', label: 'Public key (base64)', section: 'Peer' },
-        {
-          key: 'PeerPresharedKey',
-          label: 'Preshared key (base64, optional)',
-          section: 'Peer',
-          type: 'password',
-        },
-        {
-          key: 'PeerEndpoint',
-          label: 'Endpoint (host:port)',
-          section: 'Peer',
-          placeholder: 'vpn.example.com:51820',
-        },
-        {
-          key: 'AllowedIps',
-          label: 'Allowed IPs (comma-separated)',
-          section: 'Peer',
-          placeholder: 'leave blank to route all traffic (0.0.0.0/0, ::/0)',
-        },
-        {
-          key: 'PersistentKeepaliveSeconds',
-          label: 'Persistent keepalive seconds (optional)',
-          section: 'Peer',
-          type: 'number',
-        },
-      ];
-    case 1:
-      return [
-        {
-          key: 'ProfileOvpn',
-          label: 'OpenVPN profile (.ovpn contents)',
-          section: 'Profile',
-          type: 'textarea',
-          placeholder: 'client\nproto udp\nremote vpn.example.com 1194\n...',
-          hint: 'Paste the full .ovpn profile.',
-        },
-        {
-          key: 'Username',
-          label: 'Username',
-          section: 'Authentication',
-          placeholder: 'leave blank for certificate-only auth',
-        },
-        {
-          key: 'Password',
-          label: 'Password',
-          section: 'Authentication',
-          type: 'password',
-        },
-      ];
-    case 2:
-      return [
-        {
-          key: 'Host',
-          label: 'Host',
-          section: 'Gateway',
-          placeholder: 'vpn.example.com',
-        },
-        {
-          key: 'Port',
-          label: 'Port',
-          section: 'Gateway',
-          type: 'number',
-          placeholder: '443',
-        },
-        { key: 'Username', label: 'Username', section: 'Credentials' },
-        {
-          key: 'Password',
-          label: 'Password',
-          section: 'Credentials',
-          type: 'password',
-        },
-        { key: 'Realm', label: 'Realm (optional)', section: 'Credentials' },
-        {
-          key: 'UseSingleSignOn',
-          label: 'Enable single sign-on (SSO) for the VPN tunnel',
-          section: 'Single sign-on',
-          type: 'switch',
-        },
-        {
-          key: 'UseSamlCallback',
-          label: 'Use FortiGate SAML callback',
-          section: 'Single sign-on',
-          type: 'switch',
-          fullWidth: true,
-        },
-        {
-          key: 'TotpSecret',
-          label: 'TOTP shared secret (Base32, optional)',
-          section: 'Advanced',
-          type: 'password',
-          hint: 'used by username/password authentication',
-          fullWidth: true,
-        },
-        {
-          key: 'TrustServerCertificate',
-          label: 'Trust server certificate (skip verification)',
-          section: 'Advanced',
-          type: 'switch',
-          fullWidth: true,
-        },
-        {
-          key: 'ServerCertSha256Pin',
-          label: 'Server certificate SHA-256 pin (hex, optional)',
-          section: 'Advanced',
-          fullWidth: true,
-        },
-      ];
-    case 3:
-      return [
-        {
-          key: 'Server',
-          label: 'Server',
-          section: 'Gateway',
-          placeholder: 'firebox.example.com',
-        },
-        {
-          key: 'Port',
-          label: 'Port',
-          section: 'Gateway',
-          type: 'number',
-          placeholder: '443',
-        },
-        {
-          key: 'TrustServerCertificate',
-          label: 'Ignore certificate errors',
-          section: 'Gateway',
-          type: 'switch',
-          fullWidth: true,
-          hint: 'Skip certificate validation for the WatchGuard portal and embedded SAML sign-in. Use only for a gateway you trust.',
-        },
-        {
-          key: 'AuthMode',
-          label: 'Authentication mode',
-          section: 'Authentication',
-          type: 'select',
-          options: [
-            { value: 1, label: 'Username and password' },
-            { value: 2, label: 'SAML' },
-          ],
-          fullWidth: true,
-        },
-        { key: 'Username', label: 'Username', section: 'Authentication' },
-        {
-          key: 'Password',
-          label: 'Password',
-          section: 'Authentication',
-          type: 'password',
-        },
-        {
-          key: 'Domain',
-          label: 'Authentication domain override',
-          section: 'Advanced',
-          placeholder: 'auto-detect',
-        },
-        {
-          key: 'CaPem',
-          label: 'CA certificate (PEM)',
-          section: 'Advanced',
-          type: 'textarea',
-        },
-        {
-          key: 'ClientCertPem',
-          label: 'Client certificate (PEM)',
-          section: 'Advanced',
-          type: 'textarea',
-        },
-        {
-          key: 'ClientKeyPem',
-          label: 'Client private key (PEM)',
-          section: 'Advanced',
-          type: 'textarea',
-        },
-        {
-          key: 'ProfileOvpn',
-          label: 'Imported .ovpn fallback (optional)',
-          section: 'Advanced',
-          type: 'textarea',
-        },
-        {
-          key: 'VerifyX509Name',
-          label: 'verify-x509-name subject (advanced)',
-          section: 'Advanced',
-          placeholder: 'leave default unless the Firebox uses a custom server cert',
-          fullWidth: true,
-        },
-      ];
-    case 4:
-      return [
-        {
-          key: 'Mode',
-          label: 'Connection mode',
-          section: 'Connection mode',
-          type: 'select',
-          options: [
-            { value: 0, label: 'Automatic — authenticate & fetch config' },
-            { value: 1, label: 'Import — paste a downloaded .ovpn' },
-          ],
-        },
-        {
-          key: 'Server',
-          label: 'Server',
-          section: 'Gateway',
-          placeholder: 'rpv.example.com',
-        },
-        {
-          key: 'Port',
-          label: 'Port',
-          section: 'Gateway',
-          type: 'number',
-          placeholder: '443',
-        },
-        {
-          key: 'Description',
-          label: 'Description (optional)',
-          section: 'Gateway',
-        },
-        {
-          key: 'UseOtp',
-          label: 'Use an OTP',
-          section: 'Authentication',
-          type: 'checkbox',
-          fullWidth: true,
-        },
-        { key: 'Username', label: 'Username', section: 'Authentication' },
-        {
-          key: 'Password',
-          label: 'Password',
-          section: 'Authentication',
-          type: 'password',
-        },
-        {
-          key: 'ProfileOvpn',
-          label: 'OpenVPN profile (.ovpn contents)',
-          section: 'Profile',
-          type: 'textarea',
-          placeholder: 'client\ndev tun\nremote rpv.example.com 443 tcp\n...',
-        },
-        {
-          key: 'CaPem',
-          label: 'Firewall CA certificate (PEM, for automatic mode)',
-          section: 'Advanced',
-          type: 'textarea',
-          placeholder: 'paste the SNS portal CA so its TLS cert validates (CN = appliance serial)',
-        },
-        {
-          key: 'TrustServerCertificate',
-          label: 'Trust server certificate (skip ALL TLS checks)',
-          section: 'Advanced',
-          type: 'checkbox',
-        },
-        {
-          key: 'OpenVpnTransportOverride',
-          label: 'OpenVPN transport override',
-          section: 'Advanced',
-          type: 'select',
-          options: [
-            { value: 0, label: 'Auto — use profile order' },
-            { value: 1, label: 'Force TCP' },
-            { value: 2, label: 'Force UDP' },
-          ],
-        },
-        {
-          key: 'OpenVpnCompressionFramingOverride',
-          label: 'OpenVPN compression/framing',
-          section: 'Advanced',
-          type: 'select',
-          options: [
-            { value: 0, label: 'Preserve profile compression/framing' },
-            { value: 1, label: 'Add legacy no-compression stub' },
-          ],
-        },
-        {
-          key: 'AppToken',
-          label: 'Portal app token (advanced)',
-          section: 'Advanced',
-          placeholder: 'sslclient',
-        },
-      ];
-    case 5:
-      return [
-        {
-          key: 'Servers',
-          label: 'Server FQDN(s) (comma-separated)',
-          section: 'Gateway',
-          placeholder: 'gateway.vpn.azure.com, backup.vpn.azure.com',
-        },
-        {
-          key: 'Protocol',
-          label: 'Transport',
-          section: 'Gateway',
-          type: 'select',
-          options: [
-            { value: 0, label: 'TCP (default)' },
-            { value: 1, label: 'UDP' },
-          ],
-        },
-        { key: 'TenantId', label: 'Tenant ID', section: 'Microsoft Entra ID' },
-        { key: 'Audience', label: 'Audience', section: 'Microsoft Entra ID' },
-        {
-          key: 'ApplicationId',
-          label: 'Application (client) ID override',
-          section: 'Advanced',
-          placeholder: 'leave blank to use the audience as the client id',
-        },
-        {
-          key: 'Issuer',
-          label: 'Issuer',
-          section: 'Advanced',
-          placeholder: 'https://sts.windows.net/{tenant}/',
-        },
-        {
-          key: 'CaPem',
-          label: 'CA certificate override (PEM, optional)',
-          section: 'Advanced',
-          type: 'textarea',
-          placeholder: 'leave blank to validate against DigiCert Global Root G2',
-        },
-      ];
-    case 6:
-      return [
-        {
-          key: 'Host',
-          label: 'Host',
-          section: 'Gateway',
-          placeholder: 'vpn.example.com',
-        },
-        {
-          key: 'Port',
-          label: 'Port',
-          section: 'Gateway',
-          type: 'number',
-          placeholder: '443',
-        },
-        {
-          key: 'Group',
-          label: 'Group / connection profile (optional)',
-          section: 'Gateway',
-          placeholder: 'leave blank for the gateway default',
-        },
-        { key: 'Username', label: 'Username', section: 'Credentials' },
-        {
-          key: 'Password',
-          label: 'Password',
-          section: 'Credentials',
-          type: 'password',
-        },
-        {
-          key: 'TotpSecret',
-          label: 'TOTP shared secret (Base32, optional)',
-          section: 'Two-factor & advanced',
-          type: 'password',
-        },
-        {
-          key: 'SecondaryPassword',
-          label: 'Secondary password (optional)',
-          section: 'Two-factor & advanced',
-          type: 'password',
-        },
-        {
-          key: 'TrustServerCertificate',
-          label: 'Trust server certificate (skip verification)',
-          section: 'Two-factor & advanced',
-          type: 'checkbox',
-        },
-        {
-          key: 'ServerCertSha256Pin',
-          label: 'Server certificate SHA-256 pin (hex, optional)',
-          section: 'Two-factor & advanced',
-        },
-      ];
-    case 7:
-      return [
-        {
-          key: 'Host',
-          label: 'Host',
-          section: 'Gateway',
-          placeholder: 'vpn.example.com',
-          hint: 'SSL VPN with username and password.',
-        },
-        { key: 'Port', label: 'SSL port', section: 'Gateway', type: 'number', placeholder: '443' },
-        { key: 'Username', label: 'Username', section: 'Credentials' },
-        { key: 'Password', label: 'Password', section: 'Credentials', type: 'password' },
-        {
-          key: 'ServerCertSha256Pin',
-          label: 'Server certificate SHA-256 pin (optional)',
-          section: 'Certificates & advanced',
-          hint: 'Leave blank to verify the gateway certificate on first connection, or enter a fingerprint verified with your administrator or trusted client.',
-        },
-        {
-          key: 'Mtu',
-          label: 'MTU',
-          section: 'Certificates & advanced',
-          type: 'number',
-          placeholder: '1390',
-        },
-      ];
-    default:
-      return [];
-  }
-}
-
-function tunnelDefaultSettings(kind: number): Record<string, unknown> {
-  switch (kind) {
-    case 9:
-      return { ...fortinetIPsecDefaults };
-    case 2:
-      return { Port: 443 };
-    case 3:
-      return {
-        Port: 443,
-        AuthMode: 1,
-        VerifyX509Name: '/O=WatchGuard_Technologies/OU=Fireware/CN=Fireware_SSLVPN_Server',
-      };
-    case 4:
-      return {
-        Port: 443,
-        Mode: 0,
-        OpenVpnTransportOverride: 0,
-        OpenVpnCompressionFramingOverride: 0,
-        AppToken: 'sslclient',
-      };
-    case 5:
-      return { Protocol: 0 };
-    case 6:
-      return { Port: 443 };
-    case 7:
-      return { Port: 443, Mtu: 1390 };
-    case 8:
-      return { Mode: 'connection', KeepaliveSeconds: 30 };
-    default:
-      return {};
-  }
 }
 
 function blankTunnelEditor(): TunnelEditorValue {
@@ -13126,6 +12787,7 @@ function TunnelEditorDialog({
 }) {
   const [value, setValue] = useState<TunnelEditorValue>(initial);
   const { confirm, confirmationDialog } = useConfirmationDialog(isAuthorized && open);
+  const capabilities = useTunnelCapabilities(open);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [credentialDraft, setCredentialDraft] = useState<FortinetIPsecCredentialDraft | null>(null);
@@ -13170,7 +12832,7 @@ function TunnelEditorDialog({
         .map(([, label]) => label),
     );
   }, [value, credentialDraft]);
-  const canSave = missing.length === 0;
+  const canSave = missing.length === 0 && tunnelKindAvailable(value.kind, capabilities);
   const fields = tunnelEditorFields(value.kind);
   const rows = (
     section: string,
@@ -13422,18 +13084,27 @@ function TunnelEditorDialog({
                 value={String(value.kind)}
               >
                 <SelectTrigger id="tunnel-kind">
-                  <SelectValue />
+                  <SelectValue>{tunnelKindLabel(value.kind)}</SelectValue>
                 </SelectTrigger>
                 <SelectContent>
-                  {tunnelKinds.map((kind) => (
-                    <SelectItem key={kind.value} value={String(kind.value)}>
-                      {kind.label}
-                    </SelectItem>
-                  ))}
+                  {tunnelKinds
+                    .filter((kind) => tunnelKindAvailable(kind.value, capabilities))
+                    .map((kind) => (
+                      <SelectItem key={kind.value} value={String(kind.value)}>
+                        {kind.label}
+                      </SelectItem>
+                    ))}
                 </SelectContent>
               </Select>
             </div>
           </div>
+          {!tunnelKindAvailable(value.kind, capabilities) && (
+            <p role="status" className="text-sm text-muted-foreground">
+              {capabilities === null
+                ? 'Checking VPN availability…'
+                : 'This VPN provider requires an OpenVPN engine that is unavailable in this installation.'}
+            </p>
+          )}
           {value.kind === 3 ? (
             <div className="flex items-center justify-between gap-3 rounded-lg border border-border/70 bg-muted/20 px-3 py-2">
               <p className="text-[11px] text-muted-foreground">
@@ -13795,6 +13466,8 @@ function TunnelEditorDialog({
 // states transition independently, so combining them in a reducer would obscure those boundaries.
 // react-doctor-disable-next-line react-doctor/no-giant-component, react-doctor/prefer-useReducer
 export function TunnelsPage({
+  onVaultEdit,
+  onVaultDelete,
   tree,
   isAuthorized,
   credentials,
@@ -13804,6 +13477,12 @@ export function TunnelsPage({
   onTunnelUpdated,
   onTunnelDeleted,
 }: {
+  onVaultEdit?: (
+    selection: import('../electron/vault-tunnel').VaultTunnelSelection | null,
+  ) => Promise<void>;
+  onVaultDelete?: (
+    selection: import('../electron/vault-tunnel').VaultTunnelSelection,
+  ) => Promise<void>;
   tree: TreeNode[];
   isAuthorized: boolean;
   credentials: CredentialRecord[];
@@ -13871,6 +13550,7 @@ export function TunnelsPage({
   );
 
   useEffect(() => {
+    if (onVaultEdit) return;
     let active = true;
     const attempt = ++summaryLoadAttemptRef.current;
     const api = window.wormhole;
@@ -13890,7 +13570,7 @@ export function TunnelsPage({
     return () => {
       active = false;
     };
-  }, [onTunnelsLoaded]);
+  }, [onTunnelsLoaded, onVaultEdit]);
 
   useEffect(() => {
     return window.wormhole?.onTunnelTestProgress((event) => {
@@ -13925,6 +13605,14 @@ export function TunnelsPage({
     pendingTunnelEditRef.current = null;
     dialogTriggerRef.current = trigger;
     setActionError('');
+    if (onVaultEdit) {
+      void onVaultEdit(null).catch((error: unknown) =>
+        setActionError(
+          error instanceof Error ? error.message : 'Could not open VPN tunnel editor.',
+        ),
+      );
+      return;
+    }
     setEditorValue(blankTunnelEditor());
     setEditorOpen(true);
   }
@@ -13944,6 +13632,11 @@ export function TunnelsPage({
     pendingTunnelEditRef.current = request;
     setActionError('');
     try {
+      if (onVaultEdit) {
+        if (!tunnel.rowVersion) throw Error('Refresh the workspace before editing this tunnel.');
+        await onVaultEdit({ id: tunnel.id, rowVersion: tunnel.rowVersion });
+        return;
+      }
       const details = await api.readTunnel(tunnel.id);
       if (pendingTunnelEditRef.current !== request) return;
       dialogTriggerRef.current = trigger;
@@ -13973,6 +13666,11 @@ export function TunnelsPage({
     if (pendingTunnelEditRef.current?.id === tunnel.id) pendingTunnelEditRef.current = null;
     setActionError('');
     try {
+      if (onVaultDelete) {
+        if (!tunnel.rowVersion) throw Error('Refresh the workspace before deleting this tunnel.');
+        await onVaultDelete({ id: tunnel.id, rowVersion: tunnel.rowVersion });
+        return;
+      }
       const result = await api.deleteTunnel(tunnel.id);
       if (!result.deleted) {
         setActionError(result.error ?? 'Could not delete VPN tunnel.');
@@ -15162,42 +14860,14 @@ function mcpClientCopyDetails(client: McpClient): {
   }
 }
 
-async function copyTextToClipboard(value: string): Promise<void> {
-  const asyncWrite = navigator.clipboard?.writeText.bind(navigator.clipboard);
-  await writeClipboardText(value, asyncWrite, () => {
-    const activeElement =
-      document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    const selection = document.getSelection();
-    const ranges = selection
-      ? Array.from({ length: selection.rangeCount }, (_, index) =>
-          selection.getRangeAt(index).cloneRange(),
-        )
-      : [];
-    const textarea = document.createElement('textarea');
-    textarea.value = value;
-    textarea.style.position = 'fixed';
-    textarea.style.opacity = '0';
-    document.body.appendChild(textarea);
-    try {
-      textarea.select();
-      return document.execCommand('copy');
-    } finally {
-      textarea.remove();
-      activeElement?.focus({ preventScroll: true });
-      if (selection && ranges.length > 0) {
-        selection.removeAllRanges();
-        for (const range of ranges) selection.addRange(range);
-      }
-    }
-  });
-}
-
 function authSecretLabel(method: WormholeAuthFallback): string {
   return method === 'pin' ? 'PIN' : 'password';
 }
 
 function authModeLabel(mode: WormholeAuthMode): string {
   switch (mode) {
+    case 'vault':
+      return 'encrypted vault';
     case 'pin':
       return 'PIN';
     case 'password':
@@ -15575,6 +15245,36 @@ function SettingsPage({
   const idleTimeout = authState?.idleTimeoutMinutes ?? 15;
   const [securityBusy, setSecurityBusy] = useState(false);
   const [securityError, setSecurityError] = useState('');
+  const [databaseEncryptionAvailable, setDatabaseEncryptionAvailable] = useState(false);
+  const [localVaultBackupAvailable, setLocalVaultBackupAvailable] = useState(false);
+  const [localVaultBackupSaved, setLocalVaultBackupSaved] = useState(false);
+  const checkingDatabaseEncryption =
+    activeTab === 'security' && authGate === 'unlocked' && authMethod === 'vault';
+  useEffect(() => {
+    const api = window.wormhole;
+    if (!checkingDatabaseEncryption || !api?.databaseEncryptionAvailable) return;
+    let current = true;
+    void api.databaseEncryptionAvailable().then(
+      (available) => {
+        if (current) setDatabaseEncryptionAvailable(available);
+      },
+      () => {
+        if (current) setDatabaseEncryptionAvailable(false);
+      },
+    );
+    void api.localVaultBackupAvailable?.().then(
+      (available) => {
+        if (current) setLocalVaultBackupAvailable(available);
+      },
+      () => {
+        if (current) setLocalVaultBackupAvailable(false);
+      },
+    );
+    return () => {
+      current = false;
+    };
+  }, [checkingDatabaseEncryption]);
+  const [sharedWorkspaceRestartPending, setSharedWorkspaceRestartPending] = useState(false);
   const [securityMessage, setSecurityMessage] = useState('');
   const [secretDialog, setSecretDialog] = useState<WormholeAuthFallback | null>(null);
   const pendingSecretAction = useRef<(() => Promise<void>) | null>(null);
@@ -15742,6 +15442,16 @@ function SettingsPage({
     if (authGate !== 'unlocked' || !window.wormhole) return;
     let active = true;
     void (async () => {
+      if (authState?.mode === 'vault') {
+        try {
+          const settings = await window.wormhole!.readAppSettings();
+          if (active && isCurrentUnlock())
+            setPromptBeforeTunnelConnect(settings.promptBeforeTunnelConnect);
+        } catch {
+          /* Settings retain their current value until the next refresh. */
+        }
+        return;
+      }
       const [settingsResult, extensionResult, cliResult] = await Promise.allSettled([
         window.wormhole!.readAppSettings(),
         window.wormhole!.readBitwardenExtension(),
@@ -15780,7 +15490,7 @@ function SettingsPage({
     return () => {
       active = false;
     };
-  }, [authGate, isCurrentUnlock]);
+  }, [authGate, authState?.mode, isCurrentUnlock]);
 
   useEffect(() => {
     if (authGate !== 'unlocked' || !window.wormhole) return;
@@ -16343,7 +16053,7 @@ function SettingsPage({
   }
 
   async function handleSetSecret() {
-    if (securityBusy || !authState || authMethod === 'disabled') return;
+    if (securityBusy || !authState || authMethod === 'disabled' || authMethod === 'vault') return;
     clearSecurityStatus();
     const method = authMethod === 'windowsHello' ? helloFallback : authMethod;
     if (
@@ -16761,7 +16471,11 @@ function SettingsPage({
   }
 
   const selectedSecretMethod: WormholeAuthFallback | null =
-    authMethod === 'disabled' ? null : authMethod === 'windowsHello' ? helloFallback : authMethod;
+    authMethod === 'disabled' || authMethod === 'vault'
+      ? null
+      : authMethod === 'windowsHello'
+        ? helloFallback
+        : authMethod;
   const selectedSecretExists = selectedSecretMethod
     ? authStateHasSecret(authState, selectedSecretMethod)
     : false;
@@ -16894,7 +16608,10 @@ function SettingsPage({
           ) : null}
 
           <SettingsTabPanel value="file-transfer">
-            <SftpEditorSettings allowConfirmation={authGate === 'unlocked'} />
+            <SftpEditorSettings
+              vault={authState?.mode === 'vault'}
+              allowConfirmation={authGate === 'unlocked'}
+            />
           </SettingsTabPanel>
           <SettingsTabPanel value="general">
             <SettingsSection title="Appearance">
@@ -16971,382 +16688,537 @@ function SettingsPage({
           </SettingsTabPanel>
 
           <SettingsTabPanel value="security">
-            <SettingsSection
-              description="Ask for a PIN, password, or Windows Hello when Wormhole opens or is left idle."
-              title="App lock"
-            >
-              <div className="space-y-2 rounded-lg border border-border/70 bg-card/40 p-3">
-                <div className="flex items-center justify-between gap-3">
-                  <p className="text-xs font-medium">App lock</p>
-                  <Badge variant={authState?.configured ? 'default' : 'secondary'}>
-                    {authState?.configured ? 'Enabled' : 'Disabled'}
-                  </Badge>
-                </div>
-                <p className="text-[11px] leading-relaxed text-muted-foreground">
-                  {authState?.isCorrupted
-                    ? "Wormhole can't read the saved lock. Set a new PIN or password."
-                    : authState?.configured
-                      ? `Unlock with ${authModeLabel(authState.mode)}.`
-                      : 'Wormhole opens without asking you to unlock it.'}
-                </p>
-              </div>
-              <div className="grid max-w-64 gap-2">
-                <Label htmlFor="settings-auth-method">How to unlock</Label>
-                <Select
-                  disabled={!authState || securityBusy}
-                  onValueChange={(value) => void handleAuthMethodChange(value)}
-                  value={authMethod}
+            {authState?.mode === 'vault' ? (
+              <SettingsSection title="Workspace storage">
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={securityBusy}
+                  onClick={() => {
+                    setSecurityBusy(true);
+                    setSecurityError('');
+                    void window.wormhole
+                      ?.createSharedWorkspace()
+                      .then((completion) => {
+                        if (completion && 'switchOnRestart' in completion)
+                          setSharedWorkspaceRestartPending(true);
+                      })
+                      .catch(() => setSecurityError('Shared workspace setup is unavailable.'))
+                      .finally(() => setSecurityBusy(false));
+                  }}
                 >
-                  <SelectTrigger id="settings-auth-method" className="w-full">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="disabled">Disabled</SelectItem>
-                    <SelectItem value="pin">PIN</SelectItem>
-                    <SelectItem value="password">Password</SelectItem>
-                    {window.wormhole?.platform === 'win32' ? (
-                      <SelectItem value="windowsHello">Windows Hello</SelectItem>
-                    ) : authMethod === 'windowsHello' ? (
-                      <SelectItem disabled value="windowsHello">
-                        Windows Hello (Windows only)
-                      </SelectItem>
-                    ) : null}
-                  </SelectContent>
-                </Select>
-              </div>
-
-              {authMethod === 'windowsHello' && authState ? (
-                <div className="space-y-3 rounded-lg border border-border/70 bg-card/40 p-3">
+                  Create a shared workspace
+                </Button>
+                {sharedWorkspaceRestartPending ? (
+                  <p role="status">Restart Wormhole to use the shared workspace.</p>
+                ) : null}
+              </SettingsSection>
+            ) : null}
+            {authState?.mode === 'vault' ? (
+              <SettingsSection
+                title="Encrypted vault"
+                description="Your vault manages authentication and automatic locking."
+              >
+                {checkingDatabaseEncryption && window.wormhole ? (
+                  <VaultSecurityProfile
+                    api={window.wormhole}
+                    tighten={window.wormhole.tightenLocalVaultProfile}
+                    disabled={securityBusy}
+                  />
+                ) : null}
+                <Button
+                  onClick={() => void window.wormhole?.lockAuthentication().catch(() => undefined)}
+                  type="button"
+                  variant="outline"
+                >
+                  Lock vault
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={securityBusy}
+                  onClick={() => {
+                    setSecurityBusy(true);
+                    setSecurityError('');
+                    void window.wormhole
+                      ?.protectExistingWorkspace()
+                      .catch(() => setSecurityError('Vault protection could not be prepared.'))
+                      .finally(() => setSecurityBusy(false));
+                  }}
+                >
+                  Change vault password and recovery key
+                </Button>
+                {checkingDatabaseEncryption ? (
+                  <VaultPresenceSettings disabled={securityBusy} />
+                ) : null}
+                {checkingDatabaseEncryption && databaseEncryptionAvailable ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    disabled={securityBusy}
+                    onClick={() => {
+                      setSecurityBusy(true);
+                      setSecurityError('');
+                      void window.wormhole
+                        ?.encryptVaultDatabase()
+                        .catch(() => setSecurityError('Database encryption could not be prepared.'))
+                        .finally(() => setSecurityBusy(false));
+                    }}
+                  >
+                    Encrypt the vault database
+                  </Button>
+                ) : null}
+                {checkingDatabaseEncryption && localVaultBackupAvailable ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    disabled={securityBusy}
+                    onClick={() => {
+                      setSecurityBusy(true);
+                      setSecurityError('');
+                      setLocalVaultBackupSaved(false);
+                      void window.wormhole
+                        ?.exportLocalVaultBackup()
+                        .then(setLocalVaultBackupSaved)
+                        .catch(() => setSecurityError('Could not save the encrypted vault backup.'))
+                        .finally(() => setSecurityBusy(false));
+                    }}
+                  >
+                    Export encrypted vault backup…
+                  </Button>
+                ) : null}
+                {localVaultBackupSaved ? (
+                  <p role="status">Backup saved. Keep your recovery key to restore it.</p>
+                ) : null}
+                {securityError ? (
+                  <p role="alert" className="text-[11px] text-destructive">
+                    {securityError}
+                  </p>
+                ) : null}
+              </SettingsSection>
+            ) : (
+              <SettingsSection
+                description="Ask for a PIN, password, or Windows Hello when Wormhole opens or is left idle."
+                title="App lock"
+              >
+                <div className="space-y-2 rounded-lg border border-border/70 bg-card/40 p-3">
                   <div className="flex items-center justify-between gap-3">
-                    <p className="text-xs font-medium">Windows Hello</p>
-                    <Badge variant={authState.windowsHello.available ? 'default' : 'secondary'}>
-                      {authState.windowsHello.available ? 'Available' : 'Unavailable'}
+                    <p className="text-xs font-medium">Workspace protection</p>
+                    <Badge variant="secondary">Off</Badge>
+                  </div>
+                  <p className="text-[11px] leading-relaxed text-muted-foreground">
+                    Stored secrets currently rely on your operating system account. Add a Wormhole
+                    password and recovery key to protect this workspace. Connections will close, and
+                    Wormhole will restart after setup. Canceling setup also restarts Wormhole.
+                  </p>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    disabled={securityBusy}
+                    onClick={() => {
+                      setSecurityBusy(true);
+                      setSecurityError('');
+                      void window.wormhole
+                        ?.protectExistingWorkspace()
+                        .catch(() =>
+                          setSecurityError('Workspace protection could not be prepared.'),
+                        )
+                        .finally(() => setSecurityBusy(false));
+                    }}
+                  >
+                    Protect workspace and restart
+                  </Button>
+                </div>
+
+                <div className="space-y-2 rounded-lg border border-border/70 bg-card/40 p-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="text-xs font-medium">App lock</p>
+                    <Badge variant={authState?.configured ? 'default' : 'secondary'}>
+                      {authState?.configured ? 'Enabled' : 'Disabled'}
                     </Badge>
                   </div>
                   <p className="text-[11px] leading-relaxed text-muted-foreground">
-                    {authState.windowsHello.message}
+                    {authState?.isCorrupted
+                      ? "Wormhole can't read the saved lock. Set a new PIN or password."
+                      : authState?.configured
+                        ? `Unlock with ${authModeLabel(authState.mode)}.`
+                        : 'Wormhole opens without asking you to unlock it.'}
                   </p>
-                  <div className="grid max-w-64 gap-2">
-                    <Label htmlFor="settings-hello-fallback">If Windows Hello doesn't work</Label>
-                    <Select
+                </div>
+                <div className="grid max-w-64 gap-2">
+                  <Label htmlFor="settings-auth-method">How to unlock</Label>
+                  <Select
+                    disabled={!authState || securityBusy}
+                    onValueChange={(value) => void handleAuthMethodChange(value)}
+                    value={authMethod}
+                  >
+                    <SelectTrigger id="settings-auth-method" className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="disabled">Disabled</SelectItem>
+                      <SelectItem value="pin">PIN</SelectItem>
+                      <SelectItem value="password">Password</SelectItem>
+                      {window.wormhole?.platform === 'win32' ? (
+                        <SelectItem value="windowsHello">Windows Hello</SelectItem>
+                      ) : authMethod === 'windowsHello' ? (
+                        <SelectItem disabled value="windowsHello">
+                          Windows Hello (Windows only)
+                        </SelectItem>
+                      ) : null}
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                {authMethod === 'windowsHello' && authState ? (
+                  <div className="space-y-3 rounded-lg border border-border/70 bg-card/40 p-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <p className="text-xs font-medium">Windows Hello</p>
+                      <Badge variant={authState.windowsHello.available ? 'default' : 'secondary'}>
+                        {authState.windowsHello.available ? 'Available' : 'Unavailable'}
+                      </Badge>
+                    </div>
+                    <p className="text-[11px] leading-relaxed text-muted-foreground">
+                      {authState.windowsHello.message}
+                    </p>
+                    <div className="grid max-w-64 gap-2">
+                      <Label htmlFor="settings-hello-fallback">If Windows Hello doesn't work</Label>
+                      <Select
+                        disabled={securityBusy}
+                        onValueChange={(value) => void handleFallbackChange(value)}
+                        value={helloFallback}
+                      >
+                        <SelectTrigger id="settings-hello-fallback" className="w-full">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="pin">PIN</SelectItem>
+                          <SelectItem value="password">Password</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <Button
                       disabled={securityBusy}
-                      onValueChange={(value) => void handleFallbackChange(value)}
-                      value={helloFallback}
+                      onClick={() => void handleRefreshWindowsHello()}
+                      size="sm"
+                      type="button"
+                      variant="outline"
                     >
-                      <SelectTrigger id="settings-hello-fallback" className="w-full">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="pin">PIN</SelectItem>
-                        <SelectItem value="password">Password</SelectItem>
-                      </SelectContent>
-                    </Select>
+                      <RefreshCcw data-icon="inline-start" />
+                      Check again
+                    </Button>
                   </div>
+                ) : null}
+
+                <div className="grid max-w-64 gap-2">
+                  <Label htmlFor="settings-idle-timeout">Auto-lock after</Label>
+                  <Select
+                    disabled={!authState || securityBusy}
+                    onValueChange={(value) => void handleIdleTimeoutChange(value)}
+                    value={idleTimeout === null ? 'none' : String(idleTimeout)}
+                  >
+                    <SelectTrigger id="settings-idle-timeout" className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">None</SelectItem>
+                      <SelectItem value="1">1 minute</SelectItem>
+                      <SelectItem value="5">5 minutes</SelectItem>
+                      <SelectItem value="15">15 minutes</SelectItem>
+                      <SelectItem value="30">30 minutes</SelectItem>
+                      <SelectItem value="60">60 minutes</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="flex flex-wrap gap-2">
                   <Button
-                    disabled={securityBusy}
-                    onClick={() => void handleRefreshWindowsHello()}
+                    disabled={!authState || authMethod === 'disabled' || securityBusy}
+                    onClick={() => void handleSetSecret()}
+                    size="sm"
+                    type="button"
+                  >
+                    {selectedSecretExists
+                      ? `Change ${authSecretLabel(selectedSecretMethod!)}`
+                      : `Set ${authSecretLabel(selectedSecretMethod ?? 'pin')}`}
+                  </Button>
+                  <Button
+                    disabled={!authState || securityBusy}
+                    onClick={() => void handleTestUnlock()}
                     size="sm"
                     type="button"
                     variant="outline"
                   >
-                    <RefreshCcw data-icon="inline-start" />
-                    Check again
+                    Test app lock
                   </Button>
                 </div>
-              ) : null}
-
-              <div className="grid max-w-64 gap-2">
-                <Label htmlFor="settings-idle-timeout">Auto-lock after</Label>
-                <Select
-                  disabled={!authState || securityBusy}
-                  onValueChange={(value) => void handleIdleTimeoutChange(value)}
-                  value={idleTimeout === null ? 'none' : String(idleTimeout)}
-                >
-                  <SelectTrigger id="settings-idle-timeout" className="w-full">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="none">None</SelectItem>
-                    <SelectItem value="1">1 minute</SelectItem>
-                    <SelectItem value="5">5 minutes</SelectItem>
-                    <SelectItem value="15">15 minutes</SelectItem>
-                    <SelectItem value="30">30 minutes</SelectItem>
-                    <SelectItem value="60">60 minutes</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <Button
-                  disabled={!authState || authMethod === 'disabled' || securityBusy}
-                  onClick={() => void handleSetSecret()}
-                  size="sm"
-                  type="button"
-                >
-                  {selectedSecretExists
-                    ? `Change ${authSecretLabel(selectedSecretMethod!)}`
-                    : `Set ${authSecretLabel(selectedSecretMethod ?? 'pin')}`}
-                </Button>
-                <Button
-                  disabled={!authState || securityBusy}
-                  onClick={() => void handleTestUnlock()}
-                  size="sm"
-                  type="button"
-                  variant="outline"
-                >
-                  Test app lock
-                </Button>
-              </div>
-              {securityError ? (
-                <p className="text-[11px] text-destructive">{securityError}</p>
-              ) : null}
-              {securityMessage ? (
-                <p className="text-[11px] text-emerald-400">{securityMessage}</p>
-              ) : null}
-            </SettingsSection>
+                {securityError ? (
+                  <p className="text-[11px] text-destructive">{securityError}</p>
+                ) : null}
+                {securityMessage ? (
+                  <p className="text-[11px] text-emerald-400">{securityMessage}</p>
+                ) : null}
+              </SettingsSection>
+            )}
           </SettingsTabPanel>
 
           <SettingsTabPanel value="extensions">
-            <SettingsSection title="Bitwarden — Credential vault">
-              <SettingsSwitch
-                checked={bitwardenEnabled}
-                description="Manage the Bitwarden vault used by SSH, RDP, VNC, and SMB credentials."
-                disabled={bitwardenBusy}
-                label="Enable Bitwarden Password Manager"
-                onCheckedChange={(enabled) => void handleBitwardenCliEnabledChange(enabled)}
-              />
-              <p className="text-[11px] leading-relaxed text-muted-foreground">
-                Turning this on installs the official Bitwarden CLI automatically.
-              </p>
-              <div className="grid gap-2">
-                <Label htmlFor="settings-bitwarden-path">Bitwarden CLI path</Label>
-                <Input
-                  disabled={bitwardenBusy}
-                  id="settings-bitwarden-path"
-                  onBlur={(event) => {
-                    if (
-                      event.relatedTarget instanceof Element &&
-                      event.relatedTarget.closest('[data-slot="select-trigger"]')
-                    ) {
-                      return;
-                    }
-                    cancelScheduledBitwardenCliConfigSave();
-                    void handleBitwardenCliConfigSave(
-                      event.currentTarget.value,
-                      bitwardenServerRegion,
-                    );
-                  }}
-                  onChange={(event) => {
-                    const path = event.target.value;
-                    setBitwardenPath(path);
-                    scheduleBitwardenCliConfigSave(path, bitwardenServerRegion);
-                  }}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Enter') event.currentTarget.blur();
-                  }}
-                  placeholder="bw"
-                  spellCheck={false}
-                  value={bitwardenPath}
-                />
-              </div>
-              <div className="grid gap-2">
-                <Label>Server region</Label>
-                <Select
-                  disabled={bitwardenBusy}
-                  onValueChange={(value) => {
-                    const serverRegion = value as 'UnitedStates' | 'Europe' | 'Current';
-                    cancelScheduledBitwardenCliConfigSave();
-                    setBitwardenServerRegion(serverRegion);
-                    void handleBitwardenCliConfigSave(bitwardenPath, serverRegion);
-                  }}
-                  value={bitwardenServerRegion}
-                >
-                  <SelectTrigger className="w-full sm:max-w-[280px]">
-                    <SelectValue>
-                      {bitwardenServerRegion === 'Current'
-                        ? formatBitwardenCurrentServerLabel(currentBitwardenServerRegion)
-                        : undefined}
-                    </SelectValue>
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="UnitedStates">bitwarden.com (US)</SelectItem>
-                    <SelectItem value="Europe">bitwarden.eu (EU)</SelectItem>
-                    <SelectItem value="Current">
-                      {formatBitwardenCurrentServerLabel(currentBitwardenServerRegion)}
-                    </SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-              {bitwardenCliStatus ? (
-                <div className="grid gap-1 text-[11px] leading-relaxed text-muted-foreground">
-                  <p>
-                    Status:{' '}
-                    <span className="text-foreground">
-                      {formatBitwardenLoginStatus(bitwardenCliStatus.status)}
-                    </span>
-                  </p>
-                  <p>
-                    Vault:{' '}
-                    <span className="text-foreground">
-                      {formatBitwardenVaultStatus(bitwardenCliStatus.status)}
-                    </span>
-                  </p>
-                  {bitwardenCliStatus.userEmail ? (
-                    <p>
-                      Account:{' '}
-                      <span className="text-foreground">{bitwardenCliStatus.userEmail}</span>
-                    </p>
-                  ) : null}
-                  {bitwardenCliStatus.serverUrl ? (
-                    <p>
-                      Server:{' '}
-                      <span className="text-foreground">{bitwardenCliStatus.serverUrl}</span>
-                    </p>
-                  ) : null}
-                </div>
-              ) : (
-                <p className="text-[11px] text-muted-foreground">
-                  No status available. Connect to Bitwarden to see your vault.
-                </p>
-              )}
-              {bitwardenInstalledVersion ? (
-                <p className="text-[11px] text-muted-foreground">
-                  Installed bw CLI {bitwardenInstalledVersion}
-                </p>
-              ) : null}
-              {bitwardenLastSyncStatus ? (
-                <p className="text-[11px] text-muted-foreground">
-                  {bitwardenLastSyncStatus}
-                  {bitwardenAvailableCount !== null ? ` · ${bitwardenAvailableCount} logins` : ''}
-                </p>
-              ) : null}
-              {bitwardenInstallError ? (
-                <p className="text-[11px] text-destructive">{bitwardenInstallError}</p>
-              ) : null}
-              {bitwardenError && !bitwardenCliDialog ? (
-                <p className="text-[11px] text-destructive">{bitwardenError}</p>
-              ) : null}
-              <div className="flex flex-wrap gap-2">
-                <Button
-                  disabled={bitwardenBusy}
-                  onClick={() => void refreshBitwardenCliStatus()}
-                  size="sm"
-                  type="button"
-                  variant="outline"
-                >
-                  Refresh status
-                </Button>
-                <Button
-                  disabled={bitwardenBusy}
-                  onClick={() => void runBitwardenCliInstall()}
-                  size="sm"
-                  type="button"
-                  variant="outline"
-                >
-                  {bitwardenInstallBusy ? 'Working…' : 'Update CLI'}
-                </Button>
-                {bitwardenCliStatus?.status === 'Unauthenticated' ? (
-                  <Button
-                    disabled={bitwardenBusy || !bitwardenEnabled}
-                    onClick={() => {
-                      setBitwardenError('');
-                      setBitwardenCliDialog('login');
-                    }}
-                    size="sm"
-                    type="button"
-                    variant="outline"
-                  >
-                    Log in
-                  </Button>
-                ) : null}
-                {bitwardenCliStatus?.status === 'Locked' ? (
-                  <Button
-                    disabled={bitwardenBusy || !bitwardenEnabled}
-                    onClick={() => {
-                      setBitwardenError('');
-                      setBitwardenCliDialog('unlock');
-                    }}
-                    size="sm"
-                    type="button"
-                    variant="outline"
-                  >
-                    Unlock
-                  </Button>
-                ) : null}
-                {bitwardenLoggedIn ? (
-                  <>
-                    <Button
-                      disabled={bitwardenBusy || !bitwardenEnabled}
-                      onClick={() => void handleBitwardenCliSync()}
-                      size="sm"
-                      type="button"
-                      variant="outline"
-                    >
-                      Sync
-                    </Button>
-                    <Button
-                      disabled={bitwardenBusy || !bitwardenEnabled}
-                      onClick={() => void handleBitwardenCliLogout()}
-                      size="sm"
-                      type="button"
-                      variant="outline"
-                    >
-                      Log out
-                    </Button>
-                  </>
-                ) : null}
-              </div>
-            </SettingsSection>
-
-            <SettingsSection title="Bitwarden — Browser extension">
-              <SettingsSwitch
-                checked={browserExtensionEnabled}
-                description="Use the official Bitwarden extension with HTTPS home pages in Browser connections."
-                disabled={browserExtensionBusy}
-                label="Enable Bitwarden in Browser windows"
-                onCheckedChange={(enabled) => void handleBrowserExtensionEnabledChange(enabled)}
-              />
-              <p
-                className={
-                  browserExtensionError
-                    ? 'text-[11px] leading-relaxed text-destructive'
-                    : 'text-[11px] leading-relaxed text-muted-foreground'
-                }
+            {authState?.mode === 'vault' ? (
+              <SettingsSection
+                title="Bitwarden extension"
+                description="Manage the extension package for this encrypted workspace."
               >
-                {browserExtensionStatus}
-              </p>
-              <p className="text-[11px] leading-relaxed text-muted-foreground">
-                Turning this on installs the official extension automatically.
-              </p>
-              <div className="flex flex-wrap gap-2">
-                <Button
-                  disabled={browserExtensionBusy}
-                  onClick={() => void runBitwardenExtensionUpdate()}
-                  size="sm"
-                  type="button"
-                  variant="outline"
-                >
-                  {browserExtensionUpdateBusy ? 'Working…' : 'Update Extension'}
-                </Button>
-                <Button
-                  disabled={browserExtensionBusy}
-                  onClick={() => void importBitwardenExtensionZip()}
-                  size="sm"
-                  type="button"
-                  variant="outline"
-                >
-                  Import ZIP
-                </Button>
-                <Button
-                  disabled={browserExtensionBusy}
-                  onClick={() => void importBitwardenExtensionFolder()}
-                  size="sm"
-                  type="button"
-                  variant="outline"
-                >
-                  Use folder
-                </Button>
-              </div>
-            </SettingsSection>
+                {authGate === 'unlocked' ? <VaultBitwardenInstallation /> : null}
+              </SettingsSection>
+            ) : (
+              <SettingsSection
+                description="Use Bitwarden for credential passwords and Browser connections."
+                title="Bitwarden"
+              >
+                <SettingsSection title="Credential vault">
+                  <SettingsSwitch
+                    checked={bitwardenEnabled}
+                    description="Manage the Bitwarden vault used by SSH, RDP, and VNC credentials."
+                    disabled={bitwardenBusy}
+                    label="Enable Bitwarden Password Manager"
+                    onCheckedChange={(enabled) => void handleBitwardenCliEnabledChange(enabled)}
+                  />
+                  <p className="text-[11px] leading-relaxed text-muted-foreground">
+                    Turning this on installs the official Bitwarden CLI automatically.
+                  </p>
+                  <div className="grid gap-2">
+                    <Label htmlFor="settings-bitwarden-path">Bitwarden CLI path</Label>
+                    <Input
+                      disabled={bitwardenBusy}
+                      id="settings-bitwarden-path"
+                      onBlur={(event) => {
+                        if (
+                          event.relatedTarget instanceof Element &&
+                          event.relatedTarget.closest('[data-slot="select-trigger"]')
+                        ) {
+                          return;
+                        }
+                        cancelScheduledBitwardenCliConfigSave();
+                        void handleBitwardenCliConfigSave(
+                          event.currentTarget.value,
+                          bitwardenServerRegion,
+                        );
+                      }}
+                      onChange={(event) => {
+                        const path = event.target.value;
+                        setBitwardenPath(path);
+                        scheduleBitwardenCliConfigSave(path, bitwardenServerRegion);
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter') event.currentTarget.blur();
+                      }}
+                      placeholder="bw"
+                      spellCheck={false}
+                      value={bitwardenPath}
+                    />
+                  </div>
+                  <div className="grid gap-2">
+                    <Label>Server region</Label>
+                    <Select
+                      disabled={bitwardenBusy}
+                      onValueChange={(value) => {
+                        const serverRegion = value as 'UnitedStates' | 'Europe' | 'Current';
+                        cancelScheduledBitwardenCliConfigSave();
+                        setBitwardenServerRegion(serverRegion);
+                        void handleBitwardenCliConfigSave(bitwardenPath, serverRegion);
+                      }}
+                      value={bitwardenServerRegion}
+                    >
+                      <SelectTrigger className="w-full sm:max-w-[280px]">
+                        <SelectValue>
+                          {bitwardenServerRegion === 'Current'
+                            ? formatBitwardenCurrentServerLabel(currentBitwardenServerRegion)
+                            : undefined}
+                        </SelectValue>
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="UnitedStates">bitwarden.com (US)</SelectItem>
+                        <SelectItem value="Europe">bitwarden.eu (EU)</SelectItem>
+                        <SelectItem value="Current">
+                          {formatBitwardenCurrentServerLabel(currentBitwardenServerRegion)}
+                        </SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  {bitwardenCliStatus ? (
+                    <div className="grid gap-1 text-[11px] leading-relaxed text-muted-foreground">
+                      <p>
+                        Status:{' '}
+                        <span className="text-foreground">
+                          {formatBitwardenLoginStatus(bitwardenCliStatus.status)}
+                        </span>
+                      </p>
+                      <p>
+                        Vault:{' '}
+                        <span className="text-foreground">
+                          {formatBitwardenVaultStatus(bitwardenCliStatus.status)}
+                        </span>
+                      </p>
+                      {bitwardenCliStatus.userEmail ? (
+                        <p>
+                          Account:{' '}
+                          <span className="text-foreground">{bitwardenCliStatus.userEmail}</span>
+                        </p>
+                      ) : null}
+                      {bitwardenCliStatus.serverUrl ? (
+                        <p>
+                          Server:{' '}
+                          <span className="text-foreground">{bitwardenCliStatus.serverUrl}</span>
+                        </p>
+                      ) : null}
+                    </div>
+                  ) : (
+                    <p className="text-[11px] text-muted-foreground">
+                      No status available. Connect to Bitwarden to see your vault.
+                    </p>
+                  )}
+                  {bitwardenInstalledVersion ? (
+                    <p className="text-[11px] text-muted-foreground">
+                      Installed bw CLI {bitwardenInstalledVersion}
+                    </p>
+                  ) : null}
+                  {bitwardenLastSyncStatus ? (
+                    <p className="text-[11px] text-muted-foreground">
+                      {bitwardenLastSyncStatus}
+                      {bitwardenAvailableCount !== null
+                        ? ` · ${bitwardenAvailableCount} logins`
+                        : ''}
+                    </p>
+                  ) : null}
+                  {bitwardenInstallError ? (
+                    <p className="text-[11px] text-destructive">{bitwardenInstallError}</p>
+                  ) : null}
+                  {bitwardenError && !bitwardenCliDialog ? (
+                    <p className="text-[11px] text-destructive">{bitwardenError}</p>
+                  ) : null}
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      disabled={bitwardenBusy}
+                      onClick={() => void refreshBitwardenCliStatus()}
+                      size="sm"
+                      type="button"
+                      variant="outline"
+                    >
+                      Refresh status
+                    </Button>
+                    <Button
+                      disabled={bitwardenBusy}
+                      onClick={() => void runBitwardenCliInstall()}
+                      size="sm"
+                      type="button"
+                      variant="outline"
+                    >
+                      {bitwardenInstallBusy ? 'Working…' : 'Update CLI'}
+                    </Button>
+                    {bitwardenCliStatus?.status === 'Unauthenticated' ? (
+                      <Button
+                        disabled={bitwardenBusy || !bitwardenEnabled}
+                        onClick={() => {
+                          setBitwardenError('');
+                          setBitwardenCliDialog('login');
+                        }}
+                        size="sm"
+                        type="button"
+                        variant="outline"
+                      >
+                        Log in
+                      </Button>
+                    ) : null}
+                    {bitwardenCliStatus?.status === 'Locked' ? (
+                      <Button
+                        disabled={bitwardenBusy || !bitwardenEnabled}
+                        onClick={() => {
+                          setBitwardenError('');
+                          setBitwardenCliDialog('unlock');
+                        }}
+                        size="sm"
+                        type="button"
+                        variant="outline"
+                      >
+                        Unlock
+                      </Button>
+                    ) : null}
+                    {bitwardenLoggedIn ? (
+                      <>
+                        <Button
+                          disabled={bitwardenBusy || !bitwardenEnabled}
+                          onClick={() => void handleBitwardenCliSync()}
+                          size="sm"
+                          type="button"
+                          variant="outline"
+                        >
+                          Sync
+                        </Button>
+                        <Button
+                          disabled={bitwardenBusy || !bitwardenEnabled}
+                          onClick={() => void handleBitwardenCliLogout()}
+                          size="sm"
+                          type="button"
+                          variant="outline"
+                        >
+                          Log out
+                        </Button>
+                      </>
+                    ) : null}
+                  </div>
+                </SettingsSection>
+
+                <SettingsSection title="Browser extension">
+                  <SettingsSwitch
+                    checked={browserExtensionEnabled}
+                    description="Use the official Bitwarden extension with HTTPS home pages in Browser connections."
+                    disabled={browserExtensionBusy}
+                    label="Enable Bitwarden in Browser windows"
+                    onCheckedChange={(enabled) => void handleBrowserExtensionEnabledChange(enabled)}
+                  />
+                  <p
+                    className={
+                      browserExtensionError
+                        ? 'text-[11px] leading-relaxed text-destructive'
+                        : 'text-[11px] leading-relaxed text-muted-foreground'
+                    }
+                  >
+                    {browserExtensionStatus}
+                  </p>
+                  <p className="text-[11px] leading-relaxed text-muted-foreground">
+                    Turning this on installs the official extension automatically.
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      disabled={browserExtensionBusy}
+                      onClick={() => void runBitwardenExtensionUpdate()}
+                      size="sm"
+                      type="button"
+                      variant="outline"
+                    >
+                      {browserExtensionUpdateBusy ? 'Working…' : 'Update Extension'}
+                    </Button>
+                    <Button
+                      disabled={browserExtensionBusy}
+                      onClick={() => void importBitwardenExtensionZip()}
+                      size="sm"
+                      type="button"
+                      variant="outline"
+                    >
+                      Import ZIP
+                    </Button>
+                    <Button
+                      disabled={browserExtensionBusy}
+                      onClick={() => void importBitwardenExtensionFolder()}
+                      size="sm"
+                      type="button"
+                      variant="outline"
+                    >
+                      Use folder
+                    </Button>
+                  </div>
+                </SettingsSection>
+              </SettingsSection>
+            )}
           </SettingsTabPanel>
 
           <SettingsTabPanel value="updates">
@@ -17355,12 +17227,14 @@ function SettingsPage({
               <p className="text-[11px] text-muted-foreground">
                 {formatLastUpdateCheck(update.lastUpdateCheck)}
               </p>
-              <SettingsSwitch
-                checked={update.autoCheckForUpdates}
-                description="Check for a newer Wormhole build when the app starts."
-                label="Automatically check for updates on startup"
-                onCheckedChange={onSetAutoCheckForUpdates}
-              />
+              {update.result?.updatePolicy !== 'managed' ? (
+                <SettingsSwitch
+                  checked={update.autoCheckForUpdates}
+                  description="Check for a newer Wormhole build when the app starts."
+                  label="Automatically check for updates on startup"
+                  onCheckedChange={onSetAutoCheckForUpdates}
+                />
+              ) : null}
               {updateMessage ? (
                 <p className="text-[11px] text-muted-foreground">{updateMessage}</p>
               ) : null}
@@ -17378,15 +17252,20 @@ function SettingsPage({
               ) : null}
               <div className="flex flex-wrap gap-2">
                 <Button disabled={update.busy} onClick={onCheckForUpdates} size="sm">
-                  Check now
+                  {update.result?.updatePolicy === 'managed'
+                    ? 'Check managed updates'
+                    : 'Check now'}
                 </Button>
-                <Button
-                  disabled={update.busy || !updateAvailable}
-                  onClick={onInstallUpdate}
-                  size="sm"
-                >
-                  {window.wormhole?.platform === 'linux' ? 'Download AppImage' : 'Install update'}
-                </Button>
+                {update.result?.updatePolicy !== 'notify' &&
+                (update.result?.updatePolicy !== 'managed' || updateAvailable) ? (
+                  <Button
+                    disabled={update.busy || !updateAvailable}
+                    onClick={onInstallUpdate}
+                    size="sm"
+                  >
+                    {window.wormhole?.platform === 'linux' ? 'Download AppImage' : 'Install update'}
+                  </Button>
+                ) : null}
                 {updateDismissible ? (
                   <Button
                     disabled={update.busy}
@@ -17400,28 +17279,30 @@ function SettingsPage({
               </div>
             </SettingsSection>
 
-            <SettingsSection title="Release notes">
-              {showReleaseNotes ? (
-                <p className="text-xs font-medium">
-                  Update available: {update.result?.latestVersion}
-                </p>
-              ) : null}
-              <Card className="border-border/70 bg-card/40 p-4 shadow-none">
+            {update.result?.updatePolicy !== 'managed' ? (
+              <SettingsSection title="Release notes">
                 {showReleaseNotes ? (
-                  <div className="text-[11px] leading-relaxed text-muted-foreground">
-                    <ReleaseNotesMarkdown markdown={update.result?.releaseNotes ?? ''} />
-                  </div>
-                ) : (
-                  <p className="text-[11px] leading-relaxed text-muted-foreground">
-                    {update.result?.checkFailed
-                      ? "Couldn't reach the update server. Try again later."
-                      : update.result?.latestVersion
-                        ? "You're on the latest version."
-                        : 'Update information will appear here when a new release is available.'}
+                  <p className="text-xs font-medium">
+                    Update available: {update.result?.latestVersion}
                   </p>
-                )}
-              </Card>
-            </SettingsSection>
+                ) : null}
+                <Card className="border-border/70 bg-card/40 p-4 shadow-none">
+                  {showReleaseNotes ? (
+                    <div className="text-[11px] leading-relaxed text-muted-foreground">
+                      <ReleaseNotesMarkdown markdown={update.result?.releaseNotes ?? ''} />
+                    </div>
+                  ) : (
+                    <p className="text-[11px] leading-relaxed text-muted-foreground">
+                      {update.result?.checkFailed
+                        ? "Couldn't reach the update server. Try again later."
+                        : update.result?.latestVersion
+                          ? "You're on the latest version."
+                          : 'Update information will appear here when a new release is available.'}
+                    </p>
+                  )}
+                </Card>
+              </SettingsSection>
+            ) : null}
           </SettingsTabPanel>
 
           <SettingsTabPanel forceMount value="logs">

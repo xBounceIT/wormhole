@@ -16,6 +16,7 @@ import {
   type Stats,
 } from 'node:fs';
 import path from 'node:path';
+import type { VaultProfile } from './vault-security.ts';
 
 const crashDumpDirectoryName = 'crashdumps';
 const reportStateFileName = 'electron-crashdumps-reported.json';
@@ -129,6 +130,27 @@ type ReportState = {
   keys: Set<string>;
   needsRewrite: boolean;
 };
+
+export class VaultCrashCapturePolicy {
+  private readonly startLocal: () => void;
+  private attempted = false;
+
+  constructor(startLocal: () => void) {
+    this.startLocal = startLocal;
+  }
+
+  apply(profile: VaultProfile): void {
+    if (profile === 'hardened' || profile === 'paranoid') {
+      if (this.attempted) throw Error('This vault profile requires a fresh app process.');
+      return;
+    }
+    if (this.attempted) return;
+    // Crashpad cannot be stopped. A failed or partially completed start is
+    // also insufficient proof that this process is safe for a stricter vault.
+    this.attempted = true;
+    this.startLocal();
+  }
+}
 
 export function resolveCrashDiagnosticsPaths(options: {
   platform: NodeJS.Platform;

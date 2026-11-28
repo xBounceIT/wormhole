@@ -1,0 +1,196 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import {
+  parseInvitationCopyReply,
+  parseMemberInvitationReply,
+  parseMemberInvitationRequest,
+} from '../electron/vault-shared-member-invitation.ts';
+import {
+  parseAdminInventoryReply,
+  parseAdminInventoryRequest,
+  parseCreateSlot,
+  parseCreateSlotReply,
+} from '../electron/vault-shared-admin-inventory.ts';
+
+const id = (n: number) => `00000000-0000-0000-0000-${String(n).padStart(12, '0')}`;
+const at = '2026-11-23T12:00:00.123456Z';
+
+test('member invitations bind public metadata and purpose-specific sealed replies', () => {
+  const request = {
+    login: 'member',
+    name: 'Operations',
+    requestId: id(1),
+    recipient: Buffer.alloc(32, 2).toString('base64'),
+  };
+  assert.deepEqual(parseMemberInvitationRequest(request), request);
+  for (const change of [
+    { name: 'bad\nname' },
+    { login: 'ñ'.repeat(129) },
+    { recipient: 'invalid' },
+    { groups: [] },
+    { code: 'raw' },
+  ]) {
+    assert.equal(parseMemberInvitationRequest({ ...request, ...change }), undefined);
+  }
+  const bundle = {
+    formatVersion: 1,
+    suiteId: 2,
+    enc: request.recipient,
+    ciphertext: Buffer.alloc(32, 3).toString('base64'),
+  };
+  const handover = {
+    workspaceId: id(2),
+    requestId: request.requestId,
+    inviteId: id(3),
+    token: 'WHINV3-Zg.' + 'a'.repeat(64),
+    bundle,
+  };
+  assert.deepEqual(parseMemberInvitationReply({ status: 'issued', handover }), {
+    status: 'issued',
+    handover,
+  });
+  assert.equal(
+    parseMemberInvitationReply({ status: 'issued', handover: { ...handover, code: 'raw' } }),
+    undefined,
+  );
+  assert.equal(parseInvitationCopyReply({ status: 'sealed', bundle }), undefined);
+  const sealed = {
+    status: 'sealed',
+    bundle: { ...bundle, ciphertext: Buffer.alloc(50, 4).toString('base64') },
+  };
+  assert.deepEqual(parseInvitationCopyReply(sealed), sealed);
+  assert.equal(
+    parseMemberInvitationReply({
+      status: 'issued',
+      handover: { ...handover, bundle: sealed.bundle },
+    }),
+    undefined,
+  );
+  assert.equal(parseInvitationCopyReply({ status: 'copied', expiresInSeconds: 15 }), undefined);
+});
+
+test('slot creation accepts only unassigned metadata and a bounded outcome', () => {
+  const slot = { id: id(1), name: 'Créneau <&>', protocol: 'ssh', allowSelfService: true };
+  assert.deepEqual(parseCreateSlot(slot), slot);
+  for (const bad of [
+    null,
+    { ...slot, defaultCredentialId: id(2) },
+    { ...slot, allowSelfService: 1 },
+    { ...slot, id: id(0) },
+    { ...slot, protocol: 'http' },
+    { ...slot, name: '   ' },
+    { ...slot, name: '\u0001test' },
+    { ...slot, name: '\udaaa' },
+    { ...slot, name: 'è'.repeat(513) },
+  ])
+    assert.equal(parseCreateSlot(bad), undefined);
+  for (const status of ['saved', 'unavailable', 'unsupported', 'busy', 'stale'])
+    assert.deepEqual(parseCreateSlotReply({ status }), { status });
+  for (const invalid of [null, { status: 'ready' }, { status: 'saved', credentialId: id(1) }])
+    assert.equal(parseCreateSlotReply(invalid), undefined);
+});
+
+test('administration requests scope cursors to their section and preserve audit microseconds', () => {
+  assert.deepEqual(parseAdminInventoryRequest({ kind: 'accounts' }), { kind: 'accounts' });
+  assert.deepEqual(parseAdminInventoryRequest({ kind: 'devices', next: { id: id(3) } }), {
+    kind: 'devices',
+    next: { id: id(3) },
+  });
+  const request = { kind: 'sessions', next: { id: id(3), at } };
+  assert.deepEqual(parseAdminInventoryRequest(request), request);
+  for (const bad of [
+    null,
+    { kind: 'credentials' },
+    { kind: 'devices', next: { id: id(3), at } },
+    { kind: 'sessions', next: { id: id(3) } },
+    { kind: 'audit', next: { id: id(0), at } },
+    { kind: 'audit', next: { id: id(3), at: at.replace('11-23', '02-30') } },
+    { kind: 'audit', next: { id: id(3), at: at.replace('.123456', '.123') } },
+    { kind: 'audit', next: { id: id(3), at }, account: id(1) },
+  ])
+    assert.equal(parseAdminInventoryRequest(bad), undefined);
+});
+
+test('administration replies are bounded to one ordered page with exact fields', () => {
+  const account = { id: id(1), login: 'admin', role: 'administrator', status: 'enabled' };
+  const device = { id: id(1), login: 'admin', name: 'Desk', status: 'pending', at };
+  const slot = { id: id(1), name: 'Primary login', protocol: 'ssh', allowSelfService: false };
+  const session = {
+    id: id(1),
+    login: 'admin',
+    deviceId: id(2),
+    appVersion: '2.4.3',
+    transport: 'tls',
+    at,
+  };
+  const event = {
+    id: id(1),
+    login: '',
+    actorId: id(2),
+    sessionId: id(3),
+    action: 'login',
+    status: 'success',
+    source: 'ui',
+    at,
+  };
+  for (const [kind, record, invalid] of [
+    ['accounts', account, { ...account, status: 'deleted' }],
+    ['invitations', { ...device, status: 'pending' }, { ...device, code: 'private' }],
+    ['invitations', { ...device, status: 'redeemed' }, { ...device, status: 'ready-to-copy' }],
+    ['devices', device, { ...device, name: '\rsecret' }],
+    ['slots', slot, { ...slot, defaultCredentialId: id(2) }],
+    ['my-slots', { ...slot, allowSelfService: true }, slot],
+    ['slots', slot, { ...slot, allowSelfService: 'false' }],
+    ['slots', slot, { ...slot, protocol: 'https' }],
+    ['slots', slot, { ...slot, name: ' ' }],
+    ['slots', slot, { ...slot, name: 'è'.repeat(513) }],
+    ['unencrypted-clients', device, { ...device, clientAddr: '192.0.2.1' }],
+    ['sessions', session, { ...session, clientAddr: '192.0.2.1' }],
+    ['audit', event, { ...event, sessionRole: 'private-role' }],
+  ] as const) {
+    const reply = { status: 'ready', page: { kind, entries: [record] } };
+    assert.deepEqual(parseAdminInventoryReply(reply, { kind }), reply);
+    assert.equal(
+      parseAdminInventoryReply({ ...reply, page: { kind, entries: [invalid] } }, { kind }),
+      undefined,
+    );
+    assert.equal(
+      parseAdminInventoryReply({ ...reply, page: { kind, entries: [record, record] } }, { kind }),
+      undefined,
+    );
+  }
+  const kind = 'audit';
+  const shortSlotPage = { kind: 'slots', entries: [slot], next: { id: slot.id } };
+  const shortReply = { status: 'ready', page: shortSlotPage };
+  assert.deepEqual(parseAdminInventoryReply(shortReply, { kind: 'slots' }), shortReply);
+  assert.equal(
+    parseAdminInventoryReply(
+      { ...shortReply, page: { ...shortSlotPage, entries: [] } },
+      { kind: 'slots' },
+    ),
+    undefined,
+  );
+  const entries = Array.from({ length: 25 }, (_, index) => ({ ...event, id: id(30 - index) }));
+  const next = { id: id(6), at };
+  const reply = { status: 'ready', page: { kind, entries, next } };
+  assert.deepEqual(parseAdminInventoryReply(reply, { kind }), reply);
+  assert.equal(parseAdminInventoryReply(reply, { kind, next }), undefined);
+  assert.equal(
+    parseAdminInventoryReply(
+      { ...reply, page: { kind, entries, next: { id: id(5), at } } },
+      { kind },
+    ),
+    undefined,
+  );
+  assert.equal(
+    parseAdminInventoryReply({ ...reply, page: { kind, entries: [...entries, event] } }, { kind }),
+    undefined,
+  );
+  assert.deepEqual(parseAdminInventoryReply({ status: 'unavailable' }, { kind }), {
+    status: 'unavailable',
+  });
+  assert.equal(
+    parseAdminInventoryReply({ status: 'unavailable', page: reply.page }, { kind }),
+    undefined,
+  );
+});

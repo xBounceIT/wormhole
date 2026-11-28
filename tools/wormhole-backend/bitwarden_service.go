@@ -7,6 +7,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/xBounceIT/wormhole/tools/wormhole-backend/internal/resolver"
 )
 
 type bitwardenResolvedCredential struct {
@@ -672,12 +674,7 @@ func (m *vncManager) resolveBitwardenCredentialRaw(
 }
 
 func splitRdpDomainUsername(username string) (string, string) {
-	username = strings.TrimSpace(username)
-	slash := strings.IndexByte(username, '\\')
-	if slash <= 0 || slash == len(username)-1 {
-		return username, ""
-	}
-	return username[slash+1:], username[:slash]
+	return resolver.SplitRDPIdentity(username)
 }
 
 func (m *vncManager) resolveBitwardenNodeCredential(
@@ -708,7 +705,7 @@ func (m *vncManager) resolveBitwardenNodeCredential(
 	return resolved, nil
 }
 
-func resolveNodeRdpIdentity(database *sql.DB, nodeID string) (string, string, error) {
+func resolveNodeRdpIdentity(database sqlMetadataReader, nodeID string) (string, string, error) {
 	columns, err := tableColumns(database, "Nodes")
 	if err != nil {
 		return "", "", err
@@ -788,8 +785,11 @@ func resolveNodeRdpIdentity(database *sql.DB, nodeID string) (string, string, er
 	return username, domain, nil
 }
 
-func resolveNodeCredentialID(database *sql.DB, nodeID string, protocol int64) (string, error) {
+func resolveNodeCredentialID(database sqlMetadataReader, nodeID string, protocol int64) (string, error) {
 	if database == nil {
+		return "", errors.New("Wormhole database is not available")
+	}
+	if db, ok := database.(*sql.DB); ok && db == nil {
 		return "", errors.New("Wormhole database is not available")
 	}
 	columns, err := tableColumns(database, "Nodes")

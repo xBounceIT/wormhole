@@ -152,7 +152,9 @@ func unprotectDpapi(protected, entropy []byte) ([]byte, error) {
 		return nil, errors.New("Windows DPAPI returned an empty value")
 	}
 	defer localFree.Call(uintptr(unsafe.Pointer(output.pbData)))
-	return append([]byte(nil), unsafe.Slice(output.pbData, output.cbData)...), nil
+	plaintext := unsafe.Slice(output.pbData, output.cbData)
+	defer clearBytes(plaintext)
+	return append([]byte(nil), plaintext...), nil
 }
 
 // Older Wormhole versions passed entropy in the description slot and therefore
@@ -197,11 +199,14 @@ func unprotectSecret(encoded string) ([]byte, error) {
 		return nil, errors.New("Windows DPAPI returned an empty value")
 	}
 	defer localFree.Call(uintptr(unsafe.Pointer(output.pbData)))
-	return append([]byte(nil), unsafe.Slice(output.pbData, output.cbData)...), nil
+	plaintext := unsafe.Slice(output.pbData, output.cbData)
+	defer clearBytes(plaintext)
+	return append([]byte(nil), plaintext...), nil
 }
 
 func unprotectElectronSafeStorageSecret(encoded, userDataPath string) ([]byte, error) {
 	key, err := readElectronSafeStorageKey(userDataPath)
+	defer clearBytes(key)
 	if err != nil {
 		return nil, err
 	}
@@ -212,12 +217,9 @@ func readElectronSafeStorageKey(userDataPath string) ([]byte, error) {
 	if userDataPath == "" {
 		return nil, errors.New("secure storage data path is missing")
 	}
-	localState, err := os.ReadFile(filepath.Join(userDataPath, "Local State"))
+	localState, err := readBoundedRegularFile(filepath.Join(userDataPath, "Local State"), electronLocalStateMaxBytes)
 	if err != nil {
 		return nil, errors.New("secure storage key is unavailable")
-	}
-	if len(localState) > electronLocalStateMaxBytes {
-		return nil, errors.New("secure storage state is too large")
 	}
 
 	var document struct {
@@ -311,7 +313,9 @@ func unprotectFileContents(_ string, protected []byte) ([]byte, error) {
 		return nil, errors.New("Windows DPAPI returned an empty value")
 	}
 	defer localFree.Call(uintptr(unsafe.Pointer(output.pbData)))
-	return append([]byte(nil), unsafe.Slice(output.pbData, output.cbData)...), nil
+	plaintext := unsafe.Slice(output.pbData, output.cbData)
+	defer clearBytes(plaintext)
+	return append([]byte(nil), plaintext...), nil
 }
 
 func protectFile(path string, plaintext []byte) error {

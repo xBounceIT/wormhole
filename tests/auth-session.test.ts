@@ -7,6 +7,7 @@ import { EventEmitter } from 'node:events';
 import { Session } from 'node:inspector/promises';
 import { AuthSession } from '../electron/auth-session.ts';
 import { encodeTerminalClipboardText, isEncodedSshInput } from '../electron/terminal-clipboard.ts';
+import { VaultBackendHost } from '../electron/vault-host.ts';
 import { authenticationIdleSeconds } from '../src/auth-idle.ts';
 
 // main.ts is a process entrypoint, so measure its isolated production handlers
@@ -97,7 +98,10 @@ test(
         requireWorkspaceAuth: async () => session.requireUnlocked(),
         clipboard: { readText: () => read() },
         encodeTerminalClipboardText,
-        sshBackend: { sendInput: (...args: unknown[]) => inputs.push(args) },
+        sshBackend: {
+          captureOwner: () => () => {},
+          sendInput: (...args: unknown[]) => inputs.push(args),
+        },
       },
       { filename },
     ) as (operation: () => Promise<unknown>) => Promise<unknown>;
@@ -199,6 +203,7 @@ test('backend keeps idle-lock Hello alive until native completion or owner cance
     'spawn-error',
     'stdin-error',
     'stdout-limit',
+    'native-vault',
   ]) {
     const child = new EventEmitter() as EventEmitter & {
       stdout: EventEmitter & { setEncoding: () => void };
@@ -227,6 +232,7 @@ test('backend keeps idle-lock Hello alive until native completion or owner cance
         backupTimeoutMs: 120_000,
         backendMaxRequestBytes: 1024,
         backendMaxBuffer: 1024,
+        vaultBackend: { isVaultWorkspace: outcome === 'native-vault' },
         backendPath: () => 'backend',
         observeBackendProcess: () => {},
         backendErrorText: (stderr: string) => stderr.trim(),
@@ -264,6 +270,11 @@ test('backend keeps idle-lock Hello alive until native completion or owner cance
       30_000,
       controller.signal,
     );
+    if (outcome === 'native-vault') {
+      await assert.rejects(pending, /not yet available for encrypted vaults/);
+      assert.equal(spawns, 0);
+      continue;
+    }
     if (['aborted', 'oversized'].includes(outcome)) {
       await assert.rejects(pending, outcome === 'aborted' ? /cancelled/ : /too large/);
       assert.equal(spawns, 0);
@@ -478,6 +489,10 @@ test('idle lock cancels an earlier Hello before draining security mutations and 
     source.indexOf('function serializeAuthOperation'),
     source.indexOf('async function runAuthorizedOperation'),
   );
+  const lockSource = source.slice(
+    source.indexOf('function holdApplicationLock('),
+    source.indexOf('function registerIpcHandlers('),
+  );
   const handlersSource = source.slice(
     source.indexOf("ipcMain.handle('auth:update-settings'"),
     source.indexOf("ipcMain.handle('auth:system-idle'"),
@@ -495,7 +510,6 @@ test('idle lock cancels an earlier Hello before draining security mutations and 
     let firstSignal: AbortSignal | undefined;
     const nativeActions: string[] = [];
     const webSurfaceActions: string[] = [];
-    let holdHello = false;
     let pauseNextEnsure: (() => Promise<void>) | undefined;
     let start!: () => void;
     const started = new Promise<void>((resolve) => {
@@ -513,9 +527,11 @@ test('idle lock cancels an earlier Hello before draining security mutations and 
       let authOperationQueue = Promise.resolve();
       let authStateMutationQueue = Promise.resolve();
       let authLockRequested = false;
+      let authLocksInProgress = 0;
       let activeHelloVerification;
       ${serialization}
       ${clearIPsecDrafts}
+      ${lockSource}
       ${handlersSource}
       ({ get lockRequested() { return authLockRequested; }, get activeHello() { return activeHelloVerification; } })
     `),
@@ -562,7 +578,7 @@ test('idle lock cancels an earlier Hello before draining security mutations and 
           signal: AbortSignal,
         ) => {
           helloCalls++;
-          if (!holdHello && (helloCalls > 1 || scenario === 'starting-verification'))
+          if (helloCalls > 1 || scenario === 'starting-verification')
             return Promise.resolve({ succeeded: true });
           firstSignal = signal;
           start();
@@ -570,12 +586,17 @@ test('idle lock cancels an earlier Hello before draining security mutations and 
             signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true }),
           );
         },
+        stopVaultRdpSessions: async () => {},
+        stopVaultVncSessions: async () => {},
+        stopVaultBitwardenCLIUnlock: async () => {},
         cancelAllUserOperations: () => {},
         backupImportSelections: new WeakMap(),
         sshPrivateKeySelections: privateKeySelections,
         sshCertificateSelections: certificateSelections,
         mremoteImportAnalysis: new WeakMap(),
         mremoteImportSelections: new WeakMap(),
+        vaultSshIpc: { closeAll: async () => {} },
+        sealedSerial: { closeAll: async () => {} },
         sshBackend: {
           prepareForLock: () => {},
           closeAllSftp: () => {},
@@ -590,6 +611,19 @@ test('idle lock cancels an earlier Hello before draining security mutations and 
         nativeBackend: {
           send: async ({ action }: { action: string }) => nativeActions.push(action),
         },
+        vaultWebIpc: { closeAll: async () => {} },
+        vaultBackend: { stop: async () => {} },
+        vaultLockMonitor: { deactivate: () => {} },
+        vaultNotesDialog: { cancel: () => {} },
+        vaultCredentialsDialog: { cancel: () => {} },
+        vaultLinuxClipboard: { reset: async () => {} },
+        vaultTunnelDialog: { cancel: async () => {} },
+        vaultReauthenticationDialog: { cancel: async () => {} },
+        vaultSharedDialog: { cancel: async () => {} },
+        vaultCreateDialog: { active: false, cancel: async () => {} },
+        vaultMigrationSetupDialog: { active: false, cancel: async () => {} },
+        vaultOSMigrationDialog: { active: false, cancel: async () => {} },
+        vaultSharedSetupDialog: { active: false, cancel: async () => {} },
         rdpClient: undefined,
         cancelPreparingRdpStarts: () => {},
       },
@@ -608,7 +642,7 @@ test('idle lock cancels an earlier Hello before draining security mutations and 
         : Promise.resolve();
     const locked = handlers.get('auth:lock')!({ sender });
     assert.equal(context.lockRequested, true);
-    assert.deepEqual(nativeActions, ['tunnel.ipsec-clear']);
+    assert.deepEqual(nativeActions, ['tunnel.ipsec-clear', 'bitwarden.clear-session']);
     if (scenario === 'starting-verification') releaseHelloStart();
     else
       assert.equal(
@@ -616,7 +650,9 @@ test('idle lock cancels an earlier Hello before draining security mutations and 
         true,
         'locking must cancel Hello before waiting for queued settings',
       );
-    assert.equal((await oldConfirmation).succeeded, false);
+    if (scenario === 'starting-verification')
+      await assert.rejects(oldConfirmation, /locked during verification/);
+    else assert.equal((await oldConfirmation).succeeded, false);
     await queuedSettings;
     await locked;
     assert.deepEqual(webSurfaceActions, ['cancelTunnelReconnects', 'hideAll']);
@@ -649,23 +685,488 @@ test('idle lock cancels an earlier Hello before draining security mutations and 
       const firstLock = handlers.get('auth:lock')!({ sender });
       await lockStarted;
       await handlers.get('auth:lock')!({ sender });
-      holdHello = true;
-      const nextHelloStarted = new Promise<void>((resolve) => {
-        start = resolve;
-      });
-      const staleUnlock = hello({ sender });
-      await nextHelloStarted;
+      assert.equal(context.lockRequested, true);
+      await assert.rejects(hello({ sender }), /locked during verification/);
       releaseLock();
       await firstLock;
-      assert.equal(
-        firstSignal?.aborted,
-        true,
-        'the final lock transition must cancel verification started between overlapping locks',
-      );
-      assert.equal((await staleUnlock).succeeded, false);
       assert.equal(session.isAccessAllowed, false);
     }
   }
+});
+
+test('app lock clears sessions while awaiting vault exit and never acknowledges an unconfirmed stop', async (t) => {
+  const filename = 'wormhole-vault-lock-handler.js';
+  const verifyCoverage = await measureHandlerCoverage(t, filename);
+  const source = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
+  const lockSource = source.slice(
+    source.indexOf('function holdApplicationLock('),
+    source.indexOf('function registerIpcHandlers('),
+  );
+  const handlerSource = source.slice(
+    source.indexOf("ipcMain.handle('auth:lock'"),
+    source.indexOf("ipcMain.handle('auth:hello-status'"),
+  );
+  for (const {
+    confirmed,
+    services,
+    automatic = false,
+    creating = false,
+    sharedSetupActive = false,
+    refreshError = false,
+    sshConfirmed = true,
+    serialConfirmed = true,
+    vncConfirmed = true,
+    rdpConfirmed = true,
+    webConfirmed = true,
+    bitwardenConfirmed = true,
+    clipboardConfirmed = true,
+  } of [
+    { confirmed: true, services: 'running' },
+    { confirmed: false, services: 'failing' },
+    { confirmed: true, services: 'absent' },
+    { confirmed: false, services: 'destroyed-window' },
+    { confirmed: true, services: 'running', automatic: true },
+    { confirmed: true, services: 'running', creating: true },
+    { confirmed: true, services: 'running', sharedSetupActive: true },
+    { confirmed: true, services: 'notification-failure', automatic: true },
+    { confirmed: true, services: 'running', refreshError: true },
+    { confirmed: true, services: 'running', sshConfirmed: false },
+    { confirmed: true, services: 'running', serialConfirmed: false },
+    { confirmed: true, services: 'running', vncConfirmed: false },
+    { confirmed: true, services: 'running', rdpConfirmed: false },
+    { confirmed: true, services: 'running', webConfirmed: false },
+    { confirmed: true, services: 'running', bitwardenConfirmed: false },
+    { confirmed: true, services: 'running', clipboardConfirmed: false },
+  ]) {
+    const session = new AuthSession();
+    session.remember({ configured: !automatic }, true);
+    let handler!: (event: { sender: object }) => Promise<void>;
+    let completeStop!: () => void;
+    const stop = new Promise<void>((resolve, reject) => {
+      completeStop = () => (confirmed ? resolve() : reject(Error('private native diagnostic')));
+    });
+    let completeBitwarden!: () => void;
+    const bitwardenStop = new Promise<void>((resolve, reject) => {
+      completeBitwarden = () =>
+        bitwardenConfirmed ? resolve() : reject(Error('private Bitwarden diagnostic'));
+    });
+    let hidden!: () => void;
+    const surfacesHidden = new Promise<void>((resolve) => {
+      hidden = resolve;
+    });
+    const cleared = new Set<string>();
+    const sender = {
+      isDestroyed: () => false,
+      send: (channel: string) => {
+        assert.equal(channel, 'vault:locked');
+        if (services === 'notification-failure') throw Error('renderer disappeared');
+      },
+    };
+    const mainWindow = { isDestroyed: () => services === 'destroyed-window', webContents: sender };
+    const destroyedWindow = { isDestroyed: () => true };
+    const auxiliaryWindow = { isDestroyed: () => false };
+    const script = stripTypeScriptTypes(
+      `let authLockRequested = false; let authLocksInProgress = 0; ${lockSource} ${handlerSource}; lockApplication`,
+    );
+    const automaticLock = runInNewContext(
+      script,
+      {
+        ipcMain: {
+          handle: (_channel: string, callback: typeof handler) => {
+            handler = callback;
+          },
+        },
+        activeHelloVerification:
+          services === 'absent' ? undefined : { abort: () => cleared.add('hello') },
+        authStateMutationQueue: automatic
+          ? Promise.resolve().then(() => {
+              session.remember({ configured: false }, true);
+            })
+          : Promise.reject(Error('previous mutation failed')),
+        ensureAuthSession: async () => {
+          assert.equal(automatic, false, 'vault lock must not open legacy SQL');
+          assert.equal(
+            creating || sharedSetupActive,
+            false,
+            'pending setup must not initialize legacy SQL',
+          );
+          if (refreshError) throw Error('legacy unavailable');
+        },
+        authSession: session,
+        vaultBackend: { stop: () => stop, isVaultWorkspace: automatic },
+        retireVaultUpdates: () => cleared.add('updates'),
+        vaultLockMonitor: { deactivate: () => {} },
+        vaultNotesDialog: { cancel: () => {} },
+        vaultCredentialsDialog: { cancel: () => {} },
+        vaultLinuxClipboard: {
+          reset: async () => {
+            cleared.add('clipboard');
+            if (!clipboardConfirmed) throw Error('private clipboard diagnostic');
+          },
+        },
+        vaultTunnelDialog: { cancel: async () => {} },
+        vaultReauthenticationDialog: { cancel: async () => {} },
+        vaultSharedDialog: { cancel: async () => {} },
+        vaultCreateDialog: { active: creating, cancel: async () => {} },
+        vaultMigrationSetupDialog: { active: false, cancel: async () => {} },
+        vaultOSMigrationDialog: { active: false, cancel: async () => {} },
+        vaultSharedSetupDialog: {
+          active: sharedSetupActive,
+          cancel: async () => {
+            cleared.add('shared-setup');
+          },
+        },
+        stopVaultRdpSessions: async () => {
+          cleared.add('vault-rdp');
+          if (!rdpConfirmed) throw Error('private RDP diagnostic');
+        },
+        stopVaultVncSessions: async () => {
+          cleared.add('vnc');
+          if (!vncConfirmed) throw Error('private VNC diagnostic');
+        },
+        stopVaultBitwardenCLIUnlock: () => {
+          cleared.add('vault-bitwarden');
+          return bitwardenStop;
+        },
+        cancelAllUserOperations: () => cleared.add('operations'),
+        backupImportSelections: new WeakMap(),
+        sshPrivateKeySelections: new WeakMap(),
+        sshCertificateSelections: new WeakMap(),
+        mremoteImportAnalysis: new WeakMap(
+          services === 'absent' ? [] : [[sender, { abort: () => cleared.add('import') }]],
+        ),
+        mremoteImportSelections: new WeakMap(),
+        vaultSshIpc: {
+          closeAll: async () => {
+            if (!sshConfirmed) throw Error('private SSH diagnostic');
+          },
+        },
+        sealedSerial: {
+          closeAll: async () => {
+            cleared.add('serial');
+            if (!serialConfirmed) throw Error('private serial diagnostic');
+          },
+        },
+        sshBackend: {
+          prepareForLock: () => cleared.add('ssh'),
+          closeAllSftp: () => cleared.add('sftp'),
+          cancelPendingConnections: () => cleared.add('connections'),
+          setMcpLocked: async () => {
+            cleared.add('mcp');
+            if (services === 'failing') throw Error('MCP already stopped');
+          },
+        },
+        clearFortinetIPsecDrafts: () => {},
+        webSurfaces: { cancelTunnelReconnects: () => {}, hideAll: hidden },
+        vaultWebIpc: {
+          closeAll: async () => {
+            cleared.add('web');
+            if (!webConfirmed) throw Error('private web diagnostic');
+          },
+        },
+        BrowserWindow: {
+          fromWebContents: () => (services === 'absent' ? null : mainWindow),
+          getAllWindows: () => [mainWindow, destroyedWindow, auxiliaryWindow],
+        },
+        windowCloseCoordinators: new WeakMap([
+          [mainWindow, true],
+          [destroyedWindow, true],
+        ]),
+        nativeWindowHandle: () => '123',
+        nativeBackend:
+          services === 'absent'
+            ? undefined
+            : {
+                send: async () => {
+                  cleared.add('bitwarden');
+                  if (services === 'failing') throw Error('Backend already stopped');
+                },
+              },
+        rdpClient:
+          services === 'absent'
+            ? undefined
+            : {
+                cancelPendingStarts: () => cleared.add('rdp-starts'),
+                hideAll: async () => {
+                  cleared.add('rdp');
+                  if (services === 'failing') throw Error('RDP already stopped');
+                },
+              },
+        cancelPreparingRdpStarts: () => cleared.add('rdp-preparing'),
+      },
+      { filename },
+    );
+    let settled = false;
+    const result = (automatic ? automaticLock() : handler({ sender })).then(
+      () => {
+        settled = true;
+        return undefined;
+      },
+      (error: Error) => {
+        settled = true;
+        return error.message;
+      },
+    );
+    await Promise.race([
+      surfacesHidden,
+      result.then((error) => {
+        throw Error(error ?? 'Lock finished before hiding the sessions.');
+      }),
+    ]);
+    assert.equal(session.isAccessAllowed, false);
+    assert.equal(settled, false);
+    assert.deepEqual(
+      [...cleared].sort(),
+      [
+        'clipboard',
+        ...(automatic ? ['updates'] : []),
+        'vnc',
+        'vault-rdp',
+        'serial',
+        'web',
+        'hello',
+        'operations',
+        'import',
+        'ssh',
+        'sftp',
+        'shared-setup',
+        'connections',
+        'mcp',
+        'bitwarden',
+        'vault-bitwarden',
+        'rdp-starts',
+        'rdp',
+        'rdp-preparing',
+      ]
+        .filter((name) => {
+          if (services === 'absent')
+            return !['hello', 'import', 'bitwarden', 'rdp-starts', 'rdp'].includes(name);
+          if (services === 'destroyed-window') return !['rdp-starts', 'rdp'].includes(name);
+          return true;
+        })
+        .sort(),
+    );
+    completeStop();
+    await new Promise(setImmediate);
+    assert.equal(settled, false, 'lock must wait for the Bitwarden worker');
+    completeBitwarden();
+    assert.equal(
+      await result,
+      !confirmed
+        ? 'Vault shutdown could not be confirmed.'
+        : !sshConfirmed
+          ? 'SSH shutdown could not be confirmed.'
+          : !serialConfirmed
+            ? 'Serial shutdown could not be confirmed.'
+            : !vncConfirmed
+              ? 'VNC shutdown could not be confirmed.'
+              : !rdpConfirmed
+                ? 'RDP shutdown could not be confirmed.'
+                : !webConfirmed
+                  ? 'Web shutdown could not be confirmed.'
+                  : !bitwardenConfirmed
+                    ? 'Bitwarden CLI shutdown could not be confirmed.'
+                    : !clipboardConfirmed
+                      ? 'Protected content cleanup could not be confirmed.'
+                      : refreshError
+                        ? 'Authentication lock could not be confirmed.'
+                        : undefined,
+    );
+    assert.equal(
+      session.isAccessAllowed,
+      false,
+      'queued legacy settings cannot remove a vault lock',
+    );
+  }
+  await verifyCoverage();
+});
+
+test('main vault lifecycle stops monitoring on every exit and avoids recursive cleanup', async (t) => {
+  const filename = 'wormhole-vault-main-lifecycle.js';
+  const verifyCoverage = await measureHandlerCoverage(t, filename);
+  const source = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
+  const initializer = source.slice(
+    source.indexOf('const vaultLockMonitor ='),
+    source.indexOf('const vaultCreateDialog ='),
+  );
+  for (const mode of ['normal', 'locking', 'quitting', 'failure']) {
+    const security = {
+      sequence: '1',
+      workspace: 'default',
+      user: 'default',
+      os: 'default',
+      effective: 'default',
+      source: 'workspace',
+    };
+    let notify!: () => void;
+    let catalogChanged!: () => void;
+    let options: any;
+    let deactivated = 0,
+      activated = 0,
+      locks = 0,
+      cleanups = 0;
+    const warnings: string[] = [];
+    const delivered: string[][] = [];
+    const changes: string[] = [];
+    const desktopWindow = {
+      isDestroyed: () => false,
+      webContents: { isDestroyed: () => false, send: (...args: string[]) => delivered.push(args) },
+    };
+    const globals = {
+      process: { platform: 'win32' },
+      authLockRequested: false,
+      isQuitting: false,
+      nativeResourceShutdownPromise: undefined,
+      vaultMigrationBoot: {},
+      BrowserWindow: { getAllWindows: () => [desktopWindow] },
+      windowCloseCoordinators: new Set([desktopWindow]),
+      vaultWebConnections: { verifyViews: async () => changes.push('web') },
+      sealedSerial: { verifySharedUse: async () => changes.push('serial') },
+      vaultCrashCapture: { apply: (profile: string) => changes.push('crash-' + profile) },
+      vaultWindowPolicy: {
+        apply: (profile: string) => changes.push('window-' + profile),
+        requiresContentProtection: false,
+      },
+      retireVaultUpdates: () => changes.push('retire-updates'),
+      VaultBackendHost,
+      vaultCreateDialog: { active: false },
+      vaultMigrationSetupDialog: { active: false },
+      vaultOSMigrationDialog: { active: false },
+      vaultSharedSetupDialog: { active: false },
+      VaultLockMonitor: class {
+        constructor(value: unknown) {
+          options = value;
+        }
+        activate(value: unknown) {
+          assert.deepEqual(value, security);
+          activated++;
+        }
+        deactivate() {
+          deactivated++;
+        }
+      },
+      VaultBackendClient: class {
+        constructor(value: { onUnavailable(): void; onSharedCatalogChanged(): void }) {
+          notify = value.onUnavailable;
+          catalogChanged = value.onSharedCatalogChanged;
+        }
+        status() {
+          return Promise.resolve({});
+        }
+        security() {
+          return Promise.resolve(security);
+        }
+        unlock() {
+          return Promise.resolve({ unlocked: true, lockedMemory: true });
+        }
+        retired = false;
+        lock() {
+          if (!this.retired) {
+            this.retired = true;
+            notify();
+          }
+          return Promise.resolve();
+        }
+      },
+      rememberAuthState: () => {},
+      vaultAuthState: () => ({ configured: true }),
+      authSession: {
+        lock: () => {
+          locks++;
+        },
+      },
+      powerMonitor: {
+        getSystemIdleTime: () => 123,
+        getSystemIdleState: (threshold: number) => {
+          assert.equal(threshold, 900);
+          return 'active';
+        },
+      },
+      backendPath: () => 'backend',
+      wormholeDatabasePath: () => 'workspace',
+      electronUserDataPath: () => 'user-data',
+      lockApplication: async () => {
+        cleanups++;
+        if (mode === 'failure') throw Error('private cleanup diagnostic');
+      },
+      console: { warn: (message: string) => warnings.push(message) },
+    };
+    const main = runInNewContext(
+      stripTypeScriptTypes(`${initializer}; ({ vaultBackend, requestAutomaticVaultLock })`),
+      globals,
+      { filename },
+    );
+    main.requestAutomaticVaultLock();
+    assert.equal(cleanups, 0, 'power notifications must not create an owner');
+    await main.vaultBackend.status();
+    notify();
+    await new Promise(setImmediate);
+    assert.equal(locks, 0, 'metadata-only exits cannot lock legacy workspaces');
+    assert.equal(options.idleSeconds(), 123);
+    assert.equal(options.idleState(900), 'active');
+    assert.deepEqual(await options.security(), security);
+    await main.vaultBackend.unlock({
+      vaultId: '11111111-1111-4111-8111-111111111111',
+      slotId: '22222222-2222-4222-8222-222222222222',
+      kind: 'password',
+      factor: new Uint8Array([1]),
+    });
+    assert.equal(activated, 1);
+    options.applyProfile('standard', 'refresh');
+    options.profileChanged();
+    catalogChanged();
+    assert.deepEqual(delivered, [['vault:profile-changed'], ['vault:shared-catalog-changed']]);
+    assert.deepEqual(changes, [
+      'crash-standard',
+      'retire-updates',
+      'window-standard',
+      'web',
+      'serial',
+    ]);
+    globals.authLockRequested = mode === 'locking';
+    globals.isQuitting = mode === 'quitting';
+    await main.vaultBackend.stop();
+    assert.equal(deactivated, 1);
+    assert.equal(locks, 2);
+    assert.equal(cleanups, mode === 'locking' || mode === 'quitting' ? 0 : 1);
+    await options.lock();
+    assert.ok(
+      warnings.every(
+        (message) => message === '[Wormhole] Vault lock cleanup could not be confirmed.',
+      ),
+    );
+    assert.equal(warnings.length, mode === 'failure' ? 2 : 0);
+  }
+  await verifyCoverage();
+});
+
+test('lock holds deny access across settings changes and release independently', () => {
+  const session = new AuthSession();
+  session.remember({ configured: false }, true);
+  const epoch = session.authorizationEpoch;
+  let unlocks = 0;
+  session.onUnlocked(() => {
+    unlocks++;
+  });
+  const first = session.holdLock();
+  const second = session.holdLock();
+  session.remember({ configured: false }, true);
+  assert.equal(session.isAccessAllowed, false);
+  assert.throws(() => session.requireUnlocked(), /Authentication is required/);
+  assert.throws(() => session.markUnlocked(), /locked during verification/);
+  first();
+  first();
+  assert.equal(session.isAccessAllowed, false);
+  session.remember({ configured: true }, true);
+  session.lock();
+  second();
+  second();
+  assert.equal(session.isAccessAllowed, false);
+  assert.equal(unlocks, 0);
+  assert.throws(() => session.markUnlocked(epoch), /locked during verification/);
+  session.markUnlocked();
+  assert.equal(session.isAccessAllowed, true);
+  assert.equal(unlocks, 1);
 });
 
 test('configured authentication starts locked until a native verification succeeds', () => {

@@ -50,11 +50,13 @@ func rdpExternalFixtureCommand(t *testing.T, executable string, args ...string) 
 	if !reflect.DeepEqual(args, []string{"/v:rdp.example:3389"}) {
 		t.Fatalf("external client received an unexpected target: %q", args)
 	}
-	goExecutable, err := exec.LookPath("go")
-	if err != nil {
-		t.Fatal("Go tool is required for the external-process fixture")
+	// The fixture verifies process ownership and arguments, not Go toolchain
+	// resolution. A shell built-in exits deterministically without auto-switching
+	// or downloading a toolchain from the repository's go.mod.
+	if runtime.GOOS == "windows" {
+		return exec.Command(filepath.Join(os.Getenv("SystemRoot"), "System32", "cmd.exe"), "/d", "/c", "exit", "0")
 	}
-	return exec.Command(goExecutable, "version")
+	return exec.Command("/bin/sh", "-c", "exit 0")
 }
 
 func TestSystemRdpCapabilityIsWindowsOnlyAndFailsClosedForUnsupportedRouting(t *testing.T) {
@@ -1104,7 +1106,7 @@ func TestRdpNativeAndFreeRdpLaunchersSuperviseHelperProcess(t *testing.T) {
 		controller.startNative(rdpCommand{
 			Op: "start", RequestID: "native-start", SessionID: "native", LifecycleID: "lifecycle",
 			Bounds: rdpBounds{Width: 800, Height: 600}, Profile: rdpProfile{Host: "rdp.example", Port: rdpDefaultPort},
-		})
+		}, validateNativeRdpCrashPolicy)
 		waitForRdpProcessExit(t, controller, "native")
 	})
 
@@ -1133,10 +1135,32 @@ func TestRdpLaunchersReportMissingExecutables(t *testing.T) {
 		RequestID: "start", SessionID: "session", LifecycleID: "lifecycle",
 		Bounds: rdpBounds{Width: 800, Height: 600}, Profile: rdpProfile{Host: "rdp.example", Port: rdpDefaultPort},
 	}
-	controller.startNative(command)
+	controller.startNative(command, validateNativeRdpCrashPolicy)
 	controller.startFreeRdp(command)
 	if len(controller.processes) != 0 {
 		t.Fatalf("missing executables left processes behind: %#v", controller.processes)
+	}
+}
+
+func TestRdpNativeCrashPolicyDenialDoesNotPublishAChild(t *testing.T) {
+	t.Setenv("WORMHOLE_RDP_TEST_HELPER", "1")
+	var events []rdpEvent
+	controller := &rdpController{
+		nativeHostPath: os.Args[0], processes: make(map[string]*rdpProcess),
+		output: func(event rdpEvent) { events = append(events, event) },
+	}
+	var checked int
+	controller.startNative(rdpCommand{
+		RequestID: "protected-start", SessionID: "session", LifecycleID: "lifecycle",
+		requireContentProtection: true,
+	}, func(pid int) error {
+		checked = pid
+		return errors.New("private crash policy failure")
+	})
+	want := rdpEvent{Type: "error", RequestID: "protected-start", SessionID: "session", LifecycleID: "lifecycle",
+		Backend: "activex", Message: "native RDP crash capture could not be disabled"}
+	if checked <= 0 || len(controller.processes) != 0 || !reflect.DeepEqual(events, []rdpEvent{want}) {
+		t.Fatalf("crash policy did not retire the unopened host: pid=%d events=%#v", checked, events)
 	}
 }
 
@@ -1268,12 +1292,18 @@ func TestRdpPortableHelpersCoverEveryPolicyBranch(t *testing.T) {
 
 func waitForRdpProcessExit(t *testing.T, controller *rdpController, sessionID string) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	started := time.Now()
+	// Instrumented native fixture executables can require a cold Windows start.
+	// The child must still exit and be removed; this matches the native startup bound.
+	deadline := started.Add(15 * time.Second)
 	for {
 		controller.mu.Lock()
 		_, running := controller.processes[sessionID]
 		controller.mu.Unlock()
 		if !running {
+			if elapsed := time.Since(started); elapsed > 5*time.Second {
+				t.Logf("native fixture cold start/exit took %s", elapsed)
+			}
 			return
 		}
 		if time.Now().After(deadline) {

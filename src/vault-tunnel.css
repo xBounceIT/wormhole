@@ -1,0 +1,152 @@
+.vault-tunnel-fields {
+  display: grid;
+  gap: 20px;
+}
+.vault-tunnel-fields fieldset {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.vault-tunnel-fields legend {
+  width: 100%;
+  margin-bottom: 12px;
+  padding: 0 0 6px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+  font-weight: 600;
+}
+.vault-tunnel-grid,
+.vault-tunnel-controls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 16px;
+}
+.vault-tunnel-controls {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.vault-tunnel-controls > label,
+.vault-tunnel-field {
+  display: grid;
+  align-content: start;
+  min-width: 0;
+  gap: 5px;
+}
+.vault-tunnel-controls > div,
+.vault-tunnel-wide {
+  grid-column: 1 / -1;
+}
+.vault-tunnel-controls label {
+  font-size: 12px;
+  font-weight: 500;
+}
+.vault-tunnel-fields .startup-subtitle,
+.vault-tunnel-scroll > .startup-subtitle {
+  font-size: 12px;
+  font-weight: 400;
+}
+.vault-tunnel-fields .startup-subtitle {
+  margin: 0;
+}
+.vault-tunnel-scroll > .startup-subtitle {
+  margin-top: 18px;
+}
+.vault-tunnel-fields :disabled {
+  opacity: 0.6;
+}
+.vault-tunnel-fields [hidden] {
+  display: none !important;
+}
+.vault-tunnel-pin {
+  display: flex;
+  gap: 7px;
+  overflow-wrap: anywhere;
+}
+
+.vault-tunnel-fields input[role='switch'] {
+  appearance: none;
+  width: 32px;
+  height: 18px;
+  margin: 0;
+  padding: 2px;
+  border: 1px solid var(--input);
+  border-radius: 999px;
+  background: var(--secondary);
+  cursor: pointer;
+}
+.vault-tunnel-fields input[role='switch']::before {
+  content: '';
+  display: block;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--foreground);
+  transition: transform 120ms ease;
+}
+.vault-tunnel-fields input[role='switch']:checked {
+  background: var(--primary);
+}
+.vault-tunnel-fields input[role='switch']:checked::before {
+  background: var(--primary-foreground);
+  transform: translateX(14px);
+}
+
+:root .vault-dialog.vault-tunnel-document .startup-shell {
+  display: block;
+  height: 100%;
+  padding: 0;
+}
+:root .vault-dialog.vault-tunnel-document .startup-card {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+.vault-tunnel-document h1 {
+  padding: 16px 24px;
+  border-bottom: 1px solid var(--border);
+}
+.vault-tunnel-document [role='status']:not(:empty) {
+  padding: 0 24px 8px;
+}
+.vault-tunnel-document form {
+  display: grid;
+  flex: 1;
+  min-height: 0;
+  grid-template-rows: minmax(0, 1fr) auto;
+}
+.vault-tunnel-scroll {
+  overflow: auto;
+  padding: 20px 24px;
+}
+.vault-tunnel-document footer {
+  justify-content: end;
+  padding: 12px 24px;
+  border-top: 1px solid var(--border);
+}
+.vault-tunnel-imports:empty {
+  display: none;
+}
+.vault-tunnel-imports {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+@media (max-width: 540px) {
+  .vault-tunnel-grid,
+  .vault-tunnel-controls {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .vault-tunnel-fields input[role='switch']::before {
+    transition: none;
+  }
+}

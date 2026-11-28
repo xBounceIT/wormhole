@@ -107,9 +107,7 @@ export function SftpSectionHeader({
             {toggle}
           </div>
         ) : (
-          <div
-            className={`grid h-full items-center gap-x-2.5 px-[22px] py-1 ${kind === 'tree' ? 'grid-cols-[minmax(0,1fr)_5.25rem_7.75rem]' : 'grid-cols-[1rem_1.5rem_minmax(0,1fr)_5.25rem_7.75rem]'}`}
-          >
+          <div className={`sftp-columns sftp-${kind}-columns h-full items-center py-1`}>
             {kind === 'files' ? (
               <>
                 <span role="columnheader" aria-colindex={1}>
@@ -128,7 +126,7 @@ export function SftpSectionHeader({
                 onSort={kind === 'tree' && column === 'size' ? undefined : onSort}
                 className={
                   kind === 'tree' && column === 'name'
-                    ? 'pl-[60px]'
+                    ? 'sftp-tree-name-heading'
                     : column === 'modified'
                       ? 'pr-3'
                       : undefined

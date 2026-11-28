@@ -2,7 +2,7 @@
 declare const React: typeof import('react');
 declare const createRoot: typeof import('react-dom/client').createRoot;
 declare const assert: typeof import('node:assert/strict');
-declare function SerialTerminalSurface(
+declare function NativeTerminalSurface(
   props: Record<string, unknown>,
 ): import('react').ReactElement;
 
@@ -25,7 +25,8 @@ async function runTerminalScrollTests() {
     await React.act(async () => {
       root.render(
         <React.StrictMode>
-          <SerialTerminalSurface
+          <NativeTerminalSurface
+            isSerial={true}
             session={session}
             isActive={isActive}
             autoCopyOnSelect={autoCopy}

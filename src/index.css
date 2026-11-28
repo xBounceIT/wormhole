@@ -2,6 +2,7 @@
 @import 'tw-animate-css';
 @import 'shadcn/tailwind.css';
 @import '@fontsource-variable/geist';
+@import './workspace-palette.css';
 
 @custom-variant dark (&:is(.dark *));
 
@@ -47,36 +48,6 @@
 }
 
 :root {
-  color-scheme: light;
-  --background: oklch(1 0 0);
-  --canvas: var(--background);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --theme-muted-foreground: oklch(0.556 0 0);
-  --muted-foreground: var(--theme-muted-foreground);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --theme-ring: oklch(0.708 0 0);
-  --ring: var(--theme-ring);
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
   --radius: 0.625rem;
   --dialog-radius: var(--radius-2xl);
   --session-tab-row-height: 42px;
@@ -94,46 +65,6 @@
 [data-slot='dialog-footer'] {
   border-end-start-radius: var(--dialog-radius);
   border-end-end-radius: var(--dialog-radius);
-}
-
-.dark {
-  color-scheme: dark;
-  --background: oklch(0.145 0 0);
-  --canvas: oklch(0.235 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.145 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.145 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.985 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --theme-muted-foreground: var(--foreground);
-  --muted-foreground: var(--theme-muted-foreground);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(0.269 0 0);
-  --input: oklch(0.269 0 0);
-  --theme-ring: oklch(0.556 0 0);
-  --ring: var(--theme-ring);
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.985 0 0);
-  --sidebar-primary-foreground: oklch(0.205 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(0.269 0 0);
-  --sidebar-ring: oklch(0.556 0 0);
-}
-
-.oled {
-  --canvas: #101010;
-  --sidebar: #050505;
-  --sidebar-accent: #252525;
-  --sidebar-border: #292929;
 }
 
 @keyframes collapsible-down {
@@ -266,6 +197,40 @@
   height: calc(var(--session-tab-row-height) + 2px);
   padding-block-start: 4px;
   scroll-padding-inline: var(--tab-spacing);
+}
+
+.sftp-file-pane {
+  container: sftp-pane / inline-size;
+}
+.sftp-columns {
+  display: grid;
+  --sftp-column-gap: 0.625rem;
+  column-gap: var(--sftp-column-gap);
+  padding-inline: 22px;
+  --sftp-file-stats: 5.25rem 7.75rem;
+}
+.sftp-files-columns {
+  grid-template-columns: 1rem 1.5rem minmax(0, 1fr) var(--sftp-file-stats);
+}
+.sftp-tree-columns {
+  grid-template-columns: minmax(0, 1fr) var(--sftp-file-stats);
+}
+.sftp-tree-name-heading {
+  padding-inline-start: calc(2.5rem + 2 * var(--sftp-column-gap));
+}
+.sftp-tree-name-grid {
+  column-gap: var(--sftp-column-gap);
+}
+@container sftp-pane (max-width: 25rem) {
+  .sftp-columns {
+    --sftp-column-gap: 0.25rem;
+    padding-inline: 8px;
+    --sftp-file-stats: 2.875rem 6.5rem;
+  }
+  .sftp-file-pane [role='grid'],
+  .sftp-file-pane [role='treegrid'] > :is([role='row'], [role='rowgroup']) {
+    min-width: 17rem;
+  }
 }
 
 .session-tab-list {

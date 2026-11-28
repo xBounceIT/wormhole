@@ -19,8 +19,8 @@ import (
 // optional libsecret-tools package. There is deliberately no plaintext fallback when a Secret
 // Service is unavailable.
 const (
-	linuxSecretServiceName = "Wormhole"
-	linuxSecretToolTimeout = 20 * time.Second
+	linuxSecretServiceName  = "Wormhole"
+	linuxSecretStoreTimeout = 20 * time.Second
 )
 
 var linuxCredentialStore = credentialSecretKeyring{
@@ -78,7 +78,7 @@ func unprotectLegacyLinuxCredentialSecret(id, encoded string) ([]byte, error) {
 	if err != nil {
 		return nil, errCredentialSecretStoreUnavailable
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), linuxSecretToolTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), linuxSecretStoreTimeout)
 	defer cancel()
 	command := exec.CommandContext(ctx, commandPath, "lookup", "service", "Wormhole", "account", account)
 	command.Stderr = io.Discard
@@ -88,12 +88,14 @@ func unprotectLegacyLinuxCredentialSecret(id, encoded string) ([]byte, error) {
 	}
 	value, readErr := io.ReadAll(io.LimitReader(stdout, int64(maxStoredCredentialBytes+2)))
 	if readErr != nil || len(value) > maxStoredCredentialBytes+1 {
+		clearBytes(value)
 		cancel()
 		_ = command.Wait()
 		return nil, errCredentialSecretStoreUnavailable
 	}
 	waitErr := command.Wait()
 	if waitErr != nil {
+		clearBytes(value)
 		return nil, errCredentialSecretStoreUnavailable
 	}
 	return bytes.TrimSuffix(value, []byte{'\n'}), nil
@@ -108,7 +110,7 @@ func deleteLegacyLinuxCredentialSecret(id, encoded string) error {
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), linuxSecretToolTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), linuxSecretStoreTimeout)
 	defer cancel()
 	command := exec.CommandContext(ctx, commandPath, "clear", "service", "Wormhole", "account", account)
 	command.Stdout = io.Discard

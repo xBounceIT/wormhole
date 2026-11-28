@@ -1,3 +1,4 @@
+import { VaultSftpRecovery } from './VaultSftpRecovery';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
@@ -8,7 +9,13 @@ import { TextTooltip } from './ui/tooltip';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
 import { useConfirmationDialog } from './ui/confirmation-dialog';
 
-export function SftpEditorSettings({ allowConfirmation }: { allowConfirmation: boolean }) {
+export function SftpEditorSettings({
+  allowConfirmation,
+  vault = false,
+}: {
+  allowConfirmation: boolean;
+  vault?: boolean;
+}) {
   const [settings, setSettings] = useState<WormholeSftpEditorSettings>();
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
@@ -181,7 +188,11 @@ export function SftpEditorSettings({ allowConfirmation }: { allowConfirmation: b
           {message}
         </p>
       ) : null}
-      <SftpEditedFiles allowConfirmation={allowConfirmation} sessionId="sftp-recovery" recovery />
+      {vault ? (
+        <VaultSftpRecovery />
+      ) : (
+        <SftpEditedFiles allowConfirmation={allowConfirmation} sessionId="sftp-recovery" recovery />
+      )}
     </section>
   );
 }
@@ -494,9 +505,10 @@ function EditedFileList({
   );
 }
 
-export function SftpRecoveryNotice() {
+export function SftpRecoveryNotice({ vault = false }: { vault?: boolean }) {
   const [count, setCount] = useState(0);
   useEffect(() => {
+    if (vault) return;
     let active = true;
     let updated = false;
     void window.wormhole
@@ -515,8 +527,8 @@ export function SftpRecoveryNotice() {
       active = false;
       unsubscribe?.();
     };
-  }, []);
-  return count ? (
+  }, [vault]);
+  return !vault && count ? (
     <div className="border-b border-border bg-accent px-4 py-2 text-xs" role="status">
       {count} edited working copy/copies can be recovered. Open Settings → File transfer to reveal
       or discard them, or reconnect to recover and upload.

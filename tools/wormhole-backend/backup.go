@@ -893,6 +893,12 @@ func readBackupPassword(database *sql.DB, id string) (string, bool, error) {
 }
 
 func sealBackupPayload(plaintext []byte, password string) (backupEncryptedPayload, error) {
+	passwordBytes := []byte(norm.NFC.String(password))
+	defer clearBytes(passwordBytes)
+	return sealBackupPayloadWithBytes(plaintext, passwordBytes)
+}
+
+func sealBackupPayloadWithBytes(plaintext, password []byte) (backupEncryptedPayload, error) {
 	salt := make([]byte, backupSaltLength)
 	nonce := make([]byte, backupNonceLength)
 	if _, err := io.ReadFull(rand.Reader, salt); err != nil {
@@ -901,7 +907,7 @@ func sealBackupPayload(plaintext []byte, password string) (backupEncryptedPayloa
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		return backupEncryptedPayload{}, errors.New("Could not create backup encryption nonce")
 	}
-	key := deriveBackupKey(password, salt, backupPBKDF2Iterations)
+	key := pbkdf2.Key(password, salt, backupPBKDF2Iterations, backupKeyLength, sha256.New)
 	defer clearBytes(key)
 	block, err := aes.NewCipher(key)
 	if err != nil {
@@ -925,6 +931,12 @@ func sealBackupPayload(plaintext []byte, password string) (backupEncryptedPayloa
 }
 
 func unsealBackupPayload(sealed backupEncryptedPayload, password string) ([]byte, error) {
+	passwordBytes := []byte(norm.NFC.String(password))
+	defer clearBytes(passwordBytes)
+	return unsealBackupPayloadWithBytes(sealed, passwordBytes)
+}
+
+func unsealBackupPayloadWithBytes(sealed backupEncryptedPayload, password []byte) ([]byte, error) {
 	if !strings.EqualFold(sealed.KDF, backupKDFPBKDF2SHA256) {
 		return nil, errors.New("Encrypted backup uses an unsupported key derivation function.")
 	}
@@ -945,7 +957,7 @@ func unsealBackupPayload(sealed backupEncryptedPayload, password string) ([]byte
 	if len(nonce) != backupNonceLength || len(tag) < 12 || len(tag) > 16 || len(salt) == 0 || len(ciphertext) == 0 {
 		return nil, errors.New("Encrypted backup envelope has malformed nonce, tag, salt, or ciphertext lengths.")
 	}
-	key := deriveBackupKey(password, salt, iterations)
+	key := pbkdf2.Key(password, salt, iterations, backupKeyLength, sha256.New)
 	defer clearBytes(key)
 	block, err := aes.NewCipher(key)
 	if err != nil {
@@ -964,15 +976,6 @@ func unsealBackupPayload(sealed backupEncryptedPayload, password string) ([]byte
 		return nil, errBackupBadPassword
 	}
 	return plaintext, nil
-}
-
-func deriveBackupKey(password string, salt []byte, iterations int) []byte {
-	// Matches BackupService.DeriveKey: NFC normalization makes composed/decomposed passwords
-	// interoperable across Windows, macOS and Linux.
-	passwordBytes := []byte(norm.NFC.String(password))
-	key := pbkdf2.Key(passwordBytes, salt, iterations, backupKeyLength, sha256.New)
-	clearBytes(passwordBytes)
-	return key
 }
 
 func validateBackupRequest(request backupRequest, allowPassword bool) error {

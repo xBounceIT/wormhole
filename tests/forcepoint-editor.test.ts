@@ -7,6 +7,7 @@ import { join, resolve } from 'node:path';
 import test from 'node:test';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
+import { tunnelKindAvailable } from '../src/tunnel-state.ts';
 import tailwindcss from '@tailwindcss/vite';
 import { build, transformWithOxc } from 'vite';
 
@@ -72,10 +73,14 @@ test('VPN editors align paired controls and Forcepoint displays certificate conf
     const { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } = React;
     ${read('../src/fortinet-ipsec-state.ts').replace(/^export /gm, '')}
     ${section(read('../src/tunnel-state.ts'), 'function userFacingTunnelError(', '// Only treat a test')}
-    ${section(app, 'const tunnelKinds =', 'function TunnelRouteField(')}
+    ${section(read('../src/tunnel-editor-schema.ts').replace(/^export /gm, ''), 'const tunnelKinds =', 'function tunnelEditorFields(')}
+    ${read('../src/tunnel-capabilities.ts')
+      .replace(/^import .*;\r?\n/gm, '')
+      .replace(/^export /gm, '')}
+    const tunnelKindAvailable = ${tunnelKindAvailable.toString()};
     const missingTunnelFields = ({ settings }) => missingFortinetIPsecFields(settings);
     const normalizeTunnelEditorSettings = (_kind, settings) => normalizeFortinetIPsecSettings(settings);
-    ${section(app, 'function tunnelEditorFields(', 'function tunnelDefaultSettings(')}
+    ${section(read('../src/tunnel-editor-schema.ts').replace(/^export /gm, ''), 'function tunnelEditorFields(', 'function tunnelDefaultSettings(')}
     ${section(app, 'function tunnelSettingText(', '// Provider-specific tunnel fields')}
     ${section(app, 'function TunnelEditorDialog(', '// Tunnel CRUD, test progress')}
     function ForcepointEditorHarness() {
@@ -226,6 +231,7 @@ test('VPN editors align paired controls and Forcepoint displays certificate conf
       const [tunnels, setTunnels] = useState([]);
       const tree = [];
       const credentialOptions = { ssh: [] };
+      const authState = { mode: 'password' };
       const authGate = isAuthorized ? 'unlocked' : 'locked';
       return <>
         ${tunnelPageMount.replace('<TunnelsPage', '<TunnelsPage key={editorInstance}')}

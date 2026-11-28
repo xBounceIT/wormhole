@@ -247,6 +247,14 @@ function editorHarness(
     Error,
     fileSessionMode,
     isFileBrowserProtocol,
+    authState: { mode: 'pin' },
+    nativeSavedConnection: false,
+    connectionSavePending: { current: false },
+    connectionEditorGeneration: { current: 0 },
+    editingConnectionVersion: { current: undefined },
+    nativeConnectionNotes: { current: null },
+    nativeConnectionPassword: { current: null },
+    setRemoveNativeNotes: () => {},
     tree: [node],
     sessions,
     sessionsRef: { current: sessions },
@@ -812,6 +820,7 @@ function rdpLifecycleHarness() {
     sessionCloseGate: { current: new SessionCloseGate() },
     sessionResourceReleaseGate: { current: new SessionResourceReleaseGate() },
     rdpCredentialPrompt: null,
+    authState: { mode: 'local' },
     setSessions: () => {},
     defaultRdpProfile: () => ({}),
     waitForRdpSurfaceBounds: async () => ({ x: 0, y: 0, width: 1024, height: 768 }),
@@ -1078,4 +1087,20 @@ test('renaming a connection without an open session only saves and refreshes the
   assert.equal(harness.writes.length, 1);
   assert.equal(harness.sessions.length, 0);
   assert.deepEqual(harness.effects, ['refresh']);
+});
+
+test('native SMB connection save fails closed before borrowing secret inputs or falling back to legacy', async () => {
+  const harness = editorHarness('smb');
+  harness.context.nativeSavedConnection = true;
+  harness.context.authState = { mode: 'vault' };
+  for (const field of ['nativeConnectionPassword', 'nativeConnectionNotes'])
+    harness.context[field] = {
+      get current() {
+        throw new Error('unsupported flow read secret input');
+      },
+    };
+  await harness.save();
+  assert.match(harness.error, /SMB connections are unavailable/);
+  assert.equal(harness.writes.length, 0);
+  assert.equal(harness.open, true);
 });

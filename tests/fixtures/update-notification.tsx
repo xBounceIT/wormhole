@@ -25,6 +25,7 @@ async function runUpdateNotificationTests() {
     installerFileName: 'Wormhole.exe',
     installerSha256: 'a'.repeat(64),
     installerSize: 1234,
+    lastUpdateCheck: '2026-10-23T10:00:00Z',
     releaseNotes: `## Wormhole ${version}\n\n- **Faster updates**\n- Improved connections`,
   });
   let key = 0;
@@ -69,7 +70,6 @@ async function runUpdateNotificationTests() {
       resolveStatus: (value = snapshot) => resolveStatus(value),
       finishDownload: () => finishDownload(),
       finishInstall: () => finishInstall(),
-      readAppSettings: async () => ({ lastUpdateCheck: '2026-10-23T10:00:00Z' }),
       checkForUpdates: async () => {
         api.checks++;
         if (api.checkFailure) throw new Error('offline');
@@ -137,7 +137,7 @@ async function runUpdateNotificationTests() {
     document.getElementById('update-notification-title').textContent,
     'Wormhole v2.1.6 is now available',
   );
-  assert.ok(popup().textContent.includes('Update to use the best version of Wormhole'));
+  assert.ok(popup().querySelector('#update-notification-title'));
   assert.equal(nativeState(), 'hidden', 'native sessions must not cover the popup');
   const bounds = popup().getBoundingClientRect();
   assert.ok(Math.abs(innerWidth - bounds.right - 16) <= 1, 'popup must be anchored at the right');
@@ -286,6 +286,19 @@ async function runUpdateNotificationTests() {
     assert.equal(popup(), null, 'dismissal also works during installation');
   }
 
+  api = await mount({ platform: 'linux' });
+  await React.act(async () =>
+    api.emit({
+      ...release('2.1.7'),
+      updatePolicy: 'managed',
+      installerUrl: 'managed-update:Wormhole.deb',
+      installerFileName: 'Wormhole.deb',
+    }),
+  );
+  await click('Update now');
+  assert.match(popup().textContent, /ask your administrator to install/i);
+  assert.doesNotMatch(popup().textContent, /AppImage/);
+
   api = await mount({ platform: 'darwin', deferInstall: true });
   await click('Update now');
   assert.equal(button('Update now').disabled, true, 'the native quit decision is still pending');
@@ -425,6 +438,46 @@ async function runUpdateNotificationTests() {
       regressions.push(label + ' must remain reachable after a long installation error');
     }
   }
+  api = await mount({
+    result: { ...release(), isUpdateAvailable: false, updatePolicy: 'notify' },
+  });
+  assert.ok(popup(), 'the notification-only policy still announces a release');
+  assert.equal(button('Update now'), undefined);
+  await click('View changes');
+  assert.ok(
+    document
+      .getElementById('updates-page')
+      .textContent.includes('limits this app to notifications'),
+  );
+  assert.equal(button('Install update'), undefined);
+  assert.ok(button('Check now'));
+  await React.act(async () =>
+    api.emit({
+      ...release(),
+      isUpdateAvailable: false,
+      isNewerRelease: false,
+      updatePolicy: 'managed',
+    }),
+  );
+  assert.ok(
+    document.getElementById('updates-page').textContent.includes('managed by your administrator'),
+  );
+  assert.equal(button('Check now'), undefined);
+  assert.equal(button('Install update'), undefined);
+  assert.ok(button('Check managed updates'));
+  assert.ok(!document.getElementById('updates-page').textContent.includes('Release notes'));
+  api.checkResult = {
+    ...release('2.1.8'),
+    installerUrl: 'managed-update:Wormhole.exe',
+    updatePolicy: 'managed',
+  };
+  await click('Check managed updates');
+  assert.ok(document.body.textContent.includes('Your administrator approved Wormhole 2.1.8.'));
+  assert.equal(button('View changes'), undefined);
+  assert.ok(button('Install update'));
+  await click('Install update');
+  assert.equal(api.downloads.at(-1).installerUrl, 'managed-update:Wormhole.exe');
+  assert.equal(api.installations.at(-1), 'verified-installer');
   assert.deepEqual(regressions, []);
   await React.act(async () => root.unmount());
   assert.equal(previousListeners.size, 0);

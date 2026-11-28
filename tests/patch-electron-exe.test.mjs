@@ -241,9 +241,12 @@ test('supports 16-bit version limits and rejects larger components', async (cont
   assert.deepEqual(await readFile(exePath), validOutput);
 });
 
-test('stages the complete Chrome extension runtime dependency closure', async (context) => {
+test('stages the complete Chrome extension and native authentication runtime dependency closure', async (context) => {
   const declaredDependencies = JSON.parse(await readFile(runtimeDependenciesManifest, 'utf8'));
-  const expectedDependencies = await collectRuntimeDependencyClosure('electron-chrome-extensions');
+  const expectedDependencies = new Set([
+    ...(await collectRuntimeDependencyClosure('electron-chrome-extensions')),
+    ...(await collectRuntimeDependencyClosure('@hpke/core')),
+  ]);
   assert.deepEqual([...declaredDependencies].sort(), [...expectedDependencies].sort());
 
   const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'wormhole-runtime-deps-'));

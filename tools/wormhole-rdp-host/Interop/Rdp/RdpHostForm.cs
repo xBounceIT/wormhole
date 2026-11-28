@@ -24,6 +24,7 @@ internal sealed class RdpHostForm : FormsForm
     private IConnectionPoint? _connectionPoint;
     private int _adviseCookie;
     private bool _connectStarted;
+    private bool _requireContentProtection;
     private bool _hasAppliedHostBounds;
     private int _lastHostX;
     private int _lastHostY;
@@ -80,6 +81,19 @@ internal sealed class RdpHostForm : FormsForm
             }
             return Handle;
         }
+    }
+
+    internal void RequireContentProtection()
+    {
+        Win32Interop.RequireCaptureExclusion(Handle);
+        _requireContentProtection = true;
+    }
+
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        // Win32 display affinity belongs to the HWND, not to the Forms object.
+        if (_requireContentProtection) Win32Interop.RequireCaptureExclusion(Handle);
+        base.OnHandleCreated(e);
     }
 
     /// <summary>
@@ -228,11 +242,16 @@ internal sealed class RdpHostForm : FormsForm
     /// All access is via <c>dynamic</c> against the OCX's IDispatch — we don't ship typed
     /// COM wrappers, but the property names and types match the published MsRdpClient API.
     /// </summary>
+    internal NativeControlReference ExportNativeControl()
+    {
+        EnsureStaThread();
+        return new NativeControlReference(RequireOcx());
+    }
+
     internal void Configure(
         RdpConnectionProfile profile,
-        string? password,
+        bool credentialsProvided,
         string? gatewayUsername = null,
-        string? gatewayPassword = null,
         IntPtr ownerHwnd = default,
         int initialSurfaceWidth = 0,
         int initialSurfaceHeight = 0)
@@ -289,14 +308,12 @@ internal sealed class RdpHostForm : FormsForm
         // effectively universal on any supported Windows mstscax build.
         adv.EnableCredSspSupport = true;
 
-        // mstsc-style: pass password through ClearTextPassword. Connect() is asynchronous
-        // and the OCX may still need the value after Start() returns, including for its own
-        // reconnect flow, so do not mutate it after the handshake starts.
-        if (!string.IsNullOrEmpty(password)) adv.ClearTextPassword = password;
+        // Go applies write-only native credentials through the local COM reference.
+        // No password enters this adapter's JSON model or managed heap.
         ApplyPromptSuppression(
             ocx,
             adv,
-            hasPassword: !string.IsNullOrEmpty(password),
+            hasPassword: credentialsProvided,
             ownerHwnd: ownerHwnd);
 
         TrySetOptional(() => adv.RedirectClipboard = profile.RdpRedirectClipboard);
@@ -371,11 +388,6 @@ internal sealed class RdpHostForm : FormsForm
                     {
                         var capturedUser = gatewayUsername;
                         TrySetOptional(() => transport.GatewayUsername = capturedUser);
-                    }
-                    if (!string.IsNullOrEmpty(gatewayPassword))
-                    {
-                        var capturedPwd = gatewayPassword;
-                        TrySetOptional(() => transport.GatewayPassword = capturedPwd);
                     }
                 }
                 // GatewayCredsSource intentionally left at its OCX default — the property

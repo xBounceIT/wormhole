@@ -8,6 +8,7 @@ import vm from 'node:vm';
 import test from 'node:test';
 import { parse } from 'yaml';
 import { buildMacOvpnProxy } from '../scripts/build-macos-ovpnproxy.mjs';
+import { backendGoToolchain } from '../scripts/backend-go-toolchain.mjs';
 
 test('relative vcpkg roots are resolved before CMake changes its search base', (t) => {
   const f = fixture(t);
@@ -416,6 +417,7 @@ test('macOS backend delegates OpenVPN to the native builder and never runs its p
   const native = [];
   vm.runInNewContext(source, {
     path,
+    backendGoToolchain,
     fileURLToPath: (url) => new URL(url).pathname,
     mkdirSync() {},
     rmSync() {},
@@ -436,6 +438,7 @@ test('macOS backend delegates OpenVPN to the native builder and never runs its p
   });
   assert.equal(native.length, 1);
   assert.equal(native[0].architecture, 'arm64');
+  assert.equal(calls[0].options.env.GOTOOLCHAIN, backendGoToolchain());
   assert.deepEqual(
     calls.map((call) => path.basename(call.options.cwd)),
     [

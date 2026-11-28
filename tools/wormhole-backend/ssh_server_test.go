@@ -1843,7 +1843,7 @@ func TestSftpTransferValidationSeparatesLocalAndRemotePaths(t *testing.T) {
 	if err := validateSftpTransferCommand(command); err != nil {
 		t.Fatalf("valid remote-to-local transfer was rejected: %v", err)
 	}
-	command.Items[0].Name = "bad:name.txt"
+	command.Items[0].Name = "nested/name.txt"
 	if err := validateSftpTransferCommand(command); err == nil {
 		t.Fatal("unsafe transfer name was accepted")
 	}
@@ -2814,7 +2814,7 @@ func newSftpTestClient(t *testing.T) *sftp.Client {
 }
 
 func sftpTestPath(localPath string) string {
-	return "/" + filepath.ToSlash(localPath)
+	return pathpkg.Join("/", filepath.ToSlash(localPath))
 }
 
 func writeSftpTestFile(client *sftp.Client, path string, contents []byte) error {

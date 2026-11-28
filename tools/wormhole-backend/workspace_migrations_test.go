@@ -19,7 +19,7 @@ func TestEnsureElectronWorkspaceSchemaCreatesWinUICompatibleFreshDatabase(t *tes
 
 	for _, table := range []string{
 		"Nodes", "CredentialProfiles", "TunnelConfigs", "BitwardenCredentialCache",
-		"CredentialSecrets", "CredentialPrivateKeyOperations", "CredentialSecretOperations",
+		"CredentialSecrets", "CredentialPrivateKeyOperations", "CredentialSecretOperations", "EffectiveCredentialSnapshot",
 	} {
 		exists, err := tableExists(database, table)
 		if err != nil || !exists {
@@ -46,7 +46,7 @@ func TestEnsureElectronWorkspaceSchemaCreatesWinUICompatibleFreshDatabase(t *tes
 	if err := database.QueryRow("SELECT COUNT(*) FROM __migration_history;").Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != 23 {
+	if count != 24 {
 		t.Fatalf("migration history count = %d", count)
 	}
 	if err := ensureElectronWorkspaceSchema(databasePath); err != nil {

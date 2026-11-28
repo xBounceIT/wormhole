@@ -7,6 +7,7 @@ import {
   isTunnelTestNotice,
   missingTunnelFields,
   normalizeTunnelEditorSettings,
+  tunnelKindAvailable,
   normalizeWatchguardEditorSettings,
   parseTunnelProbeTarget,
   tunnelModeFor,
@@ -19,6 +20,31 @@ import {
 } from '../src/tunnel-state.ts';
 
 const tunnelId = 'b2a0a6b0-69c8-4f3e-a4cb-f3395aa0a9f7';
+
+test('VPN providers fail closed while capabilities are missing or unsupported', () => {
+  for (const kind of [1, 3, 4, 5]) {
+    assert.equal(tunnelKindAvailable(kind, null), false);
+    assert.equal(tunnelKindAvailable(kind, { openVpn: false }), false);
+    assert.equal(tunnelKindAvailable(kind, { openVpn: true }), true);
+  }
+  for (const kind of [0, 2, 6, 7, 8, 9]) assert.equal(tunnelKindAvailable(kind, null), true);
+  for (const kind of [-1, 10, 1.5, NaN])
+    assert.equal(tunnelKindAvailable(kind, { openVpn: true }), false);
+  const source = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  const editor = source.slice(
+    source.indexOf('function TunnelEditorDialog('),
+    source.indexOf('function TunnelsPage('),
+  );
+  assert.match(editor, /useTunnelCapabilities\(open\)/);
+  assert.match(
+    editor,
+    /tunnelKinds\s*\.filter\(\(kind\) => tunnelKindAvailable\(kind.value, capabilities\)\)/,
+  );
+  assert.match(
+    editor,
+    /canSave = missing.length === 0 && tunnelKindAvailable\(value.kind, capabilities\)/,
+  );
+});
 
 test('Forcepoint normalizes SSL settings without changing input or enabling other auth modes', () => {
   const input = {
@@ -473,4 +499,25 @@ test('Fortinet callback is saved for SSO and requires an empty realm', () => {
     missingTunnelFields({ name: 'Forti', kind: 2, settings: { ...settings, Realm: 'staff' } }),
     ['an empty realm for the FortiGate SAML callback'],
   );
+});
+
+test('native tunnel edit allowlists cover every existing provider editor field', () => {
+  const app = readFileSync(new URL('../src/tunnel-editor-schema.ts', import.meta.url), 'utf8');
+  const native = readFileSync(
+    new URL('../tools/wormhole-backend/vault_tunnel_editor.go', import.meta.url),
+    'utf8',
+  );
+  const fields = app.slice(
+    app.indexOf('function tunnelEditorFields('),
+    app.indexOf('function tunnelDefaultSettings('),
+  );
+  const providerCases = [...fields.matchAll(/case (\d+):([\s\S]*?)(?=case \d+:|default:)/g)];
+  assert.equal(providerCases.length, 8);
+  for (const [, kind, body] of providerCases) {
+    const declared = native.match(new RegExp('case ' + kind + ':\\s*fields = "([^"]+)"'));
+    assert.ok(declared, `Native provider ${kind} missing`);
+    const allowed = new Set(declared[1].split(' '));
+    for (const [, field] of body.matchAll(/key: '([^']+)'/g))
+      assert.ok(allowed.has(field), `Provider ${kind}: native editor rejects ${field}`);
+  }
 });

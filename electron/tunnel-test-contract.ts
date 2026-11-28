@@ -45,6 +45,13 @@ const fortinetIPsecPublicKeys = [
   ),
 ];
 
+export function parseTunnelCapabilities(value: unknown): { openVpn: boolean } {
+  if (!isRecord(value) || typeof value.openVpn !== 'boolean') {
+    throw new Error('VPN capabilities are unavailable.');
+  }
+  return { openVpn: value.openVpn };
+}
+
 export type TunnelTestRequest = {
   id: string;
   attempt: number;

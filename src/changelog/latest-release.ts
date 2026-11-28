@@ -4,6 +4,7 @@ import settings from './media/settings.webp';
 import oledTheme from './media/oled-theme.webp';
 import workspaceRedesign from './media/workspace-redesign.gif';
 import workspaceRedesignPoster from './media/workspace-redesign.png';
+import sharedCredentialSlot from './media/shared-credential-slot.png';
 
 type ChangelogMedia =
   | { kind: 'image'; src: string; alt: string }
@@ -63,6 +64,16 @@ export const latestRelease: VisualChangelogRelease = {
         kind: 'image',
         src: settings,
         alt: 'Settings opens on General with all eight categories visible on the left and preferences for appearance, tabs and the application on the right.',
+      },
+    },
+    {
+      title: 'Set a shared credential for a slot',
+      subtitle:
+        'Choose a slot by name in the connection editor. In Workspace administration, set the credential it uses when someone has no personal assignment.',
+      media: {
+        kind: 'image',
+        src: sharedCredentialSlot,
+        alt: 'The Operations remote desktop slot shows Operations RDP account as the selected credential, with Set shared default ready to confirm.',
       },
     },
     {

@@ -1,0 +1,234 @@
+@import '@fontsource-variable/geist';
+@import './workspace-palette.css';
+
+:root .startup-shell:has(.workspace-admin) {
+  background: var(--sidebar);
+  color: var(--foreground);
+  font:
+    14px/1.45 'Geist Variable',
+    'Segoe UI Variable',
+    'Segoe UI',
+    sans-serif;
+}
+
+:root .startup-shell .workspace-admin {
+  position: relative;
+  width: min(36rem, 100%);
+  padding: 20px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--popover);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 8%);
+  overflow-wrap: anywhere;
+}
+
+.workspace-admin-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.workspace-admin-header h1 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 550;
+  letter-spacing: -0.02em;
+}
+
+.workspace-admin-location {
+  display: none;
+  color: color-mix(in srgb, var(--foreground) 66%, var(--popover));
+  font-size: 12px;
+}
+
+.workspace-admin:has(.shared-slot-default, .member-invitation) .workspace-admin-location {
+  display: inline;
+}
+
+.workspace-admin-location::before {
+  content: '';
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  margin: 0 12px 2px 0;
+  border: solid currentColor;
+  border-width: 1px 1px 0 0;
+  transform: rotate(45deg);
+}
+
+.workspace-admin-close {
+  position: relative;
+  flex: 0 0 28px;
+  height: 28px;
+  margin-inline-start: auto;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font-size: 0;
+  cursor: pointer;
+}
+
+.workspace-admin-close::before,
+.workspace-admin-close::after {
+  content: '';
+  position: absolute;
+  inset: 50% auto auto 50%;
+  width: 13px;
+  height: 1.5px;
+  background: currentColor;
+  transform: translate(-50%, -50%) rotate(45deg);
+}
+
+.workspace-admin-close::after {
+  transform: translate(-50%, -50%) rotate(-45deg);
+}
+
+.workspace-admin-close:hover,
+.workspace-admin .startup-button-secondary:hover {
+  background: var(--muted);
+}
+
+.workspace-admin :is(button, summary):focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+.workspace-admin > p:empty,
+.shared-slot-default [role='status']:empty,
+.slot-selection:empty {
+  margin: 0;
+}
+
+.workspace-admin .slot-context {
+  margin: 20px 0 4px;
+  color: color-mix(in srgb, var(--foreground) 66%, var(--popover));
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.workspace-admin:has(.shared-slot-default, .member-invitation) h2 {
+  margin: 0;
+  font-size: 22px;
+  line-height: 1.25;
+  font-weight: 600;
+  letter-spacing: -0.035em;
+}
+
+.workspace-admin .shared-slot-default {
+  margin-top: 10px;
+}
+
+.workspace-admin .shared-slot-default fieldset {
+  gap: 0;
+}
+
+.shared-slot-default :is(label:not([hidden]), [role='status']:not(:empty)) {
+  margin-block: 5px;
+}
+
+.shared-slot-default label input:not([type='checkbox']) {
+  display: block;
+  margin: 5px 0 8px;
+}
+
+.slot-selection p {
+  margin: 0 0 16px;
+  color: color-mix(in srgb, var(--foreground) 72%, var(--popover));
+}
+
+.slot-credential {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.slot-credential-icon {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  border-radius: 9px;
+  background: var(--muted);
+}
+
+.slot-credential-icon svg {
+  width: 18px;
+}
+
+.slot-credential strong {
+  font-weight: 550;
+}
+
+.slot-credential details {
+  width: fit-content;
+  margin-top: 2px;
+  color: color-mix(in srgb, var(--foreground) 65%, var(--popover));
+  font-size: 12px;
+}
+
+.slot-credential summary {
+  cursor: pointer;
+}
+
+.slot-protocol {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--secondary);
+  color: var(--secondary-foreground);
+  font-size: 11px;
+  font-weight: 550;
+}
+
+.workspace-admin :is(.shared-slot-default, .member-invitation) .shared-setup-actions {
+  margin: 20px -20px -20px;
+  padding: 12px 20px;
+  border-top: 1px solid var(--border);
+  background: color-mix(in srgb, var(--muted) 50%, var(--popover));
+}
+
+.workspace-admin .startup-button {
+  width: auto;
+  min-height: 32px;
+  margin: 0;
+  padding: 0 12px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: var(--primary);
+  color: var(--primary-foreground);
+  font: inherit;
+  font-weight: 500;
+}
+
+.workspace-admin .startup-button-secondary {
+  border-color: var(--border);
+  background: var(--background);
+  color: var(--foreground);
+}
+
+.workspace-admin:has(.member-invitation) h2 {
+  margin-top: 18px;
+}
+
+.member-invitation fieldset {
+  display: grid;
+  gap: 12px;
+}
+
+.member-invitation fieldset[hidden] {
+  display: none;
+}
+
+.member-invitation-delivery textarea {
+  display: block;
+  width: 100%;
+  margin-block: 8px;
+  resize: vertical;
+  font-family: var(--font-mono, monospace);
+}

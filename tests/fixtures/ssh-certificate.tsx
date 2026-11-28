@@ -122,6 +122,7 @@ window.runCertificateTests = async () => {
   const mountEditor = async (
     credential?: WormholeWorkspaceCredential,
     { authorized = true, editorOnly = true } = {},
+    nativeSave?: (request: any) => Promise<boolean>,
   ) => {
     window.wormhole = bridge;
     await React.act(async () =>
@@ -133,6 +134,7 @@ window.runCertificateTests = async () => {
             initialCredentials={credential ? [credential] : []}
             initialEditor={{ credential, username: 'operator' }}
             isAuthorized={authorized}
+            onVaultSave={nativeSave}
             onCreate={async (request) => {
               requests.push(request);
               if (saveError) throw saveError;
@@ -219,6 +221,21 @@ window.runCertificateTests = async () => {
   assert.equal(requests.at(-1).kind, 'password');
   assert.equal(requests.at(-1).password, 'replacement-password');
   assert.equal(requests.at(-1).passphrase, '');
+
+  let smbSaves = 0;
+  await mountEditor(
+    { ...saved, kind: 'password', protocol: 'smb', hasCertificate: false },
+    {},
+    async () => {
+      smbSaves++;
+      return true;
+    },
+  );
+  await input('credential-password', 'native-smb-guard');
+  await submit();
+  assert.match(dialog().textContent!, /SMB credentials are unavailable/);
+  assert.equal(smbSaves, 0);
+  await click(button('Cancel'));
 
   await mountEditor(saved);
   assert.match(certificateRow().textContent!, /Expired/);
@@ -360,6 +377,149 @@ window.runCertificateTests = async () => {
     if (rejectSave) await regular(false);
     else await click(button('Cancel'));
     assert.equal(unsavedPassword.value, '');
+  }
+  mountID += 2; // The regular-page lifecycle fixtures above reserve two React keys.
+  // Actual native credential editor: mutable secret bytes never enter the draft,
+  // and the callback must consume them before awaiting native authentication.
+  const nativeRequests: any[] = [];
+  let nativeError = false,
+    nativeRefresh = true;
+  const nativeSave = async (request: any) => {
+    nativeRequests.push({
+      ...request,
+      metadata: { ...request.metadata },
+      password: request.password.slice(),
+      passphrase: request.passphrase.slice(),
+      borrowed: request,
+    });
+    if (nativeError) throw Error('private native diagnostic');
+    return nativeRefresh;
+  };
+  const passwordCredential = {
+    ...saved,
+    rowVersion: '7',
+    kind: 'password' as const,
+    privateKeyFileName: undefined,
+    hasCertificate: false,
+    certificateFileName: undefined,
+  };
+  await mountEditor(passwordCredential, {}, nativeSave);
+  await input('credential-password', 'native-password');
+  await submit();
+  assert.equal(new TextDecoder().decode(nativeRequests.at(-1).password), 'native-password');
+  assert.equal(nativeRequests.at(-1).rowVersion, '7');
+  assert.equal(nativeRequests.at(-1).metadata.id, saved.id);
+  assert.ok(nativeRequests.at(-1).borrowed.password.every((x: number) => x === 0));
+  await mountEditor({ ...passwordCredential, protocol: 'vnc' }, {}, nativeSave);
+  await submit();
+  assert.equal(nativeRequests.at(-1).metadata.username, '');
+  assert.equal(nativeRequests.at(-1).password.length, 0);
+  await mountEditor(
+    {
+      ...passwordCredential,
+      protocol: 'rdp',
+      domain: 'CORP',
+      provider: 'Bitwarden',
+      bitwardenItemId: 'item',
+      bitwardenItemName: 'Login',
+    },
+    {},
+    nativeSave,
+  );
+  await submit();
+  assert.equal(nativeRequests.at(-1).metadata.provider, 'Bitwarden');
+  assert.equal(nativeRequests.at(-1).metadata.domain, 'CORP');
+  nativeError = true;
+  await mountEditor(passwordCredential, {}, nativeSave);
+  await input('credential-password', 'replacement');
+  await submit();
+  let nativeCount = nativeRequests.length;
+  await submit();
+  assert.equal(nativeRequests.length, nativeCount);
+  assert.match(dialog().textContent!, /replacement password again/);
+  nativeError = false;
+  await input('credential-password', 'replacement');
+  await submit();
+  assert.equal(nativeRequests.length, nativeCount + 1);
+  nativeError = true;
+  certificateSelection = certificate;
+  await mountEditor({ ...saved, rowVersion: '2' }, {}, nativeSave);
+  await click(button('Replace…', certificateRow()));
+  await submit();
+  nativeCount = nativeRequests.length;
+  await submit();
+  assert.equal(nativeRequests.length, nativeCount);
+  assert.match(dialog().textContent!, /certificate again/);
+  nativeError = false;
+  await click(button('Replace…', certificateRow()));
+  await submit();
+  assert.equal(nativeRequests.length, nativeCount + 1);
+  // Failed imports require reselection and explicit re-entry of a supplied factor.
+  nativeError = true;
+  keySelection = key;
+  await mountEditor({ ...saved, rowVersion: '3' }, {}, nativeSave);
+  await click(button('Replace…', certificateRow().previousElementSibling!));
+  await input('credential-key-passphrase', 'native-passphrase');
+  await submit();
+  assert.equal(new TextDecoder().decode(nativeRequests.at(-1).passphrase), 'native-passphrase');
+  assert.ok(nativeRequests.at(-1).borrowed.passphrase.every((x: number) => x === 0));
+  assert.equal(
+    (document.getElementById('credential-key-passphrase') as HTMLInputElement).value,
+    '',
+  );
+  assert.doesNotMatch(dialog().textContent!, /private native diagnostic/);
+  const failedCount = nativeRequests.length;
+  await submit();
+  assert.equal(nativeRequests.length, failedCount);
+  await click(button('Replace…', certificateRow().previousElementSibling!));
+  await submit();
+  assert.equal(nativeRequests.length, failedCount);
+  assert.match(dialog().textContent!, /passphrase again/);
+  nativeError = false;
+  await input('credential-key-passphrase', 'native-passphrase');
+  await submit();
+  assert.equal(nativeRequests.length, failedCount + 1);
+  await mountEditor(undefined, {}, nativeSave);
+  await submit();
+  assert.equal(nativeRequests.length, failedCount + 1);
+  await input('credential-name', 'Created native key');
+  await click(button('Select…', certificateRow().previousElementSibling!));
+  await submit();
+  assert.equal(nativeRequests.at(-1).rowVersion, '0');
+  assert.equal(nativeRequests.at(-1).metadata.id, '');
+  nativeRefresh = false;
+  await mountEditor(passwordCredential, {}, nativeSave);
+  await submit();
+  nativeRefresh = true;
+  for (const fail of [false, true]) {
+    let finish!: (value: boolean) => void, reject!: (error: Error) => void;
+    const pending = new Promise<boolean>((yes, no) => {
+      finish = yes;
+      reject = no;
+    });
+    let calls = 0;
+    await mountEditor(passwordCredential, {}, (request) => {
+      calls++;
+      assert.equal(new TextDecoder().decode(request.password), 'pending-secret');
+      return pending;
+    });
+    await input('credential-password', 'pending-secret');
+    await submit();
+    await submit();
+    assert.equal(calls, 1);
+    assert.equal((document.getElementById('credential-password') as HTMLInputElement).value, '');
+    await mountEditor(passwordCredential, {}, nativeSave);
+    await input('credential-name', 'New draft');
+    await React.act(async () => {
+      if (fail) reject(Error('old diagnostic'));
+      else finish(true);
+    });
+    await tick();
+    assert.equal(
+      (document.getElementById('credential-name') as HTMLInputElement).value,
+      'New draft',
+    );
+    assert.doesNotMatch(dialog().textContent!, /old diagnostic/);
   }
   await React.act(async () => root.unmount());
 

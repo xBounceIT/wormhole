@@ -474,11 +474,15 @@ test('native SSH certificate parsers, pickers and selection lifetimes stay behin
   assert.equal(ipsecDraftOwners.has(contents), false);
   assert.equal(keys.get(contents), undefined);
   assert.equal(certificates.get(contents), undefined);
-  const lock = main.slice(
-    main.indexOf("ipcMain.handle('auth:lock'"),
-    main.indexOf("ipcMain.handle('auth:lock'") + 2200,
+  assert.match(
+    main,
+    /ipcMain\.handle\('auth:lock', \(event\) => lockApplication\(event.sender\)\)/,
   );
-  assert.match(lock, /sshCertificateSelections.delete\(event.sender\)/);
+  const lockStart = main.indexOf('async function lockApplication(');
+  const lockEnd = main.indexOf('\nfunction ', lockStart);
+  assert.ok(lockStart >= 0 && lockEnd > lockStart);
+  const lock = main.slice(lockStart, lockEnd);
+  assert.match(lock, /sshCertificateSelections.delete\(owner\)/);
   const preload = readFileSync(new URL('../electron/preload.cts', import.meta.url), 'utf8');
   assert.match(preload, /credential:select-ssh-certificate/);
   assert.doesNotMatch(preload, /certificatePath|privateKeyPath/);

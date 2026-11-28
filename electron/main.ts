@@ -1,3 +1,47 @@
+import { VaultTunnelBrowserDialog } from './vault-tunnel-browser-dialog.js';
+import { VaultVPNBrowserSession } from './vault-vpn-browser-session.js';
+import { VaultTunnelAuthenticationDialog } from './vault-tunnel-authentication-dialog.js';
+import { registerVaultProtectionIpc } from './vault-protection-ipc.js';
+import { registerVaultLocalBackupIpc } from './vault-local-backup-ipc.js';
+import { VaultMigrationSetupDialog } from './vault-migration-setup-dialog.js';
+import { registerVaultMigrationIpc, registerVaultRootRotationIpc } from './vault-migration-ipc.js';
+import { registerVaultUpgradeIpc } from './vault-upgrade-ipc.js';
+import { registerVaultUnprotectedIpc } from './vault-unprotected-ipc.js';
+import { registerVaultOSMigrationIpc } from './vault-os-migration-ipc.js';
+import type { IpcMainInvokeEvent } from 'electron';
+import { selectVaultNativePaths } from './vault-native-paths.js';
+import { prepareVaultMigrationBoot, type VaultMigrationBoot } from './vault-migration-boot.js';
+import type { VaultQuickTarget } from './vault-quick-target.ts';
+import { VaultRdpCredentialsDialog } from './vault-rdp-credentials-dialog.js';
+import { SealedRdpBackend } from './sealed-rdp.ts';
+import { resolveVaultRDPBitwarden } from './vault-rdp-bitwarden.ts';
+import { rdpManualTarget } from './vault-rdp-manual.ts';
+import { VaultRdpController } from './vault-rdp-controller.ts';
+import { VaultRdpIpc } from './vault-rdp-ipc.ts';
+import { VaultVncPasswordDialog } from './vault-vnc-password-dialog.js';
+import { VaultProtectedEntryDialog } from './vault-protected-entry-dialog.js';
+import {
+  parseVaultBitwardenCLIUnlockContext,
+  parseVaultBitwardenCLIPassword,
+} from './vault-bitwarden-cli-unlock.js';
+import { VaultBitwardenCLIUnlockController } from './vault-bitwarden-cli-unlock-controller.js';
+import { VaultSshCredentialsDialog } from './vault-ssh-credentials-dialog.js';
+import { SealedVncBackend } from './sealed-vnc.ts';
+import { resolveVaultVNCBitwarden } from './vault-vnc-bitwarden.ts';
+import { VaultVncController } from './vault-vnc-controller.ts';
+import { VaultVncIpc } from './vault-vnc-ipc.ts';
+import { LinuxVaultClipboard, linuxClipboardIO } from './vault-linux-clipboard.ts';
+import { SealedRouteBroker } from './sealed-route.ts';
+import {
+  VaultWebConnections,
+  parseVaultWebRequest,
+  type PreparedVaultWebConnection,
+} from './vault-web-connections.ts';
+import { VaultWebIpc } from './vault-web-ipc.ts';
+import { VaultWebCookieCheckpoint } from './vault-web-cookies.ts';
+import { SealedSshBackend, type SealedSshAdmission } from './sealed-ssh.ts';
+import { VaultSshIpc } from './vault-ssh-ipc.ts';
+import type { VaultSshOpen } from './vault-ssh-open.ts';
 import { SharedSshRoutes } from './ssh-shared-route.js';
 import { assertRdpSurfaceOwner, isRdpInput } from './rdp-framebuffer.js';
 import { confirmRdpCertificate } from './rdp-certificate.js';
@@ -17,10 +61,12 @@ import {
   app,
   BrowserWindow,
   clipboard,
+  ClipboardItem,
   crashReporter,
   dialog,
   ipcMain,
   Menu,
+  powerMonitor,
   net as electronNet,
   screen,
   session as electronSession,
@@ -34,9 +80,43 @@ import { existsSync } from 'node:fs';
 import { stat as statFile } from 'node:fs/promises';
 import path from 'node:path';
 import { createInterface, type Interface } from 'node:readline';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { ElectronChromeExtensions } from 'electron-chrome-extensions';
 import { AuthSession } from './auth-session.js';
+import { VaultBackendClient } from './vault-client.js';
+import { launchVaultTouchIDBroker } from './vault-touchid-broker.js';
+import { resolveVaultSSHBitwarden } from './vault-ssh-bitwarden.js';
+import { VaultLockMonitor, bindVaultPowerEvents } from './vault-lock-monitor.js';
+import { stricterVaultProfile, type VaultProfile } from './vault-security.js';
+import type { VaultUpdatePreferences } from './vault-preferences.js';
+import { bindNativeVaultSession } from './vault-session-monitor.js';
+import { VaultWindowPolicy } from './vault-window-policy.js';
+import { createVaultDialogWindow } from './vault-dialog-appearance.js';
+import { VaultCreateDialog } from './vault-create-dialog.js';
+import { VaultTunnelDialog } from './vault-tunnel-dialog.js';
+import { VaultCredentialsDialog } from './vault-credentials-dialog.js';
+import { VaultNotesDialog } from './vault-notes-dialog.js';
+import { VaultReauthenticationDialog } from './vault-reauth-dialog.js';
+import { VaultSharedAuthenticationDialog } from './vault-shared-dialog.js';
+import { VaultSharedSetupDialog } from './vault-shared-setup-dialog.js';
+import { pickSharedBackupDestination } from './vault-shared-backup-destination.js';
+import { isSharedInitialStartup } from './vault-shared-invitation.js';
+import {
+  registerSharedAuthenticationIpc,
+  registerSharedAdminRecoveryIpc,
+  registerSharedCatalogIpc,
+  registerSharedNodeEditIpc,
+  registerSharedCertificateRenewalIpc,
+  registerSharedChangesIpc,
+  registerSharedConnectionContextIpc,
+  registerSharedRecoveryBackupIpc,
+  registerSharedAccountResetIpc,
+  registerSharedAdministrationIpc,
+  registerSharedRecoveryInspectionIpc,
+} from './vault-shared-ipc.js';
+import { prepareVaultCredentialSelections } from './vault-credential-selection.js';
+import { VaultBackendHost, isTrustedVaultDocument, registerVaultIpc } from './vault-host.js';
+import { registerVaultPresenceIpc } from './vault-presence-ipc.js';
 import { TreeTooltipManager, type TreeTooltipRequest } from './tree-tooltip.js';
 import { parseWorkspaceNotes, workspaceNodeWriteMaxRequestBytes } from './workspace-notes.js';
 import { hasValidCredentialSecretLength } from './credential-secret-length.js';
@@ -50,7 +130,7 @@ import {
   parseConnectionTreeExpansionSetting,
   type ConnectionTreeExpansionSetting,
 } from './connection-tree-settings.js';
-import { initializeLocalCrashDiagnostics } from './crash-diagnostics.js';
+import { initializeLocalCrashDiagnostics, VaultCrashCapturePolicy } from './crash-diagnostics.js';
 import {
   backendErrorText,
   createRuntimeDiagnostics,
@@ -60,7 +140,11 @@ import {
   withIpcDiagnostics,
 } from './runtime-diagnostics.js';
 import { isAppTheme, parseThemeStartupRequest, type AppTheme } from './theme-settings.js';
-import { isSshTerminalTheme, type SshTerminalTheme } from './terminal-theme-settings.js';
+import {
+  defaultSshTerminalTheme,
+  isSshTerminalTheme,
+  type SshTerminalTheme,
+} from './terminal-theme-settings.js';
 import { nativeTitlebarOverlay, syncNativeTitlebarTheme } from './native-titlebar-theme.js';
 import {
   normalizeWindowCloseConfirmation,
@@ -149,6 +233,7 @@ import { TunnelFailureRegistry, tunnelClosedMessage } from './tunnel-failure.js'
 import {
   isTunnelIdentifier,
   parseTunnelDetailsResponse,
+  parseTunnelCapabilities,
   parseTunnelWriteRequest,
   parseTunnelSummaryList,
   parseTunnelTestRequest,
@@ -188,6 +273,7 @@ import {
   type SerialConnectedResponse,
   type SerialOpenRequest,
 } from './serial.js';
+import { SealedSerialBackend } from './sealed-serial.ts';
 import { WebSessionAttemptTracker } from './web-session-attempt.js';
 import { getInSessionNavigationUrl } from './web-new-window-navigation.js';
 import { adjustWebZoom } from './web-zoom.js';
@@ -205,6 +291,7 @@ import {
 } from './web-browser-tabs.js';
 import { webTargetURLMatchesEndpoint } from './web-target-validation.js';
 import {
+  completeWindowsUpdateHandoff,
   isSafeUpdateInstallerPath,
   launchDownloadedUpdate,
   updateInstallAction,
@@ -249,7 +336,7 @@ const applicationIconPath = path.join(
   process.platform === 'win32' ? 'Wormhole.ico' : 'Wormhole.png',
 );
 const startupWindowOpacity = 0.96;
-const wormholeDataDirectoryName = 'Wormhole';
+let nativeVaultPaths: ReturnType<typeof selectVaultNativePaths>;
 const backendTimeoutMs = 30_000;
 const backupTimeoutMs = 5 * 60_000;
 const nativeLongOperationTimeoutMs = 30 * 60_000;
@@ -307,22 +394,52 @@ app.on('child-process-gone', (_event, details) => {
   });
 });
 
-// Crashpad must start before any renderer or utility process is created. This adapter keeps every
-// report local, records only bounded non-secret context, and degrades without blocking startup.
-initializeLocalCrashDiagnostics({
-  app,
-  reporter: crashReporter,
-  platform: process.platform,
-  arch: process.arch,
-  electronVersion: process.versions.electron ?? 'unknown',
-  processId: process.pid,
-  localAppData: process.env.LOCALAPPDATA,
-  logger: {
-    info: (message) => recordCrashDiagnostic('INF', message),
-    warn: (message) => recordCrashDiagnostic('WRN', message),
-    error: (message) => recordCrashDiagnostic('ERR', message),
-  },
+// Own the original Chromium profile for this app lifetime. A pending native
+// migration isolates Chromium before readiness; Go retains the
+// original userData/database selections. No renderer may grant this authority.
+let vaultMigrationBoot: VaultMigrationBoot;
+try {
+  nativeVaultPaths = selectVaultNativePaths(app.getPath('userData'), process.env);
+  vaultMigrationBoot = prepareVaultMigrationBoot({
+    app,
+    executable: backendPath,
+    databasePath: wormholeDatabasePath(),
+    prepareProtection: process.argv.includes('--prepare-vault-protection'),
+  });
+  if (!vaultMigrationBoot.primary) app.exit(0);
+} catch {
+  dialog.showErrorBox('Wormhole', 'Wormhole could not prepare its browser session safely.');
+  app.exit(1);
+  throw Error('Vault startup unavailable.');
+}
+app.on('second-instance', () => {
+  const window = BrowserWindow.getAllWindows().find((w) => !w.isDestroyed());
+  if (window) {
+    if (window.isMinimized()) window.restore();
+    window.focus();
+  }
 });
+
+const vaultCrashCapture = new VaultCrashCapturePolicy(() => {
+  initializeLocalCrashDiagnostics({
+    app,
+    reporter: crashReporter,
+    platform: process.platform,
+    arch: process.arch,
+    electronVersion: process.versions.electron ?? 'unknown',
+    processId: process.pid,
+    localAppData: process.env.LOCALAPPDATA,
+    logger: {
+      info: (message) => recordCrashDiagnostic('INF', message),
+      warn: (message) => recordCrashDiagnostic('WRN', message),
+      error: (message) => recordCrashDiagnostic('ERR', message),
+    },
+  });
+});
+// A native vault opens with Crashpad off until its effective policy is
+// authenticated. An existing legacy workspace under the Default machine
+// floor can retain the pre-renderer local diagnostics path.
+if (vaultMigrationBoot.legacyLocalCrashCapture) vaultCrashCapture.apply('default');
 
 const forceSoftwareRendering = process.env.WORMHOLE_DISABLE_HARDWARE_ACCELERATION === '1';
 const useSoftwareRendering =
@@ -357,15 +474,31 @@ const rdpSurfacePlacements = new Map<
 >();
 const rdpOwnerSyncTasks = new Map<number, NodeJS.Immediate>();
 let serialBackend: SerialBackendClient | undefined;
+const sealedSerial = new SealedSerialBackend({
+  executable: backendPath,
+  workspaceId: () => vaultBackend.unlockedWorkspaceId,
+  authorize: (request, accepted) => vaultBackend.serialBundle(request, accepted),
+  sharedUse: {
+    active: () => vaultBackend.isSharedWorkspace,
+    check: (workspaceId, nodeIds) => vaultBackend.checkSharedSerialUse(workspaceId, nodeIds),
+  },
+});
 let latestUpdateCheck: UpdateCheckResult | undefined;
-let updateCheckInFlight: Promise<UpdateCheckResult> | undefined;
+let latestUpdateManifest: string | undefined;
+let latestUpdatePublisherVerification = false;
+let latestUpdateScope: VaultUpdateScope | undefined;
+let updateProfileFloor: { scope: VaultUpdateScope; profile: VaultProfile } | undefined;
+let downloadedUpdate: DownloadedUpdate | undefined;
+let updateCheckInFlight:
+  | { scope?: VaultUpdateScope; result: Promise<UpdateCheckResult>; cancellation: AbortController }
+  | undefined;
 let updateDownloadChild: ChildProcessWithoutNullStreams | undefined;
 const updateInstallTasks = new KeyedSingleFlight<string>();
 let pendingUpdateQuit:
   | { launch(): Promise<void>; resolve(): void; reject(error: Error): void }
   | undefined;
 let startupUpdateTimer: NodeJS.Timeout | undefined;
-let startupUpdateScheduled = false;
+let startupUpdateScheduled: { scope?: VaultUpdateScope } | undefined;
 let startupBackgroundTimer: NodeJS.Timeout | undefined;
 const startupReadyWindows = new WeakSet<BrowserWindow>();
 const failedWorkspaceWindows = new WeakSet<BrowserWindow>();
@@ -405,6 +538,7 @@ type BackendOperation =
   | 'workspace-node-notes'
   | 'tunnel-create'
   | 'tunnel-list'
+  | 'tunnel-capabilities'
   | 'tunnel-read'
   | 'tunnel-update'
   | 'tunnel-delete'
@@ -426,6 +560,8 @@ type BackendOperation =
   | 'settings-set-update-preferences'
   | 'update-check'
   | 'update-download'
+  | 'update-verify-installer'
+  | 'update-check-release'
   | 'logs-info'
   | 'settings-set-log-retention'
   | 'settings-set-log-level'
@@ -709,12 +845,28 @@ type UpdateCheckResult = {
   installerFileName?: string;
   installerSize?: number | null;
   installerSha256?: string;
+  lastUpdateCheck?: string;
+  updatePolicy?: 'notify' | 'managed';
 };
 type UpdateDownloadRequest = {
   installerUrl: string;
   installerFileName: string;
   installerSha256?: string;
   installerSize?: number | null;
+};
+type NativeUpdateDownloadRequest = {
+  installerUrl: string;
+  installerFileName: string;
+  installerSha256: string;
+  installerSize: number;
+  currentVersion: string;
+  signedManifest?: string;
+};
+type VaultUpdateScope = { workspaceId: string; epoch: number };
+type DownloadedUpdate = {
+  path: string;
+  request: NativeUpdateDownloadRequest;
+  scope?: VaultUpdateScope;
 };
 type WorkspaceResponse = {
   tree: unknown[];
@@ -934,6 +1086,7 @@ type WebOpenRequest = {
   sessionId: string;
   attempt: number;
   nodeId?: string;
+  quickTarget?: VaultQuickTarget;
   address?: string;
   port?: number;
   protocol?: 'http' | 'https';
@@ -1014,6 +1167,7 @@ const mremoteImportSelections = new WeakMap<Electron.WebContents, MRemoteImportS
 const mremoteImportAnalysis = new WeakMap<Electron.WebContents, AbortController>();
 let authStateMutationQueue: Promise<void> = Promise.resolve();
 let authLockRequested = false;
+let authLocksInProgress = 0;
 let activeHelloVerification: AbortController | undefined;
 let bitwardenExtensionOperationQueue: Promise<void> = Promise.resolve();
 
@@ -1456,6 +1610,8 @@ const webMaxAddressLength = 4096;
 const webMaxSurfaceCoordinate = 100_000;
 
 function isWebOpenRequest(value: unknown): value is WebOpenRequest {
+  if (isRecord(value) && value.quickTarget !== undefined)
+    return Boolean(parseVaultWebRequest(value));
   if (
     !isRecord(value) ||
     !isSshSessionId(value.sessionId) ||
@@ -2979,7 +3135,7 @@ async function runTunnelBrowserAuth(
     );
   });
   const parent = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
-  const authWindow = new BrowserWindow({
+  const authWindow = createApplicationWindow({
     width: 900,
     height: 700,
     minWidth: 640,
@@ -3378,6 +3534,7 @@ class NativeBackendProcess {
     timeoutMs: number | null = nativeBackendCommandTimeoutMs,
   ): Promise<BackendResponse> {
     await this.start();
+    if (this.stopping || this.permanentlyStopped) throw new Error('Wormhole service is stopping.');
     const child = this.child;
     if (!child?.stdin || child.stdin.destroyed) {
       throw new Error('Wormhole service is not available.');
@@ -3627,20 +3784,21 @@ class NativeBackendProcess {
     const child = this.child;
     this.outputBuffer = '';
     this.rejectAll(new Error('Wormhole service stopped.'));
-
-    this.stopPromise = (async () => {
-      if (!child) return;
-      const exited = await stopChildProcess(child, {
-        gracefulTimeoutMs: nativeBackendShutdownTimeoutMs,
+    this.stopPromise = Promise.resolve()
+      .then(async () => {
+        if (child) {
+          const exited = await stopChildProcess(child, {
+            gracefulTimeoutMs: nativeBackendShutdownTimeoutMs,
+            nativeExecutable: backendPath(),
+          });
+          if (!exited) throw new Error('App service termination could not be confirmed.');
+          if (this.child === child) this.child = undefined;
+        }
+        this.stopping = false;
+      })
+      .finally(() => {
+        this.stopPromise = undefined;
       });
-      if (!exited) {
-        reportWarning('App service did not stop within the allowed time.');
-      }
-      if (this.child === child) this.child = undefined;
-    })().finally(() => {
-      this.stopping = false;
-      this.stopPromise = undefined;
-    });
     return this.stopPromise;
   }
 
@@ -3669,13 +3827,19 @@ class NativeBackendProcess {
       this.child = child;
       observeBackendProcess(child, this.operation, recordDiagnostic);
       child.stdout?.setEncoding('utf8');
-      child.stdout?.on('data', (chunk: string | Buffer) => this.readOutput(String(chunk)));
+      child.stdout?.on('data', (chunk: string | Buffer) => {
+        if (this.child === child) this.readOutput(String(chunk));
+      });
       child.stdout?.once('error', (error) => {
+        if (this.child !== child) return;
         reportWarning('Native backend output stream failed', error);
         this.rejectAll(error instanceof Error ? error : new Error(String(error)));
-        void this.stop();
+        void this.stop().catch(() =>
+          console.warn('[Wormhole] App service termination is unconfirmed.'),
+        );
       });
       child.stdin?.once('error', (error) => {
+        if (this.child !== child) return;
         if (!this.stopping) reportWarning('Native backend input stream failed', error);
         this.rejectAll(error instanceof Error ? error : new Error(String(error)));
       });
@@ -3684,12 +3848,24 @@ class NativeBackendProcess {
         resolve();
       });
       child.once('error', (error) => {
-        if (this.child === child) this.child = undefined;
+        if (this.child !== child) {
+          if (!settled) reject(new Error('Wormhole service stopped.'));
+          return;
+        }
+        if (child.pid === undefined) this.child = undefined;
         this.rejectAll(error instanceof Error ? error : new Error(String(error)));
         if (!settled) reject(error instanceof Error ? error : new Error(String(error)));
+        if (child.pid !== undefined)
+          void this.stop().catch(() =>
+            console.warn('[Wormhole] App service termination is unconfirmed.'),
+          );
       });
       child.once('close', (code) => {
-        if (this.child === child) this.child = undefined;
+        if (this.child !== child) {
+          if (!settled) reject(new Error('Wormhole service stopped.'));
+          return;
+        }
+        this.child = undefined;
         this.outputBuffer = '';
         const error = new Error(
           code === null ? 'Wormhole service stopped.' : `Wormhole service stopped (${code}).`,
@@ -3708,7 +3884,7 @@ class NativeBackendProcess {
     this.outputBuffer += chunk;
     if (this.outputBuffer.length > nativeBackendLineLimit) {
       recordDiagnostic('ERR', 'Native backend response exceeded the stream limit');
-      void this.stop();
+      void this.stop().catch(() => reportWarning('App service termination is unconfirmed.'));
       return;
     }
 
@@ -4295,20 +4471,10 @@ function cancelAllUserOperations(): void {
 }
 
 function wormholeDatabasePath(): string {
-  const configured = process.env.WORMHOLE_DATABASE?.trim();
-  if (configured) return configured;
-
-  const localAppData = process.env.LOCALAPPDATA;
-  if (localAppData) return path.join(localAppData, wormholeDataDirectoryName, 'wormhole.db');
-
-  // Linux/macOS do not have the Windows compatibility root. The Electron user-data directory
-  // is deliberately kept separate from the renderer profile, while still giving the Go backend
-  // one stable location for future cross-platform persistence.
-  return path.join(app.getPath('userData'), wormholeDataDirectoryName, 'wormhole.db');
+  return nativeVaultPaths.databasePath;
 }
-
 function electronUserDataPath(): string {
-  return app.getPath('userData');
+  return nativeVaultPaths.userDataPath;
 }
 
 function findBundledExecutable(name: string): string | undefined {
@@ -4346,6 +4512,540 @@ function credentialReaderPath(): string | undefined {
   return findBundledExecutable(`wormhole-credential-reader-${architecture}.exe`);
 }
 
+const vaultWindowPolicy = new VaultWindowPolicy({
+  platform: process.platform,
+  getWindows: () => BrowserWindow.getAllWindows(),
+  createWindow: (options) => new BrowserWindow(options),
+});
+const createApplicationWindow = (options: Electron.BrowserWindowConstructorOptions) =>
+  vaultWindowPolicy.createWindow(options);
+const workspaceColorSchemes = new WeakMap<BrowserWindow, Exclude<AppTheme, 'system'>>();
+const createThemedVaultWindow = (options: Electron.BrowserWindowConstructorOptions) =>
+  createVaultDialogWindow(
+    options,
+    (options.parent instanceof BrowserWindow && workspaceColorSchemes.get(options.parent)) ||
+      'system',
+    path.join(__dirname, 'vault-dialog-appearance-preload.cjs'),
+    createApplicationWindow,
+  );
+
+const vaultLockMonitor = new VaultLockMonitor({
+  profileChanged: () => broadcastVaultChange('vault:profile-changed'),
+  applyProfile: (profile, source) => {
+    vaultCrashCapture.apply(profile);
+    if (source === 'refresh') retireVaultUpdates();
+    const protectedWindows = vaultWindowPolicy.requiresContentProtection;
+    vaultWindowPolicy.apply(profile);
+    if (
+      process.platform === 'win32' &&
+      source === 'refresh' &&
+      !protectedWindows &&
+      vaultWindowPolicy.requiresContentProtection
+    ) {
+      // Existing ActiveX overlays belong to a separate process. Retire them
+      // through the workspace lock before admitting the stronger policy.
+      throw Error('Native RDP content protection requires a new vault unlock.');
+    }
+  },
+  idleSeconds: () => powerMonitor.getSystemIdleTime(),
+  idleState: (threshold) => powerMonitor.getSystemIdleState(threshold),
+  security: () => vaultBackend.security(),
+  lock: () =>
+    lockApplication().catch(() => {
+      console.warn('[Wormhole] Vault lock cleanup could not be confirmed.');
+    }),
+});
+
+function hasAutomaticVaultLockTarget(): boolean {
+  return (
+    vaultBackend.isVaultWorkspace ||
+    vaultCreateDialog.active ||
+    vaultOSMigrationDialog.active ||
+    vaultMigrationSetupDialog.active ||
+    vaultSharedSetupDialog.active
+  );
+}
+
+function requestAutomaticVaultLock(): void {
+  if (!hasAutomaticVaultLockTarget()) return;
+  void lockApplication().catch(() => {
+    console.warn('[Wormhole] Vault lock cleanup could not be confirmed.');
+  });
+}
+
+function beginLinuxVaultSleep() {
+  const needsRetirement =
+    authLocksInProgress > 0 || vaultBackend.hasOwner || hasAutomaticVaultLockTarget();
+  const release = holdApplicationLock();
+  return {
+    retired: needsRetirement
+      ? lockApplication(undefined, { refreshLegacy: false }).catch((error) => {
+          console.warn('[Wormhole] Vault retirement before suspend could not be confirmed.');
+          throw error;
+        })
+      : Promise.resolve(),
+    release,
+  };
+}
+
+function broadcastVaultChange(channel: 'vault:profile-changed' | 'vault:shared-catalog-changed') {
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (
+      !window.isDestroyed() &&
+      windowCloseCoordinators.has(window) &&
+      !window.webContents.isDestroyed()
+    ) {
+      try {
+        window.webContents.send(channel);
+      } catch {
+        // The window closed while delivering the change notification.
+      }
+    }
+  }
+}
+
+const vaultBackend = new VaultBackendHost(
+  () =>
+    new VaultBackendClient({
+      executable: backendPath(),
+      databasePath: wormholeDatabasePath(),
+      userDataPath: electronUserDataPath(),
+      migrationSessionData: vaultMigrationBoot.migrationSessionData,
+      openTouchIDBroker:
+        process.platform === 'darwin' && app.isPackaged ? launchVaultTouchIDBroker : undefined,
+      onSharedCatalogChanged: () => {
+        void vaultWebConnections.verifyViews();
+        void sealedSerial.verifySharedUse();
+        broadcastVaultChange('vault:shared-catalog-changed');
+      },
+      onUnavailable: () => {
+        if (!vaultBackend.isVaultWorkspace) {
+          void vaultBackend.stop().catch(() => {
+            console.warn('[Wormhole] Vault metadata process shutdown could not be confirmed.');
+          });
+          return;
+        }
+        vaultLockMonitor.deactivate();
+        authSession.lock();
+        if (!authLockRequested && !isQuitting) requestAutomaticVaultLock();
+      },
+    }),
+  () => !isQuitting && !authLockRequested && !nativeResourceShutdownPromise,
+  (security) => vaultLockMonitor.activate(security),
+  () => {
+    rememberAuthState(vaultAuthState(), false);
+    authSession.lock();
+  },
+  vaultMigrationBoot.legacyMigrationRequired === true,
+);
+
+const vaultCreateDialog = new VaultCreateDialog({
+  host: vaultBackend,
+  ipc: ipcMain,
+  createWindow: createThemedVaultWindow,
+  url:
+    rendererUrl && !app.isPackaged
+      ? new URL('vault-create.html', rendererUrl.endsWith('/') ? rendererUrl : rendererUrl + '/')
+          .href
+      : pathToFileURL(path.resolve(__dirname, '..', 'dist', 'vault-create.html')).href,
+  preload: path.join(__dirname, 'vault-create-preload.cjs'),
+  activate: () => {
+    rememberAuthState(vaultAuthState(), false);
+    authSession.markUnlocked();
+  },
+});
+
+const vaultMigrationSetupDialog = new VaultMigrationSetupDialog({
+  host: vaultBackend,
+  ipc: ipcMain,
+  createWindow: createThemedVaultWindow,
+  url:
+    rendererUrl && !app.isPackaged
+      ? new URL('vault-create.html', rendererUrl.endsWith('/') ? rendererUrl : rendererUrl + '/')
+          .href
+      : pathToFileURL(path.resolve(__dirname, '..', 'dist', 'vault-create.html')).href,
+  preload: path.join(__dirname, 'vault-migration-setup-preload.cjs'),
+});
+
+const vaultOSMigrationDialog = new VaultMigrationSetupDialog({
+  host: vaultBackend,
+  ipc: ipcMain,
+  mode: 'os-migration',
+  createWindow: createThemedVaultWindow,
+  url:
+    rendererUrl && !app.isPackaged
+      ? new URL('vault-create.html', rendererUrl.endsWith('/') ? rendererUrl : rendererUrl + '/')
+          .href
+      : pathToFileURL(path.resolve(__dirname, '..', 'dist', 'vault-create.html')).href,
+  preload: path.join(__dirname, 'vault-os-migration-preload.cjs'),
+});
+
+const vaultRootSetupDialog = new VaultMigrationSetupDialog({
+  host: vaultBackend,
+  ipc: ipcMain,
+  mode: 'rotation',
+  createWindow: createThemedVaultWindow,
+  url:
+    rendererUrl && !app.isPackaged
+      ? new URL('vault-create.html', rendererUrl.endsWith('/') ? rendererUrl : rendererUrl + '/')
+          .href
+      : pathToFileURL(path.resolve(__dirname, '..', 'dist', 'vault-create.html')).href,
+  preload: path.join(__dirname, 'vault-root-setup-preload.cjs'),
+});
+
+const vaultUpgradeSetupDialog = new VaultMigrationSetupDialog({
+  host: vaultBackend,
+  ipc: ipcMain,
+  mode: 'upgrade',
+  createWindow: createThemedVaultWindow,
+  url:
+    rendererUrl && !app.isPackaged
+      ? new URL('vault-create.html', rendererUrl.endsWith('/') ? rendererUrl : rendererUrl + '/')
+          .href
+      : pathToFileURL(path.resolve(__dirname, '..', 'dist', 'vault-create.html')).href,
+  preload: path.join(__dirname, 'vault-upgrade-preload.cjs'),
+});
+
+const vaultTunnelBrowserDialog = new VaultTunnelBrowserDialog({
+  createWindow: createApplicationWindow,
+  present: (window) => mcpApprovalWindowCoordinator.presentTunnelAuthWindow(window),
+  forget: (window) => mcpApprovalWindowCoordinator.forgetTunnelAuthWindow(window),
+  storage: ({ window, current, failed, context, signal, request, fallback }) => {
+    if (!request) throw Error('VPN source request unavailable.');
+    return new VaultVPNBrowserSession({
+      window,
+      current,
+      failed,
+      context,
+      signal,
+      request,
+      ...(fallback ? { fallback } : {}),
+      executable: backendPath(),
+      authority: vaultBackend.vpnSSOAuthority(current),
+    });
+  },
+});
+
+const vaultTunnelAuthenticationDialog = new VaultTunnelAuthenticationDialog({
+  ipc: ipcMain,
+  createWindow: createApplicationWindow,
+  url:
+    rendererUrl && !app.isPackaged
+      ? new URL(
+          'vault-tunnel-authentication.html',
+          rendererUrl.endsWith('/') ? rendererUrl : rendererUrl + '/',
+        ).href
+      : pathToFileURL(path.resolve(__dirname, '..', 'dist', 'vault-tunnel-authentication.html'))
+          .href,
+  preload: path.join(__dirname, 'vault-tunnel-authentication-preload.cjs'),
+});
+
+const vaultReauthenticationDialog = new VaultReauthenticationDialog({
+  ipc: ipcMain,
+  createWindow: createThemedVaultWindow,
+  stop: () => vaultBackend.stop(),
+  url:
+    rendererUrl && !app.isPackaged
+      ? new URL('vault-reauth.html', rendererUrl.endsWith('/') ? rendererUrl : rendererUrl + '/')
+          .href
+      : pathToFileURL(path.resolve(__dirname, '..', 'dist', 'vault-reauth.html')).href,
+  preload: path.join(__dirname, 'vault-reauth-preload.cjs'),
+});
+
+const vaultSharedDialog = new VaultSharedAuthenticationDialog({
+  host: vaultBackend,
+  ipc: ipcMain,
+  createWindow: createApplicationWindow,
+  appVersion: app.getVersion(),
+  pickInvitation: async (window) => {
+    const result = await showCoordinatedOpenDialog(window, {
+      title: 'Open workspace invitation',
+      properties: ['openFile'],
+      filters: [
+        { name: 'Wormhole invitation', extensions: ['whinv', 'txt'] },
+        { name: 'All files', extensions: ['*'] },
+      ],
+    });
+    return result.canceled ? null : (result.filePaths[0] ?? null);
+  },
+  pickTLSUpdate: async (window) => {
+    const result = await showCoordinatedOpenDialog(window, {
+      title: 'Open signed workspace trust update',
+      properties: ['openFile'],
+      filters: [{ name: 'Wormhole trust bundle', extensions: ['whtls'] }],
+    });
+    return result.canceled ? null : (result.filePaths[0] ?? null);
+  },
+  pickResetOffer: async (window) => {
+    const result = await showCoordinatedOpenDialog(window, {
+      title: 'Open account reset file',
+      properties: ['openFile'],
+      filters: [{ name: 'Wormhole account reset', extensions: ['whreset'] }],
+    });
+    return result.canceled ? null : (result.filePaths[0] ?? null);
+  },
+  url:
+    rendererUrl && !app.isPackaged
+      ? new URL('vault-shared.html', rendererUrl.endsWith('/') ? rendererUrl : rendererUrl + '/')
+          .href
+      : pathToFileURL(path.resolve(__dirname, '..', 'dist', 'vault-shared.html')).href,
+  preload: path.join(__dirname, 'vault-shared-preload.cjs'),
+});
+
+const vaultSharedSetupDialog = new VaultSharedSetupDialog({
+  copyLinuxMemberCode: (scope, release, accepted) => {
+    if (!vaultLinuxClipboard) throw Error('Secure copy is unavailable.');
+    return vaultLinuxClipboard.copyMemberCode(scope, release, accepted);
+  },
+  colorScheme: (parent) => workspaceColorSchemes.get(parent),
+  host: vaultBackend,
+  pickBackup: (window, accepted) =>
+    pickSharedBackupDestination(
+      { showSaveDialog: showCoordinatedSaveDialog, showMessageBox: showCoordinatedMessageBox },
+      window,
+      accepted,
+    ),
+  pickAccountReset: async (window) => {
+    const choice = await showCoordinatedSaveDialog(window, {
+      title: 'Save account reset offer',
+      defaultPath: 'account.whreset',
+      filters: [{ name: 'Wormhole account reset', extensions: ['whreset'] }],
+    });
+    return choice.canceled ? null : (choice.filePath ?? null);
+  },
+  restore: {
+    choose: async (window) => {
+      const choice = await showCoordinatedOpenDialog(window, {
+        title: 'Open encrypted workspace recovery backup',
+        filters: [{ name: 'Wormhole recovery backup', extensions: ['json'] }],
+        properties: ['openFile'],
+      });
+      return choice.canceled ? null : (choice.filePaths[0] ?? null);
+    },
+    inspect: (input, accepted) => vaultBackend.inspectSharedRecoveryBackup(input, accepted),
+    apply: (input, accepted) => vaultBackend.restoreSharedRecoveryBackup(input, accepted),
+  },
+  recover: {
+    choose: async (window, artifact) => {
+      const kit = artifact === 'kit';
+      const choice = await showCoordinatedOpenDialog(window, {
+        title: kit ? 'Open the offline recovery kit' : 'Open the signed TLS trust bundle',
+        filters: [
+          {
+            name: kit ? 'Wormhole recovery kit' : 'Wormhole trust bundle',
+            extensions: [kit ? 'whrecovery' : 'whtls'],
+          },
+        ],
+        properties: ['openFile'],
+      });
+      return choice.canceled ? null : (choice.filePaths[0] ?? null);
+    },
+    submit: (input, accepted) =>
+      vaultBackend.sharedRecoverAdministrator(input, app.getVersion(), accepted),
+  },
+  join: (input, accepted) =>
+    vaultBackend.sharedJoinAdministrator(input, app.getVersion(), accepted),
+  ipc: ipcMain,
+  createWindow: createApplicationWindow,
+  pickExport: async (window, format) => {
+    const choice = await showCoordinatedSaveDialog(
+      window,
+      format === 'hba'
+        ? {
+            title: 'Export PostgreSQL client access rules',
+            defaultPath: 'wormhole-workspace-hba.conf',
+            filters: [{ name: 'PostgreSQL configuration', extensions: ['conf'] }],
+          }
+        : {
+            title: 'Export PostgreSQL deployment script',
+            defaultPath: 'wormhole-workspace.sql',
+            filters: [{ name: 'PostgreSQL SQL script', extensions: ['sql'] }],
+          },
+    );
+    return choice.canceled ? null : (choice.filePath ?? null);
+  },
+  pickRecovery: async (window) => {
+    const choice = await showCoordinatedSaveDialog(window, {
+      title: 'Save the organisation recovery kit offline',
+      defaultPath: 'wormhole-organisation.whrecovery',
+      filters: [{ name: 'Wormhole organisation recovery kit', extensions: ['whrecovery'] }],
+    });
+    return choice.canceled ? null : (choice.filePath ?? null);
+  },
+  url:
+    rendererUrl && !app.isPackaged
+      ? new URL(
+          'vault-shared-setup.html',
+          rendererUrl.endsWith('/') ? rendererUrl : rendererUrl + '/',
+        ).href
+      : pathToFileURL(path.resolve(__dirname, '..', 'dist', 'vault-shared-setup.html')).href,
+  preload: path.join(__dirname, 'vault-shared-setup-preload.cjs'),
+});
+
+const vaultNotesDialog = new VaultNotesDialog({
+  host: vaultBackend,
+  ipc: ipcMain,
+  createWindow: createApplicationWindow,
+  url:
+    rendererUrl && !app.isPackaged
+      ? new URL('vault-notes.html', rendererUrl.endsWith('/') ? rendererUrl : rendererUrl + '/')
+          .href
+      : pathToFileURL(path.resolve(__dirname, '..', 'dist', 'vault-notes.html')).href,
+  preload: path.join(__dirname, 'vault-notes-preload.cjs'),
+});
+
+const vaultLinuxClipboard =
+  process.platform === 'linux'
+    ? new LinuxVaultClipboard({
+        host: vaultBackend,
+        io: linuxClipboardIO(clipboard, ClipboardItem),
+      })
+    : undefined;
+
+const vaultCredentialsDialog = new VaultCredentialsDialog({
+  linuxClipboard: vaultLinuxClipboard,
+  host: vaultBackend,
+  authenticate: (parent, accepted) => async (operation, descriptor, submit) =>
+    vaultReauthenticationDialog.open(
+      parent,
+      () => accepted() && vaultBackend.unlockedWorkspaceId === descriptor.vaultId,
+      operation,
+      descriptor,
+      submit,
+    ),
+  ipc: ipcMain,
+  createWindow: createApplicationWindow,
+  url:
+    rendererUrl && !app.isPackaged
+      ? new URL(
+          'vault-credentials.html',
+          rendererUrl.endsWith('/') ? rendererUrl : rendererUrl + '/',
+        ).href
+      : pathToFileURL(path.resolve(__dirname, '..', 'dist', 'vault-credentials.html')).href,
+  preload: path.join(__dirname, 'vault-credentials-preload.cjs'),
+});
+
+const vaultSshCredentialsDialog = new VaultSshCredentialsDialog({
+  ipc: ipcMain,
+  createWindow: createApplicationWindow,
+  url:
+    rendererUrl && !app.isPackaged
+      ? new URL(
+          'vault-ssh-credentials.html',
+          rendererUrl.endsWith('/') ? rendererUrl : rendererUrl + '/',
+        ).href
+      : pathToFileURL(path.resolve(__dirname, '..', 'dist', 'vault-ssh-credentials.html')).href,
+  preload: path.join(__dirname, 'vault-ssh-credentials-preload.cjs'),
+});
+
+const vaultVncPasswordDialog = new VaultVncPasswordDialog({
+  ipc: ipcMain,
+  createWindow: createThemedVaultWindow,
+  url:
+    rendererUrl && !app.isPackaged
+      ? new URL(
+          'vault-vnc-password.html',
+          rendererUrl.endsWith('/') ? rendererUrl : rendererUrl + '/',
+        ).href
+      : pathToFileURL(path.resolve(__dirname, '..', 'dist', 'vault-vnc-password.html')).href,
+  preload: path.join(__dirname, 'vault-vnc-password-preload.cjs'),
+});
+const vaultBitwardenCLIUnlockDialog = new VaultProtectedEntryDialog({
+  ipc: ipcMain,
+  createWindow: createApplicationWindow,
+  url:
+    rendererUrl && !app.isPackaged
+      ? new URL(
+          'vault-bitwarden-cli-unlock.html',
+          rendererUrl.endsWith('/') ? rendererUrl : rendererUrl + '/',
+        ).href
+      : pathToFileURL(path.resolve(__dirname, '..', 'dist', 'vault-bitwarden-cli-unlock.html'))
+          .href,
+  preload: path.join(__dirname, 'vault-bitwarden-cli-unlock-preload.cjs'),
+  channel: 'vault-bitwarden-cli-unlock',
+  title: 'Unlock Bitwarden CLI',
+  height: 390,
+  parseContext: parseVaultBitwardenCLIUnlockContext,
+  parseEnvelope: parseVaultBitwardenCLIPassword,
+});
+const vaultBitwardenCLIUnlock = new VaultBitwardenCLIUnlockController({
+  host: vaultBackend,
+  executable: backendPath,
+  databasePath: wormholeDatabasePath,
+});
+const vaultRdpCredentialsDialog = new VaultRdpCredentialsDialog({
+  ipc: ipcMain,
+  createWindow: createApplicationWindow,
+  url:
+    rendererUrl && !app.isPackaged
+      ? new URL(
+          'vault-rdp-credentials.html',
+          rendererUrl.endsWith('/') ? rendererUrl : rendererUrl + '/',
+        ).href
+      : pathToFileURL(path.resolve(__dirname, '..', 'dist', 'vault-rdp-credentials.html')).href,
+  preload: path.join(__dirname, 'vault-rdp-credentials-preload.cjs'),
+});
+
+const vaultTunnelDialog = new VaultTunnelDialog({
+  colorScheme: (parent) => workspaceColorSchemes.get(parent),
+  pickImport: async (parent, format) => {
+    const filters = {
+      openvpn: { name: 'OpenVPN profile', extensions: ['ovpn', 'conf'] },
+      watchguard: { name: 'WatchGuard bundle', extensions: ['wgssl', 'zip'] },
+      azure: { name: 'Azure VPN profile', extensions: ['xml'] },
+      cisco: { name: 'Cisco VPN profile', extensions: ['xml'] },
+      'ipsec-cert': { name: 'Client certificate', extensions: ['pem', 'crt', 'cer'] },
+      'ipsec-key': { name: 'Client private key', extensions: ['pem', 'key'] },
+      'ipsec-ca': { name: 'CA certificates', extensions: ['pem', 'crt', 'cer'] },
+    };
+    const result = await showCoordinatedOpenDialog(parent, {
+      title: 'Import VPN profile',
+      properties: ['openFile', 'dontAddToRecent'],
+      filters: [filters[format]],
+    });
+    return result.canceled || result.filePaths.length !== 1 ? null : result.filePaths[0]!;
+  },
+  capabilities: async () =>
+    parseTunnelCapabilities(await runBackend<unknown>('tunnel-capabilities')),
+  host: vaultBackend,
+  ipc: ipcMain,
+  createWindow: createApplicationWindow,
+  confirm: (parent, accepted) => (operation, descriptor, submit) =>
+    vaultReauthenticationDialog.open(
+      parent,
+      () => accepted() && vaultBackend.unlockedWorkspaceId === descriptor.vaultId,
+      operation,
+      descriptor,
+      submit,
+    ),
+  url:
+    rendererUrl && !app.isPackaged
+      ? new URL('vault-tunnel.html', rendererUrl.endsWith('/') ? rendererUrl : rendererUrl + '/')
+          .href
+      : pathToFileURL(path.resolve(__dirname, '..', 'dist', 'vault-tunnel.html')).href,
+  preload: path.join(__dirname, 'vault-tunnel-preload.cjs'),
+});
+
+function isTrustedVaultSender(event: Electron.IpcMainInvokeEvent): boolean {
+  if (event.sender.isDestroyed()) return false;
+  const owner = BrowserWindow.fromWebContents(event.sender);
+  const frame = event.senderFrame;
+  if (
+    !owner ||
+    owner.isDestroyed() ||
+    !windowCloseCoordinators.has(owner) ||
+    !frame ||
+    frame !== event.sender.mainFrame
+  )
+    return false;
+  return isTrustedVaultDocument(
+    frame.url,
+    pathToFileURL(path.resolve(__dirname, '..', 'dist', 'index.html')).href,
+    rendererUrl,
+    app.isPackaged,
+  );
+}
+
 async function runBackend<T>(
   operation: BackendOperation,
   request?: unknown,
@@ -4353,6 +5053,18 @@ async function runBackend<T>(
   signal?: AbortSignal,
 ): Promise<T> {
   if (signal?.aborted) throw new Error('Operation cancelled.');
+  if (
+    (vaultBackend.isVaultWorkspace || vaultBackend.requiresLegacyMigration) &&
+    operation !== 'tunnel-capabilities' &&
+    !(
+      operation === 'visual-changelog-claim' &&
+      vaultBackend.isVaultWorkspace &&
+      vaultBackend.unlockedWorkspaceId
+    ) &&
+    operation !== 'update-check-release' &&
+    operation !== 'update-verify-installer'
+  )
+    throw new Error('This operation is not yet available for encrypted vaults.');
   const args = [
     '--operation',
     operation,
@@ -4497,29 +5209,184 @@ async function runBackend<T>(
 
 // ---- update checks / downloads ----
 
-// performUpdateCheck keeps a single in-flight check: a startup check and a user-triggered
-// "Check now" coalesce into one GitHub round-trip instead of two concurrent backend processes.
-function performUpdateCheck(): Promise<UpdateCheckResult> {
-  if (!updateCheckInFlight) {
-    updateCheckInFlight = runBackend<UpdateCheckResult>('update-check', {
-      currentVersion: app.getVersion(),
-    })
-      .then((result) => {
-        latestUpdateCheck = result;
-        broadcastUpdateResult(result);
-        return result;
-      })
-      .finally(() => {
-        updateCheckInFlight = undefined;
-      });
+function captureUpdateScope(): VaultUpdateScope | undefined {
+  if (vaultBackend.requiresLegacyMigration || authLockRequested || isQuitting)
+    throw Error('Update services are unavailable.');
+  if (!vaultBackend.isVaultWorkspace) return undefined;
+  const workspaceId = vaultBackend.unlockedWorkspaceId;
+  if (!workspaceId || !authSession.isAccessAllowed) throw Error('Vault is locked.');
+  return { workspaceId, epoch: authSession.authorizationEpoch };
+}
+
+function sameUpdateScope(a?: VaultUpdateScope, b?: VaultUpdateScope): boolean {
+  return a?.workspaceId === b?.workspaceId && a?.epoch === b?.epoch;
+}
+
+function requireUpdateScope(scope?: VaultUpdateScope): void {
+  if (!sameUpdateScope(scope, captureUpdateScope())) throw Error('The update workspace changed.');
+}
+
+async function readVaultUpdateProfile(scope?: VaultUpdateScope): Promise<VaultProfile | undefined> {
+  requireUpdateScope(scope);
+  if (!scope) return undefined;
+  const security = await vaultBackend.security();
+  requireUpdateScope(scope);
+  const minimum = vaultLockMonitor.effectiveProfile;
+  if (!minimum) throw Error('The vault security policy is unavailable.');
+  const fresh = stricterVaultProfile(minimum, security.effective);
+  const profile =
+    updateProfileFloor && sameUpdateScope(scope, updateProfileFloor.scope)
+      ? stricterVaultProfile(updateProfileFloor.profile, fresh)
+      : fresh;
+  updateProfileFloor = { scope, profile };
+  return profile;
+}
+
+function applyUpdatePolicy(
+  result: UpdateCheckResult,
+  profile: VaultProfile | undefined,
+  signed: boolean,
+  publisherVerification = false,
+): UpdateCheckResult {
+  const managed = result.updatePolicy === 'managed';
+  if (profile === 'paranoid' && !managed)
+    return { ...emptyUpdateResult(), updatePolicy: 'managed' };
+  if (
+    profile &&
+    (!signed || !updateProfileAllowsInstaller(profile, publisherVerification, managed))
+  ) {
+    const {
+      installerUrl: _installerUrl,
+      installerFileName: _installerFileName,
+      installerSize: _installerSize,
+      installerSha256: _installerSha256,
+      ...release
+    } = result;
+    return {
+      ...release,
+      isUpdateAvailable: false,
+      updatePolicy: managed ? 'managed' : profile === 'default' ? undefined : 'notify',
+    };
   }
-  return updateCheckInFlight;
+  return result;
+}
+
+function updateProfileAllowsInstaller(
+  profile: VaultProfile | undefined,
+  publisherVerification: boolean,
+  managed: boolean,
+): boolean {
+  if (managed) return profile === 'hardened' || profile === 'paranoid';
+  return profile === 'default' || (profile === 'standard' && publisherVerification);
+}
+
+function emptyUpdateResult(): UpdateCheckResult {
+  return {
+    currentVersion: app.getVersion(),
+    latestVersion: '',
+    isNewerRelease: false,
+    isUpdateAvailable: false,
+    checkFailed: false,
+  };
+}
+
+async function requireUpdateInstaller(scope?: VaultUpdateScope): Promise<VaultProfile | undefined> {
+  const profile = await readVaultUpdateProfile(scope);
+  if (
+    scope &&
+    (!latestUpdateManifest ||
+      !updateProfileAllowsInstaller(
+        profile,
+        latestUpdatePublisherVerification,
+        latestUpdateCheck?.updatePolicy === 'managed',
+      ))
+  )
+    throw Error('The vault update policy does not allow this installer.');
+  return profile;
+}
+
+function retireVaultUpdates(): void {
+  const notify = !!latestUpdateScope;
+  latestUpdateScope = undefined;
+  latestUpdateManifest = undefined;
+  latestUpdatePublisherVerification = false;
+  latestUpdateCheck = undefined;
+  downloadedUpdate = undefined;
+  updateCheckInFlight?.cancellation.abort();
+  updateCheckInFlight = undefined;
+  clearTimeout(startupUpdateTimer);
+  startupUpdateTimer = undefined;
+  startupUpdateScheduled = undefined;
+  updateDownloadChild?.kill();
+  if (notify) broadcastUpdateResult(emptyUpdateResult());
+}
+
+// Coalesce checks within one unlock. An old owner cannot update preferences
+// or make a release installable in a replacement workspace.
+function performUpdateCheck(): Promise<UpdateCheckResult> {
+  if (quitCleanupStarted) throw Error('Wormhole is already closing.');
+  const scope = captureUpdateScope();
+  if (updateCheckInFlight && sameUpdateScope(scope, updateCheckInFlight.scope))
+    return updateCheckInFlight.result;
+  updateCheckInFlight?.cancellation.abort();
+  const cancellation = new AbortController();
+  const result = (async () => {
+    const profile = await readVaultUpdateProfile(scope);
+    const managedMode =
+      profile === 'paranoid' ? 'required' : profile === 'hardened' ? 'preferred' : undefined;
+    const { signedManifest, publisherVerification, managed, ...release } = await runBackend<
+      UpdateCheckResult & {
+        signedManifest?: string;
+        publisherVerification?: boolean;
+        managed?: boolean;
+      }
+    >(
+      scope ? 'update-check-release' : 'update-check',
+      { currentVersion: app.getVersion(), ...(managedMode ? { managedMode } : {}) },
+      65_000,
+      cancellation.signal,
+    );
+    if (scope) {
+      const confirmed = await readVaultUpdateProfile(scope);
+      if (confirmed !== profile) throw Error('The vault update policy changed.');
+      if (cancellation.signal.aborted) throw Error('The update check was cancelled.');
+      if (release.lastUpdateCheck)
+        await vaultBackend.updatePreferences({ lastUpdateCheck: release.lastUpdateCheck });
+    }
+    requireUpdateScope(scope);
+    if (cancellation.signal.aborted) throw Error('The update check was cancelled.');
+    const verifiesPublisher = publisherVerification === true && !!signedManifest;
+    const visible = applyUpdatePolicy(
+      managed ? { ...release, updatePolicy: 'managed' } : release,
+      profile,
+      !!signedManifest,
+      verifiesPublisher,
+    );
+    latestUpdateManifest = visible.isUpdateAvailable ? signedManifest : undefined;
+    latestUpdatePublisherVerification = visible.isUpdateAvailable && verifiesPublisher;
+    latestUpdateScope = scope;
+    latestUpdateCheck = visible;
+    broadcastUpdateResult(visible);
+    return visible;
+  })().finally(() => {
+    if (updateCheckInFlight?.result === result) updateCheckInFlight = undefined;
+  });
+  updateCheckInFlight = { scope, result, cancellation };
+  return result;
 }
 
 function broadcastUpdateResult(result: UpdateCheckResult): void {
   for (const window of BrowserWindow.getAllWindows()) {
-    if (!window.isDestroyed() && windowCloseCoordinators.has(window)) {
-      window.webContents.send('update:result', result);
+    if (
+      !window.isDestroyed() &&
+      windowCloseCoordinators.has(window) &&
+      !window.webContents.isDestroyed()
+    ) {
+      try {
+        window.webContents.send('update:result', result);
+      } catch {
+        // A closing renderer cannot affect the updater or vault retirement.
+      }
     }
   }
 }
@@ -4538,7 +5405,12 @@ function updateCacheRoot(): string {
 }
 
 function isSafeInstallerPath(value: string): boolean {
-  return isSafeUpdateInstallerPath(value, updateCacheRoot(), process.platform);
+  return isSafeUpdateInstallerPath(
+    value,
+    updateCacheRoot(),
+    process.platform,
+    latestUpdateCheck?.updatePolicy === 'managed',
+  );
 }
 
 // downloadUpdateInstaller runs a dedicated backend process that streams the installer to the
@@ -4547,7 +5419,7 @@ function isSafeInstallerPath(value: string): boolean {
 // timeout would kill a large installer on a slow connection, so this spawn deliberately bypasses
 // it (matching the WinUI download client's long timeout).
 function downloadUpdateInstaller(
-  request: UpdateDownloadRequest,
+  request: NativeUpdateDownloadRequest,
   onProgress: (downloaded: number, total: number) => void,
 ): Promise<string> {
   if (updateDownloadChild) {
@@ -4574,6 +5446,7 @@ function downloadUpdateInstaller(
   return new Promise<string>((resolve, reject) => {
     let stdoutBytes = 0;
     let stderr = '';
+    let completedPath: string | undefined;
     let settled = false;
     const lineReader = createInterface({
       input: child.stdout!,
@@ -4608,8 +5481,11 @@ function downloadUpdateInstaller(
         finishReject(new Error(backendErrorText(stderr) || 'The installer download failed.'));
         return;
       }
-      recordDiagnostic('ERR', 'Update download ended before reporting completion');
-      finishReject(new Error('The installer download ended before completing.'));
+      if (completedPath) finishResolve(completedPath);
+      else {
+        recordDiagnostic('ERR', 'Update download ended before reporting completion');
+        finishReject(new Error('The installer download ended before completing.'));
+      }
     });
 
     lineReader.on('line', (line) => {
@@ -4637,7 +5513,12 @@ function downloadUpdateInstaller(
         return;
       }
       if (message.type === 'complete' && typeof message.path === 'string') {
-        finishResolve(message.path);
+        if (completedPath) {
+          child.kill();
+          finishReject(new Error('The installer download returned duplicate completion data.'));
+          return;
+        }
+        completedPath = message.path;
       }
     });
 
@@ -4645,34 +5526,85 @@ function downloadUpdateInstaller(
   });
 }
 
-async function handleDownloadedUpdate(installerPath: string): Promise<{ appWillQuit: boolean }> {
+async function handleDownloadedUpdate(
+  download: DownloadedUpdate,
+  accepted: () => boolean,
+): Promise<{ appWillQuit: boolean }> {
   if (quitCleanupStarted || isQuitting) throw new Error('Wormhole is already closing.');
   return updateInstallTasks.runExclusive(
     'install',
     async () => {
-      const launch = () =>
-        launchDownloadedUpdate(installerPath, process.platform, {
-          execute: async (installerPath) => {
-            // Detached + unref lets Inno Setup survive the immediate exit. /RESTARTAPP relaunches the
-            // newly installed Windows build when present.
-            await new Promise<void>((resolve, reject) => {
-              const child = spawn(installerPath, ['/SILENT', '/RESTARTAPP'], {
-                detached: true,
-                stdio: 'ignore',
-                windowsHide: true,
-              });
-              child.once('error', reject);
-              child.once('spawn', () => {
-                child.removeListener('error', reject);
-                child.unref();
-                resolve();
-              });
-            });
-          },
+      const action = updateInstallAction(process.platform);
+      const launch = async () => {
+        const profile = await requireUpdateInstaller(download.scope);
+        if (!accepted() || download !== downloadedUpdate || !updateMatchesLatest(download.request))
+          throw Error('The selected update changed. Download it again.');
+        const requirePublisher = latestUpdatePublisherVerification || profile === 'standard';
+        const request = { ...download.request, requirePublisher };
+        type Receipt = {
+          verified: boolean;
+          publisherVerified?: boolean;
+          managedPackagePath?: string;
+        };
+        const checkReceipt = (result: Receipt, currentProfile: VaultProfile | undefined) => {
+          requireUpdateScope(download.scope);
+          if (
+            result.verified !== true ||
+            !accepted() ||
+            download !== downloadedUpdate ||
+            !updateMatchesLatest(download.request)
+          )
+            throw Error('The installer could not be verified.');
+          if (
+            (requirePublisher ||
+              latestUpdatePublisherVerification ||
+              currentProfile === 'standard') &&
+            result.publisherVerified !== true
+          )
+            throw Error('The installer publisher could not be verified.');
+        };
+        let handoffPath = download.path;
+        if (action !== 'execute') {
+          const result = await runBackend<Receipt>('update-verify-installer', request, 120_000);
+          checkReceipt(result, await requireUpdateInstaller(download.scope));
+          if (action === 'open') isQuitting = true;
+          if (process.platform === 'linux' && latestUpdateCheck?.updatePolicy === 'managed') {
+            const staged = result.managedPackagePath;
+            if (
+              typeof staged !== 'string' ||
+              !path.posix.isAbsolute(staged) ||
+              path.posix.normalize(staged) !== staged ||
+              staged === download.path ||
+              path.posix.basename(staged) !== download.request.installerFileName
+            )
+              throw Error('The administrator-staged system package could not be verified.');
+            handoffPath = staged;
+          }
+        }
+        await launchDownloadedUpdate(handoffPath, process.platform, {
+          execute: () =>
+            completeWindowsUpdateHandoff(
+              spawn(
+                backendPath(),
+                ['--operation', 'update-install-windows', '--database', wormholeDatabasePath()],
+                {
+                  stdio: ['pipe', 'pipe', 'ignore'],
+                  windowsHide: true,
+                },
+              ),
+              request,
+              async (publisherVerified, commit) => {
+                const currentProfile = await requireUpdateInstaller(download.scope);
+                checkReceipt({ verified: true, publisherVerified }, currentProfile);
+                commit(currentProfile !== 'paranoid');
+                isQuitting = true;
+              },
+            ),
           openPath: (installerPath) => shell.openPath(installerPath),
           showItemInFolder: (installerPath) => shell.showItemInFolder(installerPath),
         });
-      const action = updateInstallAction(process.platform);
+        downloadedUpdate = undefined;
+      };
       if (action === 'execute' || action === 'open') {
         await requestUpdateQuit(launch);
         return { appWillQuit: true };
@@ -4681,6 +5613,17 @@ async function handleDownloadedUpdate(installerPath: string): Promise<{ appWillQ
       return { appWillQuit: false };
     },
     'An update installation is already in progress.',
+  );
+}
+
+function updateMatchesLatest(request: UpdateDownloadRequest): boolean {
+  const expected = latestUpdateCheck;
+  return (
+    !!expected?.isUpdateAvailable &&
+    request.installerUrl === expected.installerUrl &&
+    request.installerFileName === expected.installerFileName &&
+    request.installerSha256 === expected.installerSha256 &&
+    request.installerSize === expected.installerSize
   );
 }
 
@@ -4712,12 +5655,35 @@ function settleUpdateQuit(error?: Error): void {
   }
 }
 
-function scheduleStartupUpdateCheck(settings: AppSettings): void {
-  if (!settings.autoCheckForUpdates || startupUpdateScheduled) return;
-  startupUpdateScheduled = true;
+function scheduleStartupUpdateCheck(
+  settings: Pick<AppSettings, 'autoCheckForUpdates'>,
+  scope?: VaultUpdateScope,
+): void {
+  if (
+    !settings.autoCheckForUpdates ||
+    (startupUpdateScheduled && sameUpdateScope(startupUpdateScheduled.scope, scope))
+  )
+    return;
+  const scheduled = { scope };
+  startupUpdateScheduled = scheduled;
+  clearTimeout(startupUpdateTimer);
   startupUpdateTimer = setTimeout(() => {
     startupUpdateTimer = undefined;
-    void performUpdateCheck().catch((error) => {
+    void (async () => {
+      requireUpdateScope(scope);
+      if (scope && !(await vaultBackend.preferences()).autoCheckForUpdates) {
+        if (startupUpdateScheduled === scheduled) startupUpdateScheduled = undefined;
+        return;
+      }
+      requireUpdateScope(scope);
+      await performUpdateCheck();
+    })().catch((error) => {
+      if (
+        scope &&
+        (scope.workspaceId !== vaultBackend.unlockedWorkspaceId ||
+          !isAuthorizationEpochCurrent(scope.epoch))
+      )
+        return;
       // A failed startup check must never block the app: the settings page still exposes
       // "Check now", and a later result arrives through the update:result event.
       reportWarning('Startup update check failed.', error);
@@ -4943,9 +5909,71 @@ async function loadBitwardenExtensionWhenReady(
   }
 }
 
-const treeTooltips = new TreeTooltipManager((options) => new BrowserWindow(options));
+const treeTooltips = new TreeTooltipManager(createApplicationWindow);
+
+type VaultWebSurfaceOwner = {
+  owner: BrowserWindow;
+  contents: Electron.WebContents;
+  generation: number;
+  partition?: string;
+  cookies?: VaultWebCookieCheckpoint;
+  cleanup?: Promise<void>;
+  views?: Map<Electron.WebContents, Promise<void> | undefined>;
+};
 
 class WebSurfaceManager {
+  private readonly vault?: {
+    active: () => boolean;
+    connections: Pick<
+      VaultWebConnections,
+      'open' | 'close' | 'closeAll' | 'retireRoute' | 'retireAllRoutes'
+    >;
+  };
+  private readonly vaultSessionOwners = new Map<string, VaultWebSurfaceOwner>();
+  private readonly vaultOwnerHooks = new Map<BrowserWindow, () => void>();
+
+  constructor(vault?: WebSurfaceManager['vault']) {
+    this.vault = vault;
+  }
+
+  private watchVaultOwner(owner: BrowserWindow): void {
+    if (this.vaultOwnerHooks.has(owner)) return;
+    const close = () => this.closeForWindow(owner);
+    const contents = owner.webContents;
+    contents.on('did-start-loading', close);
+    contents.on('render-process-gone', close);
+    contents.on('destroyed', close);
+    owner.on('closed', close);
+    this.vaultOwnerHooks.set(owner, () => {
+      contents.off('did-start-loading', close);
+      contents.off('render-process-gone', close);
+      contents.off('destroyed', close);
+      owner.off('closed', close);
+    });
+  }
+
+  private forgetVaultOwner(sessionId: string, token: VaultWebSurfaceOwner): void {
+    if (this.vaultSessionOwners.get(sessionId) !== token) return;
+    this.vaultSessionOwners.delete(sessionId);
+    if (![...this.vaultSessionOwners.values()].some((entry) => entry.owner === token.owner)) {
+      this.vaultOwnerHooks.get(token.owner)?.();
+      this.vaultOwnerHooks.delete(token.owner);
+    }
+  }
+
+  async stopVaultSessions(): Promise<void> {
+    const routes = this.vault?.connections.retireAllRoutes();
+    const owned = [...this.vaultSessionOwners];
+    for (const [id] of owned) this.close(id);
+    const results = await Promise.allSettled([
+      ...owned.map(([id]) => this.releaseTunnel(id)),
+      routes,
+    ]);
+    if (results.some((result) => result.status === 'rejected'))
+      throw Error('Web shutdown could not be confirmed.');
+    await this.vault?.connections.closeAll();
+  }
+
   private readonly surfaces = new Map<string, WebSurfaceRecord>();
   private readonly tunnelProxy = new WebTunnelProxy();
   private readonly pendingOpenOwners = new Map<string, BrowserWindow>();
@@ -4986,7 +6014,26 @@ class WebSurfaceManager {
   private bitwardenCheckpointTimer: NodeJS.Timeout | undefined;
   private isolatedPartitionSequence = 0;
 
-  async open(owner: BrowserWindow, request: WebOpenRequest): Promise<WebTargetResponse> {
+  async open(
+    owner: BrowserWindow,
+    request: WebOpenRequest,
+    trusted: () => boolean = () => true,
+  ): Promise<WebTargetResponse> {
+    const vaultOpen = this.vault?.active() === true;
+    if (vaultOpen) {
+      const reserved = new Set([
+        ...this.vaultSessionOwners.keys(),
+        ...this.pendingOpenOwners.keys(),
+      ]);
+      if (!reserved.has(request.sessionId) && reserved.size >= 32)
+        throw Error('Vault web connection is unavailable.');
+      const previous =
+        this.vaultSessionOwners.get(request.sessionId)?.owner ??
+        this.pendingOpenOwners.get(request.sessionId) ??
+        this.surfaces.get(request.sessionId)?.owner;
+      if (!trusted() || !parseVaultWebRequest(request) || (previous && previous !== owner))
+        throw Error('Vault web connection is unavailable.');
+    }
     const authorizationEpoch = authSession.authorizationEpoch;
     const generation = this.attempts.begin(request.sessionId);
     this.pendingOpenOwners.set(request.sessionId, owner);
@@ -4997,6 +6044,8 @@ class WebSurfaceManager {
     let openingTunnelBackend: NativeBackendProcess | undefined;
     let bitwardenUseRelease: (() => void) | undefined;
     let openingRecord: WebSurfaceRecord | undefined;
+    let openingVaultOwner: VaultWebSurfaceOwner | undefined;
+    let prepared: PreparedVaultWebConnection | undefined;
     try {
       await this.releaseTunnel(request.sessionId);
       this.assertOpenCurrent(
@@ -5016,8 +6065,46 @@ class WebSurfaceManager {
             tunnelConfigId: request.tunnelConfigId,
           }),
         );
-      // Quick Connect has no route-choice prompt; reject invalid destinations before VPN auth.
-      let target = request.nodeId ? undefined : await resolveTarget();
+      let target: WebTargetResponse | undefined;
+      if (vaultOpen) {
+        const token = { owner, contents: owner.webContents, generation };
+        openingVaultOwner = token;
+        this.vaultSessionOwners.set(request.sessionId, token);
+        this.watchVaultOwner(owner);
+        prepared = await this.vault!.connections.open(
+          request.quickTarget
+            ? { sessionId: request.sessionId, quickTarget: request.quickTarget }
+            : { sessionId: request.sessionId, nodeId: request.nodeId! },
+          authorizationEpoch + 1,
+          () =>
+            this.vaultSessionOwners.get(request.sessionId) === token &&
+            isAuthorizationEpochCurrent(authorizationEpoch) &&
+            trusted() &&
+            !owner.isDestroyed() &&
+            !owner.webContents.isDestroyed() &&
+            this.attempts.isCurrent(request.sessionId, generation) &&
+            (this.pendingOpenOwners.get(request.sessionId) === owner ||
+              this.surfaces.get(request.sessionId)?.owner === owner),
+          (reason) => {
+            if (this.vaultSessionOwners.get(request.sessionId) !== token) return;
+            const record = this.surfaces.get(request.sessionId);
+            if (record)
+              this.sendEvent(request.sessionId, record, 'failed', {
+                error:
+                  reason === 'route'
+                    ? tunnelClosedMessage
+                    : reason === 'view-revoked'
+                      ? 'Access to the shared browser was revoked.'
+                      : 'Access to the shared browser could not be verified.',
+              });
+            this.close(request.sessionId);
+          },
+        );
+        const { proxyUrl, ...publicTarget } = prepared.target;
+        target = { ...validateWebTarget(publicTarget), ...(proxyUrl ? { proxyUrl } : {}) };
+      } else if (!request.nodeId) {
+        target = await resolveTarget();
+      }
       this.assertOpenCurrent(
         request.sessionId,
         generation,
@@ -5027,11 +6114,11 @@ class WebSurfaceManager {
       if (!isAuthorizationEpochCurrent(authorizationEpoch)) {
         throw new Error('Web session was superseded before its VPN tunnel could open.');
       }
-      let resolvedTunnelRoute: 'direct' | 'socks5' | 'forwarder' = 'direct';
+      let resolvedTunnelRoute: 'direct' | 'socks5' | 'forwarder' = prepared?.route ?? 'direct';
       let tunnel: WebBrowserState['tunnel'];
       let tunnelRoute: Awaited<ReturnType<NativeBackendProcess['acquireTunnelRoute']>> | undefined;
       // Ask for the route before a one-shot backend process resolves the browser target.
-      if (request.nodeId || request.tunnelConfigId) {
+      if (!vaultOpen && (request.nodeId || request.tunnelConfigId)) {
         const leaseId = randomUUID();
         openingLeaseId = leaseId;
         this.tunnelLeases.claim(request.sessionId, leaseId);
@@ -5054,10 +6141,13 @@ class WebSurfaceManager {
       if (!isAuthorizationEpochCurrent(authorizationEpoch)) {
         throw new Error('Web session was superseded before its target could be resolved.');
       }
-      target ??= await resolveTarget();
-      if (request.nodeId || tunnelRoute?.active) {
-        assertTunnelRouteUnchanged(tunnelRoute?.configuredTunnelId, target.tunnelConfigId ?? '');
+      if (!vaultOpen) {
+        target ??= await resolveTarget();
+        if (request.nodeId || tunnelRoute?.active) {
+          assertTunnelRouteUnchanged(tunnelRoute?.configuredTunnelId, target.tunnelConfigId ?? '');
+        }
       }
+      if (!target) throw Error('Vault web connection is unavailable.');
       this.assertOpenCurrent(
         request.sessionId,
         generation,
@@ -5122,7 +6212,7 @@ class WebSurfaceManager {
       let bitwardenDefaultPopup: string | undefined;
       let bitwardenInstallKey: string | undefined;
       let bitwardenCookieSeed: BitwardenCookieSeed | undefined;
-      if (target.url.startsWith('https://')) {
+      if (!vaultOpen && target.url.startsWith('https://')) {
         let freshState: BitwardenExtensionState | undefined;
         let reservedUseRelease: (() => void) | undefined;
         try {
@@ -5188,6 +6278,7 @@ class WebSurfaceManager {
       const browserSession = electronSession.fromPartition(partition, {
         cache: true,
       });
+      if (openingVaultOwner) openingVaultOwner.partition = partition;
       const routedOrigin =
         resolvedTunnelRoute === 'forwarder' ? new URL(target.url).origin : undefined;
       if (openingEndpoint) {
@@ -5201,6 +6292,16 @@ class WebSurfaceManager {
         }
         openingProxySession = browserSession;
         await this.tunnelProxy.attach(browserSession, openingEndpoint, proxyConfig);
+      } else if (vaultOpen) {
+        await browserSession.setProxy(
+          target.proxyUrl
+            ? {
+                mode: 'fixed_servers',
+                proxyRules: target.proxyUrl,
+                proxyBypassRules: '<-loopback>',
+              }
+            : { mode: 'direct' },
+        );
       }
       if (routedOrigin) {
         const routedUrl = target.url;
@@ -5284,6 +6385,7 @@ class WebSurfaceManager {
         );
       }
 
+      if (prepared && !prepared.active()) throw Error('Vault web connection is unavailable.');
       const view = new WebContentsView({
         webPreferences: {
           partition,
@@ -5338,6 +6440,19 @@ class WebSurfaceManager {
       this.pendingOpenOwners.delete(request.sessionId);
       owner.contentView.addChildView(view);
       view.setVisible(false);
+      if (prepared?.archive && openingVaultOwner) {
+        const checkpoint = new VaultWebCookieCheckpoint({
+          url: target.url,
+          store: prepared.archive,
+          jar: browserSession.cookies,
+          views: () => tabs.all().map((tab) => tab.webContents),
+          authorized: prepared.active,
+        });
+        openingVaultOwner.cookies = checkpoint;
+        await checkpoint.restore(view.webContents);
+        if (!prepared.active() || this.surfaces.get(request.sessionId) !== record)
+          throw Error('Vault web connection is unavailable.');
+      }
       this.configureWebContents(request.sessionId, record, tabs.activeId, view);
       const bitwardenTabPartition = selectBitwardenTabRegistrationPartition(
         bitwardenPartition,
@@ -5365,6 +6480,10 @@ class WebSurfaceManager {
       target.browser = this.browserState(record);
       this.sendEvent(request.sessionId, record, 'connected');
       openingLeaseId = undefined;
+      if (vaultOpen) {
+        const { proxyUrl: _proxy, ...publicTarget } = target;
+        return publicTarget;
+      }
       return target;
     } catch (error) {
       if (openingEndpoint) {
@@ -5375,6 +6494,12 @@ class WebSurfaceManager {
       if (openingRecord && this.surfaces.get(request.sessionId) === openingRecord) {
         this.dispose(request.sessionId);
       }
+      if (
+        openingVaultOwner &&
+        this.vaultSessionOwners.get(request.sessionId) === openingVaultOwner
+      ) {
+        await this.releaseTunnel(request.sessionId).catch(() => undefined);
+      }
       if (openingLeaseId && this.tunnelLeases.isActive(request.sessionId, openingLeaseId)) {
         await this.releaseTunnel(request.sessionId).catch(() => undefined);
       }
@@ -5384,7 +6509,7 @@ class WebSurfaceManager {
       ) {
         this.pendingOpenOwners.delete(request.sessionId);
       }
-      throw error;
+      throw vaultOpen ? Error('Vault web connection could not be opened.') : error;
     }
   }
 
@@ -5665,6 +6790,27 @@ class WebSurfaceManager {
     else for (const view of record.tabs.all()) view.setVisible(false);
   }
 
+  private closeVaultContents(contents: Electron.WebContents): Promise<void> {
+    if (contents.isDestroyed()) return Promise.resolve();
+    return new Promise<void>((resolve, reject) => {
+      const finish = (failed = false) => {
+        clearTimeout(timer);
+        contents.off('destroyed', destroyed);
+        if (failed) reject(Error('Web surface shutdown could not be confirmed.'));
+        else resolve();
+      };
+      const destroyed = () => finish();
+      const timer = setTimeout(() => finish(!contents.isDestroyed()), 5000);
+      timer.unref();
+      contents.once('destroyed', destroyed);
+      try {
+        contents.close({ waitForBeforeUnload: false });
+      } catch {
+        finish(true);
+      }
+    });
+  }
+
   private destroyBrowserTab(record: WebSurfaceRecord, view: WebContentsView): void {
     const contents = view.webContents;
     if (record.bitwarden && contents) {
@@ -5679,7 +6825,32 @@ class WebSurfaceManager {
     } catch {
       /* Owner is closing. */
     }
-    if (contents && !contents.isDestroyed()) contents.close();
+    if (!contents) return;
+    const token = this.vaultSessionOwners.get(record.sessionId);
+    if (token) {
+      const closed = this.closeVaultView(token, view.webContents);
+      void closed.catch(() => undefined);
+    } else if (!view.webContents.isDestroyed()) view.webContents.close();
+  }
+
+  private closeVaultView(
+    token: VaultWebSurfaceOwner,
+    contents: Electron.WebContents,
+  ): Promise<void> {
+    const views = (token.views ??= new Map());
+    const previous = views.get(contents);
+    if (previous) return previous;
+    const closed = this.closeVaultContents(contents).then(
+      () => {
+        views.delete(contents);
+      },
+      () => {
+        views.set(contents, undefined);
+        throw Error('Web surface shutdown could not be confirmed.');
+      },
+    );
+    views.set(contents, closed);
+    return closed;
   }
 
   async openBitwardenPopup(request: BitwardenPopupOpenRequest): Promise<{ open: boolean }> {
@@ -6362,7 +7533,7 @@ class WebSurfaceManager {
       return owner;
     }
 
-    const extensionWindow = new BrowserWindow({
+    const extensionWindow = createApplicationWindow({
       parent: record.owner,
       show: false,
       autoHideMenuBar: true,
@@ -6843,6 +8014,7 @@ class WebSurfaceManager {
     const record = this.surfaces.get(sessionId);
     if (!record) return;
     record.disposed = true;
+    this.vaultSessionOwners.get(sessionId)?.cookies?.stop();
     record.preview = undefined;
     if (record.vpn) this.detachTunnelProxy(record.vpn.session, record.vpn.endpoint);
     for (const auxiliary of [...this.bitwardenAuxiliaryWindows.values()]) {
@@ -6878,13 +8050,13 @@ class WebSurfaceManager {
     ) {
       this.activeBitwardenSessions.delete(record.bitwarden.partition);
     }
-    if (record.tunnelLeaseId) {
+    for (const view of record.tabs.all()) this.destroyBrowserTab(record, view);
+    if (record.tunnelLeaseId || this.vaultSessionOwners.has(sessionId)) {
       record.tunnelLeaseId = undefined;
       void this.releaseTunnel(sessionId).catch((error) => {
         reportWarning('Could not release the web VPN tunnel.', error);
       });
     }
-    for (const view of record.tabs.all()) this.destroyBrowserTab(record, view);
     if (record.bitwarden) {
       void this.retireBitwardenProfile(record.bitwarden.partition).catch(() => {
         reportWarning('Bitwarden profile remains loaded until its storage can be saved.');
@@ -6892,14 +8064,76 @@ class WebSurfaceManager {
     }
   }
 
-  closeForOwner(owner: BrowserWindow, sessionId: string): void {
+  vaultOwnerForSession(sessionId: string): BrowserWindow | undefined {
+    return this.vaultSessionOwners.get(sessionId)?.owner;
+  }
+  async closeForOwner(owner: BrowserWindow, sessionId: string): Promise<void> {
     const record = this.surfaces.get(sessionId);
-    if (record?.owner === owner || this.pendingOpenOwners.get(sessionId) === owner) {
+    const token = this.vaultSessionOwners.get(sessionId);
+    if (
+      record?.owner === owner ||
+      this.pendingOpenOwners.get(sessionId) === owner ||
+      token?.owner === owner
+    ) {
+      if (token?.cookies) {
+        await token.cookies.flush().catch(() => {});
+        if (this.vaultSessionOwners.get(sessionId) !== token) return;
+      }
       this.close(sessionId);
+      await this.releaseTunnel(sessionId);
     }
   }
 
+  async closeForContents(contents: Electron.WebContents, sessionId: string): Promise<void> {
+    const token = this.vaultSessionOwners.get(sessionId);
+    if (token?.contents === contents) {
+      await this.closeForOwner(token.owner, sessionId);
+      return;
+    }
+    const owner = this.pendingOpenOwners.get(sessionId) ?? this.surfaces.get(sessionId)?.owner;
+    if (owner && !owner.isDestroyed() && owner.webContents === contents)
+      await this.closeForOwner(owner, sessionId);
+  }
+
   private async releaseTunnel(sessionId: string): Promise<void> {
+    const token = this.vaultSessionOwners.get(sessionId);
+    if (token) {
+      token.cookies?.stop();
+      token.cleanup ??= Promise.resolve()
+        .then(async () => {
+          const profile = async () => {
+            const views = await Promise.allSettled(
+              [...(token.views?.keys() ?? [])].map((contents) =>
+                this.closeVaultView(token, contents),
+              ),
+            );
+            if (views.some((result) => result.status === 'rejected'))
+              throw Error('Web profile cleanup could not be confirmed.');
+            if (token.partition) {
+              const browserSession = electronSession.fromPartition(token.partition!);
+              const results = await Promise.allSettled([
+                browserSession.closeAllConnections(),
+                browserSession.clearStorageData(),
+                browserSession.clearCache(),
+              ]);
+              if (results.some((result) => result.status === 'rejected'))
+                throw Error('Web profile cleanup could not be confirmed.');
+            }
+          };
+          const results = await Promise.allSettled([
+            this.vault!.connections.retireRoute(sessionId),
+            profile(),
+          ]);
+          if (results.some((result) => result.status === 'rejected'))
+            throw Error('Web shutdown could not be confirmed.');
+          await this.vault!.connections.close(sessionId);
+          this.forgetVaultOwner(sessionId, token);
+        })
+        .finally(() => {
+          token.cleanup = undefined;
+        });
+      await token.cleanup;
+    }
     await this.tunnelLeases.release(sessionId, async (leaseId) => {
       const endpoint = this.tunnelEndpoints.get(leaseId);
       await releaseNativeTunnelLease(leaseId, endpoint?.disconnect());
@@ -7067,10 +8301,21 @@ class WebSurfaceManager {
     for (const sessionId of this.tunnelLeases.keys()) {
       if (this.tunnelLeaseOwners.get(sessionId) === owner) sessionIds.add(sessionId);
     }
+    for (const [sessionId, token] of this.vaultSessionOwners) {
+      if (token.owner === owner) sessionIds.add(sessionId);
+    }
     for (const sessionId of sessionIds) this.close(sessionId);
   }
 
   async flushAndCloseForWindow(owner: BrowserWindow): Promise<void> {
+    const vaultIds = [...this.vaultSessionOwners]
+      .filter(([, token]) => token.owner === owner)
+      .map(([id]) => id);
+    const vaultStopped = await Promise.allSettled(
+      vaultIds.map((id) => this.closeForOwner(owner, id)),
+    );
+    if (vaultStopped.some((result) => result.status === 'rejected'))
+      throw Error('Web shutdown could not be confirmed.');
     const sessionIds = new Set<string>();
     for (const [sessionId, record] of this.surfaces) {
       if (record.owner === owner) sessionIds.add(sessionId);
@@ -7080,6 +8325,9 @@ class WebSurfaceManager {
     }
     for (const sessionId of this.tunnelLeases.keys()) {
       if (this.tunnelLeaseOwners.get(sessionId) === owner) sessionIds.add(sessionId);
+    }
+    for (const [sessionId, token] of this.vaultSessionOwners) {
+      if (token.owner === owner) sessionIds.add(sessionId);
     }
     const popupSessions = new Set(
       [...this.bitwardenPopups.keys()].filter(
@@ -7124,6 +8372,10 @@ class WebSurfaceManager {
   }
 
   async flushAndCloseAll(): Promise<void> {
+    await Promise.allSettled(
+      [...this.vaultSessionOwners.values()].map((token) => token.cookies?.flush()),
+    );
+    await this.stopVaultSessions();
     clearInterval(this.bitwardenCheckpointTimer);
     this.bitwardenCheckpointTimer = undefined;
     await this.bitwardenStorageTasks.waitForAllIdle();
@@ -7131,6 +8383,7 @@ class WebSurfaceManager {
       ...this.surfaces.keys(),
       ...this.pendingOpenOwners.keys(),
       ...this.tunnelLeases.keys(),
+      ...this.vaultSessionOwners.keys(),
     ]);
     const popupSessions = new Set(this.bitwardenPopups.keys());
     for (const sessionId of popupSessions) {
@@ -7165,6 +8418,12 @@ class WebSurfaceManager {
     }
   }
 
+  async checkpointVaultCookies(): Promise<void> {
+    await Promise.allSettled(
+      [...this.vaultSessionOwners.values()].map((token) => token.cookies?.checkpointNow()),
+    );
+  }
+
   backendStopped(): void {
     for (const endpoint of this.tunnelEndpoints.values()) {
       void endpoint.disconnect().catch(() => undefined);
@@ -7186,6 +8445,8 @@ class WebSurfaceManager {
   ): void {
     view.setBorderRadius(12); // Match --workspace-canvas-radius in the renderer.
     const contents = view.webContents;
+    const cookieCheckpoint = this.vaultSessionOwners.get(sessionId)?.cookies;
+    if (cookieCheckpoint) contents.on('did-finish-load', () => cookieCheckpoint.ready());
     let faviconRequest: AbortController | undefined;
     let faviconSource: string | undefined;
     contents.setWebRTCIPHandlingPolicy('disable_non_proxied_udp');
@@ -7310,7 +8571,12 @@ class WebSurfaceManager {
             enabled: !!routeNavigation(params.linkURL) && record.tabs.size < webBrowserTabLimit,
             click: click(() => this.addBrowserTab(sessionId, record, params.linkURL)),
           },
-          { label: 'Copy link address', click: click(() => clipboard.writeText(logicalUrl)) },
+          {
+            label: 'Copy link address',
+            click: click(() => {
+              void clipboard.writeText(logicalUrl).catch(() => {});
+            }),
+          },
         );
       }
       const flags = params.editFlags;
@@ -7620,11 +8886,339 @@ function describeWebLoadFailure(errorCode: number, description: string): string 
   }
 }
 
-const webSurfaces = new WebSurfaceManager();
+const vaultWebConnections = new VaultWebConnections({
+  workspaceId: () => vaultBackend.unlockedWorkspaceId,
+  authorized: (epoch) =>
+    Boolean(vaultBackend.unlockedWorkspaceId) && isAuthorizationEpochCurrent(epoch - 1),
+  plan: (q) => vaultBackend.webPlan(q),
+  archive: (plan, active) => vaultBackend.webSessionArchive(plan, active),
+  checkViews: (workspaceId, views) => vaultBackend.checkWebSessionViews(workspaceId, views),
+  quickTarget: (target, sessionId, epoch, accepted) => {
+    const workspaceId = vaultBackend.unlockedWorkspaceId;
+    if (!workspaceId) throw Error('Protected Quick Connect is locked.');
+    return vaultBackend.beginQuickTarget({ workspaceId, sessionId, epoch, target }, accepted);
+  },
+  routes: new SealedRouteBroker({
+    authentication: {
+      prompt: (context, current, signal, request, fallback) => {
+        const parent = webSurfaces.vaultOwnerForSession(context.binding.sessionId);
+        if (!parent) return Promise.reject(Error('VPN authentication owner unavailable.'));
+        return 'startURL' in context
+          ? vaultTunnelBrowserDialog.open(parent, current, context, signal, request, fallback)
+          : vaultTunnelAuthenticationDialog.open(parent, current, context, signal);
+      },
+      close: (context) =>
+        'startURL' in context
+          ? vaultTunnelBrowserDialog.cancelChallenge(context)
+          : vaultTunnelAuthenticationDialog.cancelChallenge(context),
+    },
+
+    executable: backendPath,
+    workspaceId: () => vaultBackend.unlockedWorkspaceId,
+    authorized: (epoch) =>
+      Boolean(vaultBackend.unlockedWorkspaceId) && isAuthorizationEpochCurrent(epoch - 1),
+    plan: (q) => vaultBackend.tunnelPlan(q),
+    bundle: (q) => vaultBackend.tunnelBundle(q),
+    fallback: {
+      plan: (q) => vaultBackend.tunnelFallbackPlan(q),
+      bundle: (q) => vaultBackend.tunnelFallbackBundle(q),
+    },
+  }),
+});
+const webSurfaces = new WebSurfaceManager({
+  active: () => vaultBackend.isVaultWorkspace,
+  connections: vaultWebConnections,
+});
+const vaultWebIpc = new VaultWebIpc({
+  workspace: () => vaultBackend.isVaultWorkspace,
+  trusted: (event) => isTrustedVaultSender(event as Electron.IpcMainInvokeEvent),
+  authorize: (run, cleanup) =>
+    runAuthorizedOperation(async () => {
+      requireNativeResourcesRunning();
+      return run();
+    }, cleanup),
+  open: (owner, request, current) => {
+    const window = BrowserWindow.fromWebContents(owner as Electron.WebContents);
+    if (!window || window.isDestroyed()) throw Error('Web session owner window is unavailable.');
+    return webSurfaces.open(window, request, current);
+  },
+  close: (owner, id) => webSurfaces.closeForContents(owner as Electron.WebContents, id),
+  closeAll: () => webSurfaces.stopVaultSessions(),
+});
 
 class NativeSshBackend {
+  private disposing: Promise<void> | undefined;
+  private shutdownUnconfirmed = false;
+  private readonly routes = new SealedRouteBroker({
+    authentication: {
+      prompt: (context, current, signal, request, fallback) => {
+        const owner = this.terminalOwners.get(context.binding.sessionId);
+        const parent = BrowserWindow.getAllWindows().find((window) => window.webContents === owner);
+        if (!parent) return Promise.reject(Error('VPN authentication owner unavailable.'));
+        return 'startURL' in context
+          ? vaultTunnelBrowserDialog.open(parent, current, context, signal, request, fallback)
+          : vaultTunnelAuthenticationDialog.open(parent, current, context, signal);
+      },
+      close: (context) =>
+        'startURL' in context
+          ? vaultTunnelBrowserDialog.cancelChallenge(context)
+          : vaultTunnelAuthenticationDialog.cancelChallenge(context),
+    },
+
+    executable: backendPath,
+    workspaceId: () => vaultBackend.unlockedWorkspaceId,
+    authorized: (epoch) =>
+      Boolean(vaultBackend.unlockedWorkspaceId) && isAuthorizationEpochCurrent(epoch - 1),
+    plan: (request) => vaultBackend.tunnelPlan(request),
+    bundle: (request) => vaultBackend.tunnelBundle(request),
+    fallback: {
+      plan: (q) => vaultBackend.tunnelFallbackPlan(q),
+      bundle: (q) => vaultBackend.tunnelFallbackBundle(q),
+    },
+  });
+  private readonly sealed = new SealedSshBackend({
+    executable: backendPath,
+    fileEditing: () => ({
+      databasePath: wormholeDatabasePath(),
+      userDataPath: electronUserDataPath(),
+    }),
+    workspaceId: () => vaultBackend.unlockedWorkspaceId,
+    authorized: (epoch) =>
+      Boolean(vaultBackend.unlockedWorkspaceId) && isAuthorizationEpochCurrent(epoch - 1),
+    bundle: (request) => vaultBackend.sshBundle(request),
+    bitwarden: (request, signal, accepted) =>
+      vaultBackend.isSharedWorkspace
+        ? Promise.resolve(undefined)
+        : resolveVaultSSHBitwarden({
+            executable: backendPath(),
+            databasePath: wormholeDatabasePath(),
+            request,
+            signal,
+            prepare: (recipient) =>
+              vaultBackend.prepareSSHBitwarden(
+                request,
+                recipient,
+                () => !signal.aborted && accepted(),
+              ),
+          }),
+    manual: {
+      close: (id) => vaultSshCredentialsDialog.cancelSession(id),
+      plan: (request) => vaultBackend.sshManualPlan(request),
+      bundle: (request) => vaultBackend.sshManualBundle(request),
+      prompt: (context, current, signal) => {
+        const owner = this.terminalOwners.get(context.plan.host.binding.sessionId);
+        const parent = owner && BrowserWindow.fromWebContents(owner);
+        if (!parent) return Promise.reject(Error('SSH credential owner unavailable.'));
+        return vaultSshCredentialsDialog.open(parent, current, context, signal);
+      },
+    },
+    route: {
+      resolve: (request) => vaultBackend.connectionRoute(request),
+      broker: this.routes,
+      bundle: (request) => vaultBackend.routedSshBundle(request),
+    },
+    host: {
+      plan: (request) => vaultBackend.sshHostPlan(request),
+      confirm: async (request, plan, received, accepted, signal) => {
+        const owner = this.terminalOwners.get(request.sessionId);
+        const parent = owner && BrowserWindow.fromWebContents(owner);
+        if (!parent || parent.isDestroyed() || !accepted() || signal.aborted)
+          throw Error('SSH host confirmation is unavailable.');
+        const changed = plan.fingerprint !== '';
+        const result = await showCoordinatedMessageBox(parent, {
+          type: changed ? 'warning' : 'question',
+          title: changed ? 'SSH host key changed' : 'Verify SSH host key',
+          message: changed
+            ? 'The server identity has changed.'
+            : 'This server identity has not been verified.',
+          detail: `${plan.binding.host}:${plan.binding.port}\n\n${changed ? `Saved: ${plan.fingerprint}\n` : ''}Received: ${received}\n\nVerify this fingerprint with the server administrator before trusting it.`,
+          buttons: ['Cancel', 'Trust and connect'],
+          defaultId: 0,
+          cancelId: 0,
+          noLink: true,
+          signal,
+        });
+        if (result.response !== 1 || !accepted() || signal.aborted)
+          throw Error('SSH host confirmation was cancelled.');
+        if (vaultBackend.isSharedWorkspace) {
+          await vaultBackend.trustSharedSshHost(
+            { ...request, expected: plan, received },
+            (startup, current, submit) =>
+              vaultSharedDialog.open(parent, current, 'trust-ssh-host', startup, submit, signal),
+            () => accepted() && !signal.aborted,
+          );
+          return;
+        }
+        const trust = vaultSshIpc.isQuickTarget(request)
+          ? vaultBackend.trustQuickSshHost.bind(vaultBackend)
+          : vaultBackend.trustSshHost.bind(vaultBackend);
+        await trust(
+          { ...request, expected: plan, received },
+          (operation, descriptor, submit) =>
+            vaultReauthenticationDialog.open(
+              parent,
+              () => accepted() && !signal.aborted,
+              operation,
+              descriptor,
+              submit,
+              signal,
+            ),
+          accepted,
+        );
+      },
+    },
+    parseEvent: parseSshBackendEvent,
+    onLine: (line) => this.handleLine(line),
+  });
   private terminalDelivery = new SshTerminalDelivery();
   private terminalOwners = new Map<string, Electron.WebContents>();
+  private readonly terminalAdmissions = new Map<string, object>();
+  private readonly protectedMembers = new Map<
+    string,
+    {
+      id: string;
+      owner: Electron.WebContents;
+      members: Set<string>;
+    }
+  >();
+
+  hasProtectedReservation(id: string): boolean {
+    return this.protectedMembers.has(id) || this.sealed.hasReservation(id);
+  }
+
+  ownsProtected(owner: Electron.WebContents, id: string): boolean {
+    return this.protectedMembers.get(id)?.owner === owner || this.terminalOwners.get(id) === owner;
+  }
+
+  captureOwner(event: Electron.IpcMainInvokeEvent, id: string, allowRetired = false): () => void {
+    if (
+      !vaultBackend.isVaultWorkspace &&
+      !vaultBackend.unlockedWorkspaceId &&
+      !this.hasProtectedReservation(id)
+    )
+      return () => {};
+    const owner = event.sender,
+      token = this.terminalAdmissions.get(id),
+      epoch = authSession.authorizationEpoch;
+    const retired =
+      allowRetired && !this.hasProtectedReservation(id) && !this.terminalOwners.has(id);
+    const current = () => {
+      if (!isTrustedVaultSender(event) || owner.isDestroyed())
+        throw Error('Invalid vault SSH owner.');
+      if (!isAuthorizationEpochCurrent(epoch)) throw Error('Vault SSH session is unavailable.');
+      if (retired) {
+        if (
+          this.hasProtectedReservation(id) ||
+          this.terminalOwners.has(id) ||
+          this.terminalAdmissions.has(id)
+        )
+          throw Error('Vault SSH session is unavailable.');
+      } else if (
+        !token ||
+        this.terminalAdmissions.get(id) !== token ||
+        !this.ownsProtected(owner, id) ||
+        !this.sealed.has(id)
+      )
+        throw Error('Vault SSH session is unavailable.');
+    };
+    current();
+    return current;
+  }
+
+  admitProtected(
+    owner: Electron.WebContents,
+    q: Extract<VaultSshOpen, { nodeId: string }>,
+    epoch: number,
+    current: () => boolean,
+    retired: () => Promise<void>,
+  ): SealedSshAdmission {
+    const rejected = (): SealedSshAdmission => ({
+      accepted: false,
+      result: Promise.reject(Error('Vault SSH is unavailable.')),
+    });
+    if (
+      !vaultBackend.unlockedWorkspaceId ||
+      !isAuthorizationEpochCurrent(epoch - 1) ||
+      !current() ||
+      owner.isDestroyed() ||
+      (q.manualCredentials && (q.manualKeyPassphrase || q.credentialId !== undefined)) ||
+      this.hasProtectedReservation(q.sessionId) ||
+      this.pendingConnections.has(q.sessionId) ||
+      this.openWaiters.has(q.sessionId) ||
+      this.activeSessions.has(q.sessionId)
+    )
+      return rejected();
+    const documentURL = owner.getURL();
+    const cohort = { id: q.sessionId, owner, members: new Set([q.sessionId]) },
+      token = {};
+    this.protectedMembers.set(q.sessionId, cohort);
+    this.terminalOwners.set(q.sessionId, owner);
+    this.terminalAdmissions.set(q.sessionId, token);
+    const generation = this.connectionAttempts.begin(q.sessionId);
+    this.pendingConnections.set(q.sessionId, generation);
+    const admission = this.sealed.admit(
+      {
+        sessionId: q.sessionId,
+        nodeId: q.nodeId,
+        columns: q.columns,
+        rows: q.rows,
+        ...(q.mode ? { mode: q.mode } : {}),
+        ...(q.credentialId ? { credentialId: q.credentialId } : {}),
+        ...(q.manualCredentials ? { manualCredentials: true } : {}),
+        ...(q.manualKeyPassphrase ? { manualKeyPassphrase: true } : {}),
+      },
+      epoch,
+      () =>
+        current() &&
+        !owner.isDestroyed() &&
+        owner.getURL() === documentURL &&
+        this.terminalAdmissions.get(q.sessionId) === token &&
+        this.terminalOwners.get(q.sessionId) === owner,
+      async () => {
+        await retired();
+        for (const id of cohort.members) {
+          if (this.protectedMembers.get(id) !== cohort) continue;
+          this.protectedMembers.delete(id);
+          this.terminalAdmissions.delete(id);
+        }
+      },
+    );
+    if (!admission.accepted) {
+      this.protectedMembers.delete(q.sessionId);
+      this.terminalOwners.delete(q.sessionId);
+      this.terminalAdmissions.delete(q.sessionId);
+    }
+    return {
+      accepted: admission.accepted,
+      result: admission.result.finally(() => {
+        if (this.pendingConnections.get(q.sessionId) === generation)
+          this.pendingConnections.delete(q.sessionId);
+      }),
+    };
+  }
+
+  async closeProtected(owner: Electron.WebContents, id: string): Promise<void> {
+    if (!this.hasProtectedReservation(id)) return;
+    if (!this.ownsProtected(owner, id)) throw Error('Invalid vault SSH owner.');
+    await this.close(id);
+  }
+
+  async retireProtected(
+    owner: Electron.WebContents,
+    ids: readonly string[],
+    allOwned = false,
+  ): Promise<void> {
+    const selected = new Set(ids);
+    if (allOwned)
+      for (const [id, cohort] of this.protectedMembers)
+        if (cohort.owner === owner) selected.add(id);
+    for (const id of selected) {
+      if (!this.hasProtectedReservation(id)) continue;
+      if (!this.ownsProtected(owner, id)) throw Error('Invalid vault SSH owner.');
+      this.terminalAdmissions.delete(id);
+    }
+    await this.sealed.closeCohorts([...selected]);
+  }
 
   acknowledgeTerminal(owner: Electron.WebContents, sessionId: string, sequence: number): void {
     if (!authSession.isAccessAllowed || this.terminalOwners.get(sessionId) !== owner) return;
@@ -7647,20 +9241,22 @@ class NativeSshBackend {
   private readonly editWaiters = new Map<
     string,
     {
+      sessionId: string;
       resolve: (event: SftpEditEvent) => void;
       reject: (error: Error) => void;
       timeout: NodeJS.Timeout;
     }
   >();
   async edit(sessionId: string, request: SftpEditRequest): Promise<SftpEditEvent> {
-    this.ensureStarted();
+    if (!this.sealed.has(sessionId)) this.ensureStarted();
+    if (this.editWaiters.size >= 128) throw Error('Too many file edit requests.');
     const requestId = randomUUID();
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.editWaiters.delete(requestId);
         reject(new Error('File edit operation timed out; working copies are retained.'));
       }, 60_000);
-      this.editWaiters.set(requestId, { resolve, reject, timeout });
+      this.editWaiters.set(requestId, { sessionId, resolve, reject, timeout });
       try {
         this.write({
           type: 'sftp-edit',
@@ -7683,20 +9279,39 @@ class NativeSshBackend {
     });
   }
 
-  async prepareEditClose(sessionId = 'sftp-recovery'): Promise<boolean> {
-    if (!this.child || this.child.killed) return true;
-    const snapshot = await this.edit(sessionId, { operation: 'prepare-close' });
-    if (snapshot.error) throw new Error(snapshot.error);
-    const pending = snapshot.edits.filter((edit) => edit.pending && !edit.recovered);
-    if (pending.length) {
+  private editCloseTargets(sessionId: string, owner?: Electron.WebContents): string[] {
+    if (this.sealed.has(sessionId)) return [sessionId];
+    if (vaultBackend.unlockedWorkspaceId) {
+      return sessionId === 'sftp-recovery'
+        ? this.sealed
+            .connectedSessionIds()
+            .filter((id) => !owner || this.terminalOwners.get(id) === owner)
+        : [];
+    }
+    return this.child && !this.child.killed ? [sessionId] : [];
+  }
+
+  async prepareEditClose(
+    sessionId = 'sftp-recovery',
+    document?: Electron.WebContents,
+  ): Promise<boolean> {
+    const pending = new Set<string>();
+    for (const id of this.editCloseTargets(sessionId, document)) {
+      const snapshot = await this.edit(id, { operation: 'prepare-close' });
+      if (snapshot.error) throw new Error(snapshot.error);
+      for (const edit of snapshot.edits) if (edit.pending && !edit.recovered) pending.add(edit.id);
+    }
+    if (pending.size) {
+      const source = document ?? this.terminalOwners.get(sessionId);
       const owner =
+        (source ? BrowserWindow.fromWebContents(source) : undefined) ??
         BrowserWindow.getFocusedWindow() ??
         BrowserWindow.getAllWindows().find((window) => windowCloseCoordinators.has(window));
       if (!owner) return false;
       const answer = await showCoordinatedMessageBox(owner, {
         type: 'warning',
         title: 'Pending file edits',
-        message: `${pending.length} edited file(s) have changes that have not been uploaded.`,
+        message: `${pending.size} edited file(s) have changes that have not been uploaded.`,
         detail:
           'Keep the private working copies for recovery after reconnecting, or return to File transfer to finish uploading.',
         buttons: ['Return to editing', 'Keep copies and close'],
@@ -7710,9 +9325,10 @@ class NativeSshBackend {
   }
 
   async finishEditClose(sessionId = 'sftp-recovery'): Promise<void> {
-    if (!this.child || this.child.killed) return;
-    const finished = await this.edit(sessionId, { operation: 'finish-close', decision: 'keep' });
-    if (finished.error) throw new Error(finished.error);
+    for (const id of this.editCloseTargets(sessionId)) {
+      const finished = await this.edit(id, { operation: 'finish-close', decision: 'keep' });
+      if (finished.error) throw new Error(finished.error);
+    }
   }
 
   private child: ChildProcessWithoutNullStreams | undefined;
@@ -7763,6 +9379,7 @@ class NativeSshBackend {
         throw new Error('SSH connection closed before it could start.');
       }
       this.terminalOwners.set(request.sessionId, owner);
+      this.terminalAdmissions.set(request.sessionId, {});
       return await this.openCurrent(request, authorizationEpoch, generation);
     } finally {
       if (this.pendingConnections.get(request.sessionId) === generation) {
@@ -7776,6 +9393,46 @@ class NativeSshBackend {
     authorizationEpoch: number,
     generation: number,
   ): Promise<SshConnectedResponse> {
+    if (vaultBackend.unlockedWorkspaceId) {
+      if (
+        !request.nodeId ||
+        request.mode === 'smb' ||
+        request.manualCredentials ||
+        request.manualKeyPassphrase ||
+        request.password !== undefined ||
+        request.keyPassphrase !== undefined ||
+        request.username !== undefined ||
+        request.host !== undefined ||
+        request.tunnelConfigId !== undefined
+      ) {
+        throw new Error('This connection requires a vault SSH flow that is not available yet.');
+      }
+      requireAuthorizationEpoch(authorizationEpoch);
+      if (!this.connectionAttempts.isCurrent(request.sessionId, generation))
+        throw new Error('SSH connection was cancelled.');
+      const owner = this.terminalOwners.get(request.sessionId);
+      const admission = this.terminalAdmissions.get(request.sessionId);
+      const documentURL = owner?.getURL();
+      return this.sealed.open(
+        {
+          sessionId: request.sessionId,
+          nodeId: request.nodeId,
+          mode: request.mode,
+          credentialId: request.credentialId,
+          columns: request.columns,
+          rows: request.rows,
+        },
+        authorizationEpoch + 1,
+        () =>
+          Boolean(
+            owner &&
+            !owner.isDestroyed() &&
+            this.terminalOwners.get(request.sessionId) === owner &&
+            this.terminalAdmissions.get(request.sessionId) === admission &&
+            owner.getURL() === documentURL,
+          ),
+      );
+    }
     if (!this.connectionAttempts.isCurrent(request.sessionId, generation)) {
       throw new Error('SSH connection closed before opening its VPN tunnel.');
     }
@@ -7940,15 +9597,80 @@ class NativeSshBackend {
     this.write({ type: 'resize', session_id: sessionId, columns, rows });
   }
 
+  assertSftpOwner(
+    event: Electron.IpcMainInvokeEvent,
+    sessionId: string,
+    allowRetired = false,
+  ): void {
+    if (!this.sealed.has(sessionId) && !vaultBackend.unlockedWorkspaceId) return;
+    const retired =
+      allowRetired && !this.sealed.has(sessionId) && !this.terminalOwners.has(sessionId);
+    if (
+      !isTrustedVaultSender(event) ||
+      (!retired && this.terminalOwners.get(sessionId) !== event.sender)
+    )
+      throw new Error('Invalid vault SFTP owner.');
+  }
+
   private readonly sharedRoutes = new SharedSshRoutes();
 
-  async shareSftp(sourceId: string, sessionId: string): Promise<SshConnectedResponse> {
+  async shareSftp(
+    sourceId: string,
+    sessionId: string,
+    owner?: Electron.WebContents,
+    accepted: () => boolean = () => true,
+  ): Promise<SshConnectedResponse> {
     if (
       !this.activeSessions.has(sourceId) ||
       this.activeSessions.has(sessionId) ||
-      this.openWaiters.has(sessionId)
+      this.openWaiters.has(sessionId) ||
+      this.pendingConnections.has(sessionId) ||
+      this.hasProtectedReservation(sessionId)
     )
       throw new Error('Source SSH connection is unavailable.');
+    if (this.sealed.has(sourceId) || vaultBackend.unlockedWorkspaceId) {
+      if (
+        !owner ||
+        owner.isDestroyed() ||
+        this.terminalOwners.get(sourceId) !== owner ||
+        !this.sealed.has(sourceId)
+      )
+        throw new Error('Source vault SSH connection is unavailable.');
+      const documentURL = owner.getURL();
+      const token = {},
+        cohort = this.protectedMembers.get(sourceId);
+      const generation = this.connectionAttempts.begin(sessionId);
+      this.pendingConnections.set(sessionId, generation);
+      this.terminalOwners.set(sessionId, owner);
+      this.terminalAdmissions.set(sessionId, token);
+      if (cohort) {
+        cohort.members.add(sessionId);
+        this.protectedMembers.set(sessionId, cohort);
+      }
+      try {
+        return await this.sealed.shareSftp(
+          sourceId,
+          sessionId,
+          () =>
+            accepted() &&
+            !owner.isDestroyed() &&
+            owner.getURL() === documentURL &&
+            this.terminalAdmissions.get(sessionId) === token &&
+            this.terminalOwners.get(sessionId) === owner,
+        );
+      } finally {
+        if (this.pendingConnections.get(sessionId) === generation) {
+          this.pendingConnections.delete(sessionId);
+          if (!this.sealed.has(sessionId)) {
+            this.terminalOwners.delete(sessionId);
+            this.terminalAdmissions.delete(sessionId);
+            if (this.protectedMembers.get(sessionId) === cohort)
+              this.protectedMembers.delete(sessionId);
+            cohort?.members.delete(sessionId);
+          }
+        }
+      }
+    }
     this.sharedRoutes.attach(sourceId, sessionId);
     try {
       return await this.waitForConnection(sessionId, () =>
@@ -8071,6 +9793,8 @@ class NativeSshBackend {
   }
 
   prepareForLock(): void {
+    this.terminalAdmissions.clear();
+    void this.sealed.closeAll().catch(() => undefined);
     mcpApprovalWindowCoordinator.reset();
     try {
       this.write({ type: 'app-lock-all' });
@@ -8079,9 +9803,28 @@ class NativeSshBackend {
     }
   }
 
+  stopSealedSessions(): Promise<void> {
+    this.terminalAdmissions.clear();
+    return Promise.allSettled([this.sealed.closeAll(), vaultSshCredentialsDialog.cancel()]).then(
+      (results) => {
+        if (results.some((result) => result.status === 'rejected'))
+          throw Error('SSH shutdown could not be confirmed.');
+      },
+    );
+  }
+
   async close(sessionId: string): Promise<void> {
+    if (this.hasProtectedReservation(sessionId)) {
+      this.connectionAttempts.cancel(sessionId);
+      this.terminalDelivery.remove(sessionId);
+      this.terminalAdmissions.delete(sessionId);
+      await this.sealed.close(sessionId);
+      this.terminalOwners.delete(sessionId);
+      return;
+    }
     // A journal RPC can wait while credentials resolve. Invalidate the open before awaiting it.
     this.connectionAttempts.cancel(sessionId);
+    this.terminalAdmissions.delete(sessionId);
     return this.closingConnections.run(sessionId, async () => {
       // Native resources must still close when retaining a journal fails. Go also
       // freezes copies on native close, and the existing journal stays recoverable.
@@ -8229,8 +9972,22 @@ class NativeSshBackend {
   }
 
   async dispose(): Promise<void> {
+    if (this.disposing) return this.disposing;
+    this.shutdownUnconfirmed = true;
+    this.disposing = Promise.resolve()
+      .then(() => this.disposeOwnedProcess())
+      .finally(() => {
+        this.disposing = undefined;
+      });
+    return this.disposing;
+  }
+
+  private async disposeOwnedProcess(): Promise<void> {
+    const sealedStopped = this.sealed.closeAll();
+    void sealedStopped.catch(() => undefined);
     this.terminalDelivery.clear();
     this.terminalOwners.clear();
+    this.terminalAdmissions.clear();
     mcpApprovalWindowCoordinator.reset();
     for (const sessionId of this.pendingConnections.keys()) {
       this.connectionAttempts.cancel(sessionId);
@@ -8245,17 +10002,21 @@ class NativeSshBackend {
     this.retainedMismatchSessions.clear();
     const tunnelReleases = this.tunnelLeases.releaseAll(releaseNativeTunnelLease);
     this.sharedRoutes.clear();
+    const child = this.child;
+    const stopped = child
+      ? stopChildProcess(child, { nativeExecutable: backendPath() }).then((exited) => {
+          if (!exited) throw new Error('SSH service termination could not be confirmed.');
+        })
+      : Promise.resolve();
+    // Keep draining protocol output until the process is actually gone. Closing
+    // readline first can block a native writer during its shutdown.
+    const results = await Promise.allSettled([stopped, tunnelReleases, sealedStopped]);
+    if (results.some((result) => result.status === 'rejected'))
+      throw new Error('SSH service termination could not be confirmed.');
+    if (this.child === child) this.child = undefined;
     this.lineReader?.close();
     this.lineReader = undefined;
-    const child = this.child;
-    this.child = undefined;
-    if (child && !child.killed) {
-      const exited = await stopChildProcess(child);
-      if (!exited) {
-        reportWarning('SSH service did not stop within the allowed time.');
-      }
-    }
-    await tunnelReleases;
+    this.shutdownUnconfirmed = false;
   }
 
   backendStopped(): void {
@@ -8265,6 +10026,10 @@ class NativeSshBackend {
   }
 
   private ensureStarted(): void {
+    if (this.disposing || this.shutdownUnconfirmed)
+      throw new Error('SSH service shutdown is unconfirmed.');
+    if (vaultBackend.unlockedWorkspaceId)
+      throw new Error('Legacy SSH operations are unavailable for this vault.');
     if (this.child && !this.child.killed) return;
 
     const child = spawn(
@@ -8328,6 +10093,10 @@ class NativeSshBackend {
   }
 
   private write(command: Record<string, unknown>): void {
+    if (typeof command.session_id === 'string' && this.sealed.has(command.session_id)) {
+      this.sealed.send(command.session_id, command);
+      return;
+    }
     const child = this.child;
     if (!child || child.killed || child.stdin.destroyed) {
       throw new Error('SSH service is not running.');
@@ -8454,14 +10223,29 @@ class NativeSshBackend {
       }
       this.terminalDelivery.remove(event.sessionId);
       this.terminalOwners.delete(event.sessionId);
+      this.terminalAdmissions.delete(event.sessionId);
+      const cohort = this.protectedMembers.get(event.sessionId);
+      if (cohort && cohort.id !== event.sessionId) {
+        cohort.members.delete(event.sessionId);
+        this.protectedMembers.delete(event.sessionId);
+      }
       this.activeSessions.delete(event.sessionId);
       this.retainedMismatchSessions.delete(event.sessionId);
       void this.releaseTunnel(event.sessionId).catch(() => undefined);
     }
 
+    if (event.type === 'closed') {
+      for (const [id, waiter] of this.editWaiters) {
+        if (waiter.sessionId !== event.sessionId) continue;
+        clearTimeout(waiter.timeout);
+        this.editWaiters.delete(id);
+        waiter.reject(Error('File editing connection closed; working copies are retained.'));
+      }
+    }
+
     if (event.type === 'sftp.edit' && event.requestId) {
       const waiter = this.editWaiters.get(event.requestId);
-      if (waiter) {
+      if (waiter && waiter.sessionId === event.sessionId) {
         clearTimeout(waiter.timeout);
         this.editWaiters.delete(event.requestId);
         waiter.resolve(event);
@@ -8477,6 +10261,11 @@ class NativeSshBackend {
       (event.type === 'screen' || event.type.startsWith('sftp.')) &&
       !authSession.isAccessAllowed
     ) {
+      return;
+    }
+    if (event.type.startsWith('sftp.') && this.sealed.has(event.sessionId)) {
+      const owner = this.terminalOwners.get(event.sessionId);
+      if (owner && !owner.isDestroyed()) owner.send('ssh:event', event);
       return;
     }
     for (const window of BrowserWindow.getAllWindows()) {
@@ -8630,7 +10419,22 @@ function rememberAuthState(state: AuthStateResponse, assumeUnlocked: boolean): A
   return state;
 }
 
+function vaultAuthState() {
+  return {
+    mode: 'vault' as const,
+    configured: true,
+    fallback: 'password' as const,
+    idleTimeoutMinutes: null,
+    hasPin: false,
+    hasPassword: false,
+    isCorrupted: false,
+    windowsHello: { available: false, message: 'Unlock using a vault factor.' },
+  };
+}
+
 function refreshAuthSession(): Promise<AuthStateResponse> {
+  if (vaultBackend.isVaultWorkspace || vaultBackend.requiresLegacyMigration)
+    return Promise.resolve(rememberAuthState(vaultAuthState(), false));
   if (!authRefreshInFlight) {
     authRefreshInFlight = runBackend<AuthStateResponse>('auth-status')
       .then((state) => rememberAuthState(state, false))
@@ -8683,7 +10487,7 @@ function queueFortinetIPsecSecret(
     .then(() =>
       promptFortinetIPsecSecret({
         kind,
-        createWindow: (options) => new BrowserWindow(options),
+        createWindow: createApplicationWindow,
         ipc: ipcMain,
         preload: path.join(__dirname, 'fortinet-ipsec-secret-preload.cjs'),
         parent: owner,
@@ -8790,10 +10594,691 @@ async function saveTunnelWithNativeSecret(
   return result;
 }
 
+function holdApplicationLock(): () => void {
+  authLocksInProgress++;
+  authLockRequested = true;
+  const releaseAuthLock = authSession.holdLock();
+  let held = true;
+  return () => {
+    if (!held) return;
+    held = false;
+    releaseAuthLock();
+    authLocksInProgress--;
+    authLockRequested = authLocksInProgress > 0;
+  };
+}
+
+async function lockApplication(
+  sender?: Electron.WebContents,
+  options: { refreshLegacy?: boolean } = {},
+): Promise<void> {
+  vaultNotesDialog.cancel();
+  vaultCredentialsDialog.cancel();
+  const creatingVault =
+    vaultCreateDialog.active ||
+    vaultMigrationSetupDialog.active ||
+    vaultOSMigrationDialog.active ||
+    vaultSharedSetupDialog.active;
+  const creationStopped = Promise.all([
+    vaultLinuxClipboard?.reset(),
+    vaultCreateDialog.cancel(),
+    vaultMigrationSetupDialog.cancel(),
+    vaultOSMigrationDialog.cancel(),
+    vaultReauthenticationDialog.cancel(),
+    vaultSharedDialog.cancel(),
+    vaultSharedSetupDialog.cancel(),
+    vaultTunnelDialog.cancel(),
+  ]).then(
+    () => true,
+    () => false,
+  );
+  const ownedVault = vaultBackend.isVaultWorkspace;
+  const releaseApplicationLock = holdApplicationLock();
+  clearFortinetIPsecDrafts();
+  vaultLockMonitor.deactivate();
+  if (ownedVault) retireVaultUpdates();
+  activeHelloVerification?.abort();
+  // An authenticated vault must stay locked even if legacy app authentication
+  // has never been configured. Never refresh legacy storage while it owns SQL.
+  if (ownedVault) authSession.remember({ configured: true }, false);
+  authSession.lock();
+  if (ownedVault) {
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (
+        !window.isDestroyed() &&
+        windowCloseCoordinators.has(window) &&
+        !window.webContents.isDestroyed()
+      )
+        try {
+          window.webContents.send('vault:locked');
+        } catch {
+          // A renderer may disappear during notification. Native key retirement must continue.
+        }
+    }
+  }
+  const bitwardenCLIStopped = stopVaultBitwardenCLIUnlock().then(
+    () => true,
+    () => false,
+  );
+  const vaultStopped = vaultBackend.stop().then(
+    () => true,
+    () => false,
+  );
+  const sshStopped = vaultSshIpc.closeAll().then(
+    () => true,
+    () => false,
+  );
+  const serialStopped = sealedSerial.closeAll().then(
+    () => true,
+    () => false,
+  );
+  const webStopped = vaultWebIpc.closeAll().then(
+    () => true,
+    () => false,
+  );
+  const rdpStopped = stopVaultRdpSessions().then(
+    () => true,
+    () => false,
+  );
+  const vncStopped = stopVaultVncSessions().then(
+    () => true,
+    () => false,
+  );
+  try {
+    cancelAllUserOperations();
+    const owners = sender
+      ? [BrowserWindow.fromWebContents(sender)]
+      : BrowserWindow.getAllWindows().filter((window) => windowCloseCoordinators.has(window));
+    const senders = sender
+      ? [sender]
+      : owners
+          .filter((window) => window && !window.isDestroyed())
+          .map((window) => window!.webContents);
+    for (const owner of senders) {
+      backupImportSelections.delete(owner);
+      sshPrivateKeySelections.delete(owner);
+      sshCertificateSelections.delete(owner);
+      mremoteImportAnalysis.get(owner)?.abort();
+      mremoteImportAnalysis.delete(owner);
+      mremoteImportSelections.delete(owner);
+    }
+    sshBackend.prepareForLock();
+    sshBackend.closeAllSftp();
+    sshBackend.cancelPendingConnections();
+    webSurfaces.cancelTunnelReconnects();
+    webSurfaces.hideAll();
+    void nativeBackend?.send({ action: 'bitwarden.clear-session' }).catch(() => undefined);
+    void sshBackend.setMcpLocked(true).catch(() => undefined);
+    cancelPreparingRdpStarts();
+    for (const owner of owners) {
+      if (owner && !owner.isDestroyed()) {
+        rdpClient?.cancelPendingStarts(nativeWindowHandle(owner));
+        void rdpClient?.hideAll(nativeWindowHandle(owner)).catch(() => undefined);
+      }
+    }
+    await authStateMutationQueue.catch(() => undefined);
+    let refreshed = true;
+    try {
+      // Pending enrollment owns an empty destination. Legacy auth-status also
+      // initializes SQLite and must not create a legacy DB after cancellation.
+      if (!ownedVault && !creatingVault && options.refreshLegacy !== false)
+        await ensureAuthSession();
+    } catch {
+      refreshed = false;
+    }
+    // A legacy settings mutation already in flight may have disabled its auth
+    // while we drained the queue. It cannot remove the vault's lock boundary.
+    if (ownedVault) authSession.remember({ configured: true }, false);
+    authSession.lock();
+    clearFortinetIPsecDrafts();
+    activeHelloVerification?.abort();
+    const protectedContentStopped = await creationStopped;
+    const bitwardenCLIConfirmed = await bitwardenCLIStopped;
+    if (!(await vaultStopped)) throw new Error('Vault shutdown could not be confirmed.');
+    if (!(await sshStopped)) throw new Error('SSH shutdown could not be confirmed.');
+    if (!(await serialStopped)) throw new Error('Serial shutdown could not be confirmed.');
+    if (!(await vncStopped)) throw new Error('VNC shutdown could not be confirmed.');
+    if (!(await rdpStopped)) throw new Error('RDP shutdown could not be confirmed.');
+    if (!(await webStopped)) throw new Error('Web shutdown could not be confirmed.');
+    if (!bitwardenCLIConfirmed) throw new Error('Bitwarden CLI shutdown could not be confirmed.');
+    if (!protectedContentStopped)
+      throw new Error('Protected content cleanup could not be confirmed.');
+    if (!refreshed) throw new Error('Authentication lock could not be confirmed.');
+  } finally {
+    releaseApplicationLock();
+  }
+}
+
 function registerIpcHandlers(
   sshBackend: NativeSshBackend,
   ipcMain: Pick<Electron.IpcMain, 'handle' | 'on'>,
 ): void {
+  ipcMain.handle('vault:bitwarden-cli-available', (event, ...args: unknown[]) => {
+    if (args.length || !isTrustedVaultSender(event)) throw Error('Invalid Bitwarden CLI request.');
+    return Boolean(
+      authSession.isAccessAllowed &&
+      vaultBackend.unlockedWorkspaceId &&
+      !vaultBackend.isSharedWorkspace,
+    );
+  });
+  ipcMain.handle('vault:bitwarden-cli-unlock', async (event, ...args: unknown[]) => {
+    if (args.length || !isTrustedVaultSender(event)) throw Error('Invalid Bitwarden CLI request.');
+    const sender = event.sender;
+    const parent = BrowserWindow.fromWebContents(sender);
+    if (!parent) throw Error('Bitwarden CLI unlock is unavailable.');
+    const abort = new AbortController();
+    const cancel = () => abort.abort();
+    const navigation = (
+      _event: Electron.Event,
+      _url: string,
+      inPlace: boolean,
+      mainFrame: boolean,
+    ) => {
+      if (mainFrame && !inPlace) cancel();
+    };
+    sender.on('did-start-navigation', navigation);
+    sender.once('render-process-gone', cancel);
+    sender.once('destroyed', cancel);
+    try {
+      return await runAuthorizedOperation((epoch) => {
+        requireNativeResourcesRunning();
+        const accepted = () =>
+          !abort.signal.aborted &&
+          isAuthorizationEpochCurrent(epoch) &&
+          isTrustedVaultSender(event);
+        return vaultBitwardenCLIUnlock.unlock({
+          accepted,
+          signal: abort.signal,
+          prompt: (context, signal) =>
+            vaultBitwardenCLIUnlockDialog.open(parent, accepted, context, signal),
+        });
+      });
+    } finally {
+      sender.removeListener('did-start-navigation', navigation);
+      sender.removeListener('render-process-gone', cancel);
+      sender.removeListener('destroyed', cancel);
+    }
+  });
+  ipcMain.handle('vault:edit-tunnel', async (event, ...args: unknown[]) => {
+    if (!isTrustedVaultSender(event) || args.length !== 1)
+      throw Error('Invalid tunnel editor request.');
+    const parent = BrowserWindow.fromWebContents(event.sender);
+    if (!parent) throw Error('Tunnel editor unavailable.');
+    return vaultTunnelDialog.open(parent, () => isTrustedVaultSender(event), args[0]);
+  });
+  ipcMain.handle('vault:show-notes', async (event, ...args: unknown[]) => {
+    if (!isTrustedVaultSender(event) || args.length !== 1)
+      throw new Error('Invalid notes request.');
+    const parent = BrowserWindow.fromWebContents(event.sender);
+    if (!parent) throw new Error('Stored notes are unavailable.');
+    await vaultNotesDialog.open(parent, () => isTrustedVaultSender(event), args[0]);
+  });
+  ipcMain.handle('vault:show-credentials', async (event, ...args: unknown[]) => {
+    if (!isTrustedVaultSender(event) || args.length !== 1)
+      throw new Error('Invalid credentials request.');
+    const parent = BrowserWindow.fromWebContents(event.sender);
+    if (!parent) throw new Error('Credentials are unavailable.');
+    await vaultCredentialsDialog.open(parent, () => isTrustedVaultSender(event), args[0]);
+  });
+  for (const action of ['read', 'install-folder', 'install-zip', 'cleanup'] as const) {
+    ipcMain.handle(`vault:bitwarden-${action}`, async (event, ...args: unknown[]) => {
+      if (args.length || !isTrustedVaultSender(event))
+        throw Error('Bitwarden installation is unavailable.');
+      const parent = BrowserWindow.fromWebContents(event.sender);
+      const epoch = authSession.authorizationEpoch;
+      const frame = event.senderFrame;
+      let valid = true;
+      const invalidate = () => {
+        valid = false;
+      };
+      const navigation = (
+        _event: Electron.Event,
+        _url: string,
+        inPlace: boolean,
+        mainFrame: boolean,
+      ) => {
+        if (mainFrame && !inPlace) invalidate();
+      };
+      const accepted = () =>
+        Boolean(
+          valid &&
+          parent &&
+          !parent.isDestroyed() &&
+          event.sender.mainFrame === frame &&
+          isTrustedVaultSender(event) &&
+          isAuthorizationEpochCurrent(epoch),
+        );
+      if (!parent || !accepted()) throw Error('Bitwarden installation is unavailable.');
+      event.sender.on('did-start-navigation', navigation);
+      event.sender.on('render-process-gone', invalidate);
+      event.sender.on('destroyed', invalidate);
+      try {
+        if (action === 'read') {
+          const workspaceId = vaultBackend.unlockedWorkspaceId;
+          if (!workspaceId) throw Error('Bitwarden installation is unavailable.');
+          return await vaultBackend.bitwardenInstallationPlan(
+            { workspaceId, minimumRevision: '0' },
+            accepted,
+          );
+        }
+        if (action === 'cleanup')
+          return await vaultBackend.cleanupBitwardenInstallations(
+            accepted,
+            (operation, descriptor, submit) =>
+              vaultReauthenticationDialog.open(parent, accepted, operation, descriptor, submit),
+          );
+        const archive = action === 'install-zip';
+        const choose = archive
+          ? vaultBackend.chooseBitwardenZip.bind(vaultBackend)
+          : vaultBackend.chooseBitwardenFolder.bind(vaultBackend);
+        return await choose(
+          async () => {
+            const selection = await showCoordinatedOpenDialog(parent, {
+              title: archive
+                ? 'Import Bitwarden browser extension ZIP'
+                : 'Import unpacked Bitwarden browser extension folder',
+              properties: archive ? ['openFile'] : ['openDirectory'],
+              ...(archive ? { filters: [{ name: 'Extension ZIP', extensions: ['zip'] }] } : {}),
+            });
+            if (selection.canceled) return null;
+            if (selection.filePaths.length !== 1)
+              throw Error('Invalid Bitwarden package selection.');
+            return selection.filePaths[0];
+          },
+          accepted,
+          (operation, descriptor, submit) =>
+            vaultReauthenticationDialog.open(parent, accepted, operation, descriptor, submit),
+        );
+      } finally {
+        invalidate();
+        event.sender.removeListener('did-start-navigation', navigation);
+        event.sender.removeListener('render-process-gone', invalidate);
+        event.sender.removeListener('destroyed', invalidate);
+      }
+    });
+  }
+  const vaultProtectionOptions: Parameters<typeof registerVaultProtectionIpc>[0] = {
+    ipc: ipcMain,
+    host: vaultBackend,
+    dialog: vaultMigrationSetupDialog,
+    osDialog: vaultOSMigrationDialog,
+    rootDialog: vaultRootSetupDialog,
+    // The platform storage-fault matrix in #495 gates packaged availability.
+    allowDatabaseEncryption:
+      !app.isPackaged && (process.arch === 'x64' || process.arch === 'arm64'),
+    restartUpgrade: () => {
+      app.relaunch({
+        args: [
+          ...process.argv.slice(1).filter((arg) => arg !== '--prepare-vault-protection'),
+          '--prepare-vault-protection',
+        ],
+      });
+      app.exit(0);
+    },
+    trusted: (event) => isTrustedVaultSender(event) && !isQuitting && !authLockRequested,
+    parent: (event) => BrowserWindow.fromWebContents(event.sender) ?? undefined,
+    requireAccess: () => authSession.requireUnlocked(),
+    canStart: () => !isQuitting && !quitCleanupStarted && !nativeResourceShutdownPromise,
+    hold: () => authSession.holdLock(),
+    quiesce: async (parent, retainVaultOwner = false) => {
+      if (!(await sshBackend.prepareEditClose())) return false;
+      const active = BrowserWindow.getAllWindows().reduce(
+        (count, window) =>
+          count + (windowCloseCoordinators.get(window)?.connectedSessionCount ?? 0),
+        0,
+      );
+      if (active > 0 && !(await requestRendererCloseConfirmation(parent, active, 'quit')))
+        return false;
+      await sshBackend.finishEditClose();
+      await withBitwardenBrowserTimeout(
+        webSurfaces.flushAndCloseAll(),
+        30_000,
+        'Browser shutdown could not be confirmed.',
+      );
+      await Promise.all(
+        BrowserWindow.getAllWindows().map((window) => requestRendererTeardown(window)),
+      );
+      if (retainVaultOwner) await shutdownNativeResourcesRetainingVault();
+      else await shutdownNativeResources();
+      return true;
+    },
+    restart: () => {
+      app.relaunch({ args: process.argv.slice(1) });
+      app.exit(0);
+    },
+    fatal: () => {
+      dialog.showErrorBox(
+        'Wormhole',
+        'Workspace preparation stopped because cleanup could not be confirmed. Close Wormhole and reopen it to continue safely.',
+      );
+      app.exit(1);
+    },
+  };
+  registerVaultProtectionIpc(vaultProtectionOptions);
+  registerVaultLocalBackupIpc({
+    ipc: ipcMain,
+    host: vaultBackend,
+    trusted: vaultProtectionOptions.trusted,
+    parent: vaultProtectionOptions.parent,
+    pickExport: async (parent) => {
+      const date = new Date().toISOString().slice(0, 10);
+      const selection = await showCoordinatedSaveDialog(parent, {
+        title: 'Save encrypted vault backup',
+        defaultPath: path.join(app.getPath('documents'), `wormhole-vault-${date}.whvault`),
+        filters: [{ name: 'Wormhole vault backup', extensions: ['whvault'] }],
+      });
+      if (selection.canceled || !selection.filePath) return null;
+      const destination = selection.filePath;
+      return path.extname(destination) ? destination : `${destination}.whvault`;
+    },
+    pickRestore: async (parent) => {
+      const selection = await showCoordinatedOpenDialog(parent, {
+        title: 'Open encrypted vault backup',
+        properties: ['openFile'],
+        filters: [{ name: 'Wormhole vault backup', extensions: ['whvault'] }],
+      });
+      return !selection.canceled && selection.filePaths.length === 1
+        ? selection.filePaths[0]
+        : null;
+    },
+    authenticate: (parent, accepted) => (operation, descriptor, submit) =>
+      vaultReauthenticationDialog.open(parent, accepted, operation, descriptor, submit),
+    restart: async () => {
+      await shutdownNativeResources();
+      vaultProtectionOptions.restart();
+    },
+  });
+  registerVaultUnprotectedIpc({
+    ...vaultProtectionOptions,
+    host: vaultBackend,
+    activate: () => {
+      rememberAuthState(vaultAuthState(), false);
+      authSession.markUnlocked();
+    },
+    retire: () => lockApplication(),
+    restartUpgrade: vaultProtectionOptions.restartUpgrade!,
+  });
+  const vaultResumeOptions = {
+    ipc: ipcMain,
+    host: vaultBackend,
+    dialog: vaultReauthenticationDialog,
+    parent: (event: IpcMainInvokeEvent) => BrowserWindow.fromWebContents(event.sender) ?? undefined,
+    trusted: (event: IpcMainInvokeEvent) =>
+      isTrustedVaultSender(event) && !isQuitting && !authLockRequested,
+    quiesced: () => !!vaultMigrationBoot.migrationSessionData,
+    retire: () => lockApplication(),
+    activate: () => {
+      rememberAuthState(vaultAuthState(), false);
+      authSession.markUnlocked();
+    },
+  };
+  registerVaultMigrationIpc(vaultResumeOptions);
+  registerVaultRootRotationIpc(vaultResumeOptions);
+  registerVaultOSMigrationIpc({ ...vaultResumeOptions, fatal: vaultProtectionOptions.fatal });
+  registerVaultUpgradeIpc({
+    ...vaultResumeOptions,
+    dialog: vaultUpgradeSetupDialog,
+    hold: () => authSession.holdLock(),
+    restart: () => {
+      app.relaunch({
+        args: process.argv.slice(1).filter((arg) => arg !== '--prepare-vault-protection'),
+      });
+      app.exit(0);
+    },
+    fatal: () => {
+      dialog.showErrorBox(
+        'Wormhole',
+        'Workspace preparation stopped because cleanup could not be confirmed. Close Wormhole and reopen it to continue safely.',
+      );
+      app.exit(1);
+    },
+  });
+  ipcMain.handle('vault:create', async (event, ...args: unknown[]) => {
+    if (!isTrustedVaultSender(event) || args.length)
+      throw new Error('Invalid vault creation request.');
+    const startup = await vaultBackend.startup();
+    if (!isTrustedVaultSender(event) || startup.slots || !startup.newWorkspace)
+      throw new Error('Vault creation unavailable.');
+    const parent = BrowserWindow.fromWebContents(event.sender);
+    if (!parent) throw new Error('Vault creation unavailable.');
+    return vaultCreateDialog.open(parent, () => isTrustedVaultSender(event));
+  });
+  ipcMain.handle('vault:profile-status', (event, ...args: unknown[]) => {
+    if (!isTrustedVaultSender(event) || args.length) throw Error('Invalid vault profile request.');
+    if (
+      isQuitting ||
+      authLockRequested ||
+      !authSession.isAccessAllowed ||
+      !vaultBackend.unlockedWorkspaceId
+    )
+      throw Error('Vault profile unavailable.');
+    const status = vaultLockMonitor.profileStatus;
+    if (!status) throw Error('Vault profile unavailable.');
+    return status;
+  });
+  ipcMain.handle('vault:tighten-local-profile', async (event, ...args: unknown[]) => {
+    const accepted = () =>
+      !isQuitting &&
+      !authLockRequested &&
+      authSession.isAccessAllowed &&
+      isTrustedVaultSender(event);
+    if (args.length || !accepted()) throw Error('Invalid vault profile request.');
+    const parent = BrowserWindow.fromWebContents(event.sender);
+    if (!parent) throw Error('Local profile change unavailable.');
+    await vaultBackend.tightenLocalProfile(
+      (operation, descriptor, submit) =>
+        vaultReauthenticationDialog.open(
+          parent,
+          () => accepted() && vaultBackend.unlockedWorkspaceId === descriptor.vaultId,
+          operation,
+          descriptor,
+          submit,
+        ),
+      accepted,
+      () => lockApplication(),
+    );
+  });
+  ipcMain.handle('vault:tighten-shared-profile', async (event, ...args: unknown[]) => {
+    const accepted = () =>
+      !isQuitting &&
+      !authLockRequested &&
+      authSession.isAccessAllowed &&
+      isTrustedVaultSender(event);
+    if (args.length || !accepted()) throw Error('Invalid shared profile request.');
+    const parent = BrowserWindow.fromWebContents(event.sender);
+    if (!parent) throw Error('Shared profile change unavailable.');
+    await vaultBackend.tightenSharedProfile(
+      (startup, current, submit) =>
+        vaultSharedDialog.open(parent, current, 'tighten-profile', startup, submit),
+      accepted,
+      () => lockApplication(),
+    );
+  });
+  ipcMain.handle('vault:create-shared-workspace', async (event, ...args: unknown[]) => {
+    const trusted = () => authLocksInProgress === 0 && isTrustedVaultSender(event);
+    if (!trusted() || args.length) throw Error('Invalid shared workspace setup request.');
+    const startup = await vaultBackend.startup();
+    const localWorkspace = vaultBackend.unlockedWorkspaceId;
+    const fresh = isSharedInitialStartup(startup);
+    const accepted = () =>
+      trusted() &&
+      !vaultBackend.isSharedWorkspace &&
+      (fresh
+        ? !vaultBackend.isVaultWorkspace
+        : localWorkspace !== undefined && vaultBackend.unlockedWorkspaceId === localWorkspace);
+    const parent = BrowserWindow.fromWebContents(event.sender);
+    if (!parent || !accepted()) throw Error('Shared workspace setup is unavailable.');
+    const completion = await vaultSharedSetupDialog.open(
+      parent,
+      accepted,
+      fresh ? trusted : accepted,
+      !fresh,
+    );
+    if (completion && 'admitted' in completion && trusted()) {
+      rememberAuthState(vaultAuthState(), false);
+      authSession.markUnlocked();
+    }
+    if (trusted()) return completion;
+  });
+  registerSharedAdminRecoveryIpc({
+    ipc: ipcMain,
+    host: vaultBackend,
+    dialog: vaultSharedSetupDialog,
+    trusted: (event) => authLocksInProgress === 0 && isTrustedVaultSender(event),
+    parent: (event) => BrowserWindow.fromWebContents(event.sender),
+    activate: () => {
+      rememberAuthState(vaultAuthState(), false);
+      authSession.markUnlocked();
+    },
+  });
+  registerSharedRecoveryBackupIpc({
+    ipc: ipcMain,
+    host: vaultBackend,
+    dialog: vaultSharedSetupDialog,
+    trusted: (event) => authLocksInProgress === 0 && isTrustedVaultSender(event),
+    parent: (event) => BrowserWindow.fromWebContents(event.sender),
+  });
+  registerSharedAccountResetIpc({
+    ipc: ipcMain,
+    host: vaultBackend,
+    dialog: vaultSharedSetupDialog,
+    trusted: (event) => authLocksInProgress === 0 && isTrustedVaultSender(event),
+    parent: (event) => BrowserWindow.fromWebContents(event.sender),
+  });
+  registerSharedAdministrationIpc({
+    ipc: ipcMain,
+    host: vaultBackend,
+    dialog: vaultSharedSetupDialog,
+    currentDeviceRevoked: requestAutomaticVaultLock,
+    trusted: (event) => authLocksInProgress === 0 && isTrustedVaultSender(event),
+    parent: (event) => BrowserWindow.fromWebContents(event.sender),
+  });
+  registerSharedRecoveryInspectionIpc({
+    ipc: ipcMain,
+    host: vaultBackend,
+    dialog: vaultSharedSetupDialog,
+    trusted: (event) => authLocksInProgress === 0 && isTrustedVaultSender(event),
+    parent: (event) => BrowserWindow.fromWebContents(event.sender),
+  });
+  registerSharedAuthenticationIpc({
+    ipc: ipcMain,
+    host: vaultBackend,
+    dialog: vaultSharedDialog,
+    trusted: isTrustedVaultSender,
+    parent: (event) => BrowserWindow.fromWebContents(event.sender),
+    activate: () => {
+      rememberAuthState(vaultAuthState(), false);
+      authSession.markUnlocked();
+    },
+  });
+  registerSharedCatalogIpc({ ipc: ipcMain, host: vaultBackend, trusted: isTrustedVaultSender });
+  registerSharedNodeEditIpc({
+    ipc: ipcMain,
+    host: vaultBackend,
+    trusted: isTrustedVaultSender,
+    dialog: vaultSharedDialog,
+    parent: (event) => BrowserWindow.fromWebContents(event.sender),
+  });
+  registerSharedChangesIpc({ ipc: ipcMain, host: vaultBackend, trusted: isTrustedVaultSender });
+  registerSharedCertificateRenewalIpc({
+    ipc: ipcMain,
+    host: vaultBackend,
+    trusted: isTrustedVaultSender,
+    lockAfterCARotation: () => lockApplication(),
+    pickTLSExport: async (event) => {
+      const window = BrowserWindow.fromWebContents(event.sender);
+      if (!window || window.isDestroyed()) return null;
+      const result = await showCoordinatedSaveDialog(window, {
+        title: 'Export signed workspace trust bundle',
+        defaultPath: 'wormhole-workspace.whtls',
+        filters: [{ name: 'Wormhole trust bundle', extensions: ['whtls'] }],
+      });
+      return result.canceled ? null : (result.filePath ?? null);
+    },
+    confirmRecoveryKit: (event, startup, current, submit) => {
+      const parent = BrowserWindow.fromWebContents(event.sender);
+      if (!parent) throw Error('Recovery kit authentication unavailable.');
+      return vaultSharedDialog.open(parent, current, 'refresh-recovery-kit', startup, submit);
+    },
+    pickRecoveryKit: async (event, intent) => {
+      const window = BrowserWindow.fromWebContents(event.sender);
+      if (!window || window.isDestroyed()) return null;
+      const filters = [{ name: 'Wormhole organisation recovery kit', extensions: ['whrecovery'] }];
+      if (intent === 'open') {
+        const result = await showCoordinatedOpenDialog(window, {
+          title: 'Open the existing organisation recovery kit',
+          properties: ['openFile'],
+          filters,
+        });
+        return result.canceled ? null : (result.filePaths[0] ?? null);
+      }
+      const result = await showCoordinatedSaveDialog(window, {
+        title: 'Save the updated organisation recovery kit',
+        defaultPath: 'wormhole-organisation-updated.whrecovery',
+        filters,
+      });
+      return result.canceled ? null : (result.filePath ?? null);
+    },
+  });
+  registerSharedConnectionContextIpc({
+    ipc: ipcMain,
+    host: vaultBackend,
+    trusted: isTrustedVaultSender,
+  });
+  const activateVaultSession = () => {
+    if (!vaultBackend.unlockedWorkspaceId) throw new Error('Vault is locked.');
+    rememberAuthState(vaultAuthState(), false);
+    authSession.markUnlocked();
+  };
+  registerVaultPresenceIpc({
+    ipc: ipcMain,
+    host: vaultBackend,
+    trusted: (event) => authLocksInProgress === 0 && isTrustedVaultSender(event),
+    owner: (event) => BrowserWindow.fromWebContents(event.sender),
+    nativeHandle: nativeWindowHandle,
+    confirm: (parent, current) => (operation, descriptor, submit) =>
+      vaultReauthenticationDialog.open(
+        parent,
+        () => current() && vaultBackend.unlockedWorkspaceId === descriptor.vaultId,
+        operation,
+        descriptor,
+        (input, dialog) =>
+          operation === 'hello-enroll'
+            ? runWithNativeAuthenticationWindow(dialog, () =>
+                submit(input, nativeWindowHandle(dialog)),
+              )
+            : submit(input),
+      ),
+    unlocked: activateVaultSession,
+  });
+  registerVaultIpc(
+    ipcMain,
+    vaultBackend,
+    isTrustedVaultSender,
+    activateVaultSession,
+    (event) => async (operation, descriptor, submit) => {
+      const parent = BrowserWindow.fromWebContents(event.sender);
+      if (!parent || !isTrustedVaultSender(event))
+        throw Error('Authentication dialog unavailable.');
+      return vaultReauthenticationDialog.open(
+        parent,
+        () =>
+          isTrustedVaultSender(event) && vaultBackend.unlockedWorkspaceId === descriptor.vaultId,
+        operation,
+        descriptor,
+        submit,
+      );
+    },
+    (event, input) =>
+      prepareVaultCredentialSelections(
+        input,
+        event.sender,
+        sshPrivateKeySelections,
+        sshCertificateSelections,
+        requireAuthorizationEpoch,
+      ),
+    (path) => shell.openPath(path),
+  );
   ipcMain.on('lifecycle:close-confirmation-ready', (event) => {
     const owner = BrowserWindow.fromWebContents(event.sender);
     if (owner) closeConfirmationReadyWindows.add(owner);
@@ -8823,9 +11308,11 @@ function registerIpcHandlers(
   ipcMain.on('window:set-titlebar-theme', (event, value: unknown) => {
     const owner = BrowserWindow.fromWebContents(event.sender);
     if (!owner || owner.isDestroyed() || !windowCloseCoordinators.has(owner)) return;
-    if (value !== 'light' && value !== 'dark') return;
-    syncNativeTitlebarTheme(owner, value, process.platform);
-    treeTooltips.setColorScheme(owner, value);
+    if (value !== 'light' && value !== 'dark' && value !== 'oled') return;
+    workspaceColorSchemes.set(owner, value);
+    const nativeScheme = value === 'oled' ? 'dark' : value;
+    syncNativeTitlebarTheme(owner, nativeScheme, process.platform);
+    treeTooltips.setColorScheme(owner, nativeScheme);
   });
 
   ipcMain.on('startup:ready', (event) => {
@@ -8894,10 +11381,51 @@ function registerIpcHandlers(
     }).catch(() => reportWarning('Workspace failure cleanup did not finish cleanly.'));
   });
 
-  ipcMain.handle('startup:load', async (_event, value: unknown) => {
-    const request = parseThemeStartupRequest(value);
+  ipcMain.handle('startup:load', async (event, ...args: unknown[]) => {
+    if (args.length > 1) throw new Error('Invalid startup request.');
+    const request = parseThemeStartupRequest(args[0]);
+    if (!isTrustedVaultSender(event)) throw new Error('Invalid startup request.');
+    const metadata = await vaultBackend.startup();
+    if (!isTrustedVaultSender(event)) throw new Error('Startup owner is no longer available.');
+    // The pre-unlock request has no arguments. Full workspace loads always
+    // carry the preload's settings request and use the owning authorization path.
+    if (args.length === 0) return metadata;
+    if (vaultBackend.isVaultWorkspace) {
+      const startup = await runAuthorizedOperation(async () => {
+        if (!vaultBackend.unlockedWorkspaceId) throw new Error('Vault is locked.');
+        const settings = await vaultBackend.preferences();
+        const workspace = await vaultBackend.workspace();
+        return {
+          auth: vaultAuthState(),
+          settings,
+          workspace,
+          themeMigration: { handled: false, migrated: false },
+          migration: { status: 'vault', migrated: 0, missing: 0 },
+          migrationFailed: false,
+        };
+      });
+      if (!isTrustedVaultSender(event)) throw new Error('Startup owner is no longer available.');
+      confirmOnWindowClose = startup.settings.confirmOnWindowClose;
+      return startup;
+    }
+    if (metadata.newWorkspace || metadata.sharedJoin)
+      throw new Error('Workspace setup is incomplete.');
     return serializeAuthOperation(async () => {
+      if (
+        !isTrustedVaultSender(event) ||
+        vaultBackend.isVaultWorkspace ||
+        vaultBackend.requiresLegacyMigration
+      ) {
+        throw new Error('Startup owner is no longer available.');
+      }
       const startup = await runBackend<StartupResponse>('startup', request);
+      if (
+        !isTrustedVaultSender(event) ||
+        vaultBackend.isVaultWorkspace ||
+        vaultBackend.requiresLegacyMigration
+      ) {
+        throw new Error('Startup owner is no longer available.');
+      }
       if (startup.auth.configured && startup.workspace) {
         throw new Error('Wormhole could not load the locked workspace.');
       }
@@ -8937,8 +11465,15 @@ function registerIpcHandlers(
     });
   });
 
-  ipcMain.handle('workspace:load', async () => {
+  ipcMain.handle('workspace:load', async (event) => {
     return runAuthorizedOperation(async () => {
+      if (vaultBackend.isVaultWorkspace) {
+        if (!isTrustedVaultSender(event)) throw new Error('Invalid workspace request.');
+        const workspace = await vaultBackend.workspace();
+        if (!isTrustedVaultSender(event))
+          throw new Error('Workspace owner is no longer available.');
+        return workspace;
+      }
       const workspace = await runBackend<WorkspaceResponse>('workspace');
       console.info(
         `[Wormhole] Workspace loaded: ${workspace.tree.length} roots, ${workspace.credentials.length} credentials, ${workspace.tunnels.length} tunnels.`,
@@ -9418,24 +11953,45 @@ function registerIpcHandlers(
     });
   });
 
-  ipcMain.handle('settings:read', async () => {
+  ipcMain.handle('settings:read', async (event) => {
+    if (!isTrustedVaultSender(event)) throw Error('Settings unavailable.');
+    if (vaultBackend.isVaultWorkspace) {
+      const settings = await runAuthorizedOperation(() => vaultBackend.preferences());
+      if (!isTrustedVaultSender(event)) throw Error('Settings unavailable.');
+      return {
+        ...settings,
+        sshTerminalTheme: settings.sshTerminalTheme ?? defaultSshTerminalTheme,
+      };
+    }
     return serializeAuthOperation(async () => {
       return runBackend<AppSettings>('settings-read');
     });
   });
 
-  ipcMain.handle('settings:set-ssh-terminal-theme', async (_event, value: unknown) => {
-    if (!isSshTerminalTheme(value)) throw new Error('SSH terminal theme is invalid.');
+  ipcMain.handle('settings:set-ssh-terminal-theme', async (event, value: unknown) => {
+    if (!isTrustedVaultSender(event) || !isSshTerminalTheme(value))
+      throw new Error('SSH terminal theme is invalid.');
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
+      if (!isTrustedVaultSender(event)) throw new Error('SSH terminal theme is invalid.');
+      if (vaultBackend.isVaultWorkspace) {
+        await vaultBackend.updatePreferences({ sshTerminalTheme: value });
+        return { updated: true };
+      }
       return runBackend<{ updated: boolean }>('settings-set-ssh-terminal-theme', { theme: value });
     });
   });
 
-  ipcMain.handle('settings:set-theme', async (_event, value: unknown) => {
-    if (!isAppTheme(value)) throw new Error('Application theme is invalid.');
+  ipcMain.handle('settings:set-theme', async (event, value: unknown) => {
+    if (!isTrustedVaultSender(event) || !isAppTheme(value))
+      throw new Error('Application theme is invalid.');
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
+      if (!isTrustedVaultSender(event)) throw new Error('Application theme is invalid.');
+      if (vaultBackend.isVaultWorkspace) {
+        await vaultBackend.updatePreferences({ theme: value });
+        return { updated: true };
+      }
       return runBackend<{ updated: boolean }>('settings-set-theme', {
         theme: value,
       });
@@ -9514,9 +12070,10 @@ function registerIpcHandlers(
     });
   });
 
-  ipcMain.handle('settings:set-update-preferences', async (_event, value: unknown) => {
-    if (!isRecord(value)) throw new Error('Update preferences are invalid.');
-    const request: Record<string, unknown> = {};
+  ipcMain.handle('settings:set-update-preferences', async (event, value: unknown) => {
+    if (!isTrustedVaultSender(event) || !isRecord(value))
+      throw new Error('Update preferences are invalid.');
+    const request: VaultUpdatePreferences = {};
     if (value.autoCheckForUpdates !== undefined) {
       if (typeof value.autoCheckForUpdates !== 'boolean') {
         throw new Error('Update preferences are invalid.');
@@ -9531,82 +12088,156 @@ function registerIpcHandlers(
     }
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
+      if (!isTrustedVaultSender(event)) throw Error('Update preferences are invalid.');
+      if (vaultBackend.isVaultWorkspace) {
+        await vaultBackend.updatePreferences(request);
+        if (request.autoCheckForUpdates)
+          scheduleStartupUpdateCheck({ autoCheckForUpdates: true }, captureUpdateScope());
+        else if (request.autoCheckForUpdates === false && startupUpdateTimer) {
+          clearTimeout(startupUpdateTimer);
+          startupUpdateTimer = undefined;
+          startupUpdateScheduled = undefined;
+        }
+        return { updated: true };
+      }
       return runBackend<{ updated: boolean }>('settings-set-update-preferences', request);
     });
   });
 
-  ipcMain.handle('update:status', async () => {
-    return serializeAuthOperation(async () => {
-      return {
-        currentVersion: app.getVersion(),
-        result: latestUpdateCheck ?? null,
-      };
-    });
+  ipcMain.handle('update:status', async (event) => {
+    if (!isTrustedVaultSender(event)) throw Error('Invalid update request.');
+    const scope = captureUpdateScope();
+    const profile = await readVaultUpdateProfile(scope);
+    if (!isTrustedVaultSender(event)) throw Error('Invalid update request.');
+    const release = sameUpdateScope(scope, latestUpdateScope) ? latestUpdateCheck : undefined;
+    return {
+      currentVersion: app.getVersion(),
+      result:
+        release || profile === 'paranoid'
+          ? applyUpdatePolicy(
+              release ?? emptyUpdateResult(),
+              profile,
+              !!latestUpdateManifest,
+              latestUpdatePublisherVerification,
+            )
+          : null,
+    };
   });
 
-  ipcMain.handle('visual-changelog:claim', async (_event, hasChangelog: unknown) => {
-    if (typeof hasChangelog !== 'boolean') throw new Error('Visual changelog request is invalid.');
+  ipcMain.handle('visual-changelog:claim', async (event, hasChangelog: unknown) => {
+    if (typeof hasChangelog !== 'boolean' || !isTrustedVaultSender(event))
+      throw new Error('Visual changelog request is invalid.');
     await serializeAuthOperation(requireWorkspaceAuth);
+    if (!isTrustedVaultSender(event)) throw new Error('Visual changelog request is invalid.');
     return runBackend<{ claimed: boolean }>('visual-changelog-claim', {
       appVersion: app.getVersion(),
       hasChangelog,
     });
   });
 
-  ipcMain.handle('update:check', async () => {
-    return serializeAuthOperation(async () => performUpdateCheck());
+  ipcMain.handle('update:check', async (event) => {
+    if (!isTrustedVaultSender(event)) throw Error('Invalid update request.');
+    const result = await performUpdateCheck();
+    if (!isTrustedVaultSender(event)) throw Error('Invalid update request.');
+    return result;
   });
 
   ipcMain.handle('update:download', async (event, value: unknown) => {
-    if (!isRecord(value)) throw new Error('The update download request is invalid.');
+    if (!isTrustedVaultSender(event) || !isRecord(value) || quitCleanupStarted || isQuitting)
+      throw new Error('The update download request is invalid.');
+    const scope = captureUpdateScope();
+    await requireUpdateInstaller(scope);
+    if (
+      !isTrustedVaultSender(event) ||
+      quitCleanupStarted ||
+      !sameUpdateScope(scope, latestUpdateScope)
+    )
+      throw Error('The update download request is invalid.');
     const installerUrl = typeof value.installerUrl === 'string' ? value.installerUrl.trim() : '';
     const installerFileName =
       typeof value.installerFileName === 'string' ? value.installerFileName.trim() : '';
     const installerSha256 =
-      typeof value.installerSha256 === 'string' ? value.installerSha256.trim() : '';
+      typeof value.installerSha256 === 'string' ? value.installerSha256.trim().toLowerCase() : '';
     const installerSize =
       typeof value.installerSize === 'number' && Number.isInteger(value.installerSize)
         ? value.installerSize
         : null;
-    const expected = latestUpdateCheck;
     if (
       !installerUrl ||
       !installerFileName ||
       path.basename(installerFileName) !== installerFileName ||
-      !/^https:\/\//i.test(installerUrl) ||
-      !/^[0-9a-f]{64}$/i.test(installerSha256) ||
-      !expected?.isUpdateAvailable ||
-      installerUrl !== expected.installerUrl ||
-      installerFileName !== expected.installerFileName ||
-      installerSha256.toLowerCase() !== expected.installerSha256?.toLowerCase() ||
-      installerSize !== (expected.installerSize ?? null)
+      (latestUpdateCheck?.updatePolicy === 'managed'
+        ? installerUrl !== `managed-update:${installerFileName}`
+        : !/^https:\/\//i.test(installerUrl)) ||
+      !/^[0-9a-f]{64}$/.test(installerSha256) ||
+      installerSize === null ||
+      installerSize <= 0 ||
+      !updateMatchesLatest({ installerUrl, installerFileName, installerSha256, installerSize })
     ) {
       throw new Error('The update download request is invalid.');
     }
     const target = event.sender;
-    return downloadUpdateInstaller(
-      {
-        installerUrl,
-        installerFileName,
-        installerSha256,
-        ...(installerSize !== null ? { installerSize } : {}),
-      },
-      (downloaded, total) => broadcastUpdateProgress(target, downloaded, total),
+    const request: NativeUpdateDownloadRequest = {
+      installerUrl,
+      installerFileName,
+      installerSha256,
+      installerSize,
+      currentVersion: app.getVersion(),
+      signedManifest: latestUpdateManifest,
+    };
+    const installerPath = await downloadUpdateInstaller(request, (downloaded, total) =>
+      broadcastUpdateProgress(target, downloaded, total),
     );
+    await requireUpdateInstaller(scope);
+    requireUpdateScope(scope);
+    if (
+      !isTrustedVaultSender(event) ||
+      !updateMatchesLatest(request) ||
+      !isSafeInstallerPath(installerPath) ||
+      path.resolve(installerPath) !== path.resolve(updateCacheRoot(), request.installerFileName)
+    )
+      throw Error('The installer download could not be confirmed.');
+    downloadedUpdate = { path: path.resolve(installerPath), request, scope };
+    return downloadedUpdate.path;
   });
 
-  ipcMain.handle('update:install', async (_event, value: unknown) => {
-    if (!isRecord(value) || typeof value.path !== 'string' || !isSafeInstallerPath(value.path)) {
+  ipcMain.handle('update:install', async (event, value: unknown) => {
+    if (
+      !isTrustedVaultSender(event) ||
+      !isRecord(value) ||
+      typeof value.path !== 'string' ||
+      !isSafeInstallerPath(value.path)
+    ) {
       throw new Error('The installer path is invalid.');
     }
-    const installerPath = path.resolve(value.path);
-    if (!existsSync(installerPath)) throw new Error('The installer was not found.');
-    return handleDownloadedUpdate(installerPath);
+    const download = downloadedUpdate;
+    if (
+      !download ||
+      path.resolve(value.path) !== download.path ||
+      !updateMatchesLatest(download.request)
+    )
+      throw new Error('Download the selected update before installing it.');
+    return handleDownloadedUpdate(download, () => isTrustedVaultSender(event));
   });
 
-  ipcMain.handle('update:open-release', async (_event, value: unknown) => {
-    if (typeof value !== 'string' || !/^https:\/\/github\.com\//i.test(value)) {
+  ipcMain.handle('update:open-release', async (event, value: unknown) => {
+    if (
+      !isTrustedVaultSender(event) ||
+      typeof value !== 'string' ||
+      !/^https:\/\/github\.com\//i.test(value)
+    ) {
       throw new Error('The release URL is invalid.');
+    }
+    const scope = captureUpdateScope();
+    if (scope) {
+      const profile = await readVaultUpdateProfile(scope);
+      if (
+        profile === 'paranoid' ||
+        latestUpdateCheck?.updatePolicy === 'managed' ||
+        !sameUpdateScope(scope, latestUpdateScope) ||
+        !isTrustedVaultSender(event)
+      )
+        throw Error('The release URL is unavailable.');
     }
     await shell.openExternal(value);
   });
@@ -9973,6 +12604,12 @@ function registerIpcHandlers(
     });
   });
 
+  ipcMain.handle('tunnel:capabilities', async () => {
+    return runAuthorizedOperation(async () =>
+      parseTunnelCapabilities(await runBackend<unknown>('tunnel-capabilities')),
+    );
+  });
+
   ipcMain.handle('tunnel:discard-ipsec-credentials', (event, draftId: unknown) => {
     if (!isTunnelIdentifier(draftId))
       throw new Error('Fortinet IPsec credential draft is invalid.');
@@ -10317,47 +12954,7 @@ function registerIpcHandlers(
     });
   });
 
-  ipcMain.handle('auth:lock', async (event) => {
-    authLockRequested = true;
-    clearFortinetIPsecDrafts();
-    // A confirmation can still own Hello when idle locking starts. Cancel it
-    // before waiting for mutations queued behind that interactive operation.
-    activeHelloVerification?.abort();
-    try {
-      await authStateMutationQueue.catch(() => undefined);
-      await ensureAuthSession();
-      authSession.lock();
-      clearFortinetIPsecDrafts();
-      // Recheck after asynchronous state refresh: overlapping locks can let a
-      // verification start after the cancellation at the beginning of this request.
-      activeHelloVerification?.abort();
-      cancelAllUserOperations();
-      backupImportSelections.delete(event.sender);
-      sshPrivateKeySelections.delete(event.sender);
-      sshCertificateSelections.delete(event.sender);
-      mremoteImportAnalysis.get(event.sender)?.abort();
-      mremoteImportAnalysis.delete(event.sender);
-      mremoteImportSelections.delete(event.sender);
-    } finally {
-      authLockRequested = false;
-    }
-    sshBackend.prepareForLock();
-    sshBackend.closeAllSftp();
-    sshBackend.cancelPendingConnections();
-    webSurfaces.cancelTunnelReconnects();
-    webSurfaces.hideAll();
-    const ownerWindow = BrowserWindow.fromWebContents(event.sender);
-    // Lock is deliberately not queued behind ordinary authorized operations: a VPN test or CLI
-    // call can run for minutes. The epoch invalidates their eventual results and the renderer gets
-    // an immediate acknowledgement that covers cached SSH/VNC frames.
-    void nativeBackend?.send({ action: 'bitwarden.clear-session' }).catch(() => undefined);
-    void sshBackend.setMcpLocked(true).catch(() => undefined);
-    cancelPreparingRdpStarts();
-    if (ownerWindow && !ownerWindow.isDestroyed()) {
-      rdpClient?.cancelPendingStarts(nativeWindowHandle(ownerWindow));
-      void rdpClient?.hideAll(nativeWindowHandle(ownerWindow)).catch(() => undefined);
-    }
-  });
+  ipcMain.handle('auth:lock', (event) => lockApplication(event.sender));
 
   ipcMain.handle('auth:hello-status', async () => {
     if (process.platform !== 'win32') {
@@ -10527,21 +13124,30 @@ function registerIpcHandlers(
     if (!ownerWindow || ownerWindow.isDestroyed()) return;
     treeTooltips.hide(ownerWindow);
   });
-  ipcMain.handle('web:open', async (event, request: unknown) => {
+  ipcMain.handle('web:open', async (event, request: unknown, ...extra: unknown[]) => {
+    if (vaultBackend.isVaultWorkspace && (extra.length !== 0 || !isTrustedVaultSender(event)))
+      throw Error('Invalid vault web owner.');
     requireNativeResourcesRunning();
     if (!isWebOpenRequest(request)) throw new Error('Web connection request is invalid.');
     const ownerWindow = BrowserWindow.fromWebContents(event.sender);
     if (!ownerWindow || ownerWindow.isDestroyed())
       throw new Error('Web session owner window is unavailable.');
+    if (vaultWebIpc.handles(request.sessionId)) {
+      if (extra.length !== 0) throw Error('Invalid vault web owner.');
+      return vaultWebIpc.open(event, request);
+    }
+    if (request.quickTarget) throw Error('Protected Quick Connect is unavailable.');
     return runAuthorizedOperation(
       () => {
         requireNativeResourcesRunning();
-        return webSurfaces.open(ownerWindow, request);
+        return webSurfaces.open(ownerWindow, request, () => isTrustedVaultSender(event));
       },
       () => webSurfaces.closeForOwner(ownerWindow, request.sessionId),
     );
   });
-  ipcMain.handle('web:set-bounds', async (event, request: unknown) => {
+  ipcMain.handle('web:set-bounds', async (event, request: unknown, ...extra: unknown[]) => {
+    if (vaultBackend.isVaultWorkspace && (extra.length !== 0 || !isTrustedVaultSender(event)))
+      throw Error('Invalid vault web owner.');
     if (!isWebBoundsRequest(request)) throw new Error('Web surface bounds are invalid.');
     const ownerWindow = BrowserWindow.fromWebContents(event.sender);
     if (!ownerWindow || ownerWindow.isDestroyed()) return;
@@ -10553,7 +13159,9 @@ function registerIpcHandlers(
     }
     return webSurfaces.setBounds(ownerWindow, request);
   });
-  ipcMain.handle('web:command', async (event, request: unknown) => {
+  ipcMain.handle('web:command', async (event, request: unknown, ...extra: unknown[]) => {
+    if (vaultBackend.isVaultWorkspace && (extra.length !== 0 || !isTrustedVaultSender(event)))
+      throw Error('Invalid vault web owner.');
     if (!isWebCommandRequest(request)) throw new Error('Web browser command is invalid.');
     const ownerWindow = BrowserWindow.fromWebContents(event.sender);
     if (!ownerWindow || ownerWindow.isDestroyed()) return;
@@ -10566,14 +13174,22 @@ function registerIpcHandlers(
     }
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
+      if (vaultBackend.isVaultWorkspace && !isTrustedVaultSender(event))
+        throw Error('Invalid vault web owner.');
       await webSurfaces.command(ownerWindow, request);
     });
   });
-  ipcMain.handle('web:close', async (event, sessionId: unknown) => {
+  ipcMain.handle('web:close', async (event, sessionId: unknown, ...extra: unknown[]) => {
+    if (vaultBackend.isVaultWorkspace && (extra.length !== 0 || !isTrustedVaultSender(event)))
+      throw Error('Invalid vault web owner.');
     if (!isSshSessionId(sessionId)) throw new Error('Web session id is invalid.');
+    if (vaultWebIpc.handles(sessionId)) {
+      if (extra.length !== 0) throw Error('Invalid vault web owner.');
+      return vaultWebIpc.close(event, sessionId);
+    }
     const ownerWindow = BrowserWindow.fromWebContents(event.sender);
     if (!ownerWindow || ownerWindow.isDestroyed()) return;
-    webSurfaces.closeForOwner(ownerWindow, sessionId);
+    await webSurfaces.closeForOwner(ownerWindow, sessionId);
   });
   ipcMain.on('ssh:terminal-ack', (event, sessionId: unknown, sequence: unknown) => {
     if (
@@ -10585,9 +13201,21 @@ function registerIpcHandlers(
       return;
     sshBackend.acknowledgeTerminal(event.sender, sessionId, sequence);
   });
-  ipcMain.handle('ssh:open', async (event, request: unknown) => {
+  ipcMain.handle('ssh:open', async (event, request: unknown, ...extra: unknown[]) => {
     requireNativeResourcesRunning();
+    if (
+      vaultBackend.isVaultWorkspace ||
+      (isRecord(request) &&
+        typeof request.sessionId === 'string' &&
+        vaultSshIpc.handles(request.sessionId))
+    ) {
+      if (extra.length !== 0 || !isTrustedVaultSender(event))
+        throw Error('Invalid vault SSH owner.');
+      return vaultSshIpc.open(event, request);
+    }
     if (!isSshOpenRequest(request)) throw new Error('SSH open request is invalid.');
+    if (vaultBackend.unlockedWorkspaceId && !isTrustedVaultSender(event))
+      throw new Error('Invalid vault SSH owner.');
     return runAuthorizedOperation(
       (authorizationEpoch) => {
         requireNativeResourcesRunning();
@@ -10601,6 +13229,7 @@ function registerIpcHandlers(
     if (!isSshHostKeyTrustRequest(request)) {
       throw new Error('SSH host-key trust request is invalid.');
     }
+    if (vaultSshIpc.handles(request.sessionId)) throw Error('Use protected SSH host confirmation.');
     return runAuthorizedOperation(
       () => {
         requireNativeResourcesRunning();
@@ -10611,24 +13240,31 @@ function registerIpcHandlers(
   });
   ipcMain.handle(
     'ssh:input',
-    async (_event, sessionId: unknown, data: unknown, paste: unknown = false) => {
+    async (event, sessionId: unknown, data: unknown, paste: unknown = false) => {
       if (!isSshSessionId(sessionId) || typeof paste !== 'boolean' || !isSshInput(data, paste)) {
         throw new Error('SSH input request is invalid.');
       }
+      const current = sshBackend.captureOwner(event, sessionId);
       return serializeAuthOperation(async () => {
         await requireWorkspaceAuth();
+        current();
         sshBackend.sendInput(sessionId, data, paste);
       });
     },
   );
-  ipcMain.handle('ssh:paste-clipboard', async (_event, sessionId: unknown) => {
+  ipcMain.handle('ssh:paste-clipboard', async (event, sessionId: unknown) => {
     if (!isSshSessionId(sessionId)) throw new Error('SSH paste request is invalid.');
+    const current = sshBackend.captureOwner(event, sessionId);
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
+      current();
       const epoch = authSession.authorizationEpoch;
       // Preserve input order while the native clipboard is read. Locking bypasses this queue.
       const text = await clipboard.readText();
+      await requireWorkspaceAuth();
+      current();
       requireAuthorizationEpoch(epoch);
+      authSession.requireVerificationEpoch(epoch);
       const data = encodeTerminalClipboardText(text);
       if (!data) return { pasted: false };
       sshBackend.sendInput(sessionId, data, true);
@@ -10641,7 +13277,7 @@ function registerIpcHandlers(
   });
   ipcMain.handle(
     'ssh:resize',
-    async (_event, sessionId: unknown, columns: unknown, rows: unknown) => {
+    async (event, sessionId: unknown, columns: unknown, rows: unknown) => {
       if (
         !isSshSessionId(sessionId) ||
         typeof columns !== 'number' ||
@@ -10655,47 +13291,78 @@ function registerIpcHandlers(
       ) {
         throw new Error('SSH resize request is invalid.');
       }
+      const current = sshBackend.captureOwner(event, sessionId);
       return serializeAuthOperation(async () => {
         await requireWorkspaceAuth();
+        current();
         sshBackend.resize(sessionId, columns, rows);
       });
     },
   );
-  ipcMain.handle('settings:file-transfer-read', async () =>
+  ipcMain.handle('settings:file-transfer-read', async (event) =>
     serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
+      if (vaultBackend.isVaultWorkspace) {
+        if (!isTrustedVaultSender(event)) throw Error('Invalid vault file editor owner.');
+        return vaultBackend.fileEditSettings();
+      }
       return runBackend('settings-file-transfer-read');
     }),
   );
-  ipcMain.handle('settings:file-transfer-write', async (_event, request: unknown) => {
+  ipcMain.handle('settings:file-transfer-write', async (event, request: unknown) => {
     if (!isRecord(request) || JSON.stringify(request).length > 64 * 1024)
       throw new Error('Invalid editor settings.');
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
+      if (vaultBackend.isVaultWorkspace) {
+        if (!isTrustedVaultSender(event)) throw Error('Invalid vault file editor owner.');
+        await vaultBackend.fileEditSettings(request);
+        return;
+      }
       return runBackend('settings-file-transfer-write', request);
     });
   });
-  ipcMain.handle('ssh:sftp-edit', async (_event, sessionId: unknown, request: unknown) => {
+  ipcMain.handle('ssh:sftp-edit', async (event, sessionId: unknown, request: unknown) => {
     if (!isSshSessionId(sessionId) || !isSftpEditRequest(request))
       throw new Error('Invalid file edit request.');
-    return runAuthorizedOperation(() => sshBackend.edit(sessionId, request));
+    const current = sshBackend.captureOwner(event, sessionId);
+    return runAuthorizedOperation(() => {
+      current();
+      sshBackend.assertSftpOwner(event, sessionId);
+      return sshBackend.edit(sessionId, request);
+    });
   });
-  ipcMain.handle('ssh:sftp-edit-close', async (_event, sessionId: unknown) => {
+  ipcMain.handle('ssh:sftp-edit-close', async (event, sessionId: unknown) => {
     if (!isSshSessionId(sessionId)) throw new Error('Invalid file edit close request.');
-    return runAuthorizedOperation(() => sshBackend.prepareEditClose(sessionId));
-  });
-  ipcMain.handle('ssh:sftp-share', async (_event, sourceId: unknown, sessionId: unknown) => {
-    requireNativeResourcesRunning();
-    if (!isSshSessionId(sourceId) || !isSshSessionId(sessionId) || sourceId === sessionId)
-      throw new Error('Invalid SFTP session.');
-    return runAuthorizedOperation(
-      () => sshBackend.shareSftp(sourceId, sessionId),
-      () => sshBackend.close(sessionId),
-    );
+    const current = sshBackend.captureOwner(event, sessionId, true);
+    return runAuthorizedOperation(() => {
+      current();
+      sshBackend.assertSftpOwner(event, sessionId, true);
+      return sshBackend.prepareEditClose(sessionId);
+    });
   });
   ipcMain.handle(
+    'ssh:sftp-share',
+    async (event, sourceId: unknown, sessionId: unknown, ...extra: unknown[]) => {
+      requireNativeResourcesRunning();
+      if (!isSshSessionId(sourceId) || !isSshSessionId(sessionId) || sourceId === sessionId)
+        throw new Error('Invalid SFTP session.');
+      if (vaultSshIpc.handles(sourceId) || vaultSshIpc.handles(sessionId)) {
+        if (extra.length !== 0) throw Error('Invalid vault SSH owner.');
+        return vaultSshIpc.share(event, sourceId, sessionId);
+      }
+      return runAuthorizedOperation(
+        () => {
+          sshBackend.assertSftpOwner(event, sourceId);
+          return sshBackend.shareSftp(sourceId, sessionId, event.sender);
+        },
+        () => sshBackend.close(sessionId),
+      );
+    },
+  );
+  ipcMain.handle(
     'ssh:sftp-tree-list',
-    async (_event, sessionId: unknown, pane: unknown, path: unknown, requestId: unknown) => {
+    async (event, sessionId: unknown, pane: unknown, path: unknown, requestId: unknown) => {
       if (
         !isSshSessionId(sessionId) ||
         !isSftpRequestId(requestId) ||
@@ -10703,24 +13370,30 @@ function registerIpcHandlers(
         !(pane === 'local' ? isLocalSftpPath(path) : isSftpPath(path))
       )
         throw new Error('Invalid SFTP tree request.');
+      const current = sshBackend.captureOwner(event, sessionId);
       return serializeAuthOperation(async () => {
         await requireWorkspaceAuth();
+        current();
+        sshBackend.assertSftpOwner(event, sessionId);
         sshBackend.listSftpTree(sessionId, pane, path as string, requestId);
       });
     },
   );
-  ipcMain.handle('ssh:sftp-open', async (_event, sessionId: unknown, requestId: unknown) => {
+  ipcMain.handle('ssh:sftp-open', async (event, sessionId: unknown, requestId: unknown) => {
     if (!isSshSessionId(sessionId) || (requestId !== undefined && !isSftpRequestId(requestId))) {
       throw new Error('SFTP open request is invalid.');
     }
+    const current = sshBackend.captureOwner(event, sessionId);
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
+      current();
+      sshBackend.assertSftpOwner(event, sessionId);
       sshBackend.openSftp(sessionId, typeof requestId === 'string' ? requestId : '');
     });
   });
   ipcMain.handle(
     'ssh:sftp-list',
-    async (_event, sessionId: unknown, path: unknown, requestId: unknown) => {
+    async (event, sessionId: unknown, path: unknown, requestId: unknown) => {
       if (
         !isSshSessionId(sessionId) ||
         !isSftpPath(path) ||
@@ -10728,15 +13401,18 @@ function registerIpcHandlers(
       ) {
         throw new Error('SFTP list request is invalid.');
       }
+      const current = sshBackend.captureOwner(event, sessionId);
       return serializeAuthOperation(async () => {
         await requireWorkspaceAuth();
+        current();
+        sshBackend.assertSftpOwner(event, sessionId);
         sshBackend.listSftp(sessionId, path, typeof requestId === 'string' ? requestId : '');
       });
     },
   );
   ipcMain.handle(
     'ssh:sftp-local-list',
-    async (_event, sessionId: unknown, path: unknown, requestId: unknown) => {
+    async (event, sessionId: unknown, path: unknown, requestId: unknown) => {
       if (
         !isSshSessionId(sessionId) ||
         !isLocalSftpPath(path, true) ||
@@ -10744,34 +13420,43 @@ function registerIpcHandlers(
       ) {
         throw new Error('Local SFTP list request is invalid.');
       }
+      const current = sshBackend.captureOwner(event, sessionId);
       return serializeAuthOperation(async () => {
         await requireWorkspaceAuth();
+        current();
+        sshBackend.assertSftpOwner(event, sessionId);
         sshBackend.listLocalSftp(sessionId, path, requestId);
       });
     },
   );
-  ipcMain.handle('ssh:sftp-operation', async (_event, sessionId: unknown, request: unknown) => {
+  ipcMain.handle('ssh:sftp-operation', async (event, sessionId: unknown, request: unknown) => {
     if (!isSshSessionId(sessionId) || !isSftpOperationRequest(request)) {
       throw new Error('SFTP operation request is invalid.');
     }
+    const current = sshBackend.captureOwner(event, sessionId);
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
+      current();
+      sshBackend.assertSftpOwner(event, sessionId);
       sshBackend.operateSftp(sessionId, request);
     });
   });
-  ipcMain.handle('ssh:sftp-transfer', async (_event, sessionId: unknown, request: unknown) => {
+  ipcMain.handle('ssh:sftp-transfer', async (event, sessionId: unknown, request: unknown) => {
     if (!isSshSessionId(sessionId) || !isSftpTransferRequest(request)) {
       throw new Error('SFTP transfer request is invalid.');
     }
+    const current = sshBackend.captureOwner(event, sessionId);
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
+      current();
+      sshBackend.assertSftpOwner(event, sessionId);
       sshBackend.startSftpTransfer(sessionId, request);
     });
   });
   ipcMain.handle(
     'ssh:sftp-transfer-decision',
     async (
-      _event,
+      event,
       sessionId: unknown,
       transferId: unknown,
       itemId: unknown,
@@ -10787,15 +13472,18 @@ function registerIpcHandlers(
       ) {
         throw new Error('SFTP transfer decision is invalid.');
       }
+      const current = sshBackend.captureOwner(event, sessionId);
       return serializeAuthOperation(async () => {
         await requireWorkspaceAuth();
+        current();
+        sshBackend.assertSftpOwner(event, sessionId);
         sshBackend.decideSftpConflict(sessionId, transferId, itemId, decision, applyToAll);
       });
     },
   );
   ipcMain.handle(
     'ssh:sftp-transfer-cancel',
-    async (_event, sessionId: unknown, transferId: unknown, itemId: unknown) => {
+    async (event, sessionId: unknown, transferId: unknown, itemId: unknown) => {
       if (
         !isSshSessionId(sessionId) ||
         !isSftpTransferId(transferId) ||
@@ -10803,8 +13491,11 @@ function registerIpcHandlers(
       ) {
         throw new Error('SFTP transfer cancellation is invalid.');
       }
+      const current = sshBackend.captureOwner(event, sessionId);
       return serializeAuthOperation(async () => {
         await requireWorkspaceAuth();
+        current();
+        sshBackend.assertSftpOwner(event, sessionId);
         sshBackend.cancelSftpTransfer(
           sessionId,
           transferId,
@@ -10813,18 +13504,38 @@ function registerIpcHandlers(
       });
     },
   );
-  ipcMain.handle('ssh:sftp-close', async (_event, sessionId: unknown) => {
+  ipcMain.handle('ssh:sftp-close', async (event, sessionId: unknown) => {
     if (!isSshSessionId(sessionId)) throw new Error('SFTP close request is invalid.');
+    const current = sshBackend.captureOwner(event, sessionId);
     return serializeAuthOperation(async () => {
+      current();
+      sshBackend.assertSftpOwner(event, sessionId);
       sshBackend.closeSftp(sessionId);
     });
   });
-  ipcMain.handle('ssh:close', async (_event, sessionId: unknown) => {
+  ipcMain.handle('ssh:close', async (event, sessionId: unknown, ...extra: unknown[]) => {
     if (!isSshSessionId(sessionId)) throw new Error('SSH close request is invalid.');
+    if (vaultSshIpc.handles(sessionId)) {
+      if (extra.length !== 0) throw Error('Invalid vault SSH owner.');
+      return vaultSshIpc.close(event, sessionId);
+    }
+    sshBackend.assertSftpOwner(event, sessionId, true);
     await sshBackend.close(sessionId);
   });
-  ipcMain.handle('serial:open', async (_event, request: unknown) => {
+  ipcMain.handle('serial:open', async (event, request: unknown) => {
+    requireNativeResourcesRunning();
     if (!isSerialOpenRequest(request)) throw new Error('Serial open request is invalid.');
+    if (vaultBackend.isVaultWorkspace || sealedSerial.handles(request.sessionId)) {
+      if (!isTrustedVaultSender(event)) throw Error('Invalid serial owner.');
+      return runAuthorizedOperation((epoch) =>
+        sealedSerial.open(
+          event.sender,
+          request,
+          epoch + 1,
+          () => isAuthorizationEpochCurrent(epoch) && isTrustedVaultSender(event) && !isQuitting,
+        ),
+      );
+    }
     let connection: Promise<SerialConnectedResponse> | undefined;
     await serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
@@ -10832,18 +13543,22 @@ function registerIpcHandlers(
     });
     return connection!;
   });
-  ipcMain.handle('serial:input', async (_event, sessionId: unknown, data: unknown) => {
+  ipcMain.handle('serial:input', async (event, sessionId: unknown, data: unknown) => {
     if (!isSerialSessionId(sessionId) || !isSerialInput(data)) {
       throw new Error('Serial input request is invalid.');
     }
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
+      if (vaultBackend.isVaultWorkspace || sealedSerial.handles(sessionId)) {
+        if (!isTrustedVaultSender(event)) throw Error('Invalid serial owner.');
+        return sealedSerial.command(event.sender, sessionId, { type: 'input', data });
+      }
       getSerialBackend().sendInput(sessionId, data);
     });
   });
   ipcMain.handle(
     'serial:resize',
-    async (_event, sessionId: unknown, columns: unknown, rows: unknown) => {
+    async (event, sessionId: unknown, columns: unknown, rows: unknown) => {
       if (
         !isSerialSessionId(sessionId) ||
         typeof columns !== 'number' ||
@@ -10859,15 +13574,33 @@ function registerIpcHandlers(
       }
       return serializeAuthOperation(async () => {
         await requireWorkspaceAuth();
+        if (vaultBackend.isVaultWorkspace || sealedSerial.handles(sessionId)) {
+          if (!isTrustedVaultSender(event)) throw Error('Invalid serial owner.');
+          return sealedSerial.command(event.sender, sessionId, { type: 'resize', columns, rows });
+        }
         getSerialBackend().resize(sessionId, columns, rows);
       });
     },
   );
-  ipcMain.handle('serial:close', async (_event, sessionId: unknown) => {
+  ipcMain.handle('serial:close', async (event, sessionId: unknown) => {
     if (!isSerialSessionId(sessionId)) throw new Error('Serial close request is invalid.');
+    if (vaultBackend.isVaultWorkspace || sealedSerial.handles(sessionId)) {
+      if (!isTrustedVaultSender(event)) throw Error('Invalid serial owner.');
+      return sealedSerial.close(event.sender, sessionId);
+    }
     getSerialBackend().close(sessionId);
   });
-  ipcMain.handle('vnc:command', async (_event, input: unknown) => {
+  ipcMain.handle('vnc:command', async (event, input: unknown, ...extra: unknown[]) => {
+    if (vaultVncIpc.handles(input)) {
+      if (extra.length !== 0 || !isTrustedVaultSender(event))
+        return { id: '', ok: false, error: 'Invalid vault VNC request.' };
+      try {
+        await vaultVncIpc.command(event, input);
+        return { id: '', ok: true };
+      } catch {
+        return { id: '', ok: false, error: 'VNC connection could not be completed.' };
+      }
+    }
     if (isQuitting) {
       return { id: '', ok: false, error: 'Wormhole service is stopping.' };
     }
@@ -10909,7 +13642,15 @@ function registerIpcHandlers(
     });
   });
 
+  ipcMain.handle('vault:rdp-open', (event, value: unknown, ...extra: unknown[]) => {
+    requireNativeResourcesRunning();
+    if (extra.length) throw Error('Invalid vault RDP request.');
+    return vaultRdpIpc.open(event, value);
+  });
+
   ipcMain.handle('rdp:start', async (event, value: unknown) => {
+    if (vaultRdpIpc.handles(value))
+      throw Error('Open the saved connection through the protected RDP service.');
     requireNativeResourcesRunning();
     const request = parseRdpStartRequest(value);
     const ownerWindow = BrowserWindow.fromWebContents(event.sender);
@@ -11137,6 +13878,7 @@ function registerIpcHandlers(
   });
 
   ipcMain.handle('rdp:system-client-capability', async (_event, value: unknown) => {
+    if (vaultBackend.isVaultWorkspace) return { supported: false };
     const request = parseRdpSystemClientCapabilityRequest(value);
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
@@ -11145,6 +13887,12 @@ function registerIpcHandlers(
   });
 
   ipcMain.handle('rdp:open-system', async (event, value: unknown) => {
+    if (vaultBackend.isVaultWorkspace)
+      return {
+        ok: false,
+        lifecycleCommitted: false,
+        error: 'The system client is unavailable for this protected connection.',
+      };
     const request = parseRdpSystemClientOpenRequest(value);
     let ownsLifecycle = false;
     const ownerWindow = BrowserWindow.fromWebContents(event.sender);
@@ -11254,7 +14002,11 @@ function registerIpcHandlers(
     }
   });
 
-  ipcMain.handle('rdp:input', async (event, value: unknown) => {
+  ipcMain.handle('rdp:input', async (event, value: unknown, ...extra: unknown[]) => {
+    if (vaultRdpIpc.handles(value)) {
+      if (extra.length) throw Error('Invalid vault RDP request.');
+      return vaultRdpIpc.input(event, value);
+    }
     const request = parseRdpCommandRequest(value);
     const lifecycleId = valueAsString(value, 'lifecycleId');
     const input = valueAsObject(value, 'input');
@@ -11268,7 +14020,11 @@ function registerIpcHandlers(
     await getRdpClient().input(request.sessionId, lifecycleId, input);
   });
 
-  ipcMain.handle('rdp:resize', async (event, value: unknown) => {
+  ipcMain.handle('rdp:resize', async (event, value: unknown, ...extra: unknown[]) => {
+    if (vaultRdpIpc.handles(value)) {
+      if (extra.length) throw Error('Invalid vault RDP request.');
+      return vaultRdpIpc.resize(event, value);
+    }
     const request = parseRdpCommandRequest(value);
     const ownerWindow = BrowserWindow.fromWebContents(event.sender);
     if (!ownerWindow) throw new Error('RDP owner window is unavailable.');
@@ -11284,7 +14040,11 @@ function registerIpcHandlers(
     return client.resize({ ...request, bounds }, nativeWindowHandle(ownerWindow));
   });
 
-  ipcMain.handle('rdp:command', async (event, value: unknown) => {
+  ipcMain.handle('rdp:command', async (event, value: unknown, ...extra: unknown[]) => {
+    if (vaultRdpIpc.handles(value)) {
+      if (extra.length) throw Error('Invalid vault RDP request.');
+      return vaultRdpIpc.command(event, value);
+    }
     const request = parseRdpCommandRequest(value);
     const operation = valueAsString(value, 'operation');
     if (
@@ -11541,13 +14301,19 @@ function scheduleRdpSurfacePlacementSync(owner: BrowserWindow): void {
   if (owner.isDestroyed() || rdpOwnerSyncTasks.has(owner.id)) return;
   const task = setImmediate(() => {
     rdpOwnerSyncTasks.delete(owner.id);
-    if (owner.isDestroyed() || !rdpClient) return;
+    if (owner.isDestroyed()) return;
     const ownerWindow = nativeWindowHandle(owner);
     for (const [sessionId, placement] of rdpSurfacePlacements) {
       if (placement.owner !== owner) continue;
       const bounds = toScreenBounds(owner, placement.rendererBounds);
       if (!bounds) continue;
-      void rdpClient.resize({ sessionId, bounds }, ownerWindow).catch(() => {
+      const update = vaultRdpController.has(sessionId)
+        ? vaultRdpController.control(owner.webContents, () => true, sessionId, {
+            op: 'resize',
+            bounds,
+          })
+        : rdpClient?.resize({ sessionId, bounds }, ownerWindow);
+      void update?.catch(() => {
         // Moving the owner can race with an RDP close. The terminal event owns cleanup.
       });
     }
@@ -11747,7 +14513,8 @@ function valueAsRecord(value: unknown): Record<string, any> {
 }
 
 function createWindow() {
-  const window = new BrowserWindow({
+  const productionRendererPath = path.resolve(__dirname, '..', 'dist', 'index.html');
+  const window = createApplicationWindow({
     // Keep the window hidden until the renderer has painted its first frame
     // (ready-to-show). Showing it earlier flashes unpainted frames — black
     // (backgroundColor) then the light default page — before the UI appears.
@@ -11776,6 +14543,7 @@ function createWindow() {
   });
   const closeCoordinator = new WindowCloseCoordinator();
   windowCloseCoordinators.set(window, closeCoordinator);
+  window.on('minimize', () => vaultLockMonitor.minimized());
   window.on('move', () => scheduleRdpSurfacePlacementSync(window));
   window.on('resize', () => scheduleRdpSurfacePlacementSync(window));
   window.once('closed', () => clearRdpSurfacePlacements(window));
@@ -11866,7 +14634,10 @@ function createWindow() {
       .catch(() => {
         reportWarning('Bitwarden system shutdown checkpoint did not finish.');
       })
-      .finally(() => shutdownNativeResources());
+      .finally(() => shutdownNativeResources())
+      .catch(() => {
+        console.warn('[Wormhole] Native shutdown could not be confirmed.');
+      });
   });
   window.webContents.on('render-process-gone', (_event, { reason, exitCode }) => {
     recordDiagnostic('ERR', 'Workspace renderer exited', { reason, exitCode });
@@ -11880,7 +14651,7 @@ function createWindow() {
       .request({
         reason: failedWorkspaceWindows.has(window) ? 'renderer-failure' : closeReason.reason,
         confirmationEnabled: confirmOnWindowClose,
-        prepare: () => sshBackend.prepareEditClose(),
+        prepare: () => sshBackend.prepareEditClose('sftp-recovery', window.webContents),
         confirm: (activeCount) => requestRendererCloseConfirmation(window, activeCount, 'window'),
         teardown: async () => {
           await runWindowTeardown(
@@ -11957,16 +14728,352 @@ function isTrustedRendererNavigation(targetUrl: string, productionRendererPath: 
 }
 
 const sshBackend = new NativeSshBackend();
+const vaultSshIpc = new VaultSshIpc({
+  workspace: () => vaultBackend.isVaultWorkspace,
+  trusted: (event) => isTrustedVaultSender(event as Electron.IpcMainInvokeEvent),
+  authorize: (run, cleanup) =>
+    runAuthorizedOperation((epoch) => {
+      requireNativeResourcesRunning();
+      return run(epoch + 1);
+    }, cleanup),
+  quickTarget: (target, sessionId, epoch, current) => {
+    const workspaceId = vaultBackend.unlockedWorkspaceId;
+    if (!workspaceId) throw Error('Protected Quick Connect is locked.');
+    return vaultBackend.beginQuickTarget({ workspaceId, sessionId, epoch, target }, current);
+  },
+  native: {
+    hasReservation: (id) => sshBackend.hasProtectedReservation(id),
+    owns: (owner, id) => sshBackend.ownsProtected(owner as Electron.WebContents, id),
+    capture: (event, id) => sshBackend.captureOwner(event as Electron.IpcMainInvokeEvent, id),
+    share: (owner, sourceId, id, current) =>
+      sshBackend.shareSftp(sourceId, id, owner as Electron.WebContents, current),
+    admit: (owner, q, epoch, current, retired) =>
+      sshBackend.admitProtected(owner as Electron.WebContents, q, epoch, current, retired),
+    close: (owner, id) => sshBackend.closeProtected(owner as Electron.WebContents, id),
+    retire: (owner, id) => sshBackend.retireProtected(owner as Electron.WebContents, [id]),
+    retireOwner: (owner, ids) =>
+      sshBackend.retireProtected(owner as Electron.WebContents, ids, true),
+    closeAll: () => sshBackend.stopSealedSessions(),
+  },
+});
+const vaultRdpRoutes = new SealedRouteBroker({
+  authentication: {
+    prompt: (context, current, signal, request, fallback) => {
+      const owner = vaultRdpController.ownerForSession(context.binding.sessionId);
+      const parent = BrowserWindow.getAllWindows().find((window) => window.webContents === owner);
+      if (!parent) return Promise.reject(Error('VPN authentication owner unavailable.'));
+      return 'startURL' in context
+        ? vaultTunnelBrowserDialog.open(parent, current, context, signal, request, fallback)
+        : vaultTunnelAuthenticationDialog.open(parent, current, context, signal);
+    },
+    close: (context) =>
+      'startURL' in context
+        ? vaultTunnelBrowserDialog.cancelChallenge(context)
+        : vaultTunnelAuthenticationDialog.cancelChallenge(context),
+  },
+
+  executable: backendPath,
+  workspaceId: () => vaultBackend.unlockedWorkspaceId,
+  authorized: (epoch) =>
+    Boolean(vaultBackend.unlockedWorkspaceId) && isAuthorizationEpochCurrent(epoch - 1),
+  plan: (q) => vaultBackend.tunnelPlan(q),
+  bundle: (q) => vaultBackend.tunnelBundle(q),
+  fallback: {
+    plan: (q) => vaultBackend.tunnelFallbackPlan(q),
+    bundle: (q) => vaultBackend.tunnelFallbackBundle(q),
+  },
+});
+const vaultRdpController = new VaultRdpController(
+  (onEvent) =>
+    new SealedRdpBackend({
+      executable: backendPath,
+      workspaceId: () => vaultBackend.unlockedWorkspaceId,
+      authorized: (epoch) =>
+        Boolean(vaultBackend.unlockedWorkspaceId) && isAuthorizationEpochCurrent(epoch - 1),
+      bundle: (q) => vaultBackend.rdpBundle(q),
+      bitwarden: (request, signal, accepted) =>
+        vaultBackend.isSharedWorkspace
+          ? Promise.resolve(undefined)
+          : resolveVaultRDPBitwarden({
+              executable: backendPath(),
+              databasePath: wormholeDatabasePath(),
+              request,
+              signal,
+              prepare: (recipient) =>
+                vaultBackend.prepareRDPBitwarden(request, recipient, accepted),
+            }),
+      manual: {
+        plan: (q) => vaultBackend.rdpPlan(q),
+        bundle: (q) => vaultBackend.rdpManualBundle(q),
+        bitwarden: (q, signal, accepted) =>
+          vaultBackend.isSharedWorkspace
+            ? Promise.resolve(undefined)
+            : resolveVaultRDPBitwarden({
+                executable: backendPath(),
+                databasePath: wormholeDatabasePath(),
+                request: rdpManualTarget(q),
+                signal,
+                prepare: (recipient) =>
+                  vaultBackend.prepareManualRDPBitwarden(q, recipient, accepted),
+              }),
+        prompt: (context, active, signal) => {
+          const owner = vaultRdpController.ownerForSession(context.binding.sessionId);
+          const parent = BrowserWindow.getAllWindows().find(
+            (window) => window.webContents === owner,
+          );
+          if (!parent) return Promise.reject(Error('RDP credential owner unavailable.'));
+          return vaultRdpCredentialsDialog.open(parent, active, context, signal);
+        },
+      },
+      onEvent,
+      route: {
+        resolve: (q) => vaultBackend.connectionRoute(q),
+        broker: vaultRdpRoutes,
+        bundle: (q) => vaultBackend.routedRdpBundle(q),
+      },
+    }),
+  (epoch) => Boolean(vaultBackend.unlockedWorkspaceId) && isAuthorizationEpochCurrent(epoch - 1),
+  (event, owner) => {
+    const parent = BrowserWindow.getAllWindows().find((window) => window.webContents === owner);
+    const available = () =>
+      Boolean(parent && !parent.isDestroyed()) &&
+      authSession.isAccessAllowed &&
+      vaultRdpController.ownerForSession(event.sessionId ?? '') === owner;
+    void confirmRdpCertificate(event, {
+      available,
+      prompt: async (certificate) => {
+        const result = await showCoordinatedMessageBox(parent!, {
+          type: 'warning',
+          title: 'Remote Desktop certificate',
+          message: 'The remote desktop certificate could not be verified.',
+          detail: `Server: ${certificate.host}\nFingerprint: ${certificate.fingerprint}\n\nConnect only if you trust this server and have verified its fingerprint.`,
+          buttons: ['Cancel', 'Connect once'],
+          defaultId: 0,
+          cancelId: 0,
+        });
+        return result.response === 1;
+      },
+      reply: async (sessionId, lifecycle, accepted) => {
+        await vaultRdpController.control(
+          owner,
+          available,
+          sessionId,
+          { op: 'certificate', certificateAccepted: accepted },
+          lifecycle,
+        );
+      },
+    });
+  },
+  (event, owner) => {
+    if (event.type === 'frame' || event.type === 'frameEnd') return;
+    const parent = BrowserWindow.getAllWindows().find((window) => window.webContents === owner);
+    if (parent) treeTooltips.raiseForWindow(parent);
+  },
+);
+const vaultRdpIpc = new VaultRdpIpc({
+  controller: vaultRdpController,
+  quickTarget: (target, sessionId, epoch, accepted) => {
+    const workspaceId = vaultBackend.unlockedWorkspaceId;
+    if (!workspaceId) throw Error('Protected Quick Connect is locked.');
+    return vaultBackend.beginQuickTarget({ workspaceId, sessionId, epoch, target }, accepted);
+  },
+  workspace: () => vaultBackend.isVaultWorkspace,
+  trusted: (event) => isTrustedVaultSender(event as Electron.IpcMainInvokeEvent),
+  unlocked: async () => {
+    await ensureAuthSession();
+    authSession.requireUnlocked();
+  },
+  authorize: (run, cleanup) =>
+    runAuthorizedOperation((epoch) => {
+      requireNativeResourcesRunning();
+      return run(epoch + 1);
+    }, cleanup),
+  surface: (event, id, bounds) => {
+    const owner = BrowserWindow.fromWebContents(event.sender as Electron.WebContents);
+    if (!owner || owner.isDestroyed()) throw Error('RDP owner window unavailable.');
+    assertRdpSurfaceOwner(owner, rdpSurfacePlacements.get(id)?.owner);
+    if (bounds) rememberRdpSurfacePlacement(owner, id, bounds);
+    return {
+      ownerWindow: nativeWindowHandle(owner),
+      bounds: currentRdpSurfaceScreenBounds(owner, id),
+      ...(process.platform === 'win32' && vaultWindowPolicy.requiresContentProtection
+        ? { requireContentProtection: true as const }
+        : {}),
+    };
+  },
+  forget: forgetRdpSurfacePlacement,
+});
+async function stopVaultRdpSessions(): Promise<void> {
+  const credentialsStopped = vaultRdpCredentialsDialog.cancel();
+  const results = await Promise.allSettled([
+    credentialsStopped,
+    vaultRdpIpc.closeAll(),
+    vaultRdpRoutes.closeAll(),
+  ]);
+  if (results.some((result) => result.status === 'rejected'))
+    throw Error('RDP shutdown could not be confirmed.');
+}
+const vaultVncRoutes = new SealedRouteBroker({
+  authentication: {
+    prompt: (context, current, signal, request, fallback) => {
+      const owner = vaultVncController.ownerForSession(context.binding.sessionId);
+      const parent = BrowserWindow.getAllWindows().find((window) => window.webContents === owner);
+      if (!parent) return Promise.reject(Error('VPN authentication owner unavailable.'));
+      return 'startURL' in context
+        ? vaultTunnelBrowserDialog.open(parent, current, context, signal, request, fallback)
+        : vaultTunnelAuthenticationDialog.open(parent, current, context, signal);
+    },
+    close: (context) =>
+      'startURL' in context
+        ? vaultTunnelBrowserDialog.cancelChallenge(context)
+        : vaultTunnelAuthenticationDialog.cancelChallenge(context),
+  },
+
+  executable: backendPath,
+  workspaceId: () => vaultBackend.unlockedWorkspaceId,
+  authorized: (epoch) =>
+    Boolean(vaultBackend.unlockedWorkspaceId) && isAuthorizationEpochCurrent(epoch - 1),
+  plan: (q) => vaultBackend.tunnelPlan(q),
+  bundle: (q) => vaultBackend.tunnelBundle(q),
+  fallback: {
+    plan: (q) => vaultBackend.tunnelFallbackPlan(q),
+    bundle: (q) => vaultBackend.tunnelFallbackBundle(q),
+  },
+});
+const vaultVncController = new VaultVncController(
+  (onEvent) =>
+    new SealedVncBackend({
+      executable: backendPath,
+      workspaceId: () => vaultBackend.unlockedWorkspaceId,
+      authorized: (epoch) =>
+        Boolean(vaultBackend.unlockedWorkspaceId) && isAuthorizationEpochCurrent(epoch - 1),
+      bundle: (q) => vaultBackend.vncBundle(q),
+      bitwarden: (request, signal, accepted) =>
+        vaultBackend.isSharedWorkspace
+          ? Promise.resolve(undefined)
+          : resolveVaultVNCBitwarden({
+              executable: backendPath(),
+              databasePath: wormholeDatabasePath(),
+              request,
+              signal,
+              prepare: (recipient) =>
+                vaultBackend.prepareVNCBitwarden(request, recipient, accepted),
+            }),
+      manual: {
+        plan: (q) => vaultBackend.vncPlan(q),
+        bundle: (q) => vaultBackend.vncManualBundle(q),
+        prompt: (context, active, signal) => {
+          const owner = vaultVncController.ownerForSession(context.binding.sessionId);
+          const parent = BrowserWindow.getAllWindows().find(
+            (window) => window.webContents === owner,
+          );
+          if (!parent) return Promise.reject(Error('VNC password owner unavailable.'));
+          return vaultVncPasswordDialog.open(parent, active, context, signal);
+        },
+      },
+      onEvent,
+      route: {
+        resolve: (q) => vaultBackend.connectionRoute(q),
+        broker: vaultVncRoutes,
+        bundle: (q) => vaultBackend.routedVncBundle(q),
+      },
+    }),
+  (epoch) => Boolean(vaultBackend.unlockedWorkspaceId) && isAuthorizationEpochCurrent(epoch - 1),
+);
+const vaultVncIpc = new VaultVncIpc({
+  controller: vaultVncController,
+  workspace: () => vaultBackend.isVaultWorkspace,
+  trusted: (event) => isTrustedVaultSender(event as Electron.IpcMainInvokeEvent),
+  authorize: (run, cleanup) =>
+    runAuthorizedOperation((epoch) => {
+      requireNativeResourcesRunning();
+      return run(epoch + 1);
+    }, cleanup),
+  quickTarget: (target, sessionId, epoch, accepted) => {
+    const workspaceId = vaultBackend.unlockedWorkspaceId;
+    if (!workspaceId) throw Error('Protected Quick Connect is locked.');
+    return vaultBackend.beginQuickTarget({ workspaceId, sessionId, epoch, target }, accepted);
+  },
+});
+async function stopVaultVncSessions(): Promise<void> {
+  const passwordStopped = vaultVncPasswordDialog.cancel();
+  const results = await Promise.allSettled([
+    passwordStopped,
+    vaultVncIpc.closeAll(),
+    vaultVncRoutes.closeAll(),
+  ]);
+  if (results.some((result) => result.status === 'rejected'))
+    throw Error('VNC shutdown could not be confirmed.');
+}
+async function stopVaultBitwardenCLIUnlock(): Promise<void> {
+  const results = await Promise.allSettled([
+    vaultBitwardenCLIUnlock.stop(),
+    vaultBitwardenCLIUnlockDialog.cancel(),
+  ]);
+  if (results.some((result) => result.status === 'rejected'))
+    throw Error('Bitwarden CLI shutdown could not be confirmed.');
+}
 let nativeResourceShutdownPromise: Promise<void> | undefined;
+let nativeResourceShutdownRetainsVault = false;
 
 function shutdownNativeResources(): Promise<void> {
-  if (nativeResourceShutdownPromise) return nativeResourceShutdownPromise;
+  return shutdownNativeResourceOwner(false);
+}
+
+function shutdownNativeResourcesRetainingVault(): Promise<void> {
+  return shutdownNativeResourceOwner(true);
+}
+
+function shutdownNativeResourceOwner(retainVaultOwner: boolean): Promise<void> {
+  if (nativeResourceShutdownPromise) {
+    if (retainVaultOwner || !nativeResourceShutdownRetainsVault)
+      return nativeResourceShutdownPromise;
+    // Upgrade one in-flight retained cleanup to a full retirement. Repeated
+    // full shutdowns must join this same promise and never stop twice.
+    nativeResourceShutdownRetainsVault = false;
+    const escalated = nativeResourceShutdownPromise.finally(() => vaultBackend.stop());
+    const tracked = escalated.finally(() => {
+      if (nativeResourceShutdownPromise === tracked) nativeResourceShutdownPromise = undefined;
+    });
+    nativeResourceShutdownPromise = tracked;
+    return tracked;
+  }
+  nativeResourceShutdownRetainsVault = retainVaultOwner;
+  vaultLockMonitor.deactivate();
   const task = (async () => {
     vncSessionAttempts.cancelAll();
     cancelPreparingRdpStarts();
     serialBackend?.dispose();
     serialBackend = undefined;
-    const results = await Promise.allSettled([sshBackend.dispose(), rdpClient?.dispose()]);
+    const vncStopped = stopVaultVncSessions();
+    const sealedRdpStopped = stopVaultRdpSessions();
+    const webStopped = vaultWebIpc.closeAll();
+    const sealedSshStopped = vaultSshIpc.closeAll();
+    const sealedSerialStopped = sealedSerial.closeAll();
+    const bitwardenCLIStopped = stopVaultBitwardenCLIUnlock();
+    const results = await Promise.allSettled([
+      sshBackend.dispose(),
+      rdpClient?.dispose(),
+      retainVaultOwner ? Promise.resolve() : vaultBackend.stop(),
+      vaultCreateDialog.cancel(),
+      vaultMigrationSetupDialog.cancel(),
+      vaultOSMigrationDialog.cancel(),
+      vaultRootSetupDialog.cancel(),
+      vaultUpgradeSetupDialog.cancel(),
+      vaultReauthenticationDialog.cancel(),
+      vaultSharedDialog.cancel(),
+      vaultSharedSetupDialog.cancel(),
+      Promise.resolve(vaultNotesDialog.cancel()),
+      Promise.resolve(vaultCredentialsDialog.cancel()),
+      vaultLinuxClipboard?.reset(),
+      vaultTunnelDialog.cancel(),
+      vncStopped,
+      sealedRdpStopped,
+      webStopped,
+      sealedSshStopped,
+      sealedSerialStopped,
+      bitwardenCLIStopped,
+    ]);
     if (results.some((result) => result.status === 'rejected')) {
       reportWarning('One or more connection services did not stop cleanly.');
     }
@@ -11981,6 +15088,12 @@ function shutdownNativeResources(): Promise<void> {
     sshBackend.backendStopped();
     rdpTunnelLeases.clear();
     rdpTunnelLeaseSessions.clear();
+    if (results[2].status === 'rejected') throw new Error('Vault shutdown could not be confirmed.');
+    await vncStopped;
+    await sealedRdpStopped;
+    await webStopped;
+    if (results.some((result) => result.status === 'rejected'))
+      throw Error('Native shutdown could not be confirmed.');
   })();
   const tracked = task.finally(() => {
     if (nativeResourceShutdownPromise === tracked) nativeResourceShutdownPromise = undefined;
@@ -11990,6 +15103,7 @@ function shutdownNativeResources(): Promise<void> {
 }
 
 function scheduleUnlockedBackgroundWork(): void {
+  if (vaultBackend.isVaultWorkspace || vaultBackend.requiresLegacyMigration) return;
   const hasReadyWindow = BrowserWindow.getAllWindows().some(
     (window) => !window.isDestroyed() && startupReadyWindows.has(window),
   );
@@ -12001,7 +15115,14 @@ function scheduleUnlockedBackgroundWork(): void {
     const stillHasReadyWindow = BrowserWindow.getAllWindows().some(
       (window) => !window.isDestroyed() && startupReadyWindows.has(window),
     );
-    if (!stillHasReadyWindow || !authSession.isAccessAllowed || isQuitting) return;
+    if (
+      !stillHasReadyWindow ||
+      !authSession.isAccessAllowed ||
+      isQuitting ||
+      vaultBackend.isVaultWorkspace ||
+      vaultBackend.requiresLegacyMigration
+    )
+      return;
     const authorizationEpoch = authSession.authorizationEpoch;
     startBitwardenBackgroundMaintenance();
     void showBitwardenOnboardingNoticeIfNeeded();
@@ -12016,10 +15137,39 @@ function scheduleUnlockedBackgroundWork(): void {
 authSession.onUnlocked(() => {
   sshBackend.requestSnapshots();
   serialBackend?.requestSnapshots();
+  sealedSerial.requestSnapshots();
   scheduleUnlockedBackgroundWork();
+  if (vaultBackend.isVaultWorkspace && !vaultBackend.requiresLegacyMigration) {
+    void (async () => {
+      const scope = captureUpdateScope();
+      const settings = await vaultBackend.preferences();
+      requireUpdateScope(scope);
+      scheduleStartupUpdateCheck(settings, scope);
+    })().catch(() => undefined);
+  }
 });
 
 app.whenReady().then(() => {
+  if (vaultMigrationBoot.unavailable) {
+    dialog.showErrorBox(
+      'Wormhole',
+      vaultMigrationBoot.unsafeInstallation
+        ? 'Wormhole could not verify this installation against the machine security policy. Contact your administrator.'
+        : 'Wormhole could not verify the selected workspace.',
+    );
+    app.quit();
+    return;
+  }
+  const disposeVaultPowerEvents = bindVaultPowerEvents(powerMonitor, requestAutomaticVaultLock);
+  app.once('will-quit', disposeVaultPowerEvents);
+  if (process.platform === 'linux' || process.platform === 'win32') {
+    app.once(
+      'will-quit',
+      bindNativeVaultSession(process.platform, backendPath, requestAutomaticVaultLock, {
+        beginSleep: beginLinuxVaultSleep,
+      }),
+    );
+  }
   recordDiagnostic('INF', 'Application started', {
     version: app.getVersion(),
     platform: process.platform,
@@ -12075,7 +15225,11 @@ app.on('before-quit', (event) => {
     }
 
     await sshBackend.finishEditClose();
-    isQuitting = true;
+    await withBitwardenBrowserTimeout(
+      webSurfaces.checkpointVaultCookies(),
+      3000,
+      'Vault web cookie checkpoint timed out.',
+    ).catch(() => undefined);
     try {
       // Complete every cancellable step before opening a DMG or starting a detached installer.
       await pendingUpdateQuit?.launch();
@@ -12088,6 +15242,7 @@ app.on('before-quit', (event) => {
       );
       return;
     }
+    isQuitting = true;
     if (startupUpdateTimer) clearTimeout(startupUpdateTimer);
     startupUpdateTimer = undefined;
     if (startupBackgroundTimer) clearTimeout(startupBackgroundTimer);
@@ -12134,6 +15289,8 @@ app.on('before-quit', (event) => {
 });
 
 app.on('window-all-closed', () => {
-  void shutdownNativeResources();
+  void shutdownNativeResources().catch(() => {
+    console.warn('[Wormhole] Native shutdown could not be confirmed.');
+  });
   if (process.platform !== 'darwin') app.quit();
 });

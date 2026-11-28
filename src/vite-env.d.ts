@@ -175,6 +175,7 @@ interface WormholeRdpBackendEvent {
 
 interface WormholeWorkspaceNode {
   id: string;
+  rowVersion?: string;
   name: string;
   notes?: string;
   kind: 'folder' | 'connection';
@@ -201,6 +202,7 @@ interface WormholeWorkspaceNode {
 }
 
 interface WormholeWorkspaceCredential {
+  rowVersion?: string;
   id: string;
   name: string;
   protocol: WormholeProtocol;
@@ -226,6 +228,7 @@ interface WormholeWorkspaceCredential {
 }
 
 interface WormholeWorkspaceTunnel {
+  rowVersion?: string;
   id: string;
   name: string;
   kind: string;
@@ -543,7 +546,7 @@ type WormholeSerialEvent =
   | { type: 'screen'; sessionId: string; frame: WormholeSshTerminalFrame }
   | { type: 'closed'; sessionId: string }
   | { type: 'error'; sessionId: string; error: string };
-type WormholeAuthMode = 'disabled' | 'pin' | 'password' | 'windowsHello';
+type WormholeAuthMode = 'disabled' | 'pin' | 'password' | 'windowsHello' | 'vault';
 type WormholeAuthFallback = 'pin' | 'password';
 
 interface WormholeHelloStatus {
@@ -586,8 +589,10 @@ interface WormholeAuthSettingsRequest {
 type WormholeVncCommand =
   | {
       action: 'vnc.connect';
+      manualPassword?: true;
       sessionId: string;
       nodeId?: string;
+      quickTarget?: import('../electron/vault-quick-target').VaultQuickTarget;
       credentialId?: string;
       host?: string;
       port?: number;
@@ -699,6 +704,8 @@ interface WormholeUpdateCheckResult {
   installerFileName?: string;
   installerSize?: number | null;
   installerSha256?: string;
+  lastUpdateCheck?: string;
+  updatePolicy?: 'notify' | 'managed';
 }
 
 interface WormholeAppSettings {
@@ -795,7 +802,7 @@ interface WormholeStartupSnapshot {
     migrated: boolean;
   };
   migration: {
-    status: 'completed' | 'already-completed' | 'skipped-non-windows';
+    status: 'completed' | 'already-completed' | 'skipped-non-windows' | 'vault';
     migrated: number;
     missing: number;
   };
@@ -846,7 +853,7 @@ interface Window {
     reportRendererFailure(
       reason: 'uncaught-error' | 'unhandled-rejection' | 'workspace-mount',
     ): void;
-    setTitlebarTheme(theme: 'light' | 'dark'): void;
+    setTitlebarTheme(theme: Exclude<import('../electron/theme-settings').AppTheme, 'system'>): void;
     loadWorkspace(): Promise<WormholeWorkspaceSnapshot>;
     loadWorkspaceNodeNotes(request: { nodeId: string }): Promise<{ notes: string }>;
     selectMRemoteImport(): Promise<WormholeMRemoteImportInspection | null>;
@@ -1008,6 +1015,7 @@ interface Window {
       sessionId: string;
       attempt: number;
       nodeId?: string;
+      quickTarget?: import('../electron/vault-quick-target').VaultQuickTarget;
       address?: string;
       port?: number;
       protocol?: 'http' | 'https';
@@ -1067,6 +1075,7 @@ interface Window {
       draftId?: string,
     ): Promise<WormholeTunnelDetails>;
     listTunnels(): Promise<WormholeWorkspaceTunnel[]>;
+    getTunnelCapabilities(): Promise<{ openVpn: boolean }>;
     readTunnel(id: string): Promise<WormholeTunnelDetails>;
     updateTunnel(
       request: {
@@ -1165,6 +1174,20 @@ interface Window {
     setLogLevel(level: string): Promise<{ updated: boolean; logLevel: string }>;
     openCurrentLogFile(): Promise<{ opened: boolean }>;
     openLogsFolder(): Promise<{ opened: boolean }>;
+    readVaultBitwardenInstallation(): Promise<
+      import('../electron/vault-bitwarden-installation').BitwardenInstallationPlan
+    >;
+    vaultBitwardenCLIAvailable(): Promise<boolean>;
+    unlockVaultBitwardenCLI(): Promise<{ unlocked: true }>;
+    cleanupVaultBitwardenInstallations(): Promise<
+      import('../electron/vault-bitwarden-installation').BitwardenInstallationRevision
+    >;
+    installVaultBitwardenZip(): Promise<
+      import('../electron/vault-bitwarden-installation').BitwardenInstallationPlan | null
+    >;
+    installVaultBitwardenFolder(): Promise<
+      import('../electron/vault-bitwarden-installation').BitwardenInstallationPlan | null
+    >;
     readBitwardenExtension(): Promise<WormholeBitwardenExtensionState>;
     setBitwardenExtensionEnabled(enabled: boolean): Promise<WormholeBitwardenExtensionState>;
     installBitwardenExtension(): Promise<WormholeBitwardenExtensionState>;
@@ -1212,6 +1235,7 @@ interface Window {
       mode?: 'terminal' | 'sftp' | 'smb';
       sessionId: string;
       nodeId?: string;
+      quickTarget?: import('../electron/vault-quick-target').VaultQuickTarget;
       host?: string;
       port?: number;
       username?: string;
@@ -1311,6 +1335,130 @@ interface Window {
     closeSerialSession(sessionId: string): Promise<void>;
     onSerialEvent(listener: (event: WormholeSerialEvent) => void): () => void;
     getAuthState(): Promise<WormholeAuthState>;
+    readVaultSftpRecoveryScopes(
+      after?: string,
+    ): Promise<import('../electron/vault-sftp-recovery.js').VaultRecoveryScopes>;
+    vaultSftpRecovery(
+      request: import('../electron/vault-sftp-recovery.js').VaultRecoveryRequest,
+    ): Promise<import('../electron/vault-sftp-recovery.js').VaultRecoveryRecords>;
+    getVaultStatus(): Promise<import('../electron/vault-contract.js').VaultStatus>;
+    getVaultDescriptor(): Promise<import('../electron/vault-contract.js').VaultDescriptor | null>;
+    loadVaultCatalog(): Promise<import('../electron/vault-contract.js').VaultCatalog>;
+    loadVaultWorkspace(): Promise<import('../electron/vault-workspace.js').VaultWorkspace>;
+    onVaultLocked(callback: () => void): () => void;
+    loadVaultStartup(): Promise<import('../electron/vault-contract.js').VaultStartupMetadata>;
+    readVaultMigrationReport(
+      request: import('../electron/vault-migration.js').VaultMigrationSelection,
+    ): Promise<import('../electron/vault-migration.js').VaultMigrationReport>;
+    decideVaultMigration(
+      request: import('../electron/vault-migration.js').VaultMigrationDecision,
+    ): Promise<import('../electron/vault-folder.js').VaultFolderResult>;
+    editVaultTunnel(
+      selection: import('../electron/vault-tunnel').VaultTunnelSelection | null,
+    ): Promise<import('../electron/vault-tunnel').VaultTunnelResult | null>;
+    deleteVaultTunnel(
+      selection: import('../electron/vault-tunnel').VaultTunnelSelection,
+    ): Promise<import('../electron/vault-tunnel').VaultTunnelDeleteResult>;
+    showVaultCredentials(
+      request: import('../electron/vault-notes.js').VaultNotesSelection,
+    ): Promise<void>;
+    showVaultNotes(
+      request: import('../electron/vault-notes.js').VaultNotesSelection,
+    ): Promise<void>;
+    editVaultCredential(
+      request: import('../electron/vault-credential').VaultCredentialRequest,
+    ): Promise<import('../electron/vault-credential').VaultCredentialResult>;
+    deleteVaultCredential(
+      request: import('../electron/vault-credential').VaultCredentialSelection,
+    ): Promise<import('../electron/vault-credential').VaultCredentialDeleteResult>;
+    saveVaultConnection(
+      request: import('../electron/vault-connection').VaultConnectionInput,
+    ): Promise<import('../electron/vault-folder').VaultFolderResult>;
+    saveVaultFolder(
+      request: import('../electron/vault-folder').VaultFolderRequest,
+    ): Promise<import('../electron/vault-folder').VaultFolderResult>;
+    duplicateVaultConnection(
+      request: import('../electron/vault-node-duplicate.js').VaultNodeDuplicateRequest,
+    ): Promise<import('../electron/vault-node-duplicate.js').VaultNodeDuplicateResult>;
+    moveVaultNodes(
+      request: import('../electron/vault-node-move.js').VaultNodeMoveRequest,
+    ): Promise<import('../electron/vault-node-move.js').VaultNodeMoveResult>;
+    deleteVaultNodes(
+      request: import('../electron/vault-node-delete.js').VaultNodeDeleteRequest,
+    ): Promise<import('../electron/vault-node-delete.js').VaultNodeDeleteResult>;
+    createVault(): Promise<boolean>;
+    recoverSharedWorkspace(): Promise<
+      import('../electron/vault-shared-unlock.ts').SharedVaultSessionAdmission | null
+    >;
+    openSharedRecoveryBackup(): Promise<void>;
+    openSharedAccountReset(): Promise<void>;
+    openSharedAdministration(nodeId?: string): Promise<void>;
+    prepareSharedWorkspaceRestore(): Promise<void>;
+    createSharedWorkspace(): Promise<
+      import('../electron/vault-shared-setup-contract.ts').SharedSetupCompletion | undefined
+    >;
+    protectExistingWorkspace(): Promise<boolean>;
+    databaseEncryptionAvailable(): Promise<boolean>;
+    encryptVaultDatabase(): Promise<boolean>;
+    localVaultBackupAvailable(): Promise<boolean>;
+    exportLocalVaultBackup(): Promise<boolean>;
+    restoreLocalVaultBackup(): Promise<boolean>;
+    prepareLegacyVault(): Promise<boolean>;
+    prepareLegacyUnprotectedVault(): Promise<boolean>;
+    resumeVaultMigration(): Promise<boolean>;
+    resumeVaultRootRotation(): Promise<boolean>;
+    resumeVaultOSMigration(): Promise<boolean>;
+    upgradeVaultProtection(): Promise<boolean>;
+    openUnprotectedVault(): Promise<boolean>;
+    createUnprotectedVault(): Promise<boolean>;
+    loadVaultProtection(): Promise<{ protected: boolean }>;
+    getVaultSecurityProfile(): Promise<import('../electron/vault-security.js').VaultProfileStatus>;
+    tightenLocalVaultProfile(): Promise<void>;
+    tightenSharedVaultProfile(): Promise<void>;
+    onVaultSecurityProfileChanged(callback: () => void): () => void;
+    prepareUnprotectedVaultProtection(): Promise<boolean>;
+    readSharedConnectionContext(
+      nodeId: string,
+    ): Promise<import('../electron/vault-shared-connection.js').SharedConnectionContext>;
+    loadSharedCatalogPage(
+      request: import('../electron/vault-shared-catalog.js').SharedCatalogRequest,
+    ): Promise<import('../electron/vault-shared-catalog.js').SharedCatalogPage>;
+    editSharedNode(
+      request: import('../electron/vault-shared-node-edit.js').SharedNodeEditRequest,
+    ): Promise<import('../electron/vault-shared-node-edit.js').SharedNodeEditReply>;
+    renewSharedServerCertificate(
+      request: import('../electron/vault-shared-setup-contract.js').SharedCertificateRenewalRequest,
+    ): Promise<import('../electron/vault-shared-setup-contract.js').SharedCertificateRenewalResult>;
+    sharedWorkspaceCA(
+      request: import('../electron/vault-shared-setup-contract.js').SharedWorkspaceCARequest,
+    ): Promise<import('../electron/vault-shared-setup-contract.js').SharedWorkspaceCAResult>;
+    exportSharedTLSBundle(): Promise<boolean | null>;
+    refreshSharedRecoveryKit(): Promise<
+      import('../electron/vault-shared-unlock.js').SharedRecoveryKitRefresh | null
+    >;
+    loadSharedChanges(
+      request: import('../electron/vault-shared-catalog.js').SharedChangesRequest,
+    ): Promise<import('../electron/vault-shared-catalog.js').SharedChanges>;
+    onSharedCatalogChanged(callback: () => void): () => void;
+    authenticateSharedVault(
+      mode: 'admit' | 'recover-password' | 'recover-enrollment' | 'join-initial',
+    ): Promise<
+      | import('../electron/vault-shared-unlock.js').SharedVaultSessionAdmission
+      | import('../electron/vault-shared-unlock.js').SharedVaultRecovery
+      | null
+    >;
+    unlockVault(
+      request: import('../electron/vault-unlock.js').VaultUnlockInput,
+    ): Promise<import('../electron/vault-contract.js').VaultUnlockResult>;
+    vaultPresenceStatus(): Promise<
+      import('../electron/vault-presence.js').VaultPresenceStatus | null
+    >;
+    unlockVaultPresence(
+      request: import('../electron/vault-presence.js').VaultPresenceSelection,
+    ): Promise<import('../electron/vault-presence.js').VaultPresenceUnlockResult>;
+    configureVaultPresence(
+      action: import('../electron/vault-presence.js').VaultPresenceAction,
+    ): Promise<import('../electron/vault-presence.js').VaultPresenceChange>;
     verifyAuth(request: WormholeAuthVerificationRequest): Promise<WormholeAuthVerification>;
     setAuthSecret(request: WormholeAuthSecretRequest): Promise<WormholeAuthState>;
     updateAuthSettings(request: WormholeAuthSettingsRequest): Promise<WormholeAuthState>;
@@ -1335,6 +1483,9 @@ interface Window {
       lifecycleId: string;
       input: import('../electron/rdp-framebuffer').RdpInput;
     }): Promise<void>;
+    openVaultRdpSession(
+      request: import('../electron/vault-rdp-ipc').VaultRdpOpenRequest,
+    ): Promise<WormholeRdpBackendEvent>;
     startRdpSession(request: {
       sessionId: string;
       profile: WormholeRdpProfile;

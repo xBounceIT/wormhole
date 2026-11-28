@@ -157,10 +157,7 @@ test('saved connection form blocks missing credential selections before workspac
   const submitEnd = appSource.indexOf('async function submitFolderDetails', submitStart);
   const submitSource = appSource.slice(submitStart, submitEnd);
   const credentialFieldStart = appSource.indexOf('id="connection-credential"');
-  const credentialFieldEnd = appSource.indexOf(
-    '{!newConnectionForm.useSavedCredentials &&',
-    credentialFieldStart,
-  );
+  const credentialFieldEnd = appSource.indexOf('id="connection-username"', credentialFieldStart);
   const credentialFieldSource = appSource.slice(credentialFieldStart, credentialFieldEnd);
 
   assert.ok(
@@ -213,10 +210,25 @@ test('clearing a stored inline password updates the draft without submitting the
       /aria-label="[^"\r\n]*[^"\s][^"\r\n]*"/.test(button),
     'password removal requires visible text or an accessible label',
   );
-  assert.match(
-    button,
-    /onClick=\{\(\) =>\s*setNewConnectionForm\(\(form\) => \(\{[\s\S]*?inlinePassword: '',[\s\S]*?removeInlinePassword: !form\.removeInlinePassword/,
-  );
+  const handler = button.match(/onClick=\{(\(\) => \{[\s\S]*?)\}\s+size=/)?.[1];
+  assert.ok(handler);
+  let draft = { inlinePassword: 'draft secret', removeInlinePassword: false };
+  const input = { value: 'native secret' };
+  const click = runInNewContext(`(${handler})`, {
+    nativeConnectionPassword: { current: input },
+    clearSecretInput: (field: typeof input) => {
+      field.value = '';
+    },
+    setNewConnectionForm: (update: (value: typeof draft) => typeof draft) => {
+      draft = update(draft);
+    },
+  });
+  click();
+  assert.equal(input.value, '');
+  assert.equal(draft.inlinePassword, '');
+  assert.equal(draft.removeInlinePassword, true);
+  click();
+  assert.equal(draft.removeInlinePassword, false);
 });
 
 test('credential merge matches SQLite BINARY ordering for Unicode names', () => {
@@ -349,7 +361,7 @@ test('credential deletion names its target for assistive technology', () => {
   assert.ok(grid, 'credential grid is missing');
   const button = grid
     .match(/<IconButton\b[\s\S]*?<\/IconButton>/g)
-    ?.find((candidate) => candidate.includes('setPendingDeletion([credential.id])'));
+    ?.find((candidate) => candidate.includes('requestCredentialDeletion([credential.id])'));
   assert.ok(button, 'credential deletion control is missing');
   assert.match(button, /label=\{`Delete \$\{credential\.name\}`\}/);
 });
@@ -419,6 +431,10 @@ test('SSH key credential import keeps key paths and material behind the native b
   assert.match(
     appSource,
     /clearSecretInput\(credentialKeyPassphraseInput\.current\);\s+credentialKeyPassphraseInput\.current = input/,
+  );
+  assert.match(
+    appSource,
+    /clearSecretInput\(credentialPasswordInput\.current\);\s+clearSecretInput\(credentialKeyPassphraseInput\.current\);\s+nativeCredentialRetry\.current =/,
   );
   assert.match(
     appSource,

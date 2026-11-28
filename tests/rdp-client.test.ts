@@ -501,7 +501,7 @@ test('a rejected duplicate start cannot replace the active lifecycle identity', 
 test('RDP controller failure terminates every tracked lifecycle exactly once', () => {
   const client = new RdpBackendClient({ executable: 'unused', args: [] });
   const internals = client as any;
-  const process = {};
+  const process = { exitCode: -1 };
   internals.process = process;
   internals.sessionIds.add('first');
   // The second lifecycle is still connecting and has not received its native start ack.
@@ -566,7 +566,7 @@ test('RDP tracks a connecting lifecycle generation before controller startup', a
   const events: Array<Record<string, unknown>> = [];
   client.onEvent((event) => events.push(event as Record<string, unknown>));
   internals.ensureProcess = async () => {
-    const process = { killed: false, kill() {} };
+    const process = { killed: false, exitCode: -1 };
     internals.process = process;
     internals.handleProcessFailure(process, 'controller crashed');
     throw new Error('controller crashed');
@@ -682,17 +682,25 @@ test('oversized RDP commands are rejected before touching the controller pipe', 
   assert.equal(internals.pending.size, 0);
 });
 
-test('oversized RDP controller events fail closed before JSON parsing', () => {
+test('oversized RDP controller events fail closed before JSON parsing', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   const client = new RdpBackendClient({ executable: 'unused', args: [] });
   const internals = client as any;
   let killed = false;
-  const process = {
+  const process = Object.assign(new EventEmitter(), {
     killed: false,
+    exitCode: null as number | null,
+    signalCode: null,
+    stdin: { end() {} },
     kill() {
       killed = true;
       process.killed = true;
+      process.exitCode = -1;
+      queueMicrotask(() => process.emit('close'));
+      return true;
     },
-  };
+  });
+  internals.sendToProcess = async () => {};
   internals.process = process;
   internals.sessionIds.add('session-1');
   internals.lifecycleGenerations.set('session-1', 3);
@@ -701,6 +709,12 @@ test('oversized RDP controller events fail closed before JSON parsing', () => {
 
   internals.readOutputForProcess(process, 'x'.repeat(256 * 1024 + 1));
 
+  assert.equal(internals.process, process);
+  assert.equal(internals.shutdownUnconfirmed, true);
+  const disposing = internals.disposing;
+  await new Promise<void>((r) => setImmediate(r));
+  t.mock.timers.tick(10_001);
+  await disposing;
   assert.equal(killed, true);
   assert.equal(internals.process, undefined);
   assert.equal(internals.outputBuffer, '');

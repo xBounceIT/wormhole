@@ -20,6 +20,8 @@ type forcepointMutationFixture struct {
 	Kind     int64
 	Original json.RawMessage
 	Next     json.RawMessage
+	// The Unix test keyring is process-local. Share just this fixture's key over stdin.
+	FileKey []byte
 }
 
 // Run a real second backend process: a package-level mutex cannot protect this boundary.
@@ -31,6 +33,8 @@ func TestForcepointMutationProcessHelper(t *testing.T) {
 	if err := json.NewDecoder(os.Stdin).Decode(&fixture); err != nil {
 		os.Exit(2)
 	}
+	syncForcepointFixtureKey(t, &fixture)
+	clearBytes(fixture.FileKey)
 	encoder := json.NewEncoder(os.Stdout)
 	_ = encoder.Encode(map[string]bool{"started": true})
 	var err error
@@ -94,7 +98,13 @@ func TestForcepointTrustAndProfileMutationsSerializeAcrossProcesses(t *testing.T
 			defer cancel()
 			command := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestForcepointMutationProcessHelper$")
 			command.Env = append(os.Environ(), "WORMHOLE_FORCEPOINT_MUTATION_HELPER=1")
-			payload, _ := json.Marshal(forcepointMutationFixture{Mode: mode, Database: path, ID: created.ID, Kind: kind, Original: created.Settings, Next: next})
+			fixture := forcepointMutationFixture{Mode: mode, Database: path, ID: created.ID, Kind: kind, Original: created.Settings, Next: next}
+			syncForcepointFixtureKey(t, &fixture)
+			payload, err := json.Marshal(fixture)
+			clearBytes(fixture.FileKey)
+			if err != nil {
+				t.Fatal(err)
+			}
 			defer clearBytes(payload)
 			command.Stdin = bytes.NewReader(payload)
 			output, err := command.StdoutPipe()

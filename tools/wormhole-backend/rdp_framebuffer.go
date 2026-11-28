@@ -200,7 +200,7 @@ func (c *rdpController) startFramebufferRdp(command rdpCommand) {
 		}
 	}()
 	fail := func(message string) {
-		writeRdpEvent(rdpEvent{Type: "error", RequestID: command.RequestID, SessionID: command.SessionID, LifecycleID: command.LifecycleID, Backend: "freerdp", Message: message})
+		c.emit(rdpEvent{Type: "error", RequestID: command.RequestID, SessionID: command.SessionID, LifecycleID: command.LifecycleID, Backend: "freerdp", Message: message})
 	}
 	args, err := buildFramebufferArguments(command)
 	if err != nil {
@@ -239,9 +239,9 @@ func (c *rdpController) startFramebufferRdp(command rdpCommand) {
 	c.processes[command.SessionID] = process
 	c.mu.Unlock()
 	handoff = true
-	writeRdpEvent(rdpEvent{Type: "started", RequestID: command.RequestID, SessionID: command.SessionID, LifecycleID: command.LifecycleID, Backend: "freerdp", LifecycleGeneration: command.LifecycleGeneration})
+	c.emit(rdpEvent{Type: "started", RequestID: command.RequestID, SessionID: command.SessionID, LifecycleID: command.LifecycleID, Backend: "freerdp", LifecycleGeneration: command.LifecycleGeneration})
 	go c.readFramebufferEvents(process, output)
-	go c.waitForExit(process)
+	c.supervise(process)
 }
 
 func (c *rdpController) readFramebufferEvents(process *rdpProcess, output io.ReadCloser) {
@@ -258,7 +258,7 @@ func (c *rdpController) readFramebufferEvents(process *rdpProcess, output io.Rea
 		event.SessionID, event.LifecycleID, event.Backend = process.sessionID, process.lifecycleID, process.backend
 		event.LifecycleGeneration = process.lifecycleGeneration
 		if c.shouldForwardProcessEvent(process, event) {
-			writeRdpEvent(event)
+			c.emit(event)
 		}
 	}
 }

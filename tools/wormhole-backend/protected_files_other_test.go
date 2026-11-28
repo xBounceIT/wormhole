@@ -7,14 +7,42 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/zalando/go-keyring"
 )
 
 func TestMain(m *testing.M) {
+	if runtime.GOOS == "darwin" {
+		// SFTP destinations reject symlink ancestors. macOS exposes TMPDIR through /var.
+		directory, err := filepath.EvalSymlinks(os.TempDir())
+		if err != nil {
+			panic(err)
+		}
+		if err := os.Setenv("TMPDIR", directory); err != nil {
+			panic(err)
+		}
+	}
 	keyring.MockInit()
+	desktopProtectedKeys = legacyProtectedKeyring()
 	os.Exit(m.Run())
+}
+
+func syncForcepointFixtureKey(t *testing.T, fixture *forcepointMutationFixture) {
+	t.Helper()
+	account := protectedFileKeyringAccount(legacyTunnelSecretPath(fixture.Database, fixture.ID))
+	if len(fixture.FileKey) != 0 {
+		if err := desktopProtectedKeys.store(fileKeyringService, account, fixture.FileKey); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	key, err := desktopProtectedKeys.load(fileKeyringService, account)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.FileKey = key
 }
 
 func TestProtectedFileUsesSystemKeyringKey(t *testing.T) {

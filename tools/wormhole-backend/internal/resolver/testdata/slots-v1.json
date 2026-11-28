@@ -1,0 +1,1046 @@
+[
+  {
+    "plan": {
+      "resolverVersion": 1,
+      "nodeId": "11111111-1111-4111-8111-111111111111",
+      "protocol": 0,
+      "host": "host.example",
+      "port": 22,
+      "username": "old-user",
+      "domain": "old-domain",
+      "credential": {
+        "kind": "slot",
+        "id": "33333333-3333-4333-8333-333333333333",
+        "nodeId": "11111111-1111-4111-8111-111111111111"
+      },
+      "tunnelId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "hostKeyFingerprint": "pin"
+    },
+    "userId": "22222222-2222-4222-8222-222222222222",
+    "slot": {
+      "id": "33333333-3333-4333-8333-333333333333",
+      "protocol": "ssh",
+      "defaultCredentialId": "44444444-4444-4444-8444-444444444444",
+      "allowSelfService": false
+    },
+    "value": null,
+    "name": "default",
+    "expected": {
+      "resolverVersion": 1,
+      "nodeId": "11111111-1111-4111-8111-111111111111",
+      "protocol": 0,
+      "host": "host.example",
+      "port": 22,
+      "username": "",
+      "domain": "",
+      "credential": {
+        "kind": "saved",
+        "id": "44444444-4444-4444-8444-444444444444",
+        "nodeId": "11111111-1111-4111-8111-111111111111"
+      },
+      "tunnelId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "hostKeyFingerprint": "pin"
+    }
+  },
+  {
+    "plan": {
+      "resolverVersion": 1,
+      "nodeId": "11111111-1111-4111-8111-111111111111",
+      "protocol": 0,
+      "host": "host.example",
+      "port": 22,
+      "username": "old-user",
+      "domain": "old-domain",
+      "credential": {
+        "kind": "slot",
+        "id": "33333333-3333-4333-8333-333333333333",
+        "nodeId": "11111111-1111-4111-8111-111111111111"
+      },
+      "tunnelId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "hostKeyFingerprint": "pin"
+    },
+    "userId": "22222222-2222-4222-8222-222222222222",
+    "slot": {
+      "id": "33333333-3333-4333-8333-333333333333",
+      "protocol": "ssh",
+      "defaultCredentialId": "44444444-4444-4444-8444-444444444444",
+      "allowSelfService": false
+    },
+    "value": {
+      "slotId": "33333333-3333-4333-8333-333333333333",
+      "userId": "22222222-2222-4222-8222-222222222222",
+      "credentialId": "55555555-5555-4555-8555-555555555555"
+    },
+    "name": "personal-with-self-service-disabled",
+    "expected": {
+      "resolverVersion": 1,
+      "nodeId": "11111111-1111-4111-8111-111111111111",
+      "protocol": 0,
+      "host": "host.example",
+      "port": 22,
+      "username": "",
+      "domain": "",
+      "credential": {
+        "kind": "saved",
+        "id": "55555555-5555-4555-8555-555555555555",
+        "nodeId": "11111111-1111-4111-8111-111111111111"
+      },
+      "tunnelId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "hostKeyFingerprint": "pin"
+    }
+  },
+  {
+    "plan": {
+      "resolverVersion": 1,
+      "nodeId": "11111111-1111-4111-8111-111111111111",
+      "protocol": 0,
+      "host": "host.example",
+      "port": 22,
+      "username": "old-user",
+      "domain": "old-domain",
+      "credential": {
+        "kind": "slot",
+        "id": "33333333-3333-4333-8333-333333333333",
+        "nodeId": "11111111-1111-4111-8111-111111111111"
+      },
+      "tunnelId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "hostKeyFingerprint": "pin"
+    },
+    "userId": "22222222-2222-4222-8222-222222222222",
+    "slot": {
+      "id": "33333333-3333-4333-8333-333333333333",
+      "protocol": "ssh",
+      "defaultCredentialId": "",
+      "allowSelfService": false
+    },
+    "value": {
+      "slotId": "33333333-3333-4333-8333-333333333333",
+      "userId": "22222222-2222-4222-8222-222222222222",
+      "credentialId": "55555555-5555-4555-8555-555555555555"
+    },
+    "name": "personal-without-default",
+    "expected": {
+      "resolverVersion": 1,
+      "nodeId": "11111111-1111-4111-8111-111111111111",
+      "protocol": 0,
+      "host": "host.example",
+      "port": 22,
+      "username": "",
+      "domain": "",
+      "credential": {
+        "kind": "saved",
+        "id": "55555555-5555-4555-8555-555555555555",
+        "nodeId": "11111111-1111-4111-8111-111111111111"
+      },
+      "tunnelId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "hostKeyFingerprint": "pin"
+    }
+  },
+  {
+    "plan": {
+      "resolverVersion": 1,
+      "nodeId": "11111111-1111-4111-8111-111111111111",
+      "protocol": 0,
+      "host": "host.example",
+      "port": 22,
+      "username": "old-user",
+      "domain": "old-domain",
+      "credential": {
+        "kind": "slot",
+        "id": "33333333-3333-4333-8333-333333333333",
+        "nodeId": "11111111-1111-4111-8111-111111111111"
+      },
+      "tunnelId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "hostKeyFingerprint": "pin"
+    },
+    "userId": "22222222-2222-4222-8222-222222222222",
+    "slot": {
+      "id": "33333333-3333-4333-8333-333333333333",
+      "protocol": "ssh",
+      "defaultCredentialId": "44444444-4444-4444-8444-444444444444",
+      "allowSelfService": true
+    },
+    "value": null,
+    "name": "self-service-default",
+    "expected": {
+      "resolverVersion": 1,
+      "nodeId": "11111111-1111-4111-8111-111111111111",
+      "protocol": 0,
+      "host": "host.example",
+      "port": 22,
+      "username": "",
+      "domain": "",
+      "credential": {
+        "kind": "saved",
+        "id": "44444444-4444-4444-8444-444444444444",
+        "nodeId": "11111111-1111-4111-8111-111111111111"
+      },
+      "tunnelId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "hostKeyFingerprint": "pin"
+    }
+  },
+  {
+    "plan": {
+      "resolverVersion": 1,
+      "nodeId": "11111111-1111-4111-8111-111111111111",
+      "protocol": 7,
+      "host": "host.example",
+      "port": 22,
+      "username": "old-user",
+      "domain": "old-domain",
+      "credential": {
+        "kind": "slot",
+        "id": "33333333-3333-4333-8333-333333333333",
+        "nodeId": "11111111-1111-4111-8111-111111111111"
+      },
+      "tunnelId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "hostKeyFingerprint": "pin"
+    },
+    "userId": "22222222-2222-4222-8222-222222222222",
+    "slot": {
+      "id": "33333333-3333-4333-8333-333333333333",
+      "protocol": "ssh",
+      "defaultCredentialId": "44444444-4444-4444-8444-444444444444",
+      "allowSelfService": false
+    },
+    "value": null,
+    "name": "protocol-ssh-7",
+    "expected": {
+      "resolverVersion": 1,
+      "nodeId": "11111111-1111-4111-8111-111111111111",
+      "protocol": 7,
+      "host": "host.example",
+      "port": 22,
+      "username": "",
+      "domain": "",
+      "credential": {
+        "kind": "saved",
+        "id": "44444444-4444-4444-8444-444444444444",
+        "nodeId": "11111111-1111-4111-8111-111111111111"
+      },
+      "tunnelId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "hostKeyFingerprint": "pin"
+    }
+  },
+  {
+    "plan": {
+      "resolverVersion": 1,
+      "nodeId": "11111111-1111-4111-8111-111111111111",
+      "protocol": 1,
+      "host": "host.example",
+      "port": 22,
+      "username": "old-user",
+      "domain": "old-domain",
+      "credential": {
+        "kind": "slot",
+        "id": "33333333-3333-4333-8333-333333333333",
+        "nodeId": "11111111-1111-4111-8111-111111111111"
+      },
+      "tunnelId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "hostKeyFingerprint": "pin"
+    },
+    "userId": "22222222-2222-4222-8222-222222222222",
+    "slot": {
+      "id": "33333333-3333-4333-8333-333333333333",
+      "protocol": "rdp",
+      "defaultCredentialId": "44444444-4444-4444-8444-444444444444",
+      "allowSelfService": false
+    },
+    "value": null,
+    "name": "protocol-rdp-1",
+    "expected": {
+      "resolverVersion": 1,
+      "nodeId": "11111111-1111-4111-8111-111111111111",
+      "protocol": 1,
+      "host": "host.example",
+      "port": 22,
+      "username": "",
+      "domain": "",
+      "credential": {
+        "kind": "saved",
+        "id": "44444444-4444-4444-8444-444444444444",
+        "nodeId": "11111111-1111-4111-8111-111111111111"
+      },
+      "tunnelId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "hostKeyFingerprint": "pin"
+    }
+  },
+  {
+    "plan": {
+      "resolverVersion": 1,
+      "nodeId": "11111111-1111-4111-8111-111111111111",
+      "protocol": 6,
+      "host": "host.example",
+      "port": 22,
+      "username": "old-user",
+      "domain": "old-domain",
+      "credential": {
+        "kind": "slot",
+        "id": "33333333-3333-4333-8333-333333333333",
+        "nodeId": "11111111-1111-4111-8111-111111111111"
+      },
+      "tunnelId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "hostKeyFingerprint": "pin"
+    },
+    "userId": "22222222-2222-4222-8222-222222222222",
+    "slot": {
+      "id": "33333333-3333-4333-8333-333333333333",
+      "protocol": "vnc",
+      "defaultCredentialId": "44444444-4444-4444-8444-444444444444",
+      "allowSelfService": false
+    },
+    "value": null,
+    "name": "protocol-vnc-6",
+    "expected": {
+      "resolverVersion": 1,
+      "nodeId": "11111111-1111-4111-8111-111111111111",
+      "protocol": 6,
+      "host": "host.example",
+      "port": 22,
+      "username": "",
+      "domain": "",
+      "credential": {
+        "kind": "saved",
+        "id": "44444444-4444-4444-8444-444444444444",
+        "nodeId": "11111111-1111-4111-8111-111111111111"
+      },
+      "tunnelId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "hostKeyFingerprint": "pin"
+    }
+  },
+  {
+    "plan": {
+      "resolverVersion": 1,
+      "nodeId": "11111111-1111-4111-8111-111111111111",
+      "protocol": 0,
+      "host": "host.example",
+      "port": 22,
+      "username": "old-user",
+      "domain": "old-domain",
+      "credential": {
+        "kind": "slot",
+        "id": "33333333-3333-4333-8333-333333333333",
+        "nodeId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+      },
+      "tunnelId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "hostKeyFingerprint": "pin"
+    },
+    "userId": "22222222-2222-4222-8222-222222222222",
+    "slot": {
+      "id": "33333333-3333-4333-8333-333333333333",
+      "protocol": "ssh",
+      "defaultCredentialId": "44444444-4444-4444-8444-444444444444",
+      "allowSelfService": false
+    },
+    "value": null,
+    "name": "ancestor-slot",
+    "expected": {
+      "resolverVersion": 1,
+      "nodeId": "11111111-1111-4111-8111-111111111111",
+      "protocol": 0,
+      "host": "host.example",
+      "port": 22,
+      "username": "",
+      "domain": "",
+      "credential": {
+        "kind": "saved",
+        "id": "44444444-4444-4444-8444-444444444444",
+        "nodeId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+      },
+      "tunnelId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "hostKeyFingerprint": "pin"
+    }
+  },
+  {
+    "plan": {
+      "resolverVersion": 1,
+      "nodeId": "11111111-1111-4111-8111-111111111111",
+      "protocol": 0,
+      "host": "host.example",
+      "port": 22,
+      "username": "old-user",
+      "domain": "old-domain",
+      "credential": {
+        "kind": "slot",
+        "id": "33333333-3333-4333-8333-333333333333",
+        "nodeId": "11111111-1111-4111-8111-111111111111"
+      },
+      "tunnelId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "hostKeyFingerprint": "pin"
+    },
+    "userId": "",
+    "slot": {
+      "id": "33333333-3333-4333-8333-333333333333",
+      "protocol": "ssh",
+      "defaultCredentialId": "44444444-4444-4444-8444-444444444444",
+      "allowSelfService": false
+    },
+    "value": null,
+    "name": "user-invalid-0",
+    "error": "credential"
+  },
+  {
+    "plan": {
+      "resolverVersion": 1,
+      "nodeId": "11111111-1111-4111-8111-111111111111",
+      "protocol": 0,
+      "host": "host.example",
+      "port": 22,
+      "username": "old-user",
+      "domain": "old-domain",
+      "credential": {
+        "kind": "slot",
+        "id": "33333333-3333-4333-8333-333333333333",
+        "nodeId": "11111111-1111-4111-8111-111111111111"
+      },
+      "tunnelId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "hostKeyFingerprint": "pin"
+    },
+    "userId": "00000000-0000-0000-0000-000000000000",
+    "slot": {
+      "id": "33333333-3333-4333-8333-333333333333",
+      "protocol": "ssh",
+      "defaultCredentialId": "44444444-4444-4444-8444-444444444444",
+      "allowSelfService": false
+    },
+    "value": null,
+    "name": "user-invalid-1",
+    "error": "credential"
+  },
+  {
+    "plan": {
+      "resolverVersion": 1,
+      "nodeId": "11111111-1111-4111-8111-111111111111",
+      "protocol": 0,
+      "host": "host.example",
+      "port": 22,
+      "username": "old-user",
+      "domain": "old-domain",
+      "credential": {
+        "kind": "slot",
+        "id": "33333333-3333-4333-8333-333333333333",
+        "nodeId": "11111111-1111-4111-8111-111111111111"
+      },
+      "tunnelId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "hostKeyFingerprint": "pin"
+    },
+    "userId": "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA",
+    "slot": {
+      "id": "33333333-3333-4333-8333-333333333333",
+      "protocol": "ssh",
+      "defaultCredentialId": "44444444-4444-4444-8444-444444444444",
+      "allowSelfService": false
+    },
+    "value": null,
+    "name": "user-invalid-2",
+    "error": "credential"
+  },
+  {
+    "plan": {
+      "resolverVersion": 1,
+      "nodeId": "11111111-1111-4111-8111-111111111111",
+      "protocol": 0,
+      "host": "host.example",
+      "port": 22,
+      "username": "old-user",
+      "domain": "old-domain",
+      "credential": {
+        "kind": "slot",
+        "id": "33333333-3333-4333-8333-333333333333",
+        "nodeId": "11111111-1111-4111-8111-111111111111"
+      },
+      "tunnelId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "hostKeyFingerprint": "pin"
+    },
+    "userId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\n",
+    "slot": {
+      "id": "33333333-3333-4333-8333-333333333333",
+      "protocol": "ssh",
+      "defaultCredentialId": "44444444-4444-4444-8444-444444444444",
+      "allowSelfService": false
+    },
+    "value": null,
+    "name": "user-invalid-3",
+    "error": "credential"
+  },
+  {
+    "plan": {
+      "resolverVersion": 1,
+      "nodeId": "11111111-1111-4111-8111-111111111111",
+      "protocol": 0,
+      "host": "host.example",
+      "port": 22,
+      "username": "old-user",
+      "domain": "old-domain",
+      "credential": {
+        "kind": "slot",
+        "id": "33333333-3333-4333-8333-333333333333",
+        "nodeId": "11111111-1111-4111-8111-111111111111"
+      },
+      "tunnelId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "hostKeyFingerprint": "pin"
+    },
+    "userId": "22222222-2222-4222-8222-222222222222",
+    "slot": {
+      "id": "",
+      "protocol": "ssh",
+      "defaultCredentialId": "44444444-4444-4444-8444-444444444444",
+      "allowSelfService": false
+    },
+    "value": null,
+    "name": "slot-invalid-0",
+    "error": "credential"
+  },
+  {
+    "plan": {
+      "resolverVersion": 1,
+      "nodeId": "11111111-1111-4111-8111-111111111111",
+      "protocol": 0,
+      "host": "host.example",
+      "port": 22,
+      "username": "old-user",
+      "domain": "old-domain",
+      "credential": {
+        "kind": "slot",
+        "id": "33333333-3333-4333-8333-333333333333",
+        "nodeId": "11111111-1111-4111-8111-111111111111"
+      },
+      "tunnelId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "hostKeyFingerprint": "pin"
+    },
+    "userId": "22222222-2222-4222-8222-222222222222",
+    "slot": {
+      "id": "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA",
+      "protocol": "ssh",
+      "defaultCredentialId": "44444444-4444-4444-8444-444444444444",
+      "allowSelfService": false
+    },
+    "value": null,
+    "name": "slot-invalid-1",
+    "error": "credential"
+  },
+  {
+    "plan": {
+      "resolverVersion": 1,
+      "nodeId": "11111111-1111-4111-8111-111111111111",
+      "protocol": 0,
+      "host": "host.example",
+      "port": 22,
+      "username": "old-user",
+      "domain": "old-domain",
+      "credential": {
+        "kind": "slot",
+        "id": "33333333-3333-4333-8333-333333333333",
+        "nodeId": "11111111-1111-4111-8111-111111111111"
+      },
+      "tunnelId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "hostKeyFingerprint": "pin"
+    },
+    "userId": "22222222-2222-4222-8222-222222222222",
+    "slot": {
+      "id": "33333333-3333-4333-8333-333333333333\n",
+      "protocol": "ssh",
+      "defaultCredentialId": "44444444-4444-4444-8444-444444444444",
+      "allowSelfService": false
+    },
+    "value": null,
+    "name": "slot-invalid-2",
+    "error": "credential"
+  },
+  {
+    "plan": {
+      "resolverVersion": 1,
+      "nodeId": "11111111-1111-4111-8111-111111111111",
+      "protocol": 0,
+      "host": "host.example",
+      "port": 22,
+      "username": "old-user",
+      "domain": "old-domain",
+      "credential": {
+        "kind": "slot",
+        "id": "33333333-3333-4333-8333-333333333333",
+        "nodeId": "11111111-1111-4111-8111-111111111111"
+      },
+      "tunnelId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "hostKeyFingerprint": "pin"
+    },
+    "userId": "22222222-2222-4222-8222-222222222222",
+    "slot": {
+      "id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "protocol": "ssh",
+      "defaultCredentialId": "44444444-4444-4444-8444-444444444444",
+      "allowSelfService": false
+    },
+    "value": null,
+    "name": "wrong-slot",
+    "error": "credential"
+  },
+  {
+    "plan": {
+      "resolverVersion": 1,
+      "nodeId": "11111111-1111-4111-8111-111111111111",
+      "protocol": 0,
+      "host": "host.example",
+      "port": 22,
+      "username": "old-user",
+      "domain": "old-domain",
+      "credential": {
+        "kind": "slot",
+        "id": "33333333-3333-4333-8333-333333333333",
+        "nodeId": "11111111-1111-4111-8111-111111111111"
+      },
+      "tunnelId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "hostKeyFingerprint": "pin"
+    },
+    "userId": "22222222-2222-4222-8222-222222222222",
+    "slot": {
+      "id": "33333333-3333-4333-8333-333333333333",
+      "protocol": "rdp",
+      "defaultCredentialId": "44444444-4444-4444-8444-444444444444",
+      "allowSelfService": false
+    },
+    "value": null,
+    "name": "wrong-protocol",
+    "error": "credential"
+  },
+  {
+    "plan": {
+      "resolverVersion": 1,
+      "nodeId": "11111111-1111-4111-8111-111111111111",
+      "protocol": 0,
+      "host": "host.example",
+      "port": 22,
+      "username": "old-user",
+      "domain": "old-domain",
+      "credential": {
+        "kind": "slot",
+        "id": "33333333-3333-4333-8333-333333333333",
+        "nodeId": "11111111-1111-4111-8111-111111111111"
+      },
+      "tunnelId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "hostKeyFingerprint": "pin"
+    },
+    "userId": "22222222-2222-4222-8222-222222222222",
+    "slot": {
+      "id": "33333333-3333-4333-8333-333333333333",
+      "protocol": "",
+      "defaultCredentialId": "44444444-4444-4444-8444-444444444444",
+      "allowSelfService": false
+    },
+    "value": null,
+    "name": "empty-protocol",
+    "error": "credential"
+  },
+  {
+    "plan": {
+      "resolverVersion": 1,
+      "nodeId": "11111111-1111-4111-8111-111111111111",
+      "protocol": 4,
+      "host": "host.example",
+      "port": 22,
+      "username": "old-user",
+      "domain": "old-domain",
+      "credential": {
+        "kind": "slot",
+        "id": "33333333-3333-4333-8333-333333333333",
+        "nodeId": "11111111-1111-4111-8111-111111111111"
+      },
+      "tunnelId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "hostKeyFingerprint": "pin"
+    },
+    "userId": "22222222-2222-4222-8222-222222222222",
+    "slot": {
+      "id": "33333333-3333-4333-8333-333333333333",
+      "protocol": "ssh",
+      "defaultCredentialId": "44444444-4444-4444-8444-444444444444",
+      "allowSelfService": false
+    },
+    "value": null,
+    "name": "unsupported-protocol",
+    "error": "credential"
+  },
+  {
+    "plan": {
+      "resolverVersion": 2,
+      "nodeId": "11111111-1111-4111-8111-111111111111",
+      "protocol": 0,
+      "host": "host.example",
+      "port": 22,
+      "username": "old-user",
+      "domain": "old-domain",
+      "credential": {
+        "kind": "slot",
+        "id": "33333333-3333-4333-8333-333333333333",
+        "nodeId": "11111111-1111-4111-8111-111111111111"
+      },
+      "tunnelId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "hostKeyFingerprint": "pin"
+    },
+    "userId": "22222222-2222-4222-8222-222222222222",
+    "slot": {
+      "id": "33333333-3333-4333-8333-333333333333",
+      "protocol": "ssh",
+      "defaultCredentialId": "44444444-4444-4444-8444-444444444444",
+      "allowSelfService": false
+    },
+    "value": null,
+    "name": "wrong-version",
+    "error": "credential"
+  },
+  {
+    "plan": {
+      "resolverVersion": 1,
+      "nodeId": "",
+      "protocol": 0,
+      "host": "host.example",
+      "port": 22,
+      "username": "old-user",
+      "domain": "old-domain",
+      "credential": {
+        "kind": "slot",
+        "id": "33333333-3333-4333-8333-333333333333",
+        "nodeId": "11111111-1111-4111-8111-111111111111"
+      },
+      "tunnelId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "hostKeyFingerprint": "pin"
+    },
+    "userId": "22222222-2222-4222-8222-222222222222",
+    "slot": {
+      "id": "33333333-3333-4333-8333-333333333333",
+      "protocol": "ssh",
+      "defaultCredentialId": "44444444-4444-4444-8444-444444444444",
+      "allowSelfService": false
+    },
+    "value": null,
+    "name": "invalid-node",
+    "error": "credential"
+  },
+  {
+    "plan": {
+      "resolverVersion": 1,
+      "nodeId": "11111111-1111-4111-8111-111111111111",
+      "protocol": 0,
+      "host": "host.example",
+      "port": 22,
+      "username": "old-user",
+      "domain": "old-domain",
+      "credential": {
+        "kind": "slot",
+        "id": "33333333-3333-4333-8333-333333333333",
+        "nodeId": ""
+      },
+      "tunnelId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "hostKeyFingerprint": "pin"
+    },
+    "userId": "22222222-2222-4222-8222-222222222222",
+    "slot": {
+      "id": "33333333-3333-4333-8333-333333333333",
+      "protocol": "ssh",
+      "defaultCredentialId": "44444444-4444-4444-8444-444444444444",
+      "allowSelfService": false
+    },
+    "value": null,
+    "name": "invalid-choice-node",
+    "error": "credential"
+  },
+  {
+    "plan": {
+      "resolverVersion": 1,
+      "nodeId": "11111111-1111-4111-8111-111111111111",
+      "protocol": 0,
+      "host": "host.example",
+      "port": 22,
+      "username": "old-user",
+      "domain": "old-domain",
+      "credential": {
+        "kind": "saved",
+        "id": "33333333-3333-4333-8333-333333333333",
+        "nodeId": "11111111-1111-4111-8111-111111111111"
+      },
+      "tunnelId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "hostKeyFingerprint": "pin"
+    },
+    "userId": "22222222-2222-4222-8222-222222222222",
+    "slot": {
+      "id": "33333333-3333-4333-8333-333333333333",
+      "protocol": "ssh",
+      "defaultCredentialId": "44444444-4444-4444-8444-444444444444",
+      "allowSelfService": false
+    },
+    "value": null,
+    "name": "already-saved",
+    "error": "credential"
+  },
+  {
+    "plan": {
+      "resolverVersion": 1,
+      "nodeId": "11111111-1111-4111-8111-111111111111",
+      "protocol": 0,
+      "host": "host.example",
+      "port": 22,
+      "username": "old-user",
+      "domain": "old-domain",
+      "credential": {
+        "kind": "inline",
+        "id": "33333333-3333-4333-8333-333333333333",
+        "nodeId": "11111111-1111-4111-8111-111111111111"
+      },
+      "tunnelId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "hostKeyFingerprint": "pin"
+    },
+    "userId": "22222222-2222-4222-8222-222222222222",
+    "slot": {
+      "id": "33333333-3333-4333-8333-333333333333",
+      "protocol": "ssh",
+      "defaultCredentialId": "44444444-4444-4444-8444-444444444444",
+      "allowSelfService": false
+    },
+    "value": null,
+    "name": "inline",
+    "error": "credential"
+  },
+  {
+    "plan": {
+      "resolverVersion": 1,
+      "nodeId": "11111111-1111-4111-8111-111111111111",
+      "protocol": 0,
+      "host": "host.example",
+      "port": 22,
+      "username": "old-user",
+      "domain": "old-domain",
+      "credential": {
+        "kind": "override",
+        "id": "33333333-3333-4333-8333-333333333333",
+        "nodeId": "11111111-1111-4111-8111-111111111111"
+      },
+      "tunnelId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "hostKeyFingerprint": "pin"
+    },
+    "userId": "22222222-2222-4222-8222-222222222222",
+    "slot": {
+      "id": "33333333-3333-4333-8333-333333333333",
+      "protocol": "ssh",
+      "defaultCredentialId": "44444444-4444-4444-8444-444444444444",
+      "allowSelfService": false
+    },
+    "value": null,
+    "name": "override",
+    "error": "credential"
+  },
+  {
+    "plan": {
+      "resolverVersion": 1,
+      "nodeId": "11111111-1111-4111-8111-111111111111",
+      "protocol": 0,
+      "host": "host.example",
+      "port": 22,
+      "username": "old-user",
+      "domain": "old-domain",
+      "credential": {
+        "kind": "slot",
+        "id": "33333333-3333-4333-8333-333333333333",
+        "nodeId": "11111111-1111-4111-8111-111111111111"
+      },
+      "tunnelId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "hostKeyFingerprint": "pin"
+    },
+    "userId": "22222222-2222-4222-8222-222222222222",
+    "slot": {
+      "id": "33333333-3333-4333-8333-333333333333",
+      "protocol": "ssh",
+      "defaultCredentialId": "",
+      "allowSelfService": false
+    },
+    "value": null,
+    "name": "unassigned",
+    "error": "credential"
+  },
+  {
+    "plan": {
+      "resolverVersion": 1,
+      "nodeId": "11111111-1111-4111-8111-111111111111",
+      "protocol": 0,
+      "host": "host.example",
+      "port": 22,
+      "username": "old-user",
+      "domain": "old-domain",
+      "credential": {
+        "kind": "slot",
+        "id": "33333333-3333-4333-8333-333333333333",
+        "nodeId": "11111111-1111-4111-8111-111111111111"
+      },
+      "tunnelId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "hostKeyFingerprint": "pin"
+    },
+    "userId": "22222222-2222-4222-8222-222222222222",
+    "slot": {
+      "id": "33333333-3333-4333-8333-333333333333",
+      "protocol": "ssh",
+      "defaultCredentialId": "bad",
+      "allowSelfService": false
+    },
+    "value": null,
+    "name": "bad-default",
+    "error": "credential"
+  },
+  {
+    "plan": {
+      "resolverVersion": 1,
+      "nodeId": "11111111-1111-4111-8111-111111111111",
+      "protocol": 0,
+      "host": "host.example",
+      "port": 22,
+      "username": "old-user",
+      "domain": "old-domain",
+      "credential": {
+        "kind": "slot",
+        "id": "33333333-3333-4333-8333-333333333333",
+        "nodeId": "11111111-1111-4111-8111-111111111111"
+      },
+      "tunnelId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "hostKeyFingerprint": "pin"
+    },
+    "userId": "22222222-2222-4222-8222-222222222222",
+    "slot": {
+      "id": "33333333-3333-4333-8333-333333333333",
+      "protocol": "ssh",
+      "defaultCredentialId": "bad",
+      "allowSelfService": false
+    },
+    "value": {
+      "slotId": "33333333-3333-4333-8333-333333333333",
+      "userId": "22222222-2222-4222-8222-222222222222",
+      "credentialId": "55555555-5555-4555-8555-555555555555"
+    },
+    "name": "bad-default-despite-personal",
+    "error": "credential"
+  },
+  {
+    "plan": {
+      "resolverVersion": 1,
+      "nodeId": "11111111-1111-4111-8111-111111111111",
+      "protocol": 0,
+      "host": "host.example",
+      "port": 22,
+      "username": "old-user",
+      "domain": "old-domain",
+      "credential": {
+        "kind": "slot",
+        "id": "33333333-3333-4333-8333-333333333333",
+        "nodeId": "11111111-1111-4111-8111-111111111111"
+      },
+      "tunnelId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "hostKeyFingerprint": "pin"
+    },
+    "userId": "22222222-2222-4222-8222-222222222222",
+    "slot": {
+      "id": "33333333-3333-4333-8333-333333333333",
+      "protocol": "ssh",
+      "defaultCredentialId": "44444444-4444-4444-8444-444444444444",
+      "allowSelfService": false
+    },
+    "value": {
+      "slotId": "33333333-3333-4333-8333-333333333333",
+      "userId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "credentialId": "55555555-5555-4555-8555-555555555555"
+    },
+    "name": "wrong-user-no-fallback",
+    "error": "credential"
+  },
+  {
+    "plan": {
+      "resolverVersion": 1,
+      "nodeId": "11111111-1111-4111-8111-111111111111",
+      "protocol": 0,
+      "host": "host.example",
+      "port": 22,
+      "username": "old-user",
+      "domain": "old-domain",
+      "credential": {
+        "kind": "slot",
+        "id": "33333333-3333-4333-8333-333333333333",
+        "nodeId": "11111111-1111-4111-8111-111111111111"
+      },
+      "tunnelId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "hostKeyFingerprint": "pin"
+    },
+    "userId": "22222222-2222-4222-8222-222222222222",
+    "slot": {
+      "id": "33333333-3333-4333-8333-333333333333",
+      "protocol": "ssh",
+      "defaultCredentialId": "44444444-4444-4444-8444-444444444444",
+      "allowSelfService": false
+    },
+    "value": {
+      "slotId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "userId": "22222222-2222-4222-8222-222222222222",
+      "credentialId": "55555555-5555-4555-8555-555555555555"
+    },
+    "name": "wrong-value-slot-no-fallback",
+    "error": "credential"
+  },
+  {
+    "plan": {
+      "resolverVersion": 1,
+      "nodeId": "11111111-1111-4111-8111-111111111111",
+      "protocol": 0,
+      "host": "host.example",
+      "port": 22,
+      "username": "old-user",
+      "domain": "old-domain",
+      "credential": {
+        "kind": "slot",
+        "id": "33333333-3333-4333-8333-333333333333",
+        "nodeId": "11111111-1111-4111-8111-111111111111"
+      },
+      "tunnelId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "hostKeyFingerprint": "pin"
+    },
+    "userId": "22222222-2222-4222-8222-222222222222",
+    "slot": {
+      "id": "33333333-3333-4333-8333-333333333333",
+      "protocol": "ssh",
+      "defaultCredentialId": "44444444-4444-4444-8444-444444444444",
+      "allowSelfService": false
+    },
+    "value": {
+      "slotId": "33333333-3333-4333-8333-333333333333",
+      "userId": "22222222-2222-4222-8222-222222222222",
+      "credentialId": ""
+    },
+    "name": "empty-value-no-fallback",
+    "error": "credential"
+  },
+  {
+    "plan": {
+      "resolverVersion": 1,
+      "nodeId": "11111111-1111-4111-8111-111111111111",
+      "protocol": 0,
+      "host": "host.example",
+      "port": 22,
+      "username": "old-user",
+      "domain": "old-domain",
+      "credential": {
+        "kind": "slot",
+        "id": "33333333-3333-4333-8333-333333333333",
+        "nodeId": "11111111-1111-4111-8111-111111111111"
+      },
+      "tunnelId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "hostKeyFingerprint": "pin"
+    },
+    "userId": "22222222-2222-4222-8222-222222222222",
+    "slot": {
+      "id": "33333333-3333-4333-8333-333333333333",
+      "protocol": "ssh",
+      "defaultCredentialId": "44444444-4444-4444-8444-444444444444",
+      "allowSelfService": false
+    },
+    "value": {
+      "slotId": "33333333-3333-4333-8333-333333333333",
+      "userId": "22222222-2222-4222-8222-222222222222",
+      "credentialId": "55555555-5555-4555-8555-555555555555\n"
+    },
+    "name": "bad-value-no-fallback",
+    "error": "credential"
+  }
+]

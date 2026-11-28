@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { backendGoToolchain } from './backend-go-toolchain.mjs';
 import { devRuntimeVcpkgInputs } from './dev-runtime-cache.ts';
 
 export type DevRuntimeBuildStep = {
@@ -66,6 +67,7 @@ export function createDevRuntimeBuildPlan({
     args: [path.join(scriptDirectory, 'Build-ElectronBackend.mjs'), '--arch', architecture],
     inputs: [
       'scripts/Build-ElectronBackend.mjs',
+      'scripts/backend-go-toolchain.mjs',
       'scripts/build-macos-ovpnproxy.mjs',
       'tools/internal',
       'vendor/go-smb2',
@@ -226,6 +228,7 @@ export function devRuntimeGoBuildEnvironment(
   const macOvpn = platform === 'darwin' && moduleName === 'wormhole-ovpnproxy';
   return {
     ...environment,
+    ...(moduleName === 'wormhole-backend' ? { GOTOOLCHAIN: backendGoToolchain() } : {}),
     ...(macOvpn ? { CC: 'clang', CXX: 'clang++', MACOSX_DEPLOYMENT_TARGET: '12.0' } : {}),
     GOOS: platform === 'win32' ? 'windows' : platform,
     GOARCH: architecture === 'arm64' ? 'arm64' : 'amd64',

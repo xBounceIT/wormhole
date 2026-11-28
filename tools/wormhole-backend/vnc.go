@@ -23,6 +23,9 @@ import (
 	"github.com/kward/go-vnc/buttons"
 	"github.com/kward/go-vnc/encodings"
 	"github.com/kward/go-vnc/keys"
+	"github.com/xBounceIT/wormhole/tools/wormhole-backend/internal/ospolicy"
+	"github.com/xBounceIT/wormhole/tools/wormhole-backend/internal/resolver"
+	"github.com/xBounceIT/wormhole/tools/wormhole-backend/internal/vault"
 )
 
 const (
@@ -35,7 +38,7 @@ const (
 	maxVncFramePayload  = 20 * 1024 * 1024 // Keeps base64 JSON frames below the Electron 32 MiB line budget.
 	maxVncRawRectPixels = 4 * 1024 * 1024
 	maxVncHostLength    = 1024
-	maxVncPasswordSize  = 16 * 1024
+	maxVncPasswordSize  = vault.MaxVNCPasswordBytes
 	maxVncEncodedSecret = 64 * 1024
 	vncProtocolValue    = 6
 )
@@ -223,6 +226,7 @@ type vncManager struct {
 	electronUserDataPath string
 	output               *backendLineWriter
 	databasePath         string
+	readRouteFloor       func(context.Context) (vault.Profile, error)
 
 	mu                                 sync.Mutex
 	sessions                           map[string]*vncSession
@@ -292,6 +296,7 @@ func newVncManager(
 		database:             database,
 		electronUserDataPath: userDataPath,
 		output:               output,
+		readRouteFloor:       ospolicy.ReadFloor,
 		sessions:             make(map[string]*vncSession),
 		tunnelLeases:         make(map[string]*tunnelRuntime),
 		tunnelForwarders:     make(map[string]*tunnelForwarder),
@@ -628,6 +633,13 @@ type tunnelRouteHandler func(context.Context) (string, error)
 // (tunnel / direct / cancel) instead of free-form input.
 func (m *vncManager) routeTunnel(leaseID, progressSessionID, connectionName, tunnelName string) tunnelRouteHandler {
 	return func(ctx context.Context) (string, error) {
+		floor, err := m.readRouteFloor(ctx)
+		if err != nil {
+			return "", err
+		}
+		if !floor.AllowsDirectRoute() {
+			return "tunnel", nil
+		}
 		m.mu.Lock()
 		m.routeSequence++
 		promptID := fmt.Sprintf("tunnel-route-%d", m.routeSequence)
@@ -651,6 +663,16 @@ func (m *vncManager) routeTunnel(leaseID, progressSessionID, connectionName, tun
 		case result := <-pending.result:
 			if result.cancelled {
 				return "", errors.New("Connection cancelled.")
+			}
+			if result.value == "direct" {
+				// Machine policy can tighten while the route prompt is open.
+				floor, err := m.readRouteFloor(ctx)
+				if err != nil {
+					return "", err
+				}
+				if !floor.AllowsDirectRoute() {
+					return "", vault.ErrPolicy
+				}
 			}
 			return result.value, nil
 		case <-ctx.Done():
@@ -879,6 +901,7 @@ func (m *vncManager) emit(event backendEvent) {
 }
 
 type vncSession struct {
+	sealed              *sealedVNCSession
 	bitwardenGeneration uint64
 	id                  string
 	output              *backendLineWriter
@@ -928,6 +951,10 @@ func (s *vncSession) run(command backendCommand, database *sql.DB, electronUserD
 }
 
 func (s *vncSession) connect(command backendCommand, database *sql.DB, electronUserDataPath ...string) {
+	if s.sealed != nil {
+		s.connectSealed()
+		return
+	}
 	connectContext, ok := s.beginConnect()
 	if !ok {
 		return
@@ -1044,11 +1071,16 @@ func (s *vncSession) connect(command backendCommand, database *sql.DB, electronU
 		return
 	}
 
+	s.serveNetwork(connectContext, guardedNetwork, vnc.NewClientConfig(target.password), target.host, target.port)
+}
+
+// Both authenticated vault recipients and legacy sessions use the same bounded
+// framebuffer parser, input writer and deterministic listener teardown.
+func (s *vncSession) serveNetwork(connectContext context.Context, guardedNetwork *vncReadGuard, config *vnc.ClientConfig, host string, port int) {
 	// The package uses blocking reads during the RFB handshake, so enforce the connect timeout
 	// at the socket too. It is cleared once ServerInit completes.
 	_ = guardedNetwork.SetDeadline(time.Now().Add(vncConnectTimeout))
 	messages := make(chan vnc.ServerMessage, 16)
-	config := vnc.NewClientConfig(target.password)
 	config.ServerMessageCh = messages
 	// The renderer has no clipboard or color-map surface. Keeping those optional message types
 	// out of the long-lived parser also avoids accepting unbounded server cut-text payloads.
@@ -1111,8 +1143,13 @@ func (s *vncSession) connect(command backendCommand, database *sql.DB, electronU
 		s.fail(err)
 		return
 	}
+	if s.sealed != nil && s.sealed.ready != nil {
+		s.sealed.ready()
+	}
 	s.emitStatus("connected", "", false)
-	logInfo("VNC session connected (host=%q, port=%d)", target.host, target.port)
+	if s.sealed == nil {
+		logInfo("VNC session connected (host=%q, port=%d)", host, port)
+	}
 
 	listenDone := make(chan error, 1)
 	go func() {
@@ -1484,7 +1521,9 @@ func (s *vncSession) fail(err error) {
 	if !s.claimTerminal() {
 		return
 	}
-	if passwordRequired {
+	if s.sealed != nil {
+		message, passwordRequired = "VNC connection failed", errors.Is(err, errSealedVNCPasswordRequired)
+	} else if passwordRequired {
 		logError("VNC session failed (credential retry requested)")
 	} else {
 		logOperationFailure("VNC session", err)
@@ -1594,7 +1633,11 @@ func (s *vncSession) disconnected(message string) {
 	if !s.claimTerminal() {
 		return
 	}
-	logInfo("VNC session disconnected")
+	if s.sealed != nil {
+		message = "VNC connection closed"
+	} else {
+		logInfo("VNC session disconnected")
+	}
 	s.emitStatus("disconnected", message, false)
 	s.close()
 	s.manager.remove(s)
@@ -2028,133 +2071,16 @@ func readVncTargetFromDatabase(
 	resolvePassword bool,
 	electronUserDataPath ...string,
 ) (vncTarget, error) {
-	target := vncTarget{}
-	target.nodeID = normalizeID(nodeID)
-	if resolvePassword && credentialID != "" {
-		password, _, err := readVncCredentialSecret(database, credentialID, electronUserDataPath...)
-		if err != nil {
-			return vncTarget{}, err
-		}
-		target.password = password
-	}
-	if nodeID == "" {
-		return target, nil
-	}
-
-	columns, err := tableColumns(database, "Nodes")
-	if err != nil {
-		return vncTarget{}, err
-	}
-	if len(columns) == 0 {
-		return target, nil
-	}
-	visited := make(map[string]struct{})
-	currentID := normalizeID(nodeID)
-	inheritCredential := true
-	var resolvedProtocol int64
-	var portContextProtocol int64
-	protocolResolved := false
-	portContextResolved := false
-	tunnelResolved := false
-	tunnelEnabled := false
-	tunnelConfigID := ""
-	displayName := ""
-	for currentID != "" {
-		if _, seen := visited[currentID]; seen {
-			return vncTarget{}, errors.New("VNC connection tree contains a cycle")
-		}
-		visited[currentID] = struct{}{}
-		row, err := readVncNode(database, columns, currentID)
-		if errors.Is(err, sql.ErrNoRows) {
-			break
-		}
-		if err != nil {
-			return vncTarget{}, err
-		}
-		if displayName == "" && row.name.Valid && strings.TrimSpace(row.name.String) != "" {
-			displayName = strings.TrimSpace(row.name.String)
-		}
-		if !protocolResolved && row.protocol.Valid {
-			resolvedProtocol = row.protocol.Int64
-			protocolResolved = true
-		}
-		if !target.hostSet() && row.host.Valid && strings.TrimSpace(row.host.String) != "" {
-			target.host = strings.TrimSpace(row.host.String)
-		}
-		if target.port == 0 && row.port.Valid && row.port.Int64 > 0 && row.port.Int64 <= 65535 {
-			target.port = int(row.port.Int64)
-		}
-		if target.port != 0 && !portContextResolved && row.protocol.Valid {
-			portContextProtocol = row.protocol.Int64
-			portContextResolved = true
-		}
-		if !tunnelResolved && row.tunnelEnabled.Valid {
-			tunnelResolved = true
-			tunnelEnabled = row.tunnelEnabled.Int64 != 0
-		}
-		if tunnelConfigID == "" && row.tunnelConfigID.Valid {
-			tunnelConfigID = normalizeTunnelID(row.tunnelConfigID.String)
-		}
-
-		if inheritCredential {
-			if row.credentialMode.Valid {
-				if row.credentialMode.Int64 != 0 {
-					inheritCredential = false
-					if row.credentialMode.Int64 == 2 && resolvePassword && row.credentialID.Valid && strings.TrimSpace(row.credentialID.String) != "" {
-						password, found, err := readVncCredentialSecret(
-							database,
-							row.credentialID.String,
-							electronUserDataPath...,
-						)
-						if err != nil {
-							return vncTarget{}, err
-						}
-						if found {
-							target.password = password
-						}
-					}
-				}
-			} else if row.credentialID.Valid && strings.TrimSpace(row.credentialID.String) != "" {
-				if resolvePassword {
-					password, found, err := readVncCredentialSecret(
-						database,
-						row.credentialID.String,
-						electronUserDataPath...,
-					)
-					if err != nil {
-						return vncTarget{}, err
-					}
-					if found {
-						target.password = password
-					}
-				}
-				inheritCredential = false
-			}
-		}
-		if !row.parentID.Valid {
-			break
-		}
-		currentID = normalizeID(row.parentID.String)
-	}
-	if protocolResolved && portContextResolved && resolvedProtocol != portContextProtocol {
-		target.port = 0
-	}
-	if protocolResolved && resolvedProtocol != vncProtocolValue {
-		return vncTarget{}, errors.New("VNC node does not resolve to the VNC protocol")
-	}
-	if tunnelEnabled && tunnelConfigID == "" {
-		return vncTarget{}, errors.New("VNC connection enables a VPN tunnel but no tunnel is configured")
-	}
-	if tunnelEnabled {
-		target.tunnelConfigID = tunnelConfigID
-	}
-	target.displayName = displayName
-	return target, nil
+	return resolveLegacyVNCTarget(database, nodeID, credentialID, resolvePassword,
+		func(id string) (string, bool, error) {
+			return readVncCredentialSecret(database, id, electronUserDataPath...)
+		},
+		func(snapshot resolver.EffectiveCredentialSnapshot) { observeLegacyResolution(database, snapshot) })
 }
 
 func (target vncTarget) hostSet() bool { return strings.TrimSpace(target.host) != "" }
 
-func readVncNode(database *sql.DB, columns map[string]struct{}, id string) (vncNodeRow, error) {
+func readVncNode(database sqlMetadataReader, columns map[string]struct{}, id string) (vncNodeRow, error) {
 	column := func(name string) string {
 		if _, ok := columns[name]; ok {
 			return name
@@ -2184,45 +2110,9 @@ func readVncCredentialSecret(
 	credentialID string,
 	electronUserDataPath ...string,
 ) (string, bool, error) {
-	columns, err := tableColumns(database, "CredentialProfiles")
-	if err != nil {
+	eligible, err := legacyVNCCredentialEligible(database, credentialID)
+	if err != nil || !eligible {
 		return "", false, err
-	}
-	if len(columns) == 0 {
-		return "", false, nil
-	}
-	providerExpression := "0"
-	if _, ok := columns["SecretProvider"]; ok {
-		providerExpression = "COALESCE(SecretProvider, 0)"
-	}
-	protocolExpression := "NULL"
-	if _, ok := columns["Protocol"]; ok {
-		protocolExpression = "Protocol"
-	}
-	kindExpression := "NULL"
-	if _, ok := columns["Kind"]; ok {
-		kindExpression = "Kind"
-	}
-	var provider, protocol, kind sql.NullInt64
-	if err := database.QueryRow(
-		"SELECT "+providerExpression+", "+protocolExpression+", "+kindExpression+" FROM CredentialProfiles WHERE lower(Id) = ?;",
-		normalizeID(credentialID),
-	).Scan(&provider, &protocol, &kind); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return "", false, nil
-		}
-		return "", false, err
-	}
-	if provider.Valid && provider.Int64 != 0 {
-		// Bitwarden values are intentionally not exposed to the renderer or copied into the
-		// database. The UI can provide a connect-time password when the native cache has none.
-		return "", false, nil
-	}
-	if protocol.Valid && protocol.Int64 != vncProtocolValue {
-		return "", false, nil
-	}
-	if kind.Valid && kind.Int64 != 0 {
-		return "", false, nil
 	}
 	return readStoredSecret(database, credentialID, electronUserDataPath...)
 }

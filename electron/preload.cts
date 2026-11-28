@@ -28,6 +28,8 @@ type WormholeUpdateCheckResult = {
   installerFileName?: string;
   installerSize?: number | null;
   installerSha256?: string;
+  lastUpdateCheck?: string;
+  updatePolicy?: 'notify' | 'managed';
 };
 
 type WorkspaceRdpSettings = {
@@ -73,7 +75,7 @@ const wormholeBridge = {
   markWorkspaceFailed: () => ipcRenderer.send('workspace:failed'),
   reportRendererFailure: (reason: 'uncaught-error' | 'unhandled-rejection' | 'workspace-mount') =>
     ipcRenderer.send('diagnostics:renderer-failure', reason),
-  setTitlebarTheme: (theme: 'light' | 'dark') =>
+  setTitlebarTheme: (theme: Exclude<AppTheme, 'system'>) =>
     ipcRenderer.send('window:set-titlebar-theme', theme),
   loadWorkspace: () => ipcRenderer.invoke('workspace:load'),
   loadWorkspaceNodeNotes: (request: { nodeId: string }) =>
@@ -292,6 +294,141 @@ const wormholeBridge = {
   createTunnel: (request: TunnelWriteRequest, draftId?: string) =>
     ipcRenderer.invoke('tunnel:create', request, draftId),
   listTunnels: () => ipcRenderer.invoke('tunnel:list'),
+  getTunnelCapabilities: () => ipcRenderer.invoke('tunnel:capabilities'),
+  getVaultStatus: () => ipcRenderer.invoke('vault:status'),
+  readVaultSftpRecoveryScopes: (after = '') =>
+    ipcRenderer.invoke('vault:sftp-recovery-scopes', after),
+  vaultSftpRecovery: (request: import('./vault-sftp-recovery.js').VaultRecoveryRequest) =>
+    ipcRenderer.invoke('vault:sftp-recovery-records', request),
+  getVaultDescriptor: () => ipcRenderer.invoke('vault:describe'),
+  loadVaultCatalog: () => ipcRenderer.invoke('vault:catalog'),
+  loadVaultWorkspace: () => ipcRenderer.invoke('vault:workspace'),
+  readVaultMigrationReport: (request: import('./vault-migration.js').VaultMigrationSelection) =>
+    ipcRenderer.invoke('vault:migration-report', request),
+  decideVaultMigration: (request: import('./vault-migration.js').VaultMigrationDecision) =>
+    ipcRenderer.invoke('vault:migration-decide', request),
+  editVaultTunnel: (selection: import('./vault-tunnel.js').VaultTunnelSelection | null) =>
+    ipcRenderer.invoke('vault:edit-tunnel', selection),
+  deleteVaultTunnel: (selection: import('./vault-tunnel.js').VaultTunnelSelection) =>
+    ipcRenderer.invoke('vault:delete-tunnel', selection),
+  showVaultCredentials: (request: import('./vault-notes.js').VaultNotesSelection) =>
+    ipcRenderer.invoke('vault:show-credentials', request),
+  showVaultNotes: (request: import('./vault-notes.js').VaultNotesSelection) =>
+    ipcRenderer.invoke('vault:show-notes', request),
+  editVaultCredential: (request: import('./vault-credential.js').VaultCredentialRequest) => {
+    try {
+      return ipcRenderer.invoke('vault:edit-credential', request) as Promise<
+        import('./vault-credential.js').VaultCredentialResult
+      >;
+    } finally {
+      if (request?.password instanceof Uint8Array) request.password.fill(0);
+      if (request?.passphrase instanceof Uint8Array) request.passphrase.fill(0);
+    }
+  },
+  deleteVaultCredential: (request: import('./vault-credential.js').VaultCredentialSelection) =>
+    ipcRenderer.invoke('vault:delete-credential', request),
+  saveVaultConnection: (request: import('./vault-connection.js').VaultConnectionInput) => {
+    try {
+      return ipcRenderer.invoke('vault:save-connection', request) as Promise<
+        import('./vault-folder.js').VaultFolderResult
+      >;
+    } finally {
+      if (request?.password instanceof Uint8Array) request.password.fill(0);
+      if (request?.notes instanceof Uint8Array) request.notes.fill(0);
+    }
+  },
+  saveVaultFolder: (request: import('./vault-folder.js').VaultFolderRequest) =>
+    ipcRenderer.invoke('vault:save-folder', request) as Promise<
+      import('./vault-folder.js').VaultFolderResult
+    >,
+  duplicateVaultConnection: (
+    request: import('./vault-node-duplicate.js').VaultNodeDuplicateRequest,
+  ) => ipcRenderer.invoke('vault:duplicate-connection', request),
+  moveVaultNodes: (request: import('./vault-node-move.js').VaultNodeMoveRequest) =>
+    ipcRenderer.invoke('vault:move-nodes', request),
+  deleteVaultNodes: (request: import('./vault-node-delete.js').VaultNodeDeleteRequest) =>
+    ipcRenderer.invoke('vault:delete-nodes', request),
+  loadVaultStartup: () => ipcRenderer.invoke('startup:load'),
+  createVault: () => ipcRenderer.invoke('vault:create'),
+  createSharedWorkspace: () => ipcRenderer.invoke('vault:create-shared-workspace'),
+  recoverSharedWorkspace: () => ipcRenderer.invoke('vault:recover-shared-workspace', null),
+  prepareSharedWorkspaceRestore: () =>
+    ipcRenderer.invoke('vault:prepare-shared-workspace-restore', null),
+  openSharedRecoveryBackup: () => ipcRenderer.invoke('vault:open-shared-recovery-backup', null),
+  openSharedAccountReset: () => ipcRenderer.invoke('vault:open-shared-account-reset', null),
+  openSharedAdministration: (nodeId?: string) =>
+    ipcRenderer.invoke('vault:open-shared-administration', nodeId ?? null),
+  protectExistingWorkspace: () => ipcRenderer.invoke('vault:protect-existing'),
+  databaseEncryptionAvailable: () => ipcRenderer.invoke('vault:database-encryption-available'),
+  encryptVaultDatabase: () => ipcRenderer.invoke('vault:encrypt-database'),
+  localVaultBackupAvailable: () => ipcRenderer.invoke('vault:local-backup-available'),
+  exportLocalVaultBackup: () => ipcRenderer.invoke('vault:local-backup-export'),
+  restoreLocalVaultBackup: () => ipcRenderer.invoke('vault:local-backup-restore'),
+  prepareLegacyVault: () => ipcRenderer.invoke('vault:prepare-legacy'),
+  prepareLegacyUnprotectedVault: () => ipcRenderer.invoke('vault:prepare-legacy-os'),
+  resumeVaultMigration: () => ipcRenderer.invoke('vault:migration-resume'),
+  resumeVaultRootRotation: () => ipcRenderer.invoke('vault:rotation-resume'),
+  resumeVaultOSMigration: () => ipcRenderer.invoke('vault:os-migration-resume'),
+  upgradeVaultProtection: () => ipcRenderer.invoke('vault:upgrade-protection'),
+  openUnprotectedVault: () => ipcRenderer.invoke('vault:unprotected-open'),
+  createUnprotectedVault: () => ipcRenderer.invoke('vault:unprotected-create'),
+  loadVaultProtection: () => ipcRenderer.invoke('vault:protection'),
+  getVaultSecurityProfile: () => ipcRenderer.invoke('vault:profile-status'),
+  tightenLocalVaultProfile: () => ipcRenderer.invoke('vault:tighten-local-profile'),
+  tightenSharedVaultProfile: () => ipcRenderer.invoke('vault:tighten-shared-profile'),
+  onVaultSecurityProfileChanged: (callback: () => void) => {
+    const listener = () => callback();
+    ipcRenderer.on('vault:profile-changed', listener);
+    return () => ipcRenderer.removeListener('vault:profile-changed', listener);
+  },
+  prepareUnprotectedVaultProtection: () => ipcRenderer.invoke('vault:prepare-unprotected'),
+  authenticateSharedVault: (
+    mode: 'admit' | 'recover-password' | 'recover-enrollment' | 'join-initial',
+  ) => ipcRenderer.invoke('vault:shared-authenticate', mode),
+  readSharedConnectionContext: (nodeId: string) =>
+    ipcRenderer.invoke('vault:shared-connection-context', { nodeId }),
+  editSharedNode: (request: import('./vault-shared-node-edit.js').SharedNodeEditRequest) =>
+    ipcRenderer.invoke('vault:shared-node-edit', request),
+  loadSharedCatalogPage: (request: import('./vault-shared-catalog.js').SharedCatalogRequest) =>
+    ipcRenderer.invoke('vault:shared-catalog', request),
+  renewSharedServerCertificate: (
+    request: import('./vault-shared-setup-contract.js').SharedCertificateRenewalRequest,
+  ) => ipcRenderer.invoke('vault:shared-renew-server-certificate', request),
+  sharedWorkspaceCA: (
+    request: import('./vault-shared-setup-contract.js').SharedWorkspaceCARequest,
+  ) => ipcRenderer.invoke('vault:shared-workspace-ca', request),
+  exportSharedTLSBundle: () => ipcRenderer.invoke('vault:shared-tls-export', null),
+  refreshSharedRecoveryKit: () => ipcRenderer.invoke('vault:shared-recovery-kit-refresh', null),
+  loadSharedChanges: (request: import('./vault-shared-catalog.js').SharedChangesRequest) =>
+    ipcRenderer.invoke('vault:shared-changes', request),
+  onSharedCatalogChanged: (callback: () => void) => {
+    const listener = () => callback();
+    ipcRenderer.on('vault:shared-catalog-changed', listener);
+    return () => ipcRenderer.removeListener('vault:shared-catalog-changed', listener);
+  },
+  readVaultBitwardenInstallation: () => ipcRenderer.invoke('vault:bitwarden-read'),
+  vaultBitwardenCLIAvailable: () => ipcRenderer.invoke('vault:bitwarden-cli-available'),
+  unlockVaultBitwardenCLI: () => ipcRenderer.invoke('vault:bitwarden-cli-unlock'),
+  cleanupVaultBitwardenInstallations: () => ipcRenderer.invoke('vault:bitwarden-cleanup'),
+  installVaultBitwardenZip: () => ipcRenderer.invoke('vault:bitwarden-install-zip'),
+  installVaultBitwardenFolder: () => ipcRenderer.invoke('vault:bitwarden-install-folder'),
+  onVaultLocked: (callback: () => void) => {
+    const listener = () => callback();
+    ipcRenderer.on('vault:locked', listener);
+    return () => ipcRenderer.removeListener('vault:locked', listener);
+  },
+  unlockVault: (request: import('./vault-unlock.js').VaultUnlockInput) => {
+    try {
+      return ipcRenderer.invoke('vault:unlock', request);
+    } finally {
+      request.factor.fill(0);
+    }
+  },
+  vaultPresenceStatus: () => ipcRenderer.invoke('vault:presence-status'),
+  unlockVaultPresence: (request: import('./vault-presence.js').VaultPresenceSelection) =>
+    ipcRenderer.invoke('vault:presence-unlock', request),
+  configureVaultPresence: (action: import('./vault-presence.js').VaultPresenceAction) =>
+    ipcRenderer.invoke('vault:presence-configure', action),
   readTunnel: (id: string) => ipcRenderer.invoke('tunnel:read', { id }),
   updateTunnel: (request: TunnelWriteRequest & { id: string }, draftId?: string) =>
     ipcRenderer.invoke('tunnel:update', request, draftId),
@@ -494,6 +631,7 @@ const wormholeBridge = {
     mode?: 'terminal' | 'sftp' | 'smb';
     sessionId: string;
     nodeId?: string;
+    quickTarget?: import('./vault-quick-target').VaultQuickTarget;
     host?: string;
     port?: number;
     credentialId?: string;
@@ -826,6 +964,8 @@ const wormholeBridge = {
     ipcRenderer.on('operation:progress', handler);
     return () => ipcRenderer.removeListener('operation:progress', handler);
   },
+  openVaultRdpSession: (request: import('./vault-rdp-ipc.js').VaultRdpOpenRequest) =>
+    ipcRenderer.invoke('vault:rdp-open', request) as Promise<RdpBackendEvent>,
   startRdpSession: (request: RdpStartRequest) => ipcRenderer.invoke('rdp:start', request),
   sendRdpInput: (request: {
     sessionId: string;

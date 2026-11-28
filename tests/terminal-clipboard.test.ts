@@ -29,6 +29,15 @@ import {
 } from '../src/terminal-frame.ts';
 
 const appSource = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+const nativeSurfaceSource = readFileSync(
+  new URL('../src/components/NativeTerminalSurface.tsx', import.meta.url),
+  'utf8',
+);
+const nativeFrameSource = readFileSync(
+  new URL('../src/native-terminal-frame.ts', import.meta.url),
+  'utf8',
+);
+const nativeSurfaceStart = nativeSurfaceSource.indexOf('export function NativeTerminalSurface');
 const require = createRequire(import.meta.url);
 const electronExecutable = require('electron') as string;
 const execFileAsync = promisify(execFile);
@@ -312,17 +321,22 @@ test('SSH clipboard IPC forwards paste identity to Go and validates its type', a
   let clipboardText = 'first\r\nsecond';
   let clipboardError: Error | undefined;
   let authorized = true;
+  let clipboardEpoch = 0;
+  let readClipboard: () => Promise<string> = async () => {
+    if (clipboardError) throw clipboardError;
+    return clipboardText;
+  };
   new Function(
     'ipcMain',
     'isSshSessionId',
     'isSshInput',
     'serializeAuthOperation',
     'requireWorkspaceAuth',
-    'authSession',
     'requireAuthorizationEpoch',
     'sshBackend',
     'encodeTerminalClipboardText',
     'clipboard',
+    'authSession',
     transpile(handlersSource),
   )(
     {
@@ -335,16 +349,23 @@ test('SSH clipboard IPC forwards paste identity to Go and validates its type', a
     async () => {
       if (!authorized) throw new Error('locked');
     },
-    { authorizationEpoch: 0 },
     () => {
       if (!authorized) throw new Error('locked');
     },
-    { sendInput: (...args: unknown[]) => calls.push(args) },
-    encodeTerminalClipboardText,
     {
-      readText: async () => {
-        if (clipboardError) throw clipboardError;
-        return clipboardText;
+      // This fixture exercises the legacy workspace; protected generation/owner
+      // fencing is exercised with actual native admissions in vault-ssh-wiring.
+      captureOwner: () => () => {},
+      sendInput: (...args: unknown[]) => calls.push(args),
+    },
+    encodeTerminalClipboardText,
+    { readText: () => readClipboard() },
+    {
+      get authorizationEpoch() {
+        return clipboardEpoch;
+      },
+      requireVerificationEpoch: (epoch: number) => {
+        if (epoch !== clipboardEpoch) throw Error('locked while reading clipboard');
       },
     },
   );
@@ -381,6 +402,25 @@ test('SSH clipboard IPC forwards paste identity to Go and validates its type', a
   authorized = false;
   await assert.rejects(clipboard(null, 'session'), /locked/);
   await assert.rejects(input(null, 'session', 'YQ==', true), /locked/);
+  assert.equal(calls.length, 5);
+  authorized = true;
+  let completeRead!: (value: string) => void;
+  readClipboard = () =>
+    new Promise((resolve) => {
+      completeRead = resolve;
+    });
+  const lateRead = clipboard(null, 'session');
+  await new Promise(setImmediate);
+  authorized = false;
+  completeRead('must not paste after lock');
+  await assert.rejects(lateRead, /locked/);
+  assert.equal(calls.length, 5);
+  authorized = true;
+  const relockedRead = clipboard(null, 'session');
+  await new Promise(setImmediate);
+  clipboardEpoch++;
+  completeRead('stale across lock and unlock');
+  await assert.rejects(relockedRead, /locked/);
   assert.equal(calls.length, 5);
 
   const backendSource = main.slice(main.indexOf('class NativeSshBackend'));
@@ -631,10 +671,7 @@ test('automatic terminal scrolling tracks the applied offset and clamps short co
 });
 
 test('live scroll handler catches the final output and preserves the pin across delayed events', () => {
-  const surfaceSource = appSource.slice(
-    appSource.indexOf('function SerialTerminalSurface'),
-    appSource.indexOf('function clearSftpCancelRequestsForTransfer'),
-  );
+  const surfaceSource = nativeSurfaceSource.slice(nativeSurfaceStart);
   const handler = surfaceSource
     .slice(
       surfaceSource.indexOf('onScroll={(event) => {') + 'onScroll={'.length,
@@ -681,22 +718,26 @@ test('live scroll handler catches the final output and preserves the pin across 
 });
 
 test('the mounted serial terminal handles clipboard, focus, resize and scrolling in Chromium', async () => {
-  const start = appSource.indexOf('const terminalFontSize');
-  const end = appSource.indexOf('function clearSftpCancelRequestsForTransfer', start);
-  assert.ok(start >= 0 && end > start);
+  const start = nativeSurfaceSource.indexOf('const terminalFontSize');
+  assert.ok(start >= 0);
   const helpers = readFileSync(
     new URL('../src/terminal-frame.ts', import.meta.url),
     'utf8',
   ).replaceAll('export function', 'function');
-  const fixture = readFileSync(new URL('./fixtures/terminal-scroll.tsx', import.meta.url), 'utf8');
+  const fixture = readFileSync(
+    new URL('./fixtures/terminal-scroll.tsx', import.meta.url),
+    'utf8',
+  ).replace(
+    'runTerminalScrollTests();',
+    "runTerminalScrollTests().then(() => 'ok', (error) => String(error?.stack ?? error));",
+  );
   const selectionSource = readFileSync(
     new URL('../src/terminal-selection.ts', import.meta.url),
     'utf8',
   ).replaceAll('export function', 'function');
-  const frameApplicationSource = appSource.slice(
-    appSource.indexOf('function createBlankTerminalCells'),
-    appSource.indexOf('const navItems'),
-  );
+  const frameApplicationSource = nativeFrameSource
+    .slice(nativeFrameSource.indexOf('const terminalMaxScrollbackLines'))
+    .replace(/^export /gm, '');
   const transformed = await transformWithOxc(
     [
       helpers,
@@ -707,12 +748,8 @@ test('the mounted serial terminal handles clipboard, focus, resize and scrolling
           '',
         ),
       ),
-      appSource.slice(
-        appSource.indexOf('async function copyTextToClipboard('),
-        appSource.indexOf('function authSecretLabel('),
-      ),
       frameApplicationSource,
-      appSource.slice(start, end),
+      nativeSurfaceSource.slice(start).replace('export function', 'function'),
       fixture,
     ].join('\n'),
     'terminal-scroll.tsx',
@@ -728,6 +765,7 @@ test('the mounted serial terminal handles clipboard, focus, resize and scrolling
     globalThis.IS_REACT_ACT_ENVIRONMENT = true;
     ${transformed.code}
   `;
+  const evaluate = `try { eval(${JSON.stringify(renderer)}) } catch (error) { String(error?.stack ?? error) }`;
   const directory = mkdtempSync(join(tmpdir(), 'wormhole-terminal-scroll-'));
   const harnessPath = join(directory, 'scroll.cjs');
   const { ELECTRON_RUN_AS_NODE: _electronRunAsNode, ...environment } = process.env;
@@ -742,7 +780,8 @@ test('the mounted serial terminal handles clipboard, focus, resize and scrolling
         } });
         try {
           await window.loadURL('data:text/html,' + encodeURIComponent('<style>.terminal-scrollbar{height:180px;width:500px;overflow:auto}.min-w-max{min-width:max-content}.whitespace-pre{white-space:pre}.inline-block{display:inline-block}.overflow-hidden{overflow:hidden}.align-top{vertical-align:top}</style><div id="root"></div>'));
-          await window.webContents.executeJavaScript(${JSON.stringify(renderer)});
+          const result = await window.webContents.executeJavaScript(${JSON.stringify(evaluate)});
+          if (result !== 'ok') throw Error(result);
         } finally { window.destroy(); }
         app.quit();
       }).catch((error) => { console.error(error); app.exit(1); });
@@ -763,7 +802,7 @@ test('the mounted serial terminal handles clipboard, focus, resize and scrolling
 });
 
 test('Chromium preserves clipboard highlights, outside clicks, and double-click word selection', async () => {
-  const surfaceSource = appSource.slice(appSource.indexOf('function SerialTerminalSurface'));
+  const surfaceSource = nativeSurfaceSource.slice(nativeSurfaceStart);
   const copyHandler = surfaceSource.match(/onCopy=\{\(event\) => \{([\s\S]*?)\n      \}\}/)![1];
   const pointerStart = surfaceSource.lastIndexOf(
     '  useEffect(() => {',
@@ -771,9 +810,9 @@ test('Chromium preserves clipboard highlights, outside clicks, and double-click 
   );
   const pointerEnd = surfaceSource.indexOf('}, [isActive, session.status]);', pointerStart);
   const browserSetup = stripTypeScriptTypes(
-    appSource.slice(
-      appSource.indexOf('function terminalSelection('),
-      appSource.indexOf('function SshTerminalConnectionState'),
+    nativeSurfaceSource.slice(
+      nativeSurfaceSource.indexOf('function terminalSelection('),
+      nativeSurfaceStart,
     ) +
       copyTerminalSelection.toString() +
       `
