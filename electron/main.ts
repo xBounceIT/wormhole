@@ -4778,7 +4778,9 @@ const vaultSharedDialog = new VaultSharedAuthenticationDialog({
   preload: path.join(__dirname, 'vault-shared-preload.cjs'),
 });
 
+const workspaceColorSchemes = new WeakMap<BrowserWindow, 'light' | 'dark'>();
 const vaultSharedSetupDialog = new VaultSharedSetupDialog({
+  colorScheme: (parent) => workspaceColorSchemes.get(parent),
   host: vaultBackend,
   pickBackup: (window, accepted) =>
     pickSharedBackupDestination(
@@ -11289,6 +11291,7 @@ function registerIpcHandlers(
     const owner = BrowserWindow.fromWebContents(event.sender);
     if (!owner || owner.isDestroyed() || !windowCloseCoordinators.has(owner)) return;
     if (value !== 'light' && value !== 'dark') return;
+    workspaceColorSchemes.set(owner, value);
     syncNativeTitlebarTheme(owner, value, process.platform);
     treeTooltips.setColorScheme(owner, value);
   });

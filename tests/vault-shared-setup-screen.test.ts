@@ -164,6 +164,10 @@ let finishAdminPage;
     }
     result='review';await submit();
     check(!received.confirmation&&name.disabled&&clear.disabled&&password.required&&panel.textContent.includes('cred'),'default committed before review');
+    const identifier=panel.querySelector('.slot-credential details');
+    check(panel.querySelector('h2').textContent==='Teams'&&panel.querySelector('.slot-credential strong').textContent==='Shell'&&!identifier.open,'review hid the names or expanded the identifier');
+    identifier.querySelector('summary').click();
+    check(identifier.open&&identifier.querySelector('code').textContent==='cred','could not inspect the signed credential ID');
     password.value='A';ask.value='z';await submit();
     check(status().includes('format')&&!password.value&&!ask.value&&!received.confirmation,'invalid factors were submitted');
     password.value='A';ask.value='ab'.repeat(32);result='saved';await submit();

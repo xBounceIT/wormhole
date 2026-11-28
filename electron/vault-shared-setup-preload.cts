@@ -1,5 +1,20 @@
 import { contextBridge, ipcRenderer } from 'electron';
 
+const appearance = process.argv.find((argument) => argument.startsWith('--wormhole-appearance='));
+if (appearance) {
+  window.addEventListener(
+    'DOMContentLoaded',
+    () => {
+      const dark =
+        appearance === '--wormhole-appearance=dark' ||
+        (appearance === '--wormhole-appearance=system' &&
+          matchMedia('(prefers-color-scheme: dark)').matches);
+      document.documentElement.classList.toggle('dark', dark);
+    },
+    { once: true },
+  );
+}
+
 contextBridge.exposeInMainWorld('vaultSharedSetup', {
   contentProtectionAvailable: process.platform !== 'linux',
   mode: () => ipcRenderer.invoke('vault-shared-setup:mode'),

@@ -121,6 +121,7 @@ type SetupWindow = {
 };
 
 type SetupDialogOptions = {
+  colorScheme?: (parent: BrowserWindow) => 'light' | 'dark' | undefined;
   ipc: Pick<IpcMain, 'handle'>;
   host: Pick<VaultBackendHost, 'sharedSetup'>;
   createWindow: (options: BrowserWindowConstructorOptions) => BrowserWindow;
@@ -819,6 +820,10 @@ export class VaultSharedSetupDialog {
       }[mode],
       webPreferences: {
         preload: this.options.preload,
+        additionalArguments:
+          mode === 'administration' || mode === 'my-devices'
+            ? ['--wormhole-appearance=' + (this.options.colorScheme?.(parent) ?? 'system')]
+            : [],
         partition: `vault-shared-setup-${randomUUID()}`,
         contextIsolation: true,
         sandbox: true,

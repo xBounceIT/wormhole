@@ -67,13 +67,13 @@ export const latestRelease: VisualChangelogRelease = {
       },
     },
     {
-      title: 'Choose a credential slot by name',
+      title: 'Set a shared credential for a slot',
       subtitle:
-        'Select a slot in the connection editor. In Workspace administration, an administrator can assign a shared default for anyone without a personal assignment.',
+        'Choose a slot by name in the connection editor. In Workspace administration, set the credential it uses when someone has no personal assignment.',
       media: {
         kind: 'image',
         src: sharedCredentialSlot,
-        alt: 'Workspace administration shows the Operations RDP account ready to be set as the shared default for the Operations remote desktop slot.',
+        alt: 'The Operations remote desktop slot shows Operations RDP account as the selected credential, with Set shared default ready to confirm.',
       },
     },
     {

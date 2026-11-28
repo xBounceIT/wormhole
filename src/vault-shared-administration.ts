@@ -72,8 +72,14 @@ export function mountSharedAdministration(
   api: SharedAdministrationApi,
   ownDevicesOnly = false,
 ) {
+  card.classList.add('workspace-admin');
+  const header = document.createElement('header');
+  header.className = 'workspace-admin-header';
   const heading = document.createElement('h1');
   heading.textContent = ownDevicesOnly ? 'My devices' : 'Workspace administration';
+  const location = document.createElement('span');
+  location.className = 'workspace-admin-location';
+  location.textContent = 'Credential slots';
   const sectionLabel = document.createElement('label');
   sectionLabel.textContent = 'Section';
   const section = document.createElement('select');
@@ -113,7 +119,10 @@ export function mountSharedAdministration(
   const next = button('Next page');
   const refresh = button('Refresh');
   const close = button('Close');
-  card.replaceChildren(heading, sectionLabel, status, accessNotice, list, adminPanel, actions);
+  close.className = 'workspace-admin-close';
+  close.title = 'Close';
+  header.append(heading, location, close);
+  card.replaceChildren(header, sectionLabel, status, accessNotice, list, adminPanel, actions);
 
   let requests: AdminInventoryRequest[] = [];
   let nextRequest: AdminInventoryRequest | undefined;
