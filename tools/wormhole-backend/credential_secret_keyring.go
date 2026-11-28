@@ -52,6 +52,9 @@ func (keyring credentialSecretKeyring) load(id, reference string) ([]byte, error
 	}
 	value, err := keyring.get(keyring.service, account)
 	if err != nil {
+		if errors.Is(err, keyring.notFound) {
+			return nil, errors.New("stored credential secret is missing")
+		}
 		return nil, errCredentialSecretStoreUnavailable
 	}
 	return []byte(value), nil

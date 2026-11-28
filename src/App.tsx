@@ -916,7 +916,6 @@ type CredentialDraft = {
   kind: Extract<CredentialKind, 'password' | 'sshKey'>;
   username: string;
   domain: string;
-  password: string;
   clearPassphrase: boolean;
   privateKeySelectionId: string;
   privateKeyFileName: string;
@@ -929,6 +928,7 @@ type CredentialDraft = {
 };
 
 type CredentialWriteRequest = CredentialDraft & {
+  password: string;
   passphrase: string;
 };
 
@@ -946,7 +946,6 @@ function emptyCredentialDraft(): CredentialDraft {
     kind: 'password',
     username: '',
     domain: '',
-    password: '',
     clearPassphrase: false,
     privateKeySelectionId: '',
     privateKeyFileName: '',
@@ -1877,6 +1876,10 @@ function authSettingsErrorMessage(error: unknown): string {
   return "Wormhole couldn't save this change. Try again.";
 }
 
+function ipcErrorMessage(error: Error): string {
+  return error.message.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, '');
+}
+
 function backupOperationErrorMessage(error: unknown): string {
   if (!(error instanceof Error) || !error.message) {
     return "Wormhole couldn't complete the backup operation.";
@@ -1884,7 +1887,7 @@ function backupOperationErrorMessage(error: unknown): string {
   if (/password is incorrect|wrong password/i.test(error.message)) {
     return 'Wrong password, or the backup file is corrupted. Try again.';
   }
-  return error.message.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, '');
+  return ipcErrorMessage(error);
 }
 
 // App owns independent, long-lived desktop domains (workspace, auth, sessions, tunnels, and
@@ -11210,6 +11213,11 @@ export function CredentialsPage({
   const [privateKeySelecting, setPrivateKeySelecting] = useState(false);
   const [privateKeySelectionRetryRequired, setPrivateKeySelectionRetryRequired] = useState(false);
   const [privateKeyPassphraseRetryRequired, setPrivateKeyPassphraseRetryRequired] = useState(false);
+  const credentialPasswordInput = useRef<HTMLInputElement>(null);
+  const bindCredentialPassword = useCallback((input: HTMLInputElement | null) => {
+    clearSecretInput(credentialPasswordInput.current);
+    credentialPasswordInput.current = input;
+  }, []);
   const credentialKeyPassphraseInput = useRef<HTMLInputElement>(null);
   const bindCredentialKeyPassphrase = useCallback((input: HTMLInputElement | null) => {
     clearSecretInput(credentialKeyPassphraseInput.current);
@@ -11248,6 +11256,7 @@ export function CredentialsPage({
   useLayoutEffect(() => {
     if (isAuthorized) return;
     credentialEditorGeneration.current++;
+    clearSecretInput(credentialPasswordInput.current);
     clearSecretInput(credentialKeyPassphraseInput.current);
     bitwardenSearchAttempts.current.cancel('credential-search');
   }, [bitwardenSearchAttempts, isAuthorized]);
@@ -11301,6 +11310,7 @@ export function CredentialsPage({
   }
 
   function openNewCredential() {
+    clearSecretInput(credentialPasswordInput.current);
     clearSecretInput(credentialKeyPassphraseInput.current);
     setEditingCredential(null);
     setCredentialForm(emptyCredentialDraft());
@@ -11313,6 +11323,7 @@ export function CredentialsPage({
 
   function openEditCredential(credential: CredentialRecord) {
     if (!credential.canEdit) return;
+    clearSecretInput(credentialPasswordInput.current);
     clearSecretInput(credentialKeyPassphraseInput.current);
     const protocol = credential.protocol as CredentialDraft['protocol'];
     setEditingCredential(credential);
@@ -11326,6 +11337,7 @@ export function CredentialsPage({
 
   function closeCredentialEditor() {
     credentialEditorGeneration.current++;
+    clearSecretInput(credentialPasswordInput.current);
     clearSecretInput(credentialKeyPassphraseInput.current);
     discardPrivateKeySelection(credentialForm.privateKeySelectionId);
     discardCertificateSelection(credentialForm.certificateSelectionId);
@@ -11480,7 +11492,6 @@ export function CredentialsPage({
         (credentialForm.protocol === 'rdp' || credentialForm.protocol === 'smb')
           ? credentialForm.domain.trim()
           : '',
-      password: credentialForm.kind === 'password' ? credentialForm.password : '',
       clearPassphrase: credentialForm.kind === 'sshKey' ? credentialForm.clearPassphrase : false,
       privateKeySelectionId:
         credentialForm.kind === 'sshKey' ? credentialForm.privateKeySelectionId : '',
@@ -11504,13 +11515,17 @@ export function CredentialsPage({
       draft.kind === 'password' &&
       draft.provider === 'Local' &&
       (!editingCredential || editingCredential.provider !== 'Local');
+    const password =
+      draft.kind === 'password' && draft.provider === 'Local'
+        ? (credentialPasswordInput.current?.value ?? '')
+        : '';
     const privateKeySelectionRequired = !editingCredential || privateKeySelectionRetryRequired;
     if (
       !draft.name ||
       (draft.kind === 'sshKey'
         ? privateKeySelectionRequired && !draft.privateKeySelectionId
         : draft.provider === 'Local'
-          ? localPasswordRequired && !draft.password
+          ? localPasswordRequired && !password
           : !draft.bitwardenItemId)
     ) {
       setOperationError(
@@ -11536,12 +11551,18 @@ export function CredentialsPage({
     }
     const passphrase =
       draft.kind === 'sshKey' ? takeOneShotSecret(credentialKeyPassphraseInput.current) : '';
-    if (privateKeyPassphraseRetryRequired && !draft.clearPassphrase && !passphrase) {
+    if (
+      draft.kind === 'sshKey' &&
+      privateKeyPassphraseRetryRequired &&
+      !draft.clearPassphrase &&
+      !passphrase
+    ) {
       setOperationError('Enter the SSH key passphrase again before retrying.');
       return;
     }
     const request: CredentialWriteRequest = {
       ...draft,
+      password,
       passphrase,
     };
     setBusy(true);
@@ -11556,7 +11577,8 @@ export function CredentialsPage({
       if (generation === credentialEditorGeneration.current) closeCredentialEditor();
     } catch (error) {
       if (generation !== credentialEditorGeneration.current) return;
-      const message = error instanceof Error ? error.message : 'Could not save the credential.';
+      const message =
+        error instanceof Error ? ipcErrorMessage(error) : 'Could not save the credential.';
       const failedSelectionId = request.kind === 'sshKey' ? request.privateKeySelectionId : '';
       const selectionMustBeRepeated = failedSelectionId.length > 0;
       const passphraseMustBeRepeated = request.kind === 'sshKey' && request.passphrase.length > 0;
@@ -11909,6 +11931,7 @@ export function CredentialsPage({
                     const kind = value as CredentialDraft['kind'];
                     if (kind === 'password') {
                       clearSecretInput(credentialKeyPassphraseInput.current);
+                      setPrivateKeyPassphraseRetryRequired(false);
                       discardPrivateKeySelection(credentialForm.privateKeySelectionId);
                       discardCertificateSelection(credentialForm.certificateSelectionId);
                     }
@@ -11916,7 +11939,6 @@ export function CredentialsPage({
                       ...form,
                       kind,
                       provider: kind === 'sshKey' ? 'Local' : form.provider,
-                      password: kind === 'sshKey' ? '' : form.password,
                       clearPassphrase: kind === 'password' ? false : form.clearPassphrase,
                       privateKeySelectionId: kind === 'password' ? '' : form.privateKeySelectionId,
                       privateKeyFileName: kind === 'password' ? '' : form.privateKeyFileName,
@@ -11949,7 +11971,6 @@ export function CredentialsPage({
                       setCredentialForm((form) => ({
                         ...form,
                         provider: value as CredentialDraft['provider'],
-                        password: value === 'Bitwarden' ? '' : form.password,
                       }))
                     }
                     value={credentialForm.provider}
@@ -12162,14 +12183,8 @@ export function CredentialsPage({
                   autoComplete="new-password"
                   id="credential-password"
                   maxLength={4096}
-                  onChange={(event) =>
-                    setCredentialForm((form) => ({
-                      ...form,
-                      password: event.target.value,
-                    }))
-                  }
+                  ref={bindCredentialPassword}
                   required={!editingCredential || editingCredential.provider !== 'Local'}
-                  value={credentialForm.password}
                 />
               </div>
             ) : (
@@ -12255,7 +12270,9 @@ export function CredentialsPage({
               </div>
             )}
             {operationError ? (
-              <p className="text-[11px] text-destructive">{operationError}</p>
+              <p className="text-[11px] text-destructive" role="alert">
+                {operationError}
+              </p>
             ) : null}
             <DialogFooter>
               <Button disabled={busy} onClick={closeCredentialEditor} type="button" variant="ghost">
