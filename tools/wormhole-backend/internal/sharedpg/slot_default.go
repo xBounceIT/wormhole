@@ -91,6 +91,7 @@ func verifySlotDefault(rows [][][]byte, trust TrustState, id uuid.UUID, name, ex
 	if err != nil {
 		return trust, nil, "", err
 	}
+	initialRevision := trust.Revision
 	next, err := trust.AdvanceSelection(*slot, *author)
 	if next.Revision != 0 {
 		trust = next
@@ -115,12 +116,19 @@ func verifySlotDefault(rows [][][]byte, trust TrustState, id uuid.UUID, name, ex
 		if err != nil {
 			return trust, nil, "", err
 		}
-		next, err := trust.AdvanceCredential(*credential, *signer)
+		// Both records belong to one database snapshot and one durable checkpoint.
+		credentialTrust := trust
+		credentialTrust.Revision = initialRevision
+		next, err := credentialTrust.AdvanceCredential(*credential, *signer)
 		if next.Revision != 0 {
+			next.Revision = max(next.Revision, trust.Revision)
 			trust = next
 		}
 		if err != nil {
 			return trust, nil, "", err
+		}
+		if signer.State.UserID == author.State.UserID && signer.State.Sequence != author.State.Sequence {
+			return trust, nil, "", ErrAdmissionResponse
 		}
 		meta := credential.Record.Metadata
 		if meta.Name != name || meta.Protocol != record.Protocol || meta.Provider != "local" || meta.OwnerUserID != "" {

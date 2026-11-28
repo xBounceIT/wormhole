@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/hex"
+	"encoding/json"
 	"math"
 	"strconv"
 	"testing"
@@ -145,5 +146,50 @@ func TestSlotDefaultChecksWireShapeBeforeTrust(t *testing.T) {
 		if err == nil || review != nil || next.Revision != trust.Revision {
 			t.Fatal("accepted malformed response")
 		}
+	}
+}
+
+func TestSlotDefaultSignedSnapshotUsesOneTrustRevision(t *testing.T) {
+	f, wire, _ := snapshotFixture(t, "slot")
+	id := uuid.MustParse(f.records.Slot.Selection.Record.(sharedcatalog.SlotRecord).ID)
+	credential := f.records.Credential
+	rows := func() [][][]byte {
+		t.Helper()
+		encode := func(key string) []byte {
+			// Current projections include an optional enrollment certificate after the signing certificate.
+			data, err := json.Marshal(append(wire[key].([]any), nil))
+			if err != nil {
+				t.Fatal(err)
+			}
+			return data
+		}
+		return [][][]byte{{[]byte("review"), []byte("1"), []byte("7"), encode("slot"), encode("credential")}}
+	}
+	next, r, _, err := verifySlotDefault(rows(), f.s, id, credential.Credential.Record.Metadata.Name, "review")
+	if err != nil || r == nil {
+		t.Fatal("valid review", err)
+	}
+	if next.Revision != f.s.Revision+1 {
+		t.Errorf("one snapshot advanced the local checkpoint from %d to %d", f.s.Revision, next.Revision)
+	}
+	same, _, _, err := verifySlotDefault(rows(), next, id, credential.Credential.Record.Metadata.Name, "review")
+	if err != nil || same.Revision != next.Revision {
+		t.Fatal("unchanged observation", err)
+	}
+	state := *credential.Author.State
+	state.Sequence++
+	state, err = vault.SignUserKeyState(state, f.org)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := vault.EncodeUserKeyState(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profileRow := wire["credential"].([]any)
+	profileRow[15], profileRow[16] = strconv.FormatUint(state.Sequence, 10), hex.EncodeToString(encoded)
+	newer, r, _, err := verifySlotDefault(rows(), f.s, id, credential.Credential.Record.Metadata.Name, "review")
+	if err == nil || r != nil || newer.Catalog["author/"+state.UserID.String()].Revision != state.Sequence || newer.Revision != f.s.Revision+1 {
+		t.Error("inconsistent author snapshots must reject the review and retain the newest signed floor")
 	}
 }
