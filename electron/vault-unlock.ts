@@ -98,6 +98,7 @@ export function encodeVaultBytesFrame(
     | 'shared-node-edit'
     | 'shared-slot-default'
     | 'shared-personal-slot'
+    | 'shared-node-credential'
     | 'shared-recovery-export'
     | 'shared-account-reset-issue'
     | 'shared-personal-root-recovery'

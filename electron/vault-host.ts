@@ -190,6 +190,7 @@ import {
 import type { IpcMain, IpcMainInvokeEvent } from 'electron';
 import { parseSharedCatalogRequest, type SharedCatalogPage } from './vault-shared-catalog.ts';
 import { parseSharedNodeEditRequest, type SharedNodeEditReply } from './vault-shared-node-edit.ts';
+import type { NodeCredentialRequest, NodeCredentialReply } from './vault-shared-node-credential.ts';
 import { parseSharedChangesRequest, type SharedChanges } from './vault-shared-catalog.ts';
 import type {
   VaultCatalog,
@@ -311,6 +312,11 @@ export type VaultPresenceAuthentication = (
 
 export type SharedAdministrationPorts = {
   read(request: AdminInventoryRequest): Promise<AdminInventoryReply>;
+  nodeCredential?: (
+    request: NodeCredentialRequest,
+    factors: PersonalRootRecoveryFactors | undefined,
+    accepted: () => boolean,
+  ) => Promise<NodeCredentialReply>;
   createSlot?: CreateSlotPort;
   personalSlot?: SharedAdministrationPorts['slotDefault'];
   slotDefault?: (
@@ -338,6 +344,10 @@ type Client = BrowserTransferClient &
   VPNSSOClient & {
     sharedAdminInventory(request: AdminInventoryRequest): Promise<AdminInventoryReply>;
     sharedCreateCredentialSlot: CreateSlotPort;
+    sharedNodeCredential(
+      request: NodeCredentialRequest,
+      auth?: Omit<SharedVaultUnlockInput, 'appVersion'>,
+    ): Promise<NodeCredentialReply>;
     sharedPersonalSlot(
       request: SlotDefaultRequest,
       auth?: Omit<SharedVaultUnlockInput, 'appVersion'>,
@@ -3135,6 +3145,13 @@ export class VaultBackendHost {
         : undefined,
       personalSlot: (request, factors, accepted) =>
         withFactors(accepted, factors, (client, auth) => client.sharedPersonalSlot(request, auth)),
+      nodeCredential: (request, factors, accepted) =>
+        withFactors(accepted, factors, async (client, auth) => {
+          const reply = await client.sharedNodeCredential(request, auth);
+          if (reply.status === 'review' && reply.workspaceId !== owner.workspaceId)
+            throw Error('Shared workspace changed.');
+          return reply;
+        }),
       slotDefault: administrator
         ? (request, factors, accepted) =>
             withFactors(accepted, factors, (client, auth) =>

@@ -234,21 +234,25 @@ test('shared input and startup screens consume factors and keep admission separa
       }
       {
         const card=document.createElement('section');document.body.append(card);
-        let administrator=false,tls='verified',opens=0,fail;
+        let administrator=false,tls='verified',opens=0,fail;const credentialNodes=[];
+        const row={id:vaultId,name:'Demo desktop',kind:1,protocol:1,canUse:true};
         const dispose=mountSharedStartup(card,metadata(),{
           authenticateSharedVault:async()=>({admitted:true,lockedMemory:true,orgEscrow:false,tls,...(administrator?{administrator:true}:{})}),
           lockAuthentication:async()=>{},
           onSharedCatalogChanged:()=>()=>{},
-          loadSharedCatalogPage:async()=>({epoch:'1',changeSeq:'0',nodes:[],next:null}),
+          loadSharedCatalogPage:async()=>({epoch:'1',changeSeq:'0',nodes:[row,{...row,id:slotId,name:'Read only',canUse:false},{...row,id:slotId,name:'Browser',protocol:4}],next:null}),
           loadSharedChanges:async()=>({epoch:'1',changeSeq:'0',reset:true,nodes:[]}),
-          openSharedAdministration:()=>{opens++;return new Promise((_,reject)=>fail=reject);}
+          openSharedAdministration:id=>{if(id){credentialNodes.push(id);return Promise.resolve()}opens++;return new Promise((_,reject)=>fail=reject);}
         });
         const signIn=card.querySelector('button'),signOut=[...card.querySelectorAll('button')].find(b=>b.textContent==='Sign out');
         const admin=[...card.querySelectorAll('button')].find(b=>b.textContent.startsWith('Workspace administration'));
         signIn.click();await tick();
         check(!admin.hidden&&admin.textContent==='My workspace…','verified member could not open their workspace settings');
+        const pickers=card.querySelectorAll('[aria-label^="My credential for "]');
+        check(pickers.length===1&&pickers[0].getAttribute('aria-label')==='My credential for Demo desktop','credential offered on an ineligible connection');
+        pickers[0].click();pickers[0].click();await tick();check(credentialNodes.length===1&&credentialNodes[0]===vaultId,'credential window was not bound to the selected connection');
         signOut.click();await tick();administrator=true;tls='encrypted';signIn.click();await tick();
-        check(admin.hidden,'unverified transport was offered administration');
+        check(admin.hidden&&!card.querySelector('[aria-label^="My credential for "]'),'unverified transport was offered workspace changes');
         signOut.click();await tick();tls='verified';signIn.click();await tick();
         check(!admin.hidden&&admin.textContent==='Workspace administration…','verified administrator without escrow could not inspect inventory');
         admin.click();admin.click();
@@ -614,11 +618,11 @@ test('shared input and startup screens consume factors and keep admission separa
         const port={connect:(node,kind)=>{check(node.name==='server'&&kind==='terminal','catalog connection payload');connected++},observeNodes:nodes=>{observed+=nodes.length},dispose:()=>{removed++}};
         const api={authenticateSharedVault:async()=>({admitted:true,lockedMemory:true,orgEscrow:true,tls:'off'}),onSharedCatalogChanged:()=>()=>{},loadSharedChanges:async()=>({epoch:'1',changeSeq:'1',reset:true,nodes:[]}),loadSharedCatalogPage:async()=>({epoch:'1',changeSeq:'1',nodes:[{id:vaultId,name:'server',kind:1,protocol:0,canUse:true}],next:null}),lockAuthentication:async()=>{locked++;if(mode==='lock-error'&&locked===1)throw Error('private')}};
         const dispose=mountSharedStartup(card,metadata(),api,async(container,failed)=>{failView=failed;if(mode==='mount-error')throw Error('private');if(mode==='late-mount')return new Promise(resolve=>resolveMount=resolve);container.textContent='Session area';return port;});
-        const signIn=card.querySelector('button');signIn.click();await tick();
+        const signIn=card.querySelector('button'),signOut=[...card.querySelectorAll('button')].find(b=>b.textContent==='Sign out');signIn.click();await tick();
         if(mode==='late-mount'){dispose();resolveMount(port);await tick();check(removed===1&&!card.classList.contains('shared-workspace'),'late module mounted');}
         else if(mode==='mount-error'){check(locked===1&&!signIn.disabled&&!signIn.hidden&&!card.textContent.includes('private'),'module failure did not lock');}
-        else if(mode==='render-error'||mode==='lock-error'){failView();await tick();check(removed===1&&locked===1&&!card.textContent.includes('Session area'),'failed view kept sessions');if(mode==='lock-error'){check(signIn.disabled&&card.textContent.includes('Could not confirm'),'failed lock readmitted');card.querySelectorAll('button')[2].click();await tick();check(locked===2&&!signIn.disabled,'failed lock retry');}else check(!signIn.disabled,'render failure kept admission');}
-        else {check(card.classList.contains('shared-workspace')&&signIn.hidden&&observed===1,'workspace not mounted');const connect=card.querySelector('[aria-label="Connect · server"]');connect.click();check(connected===1,'Connect not routed');card.querySelectorAll('button')[2].click();await tick();connect.onclick();check(connected===1&&removed===1&&!card.classList.contains('shared-workspace'),'stale Connect after signout');}
+        else if(mode==='render-error'||mode==='lock-error'){failView();await tick();check(removed===1&&locked===1&&!card.textContent.includes('Session area'),'failed view kept sessions');if(mode==='lock-error'){check(signIn.disabled&&card.textContent.includes('Could not confirm'),'failed lock readmitted');signOut.click();await tick();check(locked===2&&!signIn.disabled,'failed lock retry');}else check(!signIn.disabled,'render failure kept admission');}
+        else {check(card.classList.contains('shared-workspace')&&signIn.hidden&&observed===1,'workspace not mounted');const connect=card.querySelector('[aria-label="Connect · server"]');connect.click();check(connected===1,'Connect not routed');signOut.click();await tick();connect.onclick();check(connected===1&&removed===1&&!card.classList.contains('shared-workspace'),'stale Connect after signout');}
         dispose();card.remove();
       }
       {

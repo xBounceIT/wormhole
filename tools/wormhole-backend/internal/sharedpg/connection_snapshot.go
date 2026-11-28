@@ -122,6 +122,30 @@ func snapshotOptionalRow(raw []byte, columns int) ([][]byte, error) {
 	return row, nil
 }
 
+func snapshotNodeChain(raw []byte, columns int, request AdmissionRequest, epoch, sequence uint64) ([]UnverifiedChainRecord, error) {
+	rows, err := snapshotRows(raw, vaultstore.MaxNodeDepth, columns)
+	if err != nil || len(rows) == 0 {
+		return nil, ErrAdmissionResponse
+	}
+	chain := make([]UnverifiedChainRecord, 0, len(rows))
+	for _, row := range rows {
+		id, ok := treeID(row[1])
+		if !ok {
+			return nil, ErrAdmissionResponse
+		}
+		m, err := parseTreeMetadata(row[4])
+		if err != nil || m.ID != id.String() {
+			return nil, ErrAdmissionResponse
+		}
+		envelope, err := parseCatalogProjectionEnvelope([][][]byte{row}, request, id, epoch, sequence)
+		if err != nil {
+			return nil, err
+		}
+		chain = append(chain, UnverifiedChainRecord{Node: UnverifiedTreeNode{Metadata: m, Boundary: envelope.Boundary, Seal: envelope.Seal}, Author: *envelope.Author})
+	}
+	return chain, nil
+}
+
 func parseConnectionSnapshot(raw []byte, request AdmissionRequest, node uuid.UUID, epoch, sequence uint64) (*UnverifiedConnectionSnapshot, error) {
 	if len(raw) == 0 || len(raw) > MaxConnectionSnapshotBytes || !utf8.Valid(raw) || request.WorkspaceID == uuid.Nil || request.UserID == uuid.Nil || node == uuid.Nil || epoch == 0 || epoch > math.MaxInt64 || sequence > math.MaxInt64 {
 		return nil, ErrAdmissionResponse
@@ -203,24 +227,9 @@ func parseConnectionSnapshot(raw []byte, request AdmissionRequest, node uuid.UUI
 			return nil, ErrAdmissionResponse
 		}
 	}
-	rows, e := snapshotRows(w.Chain, vaultstore.MaxNodeDepth, columns)
-	if e != nil || len(rows) == 0 {
-		return nil, ErrAdmissionResponse
-	}
-	for _, row := range rows {
-		id, ok := treeID(row[1])
-		if !ok {
-			return nil, ErrAdmissionResponse
-		}
-		m, e := parseTreeMetadata(row[4])
-		if e != nil || m.ID != id.String() {
-			return nil, ErrAdmissionResponse
-		}
-		envelope, e := parseCatalogProjectionEnvelope([][][]byte{row}, request, id, epoch, sequence)
-		if e != nil {
-			return nil, e
-		}
-		result.records.Chain = append(result.records.Chain, UnverifiedChainRecord{Node: UnverifiedTreeNode{Metadata: m, Boundary: envelope.Boundary, Seal: envelope.Seal}, Author: *envelope.Author})
+	result.records.Chain, e = snapshotNodeChain(w.Chain, columns, request, epoch, sequence)
+	if e != nil {
+		return nil, e
 	}
 	selection := func(raw []byte, kind string, subject, user uuid.UUID) (*UnverifiedSelectionRecord, error) {
 		row, e := snapshotOptionalRow(raw, columns)
@@ -306,7 +315,7 @@ func parseConnectionSnapshot(raw []byte, request AdmissionRequest, node uuid.UUI
 			required[r.Credential.Boundary] = true
 		}
 	}
-	rows, e = snapshotRows(w.Boundaries, vaultstore.MaxNodeDepth+6, 9)
+	rows, e := snapshotRows(w.Boundaries, vaultstore.MaxNodeDepth+6, 9)
 	if e != nil || len(rows) != len(required) {
 		return nil, ErrAdmissionResponse
 	}

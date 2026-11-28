@@ -16,9 +16,11 @@ if (appearance) {
 }
 
 const slotChange =
-  (channel: 'slot-default' | 'personal-slot') =>
+  (channel: 'slot-default' | 'personal-slot' | 'node-credential') =>
   (
-    value: import('./vault-shared-slot-default.js').SlotDefaultRequest,
+    value:
+      | import('./vault-shared-slot-default.js').SlotDefaultRequest
+      | import('./vault-shared-node-credential.js').NodeCredentialSelection,
     factors?: import('./vault-account-suspension.js').PersonalRootRecoveryFactors,
   ) => {
     try {
@@ -40,6 +42,7 @@ contextBridge.exposeInMainWorld('vaultSharedSetup', {
     ipcRenderer.invoke('vault-shared-setup:create-slot', value),
   slotDefault: slotChange('slot-default'),
   personalSlot: slotChange('personal-slot'),
+  nodeCredential: slotChange('node-credential'),
   workspaceAccess: (value: import('./vault-shared-access.js').WorkspaceAccessRequest) =>
     ipcRenderer.invoke('vault-shared-setup:workspace-access', value),
   accountSuspension: (value: import('./vault-account-suspension.js').AccountSuspensionRequest) =>

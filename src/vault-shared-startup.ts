@@ -33,7 +33,11 @@ export function mountSharedStartup(
         | 'editSharedNode'
       >
     >,
-  mountSessions?: (container: HTMLElement, failed: () => void) => Promise<SharedWorkspacePort>,
+  mountSessions?: (
+    container: HTMLElement,
+    failed: () => void,
+    tools: HTMLElement,
+  ) => Promise<SharedWorkspacePort>,
   initialAdmission?: SharedVaultSessionAdmission,
 ) {
   let initial = startup.shared ? initialAdmission : undefined;
@@ -94,7 +98,38 @@ export function mountSharedStartup(
   sessionContainer.className = 'shared-workspace-sessions';
   const layout = document.createElement('div');
   layout.className = 'shared-workspace-layout';
-  layout.append(catalog, sessionContainer);
+  const sidebar = document.createElement('aside');
+  sidebar.className = 'shared-workspace-sidebar';
+  sidebar.setAttribute('aria-label', 'Shared workspace navigation');
+  const account = document.createElement('footer');
+  account.className = 'shared-workspace-account';
+  const tools = document.createElement('div');
+  tools.className = 'shared-workspace-tools';
+  const actions = document.createElement('div');
+  actions.className = 'shared-account-actions';
+  const options = document.createElement('details');
+  const optionsTitle = document.createElement('summary');
+  optionsTitle.textContent = 'Workspace options';
+  options.append(optionsTitle);
+  const renderEntry = () => {
+    if (!joining) title.textContent = 'Shared workspace';
+    detail.textContent = `${hint.lastLoginName} · ${hint.serverDisplayName}`;
+    card.replaceChildren(
+      title,
+      detail,
+      transport,
+      status,
+      signIn,
+      recover,
+      signOut,
+      resumeAdmin,
+      backup,
+      reset,
+      administration,
+      layout,
+    );
+    layout.replaceChildren(catalog, sessionContainer);
+  };
   let sessions: SharedWorkspacePort | undefined;
   let disposeRenewal: (() => void) | undefined;
   let workspaceFailed = false;
@@ -109,7 +144,11 @@ export function mountSharedStartup(
     sessions = undefined;
     backup.hidden = reset.hidden = administration.hidden = true;
     sessionContainer.replaceChildren();
-    card.classList.remove('shared-workspace');
+    if (card.classList.contains('shared-workspace')) {
+      card.classList.remove('shared-workspace');
+      options.open = false;
+      renderEntry();
+    }
   };
   const lockAfterFailure = () => {
     if (disposed || !admitted || workspaceFailed) return;
@@ -199,15 +238,29 @@ export function mountSharedStartup(
           : ' Your admin cannot see your personal items.';
         signIn.hidden = recover.hidden = resumeAdmin.hidden = true;
         if (mountSessions) {
-          const mounted = await mountSessions(sessionContainer, failed);
+          const mounted = await mountSessions(sessionContainer, failed, tools);
           if (disposed || version !== generation || !admitted || workspaceFailed) {
             mounted.dispose();
             return;
           }
           sessions = mounted;
           card.classList.add('shared-workspace');
+          title.textContent = hint.serverDisplayName;
+          detail.textContent = hint.lastLoginName;
+          options.replaceChildren(optionsTitle, backup, reset);
+          actions.replaceChildren(administration, signOut);
+          account.replaceChildren(title, detail, status, tools, options, actions);
+          sidebar.replaceChildren(catalog, account);
+          layout.replaceChildren(sidebar, sessionContainer);
+          card.replaceChildren(transport, layout);
         }
-        disposeCatalog = mountSharedCatalogScreen(catalog, api, failed, sessions);
+        disposeCatalog = mountSharedCatalogScreen(
+          catalog,
+          api,
+          failed,
+          sessions,
+          tls === 'verified' ? api.openSharedAdministration : undefined,
+        );
         backup.hidden =
           tls !== 'verified' ||
           !result.orgEscrow ||
@@ -218,12 +271,13 @@ export function mountSharedStartup(
           !result.orgEscrow ||
           result.recoveryBackup !== true ||
           !api.openSharedAccountReset;
+        options.hidden = backup.hidden && reset.hidden && !api.renewSharedServerCertificate;
         administration.hidden = tls !== 'verified' || !api.openSharedAdministration;
         administration.textContent =
           result.administrator === true ? 'Workspace administration…' : 'My workspace…';
         if (tls === 'verified' && api.renewSharedServerCertificate) {
           disposeRenewal = mountSharedCertificateRenewal(
-            card,
+            sessions ? options : card,
             api.renewSharedServerCertificate,
             failed,
             api.sharedWorkspaceCA
@@ -336,20 +390,7 @@ export function mountSharedStartup(
       administration.disabled = false;
     }
   };
-  card.replaceChildren(
-    title,
-    detail,
-    transport,
-    status,
-    signIn,
-    recover,
-    signOut,
-    resumeAdmin,
-    backup,
-    reset,
-    administration,
-    layout,
-  );
+  renderEntry();
   const dispose = () => {
     if (disposed) return;
     disposed = true;

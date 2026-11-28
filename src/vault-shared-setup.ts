@@ -13,6 +13,8 @@ import {
 } from '../electron/vault-shared-setup-contract.ts';
 import { createRecoveryRecipient, type RecoveryRecipient } from './vault-recovery-recipient.ts';
 import { mountAdminRecovery } from './vault-admin-recovery-screen.ts';
+import { mountNodeCredential } from './vault-shared-node-credential.ts';
+import type { NodeCredentialPort } from '../electron/vault-shared-node-credential.ts';
 import type { AdminRecoveryInput } from '../electron/vault-admin-recovery.ts';
 import {
   mountSharedAdministration,
@@ -1083,8 +1085,10 @@ if (card) {
             | 'account-reset'
             | 'administration'
             | 'my-devices'
+            | 'node-credential'
           >;
           recover?: (input: AdminRecoveryInput) => Promise<boolean>;
+          nodeCredential: NodeCredentialPort;
           inspectBackup: Parameters<typeof mountSharedRestore>[1];
           applyBackup: Parameters<typeof mountSharedRestore>[3];
         };
@@ -1097,6 +1101,7 @@ if (card) {
         if (mode === 'setup') mountSharedSetup(card, api);
         if (mode === 'backup') await mountSharedBackup(card, api);
         if (mode === 'account-reset') await mountSharedAccountResetIssue(card, api);
+        if (mode === 'node-credential') mountNodeCredential(card, api.nodeCredential, api.close);
         if (mode === 'administration' || mode === 'my-devices')
           mountSharedAdministration(card, api, mode === 'my-devices');
         if (mode === 'restore')

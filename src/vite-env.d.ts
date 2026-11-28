@@ -1392,7 +1392,7 @@ interface Window {
     >;
     openSharedRecoveryBackup(): Promise<void>;
     openSharedAccountReset(): Promise<void>;
-    openSharedAdministration(): Promise<void>;
+    openSharedAdministration(nodeId?: string): Promise<void>;
     prepareSharedWorkspaceRestore(): Promise<void>;
     createSharedWorkspace(): Promise<
       import('../electron/vault-shared-setup-contract.ts').SharedSetupCompletion | undefined

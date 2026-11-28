@@ -64,6 +64,11 @@ var personalSlotTemplate string
 
 var personalSlotMigration = renderSlotPageMigration(personalSlotTemplate, "100")
 
+//go:embed migrations/0101_node_credential_override.sql
+var nodeOverrideTemplate string
+
+var nodeOverrideMigration = strings.Replace(nodeOverrideTemplate, "{{WEB_SUSPENSION_RESTORE_DEFINITION}}", renderWebSuspensionRestore("101"), 1)
+
 // This order matches the individual DBA upgrade scripts. A fresh deployment
 // uses the same migrations in a single transaction.
 var schemaMigrations = [...]string{
@@ -92,7 +97,7 @@ var schemaMigrations = [...]string{
 	accountReenrollmentRedemptionMigration, webSessionViewsMigration, webConnectionPlanMigration, webTunnelReleaseMigration, webSuspensionInventoryMigration,
 	auditMaintenanceMigration, unencryptedClientsMigration, sshHostPinMigration, updateNodeMigration, moveNodeMigration, suspensionRotationReceiptsMigration,
 	rowSecurityMigration, deviceConnectionLimitMigration, adminCredentialSlotsMigration, accountGroupRolesMigration, createCredentialSlotMigration, publicAPILimitsMigration,
-	slotBindingMigration, nodeSlotChoicesMigration, slotDefaultMigration, personalSlotMigration,
+	slotBindingMigration, nodeSlotChoicesMigration, slotDefaultMigration, personalSlotMigration, nodeOverrideMigration,
 }
 
 const SchemaVersion = len(schemaMigrations)

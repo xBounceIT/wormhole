@@ -6,6 +6,7 @@ import type {
 } from '../electron/vault-shared-catalog.ts';
 import { sharedConnectionMode, type SharedConnectionMode } from './shared-connection-mode.ts';
 import { openSharedNodeEditor } from './vault-shared-node-editor.ts';
+import { sharedEditFields } from '../electron/vault-shared-node-edit.ts';
 
 export type SharedWorkspacePort = {
   connect(node: SharedCatalogNode, mode?: SharedConnectionMode): void;
@@ -24,6 +25,7 @@ export function mountSharedCatalogScreen(
     Partial<Pick<NonNullable<Window['wormhole']>, 'showVaultNotes' | 'editSharedNode'>>,
   failed: () => void,
   sessions?: SharedWorkspacePort,
+  openCredential?: (nodeId: string) => Promise<void>,
 ) {
   const status = document.createElement('p');
   status.setAttribute('role', 'status');
@@ -34,6 +36,11 @@ export function mountSharedCatalogScreen(
   refresh.type = 'button';
   refresh.className = 'startup-button startup-button-secondary';
   refresh.textContent = 'Refresh catalog';
+  const header = document.createElement('header');
+  header.className = 'shared-catalog-heading';
+  const title = document.createElement('h2');
+  title.textContent = 'Connections';
+  header.append(title, refresh);
   const next = document.createElement('button');
   next.type = 'button';
   next.className = 'startup-button startup-button-secondary';
@@ -84,7 +91,19 @@ export function mountSharedCatalogScreen(
             : [node.host, node.port === null ? null : String(node.port), node.username]
                 .filter((value) => value !== null && value !== '')
                 .join(' · ');
-        item.append(name, detail);
+        const row = document.createElement('div');
+        row.className = 'shared-catalog-label';
+        row.append(name);
+        const protocolNames: Readonly<Record<number, string | undefined>> =
+          sharedEditFields.protocol.options;
+        const protocol =
+          node.protocol === null || node.kind !== 1 ? undefined : protocolNames[node.protocol];
+        if (protocol) {
+          const type = document.createElement('small');
+          type.textContent = protocol;
+          row.append(type);
+        }
+        item.append(row, detail);
         const actions = document.createElement('div');
         actions.className = 'shared-catalog-actions';
         if (sessions && node.kind === 1) {
@@ -118,6 +137,31 @@ export function mountSharedCatalogScreen(
             access.textContent = node.canUse ? 'This protocol is not available yet.' : 'View only';
             actions.append(access);
           }
+        }
+        if (
+          openCredential &&
+          node.kind === 1 &&
+          node.canUse &&
+          (node.protocol === null || [0, 1, 6, 7].includes(node.protocol))
+        ) {
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.className = 'startup-button startup-button-secondary';
+          button.textContent = 'My credential…';
+          button.setAttribute('aria-label', 'My credential for ' + node.name);
+          button.onclick = async () => {
+            if (disposed || button.disabled || !item.isConnected) return;
+            button.disabled = true;
+            try {
+              await openCredential(node.id);
+            } catch {
+              if (!disposed)
+                status.textContent = 'Could not open the credential settings for this connection.';
+            } finally {
+              if (!disposed) button.disabled = false;
+            }
+          };
+          actions.append(button);
         }
         const edit = api.editSharedNode;
         if (edit && node.editRevision) {
@@ -221,7 +265,7 @@ export function mountSharedCatalogScreen(
   next.onclick = () => {
     if (cursor) void load(cursor);
   };
-  container.replaceChildren(status, list, refresh, next);
+  container.replaceChildren(header, status, list, next);
   function dispose() {
     disposed = true;
     closeEditor?.();

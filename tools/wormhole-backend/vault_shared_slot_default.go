@@ -157,26 +157,8 @@ func (h *vaultFoundationHandler) sharedSlotChange(ctx context.Context, raw []byt
 		if reviewed == nil {
 			return nil
 		}
-		if fresh {
-			valid, err := h.verifySharedExportFactors(ctx, c, trust.Revision, auth)
-			auth.wipe()
-			if err != nil || !valid {
-				return err
-			}
-		}
-		return c.privateKeys.With(func(raw []byte) error {
-			if len(raw) != 64 {
-				return sharedpg.ErrTrustState
-			}
-			keys := &vault.UserKeys{EncryptionPrivate: raw[:32:32], SigningSeed: raw[32:]}
-			next, status, err := commit(ctx, trust, tls, reviewed, keys)
-			if next.Revision != 0 && next.Revision != trust.Revision {
-				if e := c.commitCatalogTrust(trust, next); e != nil {
-					return e
-				}
-			}
-			reply.Status = status
-			return err
+		return h.signSharedCredentialChange(ctx, c, trust, fresh, &auth, &reply.Status, func(keys *vault.UserKeys) (sharedpg.TrustState, string, error) {
+			return commit(ctx, trust, tls, reviewed, keys)
 		})
 	}, confirmation != nil)
 	if err != nil {
@@ -186,4 +168,28 @@ func (h *vaultFoundationHandler) sharedSlotChange(ctx context.Context, raw []byt
 		h.notifySharedCatalog()
 	}
 	return json.Marshal(reply)
+}
+
+func (h *vaultFoundationHandler) signSharedCredentialChange(ctx context.Context, c *sharedAdmissionController, trust sharedpg.TrustState, fresh bool, auth *vaultUnlockInput, status *string, commit func(*vault.UserKeys) (sharedpg.TrustState, string, error)) error {
+	if fresh {
+		valid, err := h.verifySharedExportFactors(ctx, c, trust.Revision, *auth)
+		auth.wipe()
+		if err != nil || !valid {
+			return err
+		}
+	}
+	return c.privateKeys.With(func(raw []byte) error {
+		if len(raw) != 64 {
+			return sharedpg.ErrTrustState
+		}
+		keys := &vault.UserKeys{EncryptionPrivate: raw[:32:32], SigningSeed: raw[32:]}
+		next, result, err := commit(keys)
+		if next.Revision != 0 && next.Revision != trust.Revision {
+			if e := c.commitCatalogTrust(trust, next); e != nil {
+				return e
+			}
+		}
+		*status = result
+		return err
+	})
 }

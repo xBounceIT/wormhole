@@ -6,6 +6,10 @@ import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { VaultSharedSetupDialog } from '../electron/vault-shared-setup-dialog.ts';
 import {
+  parseNodeCredentialReply,
+  parseNodeCredentialRequest,
+} from '../electron/vault-shared-node-credential.ts';
+import {
   confirmedSlotDefault,
   parseSlotDefaultReply,
   parseSlotDefaultRequest,
@@ -166,6 +170,8 @@ function fixture(
     inventory: (...args: any[]) => handlers.get('vault-shared-setup:admin-inventory')!(...args),
     slotDefault: (...args: any[]) => handlers.get('vault-shared-setup:slot-default')!(...args),
     personalSlot: (...args: any[]) => handlers.get('vault-shared-setup:personal-slot')!(...args),
+    nodeCredential: (...args: any[]) =>
+      handlers.get('vault-shared-setup:node-credential')!(...args),
     access: (...args: any[]) => handlers.get('vault-shared-setup:workspace-access')!(...args),
     suspension: (...args: any[]) => handlers.get('vault-shared-setup:account-suspension')!(...args),
     accountRotation: (...args: any[]) =>
@@ -315,6 +321,102 @@ test('a personal slot review binds the account and the assignment revision in it
     await f.personalSlot(f.event, input);
     assert.deepEqual(await f.personalSlot(f.event, commit), { status: 'saved' });
     await assert.rejects(f.personalSlot(f.event, commit), /review/i);
+    assert.equal(saves, 1);
+  } finally {
+    await f.dialog.cancel();
+    await opened;
+  }
+});
+
+test('a connection credential review belongs to one connection and one protected window', async () => {
+  const f = fixture();
+  const selection = { scope: 'personal', credentialName: 'Demo desktop' } as const;
+  const request = { ...selection, nodeId: offerId };
+  const confirmation = 'ab'.repeat(32);
+  const choice = {
+    ...request,
+    userId: resetRequestId,
+    protocol: 'rdp',
+    nodeName: 'Demo RDP',
+    credentialId: resetRequestId,
+    provider: 'bitwarden',
+    epoch: '1',
+    changeSeq: '9',
+    overrideRevision: '0',
+  };
+  const wire = {
+    status: 'review',
+    workspaceId,
+    review: confirmation,
+    choice,
+    authenticationRequired: true,
+  };
+  assert.deepEqual(parseNodeCredentialRequest(request), request);
+  const review = parseNodeCredentialReply(wire, request);
+  assert.ok(review?.status === 'review');
+  for (const extra of [
+    { nodeId: workspaceId },
+    { scope: 'shared' },
+    { changeSeq: '-1' },
+    { token: 'unexpected' },
+  ])
+    assert.equal(
+      parseNodeCredentialReply({ ...wire, choice: { ...choice, ...extra } }, request),
+      undefined,
+    );
+  assert.equal(
+    parseNodeCredentialReply(
+      { ...wire, choice: { ...choice, scope: 'shared' } },
+      { ...request, scope: 'shared' },
+    ),
+    undefined,
+  );
+  assert.equal(parseNodeCredentialReply({ status: 'saved' }, request), undefined);
+  assert.equal(parseNodeCredentialRequest({ ...request, scope: 'inherit' }), undefined);
+  let saves = 0;
+  const opened = f.dialog.openAdministration(
+    f.parent as any,
+    () => !f.parent.destroyed,
+    {
+      read: async () => {
+        throw Error('unexpected inventory access');
+      },
+      nodeCredential: async (action, auth, accepted) => {
+        assert.ok(accepted());
+        assert.deepEqual(action, action.confirmation ? { ...request, confirmation } : request);
+        if (!action.confirmation) return review;
+        assert.deepEqual(auth?.password, Uint8Array.of(1));
+        saves++;
+        return { status: 'saved' };
+      },
+    },
+    offerId,
+  );
+  const factors = () => ({ password: Uint8Array.of(1), ask: new Uint8Array(32).fill(7) });
+  const commit = { ...selection, confirmation };
+  try {
+    assert.equal(await f.mode(f.event), 'node-credential');
+    await assert.rejects(f.inventory(f.event), /unavailable/i);
+    await assert.rejects(
+      f.nodeCredential({ ...f.event, senderFrame: { url } }, selection),
+      /unavailable/i,
+    );
+    await assert.rejects(f.nodeCredential(f.event, request), /review/i);
+    await assert.rejects(f.nodeCredential(f.event, commit, factors()), /review/i);
+    await f.nodeCredential(f.event, selection);
+    await assert.rejects(f.nodeCredential(f.event, commit), /review/i);
+    await f.nodeCredential(f.event, selection);
+    const rejected = factors();
+    await assert.rejects(
+      f.nodeCredential(f.event, { ...commit, scope: 'shared' }, rejected),
+      /review/i,
+    );
+    assert.ok(rejected.password.every((v) => v === 0) && rejected.ask.every((v) => v === 0));
+    await f.nodeCredential(f.event, selection);
+    const accepted = factors();
+    assert.deepEqual(await f.nodeCredential(f.event, commit, accepted), { status: 'saved' });
+    assert.ok(accepted.password.every((v) => v === 0) && accepted.ask.every((v) => v === 0));
+    await assert.rejects(f.nodeCredential(f.event, commit, factors()), /review/i);
     assert.equal(saves, 1);
   } finally {
     await f.dialog.cancel();
@@ -724,7 +826,7 @@ const inspectedArchive = {
 const archiveDigest = 'e'.repeat(64);
 
 test('restore receipt exposes only bounded display and deployment identity', () => {
-  const current = { ...inspectedArchive, sourceSchemaVersion: 100 };
+  const current = { ...inspectedArchive, sourceSchemaVersion: 101 };
   assert.deepEqual(parseSharedRecoveryInspection({ status: 'ready', summary: current }), {
     status: 'ready',
     summary: current,
@@ -747,7 +849,7 @@ test('restore receipt exposes only bounded display and deployment identity', () 
     { ...inspectedArchive, nodes: -1 },
     { ...inspectedArchive, accounts: 100001 },
     { ...inspectedArchive, sourceSchemaVersion: 48 },
-    { ...inspectedArchive, sourceSchemaVersion: 101 },
+    { ...inspectedArchive, sourceSchemaVersion: current.sourceSchemaVersion + 1 },
     { ...inspectedArchive, sourceSchemaVersion: 55.5 },
     { ...inspectedArchive, sourceSchemaVersion: '85' },
     { ...inspectedArchive, profile: 'hardened' },
@@ -758,7 +860,7 @@ test('restore receipt exposes only bounded display and deployment identity', () 
   assert.equal(parseSharedRecoveryInspection(null), undefined);
   assert.equal(parseSharedRecoveryInspection({ status: 'unexpected' }), undefined);
   const ready = { status: 'ready', summary: inspectedArchive };
-  for (let version = 49; version <= 89; version++) {
+  for (let version = 49; version <= current.sourceSchemaVersion; version++) {
     const receipt = {
       ...ready,
       summary: { ...inspectedArchive, sourceSchemaVersion: version },

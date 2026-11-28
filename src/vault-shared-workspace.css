@@ -1,22 +1,134 @@
-.startup-card.shared-workspace {
-  width: min(1560px, 100%);
-  height: calc(100vh - 48px);
+:root .startup-shell:has(> .shared-workspace) {
+  display: block;
+  padding: 0;
+  background: var(--sidebar);
+  color: var(--sidebar-foreground);
+  font:
+    13px/1.45 'Geist Variable',
+    'Segoe UI',
+    sans-serif;
+}
+:root .startup-shell > .shared-workspace {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: var(--sidebar);
+  box-shadow: none;
+  --shared-secondary: color-mix(in srgb, var(--sidebar-foreground) 66%, var(--sidebar));
 }
 .shared-workspace-layout {
   display: grid;
-  grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
+  grid-template-columns: clamp(245px, 23vw, 320px) minmax(0, 1fr);
   flex: 1;
   min-height: 0;
-  gap: 16px;
 }
-.shared-workspace-catalog {
+.shared-workspace-sidebar {
+  display: flex;
+  flex-direction: column;
   min-height: 0;
   overflow: auto;
-  padding-right: 12px;
-  border-right: 1px solid #2a2a2a;
+  padding: 4px 12px 12px;
+  scrollbar-width: thin;
+}
+.shared-workspace-catalog {
+  flex: 1;
+  min-height: 8rem;
+  overflow: auto;
+  scrollbar-width: thin;
+}
+.shared-catalog-heading,
+.shared-catalog-label,
+.shared-account-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+.shared-catalog-heading {
+  min-height: var(--session-tab-row-height);
+}
+.shared-catalog-heading h2 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+.shared-workspace-catalog > [role='status'],
+.shared-workspace-account > p,
+.shared-catalog-label small,
+.shared-workspace .shared-catalog-list li > span {
+  color: var(--shared-secondary);
+  font-size: 12px;
+}
+.shared-workspace .shared-catalog-list {
+  max-height: none;
+  margin: 8px 0;
+  overflow: visible;
+}
+.shared-workspace .shared-catalog-list li {
+  padding: 10px 4px;
+  border-bottom: 1px solid var(--sidebar-border);
+}
+.shared-catalog-label strong {
+  font-size: 13px;
+  font-weight: 550;
+}
+.shared-catalog-label small {
+  font-size: 10px;
+  letter-spacing: 0.03em;
+}
+.shared-workspace-sidebar .startup-button {
+  width: auto;
+  min-height: 26px;
+  margin: 0;
+  padding: 3px 8px;
+  border: 1px solid var(--sidebar-border);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--sidebar-foreground);
+  font: inherit;
+  font-size: 12px;
+}
+.shared-workspace-sidebar .startup-button:hover:enabled {
+  background: var(--sidebar-accent);
+}
+.shared-workspace > .shared-transport-notice {
+  flex-shrink: 0;
+  margin: 0;
+  padding: 7px 14px;
+  border: 0;
+  border-bottom: 1px solid var(--sidebar-border);
+  border-radius: 0;
+  background: var(--sidebar-accent);
+  font-size: 12px;
+}
+.shared-workspace-account {
+  padding: 12px 2px 0;
+  border-top: 1px solid var(--sidebar-border);
+  overflow-wrap: anywhere;
+}
+.shared-workspace-account h1 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+.shared-workspace-account > p {
+  margin: 2px 0;
+}
+.shared-workspace-tools {
+  margin: 8px 0;
+}
+.shared-workspace-tools > * {
+  padding-inline: 0;
+}
+.shared-account-actions {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+  margin-top: 8px;
 }
 .shared-workspace-sessions {
   min-width: 0;
@@ -27,18 +139,12 @@
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 8px;
-}
-.shared-catalog-actions .startup-button {
-  width: auto;
-  min-height: 30px;
-  padding: 4px 10px;
-  margin: 0;
+  gap: 4px;
+  margin-top: 5px;
 }
 .shared-catalog-access {
   font-size: 11px;
-  color: #a1a1aa;
+  color: var(--shared-secondary);
 }
 .shared-sessions {
   display: flex;
@@ -46,26 +152,30 @@
   min-width: 0;
   min-height: 0;
   width: 100%;
-  border: 1px solid #2a2a2a;
-  border-radius: 8px;
   overflow: hidden;
-  background: #0a0a0a;
+  padding: 0 var(--workspace-canvas-gutter) var(--workspace-canvas-gutter);
+  background: var(--sidebar);
 }
 .shared-session-tabs {
   display: flex;
   overflow-x: auto;
-  min-height: 40px;
+  align-items: center;
+  min-height: var(--workspace-canvas-offset);
+  gap: 4px;
   flex-shrink: 0;
-  border-bottom: 1px solid #2a2a2a;
 }
 .shared-session-tab {
   display: flex;
   flex-shrink: 0;
-  border-right: 1px solid #2a2a2a;
+  align-items: center;
+  height: var(--session-tab-pill-height);
+  border-radius: 9px;
+  color: var(--shared-secondary, var(--sidebar-foreground));
 }
 .shared-session-tab[data-active='true'] {
-  background: #202025;
-  box-shadow: inset 0 -2px #60a5fa;
+  background: var(--background);
+  color: var(--foreground);
+  box-shadow: 0 1px 3px rgb(0 0 0 / 10%);
 }
 .shared-session-tab button {
   display: flex;
@@ -73,7 +183,7 @@
   gap: 8px;
   padding: 10px;
   border: 0;
-  color: #e5e7eb;
+  color: inherit;
   background: transparent;
   font-size: 12px;
   cursor: pointer;
@@ -85,7 +195,7 @@
   white-space: nowrap;
 }
 .shared-session-tab small {
-  color: #a1a1aa;
+  color: var(--shared-secondary);
   font-size: 10px;
 }
 .shared-session-indicator {
@@ -107,21 +217,25 @@
   flex: 1;
   min-width: 0;
   min-height: 0;
+  overflow: hidden;
+  border-radius: var(--workspace-canvas-radius);
+  background: var(--canvas);
+  color: var(--foreground);
 }
 .shared-session-route {
   display: flex;
   gap: 12px;
   align-items: center;
   padding: 8px 12px;
-  border-bottom: 1px solid #2a2a2a;
-  color: #a1a1aa;
+  border-bottom: 1px solid var(--border);
+  color: var(--shared-secondary);
   font-size: 11px;
   overflow: hidden;
   flex-shrink: 0;
 }
 .shared-session-route code {
   font-family: 'Cascadia Mono', Consolas, monospace;
-  color: #e5e7eb;
+  color: var(--foreground);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -138,6 +252,10 @@
   display: flex;
   overflow: hidden;
 }
+.shared-file-surface > [aria-label='SFTP browser'] {
+  flex: 1;
+  min-width: 0;
+}
 .shared-session-empty {
   display: flex;
   flex: 1;
@@ -146,12 +264,12 @@
   justify-content: center;
   gap: 12px;
   padding: 24px;
-  color: #a1a1aa;
+  color: var(--shared-secondary);
   text-align: center;
   font-size: 13px;
 }
 .shared-session-empty strong {
-  color: #f3f4f6;
+  color: var(--foreground);
   font-size: 16px;
   font-weight: 500;
 }
@@ -170,30 +288,28 @@
   font-size: 12px;
   margin: 0;
 }
-.shared-sessions button:focus-visible {
-  outline: 2px solid #60a5fa;
+.shared-workspace :is(button, summary):focus-visible {
+  outline: 2px solid var(--ring);
   outline-offset: -3px;
-}
-:root:not(.dark) .shared-workspace-catalog {
-  border-color: #e5e7eb;
 }
 @media (max-width: 780px) {
   .startup-shell:has(> .shared-workspace) {
     overflow-y: auto;
   }
-  .startup-card.shared-workspace {
-    align-self: start;
+  :root .startup-shell > .shared-workspace {
     height: auto;
-    min-height: calc(100vh - 48px);
+    min-height: 100%;
   }
   .shared-workspace-layout {
     grid-template-columns: 1fr;
   }
+  .shared-workspace-sidebar {
+    max-height: 55dvh;
+    border-bottom: 1px solid var(--sidebar-border);
+  }
   .shared-workspace-catalog {
-    max-height: 280px;
-    border-right: 0;
-    border-bottom: 1px solid #2a2a2a;
-    padding: 0 0 12px;
+    flex: 1 0 auto;
+    overflow: visible;
   }
   .shared-workspace-sessions {
     min-height: 480px;

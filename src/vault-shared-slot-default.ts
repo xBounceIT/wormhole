@@ -4,6 +4,37 @@ import {
   type SlotDefaultReply,
 } from '../electron/vault-shared-slot-default.ts';
 
+export function credentialReviewRow(choice: {
+  credentialName: string;
+  credentialId: string;
+  protocol: string;
+  provider?: string;
+}) {
+  const row = document.createElement('div');
+  row.className = 'slot-credential';
+  const icon = document.createElement('span');
+  icon.className = 'slot-credential-icon';
+  icon.setAttribute('aria-hidden', 'true');
+  icon.innerHTML =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M2 18v4h4v-3h3v-3h2l2.1-2.1a6.5 6.5 0 1 0-3-3Z"/><circle cx="16.5" cy="7.5" r="1"/></svg>';
+  const selected = document.createElement('strong');
+  selected.textContent = choice.credentialName;
+  const protocol = document.createElement('span');
+  protocol.className = 'slot-protocol';
+  protocol.textContent =
+    choice.protocol.toUpperCase() + (choice.provider === 'bitwarden' ? ' · Bitwarden' : '');
+  const identifier = document.createElement('details');
+  const summary = document.createElement('summary');
+  summary.textContent = 'Credential ID';
+  const id = document.createElement('code');
+  id.textContent = choice.credentialId;
+  identifier.append(summary, id);
+  const accountDetails = document.createElement('div');
+  accountDetails.append(selected, identifier);
+  row.append(icon, accountDetails, protocol);
+  return row;
+}
+
 export function mountSlotDefault(
   panel: HTMLElement,
   slotId: string,
@@ -146,28 +177,7 @@ export function mountSlotDefault(
         title.textContent = choice.slotName;
         const explanation = document.createElement('p');
         if (choice.credentialId) {
-          const row = document.createElement('div');
-          row.className = 'slot-credential';
-          const icon = document.createElement('span');
-          icon.className = 'slot-credential-icon';
-          icon.setAttribute('aria-hidden', 'true');
-          icon.innerHTML =
-            '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M2 18v4h4v-3h3v-3h2l2.1-2.1a6.5 6.5 0 1 0-3-3Z"/><circle cx="16.5" cy="7.5" r="1"/></svg>';
-          const selected = document.createElement('strong');
-          selected.textContent = choice.credentialName;
-          const protocol = document.createElement('span');
-          protocol.className = 'slot-protocol';
-          protocol.textContent =
-            choice.protocol.toUpperCase() + (choice.provider === 'bitwarden' ? ' · Bitwarden' : '');
-          const identifier = document.createElement('details');
-          const summary = document.createElement('summary');
-          summary.textContent = 'Credential ID';
-          const id = document.createElement('code');
-          id.textContent = choice.credentialId;
-          identifier.append(summary, id);
-          const accountDetails = document.createElement('div');
-          accountDetails.append(selected, identifier);
-          row.append(icon, accountDetails, protocol);
+          const row = credentialReviewRow(choice);
           explanation.textContent = personal
             ? 'Your connections using this slot will use this credential.'
             : 'Users without a personal assignment will use this credential.';

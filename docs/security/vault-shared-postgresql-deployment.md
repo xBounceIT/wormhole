@@ -177,7 +177,7 @@ Schema 50 enables import into an untouched deployment with the matching
 workspace ID and role tag. Apply
 `deploy.WorkspaceRecoveryRestoreMigration(roleTag, workspaceID)` to upgrade a
 schema-49 deployment. Fresh scripts include the migration. The wizard opens
-archives from schemas 49 through 100.
+archives from schemas 49 through 101.
 
 Use a host approved by the archived signed TLS bundle and install a server
 certificate that verifies against it. The DBA enables the dedicated
@@ -404,6 +404,18 @@ Standard asks for fresh authentication before saving a change.
 
 Choose **Use the shared default** to clear a personal assignment. The review
 shows whether the slot has a shared default to fall back to.
+
+On schema 101 and later, choose **My credential…** beside an SSH, SFTP, RDP
+or VNC connection to set a credential for your own sessions on that connection.
+Choose **My credentials** or **Shared credentials**, then enter the exact name.
+Review the connection, credential and protocol before selecting **Set my
+credential**. SSH and SFTP use the same credential type. You need verified TLS,
+View and Use on the connection, and Use on the credential. Standard also asks
+for your Wormhole password and, on devices that require it, the Account Secret Key.
+
+A connection-specific choice takes precedence over your slot assignment.
+To return to the connection's configured credential, open **My credential…**,
+select **Use the connection settings** and confirm.
 
 To enter a slot manually, copy its **Slot ID** from the administration list. In the
 connection editor choose **Credential slot** as the credential mode, clear

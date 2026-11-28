@@ -48,6 +48,11 @@ import { parseAccountResetMark } from './vault-shared-account-reset-queue.ts';
 import { parseAdminInventoryRequest, parseCreateSlot } from './vault-shared-admin-inventory.ts';
 import { parseGroupRequest } from './vault-shared-admin-groups.ts';
 import { isDeepStrictEqual } from 'node:util';
+import { vaultID, vaultRecord } from './vault-contract.ts';
+import {
+  parseNodeCredentialRequest,
+  type NodeCredentialRequest,
+} from './vault-shared-node-credential.ts';
 import {
   confirmedSlotDefault,
   parseSlotDefaultRequest,
@@ -85,6 +90,13 @@ type BackupWindow = {
   exported: boolean;
 };
 
+type NodeCredentialWindow = {
+  nodeId: string;
+  change: NonNullable<SharedAdministrationPorts['nodeCredential']>;
+  reviewed?: { request: NodeCredentialRequest; factors: boolean };
+  busy: boolean;
+};
+
 type SetupWindow = {
   window: BrowserWindow;
   accepted: () => boolean;
@@ -99,8 +111,10 @@ type SetupWindow = {
     | 'restore'
     | 'account-reset'
     | 'administration'
-    | 'my-devices';
+    | 'my-devices'
+    | 'node-credential';
   administration?: Administration;
+  nodeCredential?: NodeCredentialWindow;
   backup?: BackupWindow;
   reset?: {
     operation: SharedAccountResetIssueOperation;
@@ -304,6 +318,45 @@ export class VaultSharedSetupDialog {
         return createSlot(request);
       }),
     );
+    options.ipc.handle('vault-shared-setup:node-credential', async (event, ...args: unknown[]) => {
+      const current = this.trusted(event);
+      const port = current?.nodeCredential;
+      let factors: PersonalRootRecoveryFactors | undefined;
+      try {
+        if (!current || !port || port.busy) throw Error('Connection credential unavailable.');
+        const previous = port.reviewed;
+        port.reviewed = undefined;
+        const value = args[0];
+        const request =
+          vaultRecord(value) && !('nodeId' in value)
+            ? parseNodeCredentialRequest({ ...value, nodeId: port.nodeId })
+            : undefined;
+        if (
+          !request ||
+          (request.confirmation && !isDeepStrictEqual(previous?.request, request)) ||
+          args.length !== (request.confirmation && previous?.factors ? 2 : 1)
+        )
+          throw Error('Review this connection credential first.');
+        if (args.length === 2) factors = consumePersonalRootRecoveryFactors(args[1]);
+        port.busy = true;
+        try {
+          const accepted = () => this.trusted(event) === current;
+          const result = await port.change(request, factors, accepted);
+          if (!accepted()) throw Error('Connection credential review was interrupted.');
+          if (result.status === 'review')
+            port.reviewed = {
+              request: { ...request, confirmation: result.review },
+              factors: result.authenticationRequired,
+            };
+          return result;
+        } finally {
+          port.busy = false;
+        }
+      } finally {
+        wipePersonalRootRecoveryFactors(args[1]);
+        wipePersonalRootRecoveryFactors(factors);
+      }
+    });
     for (const channel of ['slot-default', 'personal-slot'] as const) {
       const personal = channel === 'personal-slot';
       options.ipc.handle('vault-shared-setup:' + channel, async (event, ...args: unknown[]) => {
@@ -782,7 +835,24 @@ export class VaultSharedSetupDialog {
     parent: BrowserWindow,
     accepted: () => boolean,
     ports: SharedAdministrationPorts,
+    nodeId?: string,
   ): Promise<void> {
+    if (nodeId !== undefined) {
+      if (!vaultID(nodeId) || !ports.nodeCredential)
+        throw Error('Connection credential unavailable.');
+      await this.open(
+        parent,
+        accepted,
+        undefined,
+        false,
+        'node-credential',
+        undefined,
+        undefined,
+        undefined,
+        { nodeId, busy: false, change: ports.nodeCredential },
+      );
+      return;
+    }
     await this.open(
       parent,
       accepted,
@@ -804,6 +874,7 @@ export class VaultSharedSetupDialog {
     operation?: SharedRecoveryBackupOperation,
     resetOperation?: SharedAccountResetIssueOperation,
     administration?: Administration,
+    nodeCredential?: NodeCredentialWindow,
   ): Promise<SharedSetupCompletion | undefined> {
     if (this.current || parent.isDestroyed() || !accepted())
       return Promise.reject(Error('Shared workspace setup is unavailable.'));
@@ -824,11 +895,12 @@ export class VaultSharedSetupDialog {
         'account-reset': 'Issue account reset',
         administration: 'Workspace administration',
         'my-devices': 'My workspace',
+        'node-credential': 'Credential for this connection',
       }[mode],
       webPreferences: {
         preload: this.options.preload,
         additionalArguments:
-          mode === 'administration' || mode === 'my-devices'
+          mode === 'administration' || mode === 'my-devices' || mode === 'node-credential'
             ? ['--wormhole-appearance=' + (this.options.colorScheme?.(parent) ?? 'system')]
             : [],
         partition: `vault-shared-setup-${randomUUID()}`,
@@ -888,6 +960,7 @@ export class VaultSharedSetupDialog {
         ...(operation ? { backup: { operation, exported: false } } : {}),
         ...(resetOperation ? { reset: { operation: resetOperation, queueBusy: false } } : {}),
         administration,
+        nodeCredential,
         joining: false,
         loaded: false,
         closing: false,

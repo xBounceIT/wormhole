@@ -504,6 +504,9 @@ func checkWorkspaceImportCommit(t *testing.T, ctx context.Context, dba *pgconn.P
 		trust = next
 		revisions[verified.Revision] = true
 	}
+	t.Run("node-credential-override", func(t *testing.T) {
+		checkNodeCredentialOverrides(t, ctx, dba, session, trust, tls, actor, nodeWithPins, uuid.MustParse(withGateway))
+	})
 	t.Run("ssh-host-pin", func(t *testing.T) { checkImportedSSHHostPin(t, ctx, dba, session, trust, nodeWithPins, actor) })
 	t.Run("update-node", func(t *testing.T) { checkImportedNodeEdit(t, ctx, dba, session, trust, nodeWithPins, actor) })
 	checkImportedPathReleases(t, ctx, session, trust, nodeWithPins, actor.EncryptionPrivate, uuid.Nil)

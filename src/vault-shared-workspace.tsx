@@ -9,6 +9,7 @@ import {
   type ReactNode,
 } from 'react';
 import { createRoot } from 'react-dom/client';
+import { createPortal } from 'react-dom';
 import {
   SharedConnectionSessions,
   type SharedSessionAPI,
@@ -476,6 +477,7 @@ export function mountSharedWorkspace(
   container: HTMLElement,
   api: SharedSessionAPI & SharedUpdateAPI & SharedProfileAPI,
   onFailure: () => void,
+  tools?: HTMLElement,
 ) {
   const sessions = new SharedConnectionSessions(
     api,
@@ -483,6 +485,12 @@ export function mountSharedWorkspace(
     copyTextToClipboard,
   );
   const root = createRoot(container);
+  const controls = (
+    <>
+      <SharedSecuritySettings api={api} />
+      <SharedUpdateControls api={api} />
+    </>
+  );
   root.render(
     <WorkspaceErrorBoundary
       onFailure={() => {
@@ -496,12 +504,7 @@ export function mountSharedWorkspace(
         <TooltipProvider>
           <SharedSessionsView
             sessions={sessions}
-            controls={
-              <>
-                <SharedSecuritySettings api={api} />
-                <SharedUpdateControls api={api} />
-              </>
-            }
+            controls={tools ? createPortal(controls, tools) : controls}
           />
         </TooltipProvider>
       </ContextMenuOverlayProvider>

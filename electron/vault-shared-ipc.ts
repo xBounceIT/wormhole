@@ -3,6 +3,7 @@ import type { SharedRecoveryKitConfirmation, VaultBackendHost } from './vault-ho
 import type { VaultSharedAuthenticationDialog } from './vault-shared-dialog.ts';
 import type { VaultSharedSetupDialog } from './vault-shared-setup-dialog.ts';
 import { isSharedInitialStartup } from './vault-shared-invitation.ts';
+import { vaultID } from './vault-contract.ts';
 
 export function registerSharedCatalogIpc(options: {
   ipc: Pick<IpcMain, 'handle'>;
@@ -106,20 +107,25 @@ export function registerSharedAdministrationIpc(options: {
     'vault:open-shared-administration',
     async (value, accepted, event) => {
       const parent = options.parent(event);
-      if (value !== null || !parent || parent.isDestroyed())
+      if ((value !== null && !vaultID(value)) || !parent || parent.isDestroyed())
         throw Error('Workspace administration is unavailable.');
       await options.host.openSharedAdministration(accepted, (current, { access, ...ports }) =>
-        options.dialog.openAdministration(parent, current, {
-          ...ports,
-          access:
-            access &&
-            (async (request) => {
-              const reply = await access(request);
-              if (reply.status === 'changed' && reply.currentDevice)
-                options.currentDeviceRevoked?.();
-              return reply;
-            }),
-        }),
+        options.dialog.openAdministration(
+          parent,
+          current,
+          {
+            ...ports,
+            access:
+              access &&
+              (async (request) => {
+                const reply = await access(request);
+                if (reply.status === 'changed' && reply.currentDevice)
+                  options.currentDeviceRevoked?.();
+                return reply;
+              }),
+          },
+          value ?? undefined,
+        ),
       );
     },
   );

@@ -1,15 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { consumeVaultConnectionInput } from '../electron/vault-connection.ts';
-import { connectionInput, connectionNodeId as id } from './fixtures/vault-connection.ts';
-import { readFileSync } from 'node:fs';
-import { stripTypeScriptTypes } from 'node:module';
-import { runInNewContext } from 'node:vm';
-const appSource = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
-const rdpSource = appSource.match(/const defaultRdpSettings:[\s\S]*?\n};/)![0];
-const defaultRdpSettings = runInNewContext(
-  stripTypeScriptTypes(rdpSource + '\ndefaultRdpSettings;'),
-);
+import {
+  appRdpDefaults,
+  connectionInput,
+  connectionNodeId as id,
+} from './fixtures/vault-connection.ts';
+const defaultRdpSettings = appRdpDefaults();
 import { VaultBackendHost, registerVaultIpc } from '../electron/vault-host.ts';
 import { encodeVaultBytesFrame } from '../electron/vault-unlock.ts';
 

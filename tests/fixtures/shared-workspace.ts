@@ -427,7 +427,7 @@ export async function runSharedWorkspaceTests() {
       cosmetics: { theme: 'dark' },
     },
     api,
-    async (container, failed) => mountSharedWorkspace(container, api, failed),
+    async (container, failed, tools) => mountSharedWorkspace(container, api, failed, tools),
   );
   (card.querySelector('button') as HTMLButtonElement).click();
   await until(
@@ -976,6 +976,16 @@ export async function runSharedWorkspaceTests() {
   const bounds = card.getBoundingClientRect(),
     panel = card.querySelector('.shared-session-panel')!.getBoundingClientRect();
   check(bounds.width > 900 && panel.width > 500 && panel.height > 250, 'workspace collapsed');
+  const filesTab = [...card.querySelectorAll<HTMLButtonElement>('[role=tab]')].find((tab) =>
+    tab.textContent?.includes('Files'),
+  );
+  filesTab!.click();
+  await until(
+    () =>
+      filesTab?.getAttribute('aria-selected') === 'true' &&
+      !!card.querySelector('[aria-label="Remote files"] [aria-label="Select notes.txt"]'),
+    'file transfer did not restore its directory after switching sessions',
+  );
   (globalThis as any).sharedUI = {
     calls,
     card,
@@ -993,6 +1003,19 @@ export async function runSharedWorkspaceTests() {
 }
 export async function finishSharedWorkspaceTests() {
   const { calls, card, deny, dispose, check, until } = (globalThis as any).sharedUI;
+  const sshTab = (Array.from(card.querySelectorAll('[role=tab]')) as HTMLButtonElement[]).find(
+    (tab) => tab.textContent?.includes('SSH'),
+  )!;
+  sshTab.click();
+  await until(() => !!card.querySelector('.shared-terminal-surface .xterm'), 'SSH did not resume');
+  const terminal = card.querySelector('.shared-terminal-surface') as HTMLElement;
+  const resizes = () => calls.filter((c: { name: string }) => c.name === 'resize').length;
+  const before = resizes();
+  terminal.style.width = '65%';
+  await until(
+    () => resizes() > before,
+    'resizing the resumed SSH surface did not reach the session',
+  );
   deny();
   (Array.from(card.querySelectorAll('button')) as HTMLButtonElement[])
     .find((b) => b.textContent === 'Refresh catalog')!

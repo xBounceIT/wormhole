@@ -356,7 +356,8 @@ const wormholeBridge = {
     ipcRenderer.invoke('vault:prepare-shared-workspace-restore', null),
   openSharedRecoveryBackup: () => ipcRenderer.invoke('vault:open-shared-recovery-backup', null),
   openSharedAccountReset: () => ipcRenderer.invoke('vault:open-shared-account-reset', null),
-  openSharedAdministration: () => ipcRenderer.invoke('vault:open-shared-administration', null),
+  openSharedAdministration: (nodeId?: string) =>
+    ipcRenderer.invoke('vault:open-shared-administration', nodeId ?? null),
   protectExistingWorkspace: () => ipcRenderer.invoke('vault:protect-existing'),
   databaseEncryptionAvailable: () => ipcRenderer.invoke('vault:database-encryption-available'),
   encryptVaultDatabase: () => ipcRenderer.invoke('vault:encrypt-database'),

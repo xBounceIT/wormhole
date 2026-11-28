@@ -571,9 +571,9 @@ async function bootstrap(initialShared?: SharedVaultSessionAdmission) {
         renderCard('Shared workspace', 'Sign in to continue.', 'lock'),
         vault,
         window.wormhole,
-        async (container, failed) => {
+        async (container, failed, tools) => {
           const { mountSharedWorkspace } = await import('./vault-shared-workspace');
-          return mountSharedWorkspace(container, window.wormhole!, failed);
+          return mountSharedWorkspace(container, window.wormhole!, failed, tools);
         },
         initialShared,
       );

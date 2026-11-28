@@ -11,7 +11,7 @@ import { createInterface } from 'node:readline';
 import test from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
-import { connectionInput } from './fixtures/vault-connection.ts';
+import { appRdpDefaults, connectionInput } from './fixtures/vault-connection.ts';
 
 const run = promisify(execFile);
 const root = fileURLToPath(new URL('../', import.meta.url));
@@ -165,6 +165,7 @@ app.whenReady().then(async()=>{
  const exerciseSlotBinding=target.importLocal&&!target.checkStandardPin&&!target.webFixturePort;
  const exerciseSharedDefault=exerciseSlotBinding||target.checkStandardPin;
  const slotConnectionName='Slot binding test connection';
+ const overrideConnectionName='Credential review RDP';
  const sharedCredentialName='Operations RDP account';
  const personalCredentialName='My RDP account';
  const accountPassword='synthetic-administrator-password';
@@ -353,7 +354,7 @@ app.whenReady().then(async()=>{
      } else if(mode==='admin-reopen'&&target.importLocal){
        const page=()=>host.sharedCatalog({after:'',epoch:'0',changeSeq:'0',limit:32},()=>true);
        const catalog=await page();
-       assert.equal(catalog.nodes.length,exerciseSlotBinding?3:2);
+       assert.equal(catalog.nodes.length,2+(exerciseSlotBinding?1:0)+(exerciseSharedDefault?1:0));
        const imported=catalog.nodes.find(node=>node.name==='Preserved local connection');
        assert.ok(imported && !imported.grantRevision);
        const ssh={workspaceId:host.unlockedWorkspaceId,nodeId:imported.id,credentialOverride:'',route:null,epoch:1,
@@ -383,6 +384,17 @@ app.whenReady().then(async()=>{
            const slotId=require('node:crypto').randomUUID();
            assert.equal((await ports.createSlot({id:slotId,name:'Remote desktops',protocol:'rdp',allowSelfService:true})).status,'saved');
            const {confirmedSlotDefault}=await import(${fromDist('vault-shared-slot-default.js')});
+           const nodeId=catalog.nodes.find(n=>n.name===overrideConnectionName).id;
+           const action={nodeId,scope:'personal',credentialName:personalCredentialName};
+           const override=await ports.nodeCredential(action,undefined,current);
+           assert.equal(override.status,'review');
+           assert.equal(override.authenticationRequired,true);
+           const commitOverride={...action,confirmation:override.review};
+           assert.equal((await ports.nodeCredential(commitOverride,undefined,current)).status,'authentication-required');
+           for(const [password,secret] of [['wrong',ask],[accountPassword,'5b'.repeat(32)],[accountPassword,'']]){
+             assert.equal((await ports.nodeCredential(commitOverride,{password:Buffer.from(password),...(secret?{ask:Buffer.from(secret,'hex')}:{})},current)).status,'unavailable');
+           }
+           assert.equal((await ports.nodeCredential(commitOverride,{password:Buffer.from(accountPassword),ask:Buffer.from(ask,'hex')},current)).status,'saved');
            for(const [change,credentialName] of [[ports.slotDefault,sharedCredentialName],[ports.personalSlot,personalCredentialName]]){
              const review=await change({slotId,credentialName},undefined,current);
              assert.equal(review.status,'review');
@@ -511,8 +523,7 @@ app.whenReady().then(async()=>{
          return window.webContents.executeJavaScript('window.wormhole.editSharedNode('+JSON.stringify({nodeId,revision,workspaceId,epoch,changeSeq,slotAfter})+')');
        };
        assert.equal(await window.webContents.executeJavaScript('typeof window.vaultSharedSetup'),'undefined');
-       const adminOpened=window.webContents.executeJavaScript('window.wormhole.openSharedAdministration()');
-       void adminOpened.catch(()=>{});
+       let adminOpened;
        const waitForAdmin=async expression=>{
          for(let n=0;n<200;n++){
            if(adminWindow&&!adminWindow.isDestroyed()&&await adminWindow.webContents.executeJavaScript(expression).catch(()=>false))return;
@@ -532,6 +543,28 @@ app.whenReady().then(async()=>{
        };
        const groupForm=(label, value)=>adminWindow.webContents.executeJavaScript('(()=>{const field=document.querySelector("input[aria-label="+JSON.stringify('+JSON.stringify(label)+')+"]");field.value='+JSON.stringify(value)+';field.form.requestSubmit();})()');
        try{
+         const node=catalog.nodes.find(n=>n.name===overrideConnectionName);
+         assert.ok(node?.canUse);
+         for(const [source,name] of [['shared',sharedCredentialName],['personal',personalCredentialName],['inherit','']]){
+           const opened=window.webContents.executeJavaScript('window.wormhole.openSharedAdministration('+JSON.stringify(node.id)+')');
+           void opened.catch(()=>{});
+           try {
+             await waitForAdmin('!!document.querySelector("select[name=scope]")');
+             await adminWindow.webContents.executeJavaScript('(()=>{const form=document.querySelector("form");form.elements.scope.value='+JSON.stringify(source)+';form.elements.scope.dispatchEvent(new Event("change"));form.elements.account.value='+JSON.stringify(name)+';form.requestSubmit()})()');
+             await waitForAdmin('document.querySelector("h2")?.textContent==='+JSON.stringify(node.name));
+             if(name) assert.equal(await adminWindow.webContents.executeJavaScript('document.querySelector(".slot-credential strong").textContent'),name);
+             await fieldsetButton(name?'Set my credential':'Use connection settings');
+             await opened;
+             if(name){
+               const crypto=require('node:crypto');
+               const publicKey=Buffer.from(crypto.generateKeyPairSync('x25519').publicKey.export({format:'jwk'}).x,'base64url').toString('base64');
+               const bundle=await native.rdpBundle({workspaceId:host.unlockedWorkspaceId,nodeId:node.id,credentialOverride:'',epoch:1,sessionId:crypto.randomUUID(),requestId:crypto.randomUUID(),publicKey});
+               assert.equal(bundle.binding.nodeId,node.id);
+             }
+           } finally {await administration.cancel();await opened;}
+         }
+         adminOpened=window.webContents.executeJavaScript('window.wormhole.openSharedAdministration()');
+         void adminOpened.catch(()=>{});
          await waitForRecord('administrator');
          await section('slots');
          await waitForAdmin('[...document.querySelectorAll("[role=status]")].some(s=>s.textContent==="No records on this page.")');
@@ -1038,7 +1071,7 @@ app.whenReady().then(async()=>{
  const checkLocal=async()=>{
    assert.ok(host.unlockedWorkspaceId && !host.isSharedWorkspace);
    const workspace=await host.workspace();
-   assert.equal(workspace.tree.length,(target.importLocal?2:1)+(target.webFixturePort?1:0)+(exerciseSlotBinding?1:0));
+   assert.equal(workspace.tree.length,(target.importLocal?2:1)+(target.webFixturePort?1:0)+(exerciseSlotBinding?1:0)+(exerciseSharedDefault?1:0));
    assert.ok(workspace.tree.some(node=>node.name===localName));
  };
  if(mode==='admin-offline-signin'){
@@ -1086,6 +1119,8 @@ app.whenReady().then(async()=>{
      input.notes=new TextEncoder().encode('Synthetic local notes');
      await host.saveConnection(input);
      if(exerciseSharedDefault){
+       const metadata={...input.metadata,id:'',name:overrideConnectionName,protocol:'rdp',rdp:${JSON.stringify(appRdpDefaults())},port:3389,inlinePasswordAction:'clear'};
+       await host.saveConnection({rowVersion:'0',notesAction:'clear',metadata,password:new Uint8Array(),notes:new Uint8Array()});
        for (const name of [sharedCredentialName, personalCredentialName]) {
          await host.editCredential({rowVersion:'0',metadata:{id:'',name,protocol:'rdp',
          kind:'password',username:'fixture-user',domain:'FIXTURE',provider:'Local',bitwardenItemId:'',bitwardenItemName:'',
