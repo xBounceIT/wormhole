@@ -262,7 +262,7 @@ test('actual main OS preparation window pins its dedicated preload and local pro
               options = value;
             }
           },
-          createApplicationWindow: (value: any) => value,
+          createThemedVaultWindow: (value: any) => value,
           vaultBackend: host,
           ipcMain: ipc,
           rendererUrl,

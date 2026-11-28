@@ -376,7 +376,7 @@ test('main creates the password document with its dedicated URL, preload and win
         }
       },
       ipcMain: {},
-      createApplicationWindow: () => {
+      createThemedVaultWindow: () => {
         created = true;
       },
       rendererUrl: 'http://localhost:5173',
