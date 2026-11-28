@@ -109,7 +109,7 @@ jobs:
         working-directory: tools/wormhole-backend
         run: >-
           go test -run
-          '^(TestCredentialSecretKeyringRoundTrip|TestCredentialSecretKeyringErrorsDoNotExposePassword|TestLinuxCredentialSecretRoundTripUsesDBusKeyring|TestLinuxVncSavedCredentialIDCase|TestVncCredentialLookupPreservesCompatibilityChecks|TestMcpTokenLifecycleUsesLinuxSecretService|TestBitwardenSessionResetRepairsCorruptKeyringEntry)$'
+          '^(TestCredentialSecretKeyring.*|TestLinuxCredential.*|TestLinuxVncSavedCredentialIDCase|TestVncCredentialLookupPreservesCompatibilityChecks|TestMcpTokenLifecycleUsesLinuxSecretService|TestBitwardenSessionResetRepairsCorruptKeyringEntry)$'
           ./...
 
   linux-terminal-clipboard:

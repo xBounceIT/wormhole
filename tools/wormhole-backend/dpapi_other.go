@@ -112,7 +112,10 @@ func keyringProtectionKey(service, account string, create bool) ([]byte, error) 
 	if err == nil {
 		return decodeAuthProtectionKey(encoded)
 	}
-	if !errors.Is(err, keyring.ErrNotFound) || !create {
+	if !errors.Is(err, keyring.ErrNotFound) {
+		return nil, errCredentialSecretStoreUnavailable
+	}
+	if !create {
 		return nil, fmt.Errorf("system keychain is unavailable: %w", err)
 	}
 
@@ -123,7 +126,7 @@ func keyringProtectionKey(service, account string, create bool) ([]byte, error) 
 	encoded = base64.RawStdEncoding.EncodeToString(key)
 	if err := keyring.Set(service, account, encoded); err != nil {
 		clearBytes(key)
-		return nil, fmt.Errorf("cannot store the authentication key in the system keychain: %w", err)
+		return nil, errCredentialSecretStoreUnavailable
 	}
 	return key, nil
 }

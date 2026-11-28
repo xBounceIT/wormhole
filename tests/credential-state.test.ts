@@ -405,7 +405,7 @@ test('SSH key credential import keeps key paths and material behind the native b
   );
   assert.match(
     appSource,
-    /privateKeyPassphraseRetryRequired && !draft\.clearPassphrase && !passphrase/,
+    /draft\.kind === 'sshKey' &&\s+privateKeyPassphraseRetryRequired &&\s+!draft\.clearPassphrase &&\s+!passphrase/,
   );
   assert.match(
     appSource,

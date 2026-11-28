@@ -98,7 +98,7 @@ window.runCertificateTests = async () => {
   let pendingKey: Promise<any> | undefined;
   let certificateSelection: any = certificate;
   let pickerError: unknown;
-  let saveError = false;
+  let saveError: Error | undefined;
   let pendingCertificate: Promise<any> | undefined;
   const bridge = {
     selectSshPrivateKey: async () => {
@@ -119,24 +119,27 @@ window.runCertificateTests = async () => {
     },
   } as unknown as NonNullable<Window['wormhole']>;
   let mountID = 0;
-  const mountEditor = async (credential?: WormholeWorkspaceCredential, authorized = true) => {
+  const mountEditor = async (
+    credential?: WormholeWorkspaceCredential,
+    { authorized = true, editorOnly = true } = {},
+  ) => {
     window.wormhole = bridge;
     await React.act(async () =>
       root.render(
         <TooltipProvider>
           <CredentialsPage
             key={++mountID}
-            editorOnly
+            editorOnly={editorOnly}
             initialCredentials={credential ? [credential] : []}
             initialEditor={{ credential, username: 'operator' }}
             isAuthorized={authorized}
             onCreate={async (request) => {
               requests.push(request);
-              if (saveError) throw new Error('certificate does not match');
+              if (saveError) throw saveError;
             }}
             onUpdate={async (id, request) => {
               requests.push({ ...request, id });
-              if (saveError) throw new Error('certificate does not match');
+              if (saveError) throw saveError;
             }}
             onDelete={async () => {}}
           />
@@ -145,6 +148,35 @@ window.runCertificateTests = async () => {
     );
     await tick();
   };
+
+  await mountEditor(undefined, { editorOnly: false });
+  await click(button('Add credential', document));
+  await input('credential-name', 'SSH password');
+  await input('credential-username', 'operator');
+  await input('credential-password', 'test-password');
+  const passwordField = document.getElementById('credential-password') as HTMLInputElement;
+  assert.equal(passwordField.defaultValue, '', 'the password must stay out of the rendered markup');
+  const guidance =
+    'Start a freedesktop Secret Service provider, unlock its keyring, and try again.';
+  saveError = new Error(
+    `Error invoking remote method 'workspace:create-credential': Error: ${guidance}`,
+  );
+  await click(button('Add credential'));
+  assert.equal(dialog().getAttribute('data-state'), 'open');
+  assert.equal(dialog().querySelector('[role="alert"]')?.textContent, guidance);
+  assert.equal(button('Add credential').disabled, false);
+  const failedRequest = requests.at(-1);
+  assert.equal(failedRequest.password, 'test-password');
+  const attempts = requests.length;
+  saveError = undefined;
+  await click(button('Add credential'));
+  assert.equal(requests.length, attempts + 1);
+  assert.deepEqual(requests.at(-1), failedRequest);
+  assert.equal(passwordField.value, '', 'closing the editor must clear the password immediately');
+  assert.ok(
+    !document.querySelector('[role="dialog"][data-state="open"]'),
+    'the credential editor should close after a successful retry',
+  );
 
   await mountEditor();
   assert.match(certificateRow().textContent!, /No certificate attached/);
@@ -172,7 +204,7 @@ window.runCertificateTests = async () => {
   pickerError = undefined;
   certificateSelection = certificate;
   await input('credential-key-passphrase', 'one-shot-pass');
-  saveError = true;
+  saveError = new Error('certificate does not match');
   await submit();
   assert.equal(
     (document.getElementById('credential-key-passphrase') as HTMLInputElement).value,
@@ -180,8 +212,13 @@ window.runCertificateTests = async () => {
   );
   assert.equal(requests.at(-1).certificateSelectionId, certificate.selectionId);
   assert.equal(requests.at(-1).passphrase, 'one-shot-pass');
-  saveError = false;
-  await click(button('Cancel'));
+  saveError = undefined;
+  await select('credential-kind', 'Password');
+  await input('credential-password', 'replacement-password');
+  await submit();
+  assert.equal(requests.at(-1).kind, 'password');
+  assert.equal(requests.at(-1).password, 'replacement-password');
+  assert.equal(requests.at(-1).passphrase, '');
 
   await mountEditor(saved);
   assert.match(certificateRow().textContent!, /Expired/);
@@ -263,7 +300,7 @@ window.runCertificateTests = async () => {
   await tick();
   assert.ok(discarded.includes(key.selectionId));
   pendingKey = undefined;
-  await mountEditor(saved, false);
+  await mountEditor(saved, { authorized: false });
   assert.equal(document.querySelector('[role="dialog"]'), null);
 
   // Locking resets the editor while its authorized mutation may still finish.
@@ -302,6 +339,8 @@ window.runCertificateTests = async () => {
     await regular(true);
     await click(button('Add credential', document));
     await input('credential-name', 'Keep this draft');
+    await input('credential-password', 'unsaved-password');
+    const unsavedPassword = document.getElementById('credential-password') as HTMLInputElement;
     await React.act(async () => {
       if (rejectSave) failSave(new Error('old operation failed'));
       else finishSave();
@@ -318,7 +357,9 @@ window.runCertificateTests = async () => {
       'Keep this draft',
     );
     assert.doesNotMatch(dialog().textContent!, /old operation failed/);
-    await click(button('Cancel'));
+    if (rejectSave) await regular(false);
+    else await click(button('Cancel'));
+    assert.equal(unsavedPassword.value, '');
   }
   await React.act(async () => root.unmount());
 

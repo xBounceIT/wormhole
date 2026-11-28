@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 	"unicode"
@@ -126,6 +127,14 @@ type pendingCredentialSecretOperation struct {
 	encoding  string
 }
 
+func credentialProtectionError(err, fallback error) error {
+	if runtime.GOOS == "linux" && errors.Is(err, errCredentialSecretStoreUnavailable) {
+		return errors.New("Wormhole needs a freedesktop Secret Service provider to save this credential. " +
+			"Start a provider such as GNOME Keyring in your current desktop session, unlock its keyring, and try again.")
+	}
+	return fallback
+}
+
 func stageCredentialSecretWrite(
 	database *sql.DB,
 	id string,
@@ -154,7 +163,7 @@ VALUES (?, ?, ?, ?);`, reference, id, preparedEncoding, time.Now().UTC().Format(
 	encoded, encoding, err := credentialSecretStore(id, reference, value)
 	if err != nil {
 		staged.rollback(database)
-		return nil, errors.New("could not protect the credential secret")
+		return nil, credentialProtectionError(err, errors.New("could not protect the credential secret"))
 	}
 	if staged.journalReference != "" && (encoded != reference || encoding != preparedEncoding) {
 		staged.rollback(database)
@@ -330,7 +339,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
 		stagedPrivateKey, err = stageCredentialPrivateKeyWrite(databasePath, id, privateKey)
 		if err != nil {
 			_ = deleteCredentialPrivateKey(databasePath, id)
-			return credentialRecord{}, errors.New("could not protect the SSH private key")
+			return credentialRecord{}, credentialProtectionError(err, errors.New("could not protect the SSH private key"))
 		}
 	}
 	if stagedSecret != nil {
@@ -430,6 +439,7 @@ func updateCredential(databasePath string, request credentialUpdateRequest, elec
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return credentialRecord{}, fmt.Errorf("could not read credential secret: %w", err)
 	}
+	hasStoredSecret := err == nil
 	if kind == 0 && draft.provider == 0 && draft.password == "" &&
 		(!previousEncoded.Valid || !previousEncoding.Valid) {
 		return credentialRecord{}, errors.New("the stored credential password is missing; enter it again")
@@ -446,7 +456,7 @@ func updateCredential(databasePath string, request credentialUpdateRequest, elec
 		}
 		if err != nil {
 			clearBytes(privateKey)
-			return credentialRecord{}, errors.New("could not validate the stored SSH private key with that passphrase")
+			return credentialRecord{}, credentialProtectionError(err, errors.New("could not validate the stored SSH private key with that passphrase"))
 		}
 	}
 	defer clearBytes(privateKey)
@@ -455,10 +465,14 @@ func updateCredential(databasePath string, request credentialUpdateRequest, elec
 	}
 	certificate, certificateFileName := nullableString(previousCertificate), nullableString(previousCertificateFileName)
 	validationPassphrase := draft.passphrase
-	if draft.certificatePath != "" && draft.privateKeyPath == "" && validationPassphrase == "" && !draft.clearPassphrase {
-		storedPassphrase, readErr := readOptionalCredentialSecret(database, id, electronUserDataPath...)
+	if hasStoredSecret && draft.certificatePath != "" && draft.privateKeyPath == "" && validationPassphrase == "" && !draft.clearPassphrase {
+		storedPassphrase, readErr := unprotectStoredSecret(id, previousEncoded.String, previousEncoding.String, electronUserDataPath...)
 		if readErr != nil {
-			return credentialRecord{}, readErr
+			fallback := sshSecretDecryptionError(readErr)
+			if strings.TrimSpace(previousEncoding.String) == linuxSecretServiceEncoding {
+				return credentialRecord{}, credentialProtectionError(readErr, fallback)
+			}
+			return credentialRecord{}, fallback
 		}
 		validationPassphrase = string(storedPassphrase)
 		clearBytes(storedPassphrase)
@@ -560,7 +574,7 @@ WHERE lower(Id) = ? AND COALESCE(Kind, 0) = 1 AND COALESCE(SecretProvider, 0) = 
 	if kind == 1 && draft.privateKeyPath != "" {
 		stagedReplacement, err = stageCredentialPrivateKeyWrite(databasePath, id, privateKey)
 		if err != nil {
-			return credentialRecord{}, errors.New("could not protect the SSH private key")
+			return credentialRecord{}, credentialProtectionError(err, errors.New("could not protect the SSH private key"))
 		}
 		if err := recordCredentialPrivateKeyReplacement(tx, stagedReplacement); err != nil {
 			return credentialRecord{}, err

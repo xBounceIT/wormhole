@@ -4574,13 +4574,17 @@ func readCredentialSecret(database *sql.DB, credentialID string, electronUserDat
 		return nil, fmt.Errorf("cannot read stored SSH secret: %w", err)
 	}
 	secret, err := unprotectStoredSecret(credentialID, encoded, encoding, electronUserDataPath...)
-	if errors.Is(err, errUnsupportedSecretEncoding) {
-		return nil, errors.New("stored SSH secret uses an unsupported encoding")
-	}
 	if err != nil {
-		return nil, errors.New("stored SSH secret could not be decrypted")
+		return nil, sshSecretDecryptionError(err)
 	}
 	return secret, nil
+}
+
+func sshSecretDecryptionError(err error) error {
+	if errors.Is(err, errUnsupportedSecretEncoding) {
+		return errors.New("stored SSH secret uses an unsupported encoding")
+	}
+	return errors.New("stored SSH secret could not be decrypted")
 }
 
 func readOptionalCredentialSecret(database *sql.DB, credentialID string, electronUserDataPath ...string) ([]byte, error) {
@@ -4603,11 +4607,8 @@ func readOptionalCredentialSecret(database *sql.DB, credentialID string, electro
 		return nil, fmt.Errorf("cannot read stored SSH secret: %w", err)
 	}
 	secret, err := unprotectStoredSecret(credentialID, encoded, encoding, electronUserDataPath...)
-	if errors.Is(err, errUnsupportedSecretEncoding) {
-		return nil, errors.New("stored SSH secret uses an unsupported encoding")
-	}
 	if err != nil {
-		return nil, errors.New("stored SSH secret could not be decrypted")
+		return nil, sshSecretDecryptionError(err)
 	}
 	return secret, nil
 }
