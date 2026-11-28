@@ -54,7 +54,7 @@ func checkPostgresSlotDefault(t *testing.T, ctx context.Context, db *pgconn.PgCo
 	shared := newAccount("Default shell", "ssh", "")
 	newAccount("Personal shell", "ssh", trust.UserID.String())
 	newAccount("Desktop", "rdp", "")
-	read := func(name, status string) *SlotDefaultReview {
+	read := func(name, status string) *SlotReview {
 		t.Helper()
 		next, result, got, err := session.ReadSlotDefault(ctx, trust, tls, slot.ID, name)
 		if err != nil || got != status || (result != nil) != (got == "review") {
@@ -63,7 +63,7 @@ func checkPostgresSlotDefault(t *testing.T, ctx context.Context, db *pgconn.PgCo
 		trust = next
 		return result
 	}
-	commit := func(r *SlotDefaultReview, want string) {
+	commit := func(r *SlotReview, want string) {
 		t.Helper()
 		next, status, err := session.CommitSlotDefault(ctx, trust, tls, r, keys)
 		if err != nil || status != want {

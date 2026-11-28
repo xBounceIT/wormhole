@@ -16,21 +16,35 @@ import (
 type sharedSlotDefaultSession interface {
 	sharedRuntimeStateSession
 	SlotDefaultSupported(context.Context) (bool, error)
-	ReadSlotDefault(context.Context, sharedpg.TrustState, *sharedpg.VerifiedTLSBundle, uuid.UUID, string) (sharedpg.TrustState, *sharedpg.SlotDefaultReview, string, error)
-	CommitSlotDefault(context.Context, sharedpg.TrustState, *sharedpg.VerifiedTLSBundle, *sharedpg.SlotDefaultReview, *vault.UserKeys) (sharedpg.TrustState, string, error)
+	PersonalSlotSupported(context.Context) (bool, error)
+	ReadPersonalSlot(context.Context, sharedpg.TrustState, *sharedpg.VerifiedTLSBundle, uuid.UUID, string) (sharedpg.TrustState, *sharedpg.SlotReview, string, error)
+	CommitPersonalSlot(context.Context, sharedpg.TrustState, *sharedpg.VerifiedTLSBundle, *sharedpg.SlotReview, *vault.UserKeys) (sharedpg.TrustState, string, error)
+	ReadSlotDefault(context.Context, sharedpg.TrustState, *sharedpg.VerifiedTLSBundle, uuid.UUID, string) (sharedpg.TrustState, *sharedpg.SlotReview, string, error)
+	CommitSlotDefault(context.Context, sharedpg.TrustState, *sharedpg.VerifiedTLSBundle, *sharedpg.SlotReview, *vault.UserKeys) (sharedpg.TrustState, string, error)
 }
 
-type slotDefaultConfirmation struct{ workspace, slotRevision, credentialID, credentialRevision string }
+type slotDefaultConfirmation struct{ workspace, user, slotRevision, valueRevision, credentialID, credentialRevision string }
 
-func decodeSlotDefaultConfirmation(raw []byte, name string) (*slotDefaultConfirmation, error) {
+func decodeSlotDefaultConfirmation(raw []byte, name string, personal bool) (*slotDefaultConfirmation, error) {
 	var r slotDefaultConfirmation
-	if decodeVaultObject(raw, map[string]any{"workspaceId": &r.workspace, "slotRevision": &r.slotRevision, "credentialId": &r.credentialID, "credentialRevision": &r.credentialRevision},
-		"workspaceId", "slotRevision", "credentialId", "credentialRevision") != nil || !vaultCredentialID(r.workspace) {
+	fields := map[string]any{"workspaceId": &r.workspace, "slotRevision": &r.slotRevision, "credentialId": &r.credentialID, "credentialRevision": &r.credentialRevision}
+	required := []string{"workspaceId", "slotRevision", "credentialId", "credentialRevision"}
+	if personal {
+		fields["userId"], fields["valueRevision"] = &r.user, &r.valueRevision
+		required = append(required, "userId", "valueRevision")
+	}
+	if decodeVaultObject(raw, fields, required...) != nil || !vaultCredentialID(r.workspace) {
 		return nil, vaultwire.ErrProtocol
 	}
 	revision, err := vaultCredentialRevision(r.slotRevision, false)
-	if err != nil || revision >= math.MaxInt64 {
+	if err != nil || (!personal && revision >= math.MaxInt64) {
 		return nil, vaultwire.ErrProtocol
+	}
+	if personal {
+		revision, err = vaultCredentialRevision(r.valueRevision, true)
+		if err != nil || revision >= math.MaxInt64 || !vaultCredentialID(r.user) {
+			return nil, vaultwire.ErrProtocol
+		}
 	}
 	if name == "" {
 		if r.credentialID != "" || r.credentialRevision != "" {
@@ -43,13 +57,13 @@ func decodeSlotDefaultConfirmation(raw []byte, name string) (*slotDefaultConfirm
 }
 
 type sharedSlotDefaultReply struct {
-	Status                 string                      `json:"status"`
-	WorkspaceID            string                      `json:"workspaceId,omitempty"`
-	Choice                 *sharedpg.SlotDefaultChoice `json:"choice,omitempty"`
-	AuthenticationRequired bool                        `json:"authenticationRequired,omitempty"`
+	Status                 string               `json:"status"`
+	WorkspaceID            string               `json:"workspaceId,omitempty"`
+	Choice                 *sharedpg.SlotChoice `json:"choice,omitempty"`
+	AuthenticationRequired bool                 `json:"authenticationRequired,omitempty"`
 }
 
-func (h *vaultFoundationHandler) sharedSlotDefault(ctx context.Context, raw []byte) (json.RawMessage, error) {
+func (h *vaultFoundationHandler) sharedSlotChange(ctx context.Context, raw []byte, personal bool) (json.RawMessage, error) {
 	var action, encoded, confirmed json.RawMessage
 	defer func() { vault.Wipe(raw); vault.Wipe(encoded) }()
 	var id, name string
@@ -61,7 +75,7 @@ func (h *vaultFoundationHandler) sharedSlotDefault(ctx context.Context, raw []by
 	var confirmation *slotDefaultConfirmation
 	var err error
 	if confirmed != nil {
-		confirmation, err = decodeSlotDefaultConfirmation(confirmed, name)
+		confirmation, err = decodeSlotDefaultConfirmation(confirmed, name, personal)
 		if err != nil {
 			return nil, err
 		}
@@ -82,20 +96,24 @@ func (h *vaultFoundationHandler) sharedSlotDefault(ctx context.Context, raw []by
 	if !ok {
 		return nil, h.retire(sharedpg.ErrConfiguration)
 	}
+	supports, read, commit := session.SlotDefaultSupported, session.ReadSlotDefault, session.CommitSlotDefault
+	if personal {
+		supports, read, commit = session.PersonalSlotSupported, session.ReadPersonalSlot, session.CommitPersonalSlot
+	}
 	reply := sharedSlotDefaultReply{Status: "unavailable"}
 	var tls *sharedpg.VerifiedTLSBundle
-	var reviewed *sharedpg.SlotDefaultReview
+	var reviewed *sharedpg.SlotReview
 	var fresh bool
 	err = c.withCatalogOperation(ctx, func(ctx context.Context, trust sharedpg.TrustState, pending *sharedpg.TrustState) error {
 		runtime, err := c.observeRuntime(ctx, session, trust, pending)
-		if err != nil || !runtime.Administrator || !c.tlsManaged || runtime.TLS != sharedpg.TLSVerified ||
+		if err != nil || (!personal && !runtime.Administrator) || !c.tlsManaged || runtime.TLS != sharedpg.TLSVerified ||
 			(runtime.Security.Effective != vault.Default && runtime.Security.Effective != vault.Standard) {
 			return err
 		}
-		if confirmation != nil && confirmation.workspace != pending.WorkspaceID.String() {
+		if confirmation != nil && (confirmation.workspace != pending.WorkspaceID.String() || (personal && confirmation.user != pending.UserID.String())) {
 			return nil
 		}
-		supported, err := session.SlotDefaultSupported(ctx)
+		supported, err := supports(ctx)
 		if err != nil || !supported {
 			reply.Status = "unsupported"
 			return err
@@ -104,7 +122,7 @@ func (h *vaultFoundationHandler) sharedSlotDefault(ctx context.Context, raw []by
 		if err != nil {
 			return err
 		}
-		next, r, status, err := session.ReadSlotDefault(ctx, *pending, tls, uuid.MustParse(id), name)
+		next, r, status, err := read(ctx, *pending, tls, uuid.MustParse(id), name)
 		if next.Revision != 0 {
 			*pending = next
 		}
@@ -125,7 +143,7 @@ func (h *vaultFoundationHandler) sharedSlotDefault(ctx context.Context, raw []by
 			return nil
 		}
 		if confirmation.slotRevision != r.Choice.SlotRevision || confirmation.credentialID != r.Choice.CredentialID ||
-			confirmation.credentialRevision != r.Choice.CredentialRevision || r.Unchanged() {
+			confirmation.credentialRevision != r.Choice.CredentialRevision || confirmation.valueRevision != r.Choice.ValueRevision || r.Unchanged() {
 			reply.Status = "stale"
 			return nil
 		}
@@ -151,7 +169,7 @@ func (h *vaultFoundationHandler) sharedSlotDefault(ctx context.Context, raw []by
 				return sharedpg.ErrTrustState
 			}
 			keys := &vault.UserKeys{EncryptionPrivate: raw[:32:32], SigningSeed: raw[32:]}
-			next, status, err := session.CommitSlotDefault(ctx, trust, tls, reviewed, keys)
+			next, status, err := commit(ctx, trust, tls, reviewed, keys)
 			if next.Revision != 0 && next.Revision != trust.Revision {
 				if e := c.commitCatalogTrust(trust, next); e != nil {
 					return e

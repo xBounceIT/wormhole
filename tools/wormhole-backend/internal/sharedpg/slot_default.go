@@ -20,9 +20,9 @@ const slotDefaultSQL = `SELECT status,epoch::text,change_seq::text,slot_row::tex
  FROM wormhole_api_v1.slot_default(` + serverCAArguments + `,$10::uuid,$11,$12::bigint,pg_catalog.decode($13,'hex'),
  $14::uuid,pg_catalog.decode($15,'hex'),pg_catalog.decode($16,'hex'))`
 
-// SlotDefaultChoice is the public confirmation. The native review retains the
+// SlotChoice is the public confirmation. The native review retains the
 // signed inputs until the controller has durably committed their trust floors.
-type SlotDefaultChoice struct {
+type SlotChoice struct {
 	SlotID             string `json:"slotId"`
 	SlotName           string `json:"slotName"`
 	SlotRevision       string `json:"slotRevision"`
@@ -31,20 +31,27 @@ type SlotDefaultChoice struct {
 	CredentialID       string `json:"credentialId"`
 	CredentialRevision string `json:"credentialRevision"`
 	HasDefault         bool   `json:"hasDefault"`
+	UserID             string `json:"userId,omitempty"`
+	ValueRevision      string `json:"valueRevision,omitempty"`
+	HasAssignment      bool   `json:"hasAssignment,omitempty"`
+	Provider           string `json:"provider,omitempty"`
 }
 
-type SlotDefaultReview struct {
-	Choice          SlotDefaultChoice
-	workspace, user uuid.UUID
-	slot            *UnverifiedSelection
-	credential      *UnverifiedCredential
+type SlotReview struct {
+	Choice                       SlotChoice
+	workspace, user              uuid.UUID
+	slot                         *UnverifiedSelection
+	value                        *UnverifiedSelection
+	credential                   *UnverifiedCredential
+	slotAuthor, credentialAuthor *UnverifiedNodeAuthor
+	personal                     bool
 }
 
 func (s *Session) SlotDefaultSupported(ctx context.Context) (bool, error) {
 	return s.serverCapability(ctx, slotDefaultAvailableSQL)
 }
 
-func (s *Session) ReadSlotDefault(ctx context.Context, trust TrustState, tls *VerifiedTLSBundle, id uuid.UUID, name string) (TrustState, *SlotDefaultReview, string, error) {
+func (s *Session) ReadSlotDefault(ctx context.Context, trust TrustState, tls *VerifiedTLSBundle, id uuid.UUID, name string) (TrustState, *SlotReview, string, error) {
 	if ctx == nil || id == uuid.Nil || (name != "" && !adminGroupText(name, 1024)) {
 		return trust, nil, "", ErrConfiguration
 	}
@@ -52,7 +59,7 @@ func (s *Session) ReadSlotDefault(ctx context.Context, trust TrustState, tls *Ve
 		return trust, nil, "", err
 	}
 	args := [][]byte{[]byte(id.String()), []byte(name), nil, nil, nil, nil, nil}
-	var review *SlotDefaultReview
+	var review *SlotReview
 	var status string
 	err := s.queryServerCA(ctx, trust, slotDefaultSQL, args, 2*adminSlotPageMaxBytes, 1, 5, func(rows [][][]byte) error {
 		var err error
@@ -65,7 +72,11 @@ func (s *Session) ReadSlotDefault(ctx context.Context, trust TrustState, tls *Ve
 	return trust, review, status, nil
 }
 
-func verifySlotDefault(rows [][][]byte, trust TrustState, id uuid.UUID, name, expected string) (TrustState, *SlotDefaultReview, string, error) {
+func verifySlotDefault(rows [][][]byte, trust TrustState, id uuid.UUID, name, expected string) (TrustState, *SlotReview, string, error) {
+	return verifyNamedSlot(rows, trust, id, name, expected, false)
+}
+
+func verifyNamedSlot(rows [][][]byte, trust TrustState, id uuid.UUID, name, expected string, personal bool) (TrustState, *SlotReview, string, error) {
 	if len(rows) != 1 || len(rows[0]) != 5 {
 		return trust, nil, "", ErrAdmissionResponse
 	}
@@ -100,7 +111,10 @@ func verifySlotDefault(rows [][][]byte, trust TrustState, id uuid.UUID, name, ex
 		return trust, nil, "", err
 	}
 	record := slot.Record.(sharedcatalog.SlotRecord)
-	review := &SlotDefaultReview{workspace: trust.WorkspaceID, user: trust.UserID, slot: slot, Choice: SlotDefaultChoice{
+	if personal && !record.AllowSelfService {
+		return trust, nil, "", ErrAdmissionResponse
+	}
+	review := &SlotReview{workspace: trust.WorkspaceID, user: trust.UserID, slot: slot, slotAuthor: author, personal: personal, Choice: SlotChoice{
 		SlotID: record.ID, SlotName: record.Name, SlotRevision: strconv.FormatUint(slot.Seal.Revision, 10), Protocol: record.Protocol, HasDefault: record.DefaultCredentialID != "",
 	}}
 	if name != "" {
@@ -131,28 +145,46 @@ func verifySlotDefault(rows [][][]byte, trust TrustState, id uuid.UUID, name, ex
 			return trust, nil, "", ErrAdmissionResponse
 		}
 		meta := credential.Record.Metadata
-		if meta.Name != name || meta.Protocol != record.Protocol || meta.Provider != "local" || meta.OwnerUserID != "" {
+		if meta.Name != name || meta.Protocol != record.Protocol {
+			return trust, nil, "", ErrAdmissionResponse
+		}
+		if personal {
+			if meta.OwnerUserID != trust.UserID.String() || credential.Boundary != personalImportBoundaryID(trust.WorkspaceID, trust.UserID) || (meta.Provider != "local" && meta.Provider != "bitwarden") {
+				return trust, nil, "", ErrAdmissionResponse
+			}
+		} else if meta.OwnerUserID != "" || meta.Provider != "local" {
 			return trust, nil, "", ErrAdmissionResponse
 		}
 		review.credential = credential
+		review.credentialAuthor = signer
 		review.Choice.CredentialName, review.Choice.CredentialID, review.Choice.CredentialRevision = meta.Name, meta.ID, strconv.FormatUint(credential.Seal.Revision, 10)
 	}
-	if expected == "review" && slot.Seal.Revision >= math.MaxInt64 {
+	if !personal && expected == "review" && slot.Seal.Revision >= math.MaxInt64 {
 		return trust, nil, "unavailable", nil
 	}
 	return trust, review, status, nil
 }
 
-func (r *SlotDefaultReview) Unchanged() bool {
+func (r *SlotReview) Unchanged() bool {
 	selected := ""
 	if r.credential != nil {
 		selected = r.credential.Record.Metadata.ID
 	}
-	return r.slot.Record.(sharedcatalog.SlotRecord).DefaultCredentialID == selected
+	if !r.personal {
+		return r.slot.Record.(sharedcatalog.SlotRecord).DefaultCredentialID == selected
+	}
+	if r.value == nil {
+		return selected == ""
+	}
+	value := r.value.Record.(sharedcatalog.SlotValueRecord)
+	if value.Deleted {
+		return selected == ""
+	}
+	return value.CredentialID == selected
 }
 
-func (s *Session) CommitSlotDefault(ctx context.Context, trust TrustState, tls *VerifiedTLSBundle, r *SlotDefaultReview, keys *vault.UserKeys) (TrustState, string, error) {
-	if ctx == nil || r == nil || r.workspace != trust.WorkspaceID || r.user != trust.UserID || r.slot == nil || keys == nil || r.slot.Seal.Revision >= math.MaxInt64 {
+func (s *Session) CommitSlotDefault(ctx context.Context, trust TrustState, tls *VerifiedTLSBundle, r *SlotReview, keys *vault.UserKeys) (TrustState, string, error) {
+	if ctx == nil || r == nil || r.personal || r.workspace != trust.WorkspaceID || r.user != trust.UserID || r.slot == nil || keys == nil || r.slot.Seal.Revision >= math.MaxInt64 {
 		return trust, "", ErrConfiguration
 	}
 	if _, err := authenticatedServerCAContext(trust, tls); err != nil {
@@ -188,7 +220,7 @@ func (s *Session) CommitSlotDefault(ctx context.Context, trust TrustState, tls *
 	args := [][]byte{[]byte(record.ID), []byte(name), strconv.AppendUint(nil, r.slot.Seal.Revision, 10), hex.AppendEncode(nil, r.slot.Seal.Signature), credentialID, credentialSeal, hex.AppendEncode(nil, seal.Signature)}
 	var status string
 	err = s.queryServerCA(ctx, trust, slotDefaultSQL, args, 2*adminSlotPageMaxBytes, 1, 5, func(rows [][][]byte) error {
-		var receipt *SlotDefaultReview
+		var receipt *SlotReview
 		var err error
 		trust, receipt, status, err = verifySlotDefault(rows, trust, uuid.MustParse(record.ID), name, "saved")
 		if err == nil && receipt != nil && (receipt.slot.Record != record || receipt.slot.Boundary != r.slot.Boundary ||

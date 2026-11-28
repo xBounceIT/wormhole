@@ -97,6 +97,7 @@ export function encodeVaultBytesFrame(
     | 'shared-ssh-host-trust'
     | 'shared-node-edit'
     | 'shared-slot-default'
+    | 'shared-personal-slot'
     | 'shared-recovery-export'
     | 'shared-account-reset-issue'
     | 'shared-personal-root-recovery'

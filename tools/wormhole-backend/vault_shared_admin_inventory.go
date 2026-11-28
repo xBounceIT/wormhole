@@ -46,7 +46,7 @@ func (h *vaultFoundationHandler) sharedAdminInventory(ctx context.Context, raw [
 	if err != nil {
 		return nil, err
 	}
-	if request.Kind == "slots" {
+	if request.Kind == "slots" || request.Kind == "my-slots" {
 		return h.sharedCredentialSlotInventory(ctx, request)
 	}
 	reply := sharedAdminInventoryReply{Status: "unavailable"}
@@ -82,6 +82,7 @@ type sharedCredentialSlotInventorySession interface {
 	sharedRuntimeStateSession
 	AdminInventorySupported(context.Context, string) (bool, error)
 	AdminCredentialSlots(context.Context, sharedpg.TrustState, uuid.UUID) (sharedpg.TrustState, *sharedpg.AdminSlotPage, error)
+	PersonalCredentialSlots(context.Context, sharedpg.TrustState, uuid.UUID) (sharedpg.TrustState, *sharedpg.AdminSlotPage, error)
 }
 
 func (h *vaultFoundationHandler) sharedCredentialSlotInventory(ctx context.Context, request sharedpg.AdminInventoryRequest) (json.RawMessage, error) {
@@ -99,10 +100,10 @@ func (h *vaultFoundationHandler) sharedCredentialSlotInventory(ctx context.Conte
 	}{Status: "unavailable"}
 	err = controller.withCatalogOperation(ctx, func(ctx context.Context, current sharedpg.TrustState, pending *sharedpg.TrustState) error {
 		runtime, err := controller.observeRuntime(ctx, session, current, pending)
-		if err != nil || !runtime.Administrator {
+		if err != nil || runtime.TLS != sharedpg.TLSVerified || (request.Kind == "slots" && !runtime.Administrator) {
 			return err
 		}
-		supported, err := session.AdminInventorySupported(ctx, "slots")
+		supported, err := session.AdminInventorySupported(ctx, request.Kind)
 		if err != nil {
 			return err
 		}
@@ -114,7 +115,11 @@ func (h *vaultFoundationHandler) sharedCredentialSlotInventory(ctx context.Conte
 		if request.Next != nil {
 			after = request.Next.ID
 		}
-		next, page, err := session.AdminCredentialSlots(ctx, *pending, after)
+		list := session.AdminCredentialSlots
+		if request.Kind == "my-slots" {
+			list = session.PersonalCredentialSlots
+		}
+		next, page, err := list(ctx, *pending, after)
 		if next.Revision != 0 {
 			*pending = next
 		}

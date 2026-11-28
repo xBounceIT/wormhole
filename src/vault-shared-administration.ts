@@ -34,6 +34,7 @@ export type SharedAdministrationApi = {
   adminInventory(request: AdminInventoryRequest): Promise<AdminInventoryReply>;
   createSlot?: CreateSlotPort;
   slotDefault?: SlotDefaultPort;
+  personalSlot?: SlotDefaultPort;
   adminGroups?: GroupAdminPort;
   grantTargets?: NodeGrantAdministration['catalog'];
   nodeGrant?: NodeGrantAdministration['grant'];
@@ -56,6 +57,7 @@ const sections: Record<AdminInventoryKind, string> = {
   slots: 'Credential slots',
   devices: 'Devices',
   'my-devices': 'My devices',
+  'my-slots': 'My credential slots',
   sessions: 'Recorded sessions',
   'unencrypted-clients': 'Unencrypted clients',
   audit: 'Audit',
@@ -76,7 +78,11 @@ export function mountSharedAdministration(
   const header = document.createElement('header');
   header.className = 'workspace-admin-header';
   const heading = document.createElement('h1');
-  heading.textContent = ownDevicesOnly ? 'My devices' : 'Workspace administration';
+  heading.textContent = ownDevicesOnly
+    ? api.personalSlot
+      ? 'My workspace'
+      : 'My devices'
+    : 'Workspace administration';
   const location = document.createElement('span');
   location.className = 'workspace-admin-location';
   location.textContent = 'Credential slots';
@@ -84,8 +90,12 @@ export function mountSharedAdministration(
   sectionLabel.textContent = 'Section';
   const section = document.createElement('select');
   for (const [value, label] of Object.entries(sections))
-    if (!ownDevicesOnly || value === 'my-devices') section.add(new Option(label, value));
-  sectionLabel.hidden = ownDevicesOnly;
+    if (
+      (value !== 'my-slots' || api.personalSlot) &&
+      (!ownDevicesOnly || value === 'my-devices' || value === 'my-slots')
+    )
+      section.add(new Option(label, value));
+  sectionLabel.hidden = section.options.length === 1;
   if (!ownDevicesOnly && api.adminGroups) section.add(new Option('Groups', 'groups'));
   const grantPort =
     !ownDevicesOnly && api.grantTargets && api.nodeGrant
@@ -272,7 +282,7 @@ export function mountSharedAdministration(
         const label = document.createElement('strong');
         const detail = document.createElement('p');
         const localTime = record.at ? new Date(record.at).toLocaleString() : '';
-        if (request.kind === 'slots') {
+        if (request.kind === 'slots' || request.kind === 'my-slots') {
           label.textContent = record.name ?? record.id;
           detail.textContent = [
             record.protocol?.toUpperCase(),
@@ -318,22 +328,24 @@ export function mountSharedAdministration(
           ].join(' · ');
         }
         row.append(label, detail);
-        if (request.kind === 'slots') {
+        if (request.kind === 'slots' || request.kind === 'my-slots') {
           const identifier = document.createElement('code');
           identifier.textContent = record.id;
           row.append('Slot ID ', identifier);
-          const changeDefault = api.slotDefault;
-          if (!ownDevicesOnly && changeDefault) {
+          const personal = request.kind === 'my-slots';
+          const changeDefault = personal ? api.personalSlot : !ownDevicesOnly && api.slotDefault;
+          if (changeDefault) {
             const edit = document.createElement('button');
             edit.type = 'button';
             edit.className = 'startup-button startup-button-secondary';
-            edit.textContent = 'Manage shared default';
+            edit.textContent = personal ? 'Manage my credential' : 'Manage shared default';
             edit.setAttribute('aria-label', edit.textContent + ' · ' + label.textContent);
             edit.onclick = () => {
               if (disposed || section.disabled) return;
               disposePanel?.();
               previous.hidden = next.hidden = refresh.hidden = list.hidden = status.hidden = true;
               sectionLabel.hidden = true;
+              location.textContent = sections[request.kind];
               section.disabled = true;
               adminPanel.hidden = false;
               accessNotice.textContent = '';
@@ -344,7 +356,7 @@ export function mountSharedAdministration(
                 changeDefault,
                 (message) => {
                   if (disposed) return;
-                  sectionLabel.hidden = false;
+                  sectionLabel.hidden = section.options.length === 1;
                   previous.hidden =
                     next.hidden =
                     refresh.hidden =
@@ -354,6 +366,7 @@ export function mountSharedAdministration(
                   if (message) accessNotice.textContent = message;
                   void load(request, history);
                 },
+                personal,
               );
             };
             row.append(edit);

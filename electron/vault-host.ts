@@ -312,6 +312,7 @@ export type VaultPresenceAuthentication = (
 export type SharedAdministrationPorts = {
   read(request: AdminInventoryRequest): Promise<AdminInventoryReply>;
   createSlot?: CreateSlotPort;
+  personalSlot?: SharedAdministrationPorts['slotDefault'];
   slotDefault?: (
     request: SlotDefaultRequest,
     factors: PersonalRootRecoveryFactors | undefined,
@@ -337,6 +338,10 @@ type Client = BrowserTransferClient &
   VPNSSOClient & {
     sharedAdminInventory(request: AdminInventoryRequest): Promise<AdminInventoryReply>;
     sharedCreateCredentialSlot: CreateSlotPort;
+    sharedPersonalSlot(
+      request: SlotDefaultRequest,
+      auth?: Omit<SharedVaultUnlockInput, 'appVersion'>,
+    ): Promise<SlotDefaultReply>;
     sharedSlotDefault(
       request: SlotDefaultRequest,
       auth?: Omit<SharedVaultUnlockInput, 'appVersion'>,
@@ -3122,12 +3127,14 @@ export class VaultBackendHost {
       );
     await open(owner.current, {
       read: (request) =>
-        administrator || request.kind === 'my-devices'
+        administrator || request.kind === 'my-devices' || request.kind === 'my-slots'
           ? read((client) => client.sharedAdminInventory(request))
           : Promise.resolve({ status: 'unavailable' }),
       createSlot: administrator
         ? (request) => read((client) => client.sharedCreateCredentialSlot(request))
         : undefined,
+      personalSlot: (request, factors, accepted) =>
+        withFactors(accepted, factors, (client, auth) => client.sharedPersonalSlot(request, auth)),
       slotDefault: administrator
         ? (request, factors, accepted) =>
             withFactors(accepted, factors, (client, auth) =>

@@ -5,6 +5,11 @@ import { mkdtemp, mkdir, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { VaultSharedSetupDialog } from '../electron/vault-shared-setup-dialog.ts';
+import {
+  confirmedSlotDefault,
+  parseSlotDefaultReply,
+  parseSlotDefaultRequest,
+} from '../electron/vault-shared-slot-default.ts';
 import { parsePersonalRootRecoveryReply } from '../electron/vault-account-suspension.ts';
 import {
   parseWorkspaceAccessReply,
@@ -160,6 +165,7 @@ function fixture(
       }),
     inventory: (...args: any[]) => handlers.get('vault-shared-setup:admin-inventory')!(...args),
     slotDefault: (...args: any[]) => handlers.get('vault-shared-setup:slot-default')!(...args),
+    personalSlot: (...args: any[]) => handlers.get('vault-shared-setup:personal-slot')!(...args),
     access: (...args: any[]) => handlers.get('vault-shared-setup:workspace-access')!(...args),
     suspension: (...args: any[]) => handlers.get('vault-shared-setup:account-suspension')!(...args),
     accountRotation: (...args: any[]) =>
@@ -243,6 +249,72 @@ test('slot defaults require one matching review in the protected administrator w
     assert.deepEqual(await f.slotDefault(f.event, commit, correct), { status: 'saved' });
     assert.ok(correct.password.every((v) => v === 0) && correct.ask.every((v) => v === 0));
     await assert.rejects(f.slotDefault(f.event, commit, factors()), /review/i);
+    assert.equal(saves, 1);
+  } finally {
+    await f.dialog.cancel();
+    await opened;
+  }
+});
+
+test('a personal slot review binds the account and the assignment revision in its own protected window', async () => {
+  const f = fixture();
+  const input = { slotId: offerId, credentialName: 'My desktop' };
+  const choice = {
+    ...input,
+    slotName: 'Operations',
+    slotRevision: '9223372036854775807',
+    protocol: 'rdp' as const,
+    userId: resetRequestId,
+    valueRevision: '0',
+    hasDefault: true,
+    credentialId: offerId,
+    credentialRevision: '2',
+    provider: 'bitwarden' as const,
+  };
+  const review = { status: 'review' as const, workspaceId, choice };
+  const commit = confirmedSlotDefault(review);
+  assert.deepEqual(parseSlotDefaultRequest(commit, true), commit);
+  assert.deepEqual(parseSlotDefaultReply(review, input, true), review);
+  assert.equal(parseSlotDefaultRequest(commit), undefined);
+  assert.equal(parseSlotDefaultReply(review, input), undefined);
+  for (const invalid of [
+    { userId: 'other' },
+    { valueRevision: '00' },
+    { valueRevision: '9223372036854775807' },
+    { provider: 'unknown' },
+    { hasAssignment: true },
+    { bitwardenItemId: 'private' },
+  ])
+    assert.equal(
+      parseSlotDefaultReply({ ...review, choice: { ...choice, ...invalid } }, input, true),
+      undefined,
+    );
+  let saves = 0;
+  const opened = f.dialog.openAdministration(f.parent as any, () => true, {
+    ownDevicesOnly: true,
+    read: async () => ({ status: 'unavailable' }),
+    personalSlot: async (request) => {
+      if (!request.confirmation) return review;
+      assert.deepEqual(request, commit);
+      saves++;
+      return { status: 'saved' };
+    },
+  });
+  try {
+    await f.personalSlot(f.event, input);
+    await assert.rejects(f.slotDefault(f.event, commit), /review/i);
+    await assert.rejects(f.personalSlot(f.event, commit), /review/i);
+    await f.personalSlot(f.event, input);
+    await assert.rejects(
+      f.personalSlot(f.event, {
+        ...input,
+        confirmation: { ...commit.confirmation, userId: workspaceId },
+      }),
+      /review/i,
+    );
+    await f.personalSlot(f.event, input);
+    assert.deepEqual(await f.personalSlot(f.event, commit), { status: 'saved' });
+    await assert.rejects(f.personalSlot(f.event, commit), /review/i);
     assert.equal(saves, 1);
   } finally {
     await f.dialog.cancel();
@@ -652,7 +724,7 @@ const inspectedArchive = {
 const archiveDigest = 'e'.repeat(64);
 
 test('restore receipt exposes only bounded display and deployment identity', () => {
-  const current = { ...inspectedArchive, sourceSchemaVersion: 99 };
+  const current = { ...inspectedArchive, sourceSchemaVersion: 100 };
   assert.deepEqual(parseSharedRecoveryInspection({ status: 'ready', summary: current }), {
     status: 'ready',
     summary: current,
@@ -675,7 +747,7 @@ test('restore receipt exposes only bounded display and deployment identity', () 
     { ...inspectedArchive, nodes: -1 },
     { ...inspectedArchive, accounts: 100001 },
     { ...inspectedArchive, sourceSchemaVersion: 48 },
-    { ...inspectedArchive, sourceSchemaVersion: 100 },
+    { ...inspectedArchive, sourceSchemaVersion: 101 },
     { ...inspectedArchive, sourceSchemaVersion: 55.5 },
     { ...inspectedArchive, sourceSchemaVersion: '85' },
     { ...inspectedArchive, profile: 'hardened' },

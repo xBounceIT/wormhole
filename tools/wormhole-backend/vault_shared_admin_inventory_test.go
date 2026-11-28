@@ -14,6 +14,10 @@ import (
 
 type adminInventoryMemberProbe struct{ *credentialReleaseProbe }
 
+func (p *adminInventoryMemberProbe) PersonalCredentialSlots(context.Context, sharedpg.TrustState, uuid.UUID) (sharedpg.TrustState, *sharedpg.AdminSlotPage, error) {
+	panic("administration request used personal slot inventory")
+}
+
 func (p *adminInventoryMemberProbe) AdminCredentialSlots(context.Context, sharedpg.TrustState, uuid.UUID) (sharedpg.TrustState, *sharedpg.AdminSlotPage, error) {
 	panic("member reached the credential slots query")
 }

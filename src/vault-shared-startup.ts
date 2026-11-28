@@ -220,7 +220,7 @@ export function mountSharedStartup(
           !api.openSharedAccountReset;
         administration.hidden = tls !== 'verified' || !api.openSharedAdministration;
         administration.textContent =
-          result.administrator === true ? 'Workspace administration…' : 'My devices…';
+          result.administrator === true ? 'Workspace administration…' : 'My workspace…';
         if (tls === 'verified' && api.renewSharedServerCertificate) {
           disposeRenewal = mountSharedCertificateRenewal(
             card,

@@ -116,4 +116,7 @@ func checkPostgresCreateCredentialSlot(t *testing.T, ctx context.Context, dba *p
 	t.Run("shared-default", func(t *testing.T) {
 		checkPostgresSlotDefault(t, ctx, dba, session, pinned, tls, keys, slot, boundary.BoundaryID)
 	})
+	t.Run("personal-value", func(t *testing.T) {
+		checkPostgresPersonalSlot(t, ctx, dba, session, pinned, tls, keys, slot, boundary.BoundaryID)
+	})
 }

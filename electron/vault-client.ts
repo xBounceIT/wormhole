@@ -2124,15 +2124,27 @@ export class VaultBackendClient {
     value: unknown,
     authentication?: Omit<SharedVaultUnlockInput, 'appVersion'>,
   ): Promise<SlotDefaultReply> {
-    const request = parseSlotDefaultRequest(value);
+    return this.sharedSlotChange(value, authentication, false);
+  }
+
+  sharedPersonalSlot(value: unknown, authentication?: Omit<SharedVaultUnlockInput, 'appVersion'>) {
+    return this.sharedSlotChange(value, authentication, true);
+  }
+
+  private sharedSlotChange(
+    value: unknown,
+    authentication: Omit<SharedVaultUnlockInput, 'appVersion'> | undefined,
+    personal: boolean,
+  ): Promise<SlotDefaultReply> {
+    const request = parseSlotDefaultRequest(value, personal);
     if (!request || (authentication && !request.confirmation)) {
       authentication?.password.fill(0);
       authentication?.ask?.fill(0);
       return Promise.reject(Error('Invalid shared slot default.'));
     }
     return this.sharedCustodianRequest(
-      'shared-slot-default',
-      (v) => parseSlotDefaultReply(v, request),
+      personal ? 'shared-personal-slot' : 'shared-slot-default',
+      (v) => parseSlotDefaultReply(v, request, personal),
       { action: request },
       authentication,
     );
@@ -2288,6 +2300,7 @@ export class VaultBackendClient {
     operation:
       | 'shared-tighten-profile'
       | 'shared-slot-default'
+      | 'shared-personal-slot'
       | 'shared-node-edit'
       | 'shared-ssh-host-trust'
       | 'shared-recovery-kit-refresh'
@@ -2861,6 +2874,7 @@ export class VaultBackendClient {
       | 'shared-account-reset-redeem'
       | 'shared-tighten-profile'
       | 'shared-slot-default'
+      | 'shared-personal-slot'
       | 'shared-node-edit'
       | 'shared-ssh-host-trust'
       | 'shared-recovery-kit-refresh'
@@ -2961,6 +2975,7 @@ export class VaultBackendClient {
       | 'shared-tls-export'
       | 'shared-tighten-profile'
       | 'shared-slot-default'
+      | 'shared-personal-slot'
       | 'shared-node-edit'
       | 'shared-ssh-host-trust'
       | 'shared-recovery-kit-refresh'
@@ -3254,6 +3269,7 @@ export class VaultBackendClient {
                     operation === 'shared-account-reset-targets' ||
                     operation === 'shared-admin-inventory' ||
                     operation === 'shared-slot-default' ||
+                    operation === 'shared-personal-slot' ||
                     operation === 'shared-create-credential-slot' ||
                     operation === 'shared-workspace-access' ||
                     operation === 'shared-account-suspension' ||

@@ -14,7 +14,13 @@ var adminCredentialSlotsTemplate string
 var visibleSlotPage string
 
 func renderSlotPageMigration(template, version string) string {
-	return strings.NewReplacer("{{VISIBLE_SLOT_PAGE}}", strings.TrimRight(visibleSlotPage, "\r\n"),
+	eligibility, permissions := "", "1"
+	if version == "100" {
+		eligibility = "s.allow_self_service AND EXISTS(SELECT FROM wormhole_data.boundaries b WHERE b.id=s.boundary_id AND b.owner_user_id IS NULL AND NOT b.deleted) AND "
+		permissions = "3"
+	}
+	rows := strings.NewReplacer("{{SLOT_ELIGIBILITY}}", eligibility, "{{SLOT_PERMISSIONS}}", permissions).Replace(strings.TrimRight(visibleSlotPage, "\r\n"))
+	return strings.NewReplacer("{{VISIBLE_SLOT_PAGE}}", rows,
 		"{{WEB_SUSPENSION_RESTORE_DEFINITION}}", renderWebSuspensionRestore(version)).Replace(template)
 }
 
@@ -53,6 +59,11 @@ var slotDefaultTemplate string
 
 var slotDefaultMigration = strings.Replace(slotDefaultTemplate, "{{WEB_SUSPENSION_RESTORE_DEFINITION}}", renderWebSuspensionRestore("99"), 1)
 
+//go:embed migrations/0100_personal_slot_value.sql
+var personalSlotTemplate string
+
+var personalSlotMigration = renderSlotPageMigration(personalSlotTemplate, "100")
+
 // This order matches the individual DBA upgrade scripts. A fresh deployment
 // uses the same migrations in a single transaction.
 var schemaMigrations = [...]string{
@@ -81,7 +92,7 @@ var schemaMigrations = [...]string{
 	accountReenrollmentRedemptionMigration, webSessionViewsMigration, webConnectionPlanMigration, webTunnelReleaseMigration, webSuspensionInventoryMigration,
 	auditMaintenanceMigration, unencryptedClientsMigration, sshHostPinMigration, updateNodeMigration, moveNodeMigration, suspensionRotationReceiptsMigration,
 	rowSecurityMigration, deviceConnectionLimitMigration, adminCredentialSlotsMigration, accountGroupRolesMigration, createCredentialSlotMigration, publicAPILimitsMigration,
-	slotBindingMigration, nodeSlotChoicesMigration, slotDefaultMigration,
+	slotBindingMigration, nodeSlotChoicesMigration, slotDefaultMigration, personalSlotMigration,
 }
 
 const SchemaVersion = len(schemaMigrations)

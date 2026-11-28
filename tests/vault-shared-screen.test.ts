@@ -246,7 +246,7 @@ test('shared input and startup screens consume factors and keep admission separa
         const signIn=card.querySelector('button'),signOut=[...card.querySelectorAll('button')].find(b=>b.textContent==='Sign out');
         const admin=[...card.querySelectorAll('button')].find(b=>b.textContent.startsWith('Workspace administration'));
         signIn.click();await tick();
-        check(!admin.hidden&&admin.textContent==='My devices…','verified member could not manage their own devices');
+        check(!admin.hidden&&admin.textContent==='My workspace…','verified member could not open their workspace settings');
         signOut.click();await tick();administrator=true;tls='encrypted';signIn.click();await tick();
         check(admin.hidden,'unverified transport was offered administration');
         signOut.click();await tick();tls='verified';signIn.click();await tick();

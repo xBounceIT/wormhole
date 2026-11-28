@@ -177,7 +177,7 @@ Schema 50 enables import into an untouched deployment with the matching
 workspace ID and role tag. Apply
 `deploy.WorkspaceRecoveryRestoreMigration(roleTag, workspaceID)` to upgrade a
 schema-49 deployment. Fresh scripts include the migration. The wizard opens
-archives from schemas 49 through 99.
+archives from schemas 49 through 100.
 
 Use a host approved by the archived signed TLS bundle and install a server
 certificate that verifies against it. The DBA enables the dedicated
@@ -393,6 +393,17 @@ to users without a personal assignment. Both changes require verified TLS
 and View, Write and Manage on the slot boundary. Assigning a credential also
 requires View, Use and Reveal on its boundary. Standard requires a fresh
 Wormhole password and the Account Secret Key when the device requires one.
+
+On schema 100 and later, open **My workspace** (or **Workspace administration**
+for administrators) and select **My credential slots**. Choose **Manage my
+credential** beside a slot, enter the exact name of a personal credential for
+that protocol and review it before confirming. Personal credentials can come
+from the local vault or reference a Bitwarden item. The list includes shared
+slots with self-service enabled for which the account has View and Use.
+Standard asks for fresh authentication before saving a change.
+
+Choose **Use the shared default** to clear a personal assignment. The review
+shows whether the slot has a shared default to fall back to.
 
 To enter a slot manually, copy its **Slot ID** from the administration list. In the
 connection editor choose **Credential slot** as the credential mode, clear

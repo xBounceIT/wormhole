@@ -478,6 +478,47 @@ let finishAdminPage;
     own.remove();
   }
   {
+    const card=document.createElement('section');
+    document.body.append(card);
+    const slot={id:'slot',name:'Team desktop',protocol:'rdp',allowSelfService:true};
+    let outcome='review',hasDefault=false,confirmed;
+    mountSharedAdministration(card,{
+      adminInventory:async({kind})=>{
+        check(kind==='my-devices'||kind==='my-slots','member queried another inventory');
+        return {status:'ready',page:{kind,entries:kind==='my-slots'?[slot]:[]}};
+      },
+      personalSlot:async request=>{
+        if(request.confirmation) { confirmed=request.confirmation;return {status:'saved'}; }
+        if(outcome!=='review')return {status:outcome};
+        const name=request.credentialName;
+        return {status:'review',workspaceId:'workspace',choice:{slotId:slot.id,slotName:slot.name,slotRevision:'3',protocol:'rdp',userId:'owner',valueRevision:'2',
+          credentialName:name,credentialId:name?'credential':'',credentialRevision:name?'7':'',...(name?{provider:'bitwarden'}:{}),hasDefault}};
+      },
+      close:()=>{},
+    },true);
+    await tick();
+    const menu=card.querySelector('select');
+    check(!menu.parentElement.hidden&&[...menu.options].map(o=>o.value).join(',')==='my-devices,my-slots','member navigation exposed administration');
+    menu.value='my-slots';menu.dispatchEvent(new Event('change'));await tick();
+    const press=async text=>{const b=[...card.querySelectorAll('button')].find(b=>b.textContent===text);check(b&&!b.disabled,'missing '+text);b.click();await tick()};
+    await press('Manage my credential');
+    const input=card.querySelector('fieldset input');input.value='My login';
+    for(const [state,message] of [['unavailable','personal credential'],['unsupported','personal assignments'],['unchanged','already matches']]){
+      outcome=state;await press('Review assignment');check(card.textContent.includes(message),'wrong personal status '+state);
+    }
+    outcome='review';await press('Review assignment');
+    check(card.textContent.includes('Bitwarden')&&card.textContent.includes('Your connections')&&!card.textContent.includes('Set shared default'),'wrong assignment scope');
+    await press('Set my credential');
+    check(confirmed.userId==='owner'&&confirmed.valueRevision==='2'&&card.textContent.includes('Updated your credential'),'the account or signed assignment revision was lost');
+    for(const fallback of [true,false]){
+      hasDefault=fallback;await press('Manage my credential');card.querySelector('input[type=checkbox]').click();
+      await press('Review assignment');
+      check(card.textContent.includes(fallback?'will use the shared default':'no shared default'),'clearing concealed the fallback');
+      await press('Clear my assignment');
+    }
+    card.remove();
+  }
+  {
     const adminCard = document.createElement('section');
     document.body.append(adminCard);
     let state = 'ready', release, closed = 0, createStatus='busy', submitted=[];

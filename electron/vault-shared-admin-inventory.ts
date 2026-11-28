@@ -7,6 +7,7 @@ export type AdminInventoryKind =
   | 'unencrypted-clients'
   | 'sessions'
   | 'slots'
+  | 'my-slots'
   | 'audit';
 type Cursor = { id: string; at?: string };
 export type AdminInventoryRequest = { kind: AdminInventoryKind; next?: Cursor };
@@ -69,7 +70,8 @@ export function parseAdminInventoryRequest(value: unknown): AdminInventoryReques
     kind !== 'unencrypted-clients' &&
     kind !== 'sessions' &&
     kind !== 'audit' &&
-    kind !== 'slots'
+    kind !== 'slots' &&
+    kind !== 'my-slots'
   )
     return;
   if (!Object.hasOwn(value, 'next')) return vaultFields(value, ['kind']) ? { kind } : undefined;
@@ -118,6 +120,7 @@ export function parseCreateSlotReply(value: unknown): CreateSlotReply | undefine
 
 function validEntry(value: unknown, kind: AdminInventoryKind): value is Entry {
   if (kind === 'slots') return isSlot(value);
+  if (kind === 'my-slots') return isSlot(value) && value.allowSelfService;
   if (!vaultRecord(value) || !vaultID(value.id)) return false;
   if (!text(value.login, 256) || (!value.login && kind !== 'audit')) return false;
   const names = ['id', 'login', ...(Object.hasOwn(value, 'name') ? ['name'] : [])];
@@ -216,7 +219,7 @@ export function parseAdminInventoryReply(
     next = parseAdminInventoryRequest({ kind, next: page.next })?.next;
     if (
       !next ||
-      (kind === 'slots' ? entries.length === 0 : entries.length !== 25) ||
+      (kind === 'slots' || kind === 'my-slots' ? entries.length === 0 : entries.length !== 25) ||
       next.id !== before?.id ||
       (byTime && next.at !== before.at)
     )

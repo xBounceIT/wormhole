@@ -166,6 +166,7 @@ app.whenReady().then(async()=>{
  const exerciseSharedDefault=exerciseSlotBinding||target.checkStandardPin;
  const slotConnectionName='Slot binding test connection';
  const sharedCredentialName='Operations RDP account';
+ const personalCredentialName='My RDP account';
  const accountPassword='synthetic-administrator-password';
  const localPassword='synthetic-local-vault-password';
  const ask=${withASK ? "'4b'.repeat(32)" : "''"};
@@ -380,17 +381,19 @@ app.whenReady().then(async()=>{
        if(target.checkStandardPin){
          await host.openSharedAdministration(()=>true,async(current,ports)=>{
            const slotId=require('node:crypto').randomUUID();
-           assert.equal((await ports.createSlot({id:slotId,name:'Remote desktops',protocol:'rdp',allowSelfService:false})).status,'saved');
-           const review=await ports.slotDefault({slotId,credentialName:sharedCredentialName},undefined,current);
-           assert.equal(review.status,'review');
-           assert.equal(review.authenticationRequired,true);
+           assert.equal((await ports.createSlot({id:slotId,name:'Remote desktops',protocol:'rdp',allowSelfService:true})).status,'saved');
            const {confirmedSlotDefault}=await import(${fromDist('vault-shared-slot-default.js')});
-           const commit=confirmedSlotDefault(review);
-           assert.equal((await ports.slotDefault(commit,undefined,current)).status,'authentication-required');
-           for(const [password,secret] of [['wrong',ask],[accountPassword,'5b'.repeat(32)],[accountPassword,'']]){
-             assert.equal((await ports.slotDefault(commit,{password:Buffer.from(password),...(secret?{ask:Buffer.from(secret,'hex')}:{})},current)).status,'unavailable');
+           for(const [change,credentialName] of [[ports.slotDefault,sharedCredentialName],[ports.personalSlot,personalCredentialName]]){
+             const review=await change({slotId,credentialName},undefined,current);
+             assert.equal(review.status,'review');
+             assert.equal(review.authenticationRequired,true);
+             const commit=confirmedSlotDefault(review);
+             assert.equal((await change(commit,undefined,current)).status,'authentication-required');
+             for(const [password,secret] of [['wrong',ask],[accountPassword,'5b'.repeat(32)],[accountPassword,'']]){
+               assert.equal((await change(commit,{password:Buffer.from(password),...(secret?{ask:Buffer.from(secret,'hex')}:{})},current)).status,'unavailable');
+             }
+             assert.equal((await change(commit,{password:Buffer.from(accountPassword),ask:Buffer.from(ask,'hex')},current)).status,'saved');
            }
-           assert.equal((await ports.slotDefault(commit,{password:Buffer.from(accountPassword),ask:Buffer.from(ask,'hex')},current)).status,'saved');
          });
          await assert.rejects(native.trustSharedSshHost({...ssh,expected:initial,received:fingerprint(1)}));
          assert.equal((await host.sshHostPlan(ssh)).revision,initial.revision);
@@ -597,6 +600,25 @@ app.whenReady().then(async()=>{
          await fieldsetButton('Review default');
          await waitForAdmin('document.body.textContent.includes("This is already the shared default.")');
          await fieldsetButton('Back to slots');
+         await section('my-slots');
+         await waitForRecord('Operations remote desktop');
+         const openPersonal=async()=>{
+           const button='[...document.querySelectorAll("li button")].find(b=>b.textContent==="Manage my credential")';
+           await waitForAdmin('('+button+')?.matches(":enabled")');
+           await adminWindow.webContents.executeJavaScript('('+button+').click()');
+         };
+         await openPersonal();
+         await adminWindow.webContents.executeJavaScript('document.querySelector("fieldset input").value='+JSON.stringify(personalCredentialName));
+         await fieldsetButton('Review assignment');
+         await fieldsetButton('Set my credential');
+         await waitForRecord('Operations remote desktop');
+         assert.equal((await connect()).binding.nodeId,selected.id,'connection must use the personal assignment when there is no shared default');
+         await openPersonal();
+         await adminWindow.webContents.executeJavaScript('document.querySelector("fieldset input[type=checkbox]").click()');
+         await fieldsetButton('Review assignment');
+         await waitForAdmin('document.body.textContent.includes("This slot has no shared default.")');
+         await fieldsetButton('Clear my assignment');
+         await waitForRecord('Operations remote desktop');
          await section('unencrypted-clients');
          await waitForAdmin('document.body.textContent.includes("No unencrypted clients connected.")');
          await section('accounts');
@@ -1064,10 +1086,12 @@ app.whenReady().then(async()=>{
      input.notes=new TextEncoder().encode('Synthetic local notes');
      await host.saveConnection(input);
      if(exerciseSharedDefault){
-       await host.editCredential({rowVersion:'0',metadata:{id:'',name:sharedCredentialName,protocol:'rdp',
+       for (const name of [sharedCredentialName, personalCredentialName]) {
+         await host.editCredential({rowVersion:'0',metadata:{id:'',name,protocol:'rdp',
          kind:'password',username:'fixture-user',domain:'FIXTURE',provider:'Local',bitwardenItemId:'',bitwardenItemName:'',
          privateKeyPath:'',certificatePath:'',clearPassphrase:false,clearCertificate:false},
-         password:new TextEncoder().encode('synthetic-slot-default'),passphrase:new Uint8Array()});
+         password:new TextEncoder().encode('synthetic-slot-'+name),passphrase:new Uint8Array()});
+       }
      }
      if(exerciseSlotBinding){
        const metadata={...input.metadata,id:'',name:slotConnectionName,inlinePasswordAction:'clear'};
@@ -1263,6 +1287,7 @@ app.whenReady().then(async()=>{
        await destination('shared');
        if(exerciseSharedDefault){
          await runJS('(()=>{const s=[...document.querySelectorAll("label")].find(l=>l.textContent.includes('+JSON.stringify(sharedCredentialName)+'))?.querySelector("select");s.value="shared";s.dispatchEvent(new Event("change"));})()');
+         await runJS('(()=>{const s=[...document.querySelectorAll("label")].find(l=>l.textContent.includes('+JSON.stringify(personalCredentialName)+'))?.querySelector("select");s.value="personal";s.dispatchEvent(new Event("change"));})()');
        }
        await click('Review selections');
        await waitStatus('Review the destinations, then confirm');

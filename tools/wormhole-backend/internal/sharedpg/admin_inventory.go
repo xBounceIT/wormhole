@@ -59,7 +59,7 @@ type AdminInventoryPage struct {
 
 func (r AdminInventoryRequest) Valid() bool {
 	switch r.Kind {
-	case "accounts", "devices", "my-devices", "unencrypted-clients", "sessions", "audit", "slots":
+	case "accounts", "devices", "my-devices", "unencrypted-clients", "sessions", "audit", "slots", "my-slots":
 	default:
 		return false
 	}
@@ -81,6 +81,8 @@ func (s *Session) AdminInventorySupported(ctx context.Context, kind string) (boo
 	switch kind {
 	case "slots":
 		return s.serverCapability(ctx, adminSlotsAvailableSQL)
+	case "my-slots":
+		return s.serverCapability(ctx, mySlotsAvailableSQL)
 	case "my-devices":
 		return s.WorkspaceAccessSupported(ctx)
 	case "unencrypted-clients":
@@ -92,7 +94,7 @@ func (s *Session) AdminInventorySupported(ctx context.Context, kind string) (boo
 // AdminInventory reads server policy and audit observations. SQL reauthorizes
 // every page. A nil page is an expected denial and leaves the session usable.
 func (s *Session) AdminInventory(ctx context.Context, request AdminInventoryRequest) (*AdminInventoryPage, error) {
-	if ctx == nil || !request.Valid() || request.Kind == "slots" {
+	if ctx == nil || !request.Valid() || request.Kind == "slots" || request.Kind == "my-slots" {
 		return nil, ErrConfiguration
 	}
 	var after, before []byte

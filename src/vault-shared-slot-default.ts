@@ -10,12 +10,13 @@ export function mountSlotDefault(
   slotName: string,
   change: SlotDefaultPort,
   close: (message?: string) => void,
+  personal = false,
 ) {
   const title = document.createElement('h2');
   title.textContent = slotName;
   const context = document.createElement('p');
   context.className = 'slot-context';
-  context.textContent = 'Shared default';
+  context.textContent = personal ? 'My credential' : 'Shared default';
   const form = document.createElement('form'),
     fields = document.createElement('fieldset');
   form.className = 'startup-form shared-slot-default';
@@ -59,9 +60,16 @@ export function mountSlotDefault(
   back.className = 'startup-button startup-button-secondary';
   submit.type = 'submit';
   submit.className = 'startup-button';
-  submit.textContent = 'Review default';
-  const nameLabel = label('Exact name of the shared credential', account);
-  const removeLabel = label('Remove the shared default', remove);
+  const reviewLabel = personal ? 'Review assignment' : 'Review default';
+  submit.textContent = reviewLabel;
+  const nameLabel = label(
+    personal ? 'Exact name of your credential' : 'Exact name of the shared credential',
+    account,
+  );
+  const removeLabel = label(
+    personal ? 'Use the shared default' : 'Remove the shared default',
+    remove,
+  );
   removeLabel.className = 'shared-slot-default-remove';
   const actions = document.createElement('div');
   actions.className = 'shared-setup-actions';
@@ -85,7 +93,7 @@ export function mountSlotDefault(
     auth.hidden = true;
     password.required = false;
     detail.textContent = '';
-    submit.textContent = 'Review default';
+    submit.textContent = reviewLabel;
     notice.textContent = message;
   };
   back.onclick = () => {
@@ -115,7 +123,7 @@ export function mountSlotDefault(
         clear();
       }
       fields.disabled = true;
-      notice.textContent = review ? 'Saving the default…' : 'Checking the credential…';
+      notice.textContent = review ? 'Saving the change…' : 'Checking the credential…';
       const request = review
         ? confirmedSlotDefault(review)
         : { slotId, credentialName: remove.checked ? '' : account.value };
@@ -149,7 +157,8 @@ export function mountSlotDefault(
           selected.textContent = choice.credentialName;
           const protocol = document.createElement('span');
           protocol.className = 'slot-protocol';
-          protocol.textContent = choice.protocol.toUpperCase();
+          protocol.textContent =
+            choice.protocol.toUpperCase() + (choice.provider === 'bitwarden' ? ' · Bitwarden' : '');
           const identifier = document.createElement('details');
           const summary = document.createElement('summary');
           summary.textContent = 'Credential ID';
@@ -159,37 +168,60 @@ export function mountSlotDefault(
           const accountDetails = document.createElement('div');
           accountDetails.append(selected, identifier);
           row.append(icon, accountDetails, protocol);
-          explanation.textContent = 'Users without a personal assignment will use this credential.';
+          explanation.textContent = personal
+            ? 'Your connections using this slot will use this credential.'
+            : 'Users without a personal assignment will use this credential.';
           detail.replaceChildren(explanation, row);
         } else {
-          explanation.textContent =
-            'Users without a personal assignment will have no credential for this slot.';
+          explanation.textContent = personal
+            ? choice.hasDefault
+              ? 'Your connections will use the shared default.'
+              : 'This slot has no shared default. Your connections will have no credential for it.'
+            : 'Users without a personal assignment will have no credential for this slot.';
           detail.replaceChildren(explanation);
         }
-        submit.textContent = choice.credentialId ? 'Set shared default' : 'Remove shared default';
+        submit.textContent = personal
+          ? choice.credentialId
+            ? 'Set my credential'
+            : 'Clear my assignment'
+          : choice.credentialId
+            ? 'Set shared default'
+            : 'Remove shared default';
         auth.hidden = !result.authenticationRequired;
         password.required = !!result.authenticationRequired;
         notice.textContent = '';
         fields.disabled = false;
         (auth.hidden ? submit : password).focus();
       } else if (result.status === 'saved') {
-        close('Updated the shared default for “' + slotName + '”.');
+        close(
+          (personal ? 'Updated your credential for “' : 'Updated the shared default for “') +
+            slotName +
+            '”.',
+        );
       } else if (result.status === 'unchanged') {
-        reset('This is already the shared default.');
+        reset(
+          personal
+            ? 'Your assignment already matches this selection.'
+            : 'This is already the shared default.',
+        );
       } else {
         reset(
           {
             stale: 'The selection changed. Review the current credential again.',
             busy: 'The workspace is busy. Try again.',
-            unsupported: 'Update the workspace schema to manage slot defaults.',
-            unavailable: 'The slot or matching shared credential is unavailable.',
+            unsupported: personal
+              ? 'Update the workspace schema to manage personal assignments.'
+              : 'Update the workspace schema to manage slot defaults.',
+            unavailable: personal
+              ? 'The slot or matching personal credential is unavailable.'
+              : 'The slot or matching shared credential is unavailable.',
             'authentication-required':
               'The account now requires fresh authentication. Review the change again.',
           }[result.status],
         );
       }
     } catch {
-      if (active) reset('Could not confirm the change. Review the current default again.');
+      if (active) reset('Could not confirm the change. Review your selection again.');
     } finally {
       pass?.fill(0);
       key?.fill(0);

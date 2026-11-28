@@ -1,7 +1,7 @@
     -- Apply View before pagination so the cursor cannot reveal private slots.
     FOR candidate IN SELECT s.id FROM wormhole_data.credential_slots s
-            WHERE NOT s.deleted AND (p_after IS NULL OR s.id>p_after)
-                AND (wormhole_data.effective_boundary_permissions(actor.user_id,s.boundary_id)&1)=1
+            WHERE {{SLOT_ELIGIBILITY}}NOT s.deleted AND (p_after IS NULL OR s.id>p_after)
+                AND (wormhole_data.effective_boundary_permissions(actor.user_id,s.boundary_id)&{{SLOT_PERMISSIONS}})={{SLOT_PERMISSIONS}}
             ORDER BY s.id LIMIT 26 LOOP
         IF count_rows=25 THEN outcome:='more'; EXIT; END IF;
         SELECT wormhole_data.catalog_projection_wire(to_jsonb(r)) INTO STRICT wire

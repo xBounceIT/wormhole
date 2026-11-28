@@ -74,7 +74,7 @@ type Administration = SharedAdministrationPorts & {
   accessReview?: WorkspaceAccessRequest;
   accountBoundaryReview?: AccountBoundaryRotationRequest;
   personalRecoveryReview?: PersonalRootRecoveryRequest;
-  slotDefaultReview?: { request: SlotDefaultRequest; factors: boolean };
+  slotDefaultReview?: { request: SlotDefaultRequest; factors: boolean; personal: boolean };
   reenrollmentScope?: Omit<PersonalRootRecoveryRequest, 'review'>;
   busy: boolean;
 };
@@ -304,34 +304,41 @@ export class VaultSharedSetupDialog {
         return createSlot(request);
       }),
     );
-    options.ipc.handle('vault-shared-setup:slot-default', async (event, ...args: unknown[]) => {
-      let factors: PersonalRootRecoveryFactors | undefined;
-      try {
-        return await this.runAdministration(event, async (port, accepted) => {
-          const previous = port.slotDefaultReview;
-          port.slotDefaultReview = undefined;
-          const request = parseSlotDefaultRequest(args[0]);
-          if (
-            !request ||
-            !port.slotDefault ||
-            (request.confirmation && !isDeepStrictEqual(request, previous?.request)) ||
-            args.length !== (request.confirmation && previous?.factors ? 2 : 1)
-          )
-            throw Error('Review this slot default first.');
-          if (args.length === 2) factors = consumePersonalRootRecoveryFactors(args[1]);
-          const result = await port.slotDefault(request, factors, accepted);
-          if (result.status === 'review')
-            port.slotDefaultReview = {
-              request: confirmedSlotDefault(result),
-              factors: result.authenticationRequired === true,
-            };
-          return result;
-        });
-      } finally {
-        wipePersonalRootRecoveryFactors(args[1]);
-        wipePersonalRootRecoveryFactors(factors);
-      }
-    });
+    for (const channel of ['slot-default', 'personal-slot'] as const) {
+      const personal = channel === 'personal-slot';
+      options.ipc.handle('vault-shared-setup:' + channel, async (event, ...args: unknown[]) => {
+        let factors: PersonalRootRecoveryFactors | undefined;
+        try {
+          return await this.runAdministration(event, async (port, accepted) => {
+            const previous = port.slotDefaultReview;
+            port.slotDefaultReview = undefined;
+            const request = parseSlotDefaultRequest(args[0], personal);
+            const change = personal ? port.personalSlot : port.slotDefault;
+            if (
+              !request ||
+              !change ||
+              (request.confirmation &&
+                (previous?.personal !== personal ||
+                  !isDeepStrictEqual(request, previous.request))) ||
+              args.length !== (request.confirmation && previous?.factors ? 2 : 1)
+            )
+              throw Error('Review this slot default first.');
+            if (args.length === 2) factors = consumePersonalRootRecoveryFactors(args[1]);
+            const result = await change(request, factors, accepted);
+            if (result.status === 'review')
+              port.slotDefaultReview = {
+                personal,
+                request: confirmedSlotDefault(result),
+                factors: result.authenticationRequired === true,
+              };
+            return result;
+          });
+        } finally {
+          wipePersonalRootRecoveryFactors(args[1]);
+          wipePersonalRootRecoveryFactors(factors);
+        }
+      });
+    }
     options.ipc.handle('vault-shared-setup:admin-groups', (event, ...args: unknown[]) =>
       this.runAdministration(event, async ({ groups }) => {
         const request = args.length === 1 ? parseGroupRequest(args[0]) : undefined;
@@ -816,7 +823,7 @@ export class VaultSharedSetupDialog {
         restore: 'Restore a shared workspace',
         'account-reset': 'Issue account reset',
         administration: 'Workspace administration',
-        'my-devices': 'My devices',
+        'my-devices': 'My workspace',
       }[mode],
       webPreferences: {
         preload: this.options.preload,
