@@ -49,6 +49,12 @@ test(
       };
       const token = encode(invitation);
       const certificate = rootCertificates[0] + '\n';
+      const demoToken = encode({
+        ...invitation,
+        endpoints: [{ host: 'workspace.example.test', port: 5432 }],
+        tls: 'verified',
+        caPem: Buffer.from(certificate).toString('base64'),
+      });
       const ca = certificate.repeat(Math.ceil((96 * 1024) / Buffer.byteLength(certificate)));
       assert.ok(Buffer.byteLength(ca) > 65536 && Buffer.byteLength(ca) < 256 * 1024);
       const largeToken = encode({
@@ -84,12 +90,25 @@ app.whenReady().then(async()=>{
  try{
   const startup=await client.startup();assert.equal(startup.newWorkspace,true);const result=dialog.open(parent,()=>true,'join-initial',startup);
   for(let i=0;i<100;i++){if(child&&await child.webContents.executeJavaScript('!!document.querySelector("textarea")').catch(()=>false))break;await new Promise(r=>setTimeout(r,25))}
-  await child.webContents.executeJavaScript('document.querySelectorAll("button")[0].click()');
+  const press=async label=>{
+    const clicked=await child.webContents.executeJavaScript('(()=>{const button=[...document.querySelectorAll("button")].find(b=>b.textContent==='+JSON.stringify(label)+'&&b.checkVisibility()&&!b.disabled);if(!button)return false;button.click();return true})()');
+    assert.ok(clicked,'Unavailable control: '+label);
+  };
+  await press('Open invite file…');
   for(let i=0;i<100;i++){if(await child.webContents.executeJavaScript('!document.querySelector("[type=submit]").disabled'))break;await new Promise(r=>setTimeout(r,25))}
   assert.equal((await child.webContents.executeJavaScript('document.querySelector("textarea").value'))===${JSON.stringify(largeToken)},true,'Large verified invitation was not loaded');
   assert.equal(await child.webContents.executeJavaScript('document.querySelector("[type=checkbox]").parentElement.hidden'),true);
   const layout=await child.webContents.executeJavaScript('({width:innerWidth,scroll:document.documentElement.scrollWidth})');assert.ok(layout.scroll<=layout.width+1,'Invitation hints overflow the dialog');
-  await child.webContents.executeJavaScript('document.querySelectorAll("button")[0].click()');
+  await press('Change invitation');
+  await child.webContents.executeJavaScript('document.querySelector("textarea").value='+JSON.stringify(${JSON.stringify(demoToken)}));
+  await press('Check invitation');
+  for(let i=0;i<100;i++){if(await child.webContents.executeJavaScript('!document.querySelector("[type=submit]").disabled'))break;await new Promise(r=>setTimeout(r,25))}
+  assert.equal(await child.webContents.executeJavaScript('document.querySelector(".shared-invitation-account strong").textContent'),'alice');
+  assert.ok(await child.webContents.executeJavaScript('document.querySelector("[type=checkbox]").parentElement.hidden && !document.querySelector(".shared-invitation-account details").open'));
+  await child.webContents.executeJavaScript('document.fonts.ready.then(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))))');
+  fs.writeFileSync(${JSON.stringify(capture)},(await child.webContents.capturePage(undefined,{stayHidden:true,stayAwake:true})).toPNG());
+  await press('Change invitation');
+  await press('Open invite file…');
   for(let i=0;i<100;i++){if(await child.webContents.executeJavaScript('!document.querySelector("[type=submit]").disabled'))break;await new Promise(r=>setTimeout(r,25))}
   assert.equal(await child.webContents.executeJavaScript('document.querySelector("textarea").value'),${JSON.stringify(token)});
   assert.equal(await child.webContents.executeJavaScript('document.querySelector("[type=checkbox]").parentElement.hidden'),false);
@@ -103,10 +122,7 @@ app.whenReady().then(async()=>{
     };
   })()\`);
   assert.deepEqual(appearance,{dark:true,geist:true,collapsed:true,visible:true});
-  const bottom=await child.webContents.executeJavaScript('(()=>{const cancel=document.querySelectorAll("button")[3];cancel.scrollIntoView({block:"end"});const bounds=cancel.getBoundingClientRect();return {top:bounds.top,bottom:bounds.bottom,height:innerHeight}})()');assert.ok(bottom.top>=0&&bottom.bottom<=bottom.height,'Dialog actions are not reachable by scrolling');
-  await child.webContents.executeJavaScript('scrollTo(0,0)');
-  await child.webContents.executeJavaScript('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
-  fs.writeFileSync(${JSON.stringify(capture)},(await child.webContents.capturePage(undefined,{stayHidden:true,stayAwake:true})).toPNG());
+  const bottom=await child.webContents.executeJavaScript('(()=>{const cancel=[...document.querySelectorAll("button")].find(b=>b.textContent==="Cancel");cancel.scrollIntoView({block:"end"});const bounds=cancel.getBoundingClientRect();return {top:bounds.top,bottom:bounds.bottom,height:innerHeight}})()');assert.ok(bottom.top>=0&&bottom.bottom<=bottom.height,'Dialog actions are not reachable by scrolling');
   await child.webContents.executeJavaScript('for(const [name,value] of Object.entries({code:"ab".repeat(16),password:"test password","password-confirm":"test password","device-name":"Test device"}))document.querySelector("[name="+name+"]").value=value;document.querySelector("[type=checkbox]").checked=true;document.querySelector("form").dispatchEvent(new Event("submit",{cancelable:true}))');
   for(let i=0;i<100&&!submissions;i++)await new Promise(r=>setTimeout(r,25));assert.equal(submissions,1);
   for(let i=0;i<100;i++){if(await child.webContents.executeJavaScript('document.querySelector(".startup-status").textContent.startsWith("Could not join.")'))break;await new Promise(r=>setTimeout(r,25))}

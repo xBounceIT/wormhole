@@ -142,19 +142,33 @@
   text-decoration: underline;
   text-underline-offset: 3px;
 }
-.shared-invitation-account:not(:empty) {
-  margin: 0;
-  padding: 10px 12px;
+.shared-invitation-source.has-invitation {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 12px;
   border: 1px solid var(--border);
   border-radius: 7px;
   background: var(--sidebar);
   font-size: 12px;
 }
-.shared-invitation-account > * {
-  display: block;
+.shared-invitation-account {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
-.shared-invitation-account span {
+.shared-invitation-account summary {
+  width: fit-content;
+  cursor: pointer;
   color: color-mix(in srgb, var(--foreground) 68%, var(--card));
+}
+.shared-invitation-account summary:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+.shared-invitation-account code {
+  user-select: text;
 }
 .shared-invitation-factors:not([hidden]) {
   display: grid;

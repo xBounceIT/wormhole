@@ -52,11 +52,12 @@ export function mountSharedInitialJoinScreen(card: HTMLElement, api: SharedIniti
   const sourceActions = document.createElement('div');
   sourceActions.className = 'vault-dialog-actions';
   sourceActions.append(open, check);
-  form.append(sourceActions);
-  const hint = document.createElement('p');
+  const source = document.createElement('div');
+  source.className = 'shared-invitation-source';
+  const hint = document.createElement('div');
   hint.className = 'shared-invitation-account';
-  hint.setAttribute('role', 'status');
-  form.insertBefore(hint, sourceActions);
+  source.append(hint, sourceActions);
+  form.append(source);
   form.append(factors);
   const field = (caption: string, name: string, maximum: number, secret = true) => {
     const value = document.createElement('input');
@@ -93,7 +94,7 @@ export function mountSharedInitialJoinScreen(card: HTMLElement, api: SharedIniti
   const switchMethod = api.openResetOffer ? button('Use an account reset file') : undefined;
   const actions = document.createElement('div');
   actions.className = 'vault-dialog-actions';
-  actions.append(submit, cancel);
+  actions.append(cancel, submit);
   form.append(actions);
   if (switchMethod) {
     switchMethod.classList.add('vault-dialog-link');
@@ -129,6 +130,8 @@ export function mountSharedInitialJoinScreen(card: HTMLElement, api: SharedIniti
   const showSelection = () => {
     factors.hidden = reset ? !resetFileSelected : !invitation;
     tokenLabel.hidden = reset || !!invitation;
+    source.classList.toggle('has-invitation', !!invitation);
+    open.hidden = !!invitation;
     check.hidden = reset;
     check.textContent = invitation ? 'Change invitation' : 'Check invitation';
     check.classList.toggle('startup-button-secondary', !!invitation);
@@ -168,6 +171,7 @@ export function mountSharedInitialJoinScreen(card: HTMLElement, api: SharedIniti
       reset = !reset;
       resetFileSelected = false;
       invalidate();
+      token.value = '';
       title.textContent = reset ? 'Reset your shared account' : 'Join a shared workspace';
       detail.textContent = reset
         ? 'Open the reset file from your administrator and enter the separately delivered code and account secret key.'
@@ -214,8 +218,12 @@ export function mountSharedInitialJoinScreen(card: HTMLElement, api: SharedIniti
       token.value = parsed.invitation;
       const account = document.createElement('strong');
       account.textContent = parsed.loginName;
-      const workspace = document.createElement('span');
-      workspace.textContent = 'Workspace ' + parsed.workspaceId;
+      const workspace = document.createElement('details');
+      const summary = document.createElement('summary');
+      summary.textContent = 'Workspace ID';
+      const id = document.createElement('code');
+      id.textContent = parsed.workspaceId;
+      workspace.append(summary, id);
       hint.replaceChildren(account, workspace);
       offLabel.hidden = parsed.tls !== 'off';
       status.textContent =

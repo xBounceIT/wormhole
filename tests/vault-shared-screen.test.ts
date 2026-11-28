@@ -130,6 +130,10 @@ test('shared input and startup screens consume factors and keep admission separa
         const v=joinForm(),code=v.card.querySelector('[name=code]'),token=v.card.querySelector('textarea');
         check(!code.checkVisibility(),'factors visible before invitation selection');
         await checkInvite(v);check(code.checkVisibility()&&!token.checkVisibility(),'checked invitation remained expanded');
+        const identity=v.card.querySelector('.shared-invitation-account details');
+        check(!identity.open&&identity.querySelector('code').textContent===vaultId,'workspace ID missing or expanded by default');
+        identity.querySelector('summary').click();check(identity.open,'workspace ID cannot be inspected');
+        check(v.card.querySelectorAll('button')[0].hidden,'file picker still visible after selection');
         code.value='ab'.repeat(16);v.card.querySelectorAll('button')[1].click();
         check(token.checkVisibility()&&document.activeElement===token&&!code.value&&v.card.querySelector('[type=submit]').disabled,'changing invitation retained factors or lost focus');v.remove();
       }
@@ -147,7 +151,7 @@ test('shared input and startup screens consume factors and keep admission separa
         let picks=0;
         const v=joinForm({openResetOffer:async()=>{picks++;if(picks===1)return false;if(picks===2)throw Error('private picker failure');return true}});
         const buttons=v.card.querySelectorAll('button'),mode=buttons[4],open=buttons[0],submit=v.card.querySelector('[type=submit]');
-        mode.click();check(v.card.querySelector('textarea').parentElement.hidden&&buttons[1].hidden&&submit.disabled,'reset mode exposed invitation controls');
+        await checkInvite(v);mode.click();check(!v.card.querySelector('textarea').value&&v.card.querySelector('textarea').parentElement.hidden&&buttons[1].hidden&&submit.disabled,'reset mode retained the previous invitation');
         v.card.querySelector('form').dispatchEvent(new Event('submit',{cancelable:true}));check(!v.calls,'no reset file selected');
         open.click();await tick();check(submit.disabled,'canceled reset picker enabled submit');
         open.click();await tick();check(submit.disabled&&!v.card.textContent.includes('private'),'reset picker failure leaked details');
@@ -197,7 +201,7 @@ test('shared input and startup screens consume factors and keep admission separa
         const v=joinForm(overrides);await checkInvite(v,outcome==='cancel');
         if(outcome.startsWith('late')){v.card.querySelectorAll('button')[1].onclick();check(inspectRequests===1,'duplicate initial inspection');v.dispose();if(outcome==='late')resolveInspect(inviteHints('verified'));else rejectInspect(Error('private'));await tick();check(v.card.querySelector('[type=submit]').disabled,'late invitation enabled disposed form')}
         else if(['cancel','invalid','reject'].includes(outcome))check(v.card.querySelector('[type=submit]').disabled,'invalid invitation enabled submit');
-        else if(outcome==='cancel-error'){v.card.querySelectorAll('button')[3].click();await tick()}
+        else if(outcome==='cancel-error'){[...v.card.querySelectorAll('button')].find(button=>button.textContent==='Cancel').click();await tick()}
         else{sendJoin(v);await tick();check(outcome!=='success'||v.card.querySelector('[type=submit]').disabled,'successful initial form stayed alive')}
         v.remove();
       }
