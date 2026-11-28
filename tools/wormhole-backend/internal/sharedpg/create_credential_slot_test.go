@@ -113,4 +113,7 @@ func checkPostgresCreateCredentialSlot(t *testing.T, ctx context.Context, dba *p
 	update("SELECT 1 FROM wormhole_data.workspace_meta FOR UPDATE")
 	create(slot, "busy")
 	update("ROLLBACK")
+	t.Run("shared-default", func(t *testing.T) {
+		checkPostgresSlotDefault(t, ctx, dba, session, pinned, tls, keys, slot, boundary.BoundaryID)
+	})
 }

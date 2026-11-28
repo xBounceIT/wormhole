@@ -307,6 +307,31 @@ input {
   gap: 8px;
 }
 
+.shared-slot-default code {
+  display: block;
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+}
+
+.shared-slot-default .shared-slot-default-remove:not([hidden]) {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.startup-form.shared-slot-default input[type='checkbox'] {
+  width: auto;
+  height: auto;
+}
+
+.shared-slot-default .shared-setup-actions {
+  justify-content: flex-end;
+}
+
+.shared-slot-default .startup-button-secondary {
+  width: auto;
+}
+
 .shared-setup-results:not(:empty) {
   padding-inline-start: 18px;
   margin-block: 12px;

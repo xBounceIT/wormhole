@@ -124,6 +124,8 @@ func (h *vaultFoundationHandler) handle(ctx context.Context, operation string, p
 			return h.sharedAdminInventory(ctx, payload)
 		case "shared-create-credential-slot":
 			return h.sharedCreateCredentialSlot(ctx, payload)
+		case "shared-slot-default":
+			return h.sharedSlotDefault(ctx, payload)
 		case "shared-workspace-access":
 			return h.sharedWorkspaceAccess(ctx, payload)
 		case "shared-account-suspension":

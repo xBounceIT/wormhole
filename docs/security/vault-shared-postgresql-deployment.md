@@ -177,7 +177,7 @@ Schema 50 enables import into an untouched deployment with the matching
 workspace ID and role tag. Apply
 `deploy.WorkspaceRecoveryRestoreMigration(roleTag, workspaceID)` to upgrade a
 schema-49 deployment. Fresh scripts include the migration. The wizard opens
-archives from schemas 49 through 98.
+archives from schemas 49 through 99.
 
 Use a host approved by the archived signed TLS bundle and install a server
 certificate that verifies against it. The DBA enables the dedicated
@@ -384,6 +384,15 @@ you can view. Browsing requires TLS and View and Write on the item being
 edited. Select a slot and save the changes. The same visibility check applies
 when you enter a slot ID for an empty folder. If the catalog changes while
 browsing, reopen the editor to load the current revision.
+
+On schema 99, choose **Manage shared default** beside a slot in workspace
+administration. Enter the exact name of a shared credential for the same
+protocol, then review its name and ID before confirming. To clear it, select
+**Remove the shared default** and confirm the removal. This default applies
+to users without a personal assignment. Both changes require verified TLS
+and View, Write and Manage on the slot boundary. Assigning a credential also
+requires View, Use and Reveal on its boundary. Standard requires a fresh
+Wormhole password and the Account Secret Key when the device requires one.
 
 To enter a slot manually, copy its **Slot ID** from the administration list. In the
 connection editor choose **Credential slot** as the credential mode, clear

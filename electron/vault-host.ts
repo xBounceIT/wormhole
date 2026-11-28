@@ -4,6 +4,7 @@ import { consumeOSMigrationPrepare } from './vault-os-migration-contract.ts';
 import type { VaultUpgradeContext } from './vault-upgrade-contract.ts';
 import type { VaultUnprotectedOpened } from './vault-contract.ts';
 import { wipeAdminRecoveryInput, type AdminRecoveryNativeInput } from './vault-admin-recovery.ts';
+import type { SlotDefaultReply, SlotDefaultRequest } from './vault-shared-slot-default.ts';
 import {
   parseSharedCertificateRenewalRequest,
   parseSharedWorkspaceCARequest,
@@ -311,6 +312,11 @@ export type VaultPresenceAuthentication = (
 export type SharedAdministrationPorts = {
   read(request: AdminInventoryRequest): Promise<AdminInventoryReply>;
   createSlot?: CreateSlotPort;
+  slotDefault?: (
+    request: SlotDefaultRequest,
+    factors: PersonalRootRecoveryFactors | undefined,
+    accepted: () => boolean,
+  ) => Promise<SlotDefaultReply>;
   groups?: (request: GroupRequest) => Promise<GroupReply>;
   nodeGrants?: NodeGrantAdministration;
   groupKey?: GroupKeyPort;
@@ -331,6 +337,10 @@ type Client = BrowserTransferClient &
   VPNSSOClient & {
     sharedAdminInventory(request: AdminInventoryRequest): Promise<AdminInventoryReply>;
     sharedCreateCredentialSlot: CreateSlotPort;
+    sharedSlotDefault(
+      request: SlotDefaultRequest,
+      auth?: Omit<SharedVaultUnlockInput, 'appVersion'>,
+    ): Promise<SlotDefaultReply>;
     sharedWorkspaceAccess: WorkspaceAccessPort;
     sharedAccountSuspension: AccountSuspensionPort;
     sharedAccountBoundaryRotation: AccountBoundaryRotationPort;
@@ -3093,6 +3103,23 @@ export class VaultBackendHost {
     const read = <T>(operation: (client: Client) => Promise<T>) =>
       this.sharedRead(current, operation);
     const { administrator } = owner;
+    const withFactors = <T>(
+      accepted: () => boolean,
+      factors: PersonalRootRecoveryFactors | undefined,
+      operation: (client: Client, auth?: Omit<SharedVaultUnlockInput, 'appVersion'>) => Promise<T>,
+    ) =>
+      this.sharedRead(
+        () => owner.current() && accepted(),
+        async (client, current) => {
+          if (!factors) return operation(client);
+          const startup = await client.startup();
+          const descriptor = startup.slots;
+          const slot = descriptor?.slots.find(({ kind }) => kind === 'password');
+          if (!current() || !startup.shared || descriptor?.vaultId !== owner.vaultId || !slot)
+            throw Error('Workspace authentication is unavailable.');
+          return operation(client, { vaultId: owner.vaultId, slotId: slot.id, ...factors });
+        },
+      );
     await open(owner.current, {
       read: (request) =>
         administrator || request.kind === 'my-devices'
@@ -3100,6 +3127,12 @@ export class VaultBackendHost {
           : Promise.resolve({ status: 'unavailable' }),
       createSlot: administrator
         ? (request) => read((client) => client.sharedCreateCredentialSlot(request))
+        : undefined,
+      slotDefault: administrator
+        ? (request, factors, accepted) =>
+            withFactors(accepted, factors, (client, auth) =>
+              client.sharedSlotDefault(request, auth),
+            )
         : undefined,
       groups: administrator
         ? (request) => read((client) => client.sharedAdminGroups(request))
@@ -3131,27 +3164,8 @@ export class VaultBackendHost {
         : undefined,
       personalRecovery: administrator
         ? (request, factors, accepted) =>
-            this.sharedRead(
-              () => owner.current() && accepted(),
-              async (client, current) => {
-                if (!factors) return client.sharedPersonalRootRecovery(request);
-                const startup = await client.startup();
-                const descriptor = startup.slots;
-                const slot = descriptor?.slots.find(({ kind }) => kind === 'password');
-                if (
-                  !current() ||
-                  !startup.shared ||
-                  !descriptor ||
-                  descriptor.vaultId !== this.selectedWorkspace ||
-                  !slot
-                )
-                  throw Error('Personal key recovery authentication is unavailable.');
-                return client.sharedPersonalRootRecovery(request, {
-                  vaultId: descriptor.vaultId,
-                  slotId: slot.id,
-                  ...factors,
-                });
-              },
+            withFactors(accepted, factors, (client, auth) =>
+              client.sharedPersonalRootRecovery(request, auth),
             )
         : undefined,
       reenrollment:

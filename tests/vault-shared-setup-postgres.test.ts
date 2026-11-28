@@ -163,7 +163,9 @@ app.whenReady().then(async()=>{
  let host=makeHost();
  const target=${JSON.stringify(target)},mode=${JSON.stringify(mode)},existingLocal=${existingLocal};
  const exerciseSlotBinding=target.importLocal&&!target.checkStandardPin&&!target.webFixturePort;
+ const exerciseSharedDefault=exerciseSlotBinding||target.checkStandardPin;
  const slotConnectionName='Slot binding test connection';
+ const sharedCredentialName='Operations RDP account';
  const accountPassword='synthetic-administrator-password';
  const localPassword='synthetic-local-vault-password';
  const ask=${withASK ? "'4b'.repeat(32)" : "''"};
@@ -376,6 +378,20 @@ app.whenReady().then(async()=>{
          return current;
        };
        if(target.checkStandardPin){
+         await host.openSharedAdministration(()=>true,async(current,ports)=>{
+           const slotId=require('node:crypto').randomUUID();
+           assert.equal((await ports.createSlot({id:slotId,name:'Remote desktops',protocol:'rdp',allowSelfService:false})).status,'saved');
+           const review=await ports.slotDefault({slotId,credentialName:sharedCredentialName},undefined,current);
+           assert.equal(review.status,'review');
+           assert.equal(review.authenticationRequired,true);
+           const {confirmedSlotDefault}=await import(${fromDist('vault-shared-slot-default.js')});
+           const commit=confirmedSlotDefault(review);
+           assert.equal((await ports.slotDefault(commit,undefined,current)).status,'authentication-required');
+           for(const [password,secret] of [['wrong',ask],[accountPassword,'5b'.repeat(32)],[accountPassword,'']]){
+             assert.equal((await ports.slotDefault(commit,{password:Buffer.from(password),...(secret?{ask:Buffer.from(secret,'hex')}:{})},current)).status,'unavailable');
+           }
+           assert.equal((await ports.slotDefault(commit,{password:Buffer.from(accountPassword),ask:Buffer.from(ask,'hex')},current)).status,'saved');
+         });
          await assert.rejects(native.trustSharedSshHost({...ssh,expected:initial,received:fingerprint(1)}));
          assert.equal((await host.sshHostPlan(ssh)).revision,initial.revision);
        }
@@ -552,6 +568,35 @@ app.whenReady().then(async()=>{
          assert.equal(bound.status,'ready');
          assert.equal(bound.fields.credentialSlotId,publicId);
          assert.equal(bound.fields.protocol,1);
+         const crypto=require('node:crypto');
+         const publicKey=Buffer.from(crypto.generateKeyPairSync('x25519').publicKey.export({format:'jwk'}).x,'base64url').toString('base64');
+         const connect=()=>native.rdpBundle({workspaceId:editor.workspaceId,nodeId:selected.id,credentialOverride:'',
+           epoch:1,sessionId:crypto.randomUUID(),requestId:crypto.randomUUID(),publicKey});
+         const openDefault=async()=>{
+           const manage='([...document.querySelectorAll("li button")].find(b=>b.textContent==="Manage shared default"))';
+           await waitForAdmin(manage+'?.matches(":enabled")');
+           await adminWindow.webContents.executeJavaScript(manage+'.click()');
+           await waitForAdmin('document.querySelector("fieldset input")?.matches(":enabled")');
+         };
+         await openDefault();
+         await adminWindow.webContents.executeJavaScript('document.querySelector("fieldset input").value='+JSON.stringify(sharedCredentialName));
+         await fieldsetButton('Review default');
+         await fieldsetButton('Set shared default');
+         await waitForRecord('Operations remote desktop');
+         assert.equal((await connect()).binding.nodeId,selected.id);
+         await openDefault();
+         await adminWindow.webContents.executeJavaScript('document.querySelector("fieldset input").value='+JSON.stringify(sharedCredentialName));
+         await fieldsetButton('Review default');
+         await waitForAdmin('document.body.textContent.includes("This is already the shared default.")');
+         await adminWindow.webContents.executeJavaScript('document.querySelector("fieldset input[type=checkbox]").click()');
+         await fieldsetButton('Review default');
+         await fieldsetButton('Remove shared default');
+         await waitForRecord('Operations remote desktop');
+         await openDefault();
+         await adminWindow.webContents.executeJavaScript('document.querySelector("fieldset input[type=checkbox]").click()');
+         await fieldsetButton('Review default');
+         await waitForAdmin('document.body.textContent.includes("This is already the shared default.")');
+         await fieldsetButton('Back to slots');
          await section('unencrypted-clients');
          await waitForAdmin('document.body.textContent.includes("No unencrypted clients connected.")');
          await section('accounts');
@@ -927,9 +972,15 @@ app.whenReady().then(async()=>{
            return false;
          };
          if(await ready('')){
-           const send=async factor=>child.webContents.executeJavaScript('(()=>{const fields=document.querySelectorAll("input[type=password]");fields[0].value='+JSON.stringify(accountPassword)+';fields[1].value='+JSON.stringify(factor)+';document.querySelector("form").requestSubmit()})()');
+           // The confirmation window closes on success or cancel. Wait for the request
+           // in the parent even when Electron retires the child's reply channel first.
+           const closingAction=async expression=>{
+             try {await child.webContents.executeJavaScript(expression)}
+             catch(error){if(!child.isDestroyed()||!String(error).includes('Render frame was disposed'))throw error}
+           };
+           const send=async factor=>closingAction('(()=>{const fields=document.querySelectorAll("input[type=password]");fields[0].value='+JSON.stringify(accountPassword)+';fields[1].value='+JSON.stringify(factor)+';document.querySelector("form").requestSubmit()})()');
            if(target.recoveryKitAuthentication==='cancel'){
-             await child.webContents.executeJavaScript('Array.from(document.querySelectorAll("button")).find(button=>button.textContent==="Cancel").click()');
+             await closingAction('Array.from(document.querySelectorAll("button")).find(button=>button.textContent==="Cancel").click()');
            } else {
              if(target.recoveryKitAuthentication==='retry'){
                await send('');assert.ok(await ready('Check your details'));
@@ -1012,6 +1063,12 @@ app.whenReady().then(async()=>{
      input.password=new TextEncoder().encode('synthetic-local-connection-password');
      input.notes=new TextEncoder().encode('Synthetic local notes');
      await host.saveConnection(input);
+     if(exerciseSharedDefault){
+       await host.editCredential({rowVersion:'0',metadata:{id:'',name:sharedCredentialName,protocol:'rdp',
+         kind:'password',username:'fixture-user',domain:'FIXTURE',provider:'Local',bitwardenItemId:'',bitwardenItemName:'',
+         privateKeyPath:'',certificatePath:'',clearPassphrase:false,clearCertificate:false},
+         password:new TextEncoder().encode('synthetic-slot-default'),passphrase:new Uint8Array()});
+     }
      if(exerciseSlotBinding){
        const metadata={...input.metadata,id:'',name:slotConnectionName,inlinePasswordAction:'clear'};
        await host.saveConnection({rowVersion:'0',notesAction:'clear',metadata,password:new Uint8Array(),notes:new Uint8Array()});
@@ -1204,6 +1261,9 @@ app.whenReady().then(async()=>{
        await click('Review selections');
        await waitStatus('Review the destinations, then confirm');
        await destination('shared');
+       if(exerciseSharedDefault){
+         await runJS('(()=>{const s=[...document.querySelectorAll("label")].find(l=>l.textContent.includes('+JSON.stringify(sharedCredentialName)+'))?.querySelector("select");s.value="shared";s.dispatchEvent(new Event("change"));})()');
+       }
        await click('Review selections');
        await waitStatus('Review the destinations, then confirm');
        joinButton='Import and switch on restart';

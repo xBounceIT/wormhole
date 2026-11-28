@@ -1,6 +1,12 @@
 import { isAbsolute, join } from 'node:path';
 import type { Socket } from 'node:net';
 import {
+  parseSlotDefaultRequest,
+  parseSlotDefaultReply,
+  type SlotDefaultRequest,
+  type SlotDefaultReply,
+} from './vault-shared-slot-default.ts';
+import {
   parseVaultSerialBundle,
   parseVaultSerialRequest,
   parseSharedSerialUse,
@@ -511,7 +517,7 @@ type Pending = {
 };
 type PublicPayload =
   | VaultUpdatePreferences
-  | { action: ReturnType<typeof vaultSshHostPayload> | SharedNodeEditRequest }
+  | { action: ReturnType<typeof vaultSshHostPayload> | SharedNodeEditRequest | SlotDefaultRequest }
   | { sequence: string }
   | { requestId: string; session?: VaultBitwardenCLIEnvelope }
   | { ownerWindow: string; vaultId?: string; slotId?: string }
@@ -2114,6 +2120,23 @@ export class VaultBackendClient {
   sharedCreateCredentialSlot(request: CredentialSlot) {
     return this.metadata('shared-create-credential-slot', parseCreateSlotReply, undefined, request);
   }
+  sharedSlotDefault(
+    value: unknown,
+    authentication?: Omit<SharedVaultUnlockInput, 'appVersion'>,
+  ): Promise<SlotDefaultReply> {
+    const request = parseSlotDefaultRequest(value);
+    if (!request || (authentication && !request.confirmation)) {
+      authentication?.password.fill(0);
+      authentication?.ask?.fill(0);
+      return Promise.reject(Error('Invalid shared slot default.'));
+    }
+    return this.sharedCustodianRequest(
+      'shared-slot-default',
+      (v) => parseSlotDefaultReply(v, request),
+      { action: request },
+      authentication,
+    );
+  }
 
   sharedAdminInventory(request: AdminInventoryRequest) {
     return this.metadata(
@@ -2264,6 +2287,7 @@ export class VaultBackendClient {
   private sharedCustodianRequest<T>(
     operation:
       | 'shared-tighten-profile'
+      | 'shared-slot-default'
       | 'shared-node-edit'
       | 'shared-ssh-host-trust'
       | 'shared-recovery-kit-refresh'
@@ -2273,7 +2297,12 @@ export class VaultBackendClient {
     parse: (value: unknown) => T | undefined,
     fields:
       | { sequence: string }
-      | { action: ReturnType<typeof vaultSshHostPayload> | SharedNodeEditRequest }
+      | {
+          action:
+            | ReturnType<typeof vaultSshHostPayload>
+            | SharedNodeEditRequest
+            | SlotDefaultRequest;
+        }
       | { source: string; destination: string }
       | PersonalRootRecoveryRequest
       | {
@@ -2831,6 +2860,7 @@ export class VaultBackendClient {
       | 'shared-join-initial'
       | 'shared-account-reset-redeem'
       | 'shared-tighten-profile'
+      | 'shared-slot-default'
       | 'shared-node-edit'
       | 'shared-ssh-host-trust'
       | 'shared-recovery-kit-refresh'
@@ -2930,6 +2960,7 @@ export class VaultBackendClient {
       | 'shared-ca-retire'
       | 'shared-tls-export'
       | 'shared-tighten-profile'
+      | 'shared-slot-default'
       | 'shared-node-edit'
       | 'shared-ssh-host-trust'
       | 'shared-recovery-kit-refresh'
@@ -3222,6 +3253,7 @@ export class VaultBackendClient {
                     operation === 'shared-account-reset-issue' ||
                     operation === 'shared-account-reset-targets' ||
                     operation === 'shared-admin-inventory' ||
+                    operation === 'shared-slot-default' ||
                     operation === 'shared-create-credential-slot' ||
                     operation === 'shared-workspace-access' ||
                     operation === 'shared-account-suspension' ||

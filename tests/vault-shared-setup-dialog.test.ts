@@ -159,6 +159,7 @@ function fixture(
         reenrollment,
       }),
     inventory: (...args: any[]) => handlers.get('vault-shared-setup:admin-inventory')!(...args),
+    slotDefault: (...args: any[]) => handlers.get('vault-shared-setup:slot-default')!(...args),
     access: (...args: any[]) => handlers.get('vault-shared-setup:workspace-access')!(...args),
     suspension: (...args: any[]) => handlers.get('vault-shared-setup:account-suspension')!(...args),
     accountRotation: (...args: any[]) =>
@@ -179,6 +180,75 @@ function fixture(
 
 const resetRequestId = '22222222-2222-4222-8222-222222222222';
 const offerId = '33333333-3333-4333-8333-333333333333';
+
+test('slot defaults require one matching review in the protected administrator window', async () => {
+  const f = fixture();
+  const input = { slotId: offerId, credentialName: 'Desktop' };
+  const confirmation = {
+    workspaceId: offerId,
+    slotRevision: '2',
+    credentialId: resetRequestId,
+    credentialRevision: '7',
+  };
+  const commit = { ...input, confirmation };
+  let saves = 0;
+  const opened = f.dialog.openAdministration(f.parent as any, () => true, {
+    read: async () => ({ status: 'unavailable' }),
+    slotDefault: async (request, factors, current) => {
+      assert.ok(current());
+      if (!request.confirmation)
+        return {
+          status: 'review',
+          workspaceId: offerId,
+          authenticationRequired: true,
+          choice: {
+            ...input,
+            slotName: 'Operations',
+            protocol: 'rdp',
+            slotRevision: '2',
+            credentialId: resetRequestId,
+            credentialRevision: '7',
+            hasDefault: false,
+          },
+        };
+      assert.deepEqual(request, commit);
+      assert.ok(factors?.password.length);
+      saves++;
+      return { status: 'saved' };
+    },
+  });
+  try {
+    const factors = () => ({ password: new Uint8Array([1]), ask: new Uint8Array(32).fill(9) });
+    await assert.rejects(f.slotDefault(f.event, commit, factors()), /review/i);
+    await assert.rejects(
+      f.slotDefault({ ...f.event, senderFrame: { url } }, input),
+      /unavailable/i,
+    );
+    await f.slotDefault(f.event, input);
+    const rejected = factors();
+    await assert.rejects(
+      f.slotDefault(
+        f.event,
+        { ...commit, confirmation: { ...confirmation, credentialId: offerId } },
+        rejected,
+      ),
+      /review/i,
+    );
+    assert.ok(rejected.password.every((v) => v === 0) && rejected.ask.every((v) => v === 0));
+    await assert.rejects(f.slotDefault(f.event, commit, factors()), /review/i);
+    await f.slotDefault(f.event, input);
+    await assert.rejects(f.slotDefault(f.event, commit), /review/i);
+    await f.slotDefault(f.event, input);
+    const correct = factors();
+    assert.deepEqual(await f.slotDefault(f.event, commit, correct), { status: 'saved' });
+    assert.ok(correct.password.every((v) => v === 0) && correct.ask.every((v) => v === 0));
+    await assert.rejects(f.slotDefault(f.event, commit, factors()), /review/i);
+    assert.equal(saves, 1);
+  } finally {
+    await f.dialog.cancel();
+    await opened;
+  }
+});
 
 test('protected personal key recovery consumes one review and wipes factors on every exit', async () => {
   const f = fixture();
@@ -582,7 +652,7 @@ const inspectedArchive = {
 const archiveDigest = 'e'.repeat(64);
 
 test('restore receipt exposes only bounded display and deployment identity', () => {
-  const current = { ...inspectedArchive, sourceSchemaVersion: 98 };
+  const current = { ...inspectedArchive, sourceSchemaVersion: 99 };
   assert.deepEqual(parseSharedRecoveryInspection({ status: 'ready', summary: current }), {
     status: 'ready',
     summary: current,
@@ -605,7 +675,7 @@ test('restore receipt exposes only bounded display and deployment identity', () 
     { ...inspectedArchive, nodes: -1 },
     { ...inspectedArchive, accounts: 100001 },
     { ...inspectedArchive, sourceSchemaVersion: 48 },
-    { ...inspectedArchive, sourceSchemaVersion: 99 },
+    { ...inspectedArchive, sourceSchemaVersion: 100 },
     { ...inspectedArchive, sourceSchemaVersion: 55.5 },
     { ...inspectedArchive, sourceSchemaVersion: '85' },
     { ...inspectedArchive, profile: 'hardened' },

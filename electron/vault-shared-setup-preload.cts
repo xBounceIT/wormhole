@@ -7,6 +7,19 @@ contextBridge.exposeInMainWorld('vaultSharedSetup', {
     ipcRenderer.invoke('vault-shared-setup:admin-inventory', value),
   createSlot: (value: import('./vault-shared-admin-inventory.js').CredentialSlot) =>
     ipcRenderer.invoke('vault-shared-setup:create-slot', value),
+  slotDefault: (
+    value: import('./vault-shared-slot-default.js').SlotDefaultRequest,
+    factors?: import('./vault-account-suspension.js').PersonalRootRecoveryFactors,
+  ) => {
+    try {
+      return factors
+        ? ipcRenderer.invoke('vault-shared-setup:slot-default', value, factors)
+        : ipcRenderer.invoke('vault-shared-setup:slot-default', value);
+    } finally {
+      factors?.password.fill(0);
+      factors?.ask?.fill(0);
+    }
+  },
   workspaceAccess: (value: import('./vault-shared-access.js').WorkspaceAccessRequest) =>
     ipcRenderer.invoke('vault-shared-setup:workspace-access', value),
   accountSuspension: (value: import('./vault-account-suspension.js').AccountSuspensionRequest) =>

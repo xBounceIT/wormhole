@@ -47,6 +47,12 @@ import { enrollmentID } from './vault-enrollment-contract.ts';
 import { parseAccountResetMark } from './vault-shared-account-reset-queue.ts';
 import { parseAdminInventoryRequest, parseCreateSlot } from './vault-shared-admin-inventory.ts';
 import { parseGroupRequest } from './vault-shared-admin-groups.ts';
+import { isDeepStrictEqual } from 'node:util';
+import {
+  confirmedSlotDefault,
+  parseSlotDefaultRequest,
+  type SlotDefaultRequest,
+} from './vault-shared-slot-default.ts';
 import { parseSharedCatalogRequest } from './vault-shared-catalog.ts';
 import { parseNodeGrantRequest } from './vault-shared-node-grants.ts';
 import { parseGroupKeyRequest } from './vault-shared-group-key.ts';
@@ -68,6 +74,7 @@ type Administration = SharedAdministrationPorts & {
   accessReview?: WorkspaceAccessRequest;
   accountBoundaryReview?: AccountBoundaryRotationRequest;
   personalRecoveryReview?: PersonalRootRecoveryRequest;
+  slotDefaultReview?: { request: SlotDefaultRequest; factors: boolean };
   reenrollmentScope?: Omit<PersonalRootRecoveryRequest, 'review'>;
   busy: boolean;
 };
@@ -296,6 +303,34 @@ export class VaultSharedSetupDialog {
         return createSlot(request);
       }),
     );
+    options.ipc.handle('vault-shared-setup:slot-default', async (event, ...args: unknown[]) => {
+      let factors: PersonalRootRecoveryFactors | undefined;
+      try {
+        return await this.runAdministration(event, async (port, accepted) => {
+          const previous = port.slotDefaultReview;
+          port.slotDefaultReview = undefined;
+          const request = parseSlotDefaultRequest(args[0]);
+          if (
+            !request ||
+            !port.slotDefault ||
+            (request.confirmation && !isDeepStrictEqual(request, previous?.request)) ||
+            args.length !== (request.confirmation && previous?.factors ? 2 : 1)
+          )
+            throw Error('Review this slot default first.');
+          if (args.length === 2) factors = consumePersonalRootRecoveryFactors(args[1]);
+          const result = await port.slotDefault(request, factors, accepted);
+          if (result.status === 'review')
+            port.slotDefaultReview = {
+              request: confirmedSlotDefault(result),
+              factors: result.authenticationRequired === true,
+            };
+          return result;
+        });
+      } finally {
+        wipePersonalRootRecoveryFactors(args[1]);
+        wipePersonalRootRecoveryFactors(factors);
+      }
+    });
     options.ipc.handle('vault-shared-setup:admin-groups', (event, ...args: unknown[]) =>
       this.runAdministration(event, async ({ groups }) => {
         const request = args.length === 1 ? parseGroupRequest(args[0]) : undefined;

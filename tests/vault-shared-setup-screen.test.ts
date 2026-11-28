@@ -9,6 +9,7 @@ import { promisify } from 'node:util';
 import { coverageThreshold } from '../scripts/test-coverage.ts';
 import { validSharedHBANetworks } from '../electron/vault-shared-setup-contract.ts';
 import { vaultFields, vaultID, vaultRecord } from '../electron/vault-contract.ts';
+import { confirmedSlotDefault } from '../electron/vault-shared-slot-default.ts';
 
 test('protected setup screen clears credentials and separates recovery display from confirmation', async (t) => {
   const source = stripTypeScriptTypes(
@@ -54,6 +55,11 @@ test('protected setup screen clears credentials and separates recovery display f
           .replace(/^export /gm, ''),
     ),
   );
+  const slotDefaultSource = stripTypeScriptTypes(
+    await readFile(new URL('../src/vault-shared-slot-default.ts', import.meta.url), 'utf8'),
+  )
+    .replace(/^import .*?;\s*/gms, '')
+    .replace(/^export /gm, '');
   const suspensionInventorySource = stripTypeScriptTypes(
     await readFile(new URL('../src/vault-account-suspension.ts', import.meta.url), 'utf8'),
   )
@@ -113,6 +119,8 @@ const mountCreateSlot=(()=>{
   ${slotSources.join('\n')}
   return mountCreateSlot;
 })();
+${confirmedSlotDefault.toString()}
+${slotDefaultSource}
 ${suspensionInventorySource}
 ${groupSource}
 const workspacePermissionLabels=['View','Use','Write','Reveal','Manage'];
@@ -131,6 +139,48 @@ let finishAdminPage;
   const click=async label=>{const target=find(label);check(target,'missing control '+label);target.click();await tick()};
   const enter=async()=>{card.querySelector('form').dispatchEvent(new Event('submit',{cancelable:true}));await tick()};
   const deployment={version:44,provisioning:true,requiresTls:true};
+  {
+    const panel=document.createElement('section');
+    document.body.append(panel);
+    let result='review',fresh=true,closed,received,factors,finish;
+    const choice={slotId:'slot',slotName:'Teams',slotRevision:'5',protocol:'ssh',credentialName:'Shell',credentialId:'cred',credentialRevision:'3',hasDefault:false};
+    const change=async(request,auth)=>{
+      received=request;factors=auth;
+      if(auth)check(auth.password[0]===65&&auth.ask?.[0]===171,'incorrect fresh factors');
+      if(result==='exception')throw Error('private diagnostic');
+      if(result==='defer')return new Promise(resolve=>{finish=resolve});
+      if(result!=='review')return {status:result};
+      return {status:'review',workspaceId:'workspace',authenticationRequired:fresh,choice:request.credentialName?choice:{...choice,credentialName:'',credentialId:'',credentialRevision:'',hasDefault:true}};
+    };
+    const mount=()=>mountSlotDefault(panel,'slot','Teams',change,message=>{closed=message??'back'});
+    let dispose=mount();
+    const fields=()=>[...panel.querySelectorAll('input')];
+    const submit=async()=>{panel.querySelector('form').requestSubmit();await tick()};
+    const status=()=>panel.querySelector('[role=status]').textContent;
+    const [name,clear,password,ask]=fields();
+    name.value='Shell';
+    for(const [outcome,message] of [['unavailable','unavailable'],['busy','busy'],['unsupported','Update'],['stale','changed'],['authentication-required','authentication'],['exception','Could not'],['unchanged','already']]){
+      result=outcome;await submit();check(status().includes(message),'missing default status '+outcome);
+    }
+    result='review';await submit();
+    check(!received.confirmation&&name.disabled&&clear.disabled&&password.required&&panel.textContent.includes('cred'),'default committed before review');
+    password.value='A';ask.value='z';await submit();
+    check(status().includes('format')&&!password.value&&!ask.value&&!received.confirmation,'invalid factors were submitted');
+    password.value='A';ask.value='ab'.repeat(32);result='saved';await submit();
+    check(closed.includes('Teams')&&received.confirmation.workspaceId==='workspace'&&received.confirmation.credentialRevision==='3','review did not bind the saved default');
+    check(!password.value&&!ask.value&&factors.password.every(v=>v===0)&&factors.ask.every(v=>v===0),'submitted factor buffers survived');
+    dispose();closed=undefined;dispose=mount();
+    const [,remove]=fields();remove.click();
+    fresh=false;result='review';await submit();
+    check(received.credentialName===''&&panel.textContent.includes('no credential')&&!fields()[2].required,'removal was not explicitly reviewed');
+    result='saved';await submit();
+    check(received.confirmation.credentialId===''&&!factors&&closed.includes('Teams'),'removal committed a credential');
+    dispose();closed=undefined;dispose=mount();
+    panel.querySelector('button[type=button]').click();check(closed==='back','back navigation submitted a change');
+    fields()[0].value='Shell';result='defer';await submit();dispose();
+    finish({status:'saved'});await tick();
+    check(closed==='back'&&!panel.textContent,'late reply modified a retired panel');panel.remove();
+  }
   {
     const card = document.createElement('section');
     document.body.append(card);
@@ -1274,7 +1324,7 @@ app.whenReady().then(async()=>{
     const report=await debug.sendCommand('Profiler.takePreciseCoverage');
     const script=report.result.find(entry=>entry.url==='wormhole-vault-shared-setup-screen.js');
     assert.ok(script);
-    for(const name of ['mountSharedSetup','mountAdminRecovery','mountSharedBackup','mountSharedRestore','mountSharedAccountResetIssue','createAccountResetQueue','mountSharedAdministration','mountCreateSlot','mountSharedGroupAdministration','mountSharedGrantAdministration','mountAccountSuspension']){
+    for(const name of ['mountSharedSetup','mountAdminRecovery','mountSharedBackup','mountSharedRestore','mountSharedAccountResetIssue','createAccountResetQueue','mountSharedAdministration','mountCreateSlot','mountSlotDefault','mountSharedGroupAdministration','mountSharedGrantAdministration','mountAccountSuspension']){
     const mount=script.functions.find(entry=>entry.functionName===name);
     assert.ok(mount);
     const extent=mount.ranges[0];

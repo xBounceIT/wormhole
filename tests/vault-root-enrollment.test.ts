@@ -413,7 +413,7 @@ test(
       await original.stop();
       await resumed?.stop();
       assert.ok(directory.startsWith(join(tmpdir(), 'wormhole-root-enrollment-')));
-      await rm(directory, { recursive: true, force: true });
+      await rm(directory, { recursive: true, force: true, maxRetries: 8, retryDelay: 250 });
     }
   },
 );

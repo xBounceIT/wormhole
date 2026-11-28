@@ -5,6 +5,8 @@ import type {
   CreateSlotPort,
 } from '../electron/vault-shared-admin-inventory.ts';
 import { mountCreateSlot } from './vault-shared-create-slot.ts';
+import { mountSlotDefault } from './vault-shared-slot-default.ts';
+import type { SlotDefaultPort } from '../electron/vault-shared-slot-default.ts';
 import {
   mountSharedGroupAdministration,
   type GroupAdminPort,
@@ -31,6 +33,7 @@ import type {
 export type SharedAdministrationApi = {
   adminInventory(request: AdminInventoryRequest): Promise<AdminInventoryReply>;
   createSlot?: CreateSlotPort;
+  slotDefault?: SlotDefaultPort;
   adminGroups?: GroupAdminPort;
   grantTargets?: NodeGrantAdministration['catalog'];
   nodeGrant?: NodeGrantAdministration['grant'];
@@ -310,6 +313,42 @@ export function mountSharedAdministration(
           const identifier = document.createElement('code');
           identifier.textContent = record.id;
           row.append('Slot ID ', identifier);
+          const changeDefault = api.slotDefault;
+          if (!ownDevicesOnly && changeDefault) {
+            const edit = document.createElement('button');
+            edit.type = 'button';
+            edit.className = 'startup-button startup-button-secondary';
+            edit.textContent = 'Manage shared default';
+            edit.setAttribute('aria-label', edit.textContent + ' · ' + label.textContent);
+            edit.onclick = () => {
+              if (disposed || section.disabled) return;
+              disposePanel?.();
+              previous.hidden = next.hidden = refresh.hidden = list.hidden = status.hidden = true;
+              sectionLabel.hidden = true;
+              section.disabled = true;
+              adminPanel.hidden = false;
+              accessNotice.textContent = '';
+              disposePanel = mountSlotDefault(
+                adminPanel,
+                record.id,
+                record.name ?? record.id,
+                changeDefault,
+                (message) => {
+                  if (disposed) return;
+                  sectionLabel.hidden = false;
+                  previous.hidden =
+                    next.hidden =
+                    refresh.hidden =
+                    list.hidden =
+                    status.hidden =
+                      false;
+                  if (message) accessNotice.textContent = message;
+                  void load(request, history);
+                },
+              );
+            };
+            row.append(edit);
+          }
         }
         const accessAction =
           request.kind === 'accounts'
