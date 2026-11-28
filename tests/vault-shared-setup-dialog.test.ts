@@ -826,7 +826,7 @@ const inspectedArchive = {
 const archiveDigest = 'e'.repeat(64);
 
 test('restore receipt exposes only bounded display and deployment identity', () => {
-  const current = { ...inspectedArchive, sourceSchemaVersion: 101 };
+  const current = { ...inspectedArchive, sourceSchemaVersion: 102 };
   assert.deepEqual(parseSharedRecoveryInspection({ status: 'ready', summary: current }), {
     status: 'ready',
     summary: current,

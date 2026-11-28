@@ -22,6 +22,9 @@ const adminInventorySQL = `SELECT workspace_id::text,user_id::text,device_id::te
 const unencryptedClientsSupportedSQL = `SELECT (pg_catalog.to_regprocedure('wormhole_api_v1.unencrypted_clients(bytea,uuid)') IS NOT NULL)::text`
 const unencryptedClientsSQL = `SELECT workspace_id::text,user_id::text,device_id::text,payload::text
  FROM wormhole_api_v1.unencrypted_clients(pg_catalog.decode($1,'hex'),$2::uuid)`
+const invitationInventorySupportedSQL = `SELECT (pg_catalog.to_regprocedure('wormhole_api_v1.admin_invitations(bytea,uuid)') IS NOT NULL)::text`
+const invitationInventorySQL = `SELECT workspace_id::text,user_id::text,device_id::text,payload::text
+ FROM wormhole_api_v1.admin_invitations(pg_catalog.decode($1,'hex'),$2::uuid)`
 
 var adminInventoryEvent = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
 var adminInventoryAppVersion = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$`)
@@ -59,7 +62,7 @@ type AdminInventoryPage struct {
 
 func (r AdminInventoryRequest) Valid() bool {
 	switch r.Kind {
-	case "accounts", "devices", "my-devices", "unencrypted-clients", "sessions", "audit", "slots", "my-slots":
+	case "accounts", "invitations", "devices", "my-devices", "unencrypted-clients", "sessions", "audit", "slots", "my-slots":
 	default:
 		return false
 	}
@@ -87,6 +90,8 @@ func (s *Session) AdminInventorySupported(ctx context.Context, kind string) (boo
 		return s.WorkspaceAccessSupported(ctx)
 	case "unencrypted-clients":
 		return s.serverCapability(ctx, unencryptedClientsSupportedSQL)
+	case "invitations":
+		return s.serverCapability(ctx, invitationInventorySupportedSQL)
 	}
 	return s.serverCapability(ctx, adminInventorySupportedSQL)
 }
@@ -106,8 +111,12 @@ func (s *Session) AdminInventory(ctx context.Context, request AdminInventoryRequ
 	}
 	query := adminInventorySQL
 	args := [][]byte{[]byte(request.Kind), after, before}
-	if request.Kind == "unencrypted-clients" {
+	switch request.Kind {
+	case "unencrypted-clients":
 		query = unencryptedClientsSQL
+		args = [][]byte{after}
+	case "invitations":
+		query = invitationInventorySQL
 		args = [][]byte{after}
 	}
 	var page *AdminInventoryPage
@@ -131,7 +140,7 @@ func (s *Session) AdminInventory(ctx context.Context, request AdminInventoryRequ
 }
 
 func parseAdminInventory(raw []byte, request AdminInventoryRequest) (*AdminInventoryPage, error) {
-	columns := map[string]int{"accounts": 5, "devices": 5, "my-devices": 5, "unencrypted-clients": 5, "sessions": 6, "audit": 8}[request.Kind]
+	columns := map[string]int{"accounts": 5, "invitations": 5, "devices": 5, "my-devices": 5, "unencrypted-clients": 5, "sessions": 6, "audit": 8}[request.Kind]
 	if columns == 0 || len(raw) > adminInventoryMaxBytes || !utf8.Valid(raw) {
 		return nil, ErrAdmissionResponse
 	}
@@ -187,6 +196,14 @@ func parseAdminInventoryEntry(kind string, row [][]byte) (entry AdminInventoryEn
 			return entry, false
 		}
 		entry.Status, ok = adminInventoryChoice(row[4], "disabled", "enabled")
+	case "invitations":
+		entry.Name, entry.Status, entry.At = string(row[2]), string(row[3]), string(row[4])
+		switch entry.Status {
+		case "pending", "active", "redeemed", "expired", "locked", "suspended", "superseded":
+			ok = validAdminTime(entry.At)
+		default:
+			ok = false
+		}
 	case "devices", "my-devices", "unencrypted-clients":
 		entry.Name, entry.Status, entry.At = string(row[2]), string(row[3]), string(row[4])
 		ok = (entry.Status == "active" || entry.Status == "pending" || entry.Status == "revoked") && validAdminTime(entry.At)

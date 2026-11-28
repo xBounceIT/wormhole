@@ -2,6 +2,7 @@ import { vaultFields, vaultID, vaultRecord } from './vault-contract.ts';
 
 export type AdminInventoryKind =
   | 'accounts'
+  | 'invitations'
   | 'devices'
   | 'my-devices'
   | 'unencrypted-clients'
@@ -65,6 +66,7 @@ export function parseAdminInventoryRequest(value: unknown): AdminInventoryReques
   const { kind, next } = value;
   if (
     kind !== 'accounts' &&
+    kind !== 'invitations' &&
     kind !== 'devices' &&
     kind !== 'my-devices' &&
     kind !== 'unencrypted-clients' &&
@@ -131,6 +133,16 @@ function validEntry(value: unknown, kind: AdminInventoryKind): value is Entry {
         (!Object.hasOwn(value, 'name') || text(value.name, 4096)) &&
         (value.role === 'administrator' || value.role === 'member') &&
         (value.status === 'enabled' || value.status === 'disabled')
+      );
+    case 'invitations':
+      return (
+        vaultFields(value, [...names, 'status', 'at']) &&
+        (!Object.hasOwn(value, 'name') || text(value.name, 4096)) &&
+        typeof value.status === 'string' &&
+        ['pending', 'active', 'redeemed', 'expired', 'locked', 'suspended', 'superseded'].includes(
+          value.status,
+        ) &&
+        date(value.at)
       );
     case 'devices':
     case 'my-devices':

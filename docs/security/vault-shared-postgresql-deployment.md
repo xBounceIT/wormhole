@@ -177,7 +177,7 @@ Schema 50 enables import into an untouched deployment with the matching
 workspace ID and role tag. Apply
 `deploy.WorkspaceRecoveryRestoreMigration(roleTag, workspaceID)` to upgrade a
 schema-49 deployment. Fresh scripts include the migration. The wizard opens
-archives from schemas 49 through 101.
+archives from schemas 49 through 102.
 
 Use a host approved by the archived signed TLS bundle and install a server
 certificate that verifies against it. The DBA enables the dedicated
@@ -361,6 +361,15 @@ administration**. The isolated window has sections for accounts, devices,
 recorded sessions and audit. The server checks current administrator authority
 and device admission for every page. The audit view shows the recorded action,
 outcome, time, actor and session. The session view represents sign-in records.
+
+On schema 102 and later, open **Workspace administration → Invitations** to
+review the account, expiry and status of an enrollment invitation. **Pending**
+means the invitation is unused, within its validity period and below the
+attempt limit. **Locked** means the attempt limit was
+reached. **Redeemed** means the code has been used. **Active** means the
+account has a confirmed active device. The list also identifies expired
+invitations, suspended accounts and unused invitations for an already enrolled
+account. Account reset offers appear in the separate reset workflow.
 
 Schema 93 adds **Credential slots** to this window. An administrator can review
 the name, protocol and assignment policy of each slot on a boundary where they

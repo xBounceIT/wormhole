@@ -54,6 +54,7 @@ export type SharedAdministrationApi = {
 
 const sections: Record<AdminInventoryKind, string> = {
   accounts: 'Accounts',
+  invitations: 'Invitations',
   slots: 'Credential slots',
   devices: 'Devices',
   'my-devices': 'My devices',
@@ -277,6 +278,8 @@ export function mountSharedAdministration(
       }
       if (!entries.length && !request.next && request.kind === 'unencrypted-clients')
         status.textContent = 'No unencrypted clients connected.';
+      if (!entries.length && !request.next && request.kind === 'invitations')
+        status.textContent = 'No workspace invitations.';
       for (const record of entries) {
         const row = document.createElement('li');
         const label = document.createElement('strong');
@@ -290,6 +293,15 @@ export function mountSharedAdministration(
               ? 'Users can choose a credential'
               : 'Assigned by an administrator',
           ].join(' · ');
+        } else if (request.kind === 'invitations') {
+          label.textContent = record.name || record.login || record.id;
+          detail.textContent = [
+            record.name ? record.login : '',
+            record.status,
+            'Expiry ' + localTime,
+          ]
+            .filter(Boolean)
+            .join(' · ');
         } else if (request.kind === 'accounts') {
           label.textContent = record.name || record.login || record.id;
           detail.textContent = [record.name ? record.login : '', record.role, record.status]

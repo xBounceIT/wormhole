@@ -524,6 +524,7 @@ let finishAdminPage;
     let state = 'ready', release, closed = 0, createStatus='busy', submitted=[];
     const bySection = {
       accounts:{id:'account',name:'Workspace Administrator',login:'alice',role:'administrator',status:'enabled'},
+      invitations:{id:'invitation',name:'Operations engineer',login:'ops',status:'pending',at:'2026-11-23T12:00:00.000000Z'},
       devices:{id:'device',login:'alice',status:'revoked',at:'2026-11-23T12:00:00.000000Z'},
       'unencrypted-clients':{id:'client',name:'Lab desktop',login:'alice',status:'active',at:'2026-11-23T12:00:00.000000Z'},
       sessions:{id:'session',login:'alice',appVersion:'2.4.3',transport:'tls',deviceId:'device',at:'2026-11-23T12:00:00.000000Z'},
@@ -603,6 +604,12 @@ let finishAdminPage;
     bySection.slots.allowSelfService=false;
     await press('Refresh');
     check(list().includes('SSH · Assigned by an administrator'),'assignment policy remained stale');
+    menu.value='invitations';
+    menu.dispatchEvent(new Event('change'));
+    await tick();
+    check(list().includes('Operations engineer')&&list().includes('ops')&&list().includes('pending')&&list().includes('Expiry')&&!adminCard.querySelector('li button'),'invitation row omitted status or offered a credential action');
+    state='empty';await press('Refresh');check(adminStatus()==='No workspace invitations.','empty invitation list retained stale data');
+    state='ready';
     menu.value='unencrypted-clients';
     menu.dispatchEvent(new Event('change'));
     await tick();

@@ -567,6 +567,10 @@ app.whenReady().then(async()=>{
          adminOpened=window.webContents.executeJavaScript('window.wormhole.openSharedAdministration()');
          void adminOpened.catch(()=>{});
          await waitForRecord('administrator');
+         await section('invitations');
+         await waitForRecord('first-admin');
+         await waitForRecord('active');
+         await waitForRecord('Expiry');
          await section('slots');
          await waitForAdmin('[...document.querySelectorAll("[role=status]")].some(s=>s.textContent==="No records on this page.")');
          await adminWindow.webContents.executeJavaScript('(()=>{const details=document.querySelector("details");details.open=true;const form=details.querySelector("form");form.querySelector("input").value="Operations remote desktop";form.querySelector("select").value="rdp";form.querySelector("input[type=checkbox]").checked=true;form.requestSubmit()})()');

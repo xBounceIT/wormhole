@@ -113,6 +113,9 @@ func TestPostgresAdminInventoryAuthorizesEveryPage(t *testing.T) {
 			if page, err := session.AdminInventory(ctx, AdminInventoryRequest{Kind: "unencrypted-clients"}); err != nil || page != nil {
 				t.Fatal("demoted administrator could still inspect live clients", err)
 			}
+			if page, err := session.AdminInventory(ctx, AdminInventoryRequest{Kind: "invitations"}); err != nil || page != nil {
+				t.Fatal("demoted administrator could still inspect invitations", err)
+			}
 			groups, err := session.AdminGroups(ctx, trust, AdminGroupRequest{Action: "create", GroupID: uuid.NewString(), Name: "Denied"})
 			if err != nil || groups.Status != "unavailable" || groups.Page != nil {
 				t.Fatal("demoted administrator could still create groups", err)
@@ -135,7 +138,52 @@ func TestPostgresAdminInventoryAuthorizesEveryPage(t *testing.T) {
 			if len(more.Entries) == 0 || more.Entries[0].ID.String() <= own.Next.ID.String() {
 				t.Fatal("personal devices did not continue after the last displayed device")
 			}
+			checkInvitationInventory(t, ctx, session, sql, read)
 		})
+}
+
+func checkInvitationInventory(t *testing.T, ctx context.Context, session *Session, sql func(string), read func(AdminInventoryRequest) *AdminInventoryPage) {
+	t.Helper()
+	if ok, err := session.AdminInventorySupported(ctx, "invitations"); err != nil || !ok {
+		t.Fatal("missing invitation inventory", err)
+	}
+	sql(`INSERT INTO wormhole_data.users(id,login_name,disabled) VALUES
+		(gen_random_uuid(),'invited-member',false),(gen_random_uuid(),'suspended-member',true)`)
+	// The metadata fixture uses the bootstrap row's key references. It creates no logins.
+	sql(`INSERT INTO wormhole_data.invites(id,user_id,kind,code_hash,created_by,created_at,expires_at,used_at,attempts,
+		bootstrap_enc_key_id,bootstrap_enc_key_version,bootstrap_sign_key_id,bootstrap_sign_key_version,bootstrap_envelope,manifest,manifest_revision)
+		SELECT gen_random_uuid(),u.id,CASE WHEN seq=1 THEN 'reset' ELSE 'invite' END,i.code_hash,i.created_by,now()-interval '2 days',
+		CASE WHEN seq=2 THEN now()-interval '1 day' ELSE now()+interval '1 day' END,
+		CASE WHEN seq=3 THEN now() END,CASE WHEN seq=4 THEN 5 ELSE 0 END,
+		i.bootstrap_enc_key_id,i.bootstrap_enc_key_version,i.bootstrap_sign_key_id,i.bootstrap_sign_key_version,
+		decode(repeat('00',16),'hex'),i.manifest,i.manifest_revision
+		FROM wormhole_data.invites i CROSS JOIN generate_series(1,28) seq
+		JOIN wormhole_data.users u ON u.login_name=CASE seq WHEN 5 THEN 'suspended-member' WHEN 6 THEN 'first-admin' ELSE 'invited-member' END`)
+	first := read(AdminInventoryRequest{Kind: "invitations"})
+	if first.Next == nil || len(first.Entries) != 25 {
+		t.Fatal("invitations lost the continuation cursor")
+	}
+	last := read(AdminInventoryRequest{Kind: "invitations", Next: first.Next})
+	if last.Next != nil || len(last.Entries) != 3 || last.Entries[0].ID.String() <= first.Next.ID.String() {
+		t.Fatal("invitations repeated a row or included a reset offer")
+	}
+	counts := make(map[string]int)
+	for _, page := range []*AdminInventoryPage{first, last} {
+		for _, entry := range page.Entries {
+			counts[entry.Status]++
+			if !validAdminTime(entry.At) {
+				t.Fatal("missing invitation expiry")
+			}
+		}
+	}
+	for _, status := range []string{"active", "redeemed", "expired", "locked", "suspended", "superseded"} {
+		if counts[status] != 1 {
+			t.Fatalf("unexpected number of %s invitations: %d", status, counts[status])
+		}
+	}
+	if counts["pending"] != 22 {
+		t.Fatal("incorrect pending invitation count", counts["pending"])
+	}
 }
 
 func checkLiveUnencryptedClients(t *testing.T, ctx context.Context, settings Settings, dba *pgconn.PgConn, admin *Session, user uuid.UUID) {
@@ -231,6 +279,7 @@ func TestAdminInventoryBoundedResponse(t *testing.T) {
 	first, second := "00000000-0000-0000-0000-000000000001", "00000000-0000-0000-0000-000000000002"
 	at := "2026-11-23T12:30:00.123456Z"
 	accounts := AdminInventoryRequest{Kind: "accounts"}
+	invitations := AdminInventoryRequest{Kind: "invitations"}
 	devices := AdminInventoryRequest{Kind: "devices"}
 	sessions := AdminInventoryRequest{Kind: "sessions"}
 	audit := AdminInventoryRequest{Kind: "audit"}
@@ -240,6 +289,9 @@ func TestAdminInventoryBoundedResponse(t *testing.T) {
 		raw  string
 	}{
 		{"unknown", AdminInventoryRequest{Kind: "keys"}, `[]`},
+		{"invalid-invitation-state", invitations, `[["` + first + `","login","","enabled","` + at + `"]]`},
+		{"invalid-invitation-expiry", invitations, `[["` + first + `","login","","pending","tomorrow"]]`},
+		{"unexpected-invitation-field", invitations, `[["` + first + `","login","","pending","` + at + `","extra"]]`},
 		{"null", accounts, `null`},
 		{"invalid-id", accounts, `[["oops","login","","false","false"]]`},
 		{"invalid-boolean", accounts, `[["` + first + `","login","","false","bad"]]`},

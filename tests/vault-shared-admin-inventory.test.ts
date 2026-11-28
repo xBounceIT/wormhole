@@ -76,6 +76,8 @@ test('administration replies are bounded to one ordered page with exact fields',
   };
   for (const [kind, record, invalid] of [
     ['accounts', account, { ...account, status: 'deleted' }],
+    ['invitations', { ...device, status: 'pending' }, { ...device, code: 'private' }],
+    ['invitations', { ...device, status: 'redeemed' }, { ...device, status: 'ready-to-copy' }],
     ['devices', device, { ...device, name: '\rsecret' }],
     ['slots', slot, { ...slot, defaultCredentialId: id(2) }],
     ['my-slots', { ...slot, allowSelfService: true }, slot],
