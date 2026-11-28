@@ -576,8 +576,15 @@ async function bootstrap(initialShared?: SharedVaultSessionAdmission) {
         vault,
         window.wormhole,
         async (container, failed, tools, titlebar) => {
-          const { mountSharedWorkspace } = await import('./vault-shared-workspace');
-          return mountSharedWorkspace(container, window.wormhole!, failed, tools, titlebar);
+          const [{ mountSharedWorkspace }, settings] = await Promise.all([
+            import('./vault-shared-workspace'),
+            window.wormhole!.readAppSettings().catch(() => undefined),
+          ]);
+          return mountSharedWorkspace(container, window.wormhole!, failed, {
+            tools,
+            titlebar,
+            sshTerminalTheme: settings?.sshTerminalTheme,
+          });
         },
         initialShared,
       );

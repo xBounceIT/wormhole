@@ -18,7 +18,10 @@ export type VaultPreferences = {
 };
 
 export type VaultUpdatePreferences = Partial<
-  Pick<VaultPreferences, 'theme' | 'autoCheckForUpdates' | 'skippedUpdateVersion'>
+  Pick<
+    VaultPreferences,
+    'theme' | 'sshTerminalTheme' | 'autoCheckForUpdates' | 'skippedUpdateVersion'
+  >
 > & { lastUpdateCheck?: string };
 
 export function parseVaultPreferences(value: unknown): VaultPreferences | undefined {

@@ -41,15 +41,22 @@ func (h *vaultFoundationHandler) updatePreferences(ctx context.Context, payload 
 	}
 	var autoCheck *bool
 	var theme *applicationTheme
+	var terminalTheme *string
 	var skipped json.RawMessage
 	var checkedAt *string
 	if decodeVaultNullableObject(payload, map[string]any{
-		"theme": &theme,
+		"theme": &theme, "sshTerminalTheme": &terminalTheme,
 		"autoCheckForUpdates": &autoCheck, "skippedUpdateVersion": &skipped, "lastUpdateCheck": &checkedAt,
 	}, map[string]bool{"skippedUpdateVersion": true}) != nil {
 		return nil, vaultwire.ErrProtocol
 	}
-	values := make(map[string]any, 4)
+	values := make(map[string]any, 5)
+	if terminalTheme != nil {
+		if !validSshTerminalTheme(*terminalTheme) {
+			return nil, vaultwire.ErrProtocol
+		}
+		values[sshTerminalThemeKey] = *terminalTheme
+	}
 	if theme != nil {
 		persisted, ok := persistedApplicationTheme(*theme)
 		if !ok {

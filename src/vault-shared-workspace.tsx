@@ -20,6 +20,7 @@ import {
 } from './shared-connection-sessions';
 import type { SharedConnectionMode } from './shared-connection-mode';
 import { XtermSession } from './xterm-terminal';
+import { defaultSshTerminalTheme, type SshTerminalTheme } from './terminal-themes';
 import { copyTextToClipboard } from './clipboard';
 import { VncSurface } from './components/VncSurface';
 import { WebSurface } from './components/WebSurface';
@@ -511,12 +512,19 @@ export function mountSharedWorkspace(
   container: HTMLElement,
   api: SharedSessionAPI & SharedUpdateAPI & SharedProfileAPI,
   onFailure: () => void,
-  tools?: HTMLElement,
-  titlebar?: HTMLElement,
+  {
+    tools,
+    titlebar,
+    sshTerminalTheme = defaultSshTerminalTheme,
+  }: {
+    tools?: HTMLElement;
+    titlebar?: HTMLElement;
+    sshTerminalTheme?: SshTerminalTheme;
+  } = {},
 ) {
   const sessions = new SharedConnectionSessions(
     api,
-    (id) => new XtermSession(id),
+    (id) => new XtermSession(id, undefined, sshTerminalTheme),
     copyTextToClipboard,
   );
   const root = createRoot(container);

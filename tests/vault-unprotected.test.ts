@@ -504,7 +504,7 @@ test(
         factor: password(),
       });
       assert.deepEqual(await host.protection(), { protected: true });
-      await host.updatePreferences({ theme: 'oled' });
+      await host.updatePreferences({ theme: 'oled', sshTerminalTheme: 'dracula' });
       assert.deepEqual(await factorFiles(), []);
       await host.stop();
       host = make();
@@ -522,7 +522,9 @@ test(
       });
       assert.equal(host.unlockedWorkspaceId, id);
       await host.workspace();
-      assert.equal((await host.preferences()).theme, 'oled');
+      const preferences = await host.preferences();
+      assert.equal(preferences.theme, 'oled');
+      assert.equal(preferences.sshTerminalTheme, 'dracula');
     } finally {
       recoveryCode?.fill(0);
       await host?.stop();

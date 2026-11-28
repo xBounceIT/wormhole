@@ -57,6 +57,12 @@ test('the real SSH theme IPC bridge validates input and requires authentication 
   let authorized = true;
   let authChecks = 0;
   const writes: unknown[] = [];
+  let trusted = true;
+  const vaultBackend = {
+    isVaultWorkspace: false,
+    updatePreferences: ({ sshTerminalTheme }: { sshTerminalTheme: string }) =>
+      writes.push(['vault', sshTerminalTheme]),
+  };
   const handlers = new Map<string, (event: object, theme: unknown) => Promise<unknown>>();
   runInNewContext(stripTypeScriptTypes(main.slice(start, end)), {
     ipcMain: {
@@ -64,6 +70,8 @@ test('the real SSH theme IPC bridge validates input and requires authentication 
         handlers.set(channel, callback),
     },
     isSshTerminalTheme,
+    isTrustedVaultSender: () => trusted,
+    vaultBackend,
     serializeAuthOperation: (callback: () => Promise<unknown>) => callback(),
     requireWorkspaceAuth: async () => {
       authChecks++;
@@ -107,4 +115,46 @@ test('the real SSH theme IPC bridge validates input and requires authentication 
   authorized = false;
   await assert.rejects(bridge!.setSshTerminalTheme('light'), /locked/);
   assert.equal(writes.length, 4);
+  authorized = true;
+  vaultBackend.isVaultWorkspace = true;
+  await bridge!.setSshTerminalTheme('dracula');
+  assert.deepEqual(writes.at(-1), ['vault', 'dracula']);
+  trusted = false;
+  await assert.rejects(bridge!.setSshTerminalTheme('light'), /invalid/);
+  assert.equal(writes.length, 5);
+});
+
+test('settings refresh reads the active vault and discards the result if its window navigates', async () => {
+  const main = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
+  const start = main.indexOf("  ipcMain.handle('settings:read'");
+  const end = main.indexOf("  ipcMain.handle('settings:set-ssh-terminal-theme'", start);
+  let read!: (event: object) => Promise<{ sshTerminalTheme: string }>;
+  let trusted = true;
+  let theme: string | undefined;
+  let navigate = false;
+  const vaultBackend = {
+    isVaultWorkspace: true,
+    preferences: async () => {
+      if (navigate) trusted = false;
+      return { sshTerminalTheme: theme };
+    },
+  };
+  runInNewContext(stripTypeScriptTypes(main.slice(start, end)), {
+    ipcMain: { handle: (_: string, handler: typeof read) => (read = handler) },
+    defaultSshTerminalTheme,
+    vaultBackend,
+    isTrustedVaultSender: () => trusted,
+    runAuthorizedOperation: (run: () => unknown) => run(),
+    serializeAuthOperation: (run: () => unknown) => run(),
+    runBackend: async () => ({ sshTerminalTheme: 'wormhole-dark' }),
+  });
+  assert.equal((await read({})).sshTerminalTheme, defaultSshTerminalTheme);
+  theme = 'dracula';
+  assert.equal((await read({})).sshTerminalTheme, theme);
+  navigate = true;
+  await assert.rejects(read({}), /unavailable/);
+  await assert.rejects(read({}), /unavailable/);
+  trusted = true;
+  vaultBackend.isVaultWorkspace = false;
+  assert.equal((await read({})).sshTerminalTheme, 'wormhole-dark');
 });

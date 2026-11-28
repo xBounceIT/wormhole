@@ -139,7 +139,11 @@ import {
   withIpcDiagnostics,
 } from './runtime-diagnostics.js';
 import { isAppTheme, parseThemeStartupRequest, type AppTheme } from './theme-settings.js';
-import { isSshTerminalTheme, type SshTerminalTheme } from './terminal-theme-settings.js';
+import {
+  defaultSshTerminalTheme,
+  isSshTerminalTheme,
+  type SshTerminalTheme,
+} from './terminal-theme-settings.js';
 import { nativeTitlebarOverlay, syncNativeTitlebarTheme } from './native-titlebar-theme.js';
 import {
   normalizeWindowCloseConfirmation,
@@ -11935,16 +11939,31 @@ function registerIpcHandlers(
     });
   });
 
-  ipcMain.handle('settings:read', async () => {
+  ipcMain.handle('settings:read', async (event) => {
+    if (!isTrustedVaultSender(event)) throw Error('Settings unavailable.');
+    if (vaultBackend.isVaultWorkspace) {
+      const settings = await runAuthorizedOperation(() => vaultBackend.preferences());
+      if (!isTrustedVaultSender(event)) throw Error('Settings unavailable.');
+      return {
+        ...settings,
+        sshTerminalTheme: settings.sshTerminalTheme ?? defaultSshTerminalTheme,
+      };
+    }
     return serializeAuthOperation(async () => {
       return runBackend<AppSettings>('settings-read');
     });
   });
 
-  ipcMain.handle('settings:set-ssh-terminal-theme', async (_event, value: unknown) => {
-    if (!isSshTerminalTheme(value)) throw new Error('SSH terminal theme is invalid.');
+  ipcMain.handle('settings:set-ssh-terminal-theme', async (event, value: unknown) => {
+    if (!isTrustedVaultSender(event) || !isSshTerminalTheme(value))
+      throw new Error('SSH terminal theme is invalid.');
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
+      if (!isTrustedVaultSender(event)) throw new Error('SSH terminal theme is invalid.');
+      if (vaultBackend.isVaultWorkspace) {
+        await vaultBackend.updatePreferences({ sshTerminalTheme: value });
+        return { updated: true };
+      }
       return runBackend<{ updated: boolean }>('settings-set-ssh-terminal-theme', { theme: value });
     });
   });

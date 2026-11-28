@@ -1406,7 +1406,9 @@ The following building blocks are implemented and tested:
   settings fall back to the system theme; corrupt slot files fail the request.
   System, Light, Dark and OLED survive a vault restart. The unlocked owner saves
   an appearance change through `update-preferences`. The protected workspace
-  administration window inherits the resolved theme from its parent.
+  administration window inherits the resolved theme from its parent. The same
+  native settings path saves the SSH color theme. Shared terminals apply that
+  theme after admission, including when a session reconnects.
   A null slot descriptor grants no workspace access. File reads are bounded,
   buffers cleared and settings links/non-regular files ignored. After unlock, the
   preload supplies a settings request to `startup:load`. For native vaults, the

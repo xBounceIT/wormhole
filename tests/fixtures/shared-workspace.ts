@@ -441,7 +441,11 @@ export async function runSharedWorkspaceTests() {
     },
     api,
     async (container, failed, tools, titlebar) =>
-      mountSharedWorkspace(container, api, failed, tools, titlebar),
+      mountSharedWorkspace(container, api, failed, {
+        tools,
+        titlebar,
+        sshTerminalTheme: 'dracula',
+      }),
   );
   (card.querySelector('button') as HTMLButtonElement).click();
   await until(
@@ -619,6 +623,11 @@ export async function runSharedWorkspaceTests() {
   check(card.textContent?.includes('Connecting'), 'missing pending state');
   resolveOpen!({});
   await until(() => !!card.querySelector('.xterm-screen'), 'real terminal not mounted');
+  check(
+    getComputedStyle(card.querySelector('.xterm')!.parentElement!).backgroundColor ===
+      'rgb(40, 42, 54)',
+    'the shared terminal ignored the saved Dracula theme',
+  );
   const first = calls.find((c) => c.name === 'open')!.args[0];
   check(
     Object.keys(first).sort().join(',') === 'columns,mode,nodeId,rows,sessionId',

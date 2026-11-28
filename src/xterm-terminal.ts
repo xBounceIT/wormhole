@@ -78,9 +78,10 @@ export class XtermSession {
   constructor(
     private sessionId: string,
     private createWebgl = () => new WebglAddon(),
+    initialTheme = colorTheme,
   ) {
     this.host.style.cssText = 'width:100%;height:100%;overflow:hidden';
-    this.setTheme(colorTheme);
+    this.setTheme(initialTheme);
     this.terminal.options.linkHandler = {
       activate: (event, url) => {
         event.preventDefault();
