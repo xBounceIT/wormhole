@@ -426,7 +426,7 @@ export function SftpFilePane({
   return (
     <section
       aria-label={`${pane === 'local' ? 'Local' : 'Remote'} files`}
-      className={`relative flex min-h-0 min-w-0 flex-1 flex-col gap-2 overflow-hidden rounded-md ${
+      className={`sftp-file-pane relative flex min-h-0 min-w-0 flex-1 flex-col gap-2 overflow-hidden rounded-md ${
         dropPath === state.path ? 'bg-primary/5' : ''
       }`}
       onDragEnter={(event) => setDragState(event)}
@@ -680,7 +680,7 @@ export function SftpFilePane({
                         <div
                           aria-selected={selected}
                           aria-rowindex={entryIndex + 2}
-                          className={`grid h-7 grid-cols-[1rem_1.5rem_minmax(0,1fr)_5.25rem_7.75rem] items-center gap-x-2.5 border-b border-border/50 px-[22px] text-xs outline-none transition-colors ${
+                          className={`sftp-columns sftp-files-columns h-7 items-center border-b border-border/50 text-xs outline-none transition-colors ${
                             selected ? 'bg-primary/15 text-foreground' : 'hover:bg-muted/30'
                           } ${dropPath === entry.fullPath ? 'ring-1 ring-inset ring-primary' : ''}`}
                           draggable={!busy && !isEditing}

@@ -199,6 +199,40 @@
   scroll-padding-inline: var(--tab-spacing);
 }
 
+.sftp-file-pane {
+  container: sftp-pane / inline-size;
+}
+.sftp-columns {
+  display: grid;
+  --sftp-column-gap: 0.625rem;
+  column-gap: var(--sftp-column-gap);
+  padding-inline: 22px;
+  --sftp-file-stats: 5.25rem 7.75rem;
+}
+.sftp-files-columns {
+  grid-template-columns: 1rem 1.5rem minmax(0, 1fr) var(--sftp-file-stats);
+}
+.sftp-tree-columns {
+  grid-template-columns: minmax(0, 1fr) var(--sftp-file-stats);
+}
+.sftp-tree-name-heading {
+  padding-inline-start: calc(2.5rem + 2 * var(--sftp-column-gap));
+}
+.sftp-tree-name-grid {
+  column-gap: var(--sftp-column-gap);
+}
+@container sftp-pane (max-width: 25rem) {
+  .sftp-columns {
+    --sftp-column-gap: 0.25rem;
+    padding-inline: 8px;
+    --sftp-file-stats: 2.875rem 6.5rem;
+  }
+  .sftp-file-pane [role='grid'],
+  .sftp-file-pane [role='treegrid'] > :is([role='row'], [role='rowgroup']) {
+    min-width: 17rem;
+  }
+}
+
 .session-tab-list {
   gap: var(--tab-spacing);
   padding-inline: var(--tab-spacing);

@@ -1001,6 +1001,43 @@ export async function runSharedWorkspaceTests() {
     opens: calls.filter((c) => c.name === 'open').length,
   };
 }
+export function checkCompactWorkspace() {
+  const sidebar = document.querySelector<HTMLElement>('.shared-workspace-sidebar')!;
+  const toggle = document.querySelector<HTMLButtonElement>('.shared-navigation-toggle')!;
+  check(
+    toggle.getAttribute('aria-controls') === sidebar.id && !sidebar.getClientRects().length,
+    'the compact layout should leave room for the selected session',
+  );
+  toggle.click();
+  check(
+    toggle.getAttribute('aria-expanded') === 'true' && sidebar.getClientRects().length,
+    'the compact connection list could not be opened',
+  );
+  const signOut = [...sidebar.querySelectorAll('button')].find(
+    (button) => button.textContent === 'Sign out',
+  )!;
+  signOut.scrollIntoView({ block: 'nearest' });
+  const bounds = signOut.getBoundingClientRect();
+  check(
+    bounds.top >= 0 && bounds.bottom <= innerHeight,
+    'workspace account actions were unreachable',
+  );
+  toggle.click();
+  const headers = document.querySelectorAll('[data-sftp-tree-header], [data-sftp-file-header]');
+  check(headers.length === 4, 'expected a directory tree and file list in each pane');
+  for (const header of headers) {
+    const labels = [...header.querySelectorAll('[role=columnheader]')]
+      .map((h) => h.querySelector('button span, span[class] > span'))
+      .filter((el) => el && el.textContent);
+    check(labels.length === 3, 'sort labels missing');
+    const rects = labels.map((label) => label!.getBoundingClientRect());
+    check(
+      rects[0].right < rects[1].left && rects[1].right < rects[2].left,
+      'the Name, Size and Modified labels overlap',
+    );
+  }
+}
+
 export async function finishSharedWorkspaceTests() {
   const { calls, card, deny, dispose, check, until } = (globalThis as any).sharedUI;
   const sshTab = (Array.from(card.querySelectorAll('[role=tab]')) as HTMLButtonElement[]).find(

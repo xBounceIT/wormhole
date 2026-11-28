@@ -26,6 +26,15 @@
   flex: 1;
   min-height: 0;
 }
+.shared-navigation-toggle {
+  display: none;
+}
+.shared-workspace > .startup-status {
+  flex-shrink: 0;
+  padding: 3px 12px;
+  color: var(--shared-secondary);
+  font-size: 11px;
+}
 .shared-workspace-sidebar {
   display: flex;
   flex-direction: column;
@@ -293,18 +302,39 @@
   outline-offset: -3px;
 }
 @media (max-width: 780px) {
-  .startup-shell:has(> .shared-workspace) {
-    overflow-y: auto;
-  }
-  :root .startup-shell > .shared-workspace {
-    height: auto;
-    min-height: 100%;
-  }
   .shared-workspace-layout {
-    grid-template-columns: 1fr;
+    display: flex;
+    flex-direction: column;
+  }
+  .shared-navigation-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-shrink: 0;
+    padding: 8px 14px;
+    border: 0;
+    border-bottom: 1px solid var(--sidebar-border);
+    background: var(--sidebar);
+    color: var(--sidebar-foreground);
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .shared-navigation-toggle::after {
+    content: '';
+    width: 7px;
+    height: 7px;
+    border: solid currentColor;
+    border-width: 0 1.5px 1.5px 0;
+    transform: rotate(45deg);
+  }
+  .shared-navigation-toggle[aria-expanded='true']::after {
+    transform: rotate(225deg);
+  }
+  .shared-navigation-toggle[aria-expanded='false'] + .shared-workspace-sidebar {
+    display: none;
   }
   .shared-workspace-sidebar {
-    max-height: 55dvh;
+    max-height: 45dvh;
     border-bottom: 1px solid var(--sidebar-border);
   }
   .shared-workspace-catalog {
@@ -312,10 +342,7 @@
     overflow: visible;
   }
   .shared-workspace-sessions {
-    min-height: 480px;
-  }
-  .shared-session-panel {
-    min-height: 400px;
+    flex: 1;
   }
 }
 

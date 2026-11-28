@@ -100,7 +100,18 @@ export function mountSharedStartup(
   layout.className = 'shared-workspace-layout';
   const sidebar = document.createElement('aside');
   sidebar.className = 'shared-workspace-sidebar';
+  sidebar.id = 'shared-workspace-navigation';
   sidebar.setAttribute('aria-label', 'Shared workspace navigation');
+  const navigation = document.createElement('button');
+  navigation.type = 'button';
+  navigation.className = 'shared-navigation-toggle';
+  navigation.setAttribute('aria-controls', sidebar.id);
+  navigation.textContent = 'Connections';
+  navigation.onclick = () =>
+    navigation.setAttribute(
+      'aria-expanded',
+      String(navigation.getAttribute('aria-expanded') !== 'true'),
+    );
   const account = document.createElement('footer');
   account.className = 'shared-workspace-account';
   const tools = document.createElement('div');
@@ -249,10 +260,14 @@ export function mountSharedStartup(
           detail.textContent = hint.lastLoginName;
           options.replaceChildren(optionsTitle, backup, reset);
           actions.replaceChildren(administration, signOut);
-          account.replaceChildren(title, detail, status, tools, options, actions);
+          account.replaceChildren(title, detail, tools, options, actions);
           sidebar.replaceChildren(catalog, account);
-          layout.replaceChildren(sidebar, sessionContainer);
-          card.replaceChildren(transport, layout);
+          navigation.setAttribute(
+            'aria-expanded',
+            String(window.matchMedia('(max-width: 780px)').matches),
+          );
+          layout.replaceChildren(navigation, sidebar, sessionContainer);
+          card.replaceChildren(transport, layout, status);
         }
         disposeCatalog = mountSharedCatalogScreen(
           catalog,

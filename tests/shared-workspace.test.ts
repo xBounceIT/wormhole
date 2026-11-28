@@ -80,7 +80,7 @@ test('shared catalog mounts real terminals and file tabs with owned reconnect an
  await capture(${JSON.stringify(screenshot)});
  await viewport(600,820);
  const narrow=await window.webContents.executeJavaScript('({width:innerWidth,scroll:document.documentElement.scrollWidth,top:document.querySelector(".startup-card").getBoundingClientRect().top,panel:document.querySelector(".shared-session-panel").getBoundingClientRect().height})');assert.ok(narrow.scroll<=narrow.width+1&&narrow.top>=0&&narrow.panel>=400,JSON.stringify(narrow));await capture(${JSON.stringify(screenshot.replace('.png', '-narrow.png'))});
- const scrolled=await window.webContents.executeJavaScript('(()=>{const shell=document.querySelector(".startup-shell");shell.scrollTop=shell.scrollHeight;const result={top:shell.scrollTop,bottom:document.querySelector(".shared-session-panel").getBoundingClientRect().bottom,height:innerHeight};shell.scrollTop=0;return result})()');assert.ok(scrolled.top>0&&scrolled.bottom<=scrolled.height,JSON.stringify(scrolled));
+ await window.webContents.executeJavaScript('SharedWorkspaceTests.checkCompactWorkspace()');
  await viewport(1360,850);await window.webContents.executeJavaScript('document.documentElement.classList.remove("dark")');await capture(${JSON.stringify(screenshot.replace('.png', '-light.png'))});
  await window.webContents.executeJavaScript('SharedWorkspaceTests.finishSharedWorkspaceTests()');
  await window.webContents.executeJavaScript('SharedWorkspaceTests.checkSharedWebSurface()');
