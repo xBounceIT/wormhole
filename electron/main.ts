@@ -4974,6 +4974,7 @@ const vaultRdpCredentialsDialog = new VaultRdpCredentialsDialog({
 });
 
 const vaultTunnelDialog = new VaultTunnelDialog({
+  colorScheme: (parent) => workspaceColorSchemes.get(parent),
   pickImport: async (parent, format) => {
     const filters = {
       openvpn: { name: 'OpenVPN profile', extensions: ['ovpn', 'conf'] },

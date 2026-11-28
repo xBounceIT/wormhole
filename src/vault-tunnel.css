@@ -1,64 +1,58 @@
 .vault-tunnel-fields {
   display: grid;
-  gap: 16px;
+  gap: 20px;
 }
 .vault-tunnel-fields fieldset {
   min-width: 0;
   margin: 0;
-  padding: 16px;
-  border: 1px solid #d1d5db;
-  border-radius: 8px;
+  padding: 0;
+  border: 0;
 }
 .vault-tunnel-fields legend {
-  padding: 0 6px;
+  width: 100%;
+  margin-bottom: 12px;
+  padding: 0 0 6px;
+  border-bottom: 1px solid var(--border);
   font-size: 13px;
   font-weight: 600;
 }
-.vault-tunnel-grid {
+.vault-tunnel-grid,
+.vault-tunnel-controls {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 16px;
+  gap: 12px 16px;
 }
+.vault-tunnel-controls {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.vault-tunnel-controls > label,
 .vault-tunnel-field {
   display: grid;
-  gap: 7px;
   align-content: start;
   min-width: 0;
+  gap: 5px;
 }
+.vault-tunnel-controls > div,
 .vault-tunnel-wide {
   grid-column: 1 / -1;
 }
-.vault-tunnel-field label,
-.vault-tunnel-pin {
+.vault-tunnel-controls label {
   font-size: 12px;
-  line-height: 1.5;
+  font-weight: 500;
 }
-.vault-tunnel-fields input,
-.vault-tunnel-fields select,
-.vault-tunnel-fields textarea {
-  width: 100%;
-  min-width: 0;
-  padding: 8px 10px;
-  border: 1px solid #d1d5db;
-  border-radius: 7px;
-  background: #fff;
-  color: inherit;
-  font: inherit;
-  font-size: 13px;
+.vault-tunnel-fields .startup-subtitle,
+.vault-tunnel-scroll > .startup-subtitle {
+  font-size: 12px;
+  font-weight: 400;
 }
-.vault-tunnel-fields textarea {
-  resize: vertical;
-  min-height: 100px;
-}
-.vault-tunnel-fields input[type='checkbox'] {
-  width: 18px;
-  height: 18px;
+.vault-tunnel-fields .startup-subtitle {
   margin: 0;
-  accent-color: #2563eb;
 }
-.vault-tunnel-fields :focus-visible {
-  outline: 2px solid #2563eb;
-  outline-offset: 2px;
+.vault-tunnel-scroll > .startup-subtitle {
+  margin-top: 18px;
 }
 .vault-tunnel-fields :disabled {
   opacity: 0.6;
@@ -66,114 +60,93 @@
 .vault-tunnel-fields [hidden] {
   display: none !important;
 }
-.vault-tunnel-fields .startup-subtitle {
-  margin: 0;
-  font-size: 11px;
-  line-height: 1.5;
-  color: #71717a;
-}
 .vault-tunnel-pin {
   display: flex;
-  align-items: start;
-  gap: 8px;
+  gap: 7px;
   overflow-wrap: anywhere;
-}
-.dark .vault-tunnel-fields fieldset,
-.dark .vault-tunnel-fields input,
-.dark .vault-tunnel-fields select,
-.dark .vault-tunnel-fields textarea {
-  border-color: #3f3f46;
-}
-.dark .vault-tunnel-fields input,
-.dark .vault-tunnel-fields select,
-.dark .vault-tunnel-fields textarea {
-  background: #09090b;
-}
-.dark .vault-tunnel-fields .startup-subtitle {
-  color: #a1a1aa;
-}
-@media (max-width: 540px) {
-  .vault-tunnel-grid {
-    grid-template-columns: minmax(0, 1fr);
-  }
 }
 
 .vault-tunnel-fields input[role='switch'] {
-  position: relative;
   appearance: none;
-  width: 34px;
-  height: 20px;
+  width: 32px;
+  height: 18px;
+  margin: 0;
   padding: 2px;
+  border: 1px solid var(--input);
   border-radius: 999px;
-  background: #d1d5db;
+  background: var(--secondary);
   cursor: pointer;
 }
 .vault-tunnel-fields input[role='switch']::before {
   content: '';
   display: block;
-  width: 14px;
-  height: 14px;
+  width: 12px;
+  height: 12px;
   border-radius: 50%;
-  background: #fff;
+  background: var(--foreground);
   transition: transform 120ms ease;
 }
 .vault-tunnel-fields input[role='switch']:checked {
-  background: #2563eb;
-  border-color: #2563eb;
+  background: var(--primary);
 }
 .vault-tunnel-fields input[role='switch']:checked::before {
+  background: var(--primary-foreground);
   transform: translateX(14px);
 }
-.dark .vault-tunnel-fields input[role='switch']:not(:checked) {
-  background: #3f3f46;
+
+:root .vault-dialog.vault-tunnel-document .startup-shell {
+  display: block;
+  height: 100%;
+  padding: 0;
+}
+:root .vault-dialog.vault-tunnel-document .startup-card {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+.vault-tunnel-document h1 {
+  padding: 16px 24px;
+  border-bottom: 1px solid var(--border);
+}
+.vault-tunnel-document [role='status']:not(:empty) {
+  padding: 0 24px 8px;
+}
+.vault-tunnel-document form {
+  display: grid;
+  flex: 1;
+  min-height: 0;
+  grid-template-rows: minmax(0, 1fr) auto;
+}
+.vault-tunnel-scroll {
+  overflow: auto;
+  padding: 20px 24px;
+}
+.vault-tunnel-document footer {
+  justify-content: end;
+  padding: 12px 24px;
+  border-top: 1px solid var(--border);
+}
+.vault-tunnel-imports:empty {
+  display: none;
+}
+.vault-tunnel-imports {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+@media (max-width: 540px) {
+  .vault-tunnel-grid,
+  .vault-tunnel-controls {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 @media (prefers-reduced-motion: reduce) {
   .vault-tunnel-fields input[role='switch']::before {
     transition: none;
   }
-}
-
-.vault-tunnel-document .startup-shell {
-  height: auto;
-  min-height: 100%;
-  align-items: start;
-}
-.vault-tunnel-document .startup-card {
-  width: 100%;
-  max-width: 720px;
-}
-.vault-tunnel-controls {
-  border: 0;
-  padding: 0;
-  margin: 0;
-  min-width: 0;
-}
-.vault-tunnel-controls > label {
-  display: grid;
-  gap: 6px;
-  margin-bottom: 16px;
-}
-.vault-tunnel-controls > label > input,
-.vault-tunnel-controls > label > select {
-  width: 100%;
-  min-height: 36px;
-  padding: 6px 10px;
-  font: inherit;
-  color: inherit;
-  background: transparent;
-  border: 1px solid #a1a1aa;
-  border-radius: 6px;
-}
-.vault-tunnel-document .startup-button {
-  margin-top: 12px;
-}
-
-.vault-tunnel-imports:not(:empty) {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 16px;
-}
-.vault-tunnel-imports .startup-button {
-  margin-top: 0;
 }

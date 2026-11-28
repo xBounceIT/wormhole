@@ -1,6 +1,7 @@
 import { parseVaultStartup, type VaultStartupMetadata } from '../electron/vault-contract.ts';
 import { isSharedInitialStartup } from '../electron/vault-shared-invitation.ts';
 import { mountSharedInitialJoinScreen } from './vault-shared-initial-screen.ts';
+import { applyTheme } from './theme.ts';
 import type { SharedInitialJoinInput } from '../electron/vault-shared-initial-join.ts';
 import type { SharedAccountResetInput } from '../electron/vault-shared-account-reset.ts';
 
@@ -250,6 +251,7 @@ export function mountSharedAuthenticationScreen(card: HTMLElement, api: SharedAu
         throw Error('Invalid context');
       const context = value as Record<string, unknown>;
       const metadata = parseVaultStartup(context.startup);
+      if (metadata) applyTheme(metadata.cosmetics.theme);
       if (
         context.mode === 'join-initial' &&
         Object.keys(context).length === 2 &&

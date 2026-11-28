@@ -18,7 +18,7 @@ const source = stripTypeScriptTypes(
 test('tunnel preload clears its copy immediately on synchronous IPC failure and malformed input', async () => {
   let api: any;
   runInNewContext(source, {
-    process: { platform: 'linux' },
+    process: { platform: 'linux', argv: ['--wormhole-appearance=oled'] },
     Uint8Array,
     require: () => ({
       contextBridge: {
@@ -40,6 +40,7 @@ test('tunnel preload clears its copy immediately on synchronous IPC failure and 
   assert.throws(() => api.save(null), /send failure/);
   assert.throws(() => api.save({ patch: [] }), /send failure/);
   assert.equal(api.contentProtectionAvailable, false);
+  assert.equal(api.appearance, 'oled');
 });
 
 test('actual isolated tunnel preload forwards patches once and erases its borrowed copy before a reply', async (t) => {
@@ -85,7 +86,7 @@ test('actual isolated tunnel preload forwards patches once and erases its borrow
           await window.loadURL('data:text/html,<html></html>');
           await window.webContents.executeJavaScript('('+ (async()=>{
             if(window.wormhole!==undefined||window.require!==undefined)throw Error('General API exposed');
-            if(Object.keys(window.vaultTunnel).sort().join(',')!=='capabilities,close,contentProtectionAvailable,context,discardImport,importProfile,read,references,save')throw Error('Unexpected bridge');
+            if(Object.keys(window.vaultTunnel).sort().join(',')!=='appearance,capabilities,close,contentProtectionAvailable,context,discardImport,importProfile,read,references,save')throw Error('Unexpected bridge');
             const context=await window.vaultTunnel.context();if(context.selection!==null)throw Error('Wrong context');
             if((await window.vaultTunnel.capabilities()).openVpn!==false)throw Error('Wrong capabilities');
             if((await window.vaultTunnel.references()).connections.length!==0)throw Error('Wrong references');

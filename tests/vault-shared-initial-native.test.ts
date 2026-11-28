@@ -74,8 +74,9 @@ test(
       await writeFile(
         harness,
         `
-const {app,BrowserWindow,ipcMain}=require('electron');const assert=require('node:assert/strict');const fs=require('node:fs');
+const {app,BrowserWindow,ipcMain,nativeTheme}=require('electron');const assert=require('node:assert/strict');const fs=require('node:fs');
 app.whenReady().then(async()=>{
+ nativeTheme.themeSource='dark';
  const {VaultBackendClient}=await import(${moduleURL('vault-client')});const {VaultSharedAuthenticationDialog}=await import(${moduleURL('vault-shared-dialog')});
  const client=new VaultBackendClient({executable:${JSON.stringify(join(root, 'dist-electron', `wormhole-backend-${process.arch}${process.platform === 'win32' ? '.exe' : ''}`))},databasePath:${JSON.stringify(join(data, 'workspace.db'))},userDataPath:${JSON.stringify(data)}});
  const parent=new BrowserWindow({show:false});let child,submissions=0,borrowed,picks=0;
@@ -92,6 +93,16 @@ app.whenReady().then(async()=>{
   for(let i=0;i<100;i++){if(await child.webContents.executeJavaScript('!document.querySelector("[type=submit]").disabled'))break;await new Promise(r=>setTimeout(r,25))}
   assert.equal(await child.webContents.executeJavaScript('document.querySelector("textarea").value'),${JSON.stringify(token)});
   assert.equal(await child.webContents.executeJavaScript('document.querySelector("[type=checkbox]").parentElement.hidden'),false);
+  const appearance=await child.webContents.executeJavaScript(\`(async()=>{
+    await document.fonts.ready;
+    return {
+      dark: document.documentElement.classList.contains('dark'),
+      geist: [...document.fonts].some(face=>face.family.includes('Geist')&&face.status==='loaded'),
+      collapsed: !document.querySelector('textarea').checkVisibility(),
+      visible: document.querySelector('[type=submit]').getBoundingClientRect().bottom <= innerHeight
+    };
+  })()\`);
+  assert.deepEqual(appearance,{dark:true,geist:true,collapsed:true,visible:true});
   const bottom=await child.webContents.executeJavaScript('(()=>{const cancel=document.querySelectorAll("button")[3];cancel.scrollIntoView({block:"end"});const bounds=cancel.getBoundingClientRect();return {top:bounds.top,bottom:bounds.bottom,height:innerHeight}})()');assert.ok(bottom.top>=0&&bottom.bottom<=bottom.height,'Dialog actions are not reachable by scrolling');
   await child.webContents.executeJavaScript('scrollTo(0,0)');
   await child.webContents.executeJavaScript('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');

@@ -5,13 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'none'; img-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'"
+      content="default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; connect-src 'none'; img-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'"
     />
     <link rel="stylesheet" href="/src/startup.css" />
+    <link rel="stylesheet" href="/src/vault-dialog.css" />
     <link rel="stylesheet" href="/src/vault-tunnel.css" />
     <title>VPN tunnel</title>
   </head>
-  <body class="vault-tunnel-document">
+  <body class="vault-dialog vault-tunnel-document">
     <main class="startup-shell"><section class="startup-card"></section></main>
     <script type="module" src="/src/vault-tunnel.ts"></script>
   </body>

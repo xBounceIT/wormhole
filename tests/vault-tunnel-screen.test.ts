@@ -77,10 +77,8 @@ app.whenReady().then(async () => {
     console.log('Vault tunnel screen '+name+': V8 block coverage ' + percent.toFixed(2) + '%');
     assert.ok(percent >= coverageThreshold);
     }
-    await window.webContents.executeJavaScript('window.scrollTo(0,0);');
-    await new Promise(r=>setTimeout(r,200));
-    require('node:fs').writeFileSync(${JSON.stringify(resolve('artifacts/vault/tunnel-screen.png'))},(await window.webContents.capturePage()).toPNG());
     await window.webContents.executeJavaScript('disposeFields();');
+    await require(${JSON.stringify(resolve('tests/fixtures/vault-tunnel-document.cjs'))})(window);
   } finally {
     window.destroy();
   }

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
@@ -32,7 +32,6 @@ test('isolated tunnel fields preserve stored secrets and serialize explicit chan
     .filter((item) => item.type === 'chunk')
     .map((item) => (item.type === 'chunk' ? item.code : ''))
     .join('\n');
-  mkdirSync(resolve('artifacts/vault'), { recursive: true });
   const directory = mkdtempSync(join(tmpdir(), 'wormhole-vault-tunnel-fields-'));
   const harness = join(directory, 'editor.cjs');
   const css = readFileSync(new URL('../src/vault-tunnel.css', import.meta.url), 'utf8');
@@ -69,9 +68,6 @@ app.whenReady().then(async () => {
     const percent = ranges.filter(item => item.count > 0).length * 100 / ranges.length;
     console.log('Vault tunnel fields: V8 block coverage ' + percent.toFixed(2) + '%');
     assert.ok(percent >= coverageThreshold);
-    await window.webContents.executeJavaScript('window.scrollTo(0,0);');
-    await new Promise(r=>setTimeout(r,200));
-    require('node:fs').writeFileSync(${JSON.stringify(resolve('artifacts/vault/tunnel-fields.png'))},(await window.webContents.capturePage()).toPNG());
     await window.webContents.executeJavaScript('disposeFields();');
   } finally {
     window.destroy();

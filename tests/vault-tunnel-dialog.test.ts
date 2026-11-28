@@ -162,6 +162,7 @@ function setup(mode = '') {
     },
   };
   const dialog = new VaultTunnelDialog({
+    colorScheme: () => 'oled',
     host,
     pickImport: async (owner, format) => {
       assert.equal(owner, child);
@@ -237,6 +238,7 @@ test('isolated tunnel dialog binds recipient and patch to the opening document a
   assert.equal(f.child.shown, true);
   assert.equal(f.child.protected, true);
   assert.equal(f.options.webPreferences.sandbox, true);
+  assert.deepEqual(f.options.webPreferences.additionalArguments, ['--wormhole-appearance=oled']);
   assert.equal(f.options.webPreferences.contextIsolation, true);
   assert.equal(f.options.webPreferences.nodeIntegration, false);
   assert.equal(f.options.webPreferences.devTools, false);

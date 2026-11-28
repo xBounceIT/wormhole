@@ -23,11 +23,13 @@ export function mountSharedInitialJoinScreen(card: HTMLElement, api: SharedIniti
   detail.textContent = 'Paste the invitation or open the file sent by your administrator.';
   const form = document.createElement('form');
   form.className = 'startup-form shared-invitation-form';
+  const factors = document.createElement('div');
+  factors.className = 'shared-invitation-factors';
+  factors.hidden = true;
   const label = (caption: string, control: HTMLElement) => {
     const row = document.createElement('label');
     row.textContent = caption;
     row.append(control);
-    form.append(row);
     return row;
   };
   const token = document.createElement('textarea');
@@ -37,19 +39,25 @@ export function mountSharedInitialJoinScreen(card: HTMLElement, api: SharedIniti
   token.autocapitalize = 'off';
   token.setAttribute('autocomplete', 'off');
   const tokenLabel = label('Workspace invitation', token);
+  form.append(tokenLabel);
   const button = (caption: string) => {
     const value = document.createElement('button');
     value.type = 'button';
     value.textContent = caption;
     value.className = 'startup-button startup-button-secondary';
-    form.append(value);
     return value;
   };
   const open = button('Open invite file…'),
     check = button('Check invitation');
+  const sourceActions = document.createElement('div');
+  sourceActions.className = 'vault-dialog-actions';
+  sourceActions.append(open, check);
+  form.append(sourceActions);
   const hint = document.createElement('p');
+  hint.className = 'shared-invitation-account';
   hint.setAttribute('role', 'status');
-  form.append(hint);
+  form.insertBefore(hint, sourceActions);
+  form.append(factors);
   const field = (caption: string, name: string, maximum: number, secret = true) => {
     const value = document.createElement('input');
     value.type = secret ? 'password' : 'text';
@@ -58,7 +66,7 @@ export function mountSharedInitialJoinScreen(card: HTMLElement, api: SharedIniti
     value.spellcheck = false;
     value.autocapitalize = 'off';
     value.autocomplete = name.startsWith('password') ? 'new-password' : 'off';
-    label(caption, value);
+    factors.append(label(caption, value));
     return value;
   };
   const code = field('One-time code (32 hexadecimal characters)', 'code', 32);
@@ -74,6 +82,8 @@ export function mountSharedInitialJoinScreen(card: HTMLElement, api: SharedIniti
     off,
   );
   offLabel.className = 'shared-invitation-off';
+  offLabel.prepend(off);
+  factors.append(offLabel);
   offLabel.hidden = true;
   const submit = button('Join workspace');
   submit.type = 'submit';
@@ -81,11 +91,20 @@ export function mountSharedInitialJoinScreen(card: HTMLElement, api: SharedIniti
   submit.disabled = true;
   const cancel = button('Cancel');
   const switchMethod = api.openResetOffer ? button('Use an account reset file') : undefined;
+  const actions = document.createElement('div');
+  actions.className = 'vault-dialog-actions';
+  actions.append(submit, cancel);
+  form.append(actions);
+  if (switchMethod) {
+    switchMethod.classList.add('vault-dialog-link');
+    form.append(switchMethod);
+  }
   const status = document.createElement('p');
   status.className = 'startup-status';
   status.setAttribute('role', 'status');
   status.setAttribute('aria-live', 'polite');
-  card.replaceChildren(title, detail, form, status);
+  form.insertBefore(status, actions);
+  card.replaceChildren(title, detail, form);
   const controls = [token, open, check, code, password, confirm, device, ask, off, submit];
   let disposed = false,
     busy = false,
@@ -107,6 +126,19 @@ export function mountSharedInitialJoinScreen(card: HTMLElement, api: SharedIniti
     if (switchMethod) switchMethod.disabled = value;
     submit.disabled = value || (reset ? !resetFileSelected : !invitation);
   };
+  const showSelection = () => {
+    factors.hidden = reset ? !resetFileSelected : !invitation;
+    tokenLabel.hidden = reset || !!invitation;
+    check.hidden = reset;
+    check.textContent = invitation ? 'Change invitation' : 'Check invitation';
+    check.classList.toggle('startup-button-secondary', !!invitation);
+    if (!reset)
+      detail.textContent = invitation
+        ? 'Set up your account on this device.'
+        : 'Paste the invitation or open the file sent by your administrator.';
+    submit.hidden = factors.hidden;
+  };
+  showSelection();
   const dispose = () => {
     if (disposed) return;
     disposed = true;
@@ -127,19 +159,19 @@ export function mountSharedInitialJoinScreen(card: HTMLElement, api: SharedIniti
     offLabel.hidden = true;
     submit.disabled = true;
     clearFactors();
+    showSelection();
   };
   token.oninput = invalidate;
   if (switchMethod)
     switchMethod.onclick = () => {
       if (busy || disposed || awaitingActivation) return;
       reset = !reset;
-      invalidate();
       resetFileSelected = false;
+      invalidate();
       title.textContent = reset ? 'Reset your shared account' : 'Join a shared workspace';
       detail.textContent = reset
         ? 'Open the reset file from your administrator and enter the separately delivered code and account secret key.'
         : 'Paste the invitation or open the file sent by your administrator.';
-      tokenLabel.hidden = check.hidden = reset;
       open.textContent = reset ? 'Open reset file…' : 'Open invite file…';
       askCaption.textContent = reset
         ? 'New account secret key (64 hexadecimal characters)'
@@ -180,7 +212,11 @@ export function mountSharedInitialJoinScreen(card: HTMLElement, api: SharedIniti
       if (!parsed || (!file && token.value !== requested)) throw Error('Invalid invitation');
       invitation = parsed;
       token.value = parsed.invitation;
-      hint.textContent = `${parsed.loginName} · ${parsed.workspaceId}`;
+      const account = document.createElement('strong');
+      account.textContent = parsed.loginName;
+      const workspace = document.createElement('span');
+      workspace.textContent = 'Workspace ' + parsed.workspaceId;
+      hint.replaceChildren(account, workspace);
       offLabel.hidden = parsed.tls !== 'off';
       status.textContent =
         'Invitation format checked. Enter the code sent through a separate channel.';
@@ -191,14 +227,23 @@ export function mountSharedInitialJoinScreen(card: HTMLElement, api: SharedIniti
           : 'Could not read the invitation. Check the token or choose another file.';
     } finally {
       busy = false;
-      if (!disposed) disable(false);
+      if (!disposed) {
+        showSelection();
+        disable(false);
+        if (!factors.hidden) code.focus();
+      }
     }
   };
   open.onclick = () => {
     void inspect(true);
   };
   check.onclick = () => {
-    void inspect(false);
+    if (invitation) {
+      invalidate();
+      token.value = '';
+      status.textContent = '';
+      token.focus();
+    } else void inspect(false);
   };
   cancel.onclick = () => {
     dispose();

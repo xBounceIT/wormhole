@@ -16,11 +16,13 @@ import {
 import { enrollmentBytes } from './vault-enrollment-contract.ts';
 import { protectVaultDisplayWindow } from './vault-display-window.ts';
 import type { VaultWorkspaceNode } from './vault-workspace.ts';
+import type { AppTheme } from './theme-settings.ts';
 
 type Options = {
   host: VaultBackendHost;
   ipc: Pick<IpcMain, 'handle'>;
   createWindow: (options: BrowserWindowConstructorOptions) => BrowserWindow;
+  colorScheme?: (parent: BrowserWindow) => AppTheme | undefined;
   confirm: (parent: BrowserWindow, accepted: () => boolean) => VaultFreshAuthentication;
   url: string;
   preload: string;
@@ -269,6 +271,9 @@ export class VaultTunnelDialog {
       title: selection ? 'Edit VPN tunnel' : 'Add VPN tunnel',
       webPreferences: {
         preload: this.options.preload,
+        additionalArguments: [
+          '--wormhole-appearance=' + (this.options.colorScheme?.(parent) ?? 'system'),
+        ],
         partition: `vault-tunnel-${randomUUID()}`,
         contextIsolation: true,
         sandbox: true,

@@ -2,6 +2,9 @@ import { contextBridge, ipcRenderer } from 'electron';
 // Present only in the main-owned tunnel document. Never expose the general app API.
 contextBridge.exposeInMainWorld('vaultTunnel', {
   contentProtectionAvailable: process.platform !== 'linux',
+  appearance: process.argv
+    .find((value) => value.startsWith('--wormhole-appearance='))
+    ?.split('=')[1],
   context: () => ipcRenderer.invoke('vault-tunnel:context'),
   capabilities: () => ipcRenderer.invoke('vault-tunnel:capabilities'),
   references: () => ipcRenderer.invoke('vault-tunnel:references'),

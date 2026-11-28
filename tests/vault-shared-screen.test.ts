@@ -25,6 +25,7 @@ test('isolated shared page crosses the real sandbox bridge and erases preload co
     );
     const renderer = [
       'electron/theme-settings.ts',
+      'src/theme.ts',
       'electron/vault-contract.ts',
       'electron/vault-shared-transport.ts',
       'electron/vault-shared-invitation.ts',
@@ -88,6 +89,7 @@ test('shared input and startup screens consume factors and keep admission separa
       .replace(/^export /gm, '');
   const sources = [
     'electron/theme-settings.ts',
+    'src/theme.ts',
     'electron/vault-contract.ts',
     'electron/vault-shared-transport.ts',
     'electron/vault-shared-invitation.ts',
@@ -124,6 +126,13 @@ test('shared input and startup screens consume factors and keep admission separa
       function joinForm(overrides={}){const card=document.createElement('section');document.body.append(card);let seen,copy,calls=0,inspections=0;const dispose=mountSharedInitialJoinScreen(card,{inspectInvitation:async()=>{inspections++;return inviteHints('verified')},openInvitation:async()=>inviteHints('verified'),submit:value=>{calls++;seen=value;copy={code:[...value.code],password:[...value.password],ask:value.ask?[...value.ask]:undefined,acknowledgeTLSOff:value.acknowledgeTLSOff};return Promise.resolve(false)},cancel:async()=>{},...overrides});return{card,dispose,get seen(){return seen},get copy(){return copy},get calls(){return calls},get inspections(){return inspections},remove(){dispose();dispose();card.remove()}}}
       const checkInvite=async(v,file=false)=>{v.card.querySelector('textarea').value='WHINV2-public';v.card.querySelectorAll('button')[file?0:1].click();await tick()};
       const sendJoin=(v,changes={})=>{for(const [name,value] of Object.entries({code:'ab'.repeat(16),password:'hello','password-confirm':'hello','device-name':'Device',ask:'cd'.repeat(32),...changes}))v.card.querySelector('[name="'+name+'"]').value=value;v.card.querySelector('form').dispatchEvent(new Event('submit',{cancelable:true}));check(['code','password','password-confirm','ask'].every(name=>v.card.querySelector('[name="'+name+'"]').value===''),'initial factors remained in DOM')};
+      {
+        const v=joinForm(),code=v.card.querySelector('[name=code]'),token=v.card.querySelector('textarea');
+        check(!code.checkVisibility(),'factors visible before invitation selection');
+        await checkInvite(v);check(code.checkVisibility()&&!token.checkVisibility(),'checked invitation remained expanded');
+        code.value='ab'.repeat(16);v.card.querySelectorAll('button')[1].click();
+        check(token.checkVisibility()&&document.activeElement===token&&!code.value&&v.card.querySelector('[type=submit]').disabled,'changing invitation retained factors or lost focus');v.remove();
+      }
       {
         const v=joinForm();v.card.querySelector('form').dispatchEvent(new Event('submit',{cancelable:true}));check(v.calls===0,'uninspected invitation submitted');await checkInvite(v);
         check(v.card.textContent.includes('<alice>')&&!v.card.querySelector('alice'),'invitation hints executed');sendJoin(v);check(v.copy.code.every(n=>n===171)&&v.copy.ask.every(n=>n===205)&&v.copy.password.length===5,'initial input altered');check(v.seen.code.every(n=>n===0)&&v.seen.password.every(n=>n===0)&&v.seen.ask.every(n=>n===0),'initial bytes retained');await tick();

@@ -90,21 +90,28 @@ export function mountVaultTunnelScreen(card: HTMLElement, api: VaultTunnelApi) {
   const fieldsContainer = document.createElement('div');
   const save = document.createElement('button');
   save.type = 'submit';
+  save.disabled = true;
   save.className = 'startup-button';
   save.textContent = 'Save tunnel';
   const close = document.createElement('button');
   close.type = 'button';
   close.name = 'cancel';
-  close.className = 'startup-button';
+  close.className = 'startup-button startup-button-secondary';
   close.textContent = 'Cancel';
   const notice = document.createElement('p');
   notice.className = 'startup-subtitle';
   notice.textContent = api.contentProtectionAvailable
     ? 'Stored secrets stay hidden. This editor closes when Wormhole locks or after five minutes.'
     : 'Screen capture protection is unavailable on Linux. Stored secrets stay hidden. This editor closes when Wormhole locks or after five minutes.';
-  controls.append(nameLabel, kindLabel, imports, fieldsContainer, save);
-  form.append(controls);
-  card.replaceChildren(heading, status, form, notice, close);
+  controls.append(nameLabel, kindLabel, imports, fieldsContainer);
+  const scroll = document.createElement('div');
+  scroll.className = 'vault-tunnel-scroll';
+  scroll.append(controls, notice);
+  const actions = document.createElement('footer');
+  actions.className = 'vault-dialog-actions';
+  actions.append(close, save);
+  form.append(scroll, actions);
+  card.replaceChildren(heading, status, form);
   let disposed = false,
     pending = false;
   let selection: ReturnType<typeof parseVaultTunnelSelection>;
@@ -116,6 +123,10 @@ export function mountVaultTunnelScreen(card: HTMLElement, api: VaultTunnelApi) {
   let original: VaultTunnelProjection | undefined;
   let identity: { workspaceId: string; editorId: string } | undefined;
   let imported = false;
+  function setControlsDisabled(disabled: boolean) {
+    controls.disabled = disabled;
+    save.disabled = disabled || !tunnelKindAvailable(currentKind, capabilities);
+  }
   function dispose() {
     if (disposed) return;
     disposed = true;
@@ -128,7 +139,7 @@ export function mountVaultTunnelScreen(card: HTMLElement, api: VaultTunnelApi) {
     identity = undefined;
     imports.replaceChildren();
     name.value = '';
-    controls.disabled = true;
+    setControlsDisabled(true);
     close.disabled = true;
     form.onsubmit = null;
     kind.onchange = null;
@@ -162,7 +173,7 @@ export function mountVaultTunnelScreen(card: HTMLElement, api: VaultTunnelApi) {
     for (const format of tunnelImportFormats(currentKind)) {
       const button = document.createElement('button');
       button.type = 'button';
-      button.className = 'startup-button';
+      button.className = 'startup-button startup-button-secondary';
       button.dataset.import = format;
       button.disabled = save.disabled;
       button.textContent = {
@@ -191,7 +202,7 @@ export function mountVaultTunnelScreen(card: HTMLElement, api: VaultTunnelApi) {
       return;
     if (!window.confirm('Importing replaces unsaved settings in this form. Continue?')) return;
     pending = true;
-    controls.disabled = true;
+    setControlsDisabled(true);
     status.textContent = 'Importing profile…';
     let published = false;
     let bytes: Uint8Array | undefined;
@@ -262,7 +273,7 @@ export function mountVaultTunnelScreen(card: HTMLElement, api: VaultTunnelApi) {
       recipient = undefined;
       if (!disposed) {
         pending = false;
-        controls.disabled = false;
+        setControlsDisabled(false);
       }
     }
   }
@@ -302,14 +313,14 @@ export function mountVaultTunnelScreen(card: HTMLElement, api: VaultTunnelApi) {
       return;
     }
     pending = true;
-    controls.disabled = true;
+    setControlsDisabled(true);
     void api
       .discardImport()
       .then(() => {
         if (disposed) return;
         imported = false;
         pending = false;
-        controls.disabled = false;
+        setControlsDisabled(false);
         change();
       })
       .catch(() => {
@@ -342,7 +353,7 @@ export function mountVaultTunnelScreen(card: HTMLElement, api: VaultTunnelApi) {
       return;
     }
     pending = true;
-    controls.disabled = true;
+    setControlsDisabled(true);
     status.textContent = 'Saving tunnel…';
     let operation: Promise<boolean>;
     try {
@@ -367,7 +378,7 @@ export function mountVaultTunnelScreen(card: HTMLElement, api: VaultTunnelApi) {
           void api.close().catch(() => undefined);
         } else {
           pending = false;
-          controls.disabled = false;
+          setControlsDisabled(false);
           status.textContent =
             'The tunnel was not saved. Check the settings and re-enter replacement secrets. If it changed elsewhere, close this editor and refresh the workspace.';
         }
@@ -429,7 +440,7 @@ export function mountVaultTunnelScreen(card: HTMLElement, api: VaultTunnelApi) {
       heading.textContent = selection ? 'Edit VPN tunnel' : 'Add VPN tunnel';
       name.value = projection.name;
       mount(projection, !selection);
-      controls.disabled = false;
+      setControlsDisabled(false);
       status.textContent = save.disabled
         ? 'This build has no usable OpenVPN engine. Choose an available provider to create a different configuration.'
         : '';
