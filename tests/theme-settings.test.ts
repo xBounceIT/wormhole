@@ -156,6 +156,7 @@ test('the real preload and IPC handler update only live application windows', ()
   assert.ok(start >= 0 && end > start);
   const updates: unknown[] = [];
   const tooltipSchemes: unknown[] = [];
+  const workspaceColorSchemes = new WeakMap<object, string>();
   let destroyed = false;
   const owner = {
     isDestroyed: () => destroyed,
@@ -178,6 +179,7 @@ test('the real preload and IPC handler update only live application windows', ()
         contents === sender ? owner : contents === foreignSender ? foreignWindow : null,
     },
     windowCloseCoordinators: new WeakMap([[owner, {}]]),
+    workspaceColorSchemes,
     treeTooltips: {
       setColorScheme: (window: unknown, theme: unknown) => {
         assert.equal(window, owner);
@@ -209,6 +211,7 @@ test('the real preload and IPC handler update only live application windows', ()
   assert.ok(bridge);
   bridge.setTitlebarTheme('light');
   bridge.setTitlebarTheme('dark');
+  assert.equal(workspaceColorSchemes.get(owner), 'dark');
   bridge.setTitlebarTheme('light');
   for (const value of [null, {}, 'system', 'LIGHT', 'dark\u0000', 'x'.repeat(4096)]) {
     bridge.setTitlebarTheme(value);
@@ -224,6 +227,8 @@ test('the real preload and IPC handler update only live application windows', ()
     nativeTitlebarOverlay('light'),
   ]);
   assert.deepEqual(tooltipSchemes, ['light', 'dark', 'light']);
+  assert.equal(workspaceColorSchemes.get(owner), 'light');
+  assert.equal(workspaceColorSchemes.has(foreignWindow), false);
   bridge = undefined;
   runInNewContext(preload, { ...context, process: { isMainFrame: false } });
   assert.equal(bridge, undefined, 'child frames must not receive the window controls bridge');
