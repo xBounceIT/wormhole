@@ -4,7 +4,7 @@ import { build } from 'vite';
 import tailwindcss from '@tailwindcss/vite';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createRequire } from 'node:module';
 import { execFile } from 'node:child_process';
@@ -49,39 +49,51 @@ test('shared catalog mounts real terminals and file tabs with owned reconnect an
       join(directory, 'index.html'),
       '<!doctype html><html><head><link rel="stylesheet" href="layout.css"></head><body></body></html>',
     );
-    const screenshot = fileURLToPath(
-      new URL('../artifacts/vault/shared-connect-workspace.png', import.meta.url),
-    );
-    mkdirSync(dirname(screenshot), { recursive: true });
+    const screenshotDirectory = process.env.WORMHOLE_TEST_SCREENSHOTS;
+    if (screenshotDirectory) mkdirSync(screenshotDirectory, { recursive: true });
     const harness = join(directory, 'main.cjs');
     writeFileSync(
       harness,
       `
  const assert=require('node:assert/strict'),{readFileSync,writeFileSync}=require('node:fs'),{app,BrowserWindow}=require('electron');
+ app.setPath('userData',${JSON.stringify(directory)});
  app.whenReady().then(async()=>{const window=new BrowserWindow({show:false,width:1360,height:850,webPreferences:{sandbox:true,contextIsolation:true,nodeIntegration:false,backgroundThrottling:false}});try{
  await window.loadURL(${JSON.stringify(pathToFileURL(join(directory, 'index.html')).href)});
+ if(process.env.WORMHOLE_TEST_SCREENSHOTS)await window.webContents.insertCSS('*, *::before, *::after { transition: none !important; }');
  const debug=window.webContents.debugger;debug.attach('1.3');await debug.sendCommand('Emulation.setFocusEmulationEnabled',{enabled:true});await debug.sendCommand('Profiler.enable');await debug.sendCommand('Profiler.startPreciseCoverage',{callCount:true,detailed:true});
- const capture=async path=>{
-   await window.webContents.executeJavaScript('document.fonts.ready.then(()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r))))');
-   const result=await debug.sendCommand('Page.captureScreenshot',{format:'png',fromSurface:true,captureBeyondViewport:false});
-   writeFileSync(path,Buffer.from(result.data,'base64'));
- };
+ async function capture(filename) {
+   const destination = process.env.WORMHOLE_TEST_SCREENSHOTS;
+   if (!destination) return;
+   const expected = await window.webContents.executeJavaScript('document.fonts.ready.then(() => ({ dark: document.documentElement.classList.contains("dark"), width: innerWidth, height: innerHeight }))');
+   // A hidden window may return its previous painted surface after a resize or theme change.
+   for (let attempt = 0; attempt < 20; attempt++) {
+     const image = await window.webContents.capturePage(undefined, { stayHidden: true, stayAwake: true });
+     const { width, height } = image.getSize();
+     if (width === expected.width && height === expected.height) {
+       const corner = image.toBitmap({ scaleFactor: 1 })[0];
+       if (expected.dark ? corner < 100 : corner > 175) {
+         writeFileSync(require('node:path').join(destination, filename), image.toPNG());
+         return;
+       }
+     }
+     await new Promise(resolve => setTimeout(resolve, 25));
+   }
+   throw Error('Workspace did not paint its requested size and theme: ' + filename);
+ }
  const viewport=async(width,height)=>{
    window.setContentSize(width,height);
    await debug.sendCommand('Emulation.setDeviceMetricsOverride',{width,height,mobile:false,deviceScaleFactor:1});
-   await window.webContents.executeJavaScript('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
    assert.deepEqual(await window.webContents.executeJavaScript('[innerWidth,innerHeight]'),[width,height]);
  };
  await viewport(1360,850);
  await window.webContents.executeJavaScript(readFileSync(${JSON.stringify(join(directory, 'renderer.js'))},'utf8'));
  const result=await window.webContents.executeJavaScript('SharedWorkspaceTests.runSharedWorkspaceTests()');assert.equal(result.sessions,2);assert.equal(result.opens,4);
- await window.webContents.executeJavaScript('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
  const shellBounds=await window.webContents.executeJavaScript('(()=>{const card=document.querySelector(".shared-workspace").getBoundingClientRect();const sidebar=document.querySelector(".shared-workspace-sidebar").getBoundingClientRect();const signOut=[...document.querySelectorAll("button")].find(b=>b.textContent==="Sign out").getBoundingClientRect();return [card.x,card.y,card.width===innerWidth,signOut.width<sidebar.width/2]})()');assert.deepEqual(shellBounds,[0,0,true,true]);
- await capture(${JSON.stringify(screenshot)});
+ await capture('shared-connect-workspace.png');
  await viewport(600,820);
- const narrow=await window.webContents.executeJavaScript('({width:innerWidth,scroll:document.documentElement.scrollWidth,top:document.querySelector(".startup-card").getBoundingClientRect().top,panel:document.querySelector(".shared-session-panel").getBoundingClientRect().height})');assert.ok(narrow.scroll<=narrow.width+1&&narrow.top>=0&&narrow.panel>=400,JSON.stringify(narrow));await capture(${JSON.stringify(screenshot.replace('.png', '-narrow.png'))});
+ const narrow=await window.webContents.executeJavaScript('({width:innerWidth,scroll:document.documentElement.scrollWidth,top:document.querySelector(".startup-card").getBoundingClientRect().top,panel:document.querySelector(".shared-session-panel").getBoundingClientRect().height})');assert.ok(narrow.scroll<=narrow.width+1&&narrow.top>=0&&narrow.panel>=400,JSON.stringify(narrow));await capture('shared-connect-workspace-narrow.png');
  await window.webContents.executeJavaScript('SharedWorkspaceTests.checkCompactWorkspace()');
- await viewport(1360,850);await window.webContents.executeJavaScript('document.documentElement.classList.remove("dark")');await capture(${JSON.stringify(screenshot.replace('.png', '-light.png'))});
+ await viewport(1360,850);await window.webContents.executeJavaScript('document.documentElement.classList.remove("dark")');await capture('shared-connect-workspace-light.png');
  await window.webContents.executeJavaScript('SharedWorkspaceTests.finishSharedWorkspaceTests()');
  await window.webContents.executeJavaScript('SharedWorkspaceTests.checkSharedWebSurface()');
  await window.webContents.executeJavaScript('SharedWorkspaceTests.checkSharedSerialSurface()');
