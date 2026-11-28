@@ -853,7 +853,7 @@ interface Window {
     reportRendererFailure(
       reason: 'uncaught-error' | 'unhandled-rejection' | 'workspace-mount',
     ): void;
-    setTitlebarTheme(theme: 'light' | 'dark'): void;
+    setTitlebarTheme(theme: Exclude<import('../electron/theme-settings').AppTheme, 'system'>): void;
     loadWorkspace(): Promise<WormholeWorkspaceSnapshot>;
     loadWorkspaceNodeNotes(request: { nodeId: string }): Promise<{ notes: string }>;
     selectMRemoteImport(): Promise<WormholeMRemoteImportInspection | null>;

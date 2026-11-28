@@ -1404,6 +1404,9 @@ The following building blocks are implemented and tested:
   the theme preference. They do not open SQLite, inspect the legacy auth store,
   migrate settings/data or return security policy. Missing or unusable cosmetic
   settings fall back to the system theme; corrupt slot files fail the request.
+  System, Light, Dark and OLED survive a vault restart. The unlocked owner saves
+  an appearance change through `update-preferences`. The protected workspace
+  administration window inherits the resolved theme from its parent.
   A null slot descriptor grants no workspace access. File reads are bounded,
   buffers cleared and settings links/non-regular files ignored. After unlock, the
   preload supplies a settings request to `startup:load`. For native vaults, the

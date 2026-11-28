@@ -504,10 +504,12 @@ test(
         factor: password(),
       });
       assert.deepEqual(await host.protection(), { protected: true });
+      await host.updatePreferences({ theme: 'oled' });
       assert.deepEqual(await factorFiles(), []);
       await host.stop();
       host = make();
       const startup = await host.startup();
+      assert.equal(startup.cosmetics.theme, 'oled');
       assert.equal(startup.unprotected, undefined);
       assert.equal(startup.rotation, undefined);
       const recoverySlot = startup.slots?.slots.find((slot) => slot.kind === 'recovery');
@@ -520,6 +522,7 @@ test(
       });
       assert.equal(host.unlockedWorkspaceId, id);
       await host.workspace();
+      assert.equal((await host.preferences()).theme, 'oled');
     } finally {
       recoveryCode?.fill(0);
       await host?.stop();

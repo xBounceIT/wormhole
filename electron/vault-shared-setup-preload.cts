@@ -5,11 +5,14 @@ if (appearance) {
   window.addEventListener(
     'DOMContentLoaded',
     () => {
+      const oled = appearance === '--wormhole-appearance=oled';
       const dark =
+        oled ||
         appearance === '--wormhole-appearance=dark' ||
         (appearance === '--wormhole-appearance=system' &&
           matchMedia('(prefers-color-scheme: dark)').matches);
       document.documentElement.classList.toggle('dark', dark);
+      document.documentElement.classList.toggle('oled', oled);
     },
     { once: true },
   );

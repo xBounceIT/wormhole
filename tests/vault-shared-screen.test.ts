@@ -24,6 +24,7 @@ test('isolated shared page crosses the real sandbox bridge and erases preload co
       `const electron=require('electron'),invoke=electron.ipcRenderer.invoke.bind(electron.ipcRenderer);let borrowed;electron.ipcRenderer.invoke=(channel,...args)=>{if(channel==='vault-shared:submit')borrowed=args[0];return invoke(channel,...args);};electron.contextBridge.exposeInMainWorld('testCleared',()=>borrowed.password.every(n=>n===0)&&(!borrowed.ask||borrowed.ask.every(n=>n===0)));\n${source}`,
     );
     const renderer = [
+      'electron/theme-settings.ts',
       'electron/vault-contract.ts',
       'electron/vault-shared-transport.ts',
       'electron/vault-shared-invitation.ts',
@@ -86,6 +87,7 @@ test('shared input and startup screens consume factors and keep admission separa
       .replace(/^export \{[\s\S]*?\};/gm, '')
       .replace(/^export /gm, '');
   const sources = [
+    'electron/theme-settings.ts',
     'electron/vault-contract.ts',
     'electron/vault-shared-transport.ts',
     'electron/vault-shared-invitation.ts',

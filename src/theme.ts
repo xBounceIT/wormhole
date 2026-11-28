@@ -59,5 +59,5 @@ export function applyTheme(theme: Theme): void {
     root.getBoundingClientRect();
     delete root.dataset.themeChanging;
   }
-  window.wormhole?.setTitlebarTheme(colorScheme);
+  window.wormhole?.setTitlebarTheme(resolved);
 }

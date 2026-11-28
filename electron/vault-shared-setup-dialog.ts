@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import type { AppTheme } from './theme-settings.ts';
 import type {
   BrowserWindow,
   BrowserWindowConstructorOptions,
@@ -135,7 +136,7 @@ type SetupWindow = {
 };
 
 type SetupDialogOptions = {
-  colorScheme?: (parent: BrowserWindow) => 'light' | 'dark' | undefined;
+  colorScheme?: (parent: BrowserWindow) => Exclude<AppTheme, 'system'> | undefined;
   ipc: Pick<IpcMain, 'handle'>;
   host: Pick<VaultBackendHost, 'sharedSetup'>;
   createWindow: (options: BrowserWindowConstructorOptions) => BrowserWindow;

@@ -4778,7 +4778,7 @@ const vaultSharedDialog = new VaultSharedAuthenticationDialog({
   preload: path.join(__dirname, 'vault-shared-preload.cjs'),
 });
 
-const workspaceColorSchemes = new WeakMap<BrowserWindow, 'light' | 'dark'>();
+const workspaceColorSchemes = new WeakMap<BrowserWindow, Exclude<AppTheme, 'system'>>();
 const vaultSharedSetupDialog = new VaultSharedSetupDialog({
   colorScheme: (parent) => workspaceColorSchemes.get(parent),
   host: vaultBackend,
@@ -11290,10 +11290,11 @@ function registerIpcHandlers(
   ipcMain.on('window:set-titlebar-theme', (event, value: unknown) => {
     const owner = BrowserWindow.fromWebContents(event.sender);
     if (!owner || owner.isDestroyed() || !windowCloseCoordinators.has(owner)) return;
-    if (value !== 'light' && value !== 'dark') return;
+    if (value !== 'light' && value !== 'dark' && value !== 'oled') return;
     workspaceColorSchemes.set(owner, value);
-    syncNativeTitlebarTheme(owner, value, process.platform);
-    treeTooltips.setColorScheme(owner, value);
+    const nativeScheme = value === 'oled' ? 'dark' : value;
+    syncNativeTitlebarTheme(owner, nativeScheme, process.platform);
+    treeTooltips.setColorScheme(owner, nativeScheme);
   });
 
   ipcMain.on('startup:ready', (event) => {
@@ -11948,10 +11949,16 @@ function registerIpcHandlers(
     });
   });
 
-  ipcMain.handle('settings:set-theme', async (_event, value: unknown) => {
-    if (!isAppTheme(value)) throw new Error('Application theme is invalid.');
+  ipcMain.handle('settings:set-theme', async (event, value: unknown) => {
+    if (!isTrustedVaultSender(event) || !isAppTheme(value))
+      throw new Error('Application theme is invalid.');
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
+      if (!isTrustedVaultSender(event)) throw new Error('Application theme is invalid.');
+      if (vaultBackend.isVaultWorkspace) {
+        await vaultBackend.updatePreferences({ theme: value });
+        return { updated: true };
+      }
       return runBackend<{ updated: boolean }>('settings-set-theme', {
         theme: value,
       });

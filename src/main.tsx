@@ -91,7 +91,7 @@ function renderCard(title: string, detail: string, icon: 'key' | 'lock' = 'key')
             </svg>
           </span>
           <span>
-            <strong></strong>
+            <strong role="heading" aria-level="1"></strong>
             <small></small>
           </span>
         </div>
@@ -303,7 +303,11 @@ function showUnlock(startup: WormholeStartupSnapshot) {
 function showVaultUnlock(descriptor: VaultDescriptor) {
   const api = window.wormhole!;
   const generation = startupGeneration;
-  const card = renderCard('Wormhole is locked', 'Unlock your encrypted workspace.', 'lock');
+  const card = renderCard(
+    'Wormhole is locked',
+    'Unlock your vault to load your connections.',
+    'lock',
+  );
   api.markStartupReady();
   disposeVaultUnlock?.();
   disposeVaultUnlock = mountVaultUnlockScreen(card, descriptor, api, async () => {
@@ -571,9 +575,9 @@ async function bootstrap(initialShared?: SharedVaultSessionAdmission) {
         renderCard('Shared workspace', 'Sign in to continue.', 'lock'),
         vault,
         window.wormhole,
-        async (container, failed, tools) => {
+        async (container, failed, tools, titlebar) => {
           const { mountSharedWorkspace } = await import('./vault-shared-workspace');
-          return mountSharedWorkspace(container, window.wormhole!, failed, tools);
+          return mountSharedWorkspace(container, window.wormhole!, failed, tools, titlebar);
         },
         initialShared,
       );

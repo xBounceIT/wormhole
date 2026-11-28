@@ -19,10 +19,7 @@ export function mountVaultUnlockScreen(
   api: UnlockApi,
   onUnlocked: () => Promise<void>,
 ): () => void {
-  const title = document.createElement('h1');
-  title.textContent = 'Wormhole is locked';
-  const detail = document.createElement('p');
-  detail.textContent = 'Unlock your vault to load your connections.';
+  card.classList.add('vault-unlock');
   const form = document.createElement('form');
   form.className = 'startup-form';
   const slotLabel = document.createElement('label');
@@ -162,7 +159,7 @@ export function mountVaultUnlockScreen(
   input.addEventListener('input', update);
   select.addEventListener('change', changeMethod);
   form.append(slotLabel, factorLabel, status, submit, biometric);
-  card.replaceChildren(title, detail, form);
+  card.append(form);
   changeMethod();
   input.focus();
   const dispose = () => {

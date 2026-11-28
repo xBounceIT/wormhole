@@ -26,7 +26,10 @@
   flex: 1;
   min-height: 0;
 }
-.shared-navigation-toggle {
+.shared-workspace:has(.shared-navigation-toggle[aria-expanded='false']) .shared-workspace-layout {
+  grid-template-columns: minmax(0, 1fr);
+}
+.shared-workspace:has(.shared-navigation-toggle[aria-expanded='false']) .shared-workspace-sidebar {
   display: none;
 }
 .shared-workspace > .startup-status {
@@ -305,33 +308,6 @@
   .shared-workspace-layout {
     display: flex;
     flex-direction: column;
-  }
-  .shared-navigation-toggle {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    flex-shrink: 0;
-    padding: 8px 14px;
-    border: 0;
-    border-bottom: 1px solid var(--sidebar-border);
-    background: var(--sidebar);
-    color: var(--sidebar-foreground);
-    font-weight: 600;
-    cursor: pointer;
-  }
-  .shared-navigation-toggle::after {
-    content: '';
-    width: 7px;
-    height: 7px;
-    border: solid currentColor;
-    border-width: 0 1.5px 1.5px 0;
-    transform: rotate(45deg);
-  }
-  .shared-navigation-toggle[aria-expanded='true']::after {
-    transform: rotate(225deg);
-  }
-  .shared-navigation-toggle[aria-expanded='false'] + .shared-workspace-sidebar {
-    display: none;
   }
   .shared-workspace-sidebar {
     max-height: 45dvh;

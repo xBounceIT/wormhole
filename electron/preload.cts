@@ -75,7 +75,7 @@ const wormholeBridge = {
   markWorkspaceFailed: () => ipcRenderer.send('workspace:failed'),
   reportRendererFailure: (reason: 'uncaught-error' | 'unhandled-rejection' | 'workspace-mount') =>
     ipcRenderer.send('diagnostics:renderer-failure', reason),
-  setTitlebarTheme: (theme: 'light' | 'dark') =>
+  setTitlebarTheme: (theme: Exclude<AppTheme, 'system'>) =>
     ipcRenderer.send('window:set-titlebar-theme', theme),
   loadWorkspace: () => ipcRenderer.invoke('workspace:load'),
   loadWorkspaceNodeNotes: (request: { nodeId: string }) =>

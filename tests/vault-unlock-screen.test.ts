@@ -4,6 +4,7 @@ import { createRequire, stripTypeScriptTypes } from 'node:module';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import test from 'node:test';
 import { coverageThreshold } from '../scripts/test-coverage.ts';
@@ -132,6 +133,19 @@ test('vault unlock screen clears inputs and handles password, recovery, retries 
   `;
   try {
     const harness = join(directory, 'main.cjs');
+    const previewPreload = join(directory, 'preview.cjs');
+    if (process.env.WORMHOLE_VAULT_SCREENSHOT) {
+      writeFileSync(
+        previewPreload,
+        `require('electron').contextBridge.exposeInMainWorld('wormhole', {
+        platform: 'win32', setTitlebarTheme() {}, markStartupReady() {}, onVaultLocked() {},
+        loadVaultStartup: async () => ({newWorkspace:false,cosmetics:{theme:'oled'},slots:{
+          formatVersion:5,encrypted:true,vaultId:'11111111-1111-4111-8111-111111111111',
+          slots:[{id:'password',kind:'password',preset:'kdf-v1'},{id:'recovery',kind:'recovery'}]
+        }})
+      });`,
+      );
+    }
     writeFileSync(
       harness,
       `
@@ -159,9 +173,19 @@ test('vault unlock screen clears inputs and handles password, recovery, retries 
           console.log('Vault unlock screen: V8 block coverage ' + coverage.toFixed(2) + '%');
           assert.ok(coverage >= ${coverageThreshold});
           if (process.env.WORMHOLE_VAULT_SCREENSHOT) {
-            await window.webContents.executeJavaScript('document.documentElement.classList.add("dark"); const previewShell = document.createElement("main"); previewShell.className = "startup-shell"; const previewCard = document.createElement("section"); previewCard.className = "startup-card"; previewShell.append(previewCard); document.body.replaceChildren(previewShell); mountVaultUnlockScreen(previewCard, { vaultId: "11111111-1111-4111-8111-111111111111", slots: [{id:"password",kind:"password",preset:"kdf-v1"},{id:"recovery",kind:"recovery"}] }, { unlockVault: async () => ({unlocked:true,lockedMemory:true}) }, async () => {}); undefined');
-            await new Promise(resolve => setTimeout(resolve, 80));
-            writeFileSync(process.env.WORMHOLE_VAULT_SCREENSHOT, (await window.webContents.capturePage()).toPNG());
+            const preview = new BrowserWindow({show:false,useContentSize:true,width:800,height:600,webPreferences:{preload:${JSON.stringify(previewPreload)},sandbox:true,contextIsolation:true,offscreen:true,backgroundThrottling:false}});
+            try {
+              await preview.loadFile(${JSON.stringify(fileURLToPath(new URL('../dist/index.html', import.meta.url)))});
+              await preview.webContents.executeJavaScript('document.fonts.ready.then(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))');
+              const ready = await preview.webContents.executeJavaScript(${JSON.stringify(`document.documentElement.matches('.dark.oled') &&
+                document.querySelector('.vault-unlock [role=heading]')?.textContent === 'Wormhole is locked' &&
+                document.activeElement?.matches('input[type=password]') &&
+                document.fonts.check('14px "Geist Variable"')`)});
+              assert.equal(ready,true);
+              preview.webContents.debugger.attach('1.3');
+              const {data} = await preview.webContents.debugger.sendCommand('Page.captureScreenshot');
+              writeFileSync(process.env.WORMHOLE_VAULT_SCREENSHOT, Buffer.from(data,'base64'));
+            } finally { preview.destroy(); }
           }
         } finally { window.destroy(); }
         app.quit();

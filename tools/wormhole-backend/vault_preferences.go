@@ -40,14 +40,23 @@ func (h *vaultFoundationHandler) updatePreferences(ctx context.Context, payload 
 		return nil, vaultwire.ErrProtocol
 	}
 	var autoCheck *bool
+	var theme *applicationTheme
 	var skipped json.RawMessage
 	var checkedAt *string
 	if decodeVaultNullableObject(payload, map[string]any{
+		"theme": &theme,
 		"autoCheckForUpdates": &autoCheck, "skippedUpdateVersion": &skipped, "lastUpdateCheck": &checkedAt,
 	}, map[string]bool{"skippedUpdateVersion": true}) != nil {
 		return nil, vaultwire.ErrProtocol
 	}
-	values := make(map[string]any, 3)
+	values := make(map[string]any, 4)
+	if theme != nil {
+		persisted, ok := persistedApplicationTheme(*theme)
+		if !ok {
+			return nil, vaultwire.ErrProtocol
+		}
+		values[themeKey] = persisted
+	}
 	if autoCheck != nil {
 		values[autoCheckForUpdatesKey] = *autoCheck
 	}

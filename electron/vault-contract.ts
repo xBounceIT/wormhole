@@ -1,3 +1,5 @@
+import { isAppTheme, type AppTheme } from './theme-settings.ts';
+
 export type VaultStatus = {
   formatVersion: 1;
   stage: 'foundation';
@@ -39,7 +41,7 @@ export type VaultDescriptor = {
 
 export type VaultStartupMetadata = {
   slots: VaultDescriptor | null;
-  cosmetics: { theme: 'system' | 'light' | 'dark' };
+  cosmetics: { theme: AppTheme };
   newWorkspace: boolean;
   legacy?: { unprotectedAllowed: boolean };
   shared?: { lastLoginName: string; serverDisplayName: string };
@@ -78,7 +80,7 @@ export function parseVaultStartup(value: unknown): VaultStartupMetadata | undefi
     typeof value.newWorkspace !== 'boolean' ||
     !record(value.cosmetics) ||
     !fields(value.cosmetics, ['theme']) ||
-    !['system', 'light', 'dark'].includes(value.cosmetics.theme as string)
+    !isAppTheme(value.cosmetics.theme)
   )
     return undefined;
   const slots = parseVaultDescription({ slots: value.slots });
@@ -229,7 +231,7 @@ export function parseVaultStartup(value: unknown): VaultStartupMetadata | undefi
   }
   return {
     slots,
-    cosmetics: { theme: value.cosmetics.theme as VaultStartupMetadata['cosmetics']['theme'] },
+    cosmetics: { theme: value.cosmetics.theme },
     newWorkspace: value.newWorkspace,
     ...(legacy
       ? {

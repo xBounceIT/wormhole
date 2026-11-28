@@ -4,7 +4,7 @@ import { stripTypeScriptTypes } from 'node:module';
 import test from 'node:test';
 import { runInNewContext } from 'node:vm';
 
-import { parseThemeStartupRequest } from '../electron/theme-settings.ts';
+import { isAppTheme, parseThemeStartupRequest } from '../electron/theme-settings.ts';
 import {
   nativeTitlebarOverlay,
   syncNativeTitlebarTheme,
@@ -106,8 +106,9 @@ test('applying a theme sends the actual rendered color scheme to native controls
       },
       wormhole: {
         setTitlebarTheme: (theme: string) => {
-          assert.equal(root.style.colorScheme, theme);
-          assert.equal(classes.has('dark'), theme === 'dark');
+          assert.equal(root.style.colorScheme, theme === 'oled' ? 'dark' : theme);
+          assert.equal(classes.has('dark'), theme !== 'light');
+          assert.equal(classes.has('oled'), theme === 'oled');
           assert.equal(root.dataset.themeChanging, undefined);
           updates.push(theme);
         },
@@ -126,7 +127,7 @@ test('applying a theme sends the actual rendered color scheme to native controls
   systemDark = true;
   applyTheme('system');
   applyTheme('light');
-  assert.deepEqual(updates, ['light', 'dark', 'dark', 'dark', 'light', 'dark', 'light']);
+  assert.deepEqual(updates, ['light', 'dark', 'oled', 'dark', 'light', 'dark', 'light']);
   Object.defineProperty(globalThis, 'window', { value: {} });
   assert.doesNotThrow(() => applyTheme('light'));
 });
@@ -212,6 +213,8 @@ test('the real preload and IPC handler update only live application windows', ()
   bridge.setTitlebarTheme('light');
   bridge.setTitlebarTheme('dark');
   assert.equal(workspaceColorSchemes.get(owner), 'dark');
+  bridge.setTitlebarTheme('oled');
+  assert.equal(workspaceColorSchemes.get(owner), 'oled');
   bridge.setTitlebarTheme('light');
   for (const value of [null, {}, 'system', 'LIGHT', 'dark\u0000', 'x'.repeat(4096)]) {
     bridge.setTitlebarTheme(value);
@@ -224,9 +227,10 @@ test('the real preload and IPC handler update only live application windows', ()
   assert.deepEqual(updates, [
     nativeTitlebarOverlay('light'),
     nativeTitlebarOverlay('dark'),
+    nativeTitlebarOverlay('dark'),
     nativeTitlebarOverlay('light'),
   ]);
-  assert.deepEqual(tooltipSchemes, ['light', 'dark', 'light']);
+  assert.deepEqual(tooltipSchemes, ['light', 'dark', 'dark', 'light']);
   assert.equal(workspaceColorSchemes.get(owner), 'light');
   assert.equal(workspaceColorSchemes.has(foreignWindow), false);
   bridge = undefined;
@@ -272,18 +276,40 @@ test('startup theme migration accepts only its narrow IPC request shape', () => 
   }
 });
 
-test('theme persistence crosses the validated Electron-to-Go settings bridge', () => {
+test('theme persistence crosses the validated Electron-to-Go settings bridge', async () => {
   const mainSource = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
   const preloadSource = readFileSync(new URL('../electron/preload.cts', import.meta.url), 'utf8');
   const appSource = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
   const startupSource = readFileSync(new URL('../src/main.tsx', import.meta.url), 'utf8');
 
   assert.match(preloadSource, /ipcRenderer\.invoke\('settings:set-theme', theme\)/);
-  assert.match(mainSource, /if \(!isAppTheme\(value\)\)/);
-  assert.match(
-    mainSource,
-    /ipcMain\.handle\('settings:set-theme',[\s\S]*?await requireWorkspaceAuth\(\)[\s\S]*?'settings-set-theme'/,
-  );
+  const start = mainSource.indexOf("  ipcMain.handle('settings:set-theme'");
+  const end = mainSource.indexOf('  ipcMain.handle(', start + 1);
+  let setTheme!: (event: object, theme: unknown) => Promise<{ updated: boolean }>;
+  const calls: string[] = [];
+  const workspace = {};
+  const vaultBackend = {
+    isVaultWorkspace: true,
+    updatePreferences: ({ theme }: { theme: string }) => calls.push('vault ' + theme),
+  };
+  runInNewContext(stripTypeScriptTypes(mainSource.slice(start, end)), {
+    ipcMain: { handle: (_: string, handler: typeof setTheme) => (setTheme = handler) },
+    isAppTheme,
+    isTrustedVaultSender: (event: object) => event === workspace,
+    serializeAuthOperation: (action: () => unknown) => action(),
+    requireWorkspaceAuth: () => calls.push('unlock'),
+    vaultBackend,
+    runBackend: (operation: string, { theme }: { theme: string }) => {
+      calls.push(operation + ' ' + theme);
+      return { updated: true };
+    },
+  });
+  await assert.rejects(setTheme({}, 'oled'));
+  await assert.rejects(setTheme(workspace, 'sepia'));
+  assert.equal((await setTheme(workspace, 'oled')).updated, true);
+  vaultBackend.isVaultWorkspace = false;
+  assert.equal((await setTheme(workspace, 'light')).updated, true);
+  assert.deepEqual(calls, ['unlock', 'vault oled', 'unlock', 'settings-set-theme light']);
   assert.match(appSource, /window\.wormhole\?\.setTheme\(nextTheme\)/);
   assert.match(appSource, /useState<Theme>\(initialSettings\.theme\)/);
   assert.doesNotMatch(appSource, /localStorage\.setItem/);

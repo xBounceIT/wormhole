@@ -37,6 +37,7 @@ export function mountSharedStartup(
     container: HTMLElement,
     failed: () => void,
     tools: HTMLElement,
+    titlebar: HTMLElement,
   ) => Promise<SharedWorkspacePort>,
   initialAdmission?: SharedVaultSessionAdmission,
 ) {
@@ -102,16 +103,7 @@ export function mountSharedStartup(
   sidebar.className = 'shared-workspace-sidebar';
   sidebar.id = 'shared-workspace-navigation';
   sidebar.setAttribute('aria-label', 'Shared workspace navigation');
-  const navigation = document.createElement('button');
-  navigation.type = 'button';
-  navigation.className = 'shared-navigation-toggle';
-  navigation.setAttribute('aria-controls', sidebar.id);
-  navigation.textContent = 'Connections';
-  navigation.onclick = () =>
-    navigation.setAttribute(
-      'aria-expanded',
-      String(navigation.getAttribute('aria-expanded') !== 'true'),
-    );
+  const titlebar = document.createElement('div');
   const account = document.createElement('footer');
   account.className = 'shared-workspace-account';
   const tools = document.createElement('div');
@@ -249,7 +241,7 @@ export function mountSharedStartup(
           : ' Your admin cannot see your personal items.';
         signIn.hidden = recover.hidden = resumeAdmin.hidden = true;
         if (mountSessions) {
-          const mounted = await mountSessions(sessionContainer, failed, tools);
+          const mounted = await mountSessions(sessionContainer, failed, tools, titlebar);
           if (disposed || version !== generation || !admitted || workspaceFailed) {
             mounted.dispose();
             return;
@@ -262,12 +254,8 @@ export function mountSharedStartup(
           actions.replaceChildren(administration, signOut);
           account.replaceChildren(title, detail, tools, options, actions);
           sidebar.replaceChildren(catalog, account);
-          navigation.setAttribute(
-            'aria-expanded',
-            String(window.matchMedia('(max-width: 780px)').matches),
-          );
-          layout.replaceChildren(navigation, sidebar, sessionContainer);
-          card.replaceChildren(transport, layout, status);
+          layout.replaceChildren(sidebar, sessionContainer);
+          card.replaceChildren(titlebar, transport, layout, status);
         }
         disposeCatalog = mountSharedCatalogScreen(
           catalog,

@@ -266,6 +266,7 @@ func TestVaultStartupCosmeticsCannotLockOutRecoveryOrWriteSettings(t *testing.T)
 	}{
 		{`{"Theme":"light"}`, applicationThemeLight}, {`{"Theme":1}`, applicationThemeLight},
 		{`{"Theme":"dark"}`, applicationThemeDark}, {`{"Theme":0}`, applicationThemeSystem},
+		{`{"Theme":"oled"}`, applicationThemeOLED}, {`{"Theme":3}`, applicationThemeOLED},
 		{`{"Theme":"unknown"}`, applicationThemeSystem}, {`{"Theme":{"password":"private"}}`, applicationThemeSystem},
 		{`{"Theme":"dark"} trailing`, applicationThemeSystem}, {`null`, applicationThemeSystem},
 		{`[]`, applicationThemeSystem}, {`{}`, applicationThemeSystem},

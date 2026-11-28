@@ -10,6 +10,9 @@ import {
 } from 'react';
 import { createRoot } from 'react-dom/client';
 import { createPortal } from 'react-dom';
+import { PanelLeft } from 'lucide-react';
+import { AppTitlebar } from './components/AppTitlebar';
+import { Button } from './components/ui/button';
 import {
   SharedConnectionSessions,
   type SharedSessionAPI,
@@ -473,11 +476,43 @@ const sessionLabel: Record<SharedConnectionMode, string> = {
   web: 'Web',
 };
 
+function SharedTitlebar() {
+  const [expanded, setExpanded] = useState(true);
+  useEffect(() => {
+    const compact = window.matchMedia('(max-width: 780px)');
+    const resize = (event: MediaQueryListEvent) => setExpanded(!event.matches);
+    compact.addEventListener('change', resize);
+    return () => compact.removeEventListener('change', resize);
+  }, []);
+  const label = expanded ? 'Hide connections' : 'Show connections';
+  return (
+    <AppTitlebar
+      platform={window.wormhole?.platform}
+      sidebarControl={
+        <Button
+          type="button"
+          size="icon"
+          variant="ghost"
+          className="shared-navigation-toggle"
+          aria-controls="shared-workspace-navigation"
+          aria-expanded={expanded}
+          aria-label={label}
+          title={label}
+          onClick={() => setExpanded(!expanded)}
+        >
+          <PanelLeft aria-hidden="true" />
+        </Button>
+      }
+    />
+  );
+}
+
 export function mountSharedWorkspace(
   container: HTMLElement,
   api: SharedSessionAPI & SharedUpdateAPI & SharedProfileAPI,
   onFailure: () => void,
   tools?: HTMLElement,
+  titlebar?: HTMLElement,
 ) {
   const sessions = new SharedConnectionSessions(
     api,
@@ -502,6 +537,7 @@ export function mountSharedWorkspace(
     >
       <ContextMenuOverlayProvider>
         <TooltipProvider>
+          {titlebar && createPortal(<SharedTitlebar />, titlebar)}
           <SharedSessionsView
             sessions={sessions}
             controls={tools ? createPortal(controls, tools) : controls}

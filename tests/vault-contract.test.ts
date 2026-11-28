@@ -52,6 +52,11 @@ const descriptor = {
   ],
 };
 
+test('OLED remains available while the encrypted workspace is locked', () => {
+  const startup = { slots: descriptor, cosmetics: { theme: 'oled' }, newWorkspace: false };
+  assert.deepEqual(parseVaultStartup(startup), startup);
+});
+
 test('pending migration exposes only recovery slot hints and cannot select shared or empty mode', () => {
   const value = {
     slots: descriptor,

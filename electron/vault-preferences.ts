@@ -1,9 +1,10 @@
 import { vaultRecord, vaultFields, vaultMetadataText } from './vault-contract.ts';
 import { isSshTerminalTheme, type SshTerminalTheme } from './terminal-theme-settings.ts';
+import { isAppTheme, type AppTheme } from './theme-settings.ts';
 
 export type VaultPreferences = {
   sshTerminalTheme?: SshTerminalTheme;
-  theme: 'system' | 'light' | 'dark';
+  theme: AppTheme;
   promptBeforeTunnelConnect: boolean;
   autoCopyOnSelect: boolean;
   confirmOnTabClose: boolean;
@@ -17,7 +18,7 @@ export type VaultPreferences = {
 };
 
 export type VaultUpdatePreferences = Partial<
-  Pick<VaultPreferences, 'autoCheckForUpdates' | 'skippedUpdateVersion'>
+  Pick<VaultPreferences, 'theme' | 'autoCheckForUpdates' | 'skippedUpdateVersion'>
 > & { lastUpdateCheck?: string };
 
 export function parseVaultPreferences(value: unknown): VaultPreferences | undefined {
@@ -41,7 +42,7 @@ export function parseVaultPreferences(value: unknown): VaultPreferences | undefi
       ...(Object.hasOwn(value, 'sshTerminalTheme') ? ['sshTerminalTheme'] : []),
     ]) ||
     (Object.hasOwn(value, 'sshTerminalTheme') && !isSshTerminalTheme(value.sshTerminalTheme)) ||
-    !['system', 'light', 'dark'].includes(value.theme as string) ||
+    !isAppTheme(value.theme) ||
     booleans.some((key) => typeof value[key] !== 'boolean') ||
     !Number.isInteger(value.sidebarWidth) ||
     (value.sidebarWidth as number) < 256 ||

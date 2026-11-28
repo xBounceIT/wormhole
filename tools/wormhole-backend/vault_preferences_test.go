@@ -73,6 +73,7 @@ func TestVaultUpdatePreferences(t *testing.T) {
 	for _, payload := range []string{
 		``, `[]`, `{"unknown":1}`, `{"autoCheckForUpdates":null}`, `{"autoCheckForUpdates":true,"autoCheckForUpdates":false}`,
 		`{"skippedUpdateVersion":true}`, `{"skippedUpdateVersion":"not a version"}`,
+		`{"theme":"unknown"}`, `{"theme":null}`, `{"theme":3}`,
 		`{"lastUpdateCheck":"2026-11-25T09:13:54+00:00"}`, `{"lastUpdateCheck":"invalid"}`,
 		`{"skippedUpdateVersion":"` + strings.Repeat("1", 1024) + `"}`,
 	} {
@@ -81,7 +82,7 @@ func TestVaultUpdatePreferences(t *testing.T) {
 		}
 	}
 	for _, payload := range []string{
-		`{}`, `{"autoCheckForUpdates":false,"skippedUpdateVersion":"2.4.1"}`,
+		`{}`, `{"autoCheckForUpdates":false,"skippedUpdateVersion":"2.4.1","theme":"oled"}`,
 		`{"lastUpdateCheck":"2026-11-25T09:13:54Z"}`, `{"skippedUpdateVersion":null}`,
 	} {
 		result, err := h.Handle(ctx, "update-preferences", []byte(payload))
@@ -96,7 +97,7 @@ func TestVaultUpdatePreferences(t *testing.T) {
 	var settings appSettingsSnapshot
 	if err := json.Unmarshal(raw, &settings); err != nil || settings.AutoCheckForUpdates ||
 		settings.SkippedUpdateVersion != nil || settings.LastUpdateCheck == nil ||
-		*settings.LastUpdateCheck != "2026-11-25T09:13:54Z" || settings.Theme != applicationThemeDark {
+		*settings.LastUpdateCheck != "2026-11-25T09:13:54Z" || settings.Theme != applicationThemeOLED {
 		t.Fatalf("unexpected update preferences: %s (%v)", raw, err)
 	}
 	stored, err := os.ReadFile(settingsPath)

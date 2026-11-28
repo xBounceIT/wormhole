@@ -18,6 +18,7 @@ test('preferences copy only the bounded native public projection', () => {
   value.connectionTreeExpansion.folderIds.push('later');
   assert.equal(copy.connectionTreeExpansion!.folderIds.length, 2);
   assert.ok(parseVaultPreferences({ ...preferences(), sidebarWidth: 256, theme: 'light' }));
+  assert.equal(parseVaultPreferences({ ...preferences(), theme: 'oled' })?.theme, 'oled');
   for (const sshTerminalTheme of ['wormhole-dark', 'dracula', 'tango', 'light']) {
     const themed = { ...preferences(), sshTerminalTheme };
     assert.deepEqual(parseVaultPreferences(themed), themed);

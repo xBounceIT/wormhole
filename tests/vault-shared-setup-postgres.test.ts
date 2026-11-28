@@ -503,7 +503,7 @@ app.whenReady().then(async()=>{
        assert.equal(admission.administrator,true);
        const {registerSharedAdministrationIpc,registerSharedNodeEditIpc}=await import(${fromDist('vault-shared-ipc.js')});
        let adminWindow;
-       const administration=new VaultSharedSetupDialog({host,ipc:ipcMain,pickExport:async()=>null,
+       const administration=new VaultSharedSetupDialog({host,ipc:ipcMain,pickExport:async()=>null,colorScheme:()=> 'oled',
          url:${JSON.stringify(pathToFileURL(join(root, 'dist', 'vault-shared-setup.html')).href)},
          preload:${JSON.stringify(join(root, 'dist-electron', 'vault-shared-setup-preload.cjs'))},
          createWindow:options=>{
@@ -550,6 +550,7 @@ app.whenReady().then(async()=>{
            void opened.catch(()=>{});
            try {
              await waitForAdmin('!!document.querySelector("select[name=scope]")');
+             assert.equal(await adminWindow.webContents.executeJavaScript('document.documentElement.matches(".dark.oled")'),true);
              await adminWindow.webContents.executeJavaScript('(()=>{const form=document.querySelector("form");form.elements.scope.value='+JSON.stringify(source)+';form.elements.scope.dispatchEvent(new Event("change"));form.elements.account.value='+JSON.stringify(name)+';form.requestSubmit()})()');
              await waitForAdmin('document.querySelector("h2")?.textContent==='+JSON.stringify(node.name));
              if(name) assert.equal(await adminWindow.webContents.executeJavaScript('document.querySelector(".slot-credential strong").textContent'),name);

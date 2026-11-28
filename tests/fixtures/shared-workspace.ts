@@ -116,27 +116,40 @@ export async function runSharedWorkspaceTests() {
   const record = (name: string, ...args: any[]) => {
     calls.push({ name, args });
   };
-  const entry = (path: string, name: string, isDirectory = false) => ({
+  const entry = (path: string, name: string, isDirectory = false, size = 12) => ({
     name,
-    fullPath: path + '/' + name,
+    fullPath: path.replace(/[\\/]$/, '') + '/' + name,
     isDirectory,
     isSymbolicLink: false,
-    size: 12,
+    size,
+    lastModifiedUtc: '2026-11-26T09:42:00Z',
   });
-  const ready = (sessionId: string, pane: 'local' | 'remote', path: string, requestId: string) =>
+  const ready = (sessionId: string, pane: 'local' | 'remote', path: string, requestId: string) => {
+    const directory = path || (pane === 'remote' ? '/home/operator' : 'C:/Documents');
     queueMicrotask(() =>
       emit({
         sessionId,
         type: pane === 'remote' ? 'sftp.ready' : 'sftp.local.ready',
         requestId,
-        path: path || (pane === 'remote' ? '/home/operator' : 'C:/Documents'),
+        path: directory,
         entries: [
-          entry(path || '/home/operator', 'notes.txt'),
-          entry(path || '/home/operator', 'project', true),
+          entry(directory, 'notes.txt'),
+          entry(directory, 'project', true),
+          ...(pane === 'remote'
+            ? [
+                entry(directory, 'deployments', true),
+                entry(directory, 'logs', true),
+                entry(directory, 'services.json', false, 2496),
+              ]
+            : [
+                entry(directory, 'workspaces', true),
+                entry(directory, 'release-checklist.md', false, 3840),
+              ]),
         ],
         truncated: false,
       }),
     );
+  };
   const backendListeners = new Set<(event: any) => void>();
   const emitBackend = (event: any) => {
     for (const listener of backendListeners) listener(event);
@@ -427,7 +440,8 @@ export async function runSharedWorkspaceTests() {
       cosmetics: { theme: 'dark' },
     },
     api,
-    async (container, failed, tools) => mountSharedWorkspace(container, api, failed, tools),
+    async (container, failed, tools, titlebar) =>
+      mountSharedWorkspace(container, api, failed, tools, titlebar),
   );
   (card.querySelector('button') as HTMLButtonElement).click();
   await until(
@@ -580,6 +594,13 @@ export async function runSharedWorkspaceTests() {
   check(!card.querySelector('input[type=password]'), 'password entered shared workspace');
   check(card.textContent?.includes('View only'), 'missing View-only hint');
   const transportNotice = card.querySelector('.shared-transport-notice') as HTMLElement;
+  const titlebar = card.querySelector('header')!;
+  check(
+    titlebar.textContent?.includes('Wormhole') &&
+      getComputedStyle(titlebar).getPropertyValue('-webkit-app-region') === 'drag' &&
+      titlebar.getBoundingClientRect().bottom <= transportNotice.getBoundingClientRect().top,
+    'shared workspace content overlaps the draggable titlebar',
+  );
   check(
     transportNotice && !transportNotice.hidden && transportNotice.textContent?.includes('TLS Off'),
     'missing admitted transport warning',
@@ -1001,7 +1022,7 @@ export async function runSharedWorkspaceTests() {
     opens: calls.filter((c) => c.name === 'open').length,
   };
 }
-export function checkCompactWorkspace() {
+export async function checkCompactWorkspace() {
   const sidebar = document.querySelector<HTMLElement>('.shared-workspace-sidebar')!;
   const toggle = document.querySelector<HTMLButtonElement>('.shared-navigation-toggle')!;
   check(
@@ -1009,8 +1030,8 @@ export function checkCompactWorkspace() {
     'the compact layout should leave room for the selected session',
   );
   toggle.click();
-  check(
-    toggle.getAttribute('aria-expanded') === 'true' && sidebar.getClientRects().length,
+  await until(
+    () => toggle.getAttribute('aria-expanded') === 'true' && !!sidebar.getClientRects().length,
     'the compact connection list could not be opened',
   );
   const signOut = [...sidebar.querySelectorAll('button')].find(
@@ -1023,6 +1044,10 @@ export function checkCompactWorkspace() {
     'workspace account actions were unreachable',
   );
   toggle.click();
+  await until(
+    () => !sidebar.getClientRects().length,
+    'the sidebar did not return space to the file panes',
+  );
   const headers = document.querySelectorAll('[data-sftp-tree-header], [data-sftp-file-header]');
   check(headers.length === 4, 'expected a directory tree and file list in each pane');
   for (const header of headers) {
