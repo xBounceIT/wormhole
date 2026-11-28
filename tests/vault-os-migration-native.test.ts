@@ -134,7 +134,7 @@ app.setPath('userData',data);app.disableHardwareAcceleration();app.on('window-al
     } finally {
       await client?.lock();
       assert.ok(directory.startsWith(join(tmpdir(), 'wormhole-os-migration-')));
-      await rm(directory, { recursive: true, force: true });
+      await rm(directory, { recursive: true, force: true, maxRetries: 8, retryDelay: 250 });
     }
   },
 );

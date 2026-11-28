@@ -25,7 +25,7 @@ test(
     const directory = await mkdtemp(join(tmpdir(), 'wormhole-root-resume-'));
     t.after(async () => {
       assert.ok(directory.startsWith(join(tmpdir(), 'wormhole-root-resume-')));
-      await rm(directory, { recursive: true, force: true });
+      await rm(directory, { recursive: true, force: true, maxRetries: 8, retryDelay: 250 });
     });
     const fixture = join(directory, 'fixture' + (process.platform === 'win32' ? '.exe' : ''));
     const backend = join(directory, 'backend' + (process.platform === 'win32' ? '.exe' : ''));

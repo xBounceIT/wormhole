@@ -277,7 +277,7 @@ test(
     } finally {
       await host.stop();
       await current?.lock();
-      await rm(directory, { recursive: true, force: true });
+      await rm(directory, { recursive: true, force: true, maxRetries: 8, retryDelay: 250 });
     }
   },
 );

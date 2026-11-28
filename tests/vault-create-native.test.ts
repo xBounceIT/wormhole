@@ -124,7 +124,7 @@ app.whenReady().then(async()=>{
       if (stderr.trim()) t.diagnostic(stderr.trim());
     } finally {
       assert.ok(directory.startsWith(join(tmpdir(), 'wormhole-vault-create-')));
-      await rm(directory, { recursive: true, force: true });
+      await rm(directory, { recursive: true, force: true, maxRetries: 8, retryDelay: 250 });
     }
   },
 );

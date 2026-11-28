@@ -1170,7 +1170,7 @@ test(
       throw error;
     } finally {
       await Promise.all(clients.map((client) => client.lock()));
-      await rm(directory, { recursive: true, force: true });
+      await rm(directory, { recursive: true, force: true, maxRetries: 8, retryDelay: 250 });
     }
   },
 );
@@ -1232,7 +1232,7 @@ test(
       assert.equal((await client.saveConnection(edit)).rowVersion, '4');
     } finally {
       await client.lock();
-      await rm(directory, { recursive: true, force: true });
+      await rm(directory, { recursive: true, force: true, maxRetries: 8, retryDelay: 250 });
     }
   },
 );

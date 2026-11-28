@@ -524,7 +524,7 @@ test(
       recoveryCode?.fill(0);
       await host?.stop();
       assert.ok(directory.startsWith(prefix));
-      await rm(directory, { recursive: true, force: true });
+      await rm(directory, { recursive: true, force: true, maxRetries: 8, retryDelay: 250 });
     }
   },
 );
