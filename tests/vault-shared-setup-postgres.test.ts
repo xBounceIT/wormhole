@@ -661,6 +661,25 @@ app.whenReady().then(async()=>{
          await waitForAdmin('document.body.textContent.includes("No unencrypted clients connected.")');
          await section('accounts');
          await waitForRecord('administrator');
+         const addMember='[...document.querySelectorAll("button")].find(b=>b.textContent==="Add member")';
+         await waitForAdmin('('+addMember+')?.matches(":enabled")');
+         await adminWindow.webContents.executeJavaScript('('+addMember+').click()');
+         const inviteForm='document.querySelector("form.member-invitation")';
+         await waitForAdmin('!!'+inviteForm);
+         const fillMember=(factor)=>adminWindow.webContents.executeJavaScript('(()=>{const form='+inviteForm+';const inputs=form.querySelectorAll("input");inputs[0].value="demo-operator";inputs[1].value="Demo operator";inputs[2].value='+JSON.stringify(factor)+';inputs[3].value='+JSON.stringify(ask||'')+';form.requestSubmit();})()');
+         await fillMember('incorrect demo password');
+         await waitForAdmin(inviteForm+'?.textContent.includes("Check your password and Account Secret Key.")');
+         assert.ok(await adminWindow.webContents.executeJavaScript('[...'+inviteForm+'.querySelectorAll("input[type=password]")].every(input=>input.value==="")'));
+         await fillMember(accountPassword);
+         await waitForAdmin('document.querySelector(".member-invitation-delivery")?.hidden===false');
+         assert.ok(await adminWindow.webContents.executeJavaScript('(()=>{const section=document.querySelector(".member-invitation-delivery");return section.querySelector("textarea").value.startsWith("WHINV3-")&&/^[0-9a-f]{32}$/.test(section.querySelector("code").textContent)})()'));
+         await adminWindow.webContents.executeJavaScript('('+inviteForm+').querySelector(".shared-setup-actions button").click()');
+         await waitForRecord('Demo operator');
+         assert.ok(await adminWindow.webContents.executeJavaScript('!document.querySelector(".member-invitation-delivery")'));
+         await section('invitations');
+         await waitForRecord('demo-operator');
+         await section('accounts');
+         await waitForRecord('administrator');
          const rowButton=(label, verb)=>'([...document.querySelectorAll(".shared-administration-list li")].find(row=>row.textContent.includes('+JSON.stringify(label)+'))?.querySelector("button[aria-label^="+JSON.stringify('+JSON.stringify(verb)+')+"]"))';
          const accountRow=rowButton('suspension-test-account','Disable account');
          await waitForAdmin(accountRow+'?.matches(":enabled")');
@@ -1797,6 +1816,10 @@ for (const mode of [
           database.send({ ...command, action: 'seedSuspensionAccount' });
           assert.deepEqual(await database.read(), { confirmed: true });
         }
+        if (mode === 'local-import') {
+          database.send({ ...command, action: 'enableAccountReset' });
+          assert.deepEqual(await database.read(), { confirmed: true });
+        }
         if (mode === 'run') {
           database.send({ ...command, action: 'limitDeviceConnections' });
           assert.deepEqual(await database.read(), { limited: true });
@@ -2169,6 +2192,7 @@ for (const mode of [
           ...command,
           action: 'checkAdministrator',
           checkInitialRecoveryExport: mode === 'csr-default',
+          checkMemberInvitation: mode === 'local-import',
         });
         assert.deepEqual(await database.read(), {
           version: target.schemaVersion,

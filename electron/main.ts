@@ -4793,6 +4793,10 @@ const vaultSharedDialog = new VaultSharedAuthenticationDialog({
 });
 
 const vaultSharedSetupDialog = new VaultSharedSetupDialog({
+  copyLinuxMemberCode: (scope, release, accepted) => {
+    if (!vaultLinuxClipboard) throw Error('Secure copy is unavailable.');
+    return vaultLinuxClipboard.copyMemberCode(scope, release, accepted);
+  },
   colorScheme: (parent) => workspaceColorSchemes.get(parent),
   host: vaultBackend,
   pickBackup: (window, accepted) =>

@@ -247,7 +247,8 @@ func prepareWorkspaceRecoveryDraft(settings Settings, tag, login string, kit wor
 		return nil, err
 	}
 	i := vault.InviteContext{WorkspaceID: kit.Workspace, UserID: uuid.New(), InviteID: uuid.New(), KeyID: uuid.New(), KeyVersion: 1, LoginName: login}
-	invitation := adminRecoveryInvitation(settings, tag, kit, i, now.Add(30*time.Minute).Unix())
+	invitation := verifiedEnrollmentInvitation(i, tag, settings.Database, settings.Endpoints,
+		kit.Public.Signing, settings.TLSBundle.Encode(), now.Add(30*time.Minute).Unix())
 	signer := ed25519.NewKeyFromSeed(keys.SigningSeed)
 	defer vault.Wipe(signer)
 	certification, err := certifyInvitationBootstrap(i, kit.Signing, public, signer)
@@ -349,14 +350,6 @@ func appendAdminRecoveryBoundary(wire *workspaceAdminRecoveryWire, manifest *vau
 		}
 	}
 	return nil
-}
-
-func adminRecoveryInvitation(settings Settings, tag string, kit workspaceRecoveryKit, i vault.InviteContext, expiry int64) Invitation {
-	fingerprint := sha256.Sum256(kit.Public.Signing)
-	return Invitation{FormatVersion: 3, WorkspaceID: i.WorkspaceID, LoginName: i.LoginName, Endpoints: settings.Endpoints, Database: settings.Database,
-		TLS: TLSVerified, OrganisationFingerprint: fingerprint[:], ExpiresAt: expiry,
-		Enrollment:  &InvitationEnrollment{RoleTag: tag, Context: i},
-		TLSIdentity: &InvitationTLSIdentity{Organisation: kit.Public.Signing, Bundle: settings.TLSBundle.Encode()}}
 }
 
 func appendAdminRecoveryCopy(wire *workspaceAdminRecoveryWire, manifest *vault.InviteManifest, key vault.KeyRef, raw, public, seed []byte, signer vault.KeyRef) error {

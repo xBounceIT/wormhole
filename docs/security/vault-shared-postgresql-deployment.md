@@ -177,7 +177,7 @@ Schema 50 enables import into an untouched deployment with the matching
 workspace ID and role tag. Apply
 `deploy.WorkspaceRecoveryRestoreMigration(roleTag, workspaceID)` to upgrade a
 schema-49 deployment. Fresh scripts include the migration. The wizard opens
-archives from schemas 49 through 102.
+archives from schemas 49 through 103.
 
 Use a host approved by the archived signed TLS bundle and install a server
 certificate that verifies against it. The DBA enables the dedicated
@@ -370,6 +370,20 @@ reached. **Redeemed** means the code has been used. **Active** means the
 account has a confirmed active device. The list also identifies expired
 invitations, suspended accounts and unused invitations for an already enrolled
 account. Account reset offers appear in the separate reset workflow.
+
+On schema 103, administrators with signing-key custody can open
+**Workspace administration → Accounts → Add member** on a verified TLS
+connection. Enter the member's immutable lowercase login, an optional display
+name and your own authentication factors. A newly added member starts without
+group grants. PostgreSQL must have parameter logging disabled for the issuing
+connection. Issuance creates a 72-hour enrollment login and an audit entry
+in the same transaction.
+
+Use **Copy invitation** for the public token and **Copy one-time code** for
+the separate code. Send them through different channels. The protected window
+shows the code once. Secure copy clears the app-owned clipboard entry after
+30 seconds at Default or 20 seconds at Standard. Closing the handover
+ends the ability to copy its code again from this window.
 
 Schema 93 adds **Credential slots** to this window. An administrator can review
 the name, protocol and assignment policy of each slot on a boundary where they

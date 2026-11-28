@@ -137,15 +137,7 @@ func (h *vaultFoundationHandler) issueSharedAccountReset(ctx context.Context, pa
 }
 
 func (c *sharedAdmissionController) createSharedAccountReset(ctx context.Context, session sharedAccountResetIssuer, trust sharedpg.TrustState, bundle *sharedpg.VerifiedTLSBundle, request sharedAccountResetIssueRequest) (handover sharedpg.AccountResetHandover, err error) {
-	var settings sharedpg.Settings
-	err = c.root.With(func(key []byte) error {
-		var err error
-		settings, err = readSharedTransportSetup(sharedAdmissionOptions{
-			TrustPath: c.trustPath, Binding: c.trustBinding, OSFloor: c.runtimeOSFloor,
-			UserFloor: c.runtimeUserFloor, Request: sharedpg.AdmissionRequest{API: 1},
-		}, key, trust)
-		return err
-	})
+	settings, err := c.currentTransportSettings(trust)
 	if err != nil {
 		return handover, err
 	}

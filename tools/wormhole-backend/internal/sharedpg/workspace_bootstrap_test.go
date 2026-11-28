@@ -139,6 +139,15 @@ type joinedAdministratorCheck func(*Session, TrustState, *VerifiedTLSBundle, *va
 
 func joinTestAdministrator(t *testing.T, ctx context.Context, i Invitation, code []byte, organisation []byte, signer vault.KeyRef, ask []byte, restore func([]byte), checks ...joinedAdministratorCheck) {
 	t.Helper()
+	joinConfirmedTestAccount(t, ctx, i, code, organisation, signer, ask, true,
+		func(native *Session, master *AccountMaster, material *UnverifiedAccountKeys, state TrustState, tls *VerifiedTLSBundle) error {
+			return checkWorkspaceRecoverySnapshot(t, ctx, native, master, material, state, tls, restore, checks)
+		})
+}
+
+func joinConfirmedTestAccount(t *testing.T, ctx context.Context, i Invitation, code, organisation []byte, signer vault.KeyRef, ask []byte, administrator bool,
+	check func(*Session, *AccountMaster, *UnverifiedAccountKeys, TrustState, *VerifiedTLSBundle) error) {
+	t.Helper()
 	join := NewSession()
 	defer join.Close(context.Background())
 	if err := join.OpenInitialInvitation(ctx, i, code, vault.Default, vault.Default, false); err != nil {
@@ -198,8 +207,8 @@ func joinTestAdministrator(t *testing.T, ctx context.Context, i Invitation, code
 		if err != nil {
 			return err
 		}
-		if !admission.IsAdmin {
-			t.Fatal("administrator admitted as a regular user")
+		if admission.IsAdmin != administrator {
+			t.Fatal("confirmed account has the wrong administrative role")
 		}
 		keys, err := native.AccountEnrollmentMaterial(ctx)
 		if err != nil {
@@ -221,9 +230,9 @@ func joinTestAdministrator(t *testing.T, ctx context.Context, i Invitation, code
 		if err != nil {
 			return err
 		}
-		return checkWorkspaceRecoverySnapshot(t, ctx, native, master, keys, state, tls, restore, checks)
+		return check(native, master, keys, state, tls)
 	}); err != nil {
-		t.Fatal("administrator could not join and confirm its device", err)
+		t.Fatal("account could not join and confirm its device", err)
 	}
 }
 

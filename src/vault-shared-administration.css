@@ -43,7 +43,7 @@
   font-size: 12px;
 }
 
-.workspace-admin:has(.shared-slot-default) .workspace-admin-location {
+.workspace-admin:has(.shared-slot-default, .member-invitation) .workspace-admin-location {
   display: inline;
 }
 
@@ -109,7 +109,7 @@
   font-weight: 500;
 }
 
-.workspace-admin:has(.shared-slot-default) h2 {
+.workspace-admin:has(.shared-slot-default, .member-invitation) h2 {
   margin: 0;
   font-size: 22px;
   line-height: 1.25;
@@ -186,7 +186,7 @@
   font-weight: 550;
 }
 
-.workspace-admin .shared-slot-default .shared-setup-actions {
+.workspace-admin :is(.shared-slot-default, .member-invitation) .shared-setup-actions {
   margin: 20px -20px -20px;
   padding: 12px 20px;
   border-top: 1px solid var(--border);
@@ -210,4 +210,25 @@
   border-color: var(--border);
   background: var(--background);
   color: var(--foreground);
+}
+
+.workspace-admin:has(.member-invitation) h2 {
+  margin-top: 18px;
+}
+
+.member-invitation fieldset {
+  display: grid;
+  gap: 12px;
+}
+
+.member-invitation fieldset[hidden] {
+  display: none;
+}
+
+.member-invitation-delivery textarea {
+  display: block;
+  width: 100%;
+  margin-block: 8px;
+  resize: vertical;
+  font-family: var(--font-mono, monospace);
 }

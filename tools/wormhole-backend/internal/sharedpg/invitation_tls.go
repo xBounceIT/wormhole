@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/json"
+	"slices"
 	"time"
 
 	"github.com/xBounceIT/wormhole/tools/wormhole-backend/internal/vault"
@@ -17,6 +18,19 @@ import (
 type InvitationTLSIdentity struct {
 	Organisation []byte          `json:"organisation"`
 	Bundle       json.RawMessage `json:"bundle"`
+}
+
+// Keep the issued coordinates independent of the caller's transport settings
+// and signing buffers until the invitation is delivered or redeemed.
+func verifiedEnrollmentInvitation(context vault.InviteContext, roleTag, database string, endpoints []Endpoint, organisation ed25519.PublicKey, bundle []byte, expiresAt int64) Invitation {
+	fingerprint := sha256.Sum256(organisation)
+	return Invitation{
+		FormatVersion: 3, WorkspaceID: context.WorkspaceID, LoginName: context.LoginName,
+		Endpoints: slices.Clone(endpoints), Database: database, TLS: TLSVerified,
+		OrganisationFingerprint: fingerprint[:], ExpiresAt: expiresAt,
+		Enrollment:  &InvitationEnrollment{RoleTag: roleTag, Context: context},
+		TLSIdentity: &InvitationTLSIdentity{Organisation: bytes.Clone(organisation), Bundle: bytes.Clone(bundle)},
+	}
 }
 
 func (i Invitation) invitationTLSHint() (*VerifiedTLSBundle, error) {

@@ -1,4 +1,10 @@
 import { type VaultMigrationContext } from './vault-migration-setup.ts';
+import type {
+  InvitationCopyReply,
+  InvitationCopyRequest,
+  MemberInvitationRequest,
+  MemberInvitationReply,
+} from './vault-shared-member-invitation.ts';
 import type { VaultSerialBundle, VaultSerialRequest } from './vault-serial-contract.ts';
 import { consumeOSMigrationPrepare } from './vault-os-migration-contract.ts';
 import type { VaultUpgradeContext } from './vault-upgrade-contract.ts';
@@ -311,6 +317,16 @@ export type VaultPresenceAuthentication = (
 ) => Promise<VaultPresenceChange>;
 
 export type SharedAdministrationPorts = {
+  dismissMemberInvitation?: (requestId: string) => Promise<unknown>;
+  copyMemberCode?: (
+    request: InvitationCopyRequest,
+    accepted: () => boolean,
+  ) => Promise<InvitationCopyReply>;
+  inviteMember?: (
+    request: MemberInvitationRequest,
+    factors: PersonalRootRecoveryFactors,
+    accepted: () => boolean,
+  ) => Promise<MemberInvitationReply>;
   read(request: AdminInventoryRequest): Promise<AdminInventoryReply>;
   nodeCredential?: (
     request: NodeCredentialRequest,
@@ -342,6 +358,13 @@ export type SharedAdministrationPorts = {
 
 type Client = BrowserTransferClient &
   VPNSSOClient & {
+    dismissMemberInvitation(requestId: string): Promise<unknown>;
+    copyMemberCode(request: InvitationCopyRequest): Promise<InvitationCopyReply>;
+    issueMemberInvitation(
+      workspaceId: string,
+      request: MemberInvitationRequest,
+      auth: Omit<SharedVaultUnlockInput, 'appVersion'>,
+    ): Promise<MemberInvitationReply>;
     sharedAdminInventory(request: AdminInventoryRequest): Promise<AdminInventoryReply>;
     sharedCreateCredentialSlot: CreateSlotPort;
     sharedNodeCredential(
@@ -3142,6 +3165,30 @@ export class VaultBackendHost {
           : Promise.resolve({ status: 'unavailable' }),
       createSlot: administrator
         ? (request) => read((client) => client.sharedCreateCredentialSlot(request))
+        : undefined,
+      inviteMember: administrator
+        ? (request, factors, accepted) =>
+            withFactors(accepted, factors, async (client, auth) => {
+              if (!auth) throw Error('Workspace authentication is unavailable.');
+              const reply = await client.issueMemberInvitation(owner.workspaceId, request, auth);
+              if (
+                reply.status === 'issued' &&
+                (reply.handover.workspaceId !== owner.workspaceId ||
+                  reply.handover.requestId !== request.requestId)
+              )
+                throw Error('Invitation does not match the current workspace.');
+              return reply;
+            })
+        : undefined,
+      copyMemberCode: administrator
+        ? (request, accepted) =>
+            this.sharedRead(
+              () => owner.current() && accepted(),
+              (client) => client.copyMemberCode(request),
+            )
+        : undefined,
+      dismissMemberInvitation: administrator
+        ? (id) => this.sharedRead(owner.current, (client) => client.dismissMemberInvitation(id))
         : undefined,
       personalSlot: (request, factors, accepted) =>
         withFactors(accepted, factors, (client, auth) => client.sharedPersonalSlot(request, auth)),

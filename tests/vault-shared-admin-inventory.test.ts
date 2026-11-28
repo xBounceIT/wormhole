@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  parseInvitationCopyReply,
+  parseMemberInvitationReply,
+  parseMemberInvitationRequest,
+} from '../electron/vault-shared-member-invitation.ts';
+import {
   parseAdminInventoryReply,
   parseAdminInventoryRequest,
   parseCreateSlot,
@@ -9,6 +14,60 @@ import {
 
 const id = (n: number) => `00000000-0000-0000-0000-${String(n).padStart(12, '0')}`;
 const at = '2026-11-23T12:00:00.123456Z';
+
+test('member invitations bind public metadata and purpose-specific sealed replies', () => {
+  const request = {
+    login: 'member',
+    name: 'Operations',
+    requestId: id(1),
+    recipient: Buffer.alloc(32, 2).toString('base64'),
+  };
+  assert.deepEqual(parseMemberInvitationRequest(request), request);
+  for (const change of [
+    { name: 'bad\nname' },
+    { login: 'ñ'.repeat(129) },
+    { recipient: 'invalid' },
+    { groups: [] },
+    { code: 'raw' },
+  ]) {
+    assert.equal(parseMemberInvitationRequest({ ...request, ...change }), undefined);
+  }
+  const bundle = {
+    formatVersion: 1,
+    suiteId: 2,
+    enc: request.recipient,
+    ciphertext: Buffer.alloc(32, 3).toString('base64'),
+  };
+  const handover = {
+    workspaceId: id(2),
+    requestId: request.requestId,
+    inviteId: id(3),
+    token: 'WHINV3-Zg.' + 'a'.repeat(64),
+    bundle,
+  };
+  assert.deepEqual(parseMemberInvitationReply({ status: 'issued', handover }), {
+    status: 'issued',
+    handover,
+  });
+  assert.equal(
+    parseMemberInvitationReply({ status: 'issued', handover: { ...handover, code: 'raw' } }),
+    undefined,
+  );
+  assert.equal(parseInvitationCopyReply({ status: 'sealed', bundle }), undefined);
+  const sealed = {
+    status: 'sealed',
+    bundle: { ...bundle, ciphertext: Buffer.alloc(50, 4).toString('base64') },
+  };
+  assert.deepEqual(parseInvitationCopyReply(sealed), sealed);
+  assert.equal(
+    parseMemberInvitationReply({
+      status: 'issued',
+      handover: { ...handover, bundle: sealed.bundle },
+    }),
+    undefined,
+  );
+  assert.equal(parseInvitationCopyReply({ status: 'copied', expiresInSeconds: 15 }), undefined);
+});
 
 test('slot creation accepts only unassigned metadata and a bounded outcome', () => {
   const slot = { id: id(1), name: 'Créneau <&>', protocol: 'ssh', allowSelfService: true };

@@ -39,6 +39,7 @@ type vaultFoundationHandler struct {
 	reauthenticationFailures  int
 	releaseWorkspace          func()
 	clipboard                 *secretclipboard.Manager
+	memberClipboard           *invitationClipboard // encrypted, scoped to this vault process
 	shared                    *vaultSharedSession
 	sharedFactory             func() *sharedAdmissionController       // native test seam
 	sharedInvitationFactory   func() sharedInitialInvitationSession   // native test seam
@@ -164,6 +165,12 @@ func (h *vaultFoundationHandler) handle(ctx context.Context, operation string, p
 			return h.exportSharedRecoveryBackup(ctx, payload)
 		case "shared-account-reset-issue":
 			return h.issueSharedAccountReset(ctx, payload)
+		case "shared-member-invitation":
+			return h.issueMemberInvitation(ctx, payload)
+		case "shared-member-code-copy":
+			return h.copyMemberInvitationCode(ctx, payload)
+		case "shared-member-invitation-dismiss":
+			return h.dismissMemberInvitation(payload)
 		case "shared-account-reset-targets", "shared-account-reset-mark-handover":
 			return h.sharedAccountResetQueue(ctx, operation, payload)
 		case "security":
@@ -505,7 +512,7 @@ func (*vaultFoundationHandler) ExitOnCancel(operation string) bool {
 	if operation == "local-backup-install" || operation == "local-backup-restore" || operation == "local-backup-export" {
 		return true
 	}
-	if operation == "shared-admin-recover" || operation == "shared-tighten-profile" {
+	if operation == "shared-admin-recover" || operation == "shared-tighten-profile" || operation == "shared-member-invitation" {
 		return true
 	}
 	if operation == "shared-recovery-export" || operation == "shared-recovery-inspect" || operation == "shared-recovery-restore" ||

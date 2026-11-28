@@ -74,6 +74,11 @@ var invitationInventoryTemplate string
 
 var invitationInventoryMigration = strings.Replace(invitationInventoryTemplate, "{{WEB_SUSPENSION_RESTORE_DEFINITION}}", renderWebSuspensionRestore("102"), 1)
 
+//go:embed migrations/0103_member_invitation.sql
+var memberInvitationTemplate string
+
+var memberInvitationMigration = strings.Replace(memberInvitationTemplate, "{{WEB_SUSPENSION_RESTORE_DEFINITION}}", renderWebSuspensionRestore("103"), 1)
+
 // This order matches the individual DBA upgrade scripts. A fresh deployment
 // uses the same migrations in a single transaction.
 var schemaMigrations = [...]string{
@@ -102,7 +107,7 @@ var schemaMigrations = [...]string{
 	accountReenrollmentRedemptionMigration, webSessionViewsMigration, webConnectionPlanMigration, webTunnelReleaseMigration, webSuspensionInventoryMigration,
 	auditMaintenanceMigration, unencryptedClientsMigration, sshHostPinMigration, updateNodeMigration, moveNodeMigration, suspensionRotationReceiptsMigration,
 	rowSecurityMigration, deviceConnectionLimitMigration, adminCredentialSlotsMigration, accountGroupRolesMigration, createCredentialSlotMigration, publicAPILimitsMigration,
-	slotBindingMigration, nodeSlotChoicesMigration, slotDefaultMigration, personalSlotMigration, nodeOverrideMigration, invitationInventoryMigration,
+	slotBindingMigration, nodeSlotChoicesMigration, slotDefaultMigration, personalSlotMigration, nodeOverrideMigration, invitationInventoryMigration, memberInvitationMigration,
 }
 
 const SchemaVersion = len(schemaMigrations)

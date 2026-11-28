@@ -272,6 +272,58 @@ test('main clipboard recipient authenticates the field, purpose and context and 
 });
 
 const tickClipboard = () => new Promise(setImmediate);
+test('Linux copies an invitation code only from the sealed main-process recipient and clears it on lock', async () => {
+  const fixture = linuxFixture();
+  const scope = { workspaceId: id, inviteId: node, requestId: releaseContext.requestId };
+  const value = Buffer.from('0123456789abcdef'.repeat(2));
+  const result = await fixture.manager.copyMemberCode(
+    scope,
+    async (request, current) => {
+      assert.ok(current());
+      assert.equal(request.requestId, scope.requestId);
+      assert.equal(request.inviteId, scope.inviteId);
+      const suite = new CipherSuite({
+        kem: new DhkemX25519HkdfSha256(),
+        kdf: new HkdfSha256(),
+        aead: new Aes256Gcm(),
+      });
+      const key = await suite.kem.deserializePublicKey(Buffer.from(request.recipient!, 'base64'));
+      const fields = [scope.workspaceId, scope.requestId, scope.inviteId, request.copyId];
+      const info = Buffer.concat([
+        Buffer.from('wormhole/v1/member-invitation-clipboard'),
+        ...fields.flatMap((field) => {
+          const size = Buffer.alloc(4);
+          size.writeUInt32BE(Buffer.byteLength(field));
+          return [size, Buffer.from(field)];
+        }),
+      ]);
+      const sender = await suite.createSenderContext({ recipientPublicKey: key, info });
+      const ciphertext = await sender.seal(Buffer.concat([Buffer.from([1, 20]), value]));
+      return {
+        status: 'sealed',
+        bundle: {
+          formatVersion: 1,
+          suiteId: 2,
+          enc: Buffer.from(sender.enc).toString('base64'),
+          ciphertext: Buffer.from(ciphertext).toString('base64'),
+        },
+      };
+    },
+    () => true,
+  );
+  assert.deepEqual(result, { expiresInSeconds: 20 });
+  assert.deepEqual(fixture.state.value, value);
+  await fixture.manager.reset();
+  assert.equal(fixture.state.clears, 1);
+  await assert.rejects(
+    fixture.manager.copyMemberCode(
+      scope,
+      async () => ({ status: 'unavailable' }),
+      () => true,
+    ),
+  );
+  assert.equal(fixture.state.writes, 1);
+});
 function linuxFixture(ttl = 20) {
   const raw = Buffer.from([1, ttl, 65, 66, 67]);
   const state = {

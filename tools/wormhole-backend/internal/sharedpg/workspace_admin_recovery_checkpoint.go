@@ -102,7 +102,8 @@ func OpenWorkspaceRecoveryCheckpoint(target WorkspaceRecoveryTarget, kit, recove
 		return nil, vault.ErrFormat
 	}
 	settings := target.settings(tls)
-	invitation := adminRecoveryInvitation(settings, tag, record, wire.Invite, wire.ExpiresAt)
+	invitation := verifiedEnrollmentInvitation(wire.Invite, tag, settings.Database, settings.Endpoints,
+		record.Public.Signing, tls.Encode(), wire.ExpiresAt)
 	var bootstrap vault.Envelope
 	if json.Unmarshal(wire.Bootstrap, &bootstrap) != nil {
 		return nil, vault.ErrFormat

@@ -12,6 +12,19 @@ import (
 
 func sharedTransportSetupPath(path string) string { return path + ".connection" }
 
+func (c *sharedAdmissionController) currentTransportSettings(trust sharedpg.TrustState) (sharedpg.Settings, error) {
+	var settings sharedpg.Settings
+	err := c.root.With(func(key []byte) error {
+		var err error
+		settings, err = readSharedTransportSetup(sharedAdmissionOptions{
+			TrustPath: c.trustPath, Binding: c.trustBinding, OSFloor: c.runtimeOSFloor,
+			UserFloor: c.runtimeUserFloor, Request: sharedpg.AdmissionRequest{API: 1},
+		}, key, trust)
+		return err
+	})
+	return settings, err
+}
+
 // Stage the authenticated native connection settings before initial join intent.
 // This file contains no password, ASK or root. It cannot replace key-slot storage.
 func stageSharedTransportSetup(o sharedAdmissionOptions, root []byte, trust sharedpg.TrustState) error {

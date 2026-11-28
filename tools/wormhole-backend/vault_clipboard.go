@@ -29,14 +29,7 @@ func (h *vaultFoundationHandler) copyCredential(ctx context.Context, raw []byte)
 		return nil, err
 	}
 	err = h.owner.CopyConnectionCredential(ctx, id, revision, field, func(value []byte) error {
-		if h.clipboard == nil {
-			driver, err := secretclipboard.NewNative()
-			if err != nil {
-				return err
-			}
-			h.clipboard = secretclipboard.New(driver)
-		}
-		return h.clipboard.Copy(ctx, value, ttl)
+		return h.writeNativeClipboard(ctx, value, ttl)
 	})
 	if err != nil {
 		return nil, err
@@ -46,19 +39,33 @@ func (h *vaultFoundationHandler) copyCredential(ctx context.Context, raw []byte)
 	}{int(ttl / time.Second)})
 }
 
+func (h *vaultFoundationHandler) writeNativeClipboard(ctx context.Context, value []byte, ttl time.Duration) error {
+	if h.clipboard == nil {
+		driver, err := secretclipboard.NewNative()
+		if err != nil {
+			return err
+		}
+		h.clipboard = secretclipboard.New(driver)
+	}
+	return h.clipboard.Copy(ctx, value, ttl)
+}
+
 // Both native clipboard publication and Linux sealed release use this policy.
 func (h *vaultFoundationHandler) clipboardTTL(ctx context.Context) (time.Duration, error) {
 	profile, err := h.owner.ReadSecurityProfile(ctx)
 	if err != nil {
 		return 0, err
 	}
-	ttl := 30 * time.Second
-	switch profile.Effective {
+	return vaultClipboardLifetime(profile.Effective)
+}
+
+func vaultClipboardLifetime(profile vault.Profile) (time.Duration, error) {
+	switch profile {
 	case vault.Default:
+		return 30 * time.Second, nil
 	case vault.Standard:
-		ttl = 20 * time.Second
+		return 20 * time.Second, nil
 	default:
 		return 0, vault.ErrPolicy
 	}
-	return ttl, nil
 }

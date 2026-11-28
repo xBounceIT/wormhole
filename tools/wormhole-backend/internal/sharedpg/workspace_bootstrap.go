@@ -5,7 +5,6 @@ import (
 	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/sha256"
 	"crypto/x509"
 	"slices"
 	"time"
@@ -114,10 +113,8 @@ func prepareWorkspaceBootstrap(workspace uuid.UUID, roleTag string, settings Set
 		return nil, nil, err
 	}
 	invite := vault.InviteContext{WorkspaceID: workspace, UserID: uuid.New(), InviteID: uuid.New(), KeyID: uuid.New(), KeyVersion: 1, LoginName: login}
-	fingerprint := sha256.Sum256(result.organisation.Signing)
-	result.invitation = Invitation{FormatVersion: 3, WorkspaceID: workspace, LoginName: login, Endpoints: []Endpoint{endpoint}, Database: settings.Database,
-		TLS: TLSVerified, OrganisationFingerprint: fingerprint[:], ExpiresAt: now.Add(72 * time.Hour).Unix(),
-		Enrollment: &InvitationEnrollment{RoleTag: roleTag, Context: invite}, TLSIdentity: &InvitationTLSIdentity{Organisation: result.organisation.Signing, Bundle: tls}}
+	result.invitation = verifiedEnrollmentInvitation(invite, roleTag, settings.Database, []Endpoint{endpoint},
+		result.organisation.Signing, tls, now.Add(72*time.Hour).Unix())
 	if err := result.invitation.Validate(now); err != nil {
 		return nil, nil, err
 	}

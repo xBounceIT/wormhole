@@ -43,6 +43,12 @@ import {
 import { validSharedArtifactPath, validSharedVaultAppVersion } from './vault-shared-unlock.ts';
 import { consumeSharedAccountResetInput } from './vault-shared-account-reset.ts';
 import {
+  parseMemberInvitationReply,
+  parseInvitationCopyReply,
+  type InvitationCopyRequest,
+  type MemberInvitationRequest,
+} from './vault-shared-member-invitation.ts';
+import {
   parseSharedAccountResetIssue,
   type SharedAccountResetIssueInput,
   type SharedAccountResetIssueResult,
@@ -2318,6 +2324,29 @@ export class VaultBackendClient {
       { ...factors, password: input.password, ask: input.ask },
     );
   }
+  issueMemberInvitation(
+    workspaceId: string,
+    request: MemberInvitationRequest,
+    auth: Omit<SharedVaultUnlockInput, 'appVersion'>,
+  ) {
+    return this.sharedCustodianRequest(
+      'shared-member-invitation',
+      parseMemberInvitationReply,
+      { workspaceId, ...request },
+      auth,
+    );
+  }
+  copyMemberCode(request: InvitationCopyRequest) {
+    return this.metadata('shared-member-code-copy', parseInvitationCopyReply, undefined, request);
+  }
+  dismissMemberInvitation(requestId: string) {
+    return this.metadata(
+      'shared-member-invitation-dismiss',
+      (value) => (value === true ? true : undefined),
+      undefined,
+      { requestId },
+    );
+  }
   tightenSharedProfile(sequence: string, auth: SharedVaultUnlockInput): Promise<true> {
     if (!auth) return Promise.reject(Error('Shared authentication required.'));
     return this.sharedCustodianRequest(
@@ -2338,12 +2367,14 @@ export class VaultBackendClient {
       | 'shared-recovery-kit-refresh'
       | 'shared-recovery-export'
       | 'shared-account-reset-issue'
+      | 'shared-member-invitation'
       | 'shared-personal-root-recovery',
     parse: (value: unknown) => T | undefined,
     fields:
       | { sequence: string }
       | SharedActionPayload
       | { source: string; destination: string }
+      | (MemberInvitationRequest & { workspaceId: string })
       | PersonalRootRecoveryRequest
       | {
           path: string;
@@ -2908,6 +2939,7 @@ export class VaultBackendClient {
       | 'shared-recovery-kit-refresh'
       | 'shared-recovery-export'
       | 'shared-account-reset-issue'
+      | 'shared-member-invitation'
       | 'shared-personal-root-recovery'
       | 'ssh-host-trust'
       | 'ssh-quick-host-trust'
@@ -3010,7 +3042,10 @@ export class VaultBackendClient {
       | 'shared-recovery-kit-refresh'
       | 'shared-recovery-export'
       | 'shared-account-reset-issue'
+      | 'shared-member-invitation'
       | 'shared-account-reset-targets'
+      | 'shared-member-code-copy'
+      | 'shared-member-invitation-dismiss'
       | 'shared-account-reset-mark-handover'
       | 'shared-unlock'
       | 'shared-recover-password'
@@ -3295,6 +3330,7 @@ export class VaultBackendClient {
                     operation === 'shared-recovery-kit-refresh' ||
                     operation === 'shared-recovery-export' ||
                     operation === 'shared-account-reset-issue' ||
+                    operation === 'shared-member-invitation' ||
                     operation === 'shared-account-reset-targets' ||
                     operation === 'shared-admin-inventory' ||
                     operation === 'shared-slot-default' ||

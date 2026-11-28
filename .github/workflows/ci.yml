@@ -319,7 +319,7 @@ jobs:
             $profile = if ($IsLinux) { "vault-postgres-$major.coverage" } else { 'vault-postgres.coverage' }
             $env:WORMHOLE_TEST_POSTGRES_BIN = $pgBin
             $env:WORMHOLE_TEST_POSTGRES_SCRATCH = Join-Path $env:RUNNER_TEMP "wormhole-postgres-$major"
-            go test -count=1 -race -timeout=10m "-coverprofile=$profile" -run '^TestPostgres(NativeTransportIntegration|AtomicSchemaDeployment|SchemaDeploymentWithDelegatedDBA|DeviceConnectionLimitUpgrade|WorkspaceNetworkRules|WorkspaceAccess|AuditPartitionMaintenance|AdminInventoryAuthorizesEveryPage|GeneratedSCRAMVerifierIntegration|SessionAdmissionIntegration|StatementLoggingAdmission|VerifiedBundleSessionTransport|WorkspaceImportCommitsAtomically)$' ./internal/sharedpg
+            go test -count=1 -race -timeout=10m "-coverprofile=$profile" -run '^TestPostgres(NativeTransportIntegration|AtomicSchemaDeployment|SchemaDeploymentWithDelegatedDBA|DeviceConnectionLimitUpgrade|WorkspaceNetworkRules|WorkspaceAccess|AuditPartitionMaintenance|AdminInventoryAuthorizesEveryPage|MemberInvitation|GeneratedSCRAMVerifierIntegration|SessionAdmissionIntegration|StatementLoggingAdmission|VerifiedBundleSessionTransport|WorkspaceImportCommitsAtomically)$' ./internal/sharedpg
           }
 
       - name: Verify protected PostgreSQL profiles through Electron on Windows

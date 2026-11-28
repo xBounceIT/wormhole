@@ -7,6 +7,9 @@ import type {
   IpcMainInvokeEvent,
 } from 'electron';
 import { protectVaultDisplayWindow } from './vault-display-window.ts';
+import { parseMemberInvitationRequest } from './vault-shared-member-invitation.ts';
+import type { InvitationCopyScope } from './vault-shared-member-invitation.ts';
+import type { LinuxVaultClipboard } from './vault-linux-clipboard.ts';
 import {
   consumeSharedSetupRequest,
   wipeSharedSetupRequest,
@@ -77,6 +80,8 @@ import {
 } from './vault-account-suspension.ts';
 
 type Administration = SharedAdministrationPorts & {
+  invitation?: InvitationCopyScope;
+  pendingInvitation?: string;
   accessReview?: WorkspaceAccessRequest;
   accountBoundaryReview?: AccountBoundaryRotationRequest;
   personalRecoveryReview?: PersonalRootRecoveryRequest;
@@ -136,6 +141,7 @@ type SetupWindow = {
 };
 
 type SetupDialogOptions = {
+  copyLinuxMemberCode?: LinuxVaultClipboard['copyMemberCode'];
   colorScheme?: (parent: BrowserWindow) => Exclude<AppTheme, 'system'> | undefined;
   ipc: Pick<IpcMain, 'handle'>;
   host: Pick<VaultBackendHost, 'sharedSetup'>;
@@ -310,6 +316,73 @@ export class VaultSharedSetupDialog {
           wipePersonalRootRecoveryFactors(args[1]);
           wipePersonalRootRecoveryFactors(factors);
         }
+      },
+    );
+    options.ipc.handle('vault-shared-setup:invite-member', async (event, ...args: unknown[]) => {
+      let factors: PersonalRootRecoveryFactors | undefined;
+      try {
+        return await this.runAdministration(event, async (port, accepted) => {
+          const request = args.length === 2 ? parseMemberInvitationRequest(args[0]) : undefined;
+          if (!request || !port.inviteMember || port.ownDevicesOnly)
+            throw Error('Member invitation is unavailable.');
+          if (port.invitation || port.pendingInvitation)
+            throw Error('Finish the current invitation first.');
+          factors = consumePersonalRootRecoveryFactors(args[1]);
+          port.pendingInvitation = request.requestId;
+          const current = () => accepted() && port.pendingInvitation === request.requestId;
+          try {
+            const reply = await port.inviteMember(request, factors, current);
+            if (!current()) throw Error('Invitation window was closed.');
+            if (reply.status === 'issued') {
+              const { workspaceId, inviteId, requestId } = reply.handover;
+              port.invitation = { workspaceId, inviteId, requestId };
+            }
+            return reply;
+          } finally {
+            if (port.pendingInvitation === request.requestId) port.pendingInvitation = undefined;
+          }
+        });
+      } finally {
+        wipePersonalRootRecoveryFactors(args[1]);
+        wipePersonalRootRecoveryFactors(factors);
+      }
+    });
+    options.ipc.handle('vault-shared-setup:copy-member-code', (event, ...args: unknown[]) =>
+      this.runAdministration(event, async (port, accepted) => {
+        const scope = port.invitation;
+        if (
+          args.length !== 1 ||
+          !scope ||
+          args[0] !== scope.requestId ||
+          !port.copyMemberCode ||
+          port.ownDevicesOnly
+        )
+          throw Error('Invitation is no longer open.');
+        const current = () => accepted() && port.invitation === scope;
+        if (process.platform === 'linux') {
+          if (!options.copyLinuxMemberCode) throw Error('Secure copy is unavailable.');
+          return options.copyLinuxMemberCode(scope, port.copyMemberCode, current);
+        }
+        const result = await port.copyMemberCode(
+          { requestId: scope.requestId, inviteId: scope.inviteId, copyId: randomUUID() },
+          current,
+        );
+        if (result.status !== 'copied' || !current()) throw Error('Secure copy is unavailable.');
+        return { expiresInSeconds: result.expiresInSeconds };
+      }),
+    );
+    options.ipc.handle(
+      'vault-shared-setup:finish-member-invitation',
+      async (event, ...args: unknown[]) => {
+        const port = this.trusted(event)?.administration;
+        if (!port || args.length !== 1 || !enrollmentID(args[0]))
+          throw Error('Invalid invitation.');
+        if (port.invitation?.requestId === args[0] || port.pendingInvitation === args[0]) {
+          port.invitation = undefined;
+          port.pendingInvitation = undefined;
+          await port.dismissMemberInvitation?.(args[0]);
+        }
+        return true;
       },
     );
     options.ipc.handle('vault-shared-setup:create-slot', (event, ...args: unknown[]) =>
@@ -921,6 +994,13 @@ export class VaultSharedSetupDialog {
       };
       const finish = () => {
         current.closing = true;
+        const admin = current.administration;
+        const issued = admin?.invitation?.requestId ?? admin?.pendingInvitation;
+        if (issued && admin) {
+          admin.invitation = undefined;
+          admin.pendingInvitation = undefined;
+          void admin.dismissMemberInvitation?.(issued).catch(() => {});
+        }
         wipeSharedSetupRequest(current.pending);
         wipeAdminRecoveryInput(current.recoveryFactors);
         wipeSharedRecoveryBackup(current.backup?.pending);

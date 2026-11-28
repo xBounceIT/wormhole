@@ -101,6 +101,7 @@ export function encodeVaultBytesFrame(
     | 'shared-node-credential'
     | 'shared-recovery-export'
     | 'shared-account-reset-issue'
+    | 'shared-member-invitation'
     | 'shared-personal-root-recovery'
     | 'shared-setup-check'
     | 'shared-setup-preflight'

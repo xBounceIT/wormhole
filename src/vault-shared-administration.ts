@@ -5,6 +5,8 @@ import type {
   CreateSlotPort,
 } from '../electron/vault-shared-admin-inventory.ts';
 import { mountCreateSlot } from './vault-shared-create-slot.ts';
+import { mountMemberInvitation } from './vault-shared-member-invitation.ts';
+import type { MemberInvitationPort } from '../electron/vault-shared-member-invitation.ts';
 import { mountSlotDefault } from './vault-shared-slot-default.ts';
 import type { SlotDefaultPort } from '../electron/vault-shared-slot-default.ts';
 import {
@@ -33,6 +35,9 @@ import type {
 export type SharedAdministrationApi = {
   adminInventory(request: AdminInventoryRequest): Promise<AdminInventoryReply>;
   createSlot?: CreateSlotPort;
+  inviteMember?: MemberInvitationPort;
+  copyMemberCode?: (requestId: string) => Promise<{ expiresInSeconds: 20 | 30 }>;
+  finishMemberInvitation?: (requestId: string) => Promise<unknown>;
   slotDefault?: SlotDefaultPort;
   personalSlot?: SlotDefaultPort;
   adminGroups?: GroupAdminPort;
@@ -260,6 +265,38 @@ export function mountSharedAdministration(
       const { entries, next: cursor } = result.page;
       nextRequest = cursor ? { kind: request.kind, next: cursor } : undefined;
       status.textContent = entries.length ? `Page ${requests.length}` : 'No records on this page.';
+      if (
+        request.kind === 'accounts' &&
+        !ownDevicesOnly &&
+        api.inviteMember &&
+        api.copyMemberCode &&
+        api.finishMemberInvitation
+      ) {
+        const invitation = {
+          issue: api.inviteMember,
+          copyCode: api.copyMemberCode,
+          finish: api.finishMemberInvitation,
+        };
+        const add = document.createElement('button');
+        add.type = 'button';
+        add.className = 'startup-button';
+        add.textContent = 'Add member';
+        adminPanel.hidden = false;
+        adminPanel.append(add);
+        add.onclick = () => {
+          if (disposed || section.disabled) return;
+          section.disabled = sectionLabel.hidden = true;
+          previous.hidden = next.hidden = refresh.hidden = list.hidden = status.hidden = true;
+          location.textContent = sections.accounts;
+          accessNotice.textContent = '';
+          disposePanel = mountMemberInvitation(adminPanel, invitation, (issued) => {
+            sectionLabel.hidden = section.options.length === 1;
+            previous.hidden = next.hidden = refresh.hidden = list.hidden = status.hidden = false;
+            if (issued) accessNotice.textContent = 'Member invitation created.';
+            void load(request, history);
+          });
+        };
+      }
       if (request.kind === 'slots' && !ownDevicesOnly && api.createSlot) {
         adminPanel.hidden = false;
         disposePanel = mountCreateSlot(

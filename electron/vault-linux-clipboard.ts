@@ -3,6 +3,13 @@ import type { Clipboard, ClipboardItem } from 'electron';
 import type { VaultBackendHost, VaultFreshAuthentication } from './vault-host.ts';
 import { parseVaultClipboardRequest, type VaultClipboardResult } from './vault-clipboard.ts';
 import { createClipboardRecipient, decodeClipboardRelease } from './vault-clipboard-release.ts';
+import { createVaultDisplayRecipient } from './vault-display-recipient.ts';
+import {
+  memberInvitationEnvelope,
+  type InvitationCopyScope,
+  type InvitationCopyRequest,
+  type InvitationCopyReply,
+} from './vault-shared-member-invitation.ts';
 
 type ClipboardIO = {
   write(value: Uint8Array, marker: string): Promise<void>;
@@ -100,26 +107,65 @@ export class LinuxVaultClipboard {
     accepted: () => boolean = () => true,
   ): Promise<VaultClipboardResult> {
     const request = parseVaultClipboardRequest(value);
-    if (!request || this.busy) throw Error('Invalid clipboard request.');
+    if (!request) throw Error('Invalid clipboard request.');
+    const context = { ...request, requestId: randomUUID() };
+    return this.copyRelease(
+      request.workspaceId,
+      accepted,
+      () => (this.options.recipient ?? createClipboardRecipient)(context),
+      (key, current) =>
+        this.options.host.releaseClipboard({ ...context, publicKey: key }, confirm, current),
+    );
+  }
+  copyMemberCode(
+    scope: InvitationCopyScope,
+    release: (
+      request: InvitationCopyRequest,
+      current: () => boolean,
+    ) => Promise<InvitationCopyReply>,
+    accepted: () => boolean,
+  ) {
+    const copyId = randomUUID();
+    return this.copyRelease(
+      scope.workspaceId,
+      accepted,
+      () =>
+        createVaultDisplayRecipient(
+          'wormhole/v1/member-invitation-clipboard',
+          [scope.workspaceId, scope.requestId, scope.inviteId, copyId],
+          (value) => memberInvitationEnvelope(value, 50),
+        ),
+      async (recipient, current) => {
+        const result = await release(
+          { requestId: scope.requestId, inviteId: scope.inviteId, copyId, recipient },
+          current,
+        );
+        if (result.status !== 'sealed') throw Error('Invitation copy unavailable.');
+        return result.bundle;
+      },
+    );
+  }
+  private async copyRelease(
+    workspaceId: string,
+    accepted: () => boolean,
+    create: () => ReturnType<typeof createClipboardRecipient>,
+    release: (publicKey: string, current: () => boolean) => Promise<unknown>,
+  ): Promise<VaultClipboardResult> {
+    if (this.busy) throw Error('Invalid clipboard request.');
     const generation = this.generation;
     const current = () =>
       generation === this.generation &&
       accepted() &&
-      this.options.host.unlockedWorkspaceId === request.workspaceId;
+      this.options.host.unlockedWorkspaceId === workspaceId;
     if (!current()) throw Error('Vault is locked.');
     this.busy = true;
     let raw: Uint8Array | undefined;
     let recipient: Awaited<ReturnType<typeof createClipboardRecipient>> | undefined;
     try {
-      const context = { ...request, requestId: randomUUID() };
-      recipient = await (this.options.recipient ?? createClipboardRecipient)(context);
+      recipient = await create();
       this.recipient = recipient;
       if (!current()) throw Error('Vault is locked.');
-      const result = await this.options.host.releaseClipboard(
-        { ...context, publicKey: recipient.publicKey },
-        confirm,
-        current,
-      );
+      const result = await release(recipient.publicKey, current);
       if (!current()) throw Error('Vault is locked.');
       raw = await recipient.open(result);
       this.plaintext = raw;

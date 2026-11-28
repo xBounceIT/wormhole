@@ -41,6 +41,21 @@ contextBridge.exposeInMainWorld('vaultSharedSetup', {
   mode: () => ipcRenderer.invoke('vault-shared-setup:mode'),
   adminInventory: (value: import('./vault-shared-admin-inventory.js').AdminInventoryRequest) =>
     ipcRenderer.invoke('vault-shared-setup:admin-inventory', value),
+  copyMemberCode: (requestId: string) =>
+    ipcRenderer.invoke('vault-shared-setup:copy-member-code', requestId),
+  finishMemberInvitation: (requestId: string) =>
+    ipcRenderer.invoke('vault-shared-setup:finish-member-invitation', requestId),
+  inviteMember: (
+    request: import('./vault-shared-member-invitation.js').MemberInvitationRequest,
+    factors: import('./vault-account-suspension.js').PersonalRootRecoveryFactors,
+  ) => {
+    try {
+      return ipcRenderer.invoke('vault-shared-setup:invite-member', request, factors);
+    } finally {
+      if (factors?.password instanceof Uint8Array) factors.password.fill(0);
+      if (factors?.ask instanceof Uint8Array) factors.ask.fill(0);
+    }
+  },
   createSlot: (value: import('./vault-shared-admin-inventory.js').CredentialSlot) =>
     ipcRenderer.invoke('vault-shared-setup:create-slot', value),
   slotDefault: slotChange('slot-default'),

@@ -71,6 +71,7 @@ func TestPostgresSetupApplicationFixture(t *testing.T) {
 			HBA                                              string
 			CAPEM, ServerPEM, KeyPEM                         string
 			CheckInitialRecoveryExport                       bool
+			CheckMemberInvitation                            bool
 			GroupHandoff                                     bool
 		}
 		if json.Unmarshal(scanner.Bytes(), &command) != nil || deploy.ValidateIdentity(command.RoleTag, command.WorkspaceID) != nil {
@@ -596,8 +597,17 @@ WHERE kind='org-enc' AND status='active' AND cert_signature IS NOT NULL`, nil, n
           SELECT FROM pg_catalog.pg_auth_members m WHERE m.roleid=g.role_oid AND m.member=r.oid) END)
  AND (SELECT count(*) FROM wormhole_data.audit_log WHERE action='bootstrap_workspace')=1
  AND (SELECT count(*) FROM wormhole_data.audit_log WHERE action='join_workspace')=1
- AND NOT EXISTS(SELECT FROM wormhole_data.invitation_logins WHERE NOT revoked)
 )::text`
+				if command.CheckMemberInvitation {
+					query = `SELECT ((` + query + `)::boolean
+ AND (SELECT count(*) FROM wormhole_data.invitation_logins WHERE NOT revoked)=1
+ AND EXISTS(SELECT FROM wormhole_data.invitation_logins l JOIN wormhole_data.invites i ON i.id=l.invite_id
+     JOIN wormhole_data.users u ON u.id=i.user_id WHERE NOT l.revoked AND i.used_at IS NULL
+     AND i.member_request_digest IS NOT NULL AND u.login_name='demo-operator' AND NOT u.is_admin AND NOT u.disabled)
+ AND (SELECT count(*) FROM wormhole_data.audit_log WHERE action='issue_member_invitation' AND outcome='success')=1)::text`
+				} else {
+					query = `SELECT ((` + query + `)::boolean AND NOT EXISTS(SELECT FROM wormhole_data.invitation_logins WHERE NOT revoked))::text`
+				}
 				if withCSR || withGenerated {
 					query = `SELECT ((` + query + `)::boolean AND EXISTS(
  SELECT FROM wormhole_data.workspace_bootstrap
