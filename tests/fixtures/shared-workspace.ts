@@ -102,7 +102,7 @@ async function checkSharedClipboard() {
     label.remove();
   }
 }
-export async function runSharedWorkspaceTests() {
+export async function runSharedWorkspaceTests(tls: 'off' | 'verified' = 'off') {
   await checkSharedClipboard();
   const listeners = new Set<(event: any) => void>(),
     calls: { name: string; args: any[] }[] = [],
@@ -324,7 +324,7 @@ export async function runSharedWorkspaceTests() {
       admitted: true,
       lockedMemory: true,
       orgEscrow: true,
-      tls: 'off',
+      tls,
     }),
     lockAuthentication: async () => {
       record('lock');
@@ -599,21 +599,31 @@ export async function runSharedWorkspaceTests() {
   check(card.textContent?.includes('View only'), 'missing View-only hint');
   const transportNotice = card.querySelector('.shared-transport-notice') as HTMLElement;
   const titlebar = card.querySelector('header')!;
+  const content = card.querySelector<HTMLElement>('.shared-workspace-layout')!;
   check(
     titlebar.textContent?.includes('Wormhole') &&
       getComputedStyle(titlebar).getPropertyValue('-webkit-app-region') === 'drag' &&
-      titlebar.getBoundingClientRect().bottom <= transportNotice.getBoundingClientRect().top,
+      titlebar.getBoundingClientRect().bottom <= content.getBoundingClientRect().top,
     'shared workspace content overlaps the draggable titlebar',
   );
-  check(
-    transportNotice && !transportNotice.hidden && transportNotice.textContent?.includes('TLS Off'),
-    'missing admitted transport warning',
-  );
-  check(
-    transportNotice.getBoundingClientRect().height > 0 &&
-      transportNotice.getBoundingClientRect().width > 0,
-    'transport warning hidden by workspace layout',
-  );
+  if (tls === 'off') {
+    const bounds = transportNotice.getBoundingClientRect();
+    check(
+      !transportNotice.hidden && transportNotice.textContent?.includes('TLS Off'),
+      'missing admitted transport warning',
+    );
+    check(
+      bounds.top >= titlebar.getBoundingClientRect().bottom &&
+        bounds.height > 0 &&
+        bounds.width > 0,
+      'transport warning hidden by workspace layout',
+    );
+  } else {
+    check(
+      transportNotice.hidden && !transportNotice.getClientRects().length,
+      'verified transport shows a warning',
+    );
+  }
   const connect = () =>
     (
       card.querySelector('[aria-label="Connect · Development server"]') as HTMLButtonElement

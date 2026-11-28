@@ -87,7 +87,9 @@ test('shared catalog mounts real terminals and file tabs with owned reconnect an
  };
  await viewport(1360,850);
  await window.webContents.executeJavaScript(readFileSync(${JSON.stringify(join(directory, 'renderer.js'))},'utf8'));
- const result=await window.webContents.executeJavaScript('SharedWorkspaceTests.runSharedWorkspaceTests()');assert.equal(result.sessions,2);assert.equal(result.opens,4);
+ const result=await window.webContents.executeJavaScript(${JSON.stringify(
+   `SharedWorkspaceTests.runSharedWorkspaceTests('${screenshotDirectory ? 'verified' : 'off'}')`,
+ )});assert.equal(result.sessions,2);assert.equal(result.opens,4);
  const shellBounds=await window.webContents.executeJavaScript('(()=>{const card=document.querySelector(".shared-workspace").getBoundingClientRect();const sidebar=document.querySelector(".shared-workspace-sidebar").getBoundingClientRect();const signOut=[...document.querySelectorAll("button")].find(b=>b.textContent==="Sign out").getBoundingClientRect();return [card.x,card.y,card.width===innerWidth,signOut.width<sidebar.width/2]})()');assert.deepEqual(shellBounds,[0,0,true,true]);
  await capture('shared-connect-workspace.png');
  await viewport(600,820);
